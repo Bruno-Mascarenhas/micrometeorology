@@ -30,7 +30,7 @@ conda install -c anaconda netcdf4
 
 ## Authors
 
-* **Edson P Marques Filho** - *Researcher, Leader*
+* **Edson P Marques Filho** - *Researcher, Advisor*
 * **Bruno S Mascarenhas** - *Researcher* - [Bruno Mascarenhas](https://github.com/Bruno-Mascarenhas)
 
 See also the list of [contributors](https://github.com/bruno-mascarenhas/meteorology-ufba/contributors) who participated in this project.
