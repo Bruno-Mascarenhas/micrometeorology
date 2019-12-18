@@ -34,8 +34,8 @@ pip install matplotlib numpy pandas seaborn netcdf4 sklearn
 
 ## Authors
 
-* **Edson P Marques Filho** - *Researcher, Advisor*
 * **Bruno S Mascarenhas** - *Researcher* - [Bruno Mascarenhas](https://github.com/Bruno-Mascarenhas)
+* **Edson P Marques Filho** - *Researcher, Advisor* - [Edson P. M. Filho](https://github.com/epmfilho)
 
 See also the list of [contributors](https://github.com/bruno-mascarenhas/meteorology-ufba/contributors) who participated in this project.
 
