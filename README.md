@@ -30,7 +30,7 @@ pip install matplotlib numpy pandas seaborn netcdf4 sklearn
 
 ## Built With
 
-* [PyCharm](https://www.jetbrains.com/pycharm/) - IDE used to code faster and view data easier
+* [Visual Studio Code](https://code.visualstudio.com/) - IDE used to code faster and view data easier
 
 ## Authors
 
