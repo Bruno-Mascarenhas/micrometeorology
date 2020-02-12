@@ -108,7 +108,7 @@ def generateSeries(files,stations,foutput):
             glw = dataset.variables['GLW'][:]
             ustar = dataset.variables['UST'][:]
             tsm = dataset.variables['SST'][:]
-
+            pblh = dataset.variables['PBLH'][:]
             times_array = dataset.variables['Times'][:]
 
             it = 0
@@ -162,11 +162,14 @@ def generateSeries(files,stations,foutput):
                 ustar_array = ustar[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
                 ustarfix = ustar_array[it:it + 1][0]
 
+                pblh_array = pblh[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
+                pblhfix = pblh_array[it:it + 1][0]
+
                 tsm_array = tsm[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
                 tsmfix = tsm_array[it:it + 1][0]-273.15
 
-                serie.append([year,month,day,hour,tempfix,qvfix,pfix,u10fix,v10fix,swdownfix,glwfix,hfxfix,lhfix,grdflxfix,ustarfix,tsmfix])
+                serie.append([year,month,day,hour,tempfix,qvfix,pfix,u10fix,v10fix,swdownfix,glwfix,hfxfix,lhfix,grdflxfix,ustarfix,tsmfix,pblhfix])
                 it+=1
 
-        header = 'year,month,day,hour,T,q,pressure,u,v,Sw_dw,Lw_dw,H,LE,G,ustar,TSM'
+        header = 'year,month,day,hour,T,q,pressure,u,v,Sw_dw,Lw_dw,H,LE,G,ustar,TSM,PBLH'
         np.savetxt(foutput+name+'.dat',serie,fmt='%.7g',delimiter=',',comments='',header=header)

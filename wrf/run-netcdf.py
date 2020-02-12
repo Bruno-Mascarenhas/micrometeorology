@@ -2,11 +2,9 @@ from netcdfUtils import *
 
 path = '/home/models/WRF/wrf-case/d-output/petrobras/'
 
-grades = ['d02','d04']
+grades = ['d01','d03']
 
-#cases = ['sfcpbl11/','sfcpbl11_sst/','sfcpbl17_sst/','sfcpbl22_sst/']
-cases = ['sfcpbl112_sst/','sfcpbl17_sst/']
-
+cases = ['sfcpblz1730_sst/']
 
 #all year complete
 base = 'wrfout_xxx_2013-'
@@ -15,6 +13,18 @@ months = '01 02 03 04 05 06 07 08 09 10 11 12'.split()
 
 arqs = [base+x+'-'+months[0] for x in months]
 
+"""
+#grades SSA
+#d03
+stations1 =     {'SSA_wrf':[-12.906608,-38.321383],'m1_wrf':[-13.014864,-38.480533],'m2_wrf':[-12.873015,-38.676755],'m3_wrf':[-12.816463,-38.642604],
+                'IGT_wrf':[-12.978068,-38.468746],'DIQ_wrf':[-12.983728,-38.506913],'ITG_wrf':[-12.993365,-38.461875],'CAB_wrf':[-12.953696,-38.428270],
+                'PIR_wrf':[-12.898911,-38.457865],'RVE_wrf':[-13.005552,-38.487150],'MTR_wrf':[-12.906608,-38.321383]}
+
+#d01
+stations2 = {'CDA_wrf':[-12.675422,-39.089580],'FDS_wrf':[-12.196200,-38.967384]}
+"""
+
+#grades RJ
 #d04
 stations1 =     {'wrf_COP':[-22.988286,-43.190436],'wrf_SER':[-22.757868,-43.684843],'wrf_DEO':[-22.861322,-43.411410],'wrf_SBG':[-22.808910,-43.249932],
                 'wrf_SBR':[-22.913496,-43.166118],'wrf_SBJ':[-22.987733,-43.370019],'wrf_SBS':[-22.936906,-43.712884],'wrf_CEN':[-22.908339,-43.178156],
@@ -24,12 +34,10 @@ stations1 =     {'wrf_COP':[-22.988286,-43.190436],'wrf_SER':[-22.757868,-43.684
 stations2 = {'wrf_SBL':[-22.109461,-39.916933],'wrf_SAN':[-25.439500,-45.036100],'wrf_SBC':[-21.698617,-41.306108]}
 
 for case in cases:
+    foutput = '/home/models/WRF/wrf-case/d-output/petrobras/'+case+'timeseries/'
     for grade in ['d04','d02']:
         files = [path+case+x[:7] + grade + x[10:] for x in arqs]
-
         if grade == 'd04':
-            foutput = '/home/models/WRF/wrf-case/d-output/petrobras/'+case+'series/'
             generateSeries(files,stations1,foutput)
         else:
-            foutput = '/home/models/WRF/wrf-case/d-output/petrobras/'+case+'series/'
             generateSeries(files,stations2,foutput)
