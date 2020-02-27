@@ -71,7 +71,6 @@ def drawMapSeason(variables, files_path, out_path, name, hour):
             varmin, varmax = getLowHigh(temperatura)
 
             plt.figure(figsize=(8,6))
-            #plt.title('Temperatura (2 m)',fontsize=12)
             plt.suptitle("$^\circ\mathcal{C}$", fontsize=18, ha='center', x=0.79, y=0.75)
             plt.xlabel('Long (°)', fontsize=14, labelpad=25)
             plt.ylabel('Lat (°)', fontsize=14, labelpad=60)

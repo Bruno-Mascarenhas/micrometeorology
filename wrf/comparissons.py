@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt 
 import seaborn as sns
+from datetime import datetime, timedelta
 from sys import exit
 
 #class to simplify paring of two datasets
@@ -77,7 +78,27 @@ def generate_metrics(files,foutput,name,variables,months):
             else:
                 pred = pred.loc[pred['month']==months[0],:]
                 obs = obs.loc[obs['month']==months[0],:]
-          
+                #edit to compare only between days 10 ~ 19
+                pred = pred.loc[(pred['day']>10) & (pred['day']<20),:]
+                obs = obs.loc[(obs['day']>10) & (obs['day']<20),:]
+
+            #testando a fase
+            """
+            if station == 'DEO':
+                x1 = pred['day'] + (pred['hour']/24)
+                y1 = pred['Sw_dw']
+                plt.plot(x1,y1,'*-',label='pred')
+
+                x1 = obs['day'] + (obs['hour']/24)
+                y1 = obs['Sw_dw']
+                plt.plot(x1,y1,'o-',label='obs')
+
+                plt.legend()
+                plt.show()
+                quit()
+            """
+
+
             #choosen variables
             for var in variables:
                 try:
@@ -229,6 +250,9 @@ def generate_distributions(files,foutput,name,variables,months):
             else:
                 pred = pred.loc[pred['month']==months[0],:]
                 obs = obs.loc[obs['month']==months[0],:]
+                #edit to compare only 10/07 ~ 19/07
+                pred = pred.loc[(pred['day']>10) & (pred['day']<20),:]
+                obs = obs.loc[(obs['day']>10) & (obs['day']<20),:]
 
             for var in variables:
                 try:
