@@ -51,9 +51,7 @@ def drawMapSeason(variables, files_path, out_path, name, hour):
             temperatura = None; cont = 0
             for file in files_path:
                 dataset = netCDF4.Dataset(file)
-                
                 times_array = dataset.variables['Times'][:]
-
                 for i,time in enumerate(times_array):
                     currentTime = b''.join(time.tolist()).decode('UTF-8')
                     current_date = datetime.strptime(currentTime, '%Y-%m-%d_%H:%M:%S')
@@ -66,11 +64,11 @@ def drawMapSeason(variables, files_path, out_path, name, hour):
                         else:
                             temperatura += celcius
                         cont+=1
-
             temperatura = temperatura/cont
             varmin, varmax = getLowHigh(temperatura)
 
             plt.figure(figsize=(8,6))
+            #plt.title('Temperatura (2 m)',fontsize=12)
             plt.suptitle("$^\circ\mathcal{C}$", fontsize=18, ha='center', x=0.79, y=0.75)
             plt.xlabel('Long (°)', fontsize=14, labelpad=25)
             plt.ylabel('Lat (°)', fontsize=14, labelpad=60)
@@ -182,19 +180,33 @@ def drawMapSeason(variables, files_path, out_path, name, hour):
             widths = np.linspace(0, 2, xx.size)
             nx = x[points];ny = y[points]; nu = u[points];nv = v[points]
             
+            #ssa configs
+            #"""
+            if 'd01' in name:
+                Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.00005)
+                qk = plt.quiverkey(Q,1.095, 0.78, 0.0005,label= r'$\frac{m}{s}$', fontproperties={'size': 18}, labelpos='N')
+            elif 'd02' in name:
+                Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.0002)
+                qk = plt.quiverkey(Q,1.095, 0.78, 0.0008,label= r'$\frac{m}{s}$', fontproperties={'size': 18}, labelpos='N')
+            elif 'd03' in name:
+                Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.0006)
+                qk = plt.quiverkey(Q,1.095, 0.78, 0.0019,label= r'$\frac{m}{s}$', fontproperties={'size': 18}, labelpos='N')
+
+            """
+            #rio configs
             if 'd01' in name:
                 Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.00004)
                 qk = plt.quiverkey(Q,1.095, 0.78, 0.00019,label= r'$\frac{m}{s}$', fontproperties={'size': 18}, labelpos='N')
             elif 'd02' in name:
-                Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.00007)
-                qk = plt.quiverkey(Q,1.095, 0.78, 0.00039,label= r'$\frac{m}{s}$', fontproperties={'size': 18}, labelpos='N')
+                #Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.00007)
+                #qk = plt.quiverkey(Q,1.095, 0.78, 0.00039,label= r'$\frac{m}{s}$', fontproperties={'size': 18}, labelpos='N')
             elif 'd03' in name:
                 Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.0003)
                 qk = plt.quiverkey(Q,1.095, 0.78, 0.0019,label= r'$\frac{m}{s}$', fontproperties={'size': 18}, labelpos='N')
             else:
                 Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.001)
                 qk = plt.quiverkey(Q,1.095, 0.78, 0.0019,label= r'$\frac{m}{s}$', fontproperties={'size': 18}, labelpos='N')
-
+            """
             m.drawcoastlines(color='0.15')
 
             m.drawparallels(np.arange(llat, hlat,abs(hlat-llat)/7), linewidth=0, labels=[1,0,0,0], color='r',zorder=0, fmt="%.1f", fontsize=14)
@@ -206,7 +218,7 @@ def drawMapSeason(variables, files_path, out_path, name, hour):
             plt.savefig(out_path+name+var+".png",bbox_inches='tight')
             plt.close()
 
-def drawBreeze(file, out_path, name, qtd):
+def drawBreezeWind(file, out_path, name, qtd):
     colormap = {'T':'jet','wind':'PuBu','q':'jet_r','pressure':'Blues','precip':'jet','hfx':'jet','lh':'jet','sw_dw':'jet'}
     #variables = T,q,wind
     
@@ -229,6 +241,8 @@ def drawBreeze(file, out_path, name, qtd):
         currentTime = b''.join(time.tolist()).decode('UTF-8')
         current_date = datetime.strptime(currentTime, '%Y-%m-%d_%H:%M:%S')
         cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
+        if cd < datetime(year=2014,month=12,day=3,tzinfo=timezone.utc).astimezone(tz=None):
+            continue
         var1 = dataset.variables['U10'][:,:,:].squeeze()
         var2 = dataset.variables['V10'][:,:,:].squeeze()
         u = var1[i:i+1,:,:].squeeze(); v = var2[i:i+1,:,:].squeeze()
@@ -254,7 +268,19 @@ def drawBreeze(file, out_path, name, qtd):
 
         widths = np.linspace(0, 2, xx.size)
         nx = x[points];ny = y[points]; nu = u[points];nv = v[points]
-        
+        #ssa configs
+        #"""
+        if 'd01' in name:
+            Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.00005)
+            qk = plt.quiverkey(Q,1.095, 0.78, 0.0005,label= r'$\frac{m}{s}$', fontproperties={'size': 18}, labelpos='N')
+        elif 'd02' in name:
+            Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.0005)
+            qk = plt.quiverkey(Q,1.095, 0.78, 0.0008,label= r'$\frac{m}{s}$', fontproperties={'size': 18}, labelpos='N')
+        elif 'd03' in name:
+            Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.0006)
+            qk = plt.quiverkey(Q,1.095, 0.78, 0.0019,label= r'$\frac{m}{s}$', fontproperties={'size': 18}, labelpos='N')
+        """
+        #rio configs
         if 'd01' in name:
             Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.00004)
             qk = plt.quiverkey(Q,1.095, 0.78, 0.00019,label= r'$\frac{m}{s}$', fontproperties={'size': 18}, labelpos='N')
@@ -267,11 +293,64 @@ def drawBreeze(file, out_path, name, qtd):
         else:
             Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.001)
             qk = plt.quiverkey(Q,1.095, 0.78, 0.0019,label= r'$\frac{m}{s}$', fontproperties={'size': 18}, labelpos='N')
-
+        """
         m.drawcoastlines(color='0.15')
 
         m.drawparallels(np.arange(llat, hlat,abs(hlat-llat)/7), linewidth=0, labels=[1,0,0,0], color='r',zorder=0, fmt="%.1f", fontsize=14)
         m.drawmeridians(np.arange(llong, hlong,abs(hlong-llong)/5), linewidth=0, labels=[0,0,0,1], color='r',zorder=0, fmt="%.1f", fontsize=14)
+
+        cb = plt.colorbar(shrink=0.5, pad=0.04)
+        cb.ax.tick_params(labelsize=10)
+
+        plt.savefig(out_path+name+"-"+str(cont)+".png",bbox_inches='tight')
+        plt.close()
+        cont+=1
+
+def drawBreezeHumidity(file, out_path, name, qtd):
+    data = netCDF4.Dataset(file)
+    xlat, xlong = data.variables['XLAT'][:,:,:], data.variables['XLONG'][:,:,:]
+    lon, lat = xlong[:1, :,:].squeeze(), xlat[:1, :, :].squeeze()
+    hlat, llat = np.amax(xlat), np.amin(xlat)
+    hlong, llong = np.amax(xlong), np.amin(xlong)
+    
+    u = None; v = None; cont = 0
+    dataset = data
+
+    times_array = dataset.variables['Times'][:]
+
+    #1 semana = 168h
+    for i,time in enumerate(times_array):
+        if cont  == qtd:
+            break
+
+        currentTime = b''.join(time.tolist()).decode('UTF-8')
+        current_date = datetime.strptime(currentTime, '%Y-%m-%d_%H:%M:%S')
+        cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
+        if cd < datetime(year=2014,month=12,day=3,tzinfo=timezone.utc).astimezone(tz=None):
+            continue
+        tmp = dataset.variables['Q2'][:,:,:].squeeze()
+        umidade = tmp[i:i+1,:,:] * 1000
+
+
+        varmin, varmax = getLowHigh(umidade)
+
+        plt.figure(figsize=(8,6))
+        plt.title(cd.strftime('%d/%m/%Y %H')+'h', fontsize=12)
+        plt.suptitle("$g/kg \frac{m}{s}$", fontsize=18, ha='center', x=0.80, y=0.75)
+        plt.xlabel('Long (°)', fontsize=14, labelpad=25)
+        plt.ylabel('Lat (°)', fontsize=14, labelpad=60)
+    
+        m = Basemap(rsphere=(6378137.00,6356752.3142),resolution='f',projection='merc',llcrnrlon= llong, llcrnrlat= llat, urcrnrlon= hlong, urcrnrlat= hlat)
+
+        x,y = m(lon, lat)
+
+        m.drawcoastlines()
+        m.drawparallels(np.arange(llat, hlat,abs(hlat-llat)/7), linewidth=0, labels=[1,0,0,0], color='r',zorder=0, fmt="%.1f", fontsize=14)
+        m.drawmeridians(np.arange(llong, hlong,abs(hlong-llong)/5), linewidth=0, labels=[0,0,0,1], color='r',zorder=0, fmt="%.1f", fontsize=14)
+   
+        m.contourf(x,y, np.squeeze(umidade), alpha=0.4, cmap=colormap['q'], vmin=8, vmax=22)
+    
+        m.pcolormesh(x,y, np.squeeze(umidade), alpha=0.4, cmap=colormap['q'], vmin=8, vmax=22)
 
         cb = plt.colorbar(shrink=0.5, pad=0.04)
         cb.ax.tick_params(labelsize=10)

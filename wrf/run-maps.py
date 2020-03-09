@@ -1,6 +1,15 @@
 from mapsGenerator import *
 from sys import exit
 
+#configs for ssa runs
+"""
+path = '/media/labmim/dados/coral-sol/simula/'
+grades = ['d01','d02','d03']
+cases = ['costa/','costa_sst/','costa_sst_mur/','padrao/']
+base = 'wrfout_xxx_2014-'
+months = '12'.split()
+"""
+
 path = '/home/models/WRF/wrf-case/d-output/calpuff/'
 
 grades = ['d01','d02','d03','d04']
@@ -38,8 +47,11 @@ for case in cases:
 foutput = '/home/models/WRF/wrf-case/d-output/maps/brisa/'
 
 file = '/home/models/WRF/wrf-case/d-output/petrobras/sfcpbl112_sst/wrfout_d04_2013-06-01'
-drawBreeze(file,foutput,'d04-inverno',168)
+drawBreezeWind(file,foutput,'d04-wind-inverno',168)
+drawBreezeHumidity(file,foutput,'d04-q-inverno',168)
+
 
 file = '/home/models/WRF/wrf-case/d-output/petrobras/sfcpbl112_sst/wrfout_d04_2013-01-01'
-drawBreeze(file,foutput,'d04-verao',168)
+drawBreezeWind(file,foutput,'d04-wind-verao',168)
+drawBreezeHumidity(file,foutput,'d04-q-verao',168)
 """

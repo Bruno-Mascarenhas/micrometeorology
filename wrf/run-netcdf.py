@@ -1,5 +1,21 @@
 from netcdfUtils import *
 
+#configs for ssa runs
+"""
+path = '/media/labmim/dados/coral-sol/simula/'
+cases = ['costa/','costa_sst/','costa_sst_mur/','padrao/']
+base = 'wrfout_xxx_2014-'
+months = '12'.split()
+
+#d03
+stations1 =     {'SSA_wrf':[-12.906608,-38.321383],'mt1_wrf':[-13.014864,-38.480533],'mt2_wrf':[-12.873015,-38.676755],'mt3_wrf':[-12.816463,-38.642604],
+                'IGT_wrf':[-12.978068,-38.468746],'DIQ_wrf':[-12.983728,-38.506913],'ITG_wrf':[-12.993365,-38.461875],'CAB_wrf':[-12.953696,-38.428270],
+                'PIR_wrf':[-12.898911,-38.457865],'RVE_wrf':[-13.005552,-38.487150],'MTR_wrf':[-12.906608,-38.321383],'TSM':[-12.818583,-38.657767]}
+
+#d02
+stations2 = {'CDA_wrf':[-12.675422,-39.089580],'FDS_wrf':[-12.196200,-38.967384]}
+"""
+
 path = '/home/models/WRF/wrf-case/d-output/petrobras/'
 
 cases = ['sfcpblz1730/','sfcpblz2230/','sfcpblz1130/']
@@ -12,17 +28,6 @@ base = 'wrfout_xxx_2013-'
 months = '07'.split()
 
 arqs = [base+x+'-01' for x in months]
-
-"""
-#grades SSA
-#d03
-stations1 =     {'SSA_wrf':[-12.906608,-38.321383],'m1_wrf':[-13.014864,-38.480533],'m2_wrf':[-12.873015,-38.676755],'m3_wrf':[-12.816463,-38.642604],
-                'IGT_wrf':[-12.978068,-38.468746],'DIQ_wrf':[-12.983728,-38.506913],'ITG_wrf':[-12.993365,-38.461875],'CAB_wrf':[-12.953696,-38.428270],
-                'PIR_wrf':[-12.898911,-38.457865],'RVE_wrf':[-13.005552,-38.487150],'MTR_wrf':[-12.906608,-38.321383]}
-
-#d01
-stations2 = {'CDA_wrf':[-12.675422,-39.089580],'FDS_wrf':[-12.196200,-38.967384]}
-"""
 
 #grades RJ
 #d04

@@ -6,21 +6,29 @@ from datetime import datetime
 from sys import exit
 filterwarnings('ignore')
 
+#configs for ssa runs
+"""
+obs_path = '/home/labmim/meteorologia/estacoes/rms/'
+model_path = '/media/labmim/dados/coral-sol/simula/'
+
+real = ['mt1','mt2','mt3','MTR_SSA', \
+    'CDA_inmet','FDS_inmet','SSA_inmet','IGT_pms', \
+    'CAB_pms','PIR_pms']
+
+model = ['mt1_wrf','mt2_wrf','mt3_wrf','MTR_wrf', \
+    'CDA_wrf','FDS_wrf','SSA_wrf','IGT_wrf', \
+    'CAB_wrf','PIR_wrf']
+
+out_path_sheets = '/media/labmim/dados/coral-sol/metrics/'
+out_path_distribution = '/media/labmim/dados/coral-sol/distributions/'
+params = ['costa','costa_sst','costa_sst_mur','padrao']
+
+
+"""
 #path and name os files to analyse, real = colected | model = output from model
 obs_path = '/home/labmim/meteorologia/rmrj/'
 
 model_path = '/home/models/WRF/wrf-case/d-output/petrobras/'
-
-"""real = ['COP_inmet','SER_inmet','DEO_inmet', \
-    'SBG_metar','SBR_metar','SBJ_metar','SBS_metar', \
-    'CEN_smac','LAB_igeo','LB1_igeo','LB2_igeo', \
-    'SBC_metar','SBL_metar','SAN_pnboia']
-
-model = ['wrf_COP','wrf_SER','wrf_DEO', \
-    'wrf_SBG','wrf_SBR','wrf_SBJ','wrf_SBS', \
-    'wrf_CEN','wrf_LAB', 'wrf_LAB1','wrf_LAB2', \
-    'wrf_SBC','wrf_SBL','wrf_SAN']
-"""
 
 real = ['COP_inmet','SER_inmet','DEO_inmet', \
     'SBG_metar','SBR_metar','SBJ_metar','SBS_metar', \
@@ -42,8 +50,6 @@ out_path_distribution = '/home/models/WRF/wrf-case/d-output/distributions/'
 #path to save area graphs
 out_path_plots = '/home/models/WRF/wrf-case/d-output/area_graphs/'
 
-
-#params = ['sfcpbl11','sfcpbl11_sst','sfcpbl17_sst','sfcpbl22_sst']
 params = ['sfcpblz2230','sfcpblz1130','sfcpblz1730']
 
 """
@@ -72,6 +78,7 @@ for case in params:
     generate_mean(files,out_path_sheets,case,variables,months[0])
 """
 
+#definitions for area graphs
 params = ['sfcpblz2230/','sfcpblz1130/','sfcpblz1730/']
 variables = 'T ur q WS Sw_dw H LE ustar'.split()
 
