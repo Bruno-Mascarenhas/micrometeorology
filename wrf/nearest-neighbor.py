@@ -5,6 +5,7 @@ from warnings import filterwarnings
 import matplotlib.pyplot as plt
 from math import sqrt
 from mpl_toolkits.basemap import Basemap
+import pandas as pd
 filterwarnings('ignore')
 
 def getLowHigh(variable):
@@ -113,6 +114,5 @@ def print_points(dataset, lat, lon, name, day):
     plt.show()
     plt.close()
 
-netcdf = netCDF4.Dataset('/home/models/WRF/wrf-case/d-output/petrobras/sfcpblz1730_sst/wrfout_d04_2013-07-01')
-
-print_points(netcdf,-22.857222,-43.233716,'LAB',17)
+#netcdf = netCDF4.Dataset('/home/models/WRF/wrf-case/d-output/petrobras/sfcpblz1730_sst/wrfout_d04_2013-07-01')
+#print_points(netcdf,-22.857222,-43.233716,'LAB',17)

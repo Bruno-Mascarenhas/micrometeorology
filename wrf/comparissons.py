@@ -33,7 +33,10 @@ class PairDf():
     def dict_metrics(self,var):
         ans = dict()
         #put here the functions
-        functions = [metrics.r,metrics.MBD,metrics.RMSD]
+        if var != 'WD':
+            functions = [metrics.r, metrics.MBD, metrics.RMSD]
+        else:
+            functions = [metrics.r, metrics.MBD_wind, metrics.MAGE_wind, metrics.RMSE_wind]
         for func in functions:
             ans[func.__name__]=func(self.dataframes[var]['obs'],self.dataframes[var]['pred'])
         return ans
@@ -51,26 +54,19 @@ def generate_metrics(files,foutput,name,variables,months):
     """
     total_metric = dict()
     hourly_metric = dict()
+    dates = 'year month day hour'.split()
 
     for file in files:
         station = file[2]
         try:
             obs = pd.read_csv(file[0],sep=',')
-            obs.index = pd.to_datetime(obs['year month day hour'.split()])
+            obs.index = pd.to_datetime(obs[dates])
             obs = obs[~obs.index.duplicated()]
+            obs['q'] = obs['q'].astype('float64')
 
             pred = pd.read_csv(file[1],sep=',')
-            pred.index = pd.to_datetime(pred['year month day hour'.split()])
+            pred.index = pd.to_datetime(pred[dates])
             pred = pred[~pred.index.duplicated()]
-            pred['WS'] = np.sqrt(pred['u']**2+pred['v']**2)
-            pred['q'] = pred['q']/1000
-            pred['pressure'] = pred['pressure']
-            pred['e'] = (pred['q']*pred['pressure'])/(0.622*(1-pred['q'])+pred['q'])
-            pred['es'] = 611.2*np.exp((17.67*pred['T'])/(pred['T']+243.5))
-            pred['ur'] = (pred['e']/pred['es'])*100
-            pred['q'] *= 1000
-            pred['pressure'] /= 100
-            pred['e'] /= 100
 
             if len(months) > 1:
                 pred = pd.concat([pred.loc[pred['month']==month,:] for month in months])
@@ -79,25 +75,8 @@ def generate_metrics(files,foutput,name,variables,months):
                 pred = pred.loc[pred['month']==months[0],:]
                 obs = obs.loc[obs['month']==months[0],:]
                 #edit to compare only between days 10 ~ 19
-                pred = pred.loc[(pred['day']>10) & (pred['day']<20),:]
-                obs = obs.loc[(obs['day']>10) & (obs['day']<20),:]
-
-            #testando a fase
-            """
-            if station == 'DEO':
-                x1 = pred['day'] + (pred['hour']/24)
-                y1 = pred['Sw_dw']
-                plt.plot(x1,y1,'*-',label='pred')
-
-                x1 = obs['day'] + (obs['hour']/24)
-                y1 = obs['Sw_dw']
-                plt.plot(x1,y1,'o-',label='obs')
-
-                plt.legend()
-                plt.show()
-                quit()
-            """
-
+                pred = pred.loc[(pred.index>datetime(2013,7,9)) & (pred.index<datetime(2013,7,20)),:]
+                obs = obs.loc[(obs.index>datetime(2013,7,9)) & (obs.index<datetime(2013,7,20)),:]
 
             #choosen variables
             for var in variables:
@@ -109,9 +88,9 @@ def generate_metrics(files,foutput,name,variables,months):
                         obs.loc[obs[var]<=0,var] = np.nan
                 except:
                     continue
-            
+
             #fit to total df
-            compare = PairDf(obs.drop(columns='year month day hour'.split()),pred.drop(columns='year month day hour'.split()))
+            compare = PairDf(obs.drop(columns=dates),pred.drop(columns=dates))
             
             total_metric[station] = {}
 
@@ -131,7 +110,7 @@ def generate_metrics(files,foutput,name,variables,months):
             for i in range(24):
                 hourly_metric[station][i] = {}
 
-                compare = PairDf(obsh.get_group(i).drop(columns='year month day hour'.split()),predh.get_group(i).drop(columns='year month day hour'.split()))
+                compare = PairDf(obsh.get_group(i).drop(columns=dates),predh.get_group(i).drop(columns=dates))
 
                 for var in variables:
                     try:
@@ -159,26 +138,19 @@ def generate_mean(files,foutput,name,variables,months):
     """
     monthly_mean_obs = dict()
     monthly_mean_pred = dict()
+    dates = 'year month day hour'.split()
 
     for file in files:
         station = file[2]
         try:
             obs = pd.read_csv(file[0],sep=',')
-            obs.index = pd.to_datetime(obs['year month day hour'.split()])
+            obs.index = pd.to_datetime(obs[dates])
             obs = obs[~obs.index.duplicated()]
+            obs['q'] = obs['q'].astype('float64')
 
             pred = pd.read_csv(file[1],sep=',')
-            pred.index = pd.to_datetime(pred['year month day hour'.split()])
+            pred.index = pd.to_datetime(pred[dates])
             pred = pred[~pred.index.duplicated()]
-            pred['WS'] = np.sqrt(pred['u']**2+pred['v']**2)
-            pred['q'] = pred['q']/1000
-            pred['pressure'] = pred['pressure']
-            pred['e'] = (pred['q']*pred['pressure'])/(0.622*(1-pred['q'])+pred['q'])
-            pred['es'] = 611.2*np.exp((17.67*pred['T'])/(pred['T']+243.5))
-            pred['ur'] = (pred['e']/pred['es'])*100
-            pred['q'] *= 1000
-            pred['pressure'] /= 100
-            pred['e'] /= 100
 
             for var in variables:
                 try:
@@ -222,27 +194,19 @@ def generate_distributions(files,foutput,name,variables,months):
     variables = desired variables for compare
     months = months to compare
     """
+    dates = 'year month day hour'.split()
 
     for file in files:
         station = file[2]
         try:
             obs = pd.read_csv(file[0],sep=',')
-            obs.index = pd.to_datetime(obs['year month day hour'.split()])
+            obs.index = pd.to_datetime(obs[dates])
             obs = obs[~obs.index.duplicated()]
+            obs['q'] = obs['q'].astype('float64')
 
             pred = pd.read_csv(file[1],sep=',')
-            pred.index = pd.to_datetime(pred['year month day hour'.split()])
+            pred.index = pd.to_datetime(pred[dates])
             pred = pred[~pred.index.duplicated()]
-            pred['WS'] = np.sqrt(pred['u']**2+pred['v']**2)
-            pred['q'] = pred['q']/1000
-            pred['pressure'] = pred['pressure']
-            pred['e'] = (pred['q']*pred['pressure'])/(0.622*(1-pred['q'])+pred['q'])
-            pred['es'] = 611.2*np.exp((17.67*pred['T'])/(pred['T']+243.5))
-            pred['ur'] = (pred['e']/pred['es'])*100
-            pred['q'] *= 1000
-            pred['pressure'] /= 100
-            pred['e'] /= 100
-             
 
             if len(months) > 1:
                 pred = pd.concat([pred.loc[pred['month']==month,:] for month in months])
@@ -251,8 +215,8 @@ def generate_distributions(files,foutput,name,variables,months):
                 pred = pred.loc[pred['month']==months[0],:]
                 obs = obs.loc[obs['month']==months[0],:]
                 #edit to compare only 10/07 ~ 19/07
-                pred = pred.loc[(pred['day']>10) & (pred['day']<20),:]
-                obs = obs.loc[(obs['day']>10) & (obs['day']<20),:]
+                pred = pred.loc[(pred['day']>9) & (pred['day']<20),:]
+                obs = obs.loc[(obs['day']>9) & (obs['day']<20),:]
 
             for var in variables:
                 try:
@@ -265,12 +229,12 @@ def generate_distributions(files,foutput,name,variables,months):
                     continue
             
             #fit to total df
-            compare = PairDf(obs.drop(columns='year month day hour'.split()),pred.drop(columns='year month day hour'.split()))
+            compare = PairDf(obs.drop(columns=dates),pred.drop(columns=dates))
 
             pairs = compare.get_paired()
 
             bins = {'WS':0.5,'Sw_dw':50,'ur':5,'T':1,'q':1,'ustar':0.1}
-            unidade = {'WS':'U (m/s)','Sw_dw ':'Sw_dw (W/m²)','ur':'UR (%)','T':'T (°C)','q':'Q (g/Kg)','ustar':'USTAR','pressure':'hPa'}
+            unit = {'WS':'U (m/s)','Sw_dw ':'Sw_dw (W/m²)','ur':'UR (%)','T':'T (°C)','q':'Q (g/Kg)','ustar':'USTAR','pressure':'hPa'}
 
             sns.set(font_scale=1.3)
             sns.set_style('white')
@@ -313,7 +277,7 @@ def generate_distributions(files,foutput,name,variables,months):
                     plt.xlim(mn,mx)
 
 
-                ax1.set_xlabel(unidade[var], fontsize=14)
+                ax1.set_xlabel(unit[var], fontsize=14)
                 ax1.set_ylabel('Relative', fontsize=14)
                 ax11.set_ylabel('Cumulative', fontsize=14)
 
@@ -325,3 +289,48 @@ def generate_distributions(files,foutput,name,variables,months):
         except Exception as err:
             print(file,err)
 
+
+def area_graph(fobs,fpred,foutput,variables,period):
+    unit = {'WS':'U (m/s)','Sw_dw':'Sw_dw (W/m²)','ur':'UR (%)','T':'T (°C)','q':'Q (g/Kg)','ustar':'USTAR','pressure':'hPa','H':'H (w/m²)','LE':'LE (w/m²)'}
+    dates = 'year month day hour'.split()
+
+    for station,file in fobs.items():
+        for var in variables:
+            try:
+                obs = pd.read_csv(file,sep=',')
+                obs.index = pd.to_datetime(obs[dates])
+                obs = obs[~obs.index.duplicated()]
+                obs['q'] = obs['q'].astype('float64')
+                obs = obs.loc[(obs.index>period[0]) & (obs.index<period[1]),:]
+
+                plt.ylabel(unit[var],fontdict={'family':'normal','size':13})
+                x = range(24)
+                yobs = np.array([obs.groupby('hour')[var].get_group(i).mean() for i in range(24)])
+                err = np.array([np.std(obs.groupby('hour')[var].get_group(i).dropna().tolist())/np.sqrt(len(obs.groupby('hour')[var].get_group(i).dropna().tolist())) for i in range(24)])
+                plt.fill_between(x,yobs+err,yobs-err,color=[(224/256,224/256,224/256)])
+
+                for param, arq in fpred[station]:
+                    pred = pd.read_csv(arq,sep=',')
+                    pred.index = pd.to_datetime(pred[dates])
+                    pred = pred[~pred.index.duplicated()]
+
+                    ypred = [pred.groupby('hour')[var].get_group(i).dropna().mean() for i in range(24)]
+                    err = [np.std(pred.groupby('hour')[var].get_group(i).dropna())/np.sqrt(len(pred.groupby('hour')[var].get_group(i).dropna())) for i in range(24)]
+                    plt.errorbar(x,ypred,err,label=param)
+
+                plt.xlim(0,23)
+                plt.xticks(range(0,24,3))
+                plt.legend()
+                plt.savefig(foutput+station+'-'+var+'.png',bbox_inches='tight',quality=100,format='png')
+                plt.close()
+
+            except Exception as err:
+                print(file,err)
+
+def interpol(df):
+    df = df.rolling(window='2H',min_periods=1,).mean().shift(-1)
+    df['year'] = df.index.year
+    df['month'] = df.index.month
+    df['day'] = df.index.day
+    df['hour'] = df.index.hour
+    return df

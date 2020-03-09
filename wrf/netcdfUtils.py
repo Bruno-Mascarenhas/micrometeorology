@@ -112,6 +112,12 @@ def generateSeries(files,stations,foutput):
             times_array = dataset.variables['Times'][:]
 
             it = 0
+
+            header = 'year,month,day,hour,T,q,pressure,u,v,Sw_dw,Lw_dw,H,LE,G,ustar,TSM,PBLH'.split(',')
+            serie = {}
+            for el in header:
+                serie[el] = []
+
             for time in times_array:
                 try:
                     currentTime = b''.join(time.tolist()).decode('UTF-8')
@@ -120,56 +126,67 @@ def generateSeries(files,stations,foutput):
                 except:
                     continue
 
-                year = int(cd.year);    month = int(cd.month);    day = int(cd.day);    hour = int(cd.hour)
-
+                serie['year'].append(int(cd.year));    serie['month'].append(int(cd.month));    serie['day'].append(int(cd.day));    serie['hour'].append(int(cd.hour))
+                
                 temp_array = temp[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                tempfix = temp_array[it:it + 1][0]-273.15
-
+                serie['T'].append(temp_array[it:it + 1][0]-273.15)
+                
 
                 u10_array = u10[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                u10fix = u10_array[it:it + 1][0]
-
+                serie['u'].append(u10_array[it:it + 1][0])
 
                 v10_array = v10[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                v10fix = v10_array[it:it + 1][0]
+                serie['v'].append(v10_array[it:it + 1][0])
 
 
                 p_array = p[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                pfix = p_array[it:it + 1][0]
+                serie['pressure'].append(p_array[it:it + 1][0])
 
 
                 qv_array = qv[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                qvfix = qv_array[it:it + 1][0]*1000
+                serie['q'].append(qv_array[it:it + 1][0]*1000)
 
 
                 hfx_array = hfx[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                hfxfix = hfx_array[it:it + 1][0]
+                serie['H'].append(hfx_array[it:it + 1][0])
 
 
                 lh_array = lh[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                lhfix = lh_array[it:it + 1][0]
+                serie['LE'].append(lh_array[it:it + 1][0])
 
 
                 swdown_array = swdown[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                swdownfix = swdown_array[it:it + 1][0]
+                serie['Sw_dw'].append(swdown_array[it:it + 1][0])
 
                 grdflx_array = grdflx[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                grdflxfix = grdflx_array[it:it + 1][0]
+                serie['G'].append(grdflx_array[it:it + 1][0])
 
                 glw_array = glw[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                glwfix = glw_array[it:it + 1][0]
+                serie['Lw_dw'].append(glw_array[it:it + 1][0])
 
                 ustar_array = ustar[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                ustarfix = ustar_array[it:it + 1][0]
+                serie['ustar'].append(ustar_array[it:it + 1][0])
 
                 pblh_array = pblh[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                pblhfix = pblh_array[it:it + 1][0]
+                serie['PBLH'].append(pblh_array[it:it + 1][0])
 
                 tsm_array = tsm[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                tsmfix = tsm_array[it:it + 1][0]-273.15
+                serie['TSM'].append(tsm_array[it:it + 1][0]-273.15)
 
-                serie.append([year,month,day,hour,tempfix,qvfix,pfix,u10fix,v10fix,swdownfix,glwfix,hfxfix,lhfix,grdflxfix,ustarfix,tsmfix,pblhfix])
                 it+=1
 
-        header = 'year,month,day,hour,T,q,pressure,u,v,Sw_dw,Lw_dw,H,LE,G,ustar,TSM,PBLH'
-        np.savetxt(foutput+name+'.dat',serie,fmt='%.7g',delimiter=',',comments='',header=header)
+        
+        df = pd.DataFrame(serie)
+        
+        df['WS'] = np.sqrt(df['u']**2+df['v']**2)
+        df['q'] = df['q']/1000
+        df['e'] = (df['q']*df['pressure'])/(0.622*(1-df['q'])+df['q'])
+        df['es'] = 611.2*np.exp((17.67*df['T'])/(df['T']+243.5))
+        df['ur'] = (df['e']/df['es'])*100
+        df['q'] *= 1000
+        df['pressure'] /= 100
+        df['e'] /= 100  
+        df['WD'] = 180/np.pi*np.arctan2(df['u'],df['v'])+180
+
+        df = df[header+'WS WD e es ur'.split()]
+        df.to_csv(foutput+name+'.dat',sep=',',index=False,na_rep='nan',float_format='%.7f')

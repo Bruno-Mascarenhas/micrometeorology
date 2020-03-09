@@ -2,16 +2,16 @@ from netcdfUtils import *
 
 path = '/home/models/WRF/wrf-case/d-output/petrobras/'
 
-grades = ['d01','d03']
-
-cases = ['sfcpblz1730_sst/','sfcpblz2230_sst/']
+cases = ['sfcpblz1730/','sfcpblz2230/','sfcpblz1130/']
+#cases = ['sfcpblz1130/']
 
 #all year complete
 base = 'wrfout_xxx_2013-'
 
-months = '01 02 03 04 05 06 07 08 09 10 11 12'.split()
+#months = '01 02 03 04 05 06 07 08 09 10 11 12'.split()
+months = '07'.split()
 
-arqs = [base+x+'-'+months[0] for x in months]
+arqs = [base+x+'-01' for x in months]
 
 """
 #grades SSA
@@ -35,7 +35,8 @@ stations2 = {'wrf_SBL':[-22.109461,-39.916933],'wrf_SAN':[-25.439500,-45.036100]
 
 for case in cases:
     foutput = '/home/models/WRF/wrf-case/d-output/petrobras/'+case+'timeseries/'
-    for grade in ['d04','d02']:
+    #for grade in ['d04','d02']:
+    for grade in ['d04']:
         files = [path+case+x[:7] + grade + x[10:] for x in arqs]
         if grade == 'd04':
             generateSeries(files,stations1,foutput)

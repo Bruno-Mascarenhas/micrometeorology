@@ -68,3 +68,64 @@ def LCE(obs,pred):
 def KSI(obs,pred):
     #wil return D and p-value, if p is high or D is small we can reject the hypothesis
     return ks_2samp(obs,pred)
+
+#statistics for wind direction - Reboredo Et. al (2015)
+def RMSE_wind(obs,pred):
+    N = len(obs)
+    D = []
+    for m,o in zip(pred,obs):
+        if m < o:
+            if  abs(m-o) < abs(360+(m-o)):
+                D.append(np.square(m-o))
+            else:
+                D.append(np.square(360+(m-o)))
+        elif m > o:
+            if abs(m-o) < abs((m-o)-360):
+                D.append(np.square(m-o))
+            else:
+                D.append(np.square((m-o)-360))
+        else:
+            D.append(0)
+
+    return np.sqrt(np.sum(D)/N)
+
+
+#statistics for wind direction - Reboredo Et. al (2015)
+def MAGE_wind(obs,pred):
+    N = len(obs)
+    D = []
+    for m,o in zip(pred,obs):
+        if m < o:
+            if  abs(m-o) < abs(360+(m-o)):
+                D.append(abs(m-o))
+            else:
+                D.append(abs(360+(m-o)))
+        elif m > o:
+            if abs(m-o) < abs((m-o)-360):
+                D.append(abs(m-o))
+            else:
+                D.append(abs((m-o)-360))
+        else:
+            D.append(0)
+
+    return abs(np.sum(D))/N
+
+#statistics for wind direction - Reboredo Et. al (2015)
+def MBD_wind(obs,pred):
+    N = len(obs)
+    D = []
+    for m,o in zip(pred,obs):
+        if m < o:
+            if  abs(m-o) < abs(360+(m-o)):
+                D.append(m-o)
+            else:
+                D.append(360+(m-o))
+        elif m > o:
+            if abs(m-o) < abs((m-o)-360):
+                D.append(m-o)
+            else:
+                D.append((m-o)-360)
+        else:
+            D.append(0)
+
+    return np.sum(D)/N
