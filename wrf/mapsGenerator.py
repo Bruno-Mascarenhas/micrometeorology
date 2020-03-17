@@ -307,6 +307,7 @@ def drawBreezeWind(file, out_path, name, qtd):
         cont+=1
 
 def drawBreezeHumidity(file, out_path, name, qtd):
+    colormap = {'T':'jet','wind':'PuBu','q':'jet_r','pressure':'Blues','precip':'jet','hfx':'jet','lh':'jet','sw_dw':'jet'}
     data = netCDF4.Dataset(file)
     xlat, xlong = data.variables['XLAT'][:,:,:], data.variables['XLONG'][:,:,:]
     lon, lat = xlong[:1, :,:].squeeze(), xlat[:1, :, :].squeeze()
