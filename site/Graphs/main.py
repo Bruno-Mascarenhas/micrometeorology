@@ -11,6 +11,11 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.basemap import Basemap
 import json
 from utility import getFileNames
+from warnings import filterwarnings
+import imageio
+import moviepy.editor as mp
+import glob
+filterwarnings('ignore')
 
 def toNum(arg):
     arg = str(arg)
@@ -33,14 +38,16 @@ def getLowHighWind(variable1, variable2):
 
 def drawmap(tipo,dataset):
     colormap = {'temperature':'jet','wind':'PuBu','vapor':'jet_r','pressure':'Blues','rain':'jet','HFX':'jet','LH':'jet','SWDOWN':'jet'}
+    path = '/home/labmim/Build_WRF/d-output/figuras/'
+
     grade = dataset[39:42]; grade = grade.upper()
     dataset = netCDF4.Dataset(dataset)
     times_array = dataset.variables['Times'][:]
     dates = []; datesStr = []; names = []
+
     map = {'HFX':'HFX','LH':'LH','pressure':'PRES','rain':'RAIN','SWDOWN':'SWDOWN','temperature':'TEMP','vapor':'VAPOR','wind':'WIND'}
     week = {1:'Segunda',2:'Terça',3:'Quarta',4:'Quinta',5:'Sexta',6:'Sábado',7:'Domingo'}
     #desc = {'HFX':'Calor Sensível','pressure':'Pressão Atmosférica (Nível do Mar)','rain':'Precipitação','SWDOWN':'Radiação Global','temperature':'Temperatura (2 m)','vapor':'Umidade Específica','wind':'Velocidade do Vento (10 m)'}
-
 
     month = str(datetime.now().month); day = str(datetime.now().day)
     if len(month) == 1:
@@ -48,40 +55,51 @@ def drawmap(tipo,dataset):
     if len(day) == 1:
         day = '0'+str(day)
     today = str(datetime.now().year)+month+day
-
-    #path = '/home/labmim/Build_WRF/d-output/figuras/'+today+'/'
-    path = '/home/labmim/Build_WRF/d-output/figuras/'
     
     it = 0
     for time in times_array:
-        #if it == 25:
-        #    break
         currentTime = b''.join(time.tolist()).decode('UTF-8')
         current_date = datetime.strptime(currentTime, '%Y-%m-%d_%H:%M:%S')
         if it == 0:
             start = current_date.strftime("%d/%m/%Y %H") + " (UTC)\n"
+            cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
+            datesStr.append("\nInício Análise: "+start+"Previsão: "+cd.strftime("%d/%m/%Y %H")+"HL ("+week[cd.isoweekday()]+")")
+            names.append(grade+"_"+map[tipo]+"_"+toNum(it))
+            it+=1
+            continue
         cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
-        datesStr.append("\nWRF - LabMiM/LMAC (UFBA)\nInício Análise: "+start+"Previsão: "+cd.strftime("%d/%m/%Y %H")+" ("+week[cd.isoweekday()]+") HL ")
+        if tipo == 'SWDOWN' and (cd.hour < 6 or cd.hour > 18):
+            datesStr.append("\nInício Análise: "+start+"Previsão: "+cd.strftime("%d/%m/%Y %H")+"HL ("+week[cd.isoweekday()]+")")
+            names.append(grade+"_"+map[tipo]+"_"+toNum(it))
+            it+=1
+            continue
+        datesStr.append("\nInício Análise: "+start+"Previsão: "+cd.strftime("%d/%m/%Y %H")+"HL ("+week[cd.isoweekday()]+")")
         names.append(grade+"_"+map[tipo]+"_"+toNum(it))
-        dates.append(cd)
+        dates.append((it,cd))
         it+=1
 
+    #grafico da temperatura com as linhas de pressao
     if tipo == 'temperature':
         xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
         lon, lat = xlong[:1, :,:].squeeze(), xlat[:1, :, :].squeeze()
         hlat, llat = np.amax(xlat), np.amin(xlat)
         hlong, llong = np.amax(xlong), np.amin(xlong)
+        #temperatura
         var = dataset.variables['T2'][:,:,:].squeeze()
         varmin, varmax = getLowHigh(var);
         varmax = varmax - 273;        varmin = varmin - 273
+        #pressao
+        var2 = dataset.variables['PSFC'][:,:,:].squeeze()
+        var2 /= 100
 
-        for i in range(len(dates)):
+        for i,date in dates:
 
             celcius = var[i:i+1,:,:] - 273.15
+            pressure = var2[i:i+1,:,:]
 
             plt.figure(figsize=(8,6))
-            plt.title('Temperatura do Ar em 2m ' + datesStr[i], fontsize=12)
-            plt.suptitle("$^\circ\mathcal{C}$", fontsize=18, ha='center', x=0.79, y=0.75)
+            plt.title('Temperatura do Ar em 2m / Pressão Atm. Superfície ' + datesStr[i], fontsize=12)
+            plt.suptitle("$^\circ\mathcal{C}$", fontsize=14, ha='center', x=0.79, y=0.75)
             plt.xlabel('Longitude', fontsize=11, labelpad=25)
             plt.ylabel('Latitude', fontsize=11, labelpad=60)
 
@@ -95,11 +113,16 @@ def drawmap(tipo,dataset):
             m.drawparallels(np.arange(llat, hlat,abs(hlat-llat)/10), linewidth=0, labels=[1,0,0,0], color='r',zorder=0, fmt="%.2f")
             m.drawmeridians(np.arange(llong, hlong,abs(hlong-llong)/5), linewidth=0, labels=[0,0,0,1], color='r',zorder=0, fmt="%.2f")
 
+            #temperatura
             m.contourf(x,y, np.squeeze(celcius), alpha=0.4, cmap=colormap[tipo], vmin=varmin, vmax=varmax)
             m.pcolor(x,y, np.squeeze(celcius), alpha=0.4, cmap=colormap[tipo], vmin=varmin, vmax=varmax)
-
             cb = plt.colorbar(shrink=0.5, pad=0.04)
             cb.ax.tick_params(labelsize=10)
+            #pressao
+            levels = [880,900,950,1000,1013]
+            p = m.contour(x,y, np.squeeze(pressure), levels,linewidths=0.8, colors='black')
+            plt.clabel(p,colors='black',fmt='%.0f')
+
             plt.savefig(path + names[i] +".png",bbox_inches='tight')
             plt.close()
 
@@ -112,13 +135,13 @@ def drawmap(tipo,dataset):
         varmin, varmax = getLowHigh(var);
         varmax = varmax/100;        varmin = varmin/100
 
-        for i in range(len(dates)):
+        for i,date in dates:
 
             mbar = var[i:i+1,:,:]/100
 
             plt.figure(figsize=(8,6))
             plt.title('Pressão Atmosférica ao Nível do Mar ' + datesStr[i], fontsize=12)
-            plt.suptitle("${mBar}$", fontsize=18, ha='center', x=0.79, y=0.75)
+            plt.suptitle("${mBar}$", fontsize=14, ha='center', x=0.82, y=0.75)
             plt.xlabel('Longitude', fontsize=11, labelpad=25)
             plt.ylabel('Latitude', fontsize=11, labelpad=60)
 
@@ -149,13 +172,13 @@ def drawmap(tipo,dataset):
         varmin, varmax = getLowHigh(var);
         varmax = varmax*1000;        varmin = varmin*1000
 
-        for i in range(len(dates)):
+        for i,date in dates:
 
             gkg = var[i:i+1,:,:]*1000
 
             plt.figure(figsize=(8,6))
             plt.title('Umidade Específica do Ar em 2m' + datesStr[i], fontsize=12)
-            plt.suptitle("$g/kg \frac{m}{s}$", fontsize=18, ha='center', x=0.79, y=0.75)
+            plt.suptitle("$g/kg \frac{m}{s}$", fontsize=14, ha='center', x=0.80, y=0.75)
             plt.xlabel('Longitude', fontsize=11, labelpad=25)
             plt.ylabel('Latitude', fontsize=11, labelpad=60)
 
@@ -185,7 +208,7 @@ def drawmap(tipo,dataset):
         u10 = dataset.variables['U10'][:].squeeze(); v10 = dataset.variables['V10'][:].squeeze()
         varmin, varmax = getLowHighWind(u10,v10);
 
-        for i in range(len(dates)):
+        for i,date in dates:
 
             u = u10[i:i+1,:,:].squeeze()
             v = v10[i:i+1,:,:].squeeze()
@@ -249,13 +272,13 @@ def drawmap(tipo,dataset):
         var = var + var2
         varmin, varmax = getLowHigh(var)
 
-        for i in range(len(dates)):
+        for i,date in dates:
 
             mm = var[i:i+1,:,:]
 
             plt.figure(figsize=(8,6))
             plt.title('Precipitação Acumulada em 6h' + datesStr[i], fontsize=12)
-            plt.suptitle("$mm$", fontsize=18, ha='center', x=0.79, y=0.75)
+            plt.suptitle("$mm$", fontsize=14, ha='center', x=0.79, y=0.75)
             plt.xlabel('Longitude', fontsize=11, labelpad=25)
             plt.ylabel('Latitude', fontsize=11, labelpad=60)
 
@@ -284,13 +307,13 @@ def drawmap(tipo,dataset):
         var = dataset.variables['HFX'][:,:,:].squeeze()
         varmin, varmax = getLowHigh(var);
 
-        for i in range(len(dates)):
+        for i,date in dates:
 
             mm = var[i:i+1,:,:]
 
             plt.figure(figsize=(8,6))
             plt.title('Calor Sensível em Superfície ' + datesStr[i], fontsize=12)
-            plt.suptitle("$ W m ^ {-2} $", fontsize=18, ha='center', x=0.79, y=0.75)
+            plt.suptitle("$ W m ^ {-2} $", fontsize=14, ha='center', x=0.82, y=0.75)
             plt.xlabel('Longitude', fontsize=11, labelpad=25)
             plt.ylabel('Latitude', fontsize=11, labelpad=60)
 
@@ -319,13 +342,13 @@ def drawmap(tipo,dataset):
         var = dataset.variables['LH'][:,:,:].squeeze()
         varmin, varmax = getLowHigh(var);
 
-        for i in range(len(dates)):
+        for i,date in dates:
 
             mm = var[i:i+1,:,:]
 
             plt.figure(figsize=(8,6))
             plt.title('Calor Latente em Superfície' + datesStr[i], fontsize=12)
-            plt.suptitle("$ W m ^ {-2} $", fontsize=18, ha='center', x=0.79, y=0.75)
+            plt.suptitle("$ W m ^ {-2} $", fontsize=14, ha='center', x=0.82, y=0.75)
             plt.xlabel('Longitude', fontsize=11, labelpad=25)
             plt.ylabel('Latitude', fontsize=11, labelpad=60)
 
@@ -354,13 +377,13 @@ def drawmap(tipo,dataset):
         var = dataset.variables['SWDOWN'][:,:,:].squeeze()
         varmin, varmax = getLowHigh(var);
 
-        for i in range(len(dates)):
+        for i,date in dates:
 
             mm = var[i:i+1,:,:]
 
             plt.figure(figsize=(8,6))
             plt.title('Radiação Solar Global ' + datesStr[i], fontsize=12)
-            plt.suptitle("$ W m ^ {-2} $", fontsize=18, ha='center', x=0.79, y=0.75)
+            plt.suptitle("$ W m ^ {-2} $", fontsize=14, ha='center', x=0.82, y=0.75)
             plt.xlabel('Longitude', fontsize=11, labelpad=25)
             plt.ylabel('Latitude', fontsize=11, labelpad=60)
 
@@ -381,9 +404,24 @@ def drawmap(tipo,dataset):
             plt.savefig(path + names[i] +".png",bbox_inches='tight')
             plt.close()
 
-if __name__ == '__main__':
+def generateGifs(name, files, path_output):
+    files = glob.glob(files+'*.png')
+    files.sort(key=os.path.getmtime)
 
-    args = ['temperature','pressure','vapor','wind','rain','HFX','LH','SWDOWN']
+    images = [imageio.imread(x) for x in files]
+    imageio.mimsave(path_output+name+'.gif',images,format='GIF',duration=0.5)
+
+    clip = mp.VideoFileClip(path_output+name+'.gif')
+    clip.write_videofile(path_output+name+'.webm')
+
+    os.remove(path_output+name+'.gif')
+
+if __name__ == '__main__':
+    
+    #graphs.png for each hour
+    #args = ['temperature','pressure','vapor','wind','rain','HFX','LH','SWDOWN']
+    args = ['temperature','vapor','wind','SWDOWN','rain']
+    
     path = '/home/labmim/Build_WRF/d-output'
     files = getFileNames(path)
 
@@ -391,3 +429,13 @@ if __name__ == '__main__':
     processes = Pool(processes=20)
 
     processes.starmap(drawmap,final)
+
+    #make a .webm with the graphs
+    path = '/home/labmim/Build_WRF/d-output/figuras/'
+    names = ['_RAIN','_SWDOWN','_TEMP','_VAPOR','_WIND']
+    grade = ['D01','D02','D03']
+
+    files = [(g+n[1:], path+g+n, path) for g in grade for n in names]
+    
+    processes.starmap(generateGifs,files)
+

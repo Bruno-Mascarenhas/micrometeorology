@@ -8,8 +8,11 @@ plt.style.use('seaborn-whitegrid')
 from sys import exit 
 import scipy
 
-labmim = pd.read_csv(filepath_or_buffer='/home/labmim/meteorologia/estacoes/rms/labmim_completo_controle.dat',sep=';')
+#labmim = pd.read_csv(filepath_or_buffer='/home/labmim/meteorologia/estacoes/rms/labmim_completo_controle.dat',sep=';')
+labmim = pd.read_csv('labmim_completo_controle.dat',sep=';')
 labmim.index = pd.to_datetime(labmim[['year','month','day','hour']])
+
+labmim['Sw_dif'] = labmim['Sw_dif'] * labmim['fc']
 
 n_dif = []
 n_sw = []
@@ -24,20 +27,32 @@ for dif, sw, precip in zip(labmim['Sw_dif'],labmim['Sw_dw'],labmim['precip']):
 labmim['Sw_dif'] = n_dif
 labmim['Sw_dw'] = n_sw
 
+
+###############################################################################
+# Alterações calibração #######################################################
+"""
 #antiga dif = 1.1074
-labmim['Sw_dif'] = labmim['Sw_dif'] * 1.1009        #fator constante de calibração
-labmim['Sw_dif'] = labmim['Sw_dif'] * labmim['fc']
+#labmim['Sw_dif'] = labmim['Sw_dif'] * 1.1009        #fator constante de calibração
+labmim['Sw_dif'] = labmim['Sw_dif'] * 1.0933        #fator constante de calibração  8.37/7.66
+
 #antiga sw_dw = 0.9983
 #labmim['Sw_dw'] = labmim['Sw_dw'] * 0.9983
-tmp = labmim.loc['2016':'2018-08','Sw_dw']
-tmp *= 0.9383 #constante corrigida de calibração
-labmim.loc['2016':'2018-08','Sw_dw'] = tmp
+tmp = labmim.loc['2018':'2018-09','Sw_dw']
+tmp *= 0.9383 #constante corrigida de calibração    8.37/8.92
+labmim.loc['2018':'2018-09','Sw_dw'] = tmp
 
-tmp = labmim.loc['2018-09':'2019','Sw_dw']
-tmp *= 0.9694 #constante corrigida de calibração
-labmim.loc['2018-09':'2019','Sw_dw'] = tmp
+#cnr
+tmp = labmim.loc['2018-09':'2019-01','Sw_dw']
+tmp *= 0.9694 #constante corrigida de calibração    10.46/10.79
+labmim.loc['2018-09':'2019-01','Sw_dw'] = tmp
 
-
+#cnr 2019
+tmp = labmim.loc['2019':'2020','Sw_dw']
+tmp *= 1.006 #constante corrigida de calibração    10.46/10.40
+labmim.loc['2019':'2020','Sw_dw'] = tmp
+"""
+################################################################################
+################################################################################
 
 labmim['kt'] = labmim['Sw_dw']/labmim['oc_topo']
 

@@ -18,7 +18,7 @@ def getFileNames(dataDir):
     today = str(datetime.now().year)+'-'+month+'-'+day
     #today = '2018-08-30'
     #grades = ['d01','d02','d03','d04']
-    grades = ['d01','d02']
+    grades = ['d01','d02','d03']
     os.chdir(dataDir)
     fileList = os.listdir() #glob.glob('*.nc')
     file = open(os.path.join(__location__,'files.dat'), 'w')
