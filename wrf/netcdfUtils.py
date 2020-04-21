@@ -111,9 +111,16 @@ def generateSeries(files,stations,foutput):
             pblh = dataset.variables['PBLH'][:]
             times_array = dataset.variables['Times'][:]
 
+            #BES variables
+            albd = dataset.variables['ALBEDO']
+            emiss = dataset.variables['EMISS']
+            lwdw_sfc = dataset.variables['LWDNB']
+            lwup_sfc = dataset.variables['LWUPB']
+
+
             it = 0
 
-            header = 'year,month,day,hour,T,q,pressure,u,v,Sw_dw,Lw_dw,H,LE,G,ustar,TSM,PBLH'.split(',')
+            header = 'year,month,day,hour,T,q,pressure,u,v,Sw_dw,Lwdw_atm,H,LE,G,ustar,TSM,PBLH,ALBD,EMISS'.split(',')
             serie = {}
             for el in header:
                 serie[el] = []
@@ -162,7 +169,7 @@ def generateSeries(files,stations,foutput):
                 serie['G'].append(grdflx_array[it:it + 1][0])
 
                 glw_array = glw[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
-                serie['Lw_dw'].append(glw_array[it:it + 1][0])
+                serie['Lwdw_atm'].append(glw_array[it:it + 1][0])
 
                 ustar_array = ustar[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
                 serie['ustar'].append(ustar_array[it:it + 1][0])
@@ -173,11 +180,18 @@ def generateSeries(files,stations,foutput):
                 tsm_array = tsm[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
                 serie['TSM'].append(tsm_array[it:it + 1][0]-273.15)
 
+                ALBD_array = albd[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
+                serie['ALBD'].append(ALBD_array[it:it + 1][0]-273.15)
+
+                EMISS_array = emiss[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
+                serie['EMISS'].append(EMISS_array[it:it + 1][0]-273.15)
+
                 it+=1
 
         
         df = pd.DataFrame(serie)
-        
+
+        sigma = 5.670367*(10**-8)
         df['WS'] = np.sqrt(df['u']**2+df['v']**2)
         df['q'] = df['q']/1000
         df['e'] = (df['q']*df['pressure'])/(0.622*(1-df['q'])+df['q'])
@@ -188,5 +202,8 @@ def generateSeries(files,stations,foutput):
         df['e'] /= 100  
         df['WD'] = 180/np.pi*np.arctan2(df['u'],df['v'])+180
 
-        df = df[header+'WS WD e es ur'.split()]
+        df['Swup_atm'] = df['ALBD'] * df['Sw_dw']
+        df['Lwup_atm'] = (df['EMISS']*sigma)*(df['T']**4)
+        
+        df = df[header+'WS WD e es ur Swup_atm Lwup_atm'.split()]
         df.to_csv(foutput+name+'.dat',sep=',',index=False,na_rep='nan',float_format='%.7f')
