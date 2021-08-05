@@ -9,7 +9,7 @@ from sys import exit
 import scipy
 
 #labmim = pd.read_csv(filepath_or_buffer='/home/labmim/meteorologia/estacoes/rms/labmim_completo_controle.dat',sep=';')
-labmim = pd.read_csv('labmim_completo_controle.dat',sep=';')
+labmim = pd.read_csv('/home/labmim/meteorologia/estacoes/rms/labmim_completo_controle2020.dat',sep=';')
 labmim.index = pd.to_datetime(labmim[['year','month','day','hour']])
 
 labmim['Sw_dif'] = labmim['Sw_dif'] * labmim['fc']
@@ -160,9 +160,9 @@ for i in range(len(dados.index)):
     model2.append(0.13 + 0.86 * (1/(1+np.exp(-6.29+12.26*dados['kt'][i]))))
     model3.append(1 / (1+ np.exp(-5.38 + 6.63*dados['kt'][i] + -0.006*dados['ast'][i] + -0.007*dados['elev'][i] + 1.75*dados['ktday'][i] + 1.31*dados['psi'][i])))
 
-dados['model1'] = model1
-dados['model2'] = model2
-dados['model3'] = model3
+dados['model_lemos'] = model1
+dados['model_marquesfh'] = model2
+dados['model_ridley'] = model3
 
 dados['year'] = dados.index.year
 dados['month'] = dados.index.month 
@@ -173,9 +173,9 @@ dados['hour'] = dados.index.hour
 # Plot das medidas e modelos de KT-KD
 ##############################################################
 plt.scatter(x=dados['kt'],y=dados['kd'],label='medidas')
-plt.scatter(y=dados['model1'],x=dados['kt'],label='modelo1')
-plt.scatter(y=dados['model3'],x=dados['kt'],label='modelo3')
-plt.scatter(y=dados['model2'],x=dados['kt'],label='modelo2')
+plt.scatter(y=dados['model_lemos'],x=dados['kt'],label='model_lemos')
+plt.scatter(y=dados['model_marquesfh'],x=dados['kt'],label='model_marquesfh')
+plt.scatter(y=dados['model_ridley'],x=dados['kt'],label='model_ridley')
 plt.ylabel('Kd')
 plt.xlabel('Kt')
 plt.legend()
@@ -187,5 +187,5 @@ plt.show()
 
 
 #Organização e exportação da tabela dos dados usados
-dados = dados['year month day hour sw_dw sw_dif sw_top kt ktday kd ast elev psi model1 model2 model3'.split()]
+dados = dados['year month day hour sw_dw sw_dif sw_top kt ktday kd ast elev psi model_lemos model_marquesfh model_ridley'.split()]
 dados.to_csv('ktkd_labmim.dat',na_rep='nan',sep=';',index=False)

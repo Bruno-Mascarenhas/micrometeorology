@@ -1,3 +1,4 @@
+
 import pandas as pd
 import numpy as np 
 import matplotlib.pyplot as plt 
@@ -35,12 +36,12 @@ def factor2(df):
     for Eg, Et, Edf in  zip(df['Sw_dw'],df['oc_topo'],df['Sw_dif']):
         if Et!=0 and Eg/Et < 1:
             new_swdw.append(Eg)
-            new_swdif.append(Edf)
+            #new_swdif.append(Edf)
         else:
             new_swdw.append(np.nan)
-            new_swdif.append(np.nan)
+            #new_swdif.append(np.nan)
     df['Sw_dw'] = new_swdw
-    df['Sw_dif'] = new_swdif
+    #df['Sw_dif'] = new_swdif
     return df
 
 #Edf/Et < 0.8 (Younes)
@@ -49,12 +50,12 @@ def factor3(df):
     new_swdif = []
     for Edf, Et, Eg in  zip(df['Sw_dif'],df['oc_topo'],df['Sw_dw']):
         if not np.isnan(Edf) and Et!=0 and Edf/Et > 0.8:
-            new_swdw.append(np.nan)
+            #new_swdw.append(np.nan)
             new_swdif.append(np.nan)
         else:
-            new_swdw.append(Eg)
+            #new_swdw.append(Eg)
             new_swdif.append(Edf)
-    df['Sw_dw'] = new_swdw
+    #df['Sw_dw'] = new_swdw
     df['Sw_dif'] = new_swdif
     return df
 
@@ -64,12 +65,12 @@ def factor4(df):
     new_swdif = []
     for Edf, Eg in  zip(df['Sw_dif'],df['Sw_dw']):
         if not np.isnan(Edf) and Eg!=0 and Edf/Eg > 1.1:
-            new_swdw.append(np.nan)
+            #new_swdw.append(np.nan)
             new_swdif.append(np.nan)
         else:
-            new_swdw.append(Eg)
+            #new_swdw.append(Eg)
             new_swdif.append(Edf)
-    df['Sw_dw'] = new_swdw
+    #df['Sw_dw'] = new_swdw
     df['Sw_dif'] = new_swdif
     return df
 
@@ -109,13 +110,8 @@ def factor6(df):
     df['Sw_dif'] = new_swdif
     return df
 
-labmim = pd.read_csv('labmim_completo.dat',sep=';')
+labmim = pd.read_csv('labmim_horario_final.dat',sep=',')
 labmim.index = pd.to_datetime(labmim[['year','month','day','hour']])
-
-labmim['Sw_dw'].plot()
-labmim['Sw_dif'].plot()
-plt.show()
-plt.close()
 
 quantity = {'total':0,'factor1':0,'factor2':0,'factor3':0,'factor4':0,'factor5':0,'factor6':0}
 
@@ -155,6 +151,3 @@ print(1-quantity['factor6']/quantity['total'])
 
 labmim.to_csv('labmim_completo_controle.dat',sep=';',na_rep='nan',index=False)
 
-labmim['Sw_dw'].plot()
-labmim['Sw_dif'].plot()
-plt.show()
