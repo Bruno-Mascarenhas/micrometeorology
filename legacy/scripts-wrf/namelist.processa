@@ -1,0 +1,426 @@
+!#/bin/ksh
+╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                                                                                                                     ║
+║          ENTRADA DE DADOS PARA WRF (AERMOD+CALPUFF - NAO IMLEMENTADOS)                                                                                                              ║
+║                                                                                                                                                                                     ║
+║ IMPORTANTE:                                                                                                                                                                         ║
+║    1) dados sempre comecam na terceira coluna apos o "="                                                                                                                            ║
+║    2) todas as palavras a esquerda antes do "=" são reservadas e não podem ser repetidas                                                                                            ║
+║                                                                                                                                                                                     ║
+║ FORMATO: VARIAVEL SEPARADAS POR ESPACO                                                                                                                                              ║
+║                                                                                                                                                                                     ║
+╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+       #~~~~~~~~nao apagar~~~~~~~~~~~~~~~~
+       #├  ┤  ┐  └  ┴  ┬  ─  ┼  ┘  ┌  │  ¬
+       #╠  ╣  ╗  ╚  ╩  ╦  ═  ╬  ╝  ╔  ║  ╗
+       #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ╔═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+      ║ 0) O QUE SERA EXECUTADO?                                                                                                                                                      ║
+      ║ ~~~~~~~~~~~~~~~~~~~~~~~~                                                                                                                                                      ║
+      ╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+processo_binario  = N     !se S-SIM/N-NAO, executa o *.bin, caso contario o *.scpt
+
+╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║PROCESSO A SER EXECUTADO           VERSAO                                        EXECUTAR (S-SIM/N-NAO)        LINGUAGEM  O QUE FAZ                                                  ║
+╠═══════════════════════════════════╬═════════════════════════════════════════════╬═════════════════════════════╬══════════╬══════════════════════════════════════════════════════════╣
+
+VERSAO_NAMELIST                   = 4.0.0                                                                       !        - controle de versao do namelist
+processa_wrf_system               = processa_wrf_00_system-V3.1.0                 S                             !SHELL   - controle de processos
+processa_wrf_busca                = processa_wrf_01_busca-V2.0.0                  N                             !SHELL   - busca de dados do GFS
+processa_wrf_wps                  = processa_wrf_02_wps-V2.0.0                    N                             !SHELL   - processa o WPS
+processa_wrf_wrf                  = processa_wrf_03_wrf-V2.0.0                    N                             !SHELL   - processa o WRF
+processa_wrf_python               = processa_wrf_04_python-V2.0.0                 S                             !SHELL   - formata dados para o python
+processa_wrf_figuras              = processa_wrf_04.1_figuras-V1.0.3.py           S                             !PYTHON  - gera das figuras no python
+processa_wrf_mmif                 = processa_wrf_05_mmif-V2.0.0                   S                             !SHELL   - processa os dados do MMIF
+processa_wrf_wap                  = processa_wrf_05.1_wap-V1.0.1.py               S                             !PYTHON  - gera das figuras no python do aermod
+processa_wrf_readwrfnc            = processa_wrf_06_readwrfnc-V2.1.0              S                             !SHELL   - formata dados para o READ_WRF_NC
+processa_wrf_interativemap        = processa_wrf_07_interative-map-V1.0.0         S                             !SHELL   - gera as figuras para os mapas interativos
+processa_wrf_geoJSON              = processa_wrf_07.1_geojson-V1.0.0.py           S                             !PYTHON  - gera as figuras geoTIFF
+processa_wrf_ftp                  = processa_wrf_08_ftp-V2.0.0                    N                             !SHELL   - envia os dados para o portal ufes
+processa_wrf_deletafiles          = processa_wrf_09_deletafiles-V1.1.2            N                             !SHELL   - deleta arquivos antigos (>30 dias)
+VERSAO_WPS                        = 4.7.1                                                                       !FORTRAN - versao do WPS
+VERSAO_WRF                        = 4.7.1                                                                       !FORTRAN - versao do WRF
+VERSAO_MMIF                       = 4.1.1                                                                       !FORTRAN - versao do MMIF
+
+╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+       ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+       ║1) CONFIGURACAO DOS NAMELISTs DO WRF                                                                                                                                          ║
+       ║~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~                                                                                                                                          ║
+       ║├── time_step        ───  passo no tempo                                                                                                                                      ║
+       ║├── numproc          ───  numero de processadores utilizados                                                                                                                  ║
+       ║├── WPSoutput        ───  local de saida do WPS                                                                                                                               ║
+       ║├── WRFoutput        ───  local de saida do WRF                                                                                                                               ║
+       ║├── DATAhistory      ───  local dos dados diarios                                                                                                                             ║
+       ║├── DATAtype         ┬──  gfs-0.50°   ───    default com ~54 km - (tipo de dados)                                                                                             ║
+       ║│                    ├──  gfs-0.25°   ───    ~27 km - roda operacional se comecar as 6 horas da manha                                                                         ║
+       ║│                    ├──  fnl         ───    dados historicos com ~54 km                                                                                                      ║
+       ║│                    └──  gdas        ───    dados historicos com ~27 km                                                                                                      ║
+       ║├── DATAgeog         ─── local dos dados geograficos                                                                                                                          ║
+       ║├── geog_data_res    ─── topografia e uso do solo                                                                                                                             ║
+       ║├── interval_seconds ─── intervalo de leitura dos arquivos: gfs (3 em 3 horas = 10800 s) - fnl ou gdas (6 em 6 horas = 21600 s)                                               ║
+       ║└── wudapt_op        ─── opcao do wudapt                                                                                                                                      ║
+       ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+
+time_step        = 160
+numproc          = 36
+WPSoutput        = /home/models/WRF/wrf-op/d-input
+WRFoutput        = /home/models/WRF/wrf-op/d-output
+DATAhistory      = /home/models/WRF/wrf-op/d-input
+DATAtype         = gfs-0.50
+DATAgeog         = /home/models/WRF/wrf-geog
+geog_data_res    = cglc_modis_lcz+usgs+srmt+default
+interval_seconds = 10800
+wudapt_op        = S
+
+╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+       ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+       ║2) WRF - CONFIGURACAO (execucao inicial e final)                                                                                                                              ║
+       ║~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~                                                                                                                              ║
+       ║├── wrf_ini         ─── execucao inicial do wrfxx em 1                                                                                                                        ║
+       ║├── wrf_fin         ─── execucao final   do wrfxx em 10 (se desejar aumentar o n.° de linhas)                                                                                 ║
+       ║├── wrf no.         ─── (VARIAVEL RESERVADA) configuracao do no. do projeto - No. = 01, 02, 03 etc.                                                                           ║
+       ║├── exe_simulacao   ─── executa a simulacao (S-SIM/N-NAO)                                                                                                                     ║
+       ║├── projeto         ┬── nome do projeto (preferencialmente em maiusculo)                                                                                                      ║
+       ║│                   └── fazer os arquivos dentro de d-namelist (lista-json, namelist.wps e namelist.input)                                                                    ║
+       ║├── num_max_dom     ─── quantidade de dominios do wrf (1, 2, 3, 4, 5 etc.)                                                                                                    ║
+       ║├── deltahora       ┬── tempo de simulacao (horas). e.g., 03, 06, 75 (tem que colocar o zero para mumeros menores do que 10)                                                  ║
+       ║│                   └── deltahora  eh SEMPRE de 3 em 3 horas (GFS)                                                                                                            ║
+       ║├── lat_central     ─── latitude central do wrf                                                                                                                               ║
+       ║├── lon_central     ─── longitude central do wrf                                                                                                                              ║
+       ║├── localidade_ini  ─── eh a localidade inicial de extracao dos dados e figuras                                                                                               ║
+       ║├── localidade_fin  ─── eh a localidade  final  de extracao dos dados e figuras                                                                                               ║
+       ║├── wrf_ini = 1     ─── execucao inicial do wrfxx em 1                                                                                                                        ║
+       ║└── wrf_fin = 4     ─── execucao final   do wrfxx em 10 (se desejar aumentar o n.° de linhas)                                                                                 ║
+       ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+wrf_ini      = 1
+wrf_fin      = 5
+
+╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║simulacao         projeto          num_max_dom    deltahora    lat_central    lon_central    localidade_ini    localidade_fin                                                        ║
+╠══════════════════╬════════════════╬══════════════╬════════════╬══════════════╬══════════════╬═════════════════╬═════════════════════════════════════════════════════════════════════╣
+
+wrf01 = S          LABMIM           4               75          -12.000000     -41.000000     localidade_01     localidade_01
+wrf02 = N          LEAL             4               75          -20.132680     -40.350294     localidade_02     localidade_02
+wrf03 = N          PETROBRAS        3               75          -21.450000     -40.100000     localidade_03     localidade_03
+wrf04 = N          IFES             4               72          -20.197800     -40.215900     localidade_04     localidade_04
+wrf05 = 
+wrf06 =
+wrf07 =
+wrf08 =
+wrf09 =
+wrf10 =
+
+
+       ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+       ║3) EXTRACAO DE DADOS E MODELOS DE DISPERSAO AERMOD E CALPUFF                                                                                                                  ║
+       ║~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~                                                                                                                ║
+       ║├── localidadeNo.   ─┬── (VARIAVEL RESERVADA) configuracao do no. da localidade dentro do wrfNo. - No. = 01, 02, 03 etc.                                                      ║
+       ║│                    └── ex: extrai dados das localidade 01, 02, 03 etc. dentro do dominio do WRF de acordo com as coordenadas abaixo                                         ║
+       ║├── nome-da-estacao ──── nome da localidade de onde se extrai os dados                                                                                                        ║
+       ║├── timezona        ──── zone UTM (olhar no Google Earth, com base na lat-lon)                                                                                                ║
+       ║├── latitude        ──── latitude  do ponto de extracao de dados                                                                                                              ║
+       ║├── longitude       ──── longitude do ponto de extracao de dados                                                                                                              ║
+       ║├── time_serie      ─┬── extrair dados das series temporal de superfície (TIME_SERIES_SOUNDING) e de altitude (TIME_SERIES_SURFACE) do WRF                                    ║
+       ║├── TSgrade          └── TimeSeries dominio (grade) do WRF que se deseja extrair os dados (d01, d02, d03 etc.)                                                                ║
+       ║├── FIG             ─┬── PYTHON gera figuras do WRF, condicionadas aos dominios d01, d02, d03, d04 etc. (DOMini a DOMfim).                                                    ║
+       ║├── DOMini           ├── figura inicial comeca no dominio d0 = 1, 2, 3, 4 etc. (ex: se voce deseja figuras das grades d03 e d04, DOMini = 3 e DOMfim = 4)                     ║
+       ║├── DOMfim           ├── figura final temina no dominio d0 = 1, 2, 3, 4 etc.   (ex: se voce deseja figura somente da grades d02, DOMini = 2 e DOMfim = 2)                     ║
+       ║│                    ├── ex: se Figura = S: (DOMini, DOMfim) = (1, 1) - faz somente as figuras de d01                                                                         ║
+       ║│                    └──                    (DOMini, DOMfim) = (2, 4) - faz as figuras de d02 a d04                                                                           ║
+       ║├── IntMap          ──── gera as figuras para o interative map (https://leafletjs.com/)                                                                                       ║
+       ║├── MMIF            ──── extracao dos dados das coordenadas lat-lon para o AERMOD                  (S-sim/N-nao)                                                              ║
+       ║├── h_estacao       ──── altura da estacao meteorologica acima da superficie (m)                                                                                              ║
+       ║└── ftp             ──── envia os dados para o portal www.leal.ufes.br                             (S-sim/N-nao)                                                              ║
+       ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║              nome-da-estacao  utm-zona  latitude    longitude   timezone  time_serie  TSgrade  FIG  DOMini  DOMfim  IntMap   MMIF  h_estacao   ftp                                  ║
+╠══════════════╬════════════════╬═════════╬═══════════╬═══════════╬═════════╬═══════════╬════════╬════╬═══════╬═══════╬════════╬═════╬═══════════╬════════════════════════════════════╣
+
+localidade01 = LABMIM           24        -13.000797  -38.507198  -3        N           4        S    1       4       S        N     20          S
+localidade02 = LEAL             24        -20.132680  -40.350294  -3        N           1        N    1       4       S        N     20          N
+localidade03 = CENARIO_01       24        -21.450000  -40.100000  -3        N           3        N    0       0       N        S     10          N
+localidade04 = IFES             24        -20.197800  -40.215900  -3        N           4        N    1       4       N        N     10          N
+localidade05 = 
+localidade06 =
+localidade07 =
+localidade08 =
+localidade09 =
+localidade10 =
+localidade11 =
+localidade12 =
+localidade13 =
+localidade14 =
+localidade15 =
+localidade16 =
+localidade17 =
+localidade18 =
+localidade19 =
+localidade20 =
+localidade21 =
+localidade22 =
+localidade23 =
+localidade24 =
+localidade25 =
+localidade26 =
+localidade27 =
+localidade28 =
+localidade29 =
+localidade30 =
+
+
+       ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+       ║numero de variaveis das series temporais do WRF - se aumentar, inserir a quantidade                                                                                           ║
+       ║comando para ver as variaveis no arquivo do WRF eh: ncdump -h <NOME-DO-ARQUIVO>                                                                                               ║
+       ║IMPORTANTE: 0 (NAO) = nao utilizado, 1 (SIM) = utilizado                                                                                                                      ║
+       ║                                                                                                                                                                              ║
+       ║                                                                                                                                                                              ║
+       ║       ┌─────➤ 1.° x = TIME_SERIES_SOUNDING      EXEMPLOS: ─➤ 1000                                                                                                            ║
+       ║       │┌────➤ 2.° X = TIME_SERIES_SURFACE                 ─➤ 0100                                                                                                            ║
+       ║       ││┌───➤ 3.° x = GRAFICOS WRF                        ─➤ 0010 (PYTHON)                                                                                                   ║
+       ║       │││┌──➤ 4.° X = TIME_SERIES_INTERATIVEMAP           ─➤ 0001                                                                                                            ║
+       ║       ││││                                                                                                                                                                   ║
+       ║uso ─> XAXA, onde X ou A valem 0 (ignora variavel) ou 1 (aceita a variavel)                                                                                                   ║
+       ║       1234                                                                                                                                                                   ║
+       ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+nvar   =    229
+
+╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║var        uso     variavel                 unidade          significado                                                                                                             ║
+╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+var001 =    0000    AOD_OUT                  dimensionless    Aerosol Optical Depth
+var002 =    0000    AOD2D_OUT                dimensionless    Aerosol Optical Depth, 2d
+var003 =    0000    ATOP2D_OUT               dimensionless    Aerosol Optical Depth, top
+var004 =    0000    ICN_DIAG                 dimensionless    Some chem thing, ICN_DIAG
+var005 =    0000    NC_DIAG                  dimensionless    Some chem thing, NC_DIAG
+var006 =    0000    CLDFRA2                  dimensionless    CLOUD FRACTION
+var007 =    0000    UST_T                    m s-1            Threshold Friction Velocity
+var008 =    0000    ROUGH_COR                dimensionless    roughness elements correction
+var009 =    0000    SMOIS_COR                dimensionless    soil moisture correction
+var010 =    0000    DRYDEPVEL                m/s              dust dry deposition velocity
+var011 =    0000    DRY_DEP_LEN              cm/s             dry deposition velocity
+var012 =    0000    EBIO_ISO                 mol km^-2 hr^-1  Actual biog emiss
+var013 =    0000    EBIO_API                 mol km^-2 hr^-1  Actual biog emiss
+var014 =    0000    ACTNH3                   0-1 fraction     The activity of NH3
+var015 =    0000    LAI_VEGMASK              none             MODIS LAI vegetation mask for this date; 0=no dust produced (vegetation)
+var016 =    0000    dvel_o3                  cm/s             O3 deposition velocity
+var017 =    0000    PM2_5_DRY                ug m^-3          pm2.5 aerosol dry mass
+var018 =    0000    PM10                     ug m^-3          pm10 dry mass
+var019 =    0000    DMS_0                    nM/L             dms oceanic concentrations
+var020 =    0000    SNU                      m² m^-3          2nd moment Aitken mode
+var021 =    0000    SAC                      m² m^-3          2nd moment Aitken mode
+var022 =    0000    PV                       pvu              Potential Vorticity
+var023 =    0000    GAMN2O5                  numerical value  n2o5 uptake by aerosol
+var024 =    0000    CN2O5                    m/s              n2o5 velocity
+var025 =    0000    KN2O5                    s-1              n2o5 het reaction rate
+var026 =    0000    YCLNO2                   numerical value  clno2 yield from n2o5 het
+var027 =    0000    XLAT                     degree_north     LATITUDE, SOUTH IS NEGATIVE
+var028 =    0000    XLONG                    degree_east      LONGITUDE, WEST IS NEGATIVE
+var029 =    0000    LU_INDEX                 dimensionless    LAND USE CATEGORY
+var030 =    0000    ZNU                      dimensionless    eta values on half (mass) levels
+var031 =    0000    ZNW                      dimensionless    eta values on full (w) levels
+var032 =    0000    ZS                       m                DEPTHS OF CENTERS OF SOIL LAYERS
+var033 =    0000    DZS                      m                THICKNESSES OF SOIL LAYERS
+var034 =    0000    VAR_SSO                  m²               variance of subgrid-scale orography
+var035 =    0000    BATHYMETRY_FLAG          dimensionless    Flag for bathymetry in the global attributes for metgrid data
+var036 =    0000    U                        m/s¹             x-wind component
+var037 =    0000    V                        m/s¹             y-wind component
+var038 =    0000    W                        m/s¹             z-wind component
+var039 =    0000    PH                       m²/s²            perturbation geopotential
+var040 =    0000    PHB                      m²/s²            base-state geopotential
+var041 =    0000    T                        K                perturbation potential temperature theta-t0
+var042 =    0000    THM                      K                either 1) pert moist pot temp=(1+Rv/Rd Qv)*(theta)-T0, or 2) pert dry pot temp=t
+var043 =    0000    HFX_FORCE                W/m²             SCM ideal surface sensible heat flux
+var044 =    0000    LH_FORCE                 W/m²             SCM ideal surface latent heat flux
+var045 =    0000    TSK_FORCE                W/m²             SCM ideal surface skin temperature
+var046 =    0000    HFX_FORCE_TEND           W/m²/s¹          SCM ideal surface sensible heat flux tendency
+var047 =    0000    LH_FORCE_TEND            W/m²/s¹          SCM ideal surface latent heat flux tendency
+var048 =    0000    TSK_FORCE_TEND           W/m²/s¹          SCM ideal surface skin temperature tendency
+var049 =    0000    MU                       Pa               perturbation dry air mass in column
+var050 =    0000    MUB                      Pa               base state dry air mass in column
+var051 =    0000    NEST_POS                 dimensionless    dimensionless
+var052 =    0000    P                        Pa               perturbation pressure
+var053 =    0000    PB                       Pa               BASE STATE PRESSURE
+var054 =    0000    FNM                      dimensionless    upper weight for vertical stretching
+var055 =    0000    FNP                      dimensionless    lower weight for vertical stretching
+var056 =    0000    RDNW                     dimensionless    inverse d(eta) values between full (w) levels
+var057 =    0000    RDN                      dimensionless    inverse d(eta) values between half (mass) levels
+var058 =    0000    DNW                      dimensionless    d(eta) values between full (w) levels
+var059 =    0000    DN                       dimensionless    d(eta) values between half (mass) levels
+var060 =    0000    CFN                      dimensionless    extrapolation constant
+var061 =    0000    CFN1                     dimensionless    extrapolation constant
+var062 =    0000    THIS_IS_AN_IDEAL_RUN     dimensionless    T/F flag: this is an ARW ideal simulation
+var063 =    0000    P_HYD                    Pa               hydrostatic pressure
+var064 =    0000    Q2                       kg/kg¹           QV at 2 M
+var065 =    0000    T2                       K                TEMP at 2 M
+var066 =    0000    TH2                      K                POT TEMP at 2 M
+var067 =    0000    PSFC                     Pa               SFC PRESSURE
+var068 =    0000    U10                      m/s¹             U at 10 M
+var069 =    0000    V10                      m/s¹             V at 10 M
+var070 =    0000    RDX                      1/m¹             INVERSE X GRID LENGTH
+var071 =    0000    RDY                      1/m¹             INVERSE Y GRID LENGTH
+var072 =    0000    AREA2D                   m²               Horizontal grid cell area, using dx, dy, and map factors
+var073 =    0000    DX2D                     m                Horizontal grid distance: sqrt(area2d)
+var074 =    0000    RESM                     dimensionless    TIME WEIGHT CONSTANT FOR SMALL STEPS
+var075 =    0000    ZETATOP                  dimensionless    ZETA AT MODEL TOP
+var076 =    0000    CF1                      dimensionless    2nd order extrapolation constant
+var077 =    0000    CF2                      dimensionless    2nd order extrapolation constant
+var078 =    0000    CF3                      dimensionless    2nd order extrapolation constant
+var079 =    0000    ITIMESTEP                dimensionless    dimensionless
+var080 =    0000    XTIME                    minutes          minutes
+var081 =    0000    QVAPOR                   kg/kg¹           Water vapor mixing ratio
+var082 =    0000    QCLOUD                   kg/kg¹           Cloud water mixing ratio
+var083 =    0000    QRAIN                    kg/kg¹           Rain water mixing ratio
+var084 =    0000    SHDMAX                   dimensionless    ANNUAL MAX VEG FRACTION
+var085 =    0000    SHDMIN                   dimensionless    ANNUAL MIN VEG FRACTION
+var086 =    0000    SHDAVG                   dimensionless    ANNUAL MIN VEG FRACTION
+var087 =    0000    SNOALB                   dimensionless    ANNUAL MAX SNOW ALBEDO IN FRACTION
+var088 =    0000    TSLB                     K                SOIL TEMPERATURE
+var089 =    0000    SMOIS                    m³/m³            SOIL MOISTURE
+var090 =    0000    SH2O                     m³/m³            SOIL LIQUID WATER
+var091 =    0000    SMCREL                   dimensionless    RELATIVE SOIL MOISTURE
+var092 =    0000    SEAICE                   dimensionless    SEA ICE FLAG
+var093 =    0000    XICEM                    dimensionless    SEA ICE FLAG (PREVIOUS STEP)
+var094 =    0000    SFROFF                   mm               SURFACE RUNOFF
+var095 =    0000    UDROFF                   mm               UNDERGROUND RUNOFF
+var096 =    0000    IVGTYP                   dimensionless    DOMINANT VEGETATION CATEGORY
+var097 =    0000    ISLTYP                   dimensionless    DOMINANT SOIL CATEGORY
+var098 =    0000    VEGFRA                   dimensionless    VEGETATION FRACTION
+var099 =    0000    GRDFLX                   W/m²             GROUND HEAT FLUX
+var100 =    0000    ACGRDFLX                 J/m²             ACCUMULATED GROUND HEAT FLUX
+var101 =    0000    ACSNOM                   kg/m²            ACCUMULATED MELTED SNOW
+var102 =    0000    SNOW                     kg/m²            SNOW WATER EQUIVALENT
+var103 =    0000    SNOWH                    m                PHYSICAL SNOW DEPTH
+var104 =    0000    CANWAT                   kg/m²            CANOPY WATER
+var105 =    0000    SSTSK                    K                SKIN SEA SURFACE TEMPERATURE
+var106 =    0000    WATER_DEPTH              m                global water depth
+var107 =    0000    COSZEN                   dimensionless    COS of SOLAR ZENITH ANGLE
+var108 =    0000    HRANG                    radians          SOLAR HOUR ANGLE
+var109 =    0000    DECLIN                   radians          SOLAR DECLINATION
+var110 =    0000    SOLCON                   W m-2            SOLAR CONSTANT
+var111 =    0000    LAI                      m²/m²            LEAF AREA INDEX
+var112 =    0000    VAR                      m                STANDARD DEVIATION OF SUBGRID-SCALE OROGRAPHY
+var113 =    0000    O3_GFS_DU                Dobson Units     Total ozone from GFS
+var114 =    0000    MAPFAC_M                 dimensionless    Map scale factor on mass grid
+var115 =    0000    MAPFAC_U                 dimensionless    Map scale factor on u-grid
+var116 =    0000    MAPFAC_V                 dimensionless    Map scale factor on v-grid
+var117 =    0000    MAPFAC_MX                dimensionless    Map scale factor on mass grid, x direction
+var118 =    0000    MAPFAC_MY                dimensionless    Map scale factor on mass grid, y direction
+var119 =    0000    MAPFAC_UX                dimensionless    Map scale factor on u-grid, x direction
+var120 =    0000    MAPFAC_UY                dimensionless    Map scale factor on u-grid, y direction
+var121 =    0000    MAPFAC_VX                dimensionless    Map scale factor on v-grid, x direction
+var122 =    0000    MF_VX_INV                dimensionless    Inverse map scale factor on v-grid, x direction
+var123 =    0000    MAPFAC_VY                dimensionless    Map scale factor on v-grid, y direction
+var124 =    0000    F                        1/s¹             Coriolis sine latitude term
+var125 =    0000    E                        1/s¹             Coriolis cosine latitude term
+var126 =    0000    SINALPHA                 dimensionless    Local sine of map rotation
+var127 =    0000    COSALPHA                 dimensionless    Local cosine of map rotation
+var128 =    0000    HGT                      m                Terrain Height
+var129 =    0000    TSK                      K                SURFACE SKIN TEMPERATURE
+var130 =    0000    P_TOP                    Pa               PRESSURE TOP OF THE MODEL
+var131 =    0000    GOT_VAR_SSO              dimensionless    whether VAR_SSO was included in WPS output (beginning V3.4)
+var132 =    0000    T00                      K                BASE STATE TEMPERATURE
+var133 =    0000    P00                      Pa               BASE STATE PRESSURE
+var134 =    0000    TLP                      dimensionless    BASE STATE LAPSE RATE
+var135 =    0000    TISO                     K                TEMP AT WHICH THE BASE T TURNS CONST
+var136 =    0000    TLP_STRAT                K                BASE STATE LAPSE RATE (DT/D(LN(P)) IN STRATOSPHERE
+var137 =    0000    P_STRAT                  Pa               BASE STATE PRESSURE AT BOTTOM OF STRATOSPHERE
+var138 =    0000    MAX_MSFTX                dimensionless    Max map factor in domain
+var139 =    0000    MAX_MSFTY                dimensionless    Max map factor in domain
+var140 =    0000    RAINC                    mm               ACCUMULATED TOTAL CUMULUS PRECIPITATION
+var141 =    0000    RAINSH                   mm               ACCUMULATED SHALLOW CUMULUS PRECIPITATION
+var142 =    0000    RAINNC                   mm               ACCUMULATED TOTAL GRID SCALE PRECIPITATION
+var143 =    0000    SNOWNC                   mm               ACCUMULATED TOTAL GRID SCALE SNOW AND ICE
+var144 =    0000    GRAUPELNC                mm               ACCUMULATED TOTAL GRID SCALE GRAUPEL
+var145 =    0000    HAILNC                   mm               ACCUMULATED TOTAL GRID SCALE HAIL
+var146 =    0000    CLDFRA                   dimensionless    CLOUD FRACTION
+var147 =    0011    SWDOWN                   W/m²             DOWNWARD SHORT WAVE FLUX AT GROUND SURFACE
+var148 =    0000    GLW                      W/m²             DOWNWARD LONG WAVE FLUX AT GROUND SURFACE
+var149 =    0000    SWNORM                   W/m²             NORMAL SHORT WAVE FLUX AT GROUND SURFACE (SLOPE-DEPENDENT)
+var150 =    0000    SWDDIR                   W/m²             Shortwave surface downward direct irradiance
+var151 =    0000    SWDDIRC                  W/m²             Clear-sky Shortwave surface downward direct irradiance
+var152 =    0000    SWDDNI                   W/m²             Shortwave surface downward direct normal irradiance
+var153 =    0000    SWDDNIC                  W/m²             Clear-sky Shortwave surface downward direct normal irradiance
+var154 =    0000    SWDDIF                   W/m²             Shortwave surface downward diffuse irradiance
+var155 =    0000    GX
+var156 =    0000    BX
+var157 =    0000    GG
+var158 =    0000    BB
+var159 =    0000    COSZEN_REF
+var160 =    0000    SWDOWN_REF
+var161 =    0000    SWDDIR_REF
+var162 =    0000    ACSWUPT                  J/m²             ACCUMULATED UPWELLING SHORTWAVE FLUX AT TOP
+var163 =    0000    ACSWUPTC                 J/m²             ACCUMULATED UPWELLING CLEAR SKY SHORTWAVE FLUX AT TOP
+var164 =    0000    ACSWDNT                  J/m²             ACCUMULATED DOWNWELLING SHORTWAVE FLUX AT TOP
+var165 =    0000    ACSWDNTC                 J/m²             ACCUMULATED DOWNWELLING CLEAR SKY SHORTWAVE FLUX AT TOP
+var166 =    0000    ACSWUPB                  J/m²             ACCUMULATED UPWELLING SHORTWAVE FLUX AT BOTTOM
+var167 =    0000    ACSWUPBC                 J/m²             ACCUMULATED UPWELLING CLEAR SKY SHORTWAVE FLUX AT BOTTOM
+var168 =    0000    ACSWDNB                  J/m²             ACCUMULATED DOWNWELLING SHORTWAVE FLUX AT BOTTOM
+var169 =    0000    ACSWDNBC                 J/m²             ACCUMULATED DOWNWELLING CLEAR SKY SHORTWAVE FLUX AT BOTTOM
+var170 =    0000    SWUPT                    W/m²             INSTANTANEOUS UPWELLING SHORTWAVE FLUX AT TOP
+var171 =    0000    SWUPTC                   W/m²             INSTANTANEOUS UPWELLING CLEAR SKY SHORTWAVE FLUX AT TOP
+var172 =    0000    SWDNT                    W/m²             INSTANTANEOUS DOWNWELLING SHORTWAVE FLUX AT TOP
+var173 =    0000    SWDNTC                   W/m²             INSTANTANEOUS DOWNWELLING CLEAR SKY SHORTWAVE FLUX AT TOP
+var174 =    0000    SWUPB                    W/m²             INSTANTANEOUS UPWELLING SHORTWAVE FLUX AT BOTTOM
+var175 =    0000    SWUPBC                   W/m²             INSTANTANEOUS UPWELLING CLEAR SKY SHORTWAVE FLUX AT BOTTOM
+var176 =    0000    SWDNB                    W/m²             INSTANTANEOUS DOWNWELLING SHORTWAVE FLUX AT BOTTOM
+var177 =    0000    SWDNBC                   W/m²             INSTANTANEOUS DOWNWELLING CLEAR SKY SHORTWAVE FLUX AT BOTTOM
+var178 =    0000    OLR                      W/m²             TOA OUTGOING LONG WAVE
+var179 =    0000    XLAT_U                   degree_north     LATITUDE, SOUTH IS NEGATIVE
+var180 =    0000    XLONG_U                  degree_east      LONGITUDE, WEST IS NEGATIVE
+var181 =    0000    XLAT_V                   degree_north     LATITUDE, SOUTH IS NEGATIVE
+var182 =    0000    XLONG_V                  degree_east      LONGITUDE, WEST IS NEGATIVE
+var183 =    0000    ALBEDO                   dimensionless    ALBEDO
+var184 =    0000    CLAT                     degree_north     COMPUTATIONAL GRID LATITUDE, SOUTH IS NEGATIVE
+var185 =    0000    ALBBCK                   dimensionless    BACKGROUND ALBEDO
+var186 =    0000    EMISS                    dimensionless    SURFACE EMISSIVITY
+var187 =    0000    NOAHRES                  W/m²             RESIDUAL OF THE NOAH SURFACE ENERGY BUDGET
+var188 =    0000    TMN                      K                SOIL TEMPERATURE AT LOWER BOUNDARY
+var189 =    0000    XLAND                    dimensionless    LAND MASK (1 FOR LAND, 2 FOR WATER)
+var190 =    0000    UST                      m/s¹             U* IN SIMILARITY THEORY
+var191 =    0000    RMOL                     1/m              1./Monin Ob. Length
+var192 =    0000    PBLH                     m                PBL HEIGHT
+var193 =    0000    HFX                      W/m²             UPWARD HEAT FLUX AT THE SURFACE
+var194 =    0000    QFX                      kg/m²/s¹         UPWARD MOISTURE FLUX AT THE SURFACE
+var195 =    0000    LH                       W/m²             LATENT HEAT FLUX AT THE SURFACE
+var196 =    0000    ACHFX                    J/m²             ACCUMULATED UPWARD HEAT FLUX AT THE SURFACE
+var197 =    0000    ACLHF                    J/m²             ACCUMULATED UPWARD LATENT HEAT FLUX AT THE SURFACE
+var198 =    0000    SNOWC                    dimensionless    FLAG INDICATING SNOW COVERAGE (1 FOR SNOW COVER)
+var199 =    0000    SR                       dimensionless    fraction of frozen precipitation
+var200 =    0000    SAVE_TOPO_FROM_REAL      flag             1=original topo from real/0=topo modified by WRF
+var201 =    0000    ISEEDARR_SPPT            dimensionless    Array to hold seed for restart, SPPT
+var202 =    0000    ISEEDARR_SKEBS           dimensionless    Array to hold seed for restart, SKEBS
+var203 =    0000    ISEEDARR_RAND_PERTURB    dimensionless    Array to hold seed for restart, RAND_PERT
+var204 =    0000    ISEEDARRAY_SPP_CONV      dimensionless    Array to hold seed for restart, RAND_PERT2
+var205 =    0000    ISEEDARRAY_SPP_PBL       dimensionless    Array to hold seed for restart, RAND_PERT3
+var206 =    0000    ISEEDARRAY_SPP_LSM       dimensionless    Array to hold seed for restart, RAND_PERT4
+var207 =    0000    C1H                      dimensionless    half levels, c1h = d bf / d eta, using znw
+var208 =    0000    C2H                      Pa               (1-c1h)*(p0-pt)
+var209 =    0000    C1F                      dimensionless    full levels, c1f = d bf / d eta, using znu
+var210 =    0000    C2F                      Pa               (1-c1f)*(p0-pt)
+var211 =    0000    C3H                      dimensionless    half levels, c3h = bh
+var212 =    0000    C4H                      Pa               (eta-bh)*(p0-pt), using znu
+var213 =    0000    C3F                      dimensionless    full levels, c3f = bf
+var214 =    0000    C4F                      Pa               (eta-bf)*(p0-pt), using znw
+var215 =    0000    PCB                      Pa               base state dry air mass in column
+var216 =    0000    PC                       Pa               perturbation dry air mass in column
+var217 =    0000    LANDMASK                 dimensionless    LAND MASK (1 FOR LAND, 0 FOR WATER)
+var218 =    0000    LAKEMASK                 dimensionless    LAKE MASK (1 FOR LAKE, 0 FOR NON-LAKE)
+var219 =    0000    SST                      K                SEA SURFACE TEMPERATURE
+var220 =    0000    SST_INPUT                K                SEA SURFACE TEMPERATURE FROM WRFLOWINPUT FILE
+var221 =    0011    wind
+var222 =    0011    temperature
+var223 =    0011    pressure
+var224 =    0011    rain
+var225 =    0010    weibull
+var226 =    0011    poteolico50
+var227 =    0011    poteolico100
+var228 =    0011    poteolico150
+var229 =    0001    vapor

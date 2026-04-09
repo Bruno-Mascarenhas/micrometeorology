@@ -1,0 +1,44 @@
+name: lstm_hourly_baseline
+description: >
+  Baseline LSTM experiment using hourly sensor data with 24-step windows.
+seed: 42
+
+data:
+  hourly_data_path: data/hourly/sensor_data.csv
+  target_column: SW_dif
+  feature_columns:
+    - SWDOWN
+    - T2
+    - Q2
+    - PSFC
+  use_raw: false
+
+split:
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  shuffle: false
+
+preprocess:
+  scaler_type: standard
+  impute_strategy: drop
+
+features:
+  lag_steps: []
+  rolling_windows: []
+  add_temporal: true
+  cyclic_encoding: true
+
+model:
+  model_type: lstm
+  lstm_hidden_size: 64
+  lstm_num_layers: 2
+  lstm_dropout: 0.1
+  sequence_length: 24
+  batch_size: 32
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  max_epochs: 100
+  patience: 10
+
+output_dir: output/experiments

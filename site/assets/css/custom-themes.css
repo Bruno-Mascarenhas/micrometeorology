@@ -1,0 +1,642 @@
+/**
+ * CUSTOM_THEMES.css
+ * 
+ * Temas customizados e estilos adicionais para o sistema MeteoMap
+ * Adicione aqui seus estilos personalizados para diferentes tipos de dados
+ */
+
+/* ============================================
+   TEMA ESCURO
+   ============================================ */
+.dark-theme {
+    --primary-color: #667eea;
+    --primary-dark: #764ba2;
+    --bg-primary: #1e1e1e;
+    --bg-secondary: #2d2d2d;
+    --text-primary: #ffffff;
+    --text-secondary: #b0b0b0;
+    --border-color: #404040;
+}
+
+.dark-theme body {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+}
+
+.dark-theme .sidebar {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+.dark-theme .sidebar-header {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-dark) 100%);
+}
+
+.dark-theme .info-item {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+
+.dark-theme .controls-container {
+    background: var(--bg-secondary);
+    border-top-color: var(--border-color);
+}
+
+.dark-theme .control-btn {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
+
+/* ============================================
+   TEMA CLARO (PADRÃO)
+   ============================================ */
+.light-theme {
+    --primary-color: #667eea;
+    --primary-dark: #764ba2;
+    --bg-primary: #ffffff;
+    --bg-secondary: #f5f5f5;
+    --text-primary: #333333;
+    --text-secondary: #666666;
+    --border-color: #e9ecef;
+}
+
+/* ============================================
+   CORES ESPECÍFICAS POR VARIÁVEL
+   ============================================ */
+
+/* RADIAÇÃO SOLAR */
+.variable-solar {
+    --variable-accent: #ff6b00;
+    --variable-light: #ffe4cc;
+}
+
+.variable-solar .sidebar-header {
+    background: linear-gradient(135deg, #ff6b00, #ff8c42);
+}
+
+.variable-solar .info-section-title {
+    color: #ff6b00;
+}
+
+/* POTENCIAL EÓLICO */
+.variable-wind {
+    --variable-accent: #0066cc;
+    --variable-light: #cce5ff;
+}
+
+.variable-wind .sidebar-header {
+    background: linear-gradient(135deg, #0066cc, #0052a3);
+}
+
+.variable-wind .info-section-title {
+    color: #0066cc;
+}
+
+/* TEMPERATURA */
+.variable-temperature {
+    --variable-accent: #d62828;
+    --variable-light: #ffe0e0;
+}
+
+.variable-temperature .sidebar-header {
+    background: linear-gradient(135deg, #d62828, #a41e35);
+}
+
+.variable-temperature .info-section-title {
+    color: #d62828;
+}
+
+/* UMIDADE */
+.variable-humidity {
+    --variable-accent: #2a9d8f;
+    --variable-light: #d0ede9;
+}
+
+.variable-humidity .sidebar-header {
+    background: linear-gradient(135deg, #2a9d8f, #1f7170);
+}
+
+.variable-humidity .info-section-title {
+    color: #2a9d8f;
+}
+
+/* PRECIPITAÇÃO */
+.variable-rain {
+    --variable-accent: #457b9d;
+    --variable-light: #d4dce8;
+}
+
+.variable-rain .sidebar-header {
+    background: linear-gradient(135deg, #457b9d, #354a6f);
+}
+
+.variable-rain .info-section-title {
+    color: #457b9d;
+}
+
+/* ============================================
+   ANIMAÇÕES PERSONALIZADAS
+   ============================================ */
+
+@keyframes slideInRight {
+    from {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+@keyframes slideOutRight {
+    from {
+        transform: translateX(0);
+        opacity: 1;
+    }
+    to {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+}
+
+@keyframes fadeInUp {
+    from {
+        transform: translateY(10px);
+        opacity: 0;
+    }
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+
+@keyframes pulseGlow {
+    0%, 100% {
+        box-shadow: 0 0 5px rgba(102, 126, 234, 0.5);
+    }
+    50% {
+        box-shadow: 0 0 15px rgba(102, 126, 234, 1);
+    }
+}
+
+@keyframes rotate {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* ============================================
+   COMPONENTES AVANÇADOS
+   ============================================ */
+
+/* Card com borda animada */
+.animated-card {
+    position: relative;
+    overflow: hidden;
+    border-radius: 8px;
+    padding: 15px;
+    background: white;
+    border: 2px solid #667eea;
+}
+
+.animated-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+    animation: slideAnimation 3s infinite;
+}
+
+@keyframes slideAnimation {
+    0% {
+        left: -100%;
+    }
+    100% {
+        left: 100%;
+    }
+}
+
+/* Badge de alerta */
+.badge-alert {
+    display: inline-block;
+    padding: 4px 8px;
+    background: #ff6b6b;
+    color: white;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    animation: pulseGlow 2s infinite;
+}
+
+/* Badge de sucesso */
+.badge-success {
+    display: inline-block;
+    padding: 4px 8px;
+    background: #51cf66;
+    color: white;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+/* Badge de aviso */
+.badge-warning {
+    display: inline-block;
+    padding: 4px 8px;
+    background: #ffd43b;
+    color: #333;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+/* Barra de progresso */
+.progress-bar-custom {
+    height: 6px;
+    background: #e9ecef;
+    border-radius: 3px;
+    overflow: hidden;
+    margin: 8px 0;
+}
+
+.progress-bar-custom .fill {
+    height: 100%;
+    background: linear-gradient(90deg, #667eea, #764ba2);
+    border-radius: 3px;
+    animation: growWidth 1s ease;
+}
+
+@keyframes growWidth {
+    from {
+        width: 0;
+    }
+    to {
+        width: var(--progress, 100%);
+    }
+}
+
+/* Tabela com estilos customizados */
+.table-custom {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 15px 0;
+}
+
+.table-custom thead {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: white;
+}
+
+.table-custom th {
+    padding: 12px;
+    text-align: left;
+    font-weight: 600;
+}
+
+.table-custom td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.table-custom tbody tr:hover {
+    background: #f8f9fa;
+}
+
+.table-custom tbody tr:nth-child(even) {
+    background: #fafbfc;
+}
+
+/* Card de estatística */
+.stat-card-custom {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border-radius: 8px;
+    padding: 20px;
+    text-align: center;
+    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+    transition: all 0.3s ease;
+}
+
+.stat-card-custom:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 8px 25px rgba(102, 126, 234, 0.5);
+}
+
+.stat-card-custom .value {
+    font-size: 2.5rem;
+    font-weight: 700;
+    margin: 10px 0;
+}
+
+.stat-card-custom .label {
+    font-size: 0.9rem;
+    opacity: 0.9;
+}
+
+.stat-card-custom .unit {
+    font-size: 0.8rem;
+    opacity: 0.8;
+}
+
+/* ============================================
+   MODAL CUSTOMIZADO
+   ============================================ */
+
+.modal-custom {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+    z-index: 2000;
+    max-width: 500px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+    animation: fadeInUp 0.3s ease;
+}
+
+.modal-custom-header {
+    padding: 20px;
+    border-bottom: 1px solid #e9ecef;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.modal-custom-title {
+    font-size: 1.3rem;
+    font-weight: 600;
+    margin: 0;
+}
+
+.modal-custom-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: #999;
+}
+
+.modal-custom-close:hover {
+    color: #333;
+}
+
+.modal-custom-body {
+    padding: 20px;
+}
+
+.modal-custom-footer {
+    padding: 20px;
+    border-top: 1px solid #e9ecef;
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+}
+
+/* ============================================
+   TOOLTIP
+   ============================================ */
+
+.tooltip-custom {
+    position: relative;
+    display: inline-block;
+    cursor: help;
+    border-bottom: 1px dotted #667eea;
+}
+
+.tooltip-custom .tooltip-text {
+    visibility: hidden;
+    width: 200px;
+    background: #333;
+    color: white;
+    text-align: center;
+    padding: 8px;
+    border-radius: 6px;
+    position: absolute;
+    z-index: 1001;
+    bottom: 125%;
+    left: 50%;
+    margin-left: -100px;
+    opacity: 0;
+    transition: opacity 0.3s;
+    font-size: 0.85rem;
+    pointer-events: none;
+}
+
+.tooltip-custom .tooltip-text::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    margin-left: -5px;
+    border-width: 5px;
+    border-style: solid;
+    border-color: #333 transparent transparent transparent;
+}
+
+.tooltip-custom:hover .tooltip-text {
+    visibility: visible;
+    opacity: 1;
+}
+
+/* ============================================
+   RESPONSIVIDADE AVANÇADA
+   ============================================ */
+
+@media (max-width: 1024px) {
+    .sidebar {
+        width: 100%;
+        max-height: 50vh;
+    }
+
+    .colorbar-container {
+        width: auto;
+        top: auto;
+        bottom: 90px;
+    }
+
+    .stat-card-custom .value {
+        font-size: 2rem;
+    }
+}
+
+@media (max-width: 768px) {
+    .sidebar {
+        width: 100%;
+        height: auto;
+        max-height: 60vh;
+    }
+
+    .modal-custom {
+        width: 95%;
+        max-height: 90vh;
+    }
+
+    .stat-card-custom {
+        padding: 15px;
+    }
+
+    .stat-card-custom .value {
+        font-size: 1.8rem;
+    }
+
+    #map {
+        height: calc(100vh - 200px);
+    }
+
+    .controls-container {
+        flex-direction: column;
+        height: auto;
+        padding: 8px;
+    }
+
+    .slider-wrapper {
+        width: 100%;
+    }
+
+    .table-custom {
+        font-size: 0.9rem;
+    }
+
+    .table-custom th,
+    .table-custom td {
+        padding: 8px;
+    }
+}
+
+@media (max-width: 480px) {
+    .sidebar-header h3 {
+        font-size: 1.1rem;
+    }
+
+    .info-item {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .info-value {
+        margin-top: 5px;
+    }
+
+    .stat-card-custom .value {
+        font-size: 1.5rem;
+    }
+
+    .modal-custom {
+        width: 98%;
+    }
+
+    .buttons-group {
+        width: 100%;
+    }
+
+    .control-btn {
+        flex: 1;
+        min-width: auto;
+    }
+}
+
+/* ============================================
+   IMPRESSÃO
+   ============================================ */
+
+@media print {
+    .sidebar,
+    .controls-container,
+    .colorbar-container,
+    .toggle-container {
+        display: none;
+    }
+
+    #map {
+        height: 100vh;
+        width: 100vw;
+    }
+
+    body {
+        margin: 0;
+        padding: 0;
+    }
+}
+
+/* ============================================
+   ACESSIBILIDADE
+   ============================================ */
+
+/* Focus visível para navegação por teclado */
+.control-btn:focus-visible,
+.sidebar-close-btn:focus-visible,
+input:focus-visible {
+    outline: 3px solid #667eea;
+    outline-offset: 2px;
+}
+
+/* Modo de contraste alto */
+@media (prefers-contrast: more) {
+    .info-item {
+        border: 2px solid #333;
+    }
+
+    .control-btn {
+        border-width: 2px;
+    }
+
+    .sidebar-header {
+        border-bottom-width: 3px;
+    }
+}
+
+/* Respeitar preferência de movimento reduzido */
+@media (prefers-reduced-motion: reduce) {
+    * {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+/* ============================================
+   MODO ESCURO DO SISTEMA
+   ============================================ */
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        color-scheme: dark;
+    }
+
+    body {
+        background: #1e1e1e;
+        color: #ffffff;
+    }
+
+    .sidebar {
+        background: #2d2d2d;
+    }
+
+    .info-item {
+        background: #1e1e1e;
+        border-color: #404040;
+    }
+
+    .control-btn {
+        background: #2d2d2d;
+        color: #ffffff;
+        border-color: #404040;
+    }
+
+    .control-btn:hover {
+        background: #3d3d3d;
+    }
+}

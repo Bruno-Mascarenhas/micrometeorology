@@ -1,0 +1,25 @@
+{
+  "videos": [
+    {
+      "wind":        "assets/video/D01WIND.webm",
+      "humidity":    "assets/video/D01VAPOR.webm",
+      "temperature": "assets/video/D01TEMP.webm",
+      "radiation":   "assets/video/D01SWDOWN.webm",
+      "rain":        "assets/video/D01RAIN.webm"
+    },
+    {
+      "wind":        "assets/video/D02WIND.webm",
+      "humidity":    "assets/video/D02VAPOR.webm",
+      "temperature": "assets/video/D02TEMP.webm",
+      "radiation":   "assets/video/D02SWDOWN.webm",
+      "rain":        "assets/video/D02RAIN.webm"
+    },
+    {
+      "wind":        "assets/video/D03WIND.webm",
+      "humidity":    "assets/video/D03VAPOR.webm",
+      "temperature": "assets/video/D03TEMP.webm",
+      "radiation":   "assets/video/D03SWDOWN.webm",
+      "rain":        "assets/video/D03RAIN.webm"
+    }
+  ]
+}

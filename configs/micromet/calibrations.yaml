@@ -1,0 +1,133 @@
+# ==============================================================================
+# LabMiM — Instrument Calibration Records
+# ==============================================================================
+#
+# IMPORTANT: These are HISTORICAL FACTS representing the actual calibration
+# state of physical instruments during specific periods.  Existing entries
+# must NEVER be modified.  When a new calibration is performed, APPEND a new
+# record with the appropriate date range.
+#
+# Fields:
+#   column     — DataFrame column name of the sensor
+#   start_date — First date the calibration applies (inclusive, ISO 8601)
+#                null means "from the beginning of the dataset"
+#   end_date   — Last date the calibration applies (inclusive, ISO 8601)
+#                null means "until the end of the dataset"
+#   factor     — Multiplicative correction factor to apply
+#   description — Human-readable note about the calibration
+#
+
+calibrations:
+
+  # ── CMP21 (diffuse shortwave pyranometer) ──────────────────────────────
+  - column: CMP21_Wm2_Avg
+    start_date: null
+    end_date: "2019-10-12"
+    factor: null              # Set entire column to NaN (sensor not installed)
+    description: "CMP21 not installed before 2019-10-12; data is invalid"
+
+  - column: CMP21_Wm2_Avg
+    start_date: "2019-10-13"
+    end_date: null
+    factor: 0.9852941176       # 9.38 / 9.52
+    description: "CMP21 sensitivity correction: 9.38 / 9.52"
+
+  # ── CM3Up (global shortwave, upward-facing CNR1 component) ─────────────
+  - column: CM3Up_Wm2_Avg
+    start_date: null
+    end_date: "2018-12-31"
+    factor: 0.9694162150       # 10.46 / 10.79
+    description: "CM3Up pre-2019 sensitivity: 10.46 / 10.79"
+
+  - column: CM3Up_Wm2_Avg
+    start_date: "2019-01-01"
+    end_date: null
+    factor: 1.0057692308       # 10.46 / 10.4
+    description: "CM3Up post-2019 sensitivity: 10.46 / 10.4"
+
+  # ── PSP1 (Eppley PSP pyranometer) ──────────────────────────────────────
+  - column: PSP1_Wm2_Avg
+    start_date: "2018-01-01"
+    end_date: "2018-12-31"
+    factor: 0.9383408072       # 8.37 / 8.92
+    description: "PSP1 2018 sensitivity: 8.37 / 8.92"
+
+  - column: PSP1_Wm2_Avg
+    start_date: "2019-01-01"
+    end_date: null
+    factor: 1.0926892950       # 8.37 / 7.66
+    description: "PSP1 post-2019 sensitivity: 8.37 / 7.66"
+
+  # ── Sensor switch dates (instrument unification) ───────────────────────
+  # These define which raw column maps to the unified variable by date range.
+  # Used by sensors/export.py for the final unified dataset.
+
+sensor_switches:
+  # Shortwave downwelling
+  - unified_name: Sw_dw
+    mappings:
+      - column: PSP1_Wm2
+        start_date: "2016-01-01"
+        end_date: "2018-10-31"
+      - column: CM3Up_Wm2
+        start_date: "2018-11-01"
+        end_date: null
+
+  # Shortwave diffuse
+  - unified_name: Sw_dif
+    mappings:
+      - column: PSP1_Wm2
+        start_date: "2018-09-01"
+        end_date: "2019-08-31"
+      - column: CMP21_Wm2
+        start_date: "2019-10-01"
+        end_date: null
+
+  # Wind components (u, v)
+  - unified_name: u
+    mappings:
+      - column: u_WVT
+        start_date: null
+        end_date: "2019-03-21"
+      - column: u_WXT
+        start_date: "2019-03-22"
+        end_date: null
+
+  - unified_name: v
+    mappings:
+      - column: v_WVT
+        start_date: null
+        end_date: "2019-03-21"
+      - column: v_WXT
+        start_date: "2019-03-22"
+        end_date: null
+
+  # Wind speed
+  - unified_name: WS
+    mappings:
+      - column: WS_WVT
+        start_date: null
+        end_date: "2019-04-20"
+      - column: WS_WXT
+        start_date: "2019-04-21"
+        end_date: null
+
+  # Wind direction
+  - unified_name: WD
+    mappings:
+      - column: WindDir_WVT
+        start_date: null
+        end_date: "2019-04-20"
+      - column: WD_WXT
+        start_date: "2019-04-21"
+        end_date: null
+
+  # Longwave downwelling
+  - unified_name: Lw_dw
+    mappings:
+      - column: PIR1_Wm2
+        start_date: null
+        end_date: "2018-07-31"
+      - column: CG3Up_Wm2Cr
+        start_date: "2018-08-01"
+        end_date: null

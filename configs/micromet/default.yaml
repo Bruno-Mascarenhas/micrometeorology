@@ -1,0 +1,65 @@
+# ==============================================================================
+# LabMiM Micrometeorology — Default Configuration
+# ==============================================================================
+# This file ships with the repository and provides sensible defaults.
+# Override per-environment via server.yaml / local.yaml or env vars.
+
+# Paths (relative to project root; resolved at runtime)
+data_dir: data
+output_dir: output
+figures_dir: output/figures
+shapes_dir: shapes_BR_cities
+configs_dir: configs
+
+# WRF processing
+wrf_default_variables:
+  - temperature
+  - pressure
+  - vapor
+  - wind
+  - rain
+  - HFX
+  - LH
+  - SWDOWN
+
+# Sensor quality-control limits
+# Each entry: {column, lower, upper}
+# Values outside [lower, upper] are replaced with NaN.
+sensor_limits:
+  - {column: PSP1_Wm2,      lower: 0,    upper: 1370}
+  - {column: PIR1_Wm2,      lower: 340,  upper: 460}
+  - {column: NRLite_Wm2Cr,  lower: -100, upper: 1000}
+  - {column: PAR_Wm2,       lower: 0,    upper: 600}
+  - {column: Temp1,          lower: 15,   upper: 35}
+  - {column: RH1,            lower: 20,   upper: 100}
+  - {column: WS_WVT,        lower: 0,    upper: 10}
+  - {column: WindDir_WVT,   lower: 0,    upper: 360}
+  - {column: CM3Up_Wm2,     lower: 0,    upper: 1400}
+  - {column: CM3Dn_Wm2,     lower: 0,    upper: 500}
+  - {column: CNR1TC,         lower: 15,   upper: 40}
+  - {column: Temp_WXT,      lower: 15,   upper: 37}
+  - {column: CG3Up_Wm2Cr,   lower: 350,  upper: 500}
+  - {column: CG3Dn_Wm2Cr,   lower: 350,  upper: 580}
+  - {column: Net_Wm2,       lower: -100, upper: 1100}
+  - {column: WS_WXT,        lower: 0,    upper: 10}
+  - {column: WD_WXT,        lower: 0,    upper: 360}
+  - {column: precip,         lower: 0,    upper: 15}
+  - {column: RH_WXT,        lower: 20,   upper: 100}
+  - {column: Pmb_WXT,       lower: 1000, upper: 1020}
+  - {column: CMP21_Wm2,     lower: 0,    upper: 700}
+
+# Columns requiring special aggregation
+sensor_sum_columns:
+  - precip
+  - PL01_mm_Tot
+
+sensor_wind_dir_columns:
+  - WD_WXT
+  - WindDir_WVT
+
+# Minimum valid samples per aggregation window
+sensor_min_samples_per_hour: 6
+sensor_sentinel_value: -900.0
+
+# Logging
+log_level: INFO

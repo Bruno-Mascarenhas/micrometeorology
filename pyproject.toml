@@ -1,0 +1,111 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "labmim-micrometeorology"
+version = "1.1.0"
+description = "LabMiM/UFBA micrometeorology data processing, WRF output analysis, solar radiation bias correction, and ML-based model evaluation."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "LabMiM - UFBA"},
+]
+keywords = ["micrometeorology", "WRF", "netcdf", "cartopy", "geospatial", "solar-radiation", "bias-correction"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "xarray>=2024.1",
+    "netCDF4>=1.6",
+    "matplotlib>=3.8",
+    "cartopy>=0.22",
+    "seaborn>=0.13",
+    "scikit-learn>=1.4",
+    "scipy>=1.12",
+    "click>=8.1",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "pyyaml>=6.0",
+    "imageio>=2.33",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.3",
+    "mypy>=1.8",
+    "pre-commit>=3.6",
+    "pandas-stubs",
+]
+video = [
+    "moviepy>=1.0",
+]
+# TCC: ML-based solar radiation correction (CPU-only PyTorch)
+tcc = [
+    "torch>=2.1",
+    "joblib>=1.3",
+    "tqdm>=4.66",
+]
+# TCC with CUDA support (install separately: pip install torch --index-url https://download.pytorch.org/whl/cu121)
+tcc-cuda = [
+    "joblib>=1.3",
+    "tqdm>=4.66",
+]
+
+[project.scripts]
+# Micrometeorology CLIs
+labmim-wrf-figures = "labmim_micrometeorology.cli:wrf_figures"
+labmim-wrf-geojson = "labmim_micrometeorology.cli:wrf_geojson"
+labmim-sensor-process = "labmim_micrometeorology.cli:sensor_process"
+labmim-site-graphs = "labmim_micrometeorology.cli:site_graphs"
+labmim-comparison = "labmim_micrometeorology.cli:comparison"
+labmim-metrics = "labmim_micrometeorology.cli:metrics"
+# TCC CLIs
+solrad-run = "solrad_correction.cli:run_experiment_cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labmim_micrometeorology", "src/solrad_correction"]
+
+[tool.ruff]
+src = ["src"]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "TCH",  # flake8-type-checking
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["labmim_micrometeorology", "solrad_correction"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
