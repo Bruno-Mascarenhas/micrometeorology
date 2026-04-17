@@ -81,6 +81,14 @@ packages = ["src/labmim_micrometeorology", "src/solrad_correction"]
 src = ["src"]
 target-version = "py311"
 line-length = 100
+exclude = [
+    "legacy",
+    "site",
+    ".venv",
+    "venv",
+    "env",
+    ".git"
+]
 
 [tool.ruff.lint]
 select = [
