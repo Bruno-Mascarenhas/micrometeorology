@@ -1,96 +1,96 @@
-# `solrad_correction` — Documentação
+# `solrad_correction` — Documentation
 
-Pacote para correção de viés da radiação solar difusa do modelo WRF usando aprendizado de máquina. Projetado para ser genérico — funciona com dados de qualquer estação meteorológica e coordenadas geográficas.
+A package for bias correction of diffuse solar radiation from the WRF model using machine learning. Designed to be generic — works with data from any meteorological station and geographic coordinates.
 
 ---
 
-## Visão Geral
+## Overview
 
-O WRF (Weather Research and Forecasting) frequentemente apresenta viés sistemático na estimativa da radiação solar difusa (`SW_dif`). Este pacote treina modelos de ML para corrigir esse viés usando dados observacionais de estações meteorológicas como referência.
+WRF (Weather Research and Forecasting) often exhibits systematic bias when estimating diffuse solar radiation (`SW_dif`). This package trains ML models to correct this bias using observational data from meteorological stations as a baseline.
 
-### Modelos Disponíveis
+### Available Models
 
-| Modelo | Tipo | Entrada | Quando Usar |
+| Model | Type | Input | When to Use |
 |---|---|---|---|
-| **SVM** | Scikit-learn (SVR) | Tabular (1 linha = 1 amostra) | Baseline rápido, poucos dados |
-| **LSTM** | PyTorch (RNN) | Janelas temporais (seq_len × features) | Captura dependências temporais |
-| **Transformer** | PyTorch (Attention) | Janelas temporais (seq_len × features) | Relações de longo alcance, mais dados |
+| **SVM** | Scikit-learn (SVR) | Tabular (1 row = 1 sample) | Fast baseline, small datasets |
+| **LSTM** | PyTorch (RNN) | Temporal windows (seq_len × features) | Capturing temporal dependencies |
+| **Transformer** | PyTorch (Attention) | Temporal windows (seq_len × features) | Long-range relationships, larger datasets |
 
 ---
 
-## Estrutura do Pacote
+## Package Structure
 
 ```
 src/solrad_correction/
-├── __init__.py              # Versão e docstring
-├── config.py                # Configuração de experimentos (dataclasses + YAML)
+├── __init__.py              # Version and docstring
+├── config.py                # Experiment configuration (dataclasses + YAML)
 ├── cli.py                   # CLI: solrad-run
 ├── data/
-│   ├── loaders.py           # Wrappers para carregar dados de sensor/WRF
-│   ├── alignment.py         # Alinhamento temporal sensor ↔ WRF
-│   ├── preprocessing.py     # Pipeline com fit apenas no treino (sem leakage)
-│   └── splits.py            # Divisão cronológica, walk-forward, K-fold temporal
+│   ├── loaders.py           # Wrappers for loading sensor/WRF data
+│   ├── alignment.py         # Temporal alignment sensor ↔ WRF
+│   ├── preprocessing.py     # Pipeline with fit on train only (no leakage)
+│   └── splits.py            # Chronological split, walk-forward, temporal K-fold
 ├── features/
-│   ├── engineering.py       # Lags, médias móveis, diferenças
-│   ├── temporal.py          # Hora, dia do ano, mês + encoding cíclico (sin/cos)
-│   └── sequence.py          # Construção de janelas deslizantes para LSTM/Transformer
+│   ├── engineering.py       # Lags, rolling means, differences
+│   ├── temporal.py          # Hour, day of year, month + cyclic encoding (sin/cos)
+│   └── sequence.py          # Sliding windows construction for LSTM/Transformer
 ├── datasets/
-│   ├── tabular.py           # TabularDataset (X, y) + save/load reproduzível
+│   ├── tabular.py           # TabularDataset (X, y) + reproducible save/load
 │   └── sequence.py          # SequenceDataset (torch.Dataset) + save/load
 ├── models/
-│   ├── base.py              # BaseRegressorModel (ABC): interface unificada
-│   ├── sklearn_base.py      # Wrapper para regressores scikit-learn
-│   ├── torch_base.py        # Base para modelos PyTorch (device, transfer learning)
+│   ├── base.py              # BaseRegressorModel (ABC): unified interface
+│   ├── sklearn_base.py      # Wrapper for scikit-learn regressors
+│   ├── torch_base.py        # Base for PyTorch models (device, transfer learning)
 │   ├── svm.py               # SVMRegressor (SVR)
 │   ├── lstm.py              # LSTMRegressor + LSTMNet (nn.Module)
 │   └── transformer.py       # TransformerRegressor + TimeSeriesTransformer
 ├── training/
-│   ├── trainer.py           # Loop de treino completo
+│   ├── trainer.py           # Full training loop
 │   ├── loops.py             # train_one_epoch(), evaluate_epoch()
 │   ├── callbacks.py         # Early stopping, checkpointing
-│   └── progress.py          # Progresso com % por batch, epoch, e ETA
+│   └── progress.py          # Progress with batch %, epoch %, and ETA
 ├── evaluation/
-│   ├── metrics.py           # Métricas (reutiliza labmim + MAPE)
-│   ├── reports.py           # ExperimentReport: salva métricas, config, histórico
-│   └── comparison.py        # Tabela comparativa entre experimentos
+│   ├── metrics.py           # Metrics (reuses labmim + MAPE)
+│   ├── reports.py           # ExperimentReport: saves metrics, config, history
+│   └── comparison.py        # Comparative table between experiments
 ├── experiments/
-│   └── runner.py            # Pipeline completo: config → dados → treino → avaliação
+│   └── runner.py            # Complete pipeline: config → data → train → evaluate
 └── utils/
-    ├── seeds.py             # Controle de seeds (numpy, torch, random)
-    ├── io.py                # Leitura/escrita de JSON, predições CSV
-    └── serialization.py     # Serialização: joblib (sklearn) / torch (checkpoint)
+    ├── seeds.py             # Seed control (numpy, torch, random)
+    ├── io.py                # JSON I/O, CSV predictions
+    └── serialization.py     # Serialization: joblib (sklearn) / torch (checkpoint)
 ```
 
 ---
 
-## Instalação
+## Installation
 
 ```bash
-# Com PyTorch CPU:
+# With CPU PyTorch:
 pip install -e ".[tcc]"
 
-# Com PyTorch CUDA (instale o torch primeiro):
+# With CUDA PyTorch (install torch first):
 pip install torch --index-url https://download.pytorch.org/whl/cu121
 pip install -e ".[tcc-cuda]"
 ```
 
-### Verificar se GPU está disponível
+### Check if GPU is available
 
 ```python
 from solrad_correction.utils.seeds import get_device
-print(get_device())  # "cuda" ou "cpu"
+print(get_device())  # "cuda" or "cpu"
 ```
 
 ---
 
-## Guia Rápido
+## Quick Start
 
-### 1. Criar um Arquivo de Configuração
+### 1. Create a Configuration File
 
 ```yaml
-# configs/tcc/experiments/meu_experimento.yaml
+# configs/tcc/experiments/my_experiment.yaml
 name: svm_baseline_salvador
-description: "SVM com dados horários de Salvador"
+description: "SVM with hourly data from Salvador"
 seed: 42
 
 data:
@@ -108,14 +108,14 @@ split:
   train_ratio: 0.7
   val_ratio: 0.15
   test_ratio: 0.15
-  shuffle: false    # NUNCA usar shuffle em séries temporais
+  shuffle: false    # NEVER use shuffle for time series
 
 preprocess:
   scaler_type: standard    # "standard", "minmax", "none"
   impute_strategy: drop    # "drop", "ffill", "mean", "interpolate"
 
 features:
-  add_temporal: true       # hora, dia, mês
+  add_temporal: true       # hour, day, month
   cyclic_encoding: true    # sin/cos
   lag_steps: []
   rolling_windows: []
@@ -130,44 +130,44 @@ model:
 output_dir: output/experiments
 ```
 
-### 2. Rodar o Experimento
+### 2. Run the Experiment
 
 ```bash
-solrad-run --config configs/tcc/experiments/meu_experimento.yaml
+solrad-run --config configs/tcc/experiments/my_experiment.yaml
 ```
 
-Ou via Python:
+Or via Python:
 
 ```python
 from solrad_correction.config import ExperimentConfig
 from solrad_correction.experiments.runner import run_experiment
 
-config = ExperimentConfig.from_yaml("configs/tcc/experiments/meu_experimento.yaml")
+config = ExperimentConfig.from_yaml("configs/tcc/experiments/my_experiment.yaml")
 report = run_experiment(config)
 report.print_summary()
 ```
 
-### 3. Estrutura de Saída
+### 3. Output Structure
 
-Cada experimento gera um diretório com tudo necessário para reproduzir:
+Each experiment generates a directory containing everything needed to reproduce it:
 
 ```
 output/experiments/svm_baseline_salvador/
-├── config.yaml                      # Config exata usada
-├── config_resolved.json             # Config como JSON
-├── metrics.json                     # Resultados (RMSE, MAE, R², etc.)
+├── config.yaml                      # Exact config used
+├── config_resolved.json             # Config dumped to JSON
+├── metrics.json                     # Results (RMSE, MAE, R², etc.)
 ├── predictions.csv                  # y_true vs y_pred
-├── training_history.csv             # Loss por epoch (se neural)
-├── model.joblib (ou model.pt)       # Modelo treinado
-├── preprocessing_pipeline.joblib    # Estado do preprocessamento
+├── training_history.csv             # Loss per epoch (if neural network)
+├── model.joblib (or model.pt)       # Trained model
+├── preprocessing_pipeline.joblib    # Preprocessing state
 └── datasets/
-    ├── train/                       # Dataset de treino salvo
-    └── test/                        # Dataset de teste salvo
+    ├── train/                       # Saved training dataset
+    └── test/                        # Saved testing dataset
 ```
 
 ---
 
-## Usando Cada Modelo
+## Using Each Model
 
 ### SVM
 
@@ -175,9 +175,9 @@ output/experiments/svm_baseline_salvador/
 model:
   model_type: svm
   svm_kernel: rbf       # "rbf", "linear", "poly"
-  svm_c: 10.0           # Regularização (maior = menos regularização)
-  svm_epsilon: 0.1      # Margem de tolerância
-  svm_gamma: scale      # "scale", "auto", ou float
+  svm_c: 10.0           # Regularization (higher = less regularization)
+  svm_epsilon: 0.1      # Tolerance margin
+  svm_gamma: scale      # "scale", "auto", or float
 ```
 
 ### LSTM
@@ -185,14 +185,14 @@ model:
 ```yaml
 model:
   model_type: lstm
-  lstm_hidden_size: 64       # Neurônios na camada hidden
-  lstm_num_layers: 2         # Número de camadas LSTM empilhadas
-  lstm_dropout: 0.1          # Dropout entre camadas
-  sequence_length: 24        # Tamanho da janela temporal (horas)
+  lstm_hidden_size: 64       # Neurons in hidden layer
+  lstm_num_layers: 2         # Number of stacked LSTM layers
+  lstm_dropout: 0.1          # Dropout between layers
+  sequence_length: 24        # Temporal window size (hours)
   batch_size: 32
   learning_rate: 0.001
   max_epochs: 100
-  patience: 10               # Early stopping: para após 10 epochs sem melhora
+  patience: 10               # Early stopping: stops after 10 epochs without improvement
 ```
 
 ### Transformer
@@ -200,10 +200,10 @@ model:
 ```yaml
 model:
   model_type: transformer
-  tf_d_model: 64             # Dimensão do embedding
-  tf_nhead: 4                # Número de attention heads (d_model deve ser divisível)
-  tf_num_encoder_layers: 2   # Número de blocos encoder
-  tf_dim_feedforward: 128    # Dimensão do FFN interno
+  tf_d_model: 64             # Embedding dimension
+  tf_nhead: 4                # Number of attention heads (d_model must be divisible)
+  tf_num_encoder_layers: 2   # Number of encoder blocks
+  tf_dim_feedforward: 128    # Internal FFN dimension
   tf_dropout: 0.1
   sequence_length: 24
   batch_size: 32
@@ -214,68 +214,68 @@ model:
 
 ---
 
-## Transfer Learning (Continuar Treinamento)
+## Transfer Learning (Resume Training)
 
-Treinamento pode ser retomado de um checkpoint anterior:
+Training can be resumed from a previous checkpoint:
 
 ```yaml
 model:
   model_type: lstm
-  pretrained_path: output/experiments/lstm_v1/model.pt   # Pesos anteriores
-  max_epochs: 50       # Epochs ADICIONAIS
+  pretrained_path: output/experiments/lstm_v1/model.pt   # Previous weights
+  max_epochs: 50       # ADDITIONAL epochs
 ```
 
-Isso carrega os pesos do `lstm_v1` e treina por mais 50 epochs. O checkpoint salva:
+This loads the weights from `lstm_v1` and trains for an additional 50 epochs. The checkpoint saves:
 
-- `model_state_dict` (pesos do modelo)
-- `optimizer_state_dict` (estado do otimizador)
-- `epoch` (epoch em que parou)
-- `config` (parâmetros da arquitetura para reconstrução)
+- `model_state_dict` (model weights)
+- `optimizer_state_dict` (optimizer state)
+- `epoch` (epoch it stopped at)
+- `config` (architecture parameters for reconstruction)
 
 ---
 
-## Prevenção de Data Leakage
+## Data Leakage Prevention
 
-O pacote implementa múltiplas camadas de proteção:
+The package implements multiple protection layers:
 
-### 1. Divisão Cronológica
+### 1. Chronological Splitting
 
 ```
-|←——— treino (70%) ———→|←— val (15%) —→|←— teste (15%) —→|
-        passado              presente           futuro
+|←——— train (70%) ———→|←— val (15%) —→|←— test (15%) —→|
+        past                 present           future
 ```
 
-O `shuffle=false` é o padrão. Se ativado, um warning é emitido.
+`shuffle=false` is the default. If enabled, a warning is emitted.
 
-### 2. Preprocessamento com Fit no Treino
+### 2. Preprocessing with Fit on Train
 
 ```python
 pipeline = PreprocessingPipeline(scaler_type="standard")
-train_pp = pipeline.fit_transform(train_df)   # ← Fit APENAS aqui
-val_pp   = pipeline.transform(val_df)          # ← Aplica parâmetros do treino
-test_pp  = pipeline.transform(test_df)         # ← Aplica parâmetros do treino
+train_pp = pipeline.fit_transform(train_df)   # ← Fit ONLY here
+val_pp   = pipeline.transform(val_df)         # ← Apply train parameters
+test_pp  = pipeline.transform(test_df)        # ← Apply train parameters
 ```
 
-A média e desvio-padrão usados para normalizar são calculados **apenas** no treino. Validação e teste usam esses mesmos valores.
+The mean and standard deviation used to normalize are calculated **only** on the training set. Validation and testing use these identical values.
 
-### 3. Janelas Deslizantes (Sequence)
+### 3. Sliding Windows (Sequence)
 
-Para LSTM/Transformer, cada janela olha apenas para o **passado**:
+For LSTM/Transformer, each window only looks into the **past**:
 
 ```
-Janela 1: [t₀, t₁, t₂, t₃] → alvo: t₄
-Janela 2: [t₁, t₂, t₃, t₄] → alvo: t₅
+Window 1: [t₀, t₁, t₂, t₃] → target: t₄
+Window 2: [t₁, t₂, t₃, t₄] → target: t₅
 ```
 
-O alvo sempre está **após** o final da janela.
+The target is always **after** the end of the window.
 
-### 4. Pipeline Serializado
+### 4. Serialized Pipeline
 
-O estado do preprocessamento é salvo com cada experimento (`preprocessing_pipeline.joblib`), garantindo que o mesmo transform exato possa ser aplicado em dados futuros.
+The preprocessing state is saved with each experiment (`preprocessing_pipeline.joblib`), ensuring that the exact same transform can be applied to future data.
 
 ---
 
-## Comparando Experimentos
+## Comparing Experiments
 
 ```python
 from solrad_correction.evaluation.comparison import compare_experiments
@@ -300,33 +300,33 @@ print(df)
 
 ```yaml
 features:
-  add_temporal: true      # Adiciona: hour, day_of_year, month, weekday
-  cyclic_encoding: true   # Converte para sin/cos (evita descontinuidade 23→0)
+  add_temporal: true      # Adds: hour, day_of_year, month, weekday
+  cyclic_encoding: true   # Converts to sin/cos (avoids 23→0 discontinuity)
 ```
 
-**Por que encoding cíclico?** A hora 23 e a hora 0 são adjacentes, mas numericamente distantes. O encoding sin/cos preserva essa proximidade:
+**Why cyclic encoding?** Hour 23 and hour 0 are adjacent in time, but numerically far apart. The sin/cos encoding preserves this proximity:
 
 ```
 hour=0  → sin=0.00, cos=1.00
 hour=6  → sin=1.00, cos=0.00
 hour=12 → sin=0.00, cos=-1.00
-hour=23 → sin=-0.26, cos=0.97  ← próximo de hour=0
+hour=23 → sin=-0.26, cos=0.97  ← close to hour=0
 ```
 
-### Lags e Médias Móveis
+### Lags and Rolling Windows
 
 ```yaml
 features:
-  lag_steps: [1, 3, 6, 12, 24]       # Valores das últimas 1, 3, 6, 12, 24 horas
-  rolling_windows: [3, 6, 12, 24]     # Média e desvio-padrão móvel
+  lag_steps: [1, 3, 6, 12, 24]        # Values from the last 1, 3, 6, 12, 24 hours
+  rolling_windows: [3, 6, 12, 24]     # Rolling mean and standard deviation
   rolling_aggs: ["mean", "std"]
 ```
 
 ---
 
-## Progresso do Treinamento
+## Training Progress
 
-Durante o treinamento neural, o progresso é exibido em tempo real:
+During neural network training, progress is displayed in real-time:
 
 ```
   Epoch 1/100 [100.0%] ETA epoch: 0.0s | Overall:  1.0%
@@ -340,21 +340,21 @@ Durante o treinamento neural, o progresso é exibido em tempo real:
 
 ---
 
-## Adicionando um Novo Modelo
+## Adding a New Model
 
-1. Escolha a base correta:
-   - **Sklearn** → herde de `SklearnRegressorModel`
-   - **PyTorch** → herde de `TorchRegressorModel`
+1. Choose the correct base:
+   - **Sklearn** → inherit from `SklearnRegressorModel`
+   - **PyTorch** → inherit from `TorchRegressorModel`
 
-2. Implemente a interface:
+2. Implement the interface:
 
 ```python
 from solrad_correction.models.sklearn_base import SklearnRegressorModel
 
-class MeuModelo(SklearnRegressorModel):
+class MyModel(SklearnRegressorModel):
     @property
     def name(self) -> str:
-        return "MeuModelo"
+        return "MyModel"
 
     def __init__(self, param1: float = 1.0) -> None:
         from sklearn.ensemble import RandomForestRegressor
@@ -365,53 +365,53 @@ class MeuModelo(SklearnRegressorModel):
         return cls(param1=config.custom_param)
 ```
 
-3. Registre no `runner.py`:
+3. Register it in `runner.py`:
 
 ```python
-elif model_type == "meumodelo":
-    model = MeuModelo.from_config(config.model)
+elif model_type == "mymodel":
+    model = MyModel.from_config(config.model)
 ```
 
-Para PyTorch, use `TorchRegressorModel` que fornece automaticamente:
-- Detecção automática de GPU/CPU
-- Transfer learning
-- Salvamento de checkpoints
-- Integração com o Trainer (progress + early stopping)
+For PyTorch, use `TorchRegressorModel` which automatically provides:
+- Automatic GPU/CPU detection
+- Transfer learning support
+- Checkpoint saving
+- Trainer integration (progress + early stopping)
 
 ---
 
-## Dúvidas Frequentes
+## Frequently Asked Questions
 
-### Posso usar para outra variável além de SW_dif?
+### Can I use this for variables other than `SW_dif`?
 
-Sim. Altere `target_column` e `feature_columns` no config YAML. O pacote é genérico.
+Yes. Change `target_column` and `feature_columns` in the YAML config. The package is generic.
 
-### Posso treinar com dados de outra cidade?
+### Can I train with data from another city?
 
-Sim. Altere `station_lat` e `station_lon` no config e forneça os dados correspondentes. O nome `solrad_correction` é genérico, não está vinculado a nenhuma localização.
+Yes. Change `station_lat` and `station_lon` in the config and provide the corresponding data. The name `solrad_correction` is generic and not tied to any specific location.
 
-### O que é `tolerance="30min"` no alinhamento?
+### What is `tolerance="30min"` in alignment?
 
-Ao alinhar dados de sensor (observação) com dados WRF (modelo), os timestamps podem não coincidir exatamente. A tolerância permite parear timestamps com até 30 minutos de diferença.
+When aligning sensor (observation) data with WRF (model) data, timestamps might not match exactly. The tolerance allows pairing timestamps with up to a 30-minute difference.
 
-### Preciso de GPU?
+### Do I need a GPU?
 
-Não. O SVM roda apenas em CPU. LSTM e Transformer funcionam em CPU, mas são significativamente mais rápidos com CUDA. O código auto-detecta e usa GPU se disponível.
+No. SVM runs exclusively on CPU. LSTM and Transformer work on CPU but are significantly faster with CUDA. The code auto-detects and uses a GPU if available.
 
-### Como reproduzir exatamente um experimento?
+### How do I reproduce an experiment exactly?
 
-1. Use o mesmo `seed` no config
-2. Use o dataset salvo em `experiments/<nome>/datasets/`
-3. Use o config salvo em `experiments/<nome>/config.yaml`
+1. Use the exact same `seed` in the config
+2. Use the saved dataset in `experiments/<name>/datasets/`
+3. Use the saved config in `experiments/<name>/config.yaml`
 
 ```python
 config = ExperimentConfig.from_yaml("output/experiments/lstm_v1/config.yaml")
 report = run_experiment(config)
 ```
 
-### Como ver quais features foram usadas?
+### How do I see which features were used?
 
-O dataset salvo inclui `feature_names.csv`:
+The saved dataset includes `feature_names.csv`:
 
 ```python
 from solrad_correction.datasets.tabular import TabularDataset
@@ -419,13 +419,13 @@ ds = TabularDataset.load("output/experiments/svm_v1/datasets/train")
 print(ds.feature_names)
 ```
 
-### Como fazer inverse transform das predições?
+### How do I apply an inverse transform to the predictions?
 
-O pipeline salvo permite desfazer a normalização:
+The saved pipeline allows you to undo the normalization:
 
 ```python
 from solrad_correction.data.preprocessing import PreprocessingPipeline
 
 pipeline = PreprocessingPipeline.load("output/experiments/svm_v1/preprocessing_pipeline.joblib")
-y_original = pipeline.inverse_transform_column(y_normalizado, "SW_dif")
+y_original = pipeline.inverse_transform_column(y_normalized, "SW_dif")
 ```

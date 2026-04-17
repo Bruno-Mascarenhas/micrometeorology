@@ -114,7 +114,7 @@ labmim-wrf-figures --wrf-dir /path/to/wrfout/ --date 20240101 \
 ## Testing
 
 ```bash
-pytest tests/ -v          # all 53 tests
+pytest tests/ -v          # all the tests
 pytest tests/micromet/    # micrometeorology only
 pytest tests/tcc/         # ML correction only
 ruff check src/ tests/    # lint
