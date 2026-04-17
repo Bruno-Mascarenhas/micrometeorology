@@ -1,20 +1,19 @@
 # -*- Coding: UTF-8 -*-
-#coding: utf-8
-from multiprocessing import Pool
-from itertools import product
-import numpy as np
-import netCDF4
-from datetime import timezone
-from datetime import datetime
-import os
-import matplotlib.pyplot as plt
-from mpl_toolkits.basemap import Basemap
-import json
-from utility import getFileNames
-from warnings import filterwarnings
-import imageio
-import moviepy.editor as mp
 import glob
+import os
+from datetime import UTC, datetime
+from itertools import product
+from multiprocessing import Pool
+from warnings import filterwarnings
+
+import imageio
+import matplotlib.pyplot as plt
+import moviepy.editor as mp
+import netCDF4
+import numpy as np
+from mpl_toolkits.basemap import Basemap
+from utility import getFileNames
+
 filterwarnings('ignore')
 
 def toNum(arg):
@@ -55,19 +54,19 @@ def drawmap(tipo,dataset):
     if len(day) == 1:
         day = '0'+str(day)
     today = str(datetime.now().year)+month+day
-    
+
     it = 0
     for time in times_array:
         currentTime = b''.join(time.tolist()).decode('UTF-8')
         current_date = datetime.strptime(currentTime, '%Y-%m-%d_%H:%M:%S')
         if it == 0:
             start = current_date.strftime("%d/%m/%Y %H") + " (UTC)\n"
-            cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
+            cd = current_date.replace(tzinfo=UTC).astimezone(tz=None)
             datesStr.append("\nInício Análise: "+start+"Previsão: "+cd.strftime("%d/%m/%Y %H")+"HL ("+week[cd.isoweekday()]+")")
             names.append(grade+"_"+map[tipo]+"_"+toNum(it))
             it+=1
             continue
-        cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
+        cd = current_date.replace(tzinfo=UTC).astimezone(tz=None)
         if tipo == 'SWDOWN' and (cd.hour < 6 or cd.hour > 18):
             datesStr.append("\nInício Análise: "+start+"Previsão: "+cd.strftime("%d/%m/%Y %H")+"HL ("+week[cd.isoweekday()]+")")
             names.append(grade+"_"+map[tipo]+"_"+toNum(it))
@@ -86,7 +85,7 @@ def drawmap(tipo,dataset):
         hlong, llong = np.amax(xlong), np.amin(xlong)
         #temperatura
         var = dataset.variables['T2'][:,:,:].squeeze()
-        varmin, varmax = getLowHigh(var);
+        varmin, varmax = getLowHigh(var)
         varmax = varmax - 273;        varmin = varmin - 273
         #pressao
         var2 = dataset.variables['PSFC'][:,:,:].squeeze()
@@ -99,7 +98,7 @@ def drawmap(tipo,dataset):
 
             plt.figure(figsize=(8,6))
             plt.title('Temperatura do Ar em 2m / Pressão Atm. Superfície ' + datesStr[i], fontsize=12)
-            plt.suptitle("$^\circ\mathcal{C}$", fontsize=14, ha='center', x=0.79, y=0.75)
+            plt.suptitle(r"$^\circ\mathcal{C}$", fontsize=14, ha='center', x=0.79, y=0.75)
             plt.xlabel('Longitude', fontsize=11, labelpad=25)
             plt.ylabel('Latitude', fontsize=11, labelpad=60)
 
@@ -132,7 +131,7 @@ def drawmap(tipo,dataset):
         hlat, llat = np.amax(xlat), np.amin(xlat)
         hlong, llong = np.amax(xlong), np.amin(xlong)
         var = dataset.variables['PSFC'][:,:,:].squeeze()
-        varmin, varmax = getLowHigh(var);
+        varmin, varmax = getLowHigh(var)
         varmax = varmax/100;        varmin = varmin/100
 
         for i,date in dates:
@@ -169,7 +168,7 @@ def drawmap(tipo,dataset):
         hlat, llat = np.amax(xlat), np.amin(xlat)
         hlong, llong = np.amax(xlong), np.amin(xlong)
         var = dataset.variables['Q2'][:,:,:].squeeze()
-        varmin, varmax = getLowHigh(var);
+        varmin, varmax = getLowHigh(var)
         varmax = varmax*1000;        varmin = varmin*1000
 
         for i,date in dates:
@@ -206,7 +205,7 @@ def drawmap(tipo,dataset):
         hlat, llat = np.amax(xlat), np.amin(xlat)
         hlong, llong = np.amax(xlong), np.amin(xlong)
         u10 = dataset.variables['U10'][:].squeeze(); v10 = dataset.variables['V10'][:].squeeze()
-        varmin, varmax = getLowHighWind(u10,v10);
+        varmin, varmax = getLowHighWind(u10,v10)
 
         for i,date in dates:
 
@@ -218,7 +217,7 @@ def drawmap(tipo,dataset):
             plt.xlabel('Longitude', fontsize=11, labelpad=25)
             plt.ylabel('Latitude', fontsize=11, labelpad=60)
 
-            m = Basemap(rsphere=(6378137.00,6356752.3142),resolution='f',projection='merc',llcrnrlon= llong, llcrnrlat= llat,urcrnrlon= hlong, urcrnrlat= hlat)                                                                                     
+            m = Basemap(rsphere=(6378137.00,6356752.3142),resolution='f',projection='merc',llcrnrlon= llong, llcrnrlat= llat,urcrnrlon= hlong, urcrnrlat= hlat)
             x,y = m(lon, lat)
 
             yy = np.arange(0, y.shape[0], 3)
@@ -305,7 +304,7 @@ def drawmap(tipo,dataset):
         hlat, llat = np.amax(xlat), np.amin(xlat)
         hlong, llong = np.amax(xlong), np.amin(xlong)
         var = dataset.variables['HFX'][:,:,:].squeeze()
-        varmin, varmax = getLowHigh(var);
+        varmin, varmax = getLowHigh(var)
 
         for i,date in dates:
 
@@ -325,7 +324,7 @@ def drawmap(tipo,dataset):
             m.drawcoastlines()
             m.drawparallels(np.arange(llat, hlat,abs(hlat-llat)/10), linewidth=0, labels=[1,0,0,0], color='r',zorder=0, fmt="%.2f")
             m.drawmeridians(np.arange(llong, hlong,abs(hlong-llong)/5), linewidth=0, labels=[0,0,0,1], color='r',zorder=0, fmt="%.2f")
-            
+
             m.contourf(x,y, np.squeeze(mm), alpha = 0.4, cmap = colormap[tipo], vmin=varmin, vmax=varmax)
             m.pcolor(x,y, np.squeeze(mm), alpha = 0.4, cmap = colormap[tipo], vmin=varmin, vmax=varmax)
 
@@ -340,7 +339,7 @@ def drawmap(tipo,dataset):
         hlat, llat = np.amax(xlat), np.amin(xlat)
         hlong, llong = np.amax(xlong), np.amin(xlong)
         var = dataset.variables['LH'][:,:,:].squeeze()
-        varmin, varmax = getLowHigh(var);
+        varmin, varmax = getLowHigh(var)
 
         for i,date in dates:
 
@@ -375,7 +374,7 @@ def drawmap(tipo,dataset):
         hlat, llat = np.amax(xlat), np.amin(xlat)
         hlong, llong = np.amax(xlong), np.amin(xlong)
         var = dataset.variables['SWDOWN'][:,:,:].squeeze()
-        varmin, varmax = getLowHigh(var);
+        varmin, varmax = getLowHigh(var)
 
         for i,date in dates:
 
@@ -417,11 +416,11 @@ def generateGifs(name, files, path_output):
     os.remove(path_output+name+'.gif')
 
 if __name__ == '__main__':
-    
+
     #graphs.png for each hour
     #args = ['temperature','pressure','vapor','wind','rain','HFX','LH','SWDOWN']
     args = ['temperature','vapor','wind','SWDOWN','rain']
-    
+
     path = '/home/labmim/Build_WRF/d-output'
     files = getFileNames(path)
 
@@ -436,6 +435,6 @@ if __name__ == '__main__':
     grade = ['D01','D02','D03']
 
     files = [(g+n[1:], path+g+n, path) for g in grade for n in names]
-    
+
     processes.starmap(generateGifs,files)
 

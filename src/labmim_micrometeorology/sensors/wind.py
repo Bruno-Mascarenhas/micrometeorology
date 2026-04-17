@@ -43,6 +43,16 @@ def wind_components(
     return u, v
 
 
+def wind_direction_from_components(u: NDArray | float, v: NDArray | float) -> NDArray | float:
+    """Compute wind direction element-wise from U/V components.
+
+    Returns the direction in degrees [0, 360).
+    """
+    alpha = np.arctan2(v, u)
+    direction = np.fmod(3.0 * (np.pi / 2.0) - alpha, 2.0 * np.pi) * (180.0 / np.pi)
+    return direction % 360.0
+
+
 def vector_mean_direction(u: NDArray, v: NDArray) -> float:
     """Compute mean wind direction from U/V component arrays.
 
@@ -50,11 +60,9 @@ def vector_mean_direction(u: NDArray, v: NDArray) -> float:
     """
     u_mean = float(np.nanmean(u))
     v_mean = float(np.nanmean(v))
-    alpha = np.arctan2(v_mean, u_mean)
-    direction = np.fmod(3.0 * (np.pi / 2.0) - alpha, 2.0 * np.pi) * (180.0 / np.pi)
-    return float(direction % 360.0)
+    return float(wind_direction_from_components(u_mean, v_mean))
 
 
 def wind_speed_from_components(u: NDArray, v: NDArray) -> NDArray:
     """Compute wind speed from U/V components."""
-    return np.sqrt(np.asarray(u) ** 2 + np.asarray(v) ** 2)
+    return np.hypot(np.asarray(u), np.asarray(v))

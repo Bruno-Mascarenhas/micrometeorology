@@ -1,19 +1,20 @@
 
+from datetime import datetime
+
+import matplotlib.pyplot as plt
 import metrics
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt 
 import seaborn as sns
-from datetime import datetime, timedelta
-from sys import exit
+
 
 #class to simplify paring of two datasets
-class PairDf():
+class PairDf:
     #atributes
     def __init__(self,obs,pred):
         self.dataframes = dict()
         PairDf.fit(self,obs,pred)
-    
+
     #method to paring over columns and return a dict with paired dataframes for each column in commom
     def fit(self,obs,pred):
         idx1 = obs.index.intersection(pred.index)
@@ -54,7 +55,7 @@ def generate_metrics(files,foutput,name,variables,months):
     """
     total_metric = dict()
     hourly_metric = dict()
-    dates = 'year month day hour'.split()
+    dates = ['year', 'month', 'day', 'hour']
 
     for file in files:
         station = file[2]
@@ -91,7 +92,7 @@ def generate_metrics(files,foutput,name,variables,months):
 
             #fit to total df
             compare = PairDf(obs.drop(columns=dates),pred.drop(columns=dates))
-            
+
             total_metric[station] = {}
 
             for var in variables:
@@ -138,7 +139,7 @@ def generate_mean(files,foutput,name,variables,months):
     """
     monthly_mean_obs = dict()
     monthly_mean_pred = dict()
-    dates = 'year month day hour'.split()
+    dates = ['year', 'month', 'day', 'hour']
 
     for file in files:
         station = file[2]
@@ -171,7 +172,7 @@ def generate_mean(files,foutput,name,variables,months):
                 for var in variables:
                     try:
                         x = obs.loc[obs['month'] == i,var].mean()
-                        monthly_mean_obs[station][i][var] = x                    
+                        monthly_mean_obs[station][i][var] = x
                         x = pred.loc[pred['month'] == i,var].mean()
                         monthly_mean_pred[station][i][var] = x
                     except:
@@ -194,7 +195,7 @@ def generate_distributions(files,foutput,name,variables,months):
     variables = desired variables for compare
     months = months to compare
     """
-    dates = 'year month day hour'.split()
+    dates = ['year', 'month', 'day', 'hour']
 
     for file in files:
         station = file[2]
@@ -227,7 +228,7 @@ def generate_distributions(files,foutput,name,variables,months):
                         obs.loc[obs[var]<=0,var] = np.nan
                 except:
                     continue
-            
+
             #fit to total df
             compare = PairDf(obs.drop(columns=dates),pred.drop(columns=dates))
 
@@ -238,7 +239,7 @@ def generate_distributions(files,foutput,name,variables,months):
 
             sns.set(font_scale=1.3)
             sns.set_style('white')
-            
+
             #print(pairs.keys())
 
             for var in pairs.keys():
@@ -246,13 +247,13 @@ def generate_distributions(files,foutput,name,variables,months):
                 ax11 = ax1.twinx()
 
                 #fig.suptitle('Distributions')
-                
-                if var in bins.keys():
+
+                if var in bins:
                     #relative
                     mn = min(pairs[var]['obs'].min(),pairs[var]['pred'].min())
                     mx = max(pairs[var]['pred'].max(),pairs[var]['obs'].max())
                     b = (mx - mn)/bins[var]
-                    
+
                     #relativess
                     sns.distplot(pairs[var]['obs'],kde=False,bins=int(b),hist_kws={'edgecolor':'black','facecolor':'gray'},norm_hist=True,ax=ax1)
                     sns.distplot(pairs[var]['pred'],kde=True,hist=False,kde_kws={'linestyle':'dashed','color':'blue'},ax=ax1)
@@ -292,7 +293,7 @@ def generate_distributions(files,foutput,name,variables,months):
 
 def area_graph(fobs,fpred,foutput,variables,period):
     unit = {'WS':'U (m/s)','Sw_dw':'Sw_dw (W/m²)','ur':'UR (%)','T':'T (°C)','q':'Q (g/Kg)','ustar':'USTAR','pressure':'hPa','H':'H (w/m²)','LE':'LE (w/m²)'}
-    dates = 'year month day hour'.split()
+    dates = ['year', 'month', 'day', 'hour']
 
     for station,file in fobs.items():
         for var in variables:

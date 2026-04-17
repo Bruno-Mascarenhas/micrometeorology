@@ -8,7 +8,9 @@ from solrad_correction.config import ExperimentConfig
 
 
 @click.command()
-@click.option("--config", "-c", required=True, type=click.Path(exists=True), help="Experiment config YAML.")
+@click.option(
+    "--config", "-c", required=True, type=click.Path(exists=True), help="Experiment config YAML."
+)
 @click.option("--name", "-n", default=None, help="Override experiment name.")
 @click.option("--output", "-o", default=None, help="Override output directory.")
 def run_experiment_cli(config: str, name: str | None, output: str | None) -> None:

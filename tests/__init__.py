@@ -1,1 +1,1 @@
-﻿# Tests root
+# Tests root

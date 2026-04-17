@@ -1,24 +1,26 @@
 # -*- Coding: UTF-8 -*-
-#coding: utf-8
-from multiprocessing import Pool
-from itertools import product
-import numpy as np
-import netCDF4
-from datetime import timezone, datetime
+#import imageio
+#import moviepy as mp
+import json
 import os
-import matplotlib.pyplot as plt
+import sys
+
+# usar json nativo para serialização mais leve
+from collections import OrderedDict
+from datetime import UTC, datetime
+from itertools import product
+from multiprocessing import Pool
+
 #from mpl_toolkits.basemap import Basemap
 #from utility import getFileNames
 from warnings import filterwarnings
-#import imageio
-#import moviepy as mp
-import glob
-import sys
-from wrf import interplevel
+
 import matplotlib.colors as mcolors
-# usar json nativo para serialização mais leve
-from collections import OrderedDict
-import json
+import matplotlib.pyplot as plt
+import netCDF4
+import numpy as np
+from wrf import interplevel
+
 #import pdb
 filterwarnings('ignore')
 #print (np.__version__)
@@ -43,7 +45,7 @@ def getLowHigh(variable):
 def getLowHighWind(variable1, variable2):
     varflat1, varflat2 = variable1[1:,:].flatten(), variable2[1:,:].flatten()
     speed = np.sqrt(varflat1*varflat1 + varflat2*varflat2)   #speed² = U² + V²
-    varlow , varhigh = np.amin(speed), np.amax(speed) 
+    varlow , varhigh = np.amin(speed), np.amax(speed)
     return varlow, varhigh
 
 #funcao que calcula a velocidade minima e maxima da chuva
@@ -178,7 +180,7 @@ def create_values_json(var, scale_min, scale_max, date_time, wind_data=None):
         "scale_values": scale_values,
         "date_time": date_time_str
     }
-    
+
     # Adicionar dados de vento se fornecidos
     if wind_data is not None:
         metadata["wind"] = wind_data
@@ -212,7 +214,7 @@ def save_geojson(output_dir, filename_prefix, lon, lat, DX, DY, colormap):
     out_path = os.path.join(output_dir, filename_prefix + ".geojson")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(geojson_obj, f, indent=2, ensure_ascii=False)
-    print(f'    + PYTHON - ' + out_path)
+    print('    + PYTHON - ' + out_path)
 
 
 def save_values_file(output_dir, name, json_obj):
@@ -220,7 +222,7 @@ def save_values_file(output_dir, name, json_obj):
     out_path = os.path.join(output_dir, name + ".json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(json_obj, f, indent=2, ensure_ascii=False)
-    print(f'    + PYTHON - ' + out_path)
+    print('    + PYTHON - ' + out_path)
 
 
 def vertical_interpolate_to_target(speed_levels, height_levels, target_height):
@@ -303,11 +305,11 @@ def compute_wind_vectors_at_height(U_central, V_central, altura_ajustada, target
     - downsampled_linear_indices: índices lineares (row-major) dos vetores subamostrados
     """
     levels, _, ny, nx = U_central.shape
-    
+
     # Interpolar componentes U e V para altura alvo
     U_target = np.full((ny, nx), np.nan)
     V_target = np.full((ny, nx), np.nan)
-    
+
     for t in range(U_central.shape[0]):
         try:
             U_t = vertical_interpolate_to_target(U_central[t], altura_ajustada[t], target_height)
@@ -317,19 +319,19 @@ def compute_wind_vectors_at_height(U_central, V_central, altura_ajustada, target
             V_target = np.nanmean([V_target, V_t], axis=0) if not np.all(np.isnan(V_target)) else V_t
         except:
             pass
-    
+
     # Calcular magnitude e ângulo (convenção meteorológica: 0=Norte, 90=Leste)
     magnitude = np.sqrt(U_target**2 + V_target**2)
     angle = np.arctan2(U_target, V_target) * 180 / np.pi
     angle = np.where(angle < 0, angle + 360, angle)
-    
+
     # Downsampling para reduzir poluição visual
     downsampled_angles = []
     downsampled_magnitudes = []
     downsampled_linear_indices = []
     all_angles = []
     all_magnitudes = []
-    
+
     for i in range(0, ny, downsampling):
         for j in range(0, nx, downsampling):
             if not np.isnan(angle[i, j]):
@@ -338,11 +340,11 @@ def compute_wind_vectors_at_height(U_central, V_central, altura_ajustada, target
                 downsampled_linear_indices.append(linear_idx)
                 downsampled_angles.append(float(angle[i, j]))
                 downsampled_magnitudes.append(float(magnitude[i, j]))
-    
+
     # Converter arrays completos para listas (JSON serializable)
     all_angles = angle.flatten().tolist()
     all_magnitudes = magnitude.flatten().tolist()
-    
+
     return {
         "angles": all_angles,
         "magnitudes": all_magnitudes,
@@ -361,16 +363,16 @@ def drawmap(tipo,dataset):
     WRFoutput = sys.argv[2]+'/'
     grade = dataset[dataset.find('d0'):dataset.find('d0')+3]; grade = grade.upper()
     dataset = netCDF4.Dataset(dataset)
-    times_array = dataset.variables['Times'][:] 
-    DX = dataset.getncattr("DX"); DY = dataset.getncattr("DY")  #resolucao espacial em metros 
+    times_array = dataset.variables['Times'][:]
+    DX = dataset.getncattr("DX"); DY = dataset.getncattr("DY")  #resolucao espacial em metros
     dates = []; datesStr = [];   names = []
-    #datas      #texto da data   #identificacao do mapa 
+    #datas      #texto da data   #identificacao do mapa
                                  #(grade+variavel+numero)
 
     map = {'HFX':'HFX','LH':'LH','pressure':'PRES','rain':'RAIN','SWDOWN':'SWDOWN','temperature':'TEMP','vapor':'VAPOR','wind':'WIND','weibull':'K_WEIB',f'poteolico{tipo[9:]}':f'POT_EOLICO_{tipo[9:]}M'}
     week = {1:'Segunda',2:'Terça',3:'Quarta',4:'Quinta',5:'Sexta',6:'Sábado',7:'Domingo'}
     #desc = {'HFX':'Calor Sensível','pressure':'Pressão Atmosférica (Nível do Mar)','rain':'Precipitação','SWDOWN':'Radiação Global','temperature':'Temperatura (2 m)','vapor':'Umidade Específica','wind':'Velocidade do Vento (10 m)'}
-    
+
     month = str(datetime.now().month); day = str(datetime.now().day)
     day = sys.argv[4]
     month = sys.argv[5]
@@ -383,7 +385,7 @@ def drawmap(tipo,dataset):
     today = str(year+month+day)
     print(f'    + PYTHON - data do arquivo: {today}')
 
-    #data do inicio da analise + data e horario da previsao 
+    #data do inicio da analise + data e horario da previsao
     it = 0
     for time in times_array:
         currentTime = b''.join(time.tolist()).decode('UTF-8')
@@ -391,13 +393,13 @@ def drawmap(tipo,dataset):
         if it == 0:
             start = current_date.strftime("%d/%m/%Y %H") + " (UTC)\n"   #data de inicio da analise UTC
         if it < 3:
-            cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)   #data e horario da previsao
+            cd = current_date.replace(tzinfo=UTC).astimezone(tz=None)   #data e horario da previsao
             datesStr.append("\nInício Análise: "+start+"Previsão: "+cd.strftime("%d/%m/%Y %H")+"HL ("+week[cd.isoweekday()]+")")
             names.append(grade+"_"+map[tipo]+"_"+toNum(it))
             it+=1
             continue
-        cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
-        #graficos de radiacao solar so sao gerados entre 6h e 18h 
+        cd = current_date.replace(tzinfo=UTC).astimezone(tz=None)
+        #graficos de radiacao solar so sao gerados entre 6h e 18h
         if tipo == 'SWDOWN' and (cd.hour < 6 or cd.hour > 18):
             datesStr.append("\nInício Análise: "+start+"Previsão: "+cd.strftime("%d/%m/%Y %H")+"HL ("+week[cd.isoweekday()]+")")
             names.append(grade+"_"+map[tipo]+"_"+toNum(it))
@@ -405,7 +407,7 @@ def drawmap(tipo,dataset):
             continue
         datesStr.append("\nInício Análise: "+start+"Previsão: "+cd.strftime("%d/%m/%Y %H")+"HL ("+week[cd.isoweekday()]+")")
         names.append(grade+"_"+map[tipo]+"_"+toNum(it-2))
-        dates.append((it,cd)) #primeiros 3 indices temporais '0,1,2' são excluidos na geracao dos raster/json 
+        dates.append((it,cd)) #primeiros 3 indices temporais '0,1,2' são excluidos na geracao dos raster/json
         it+=1
 
     #grafico da temperatura com as linhas de pressao
@@ -415,7 +417,7 @@ def drawmap(tipo,dataset):
         hlat, llat = np.amax(xlat), np.amin(xlat)   #valor maximo e minimo da latitude (eixo y do grafico)
         hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
         var = dataset.variables['T2'][:,:,:].squeeze()   #variavel = temperatura
-        varmin, varmax = getLowHigh(var);   #valor minimo e maximo da temperatura
+        varmin, varmax = getLowHigh(var)   #valor minimo e maximo da temperatura
         varmax = varmax - 273;        varmin = varmin - 273   #conversao de K para C°
         var2 = dataset.variables['PSFC'][:,:,:].squeeze()   #variavel = pressao
         var2 /= 100
@@ -423,42 +425,42 @@ def drawmap(tipo,dataset):
             save_geojson(WRFoutput, grade + "_" + map[tipo], lon, lat, DX, DY, colormap[tipo])
         except Exception as e:
             raise Exception(f'Erro ao criar o arquivo GeoJSON {grade + "_" + map[tipo]}: {e}')
-        
+
         for i,date in dates:
 
             celsius = var[i:i+1,:,:].squeeze() - 273.15   #conversao da temperatura em K para C°
             pressure = var2[i:i+1,:,:].squeeze()
 
             try:
-                json_obj = create_values_json(celsius, varmin, varmax, date) 
+                json_obj = create_values_json(celsius, varmin, varmax, date)
                 save_values_file(sys.argv[3], names[i], json_obj)
             except Exception as e:
-                raise Exception(f'Erro ao criar o arquivo JSON {names[i]}: {e}')             
+                raise Exception(f'Erro ao criar o arquivo JSON {names[i]}: {e}')
 
-    #grafico da pressao 
+    #grafico da pressao
     elif tipo == 'pressure':
         xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
         lon, lat = xlong[:1, :,:].squeeze(), xlat[:1, :, :].squeeze()
         hlat, llat = np.amax(xlat), np.amin(xlat)   #valor maximo e minimo da latitude (eixo y do grafico)
         hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
         var = dataset.variables['PSFC'][:,:,:].squeeze()   #variavel = pressao
-        varmin, varmax = getLowHigh(var);   #valor minimo e maximo da pressao
+        varmin, varmax = getLowHigh(var)   #valor minimo e maximo da pressao
         varmax = varmax/100;        varmin = varmin/100
         try:
             save_geojson(WRFoutput, grade + "_" + map[tipo], lon, lat, DX, DY, colormap[tipo])
         except Exception as e:
             raise Exception(f'Erro ao criar o arquivo GeoJSON {grade + "_" + map[tipo]}: {e}')
-        
+
         for i,date in dates:
 
             mbar = var[i:i+1,:,:].squeeze()/100
 
             try:
-                json_obj = create_values_json(mbar, varmin, varmax, date) 
+                json_obj = create_values_json(mbar, varmin, varmax, date)
                 save_values_file(sys.argv[3], names[i], json_obj)
             except Exception as e:
                 raise Exception(f'Erro ao criar o arquivo JSON {names[i]}: {e}')
-    
+
     #grafico da umidade especifica
     elif tipo == 'vapor':
         xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
@@ -466,23 +468,23 @@ def drawmap(tipo,dataset):
         hlat, llat = np.amax(xlat), np.amin(xlat)   #valor maximo e minimo da latitude (eixo y do grafico)
         hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
         var = dataset.variables['Q2'][:,:,:].squeeze()   #variavel = umidade especifica
-        varmin, varmax = getLowHigh(var);   #valor minimo e maximo da umidade especifica
+        varmin, varmax = getLowHigh(var)   #valor minimo e maximo da umidade especifica
         varmax = varmax*1000;        varmin = varmin*1000
         try:
             save_geojson(WRFoutput, grade + "_" + map[tipo], lon, lat, DX, DY, colormap[tipo])
         except Exception as e:
             raise Exception(f'Erro ao criar o arquivo GeoJSON {grade + "_" + map[tipo]}: {e}')
-        
+
         for i,date in dates:
 
             gkg = var[i:i+1,:,:].squeeze()*1000
 
             try:
-                json_obj = create_values_json(gkg, varmin, varmax, date) 
+                json_obj = create_values_json(gkg, varmin, varmax, date)
                 save_values_file(sys.argv[3], names[i], json_obj)
             except Exception as e:
                 raise Exception(f'Erro ao criar o arquivo JSON {names[i]}: {e}')
-    
+
     #grafico da velocidade do vento
     elif tipo == 'wind':
         xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
@@ -495,7 +497,7 @@ def drawmap(tipo,dataset):
             save_geojson(WRFoutput, grade + "_" + map[tipo], lon, lat, DX, DY, colormap[tipo])
         except Exception as e:
             raise Exception(f'Erro ao criar o arquivo GeoJSON {grade + "_" + map[tipo]}: {e}')
-        
+
         for i,date in dates:
 
             u = u10[i:i+1,:,:].squeeze()
@@ -503,7 +505,7 @@ def drawmap(tipo,dataset):
             speed = np.sqrt(u*u + v*v)
 
             try:
-                json_obj = create_values_json(speed, varmin, varmax, date) 
+                json_obj = create_values_json(speed, varmin, varmax, date)
                 save_values_file(sys.argv[3], names[i], json_obj)
             except Exception as e:
                 raise Exception(f'Erro ao criar o arquivo JSON {names[i]}: {e}')
@@ -522,9 +524,9 @@ def drawmap(tipo,dataset):
             save_geojson(WRFoutput, grade + "_" + map[tipo], lon, lat, DX, DY, colormap[tipo])
         except Exception as e:
             raise Exception(f'Erro ao criar o arquivo GeoJSON {grade + "_" + map[tipo]}: {e}')
-        
+
         for i,date in dates:
-            
+
             # mm = var[i:i+1,:,:]
 
             if i == 1:
@@ -533,11 +535,11 @@ def drawmap(tipo,dataset):
                mm = var[i:i+1,:,:].squeeze()-var[i-1:i,:,:].squeeze()
 
             try:
-                json_obj = create_values_json(mm, varmin, varmax, date) 
+                json_obj = create_values_json(mm, varmin, varmax, date)
                 save_values_file(sys.argv[3], names[i], json_obj)
             except Exception as e:
                 raise Exception(f'Erro ao criar o arquivo JSON {names[i]}: {e}')
-    
+
     #grafico do calor sensivel
     elif tipo == 'HFX':
         xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
@@ -545,25 +547,25 @@ def drawmap(tipo,dataset):
         hlat, llat = np.amax(xlat), np.amin(xlat)   #valor maximo e minimo da latitude (eixo y do grafico)
         hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
         var = dataset.variables['HFX'][:,:,:].squeeze()
-        varmin, varmax = getLowHigh(var);   #valor minimo e maximo da 
+        varmin, varmax = getLowHigh(var)   #valor minimo e maximo da
         try:
             save_geojson(WRFoutput, grade + "_" + map[tipo], lon, lat, DX, DY, colormap[tipo])
         except Exception as e:
             raise Exception(f'Erro ao criar o arquivo GeoJSON {grade + "_" + map[tipo]}: {e}')
-        
+
         for i,date in dates:
 
             mm = var[i:i+1,:,:].squeeze()
 
             try:
-                json_obj = create_values_json(mm, varmin, varmax, date) 
+                json_obj = create_values_json(mm, varmin, varmax, date)
                 # Salvando em um arquivo
                 with open(f"{sys.argv[3]}/{names[i]}.json", "w") as f:
                     json.dump(json_obj, f, indent=2)
-                print(f'    + PYTHON - ' + sys.argv[3] + "/"  + names[i] +".json")
+                print('    + PYTHON - ' + sys.argv[3] + "/"  + names[i] +".json")
             except Exception as e:
                 raise Exception(f'Erro ao criar o arquivo JSON {names[i]}: {e}')
-    
+
     #grafico do calor latente
     elif tipo == 'LH':
         xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
@@ -571,18 +573,18 @@ def drawmap(tipo,dataset):
         hlat, llat = np.amax(xlat), np.amin(xlat)   #valor maximo e minimo da latitude (eixo y do grafico)
         hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
         var = dataset.variables['LH'][:,:,:].squeeze()
-        varmin, varmax = getLowHigh(var);   #valor minimo e maximo da 
+        varmin, varmax = getLowHigh(var)   #valor minimo e maximo da
         try:
             save_geojson(WRFoutput, grade + "_" + map[tipo], lon, lat, DX, DY, colormap[tipo])
         except Exception as e:
             raise Exception(f'Erro ao criar o arquivo GeoJSON {grade + "_" + map[tipo]}: {e}')
-        
+
         for i,date in dates:
 
             mm = var[i:i+1,:,:].squeeze()
 
             try:
-                json_obj = create_values_json(mm, varmin, varmax, date) 
+                json_obj = create_values_json(mm, varmin, varmax, date)
                 save_values_file(sys.argv[3], names[i], json_obj)
             except Exception as e:
                 raise Exception(f'Erro ao criar o arquivo JSON {names[i]}: {e}')
@@ -594,22 +596,22 @@ def drawmap(tipo,dataset):
         hlat, llat = np.amax(xlat), np.amin(xlat)   #valor maximo e minimo da latitude (eixo y do grafico)
         hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
         var = dataset.variables['SWDOWN'][:,:,:].squeeze()
-        varmin, varmax = getLowHigh(var);   #valor minimo e maximo da 
+        varmin, varmax = getLowHigh(var)   #valor minimo e maximo da
         try:
             save_geojson(WRFoutput, grade + "_" + map[tipo], lon, lat, DX, DY, colormap[tipo])
         except Exception as e:
             raise Exception(f'Erro ao criar o arquivo GeoJSON {grade + "_" + map[tipo]}: {e}')
-        
+
         for i,date in dates:
 
             mm = var[i:i+1,:,:].squeeze()
 
             try:
-                json_obj = create_values_json(mm, varmin, varmax, date) 
+                json_obj = create_values_json(mm, varmin, varmax, date)
                 save_values_file(sys.argv[3], names[i], json_obj)
             except Exception as e:
                 raise Exception(f'Erro ao criar o arquivo JSON {names[i]}: {e}')
-    
+
     #grafico fator k de weibull
     elif tipo == 'weibull':
         xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
@@ -618,32 +620,32 @@ def drawmap(tipo,dataset):
         hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
         U = dataset.variables['U'][:].squeeze(); V = dataset.variables['V'][:].squeeze()  #velocidades horizontais e verticais do vento na borda das grades
         #interpolacao das velocidades para representarem os valores nos centros das grades
-        U_central = (U[:, :, :, :-1] + U[:, :, :, 1:])/2; V_central = (V[:, :, :-1, :] + V[:, :, 1:, :])/2;       
+        U_central = (U[:, :, :, :-1] + U[:, :, :, 1:])/2; V_central = (V[:, :, :-1, :] + V[:, :, 1:, :])/2
         speed4d = np.empty_like(U_central) #matriz das velocidades resultantes (4d)
         speed3d = np.empty_like(U_central[:,0,:,:]) #matriz das velocidades resultantes para uma altura especifica (3d)
         fator_k = np.empty_like(U_central[0,0,:,:]) #matriz do fator K de weibull
-        
+
         ph = dataset.variables['PH'][:].squeeze(); phb = dataset.variables['PHB'][:].squeeze()  #alturas potencias
-        hgt = dataset.variables['HGT'][:].squeeze() #altura do terreno 
-        
+        hgt = dataset.variables['HGT'][:].squeeze() #altura do terreno
+
         geopot_total = ph + phb      #geopotencial total (media + variação)
         altura = geopot_total / 9.81        #altura das extremidades dos niveis (em relaçao ao nivel do mar)
-        
+
         #interpolacao das velocidades para representarem os valores no meio dos niveis
         altura_central = (altura[:, :-1, :, :] + altura[:, 1:, :, :])/2
-        
+
         #ajustando a altura para considerar o nivel do terreno
-        altura_ajustada = np.empty_like(altura_central)       
+        altura_ajustada = np.empty_like(altura_central)
         for i in range(altura_ajustada.shape[0]):
             for j in range(altura_ajustada.shape[1]):
                 altura_ajustada[i,j,:,:] = altura_central[i,j,:,:] - hgt[i,:,:]
-             
-        #calculo do mapa de velocidade resultante do vento para cada hora analisada em todas os niveis de altura 
+
+        #calculo do mapa de velocidade resultante do vento para cada hora analisada em todas os niveis de altura
         for i in range(speed4d.shape[0]):
             u = U_central[i:i+1,:,:,:].squeeze()
             v = V_central[i:i+1,:,:,:].squeeze()
             speed4d[i,:,:,:] = np.sqrt(u*u + v*v)
-        
+
         # Interpolação vertical para 100 m usando função vetorizada (mais robusta e rápida)
         for ti in range(speed3d.shape[0]):
             try:
@@ -657,7 +659,7 @@ def drawmap(tipo,dataset):
             mean = np.nanmean(speed3d[1:,...], axis=0)
             ratio = np.where(mean > 0, std / mean, np.nan)
             fator_k = np.power(ratio, -1.086)
-        
+
         try:
             save_geojson(WRFoutput, grade + "_" + map[tipo], lon, lat, DX, DY, colormap[tipo])
         except Exception as e:
@@ -671,7 +673,7 @@ def drawmap(tipo,dataset):
         except Exception as e:
             raise Exception(f'Erro ao criar o arquivo JSON {grade + "_" + map[tipo]}: {e}')
 
-    #grafico potencial eolico  
+    #grafico potencial eolico
     elif 'poteolico' in tipo:
         xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
         lon, lat = xlong[:1, :,:].squeeze(), xlat[:1, :, :].squeeze()
@@ -679,7 +681,7 @@ def drawmap(tipo,dataset):
         hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
 
         U = dataset.variables['U'][:].squeeze(); V = dataset.variables['V'][:].squeeze()  #velocidades horizontais e verticais do vento na borda das grades
-        U_central = (U[:, :, :, :-1] + U[:, :, :, 1:])/2; V_central = (V[:, :, :-1, :] + V[:, :, 1:, :])/2;   #interpolacao das velocidades para representarem os valores nos centros das grades     
+        U_central = (U[:, :, :, :-1] + U[:, :, :, 1:])/2; V_central = (V[:, :, :-1, :] + V[:, :, 1:, :])/2   #interpolacao das velocidades para representarem os valores nos centros das grades
 
         speed4d = np.empty_like(U_central) #matriz das velocidades resultantes (4d)
         speed3d = np.empty_like(U_central[:,0,:,:]) #matriz das velocidades resultantes para uma altura especifica (3d)
@@ -687,13 +689,13 @@ def drawmap(tipo,dataset):
 
 
         ph = dataset.variables['PH'][:].squeeze(); phb = dataset.variables['PHB'][:].squeeze()  #alturas potencias
-        hgt = dataset.variables['HGT'][:].squeeze() #altura do terreno 
+        hgt = dataset.variables['HGT'][:].squeeze() #altura do terreno
         geopot_total = ph + phb    #geopotencial total (media + variação)
         altura = geopot_total / 9.81      #altura das extremidades dos niveis (em relaçao ao nivel do mar)
         altura_central = (altura[:, :-1, :, :] + altura[:, 1:, :, :])/2    #interpolacao das velocidades para representarem os valores no meio dos niveis
 
         #ajustando a altura para considerar o nivel do terreno
-        altura_ajustada = np.empty_like(altura_central)       
+        altura_ajustada = np.empty_like(altura_central)
         for i in range(altura_ajustada.shape[0]):
             for j in range(altura_ajustada.shape[1]):
                 altura_ajustada[i,j,:,:] = altura_central[i,j,:,:] - hgt[i,:,:]
@@ -701,7 +703,7 @@ def drawmap(tipo,dataset):
         #altura media de todos os pontos de cada nivel (referente ao meio do nivel)
         altura_media = [np.mean(altura_ajustada[:,i,:,:]) for i in range(altura_ajustada.shape[1])]
         # print(altura_media,np.size(altura_media))
-            
+
         altura_desejada = int(tipo[9:]) #altura escolhida no comando de rodar o script
 
         #valores minimo e maximo da escala das figuras
@@ -710,7 +712,7 @@ def drawmap(tipo,dataset):
                 nivel_inf_altura = i
         # varmin,_ = getLowHighWind(U_central[:,nivel_inf_altura,:,:],V_central[:,nivel_inf_altura,:,:])
         # _,varmax = getLowHighWind(U_central[:,nivel_inf_altura+1,:,:],V_central[:,nivel_inf_altura+1,:,:])
-        
+
         speed4d = np.sqrt(U_central**2+V_central**2)
         # calculo do mapa de velocidade resultante do vento para cada hora analisada em um nivel de altura especificado
         for ti in range(speed3d.shape[0]):
@@ -729,14 +731,14 @@ def drawmap(tipo,dataset):
             save_geojson(WRFoutput, grade + "_" + map[tipo], lon, lat, DX, DY, colormap[tipo])
         except Exception as e:
             raise Exception(f'Erro ao criar o arquivo GeoJSON {grade + "_" + map[tipo]}: {e}')
-        
+
         for i,date in dates:
-             
-            #calculo do mapa de velocidade resultante do vento para cada hora analisada em todas os niveis de altura 
+
+            #calculo do mapa de velocidade resultante do vento para cada hora analisada em todas os niveis de altura
             u = U_central[i:i+1,:,:,:].squeeze()
             v = V_central[i:i+1,:,:,:].squeeze()
             speed3d = np.sqrt(u*u + v*v)
-            
+
             #calculo do mapa de velocidade resultante do vento para cada hora analisada em um nivel de altura especificado (interpolaçao)
             pot_eolico = interplevel(speed3d, altura_ajustada[i,:,:,:], altura_desejada)
 
@@ -750,7 +752,7 @@ def drawmap(tipo,dataset):
             # Calcular vetores de vento para os dados do timestamp atual
             try:
                 wind_data = compute_wind_vectors_at_height(
-                    U_central[i:i+1], V_central[i:i+1], 
+                    U_central[i:i+1], V_central[i:i+1],
                     altura_ajustada[i:i+1], altura_desejada, downsampling=4
                 )
             except Exception as e:
@@ -785,11 +787,11 @@ def drawmap(tipo,dataset):
 #         print(err)
 
 if __name__ == '__main__':
-    
+
     #graphs.png for each hour (define quais tipos (variaveis) de graficos seram gerados)
-    #args = ['temperature','pressure','vapor','wind','rain','HFX','LH','SWDOWN'] 
+    #args = ['temperature','pressure','vapor','wind','rain','HFX','LH','SWDOWN']
     args = [arg for arg in sys.argv[13:]] #variaveis de saida
-    #caminho de input dos dados wrf 
+    #caminho de input dos dados wrf
     #pathX = ['/home/murilo/leal/mapas/wrfout_d0X_2024-06-19_00_00_00']
 
 
@@ -800,11 +802,11 @@ if __name__ == '__main__':
 
     #dir_scriptpy $WRFoutput $day $month $year $FIGini $FIGfim $path1 $path2 $path3 $path4 $path5
 
-    print(f' ')
-    print(f'    ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐')
-    print(f'    + PYTHON - EXECUTANDO O PYTHON')
-    print(f'    └──────────────────────────────────────────────────────────────────────────────────────────────────────────┘')
-    print(f' ')
+    print(' ')
+    print('    ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐')
+    print('    + PYTHON - EXECUTANDO O PYTHON')
+    print('    └──────────────────────────────────────────────────────────────────────────────────────────────────────────┘')
+    print(' ')
 
 
     print(f'    + PYTHON - dir_scriptpy = {sys.argv[1]}')
@@ -819,22 +821,22 @@ if __name__ == '__main__':
     print(f'    + PYTHON - path2        = {sys.argv[10]}')
     print(f'    + PYTHON - path3        = {sys.argv[11]}')
     print(f'    + PYTHON - path4        = {sys.argv[12]}')
-    
+
     if np.size(args) == 0:
         print('Nenhuma variável foi selecionada')
         exit()
     else:
         [print(f'    + PYTHON - variavel_saida_{i+1}        = {args[i]}') for i in range(np.size(args))]
 
-    #define de quais arquivos wrf serao gerados as imagens 
+    #define de quais arquivos wrf serao gerados as imagens
     num_min_dom= int(sys.argv[7]) #inicio - wrf_d+num_min_dom
     num_max_dom= int(sys.argv[8]) #fim - wrf_d+num_max_dom
-    
+
     #num_min_dom <= num_max_dom
     if num_min_dom > num_max_dom:
         print('    + PYTHON - O primeiro argumento wrf deve ser menor ou igual ao segundo')
         exit()
-    #se num_min_dom == num_max_dom, gera os graficos correspondente a apenas um arquivo wrf 
+    #se num_min_dom == num_max_dom, gera os graficos correspondente a apenas um arquivo wrf
     elif num_min_dom == num_max_dom:
         files = [sys.argv[8+num_min_dom]]
         #files = path
@@ -859,7 +861,7 @@ if __name__ == '__main__':
     for i in range(np.size(args)):
         if 'poteolico' in args[i]:
             map[f'poteolico{args[i][9:]}'] = f'POT_EOLICO_{args[i][9:]}M'
-    
+
     # names = ['_RAIN','_SWDOWN','_TEMP','_VAPOR','_WIND']
     names = ['_' + map[arg] for arg in args] #variaveis para quais seram geradas os .webm
     grade = ['D01','D02','D03','D04','D05']  #grades escolhidas
@@ -867,7 +869,7 @@ if __name__ == '__main__':
     files = [(g+n[1:], WRFoutput+g+n, WRFoutput) for g in grade for n in names]
 
     try:
-        #processes.starmap(generateGifs,files)   #executa a funcao de criacao dos videos 
+        #processes.starmap(generateGifs,files)   #executa a funcao de criacao dos videos
         pass
     except Exception as err:
         print(err)

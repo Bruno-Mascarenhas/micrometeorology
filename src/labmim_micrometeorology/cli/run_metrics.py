@@ -31,12 +31,40 @@ from labmim_micrometeorology.stats.metrics import compute_all
 
 
 @click.command()
-@click.option("--dataset-a", "-a", required=True, type=click.Path(exists=True), help="First dataset (treated as 'observed').")
-@click.option("--dataset-b", "-b", required=True, type=click.Path(exists=True), help="Second dataset (treated as 'predicted').")
-@click.option("--columns", "-c", multiple=True, default=None, help="Columns to evaluate. If omitted, all common columns are used.")
-@click.option("--output", "-o", default=None, help="Output CSV for metrics table. If omitted, prints to stdout.")
+@click.option(
+    "--dataset-a",
+    "-a",
+    required=True,
+    type=click.Path(exists=True),
+    help="First dataset (treated as 'observed').",
+)
+@click.option(
+    "--dataset-b",
+    "-b",
+    required=True,
+    type=click.Path(exists=True),
+    help="Second dataset (treated as 'predicted').",
+)
+@click.option(
+    "--columns",
+    "-c",
+    multiple=True,
+    default=None,
+    help="Columns to evaluate. If omitted, all common columns are used.",
+)
+@click.option(
+    "--output",
+    "-o",
+    default=None,
+    help="Output CSV for metrics table. If omitted, prints to stdout.",
+)
 @click.option("--separator", "-s", default=",", help="Column separator for input files.")
-@click.option("--join", type=click.Choice(["index", "nearest"]), default="index", help="How to align rows: by exact index match or nearest timestamp.")
+@click.option(
+    "--join",
+    type=click.Choice(["index", "nearest"]),
+    default="index",
+    help="How to align rows: by exact index match or nearest timestamp.",
+)
 @click.option("--tolerance", default="30min", help="Max offset for 'nearest' join.")
 @click.option("--log-level", default="INFO", help="Logging level.")
 def main(

@@ -1,11 +1,8 @@
 import os
-import sys
-import glob
-import netCDF4
-import numpy as np
+from datetime import datetime
 from math import sqrt
-from datetime import datetime, timedelta
-import pandas as pd
+
+import numpy as np
 
 __location__ = os.path.realpath(os.path.join(os.getcwd(), os.path.dirname(__file__)))
 
@@ -33,7 +30,7 @@ def getFileNames(dataDir):
     return files
 
 #getFileNames("/home/labmim/Build_WRF/d-output")
-	
+
 def ordDirectory(dataDir)	:
     for name in os.listdir(dataDir):
         current_name = os.path.join(dataDir, name)
@@ -70,20 +67,20 @@ def getLatLon(dataset,lat,lon,name):
             if a[i-1][0] == a[i][0] and a[i-1][1] == a[i][1]:
                 latCoord = a[i][0]; longCoord = a[i][1]
 
-        print("LambMiM = lat = {} long = {}".format(latCoord,longCoord))
-        print("lat = {} long = {}".format(ncoord[0][0], ncoord[0][1]))
+        print(f"LambMiM = lat = {latCoord} long = {longCoord}")
+        print(f"lat = {ncoord[0][0]} long = {ncoord[0][1]}")
 
         return latCoord, longCoord
 
     except IndexError:
-        print('File {i} is out of shape! shape is {j}'.format(i=name, j=id))
+        print(f'File {name} is out of shape! shape is {id}')
 
         xlat = dataset.variables['XLAT'][:]
         xlong = dataset.variables['XLONG'][:]
         xlat = xlat[0:1, :, :].squeeze()
         xlong = xlong[0:1, :, :].squeeze()
         id = xlat.shape
-        print('Dim = {}\n'.format(id))
+        print(f'Dim = {id}\n')
         return 0, 0
 
 #dataset = netCDF4.Dataset("C:\\Users\\BrunoM\\Documents\\working now\\allGraphs\\wrfout_d03_2018-04-27_00_00_00.nc")

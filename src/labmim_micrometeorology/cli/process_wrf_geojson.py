@@ -28,15 +28,23 @@ from labmim_micrometeorology.common.types import (
 from labmim_micrometeorology.wrf import geojson, reader
 from labmim_micrometeorology.wrf import variables as vmod
 from labmim_micrometeorology.wrf.batch import JsonTask, default_workers, run_json_tasks
+from labmim_micrometeorology.wrf.geojson import create_wind_vectors_json
 from labmim_micrometeorology.wrf.interpolation import (
     compute_wind_vectors_at_height,
     interpolate_speed_to_height,
 )
 
 DEFAULT_VARS = [
-    "temperature", "pressure", "wind", "rain",
-    "vapor", "HFX", "LH", "SWDOWN",
+    "temperature",
+    "pressure",
+    "wind",
+    "rain",
+    "vapor",
+    "HFX",
+    "LH",
+    "SWDOWN",
     "poteolico",
+    "wind_vectors",
 ]
 
 
@@ -125,12 +133,16 @@ def _build_json_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.extract_temperature_step(t2[i : i + 1, :, :])
-                tasks.append(JsonTask(
-                    data=data, scale_min=vmin, scale_max=vmax,
-                    date_str=_format_datetime(meta["datetime_local"]),
-                    output_path=str(Path(json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"),
-                    wind_data=None,
-                ))
+                tasks.append(
+                    JsonTask(
+                        data=data,
+                        scale_min=vmin,
+                        scale_max=vmax,
+                        date_str=_format_datetime(meta["datetime_local"]),
+                        output_path=str(Path(json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"),
+                        wind_data=None,
+                    )
+                )
 
         elif var_name == WRFVariable.RAIN:
             total, vmin, vmax = vmod.extract_rain(ds)
@@ -139,12 +151,16 @@ def _build_json_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.extract_rain_step(total, i)
-                tasks.append(JsonTask(
-                    data=data, scale_min=vmin, scale_max=vmax,
-                    date_str=_format_datetime(meta["datetime_local"]),
-                    output_path=str(Path(json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"),
-                    wind_data=None,
-                ))
+                tasks.append(
+                    JsonTask(
+                        data=data,
+                        scale_min=vmin,
+                        scale_max=vmax,
+                        date_str=_format_datetime(meta["datetime_local"]),
+                        output_path=str(Path(json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"),
+                        wind_data=None,
+                    )
+                )
 
         elif var_name == WRFVariable.WIND:
             u10, v10, vmin, vmax = vmod.extract_wind(ds)
@@ -154,13 +170,17 @@ def _build_json_tasks_for_domain(
                 i = meta["index"]
                 u = np.squeeze(u10[i : i + 1])
                 v = np.squeeze(v10[i : i + 1])
-                speed = np.sqrt(u**2 + v**2)
-                tasks.append(JsonTask(
-                    data=speed, scale_min=vmin, scale_max=vmax,
-                    date_str=_format_datetime(meta["datetime_local"]),
-                    output_path=str(Path(json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"),
-                    wind_data=None,
-                ))
+                speed = np.hypot(u, v)
+                tasks.append(
+                    JsonTask(
+                        data=speed,
+                        scale_min=vmin,
+                        scale_max=vmax,
+                        date_str=_format_datetime(meta["datetime_local"]),
+                        output_path=str(Path(json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"),
+                        wind_data=None,
+                    )
+                )
 
         elif var_name == WRFVariable.SWDOWN:
             var_data, vmin, vmax = vmod.extract_scalar(ds, "SWDOWN")
@@ -172,19 +192,27 @@ def _build_json_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = np.squeeze(var_data[i : i + 1, :, :])
-                tasks.append(JsonTask(
-                    data=data, scale_min=vmin, scale_max=vmax,
-                    date_str=_format_datetime(meta["datetime_local"]),
-                    output_path=str(Path(json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"),
-                    wind_data=None,
-                ))
+                tasks.append(
+                    JsonTask(
+                        data=data,
+                        scale_min=vmin,
+                        scale_max=vmax,
+                        date_str=_format_datetime(meta["datetime_local"]),
+                        output_path=str(Path(json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"),
+                        wind_data=None,
+                    )
+                )
 
         elif var_name == WRFVariable.WIND_POTENTIAL:
             # Wind potential: interpolate wind speed to 50m, 100m, 150m
-            click.echo(f"  Computing adjusted heights for wind potential...")
+            click.echo("  Computing adjusted heights for wind potential...")
             u_central, v_central, height_adjusted, speed_4d = vmod.compute_adjusted_heights(ds)
 
-            for target_height, suffix in [(50, "POT_EOLICO_50M"), (100, "POT_EOLICO_100M"), (150, "POT_EOLICO_150M")]:
+            for target_height, suffix in [
+                (50, "POT_EOLICO_50M"),
+                (100, "POT_EOLICO_100M"),
+                (150, "POT_EOLICO_150M"),
+            ]:
                 click.echo(f"    -> Interpolating to {target_height}m ({suffix})...")
                 speed_3d = interpolate_speed_to_height(speed_4d, height_adjusted, target_height)
 
@@ -200,19 +228,50 @@ def _build_json_tasks_for_domain(
                     # Compute wind vectors per timestep (matches legacy behavior)
                     try:
                         wind_vectors = compute_wind_vectors_at_height(
-                            u_central[i : i + 1], v_central[i : i + 1],
-                            height_adjusted[i : i + 1], target_height,
+                            u_central[i : i + 1],
+                            v_central[i : i + 1],
+                            height_adjusted[i : i + 1],
+                            target_height,
                             downsampling=4,
                         )
                     except Exception:
                         wind_vectors = None
 
-                    tasks.append(JsonTask(
-                        data=data, scale_min=vmin, scale_max=vmax,
-                        date_str=_format_datetime(meta["datetime_local"]),
-                        output_path=str(Path(json_dir) / f"{grid}_{suffix}_{i:03d}.json"),
-                        wind_data=wind_vectors,
-                    ))
+                    tasks.append(
+                        JsonTask(
+                            data=data,
+                            scale_min=vmin,
+                            scale_max=vmax,
+                            date_str=_format_datetime(meta["datetime_local"]),
+                            output_path=str(Path(json_dir) / f"{grid}_{suffix}_{i:03d}.json"),
+                            wind_data=wind_vectors,
+                        )
+                    )
+
+        elif var_name == "wind_vectors":
+            # Standalone wind vector overlay files (surface U10/V10)
+            click.echo("  Computing standalone wind vectors (U10/V10)...")
+            u10, v10, _vmin, _vmax = vmod.extract_wind(ds)
+            for meta in time_meta:
+                if meta.get("skip"):
+                    continue
+                i = meta["index"]
+                u = np.squeeze(u10[i : i + 1])
+                v = np.squeeze(v10[i : i + 1])
+                wv_json = create_wind_vectors_json(
+                    u,
+                    v,
+                    date_time=meta["datetime_local"],
+                    downsampling=4,
+                )
+                # Write directly via save_values_json (same format)
+                name = f"{grid}_WIND_VECTORS_{i:03d}"
+                out_path = Path(json_dir) / f"{name}.json"
+                import json as _json
+
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(out_path, "w", encoding="utf-8") as f:
+                    _json.dump(wv_json, f, separators=(",", ":"), ensure_ascii=False)
 
         else:
             nc_var = var_name.upper()
@@ -231,12 +290,16 @@ def _build_json_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = np.squeeze(var_data[i : i + 1, :, :])
-                tasks.append(JsonTask(
-                    data=data, scale_min=vmin, scale_max=vmax,
-                    date_str=_format_datetime(meta["datetime_local"]),
-                    output_path=str(Path(json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"),
-                    wind_data=None,
-                ))
+                tasks.append(
+                    JsonTask(
+                        data=data,
+                        scale_min=vmin,
+                        scale_max=vmax,
+                        date_str=_format_datetime(meta["datetime_local"]),
+                        output_path=str(Path(json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"),
+                        wind_data=None,
+                    )
+                )
 
     return tasks
 
@@ -250,7 +313,13 @@ def _build_json_tasks_for_domain(
 @click.option("--geojson-dir", "-g", required=True, help="Output dir for GeoJSON grid files.")
 @click.option("--variables", "-v", multiple=True, default=None, help="Variables to process.")
 @click.option("--skip-first", default=0, type=int, help="Time steps to skip.")
-@click.option("--workers", "-w", default=None, type=int, help=f"Parallel workers (default: {default_workers()}).")
+@click.option(
+    "--workers",
+    "-w",
+    default=None,
+    type=int,
+    help=f"Parallel workers (default: {default_workers()}).",
+)
 @click.option("--log-level", default="INFO", help="Logging level.")
 def main(
     dataset: str | None,

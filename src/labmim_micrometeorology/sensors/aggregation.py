@@ -12,7 +12,10 @@ import logging
 import numpy as np
 import pandas as pd
 
-from labmim_micrometeorology.sensors.wind import vector_mean_direction, wind_components
+from labmim_micrometeorology.sensors.wind import (
+    wind_components,
+    wind_direction_from_components,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,12 +67,12 @@ def aggregate_to_hourly(
 
     resampler = df.resample(freq)
 
-    # Mean columns
+    # Mean columns — use vectorized .count() instead of apply(lambda)
     for col in sorted(mean_columns):
         if col not in df.columns:
             continue
         grouped = resampler[col]
-        counts = grouped.apply(lambda x: x.dropna().shape[0])
+        counts = grouped.count()
         means = grouped.mean()
         means[counts < min_samples] = np.nan
         results[col] = means
@@ -79,12 +82,12 @@ def aggregate_to_hourly(
         if col not in df.columns:
             continue
         grouped = resampler[col]
-        counts = grouped.apply(lambda x: x.dropna().shape[0])
+        counts = grouped.count()
         sums = grouped.sum(min_count=1)
         sums[counts < min_samples] = np.nan
         results[col] = sums
 
-    # Wind direction columns (vector mean)
+    # Wind direction columns (vector mean) — vectorized resample on u/v
     for dir_col in sorted(wind_dir_columns):
         if dir_col not in df.columns:
             continue
@@ -96,17 +99,15 @@ def aggregate_to_hourly(
             u, v = wind_components(np.ones(len(df)), df[dir_col].values)
 
         df_uv = pd.DataFrame({"u": u, "v": v}, index=df.index)
-        grouped_uv = df_uv.resample(freq)
+        uv_resampled = df_uv.resample(freq)
+        uv_counts = uv_resampled["u"].count()
+        uv_means = uv_resampled.mean()
 
-        directions: list[float] = []
-        for _, group in grouped_uv:
-            valid = group.dropna()
-            if len(valid) >= min_samples:
-                directions.append(vector_mean_direction(valid["u"].values, valid["v"].values))
-            else:
-                directions.append(np.nan)
-
-        results[dir_col] = pd.Series(directions, index=resampler.mean().index)
+        # Vectorized direction from mean components
+        dirs = wind_direction_from_components(uv_means["u"].values, uv_means["v"].values)
+        dir_series = pd.Series(dirs, index=uv_means.index)
+        dir_series[uv_counts < min_samples] = np.nan
+        results[dir_col] = dir_series
 
     out = pd.DataFrame(results)
     out.index.name = None

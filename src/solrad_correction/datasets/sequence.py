@@ -81,11 +81,12 @@ class SequenceDatasetMeta:
         index = None
         idx_path = p / "index.csv"
         if idx_path.exists():
-            idx_series = pd.read_csv(idx_path, squeeze=False)
-            index = pd.to_datetime(idx_series.iloc[:, 0])
+            idx_df = pd.read_csv(idx_path)
+            index = pd.to_datetime(idx_df.iloc[:, 0])
 
         return cls(
-            X_raw=features, y_raw=targets,
+            X_raw=features,
+            y_raw=targets,
             feature_names=feature_names,
             sequence_length=seq_len,
             index=index,

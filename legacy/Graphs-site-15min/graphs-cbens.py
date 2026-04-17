@@ -1,11 +1,10 @@
-import pandas as pd
-import numpy as np
+
 import matplotlib.pyplot as plt
-import seaborn as sns
-from sys import exit
+import numpy as np
+import pandas as pd
 
 labmim = pd.read_csv('rad_labmim_bruno.dat',sep=';')
-labmim.index = pd.to_datetime(labmim['year month day hour'.split()])
+labmim.index = pd.to_datetime(labmim[['year', 'month', 'day', 'hour']])
 
 sw_dir = []
 for dw, dif in zip(labmim['Sw_dw'],labmim['Sw_dif']):
@@ -31,14 +30,14 @@ plt.close()
 #daily######################################################## VERAO
 #topo
 x = [x+1 for x in range(24)]
-mm = labmim.groupby('month hour'.split())['Sw_top']
+mm = labmim.groupby(['month', 'hour'])['Sw_top']
 line = []
 for i in range(24):
         line.append(mm.get_group((1,i)).dropna().mean())
 line = plt.plot(x,np.array(line)*0.0036,color='black')
 
-#dif     
-mm = labmim.groupby('month hour'.split())['Sw_dif']
+#dif
+mm = labmim.groupby(['month', 'hour'])['Sw_dif']
 bp1 = []
 for i in range(24):
     bp1.append(list(mm.get_group((1,i)).dropna().values*0.0036))
@@ -49,7 +48,7 @@ for i in range(24):
 
 
 #direta
-mm = labmim.groupby('month hour'.split())['Sw_dir']
+mm = labmim.groupby(['month', 'hour'])['Sw_dir']
 bp2 = []
 for i in range(24):
     bp2.append(list(mm.get_group((1,i)).dropna().values*0.0036))
@@ -60,7 +59,7 @@ for i in range(24):
 
 
 #global
-mm = labmim.groupby('month hour'.split())['Sw_dw']
+mm = labmim.groupby(['month', 'hour'])['Sw_dw']
 bp3 = []
 for i in range(24):
     bp3.append(list(mm.get_group((1,i)).dropna().values*0.0036))
@@ -92,16 +91,16 @@ plt.savefig('rad-hourly-verao.png',bbox_inches='tight')
 plt.close()
 
 #daily######################################################## INVERNO
-#topo 
+#topo
 x = [x+1 for x in range(24)]
-mm = labmim.groupby('month hour'.split())['Sw_top']
+mm = labmim.groupby(['month', 'hour'])['Sw_top']
 line = []
 for i in range(24):
         line.append(mm.get_group((7,i)).dropna().mean())
 line = plt.plot(x,np.array(line)*0.0036,color='black')
 
-#dif     
-mm = labmim.groupby('month hour'.split())['Sw_dif']
+#dif
+mm = labmim.groupby(['month', 'hour'])['Sw_dif']
 bp1 = []
 for i in range(24):
     bp1.append(list(mm.get_group((6,i)).dropna().values*0.0036))
@@ -111,7 +110,7 @@ for i in range(24):
     bp1[i] += list(mm.get_group((8,i)).dropna().values*0.0036)
 
 #direta
-mm = labmim.groupby('month hour'.split())['Sw_dir']
+mm = labmim.groupby(['month', 'hour'])['Sw_dir']
 bp2 = []
 for i in range(24):
     bp2.append(list(mm.get_group((7,i)).dropna().values*0.0036))
@@ -122,7 +121,7 @@ for i in range(24):
 
 
 #global
-mm = labmim.groupby('month hour'.split())['Sw_dw']
+mm = labmim.groupby(['month', 'hour'])['Sw_dw']
 bp3 = []
 for i in range(24):
     bp3.append(list(mm.get_group((7,i)).dropna().values*0.0036))
@@ -157,19 +156,19 @@ plt.close()
 #mensal
 ######################################################
 
-top = labmim.loc[labmim['Sw_top']>1].groupby('year month day'.split()).sum().reset_index().groupby('month').mean()['Sw_top']
+top = labmim.loc[labmim['Sw_top']>1].groupby(['year', 'month', 'day']).sum().reset_index().groupby('month').mean()['Sw_top']
 x = [x for x in range(1,13)]
 plt.plot(x,top*0.0036,color='black')
 
-sw = labmim.groupby('year month day'.split()).sum()['Sw_dw'].reset_index().groupby('month')['Sw_dw']
-dif = labmim.loc[labmim['Sw_dif']>1].groupby('year month day'.split()).sum()['Sw_dif'].reset_index().groupby('month')['Sw_dif']
-dir = labmim.loc[labmim['Sw_dir']>1].groupby('year month day'.split()).sum()['Sw_dir'].reset_index().groupby('month')['Sw_dir']
+sw = labmim.groupby(['year', 'month', 'day']).sum()['Sw_dw'].reset_index().groupby('month')['Sw_dw']
+dif = labmim.loc[labmim['Sw_dif']>1].groupby(['year', 'month', 'day']).sum()['Sw_dif'].reset_index().groupby('month')['Sw_dif']
+dir = labmim.loc[labmim['Sw_dir']>1].groupby(['year', 'month', 'day']).sum()['Sw_dir'].reset_index().groupby('month')['Sw_dir']
 
 bp1 = []
 for i in range(1,13):
     try:
         tmp = []
-        for x in sw.get_group( (i) ).dropna()*0.0036:
+        for x in sw.get_group( i ).dropna()*0.0036:
             if x > 0:
                 tmp.append(x)
         bp1.append(np.array(tmp))
@@ -179,14 +178,14 @@ for i in range(1,13):
 bp2 = []
 for i in range(1,13):
     try:
-        bp2.append(dif.get_group( (i) ).dropna()*0.0036)
+        bp2.append(dif.get_group( i ).dropna()*0.0036)
     except:
         bp2.append([])
 
 bp3 = []
 for i in range(1,13):
     try:
-        bp3.append(dir.get_group( (i) ).dropna()*0.0036)
+        bp3.append(dir.get_group( i ).dropna()*0.0036)
     except:
         bp3.append([])
 
@@ -203,7 +202,7 @@ for box in props_dif['boxes']:
 
 plt.legend([line[0],props_dw['boxes'][0],props_dif['boxes'][0]],['Sw_top','Sw_dw','Sw_dif'])
 plt.ylabel('Radiação (MJ/m²h)')
-plt.xticks(range(1,13),'J F M A M J J A S O N D'.split())
+plt.xticks(range(1,13),['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'])
 
 plt.savefig('rad-monthly.png',bbox_inches='tight')
 #plt.show()

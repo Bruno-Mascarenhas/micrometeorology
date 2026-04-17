@@ -1,8 +1,7 @@
-import pandas as pd
-import numpy as np 
-from scipy.integrate import quad
+import numpy as np
 from scipy.stats import ks_2samp, pearsonr
 from sklearn.metrics import r2_score
+
 #quad == mmethod to solve integrate equations
 
 #mean bias difference
@@ -40,7 +39,7 @@ def SBF(obs,pred):
 
 #uncertainty at 95%
 def U95(obs,pred):
-    return 1.96*np.sqrt((np.square(SD(obs,pred))+np.square(RMSD(obs,pred))))
+    return 1.96*np.sqrt(np.square(SD(obs,pred))+np.square(RMSD(obs,pred)))
 
 #t-statistic
 def TS(obs,pred):
@@ -52,12 +51,12 @@ def NSE(obs,pred):
     om = np.mean(obs)
     return 1 - (np.sum(np.square(pred-obs))/np.sum(np.square(obs-om)))
 
-#Willmott's index of agreement 
+#Willmott's index of agreement
 def WIA(obs,pred):
     om = np.mean(obs)
     f1 = np.sum(np.square(pred-obs))
     f2 = np.sum(np.square(np.abs(pred-om) + np.abs(obs-om)))
-    return 1 - f1/f2 
+    return 1 - f1/f2
 
 #Legates's coefficient of efficiency
 def LCE(obs,pred):

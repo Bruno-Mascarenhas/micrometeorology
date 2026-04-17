@@ -1,10 +1,9 @@
-# coding: utf-8
-from numpy.core.fromnumeric import mean
-import pandas as pd 
-import numpy as np
-import matplotlib.pyplot as plt 
-import matplotlib.dates as mdates
 from datetime import datetime, timedelta
+
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
 plt.rcParams['figure.figsize'] = 8, 4
 path_fig = 'E:/LABMIM_UFBA/formatado/figuras/'
@@ -13,12 +12,12 @@ path_csv = 'E:/LABMIM_UFBA/'
 
 labmim = pd.read_csv(path_csv + 'LBM_lenta_2021.dat', sep=',', skiprows=[0,2,3], parse_dates=True, infer_datetime_format=True)
 labmim.index = pd.to_datetime(labmim['TIMESTAMP'])
-labmim.drop(columns='TIMESTAMP RECORD rtime batt_volt panel_temp CM3Up_mv_Avg CG3Up_mv_Avg CM3Dn_mv_Avg CG3Dn_mv_Avg NRLite_Wm2_Avg CMP21_Avg PAR_Den_Avg'.split(), inplace=True)
+labmim.drop(columns=['TIMESTAMP', 'RECORD', 'rtime', 'batt_volt', 'panel_temp', 'CM3Up_mv_Avg', 'CG3Up_mv_Avg', 'CM3Dn_mv_Avg', 'CG3Dn_mv_Avg', 'NRLite_Wm2_Avg', 'CMP21_Avg', 'PAR_Den_Avg'], inplace=True)
 labmim.index.name = None
 
 labmim_rain = pd.read_csv(path_csv + 'LBM_rain_2021.dat', sep=',', skiprows=[0,2,3], parse_dates=True, infer_datetime_format=True)
 labmim_rain.index = pd.to_datetime(labmim_rain['TIMESTAMP'])
-labmim_rain.drop(columns='TIMESTAMP RECORD rtime(9) rtime(1) rtime(4) rtime(5)'.split(), inplace=True)
+labmim_rain.drop(columns=['TIMESTAMP', 'RECORD', 'rtime(9)', 'rtime(1)', 'rtime(4)', 'rtime(5)'], inplace=True)
 rain_col = 'PL01_mm_Tot'
 
 labmim['u'] = -labmim['WS_WXT_Avg']*np.sin(np.radians(labmim['WD_WXT_Avg']))
@@ -43,7 +42,7 @@ current_date = current_date.replace(minute=30)
 
 while current_date <= date_end:
     means['TIMESTAMP'].append(current_date.replace(minute=0) + timedelta(hours=1))
-    
+
     next_date = current_date + timedelta(hours=1)
     idxs = np.array(list(map(lambda x: current_date <= x < next_date, labmim.index)))
     idxs_r = np.array(list(map(lambda x: current_date <= x < next_date, labmim_rain.index)))
@@ -58,7 +57,7 @@ while current_date <= date_end:
                 means[col].append(np.nanmean(df))
         else:
             means[col].append(np.nan)
-    
+
     df = labmim_rain.loc[idxs_r,rain_col]
     if len(df) >= 6:
         means[rain_col].append(np.sum(df))

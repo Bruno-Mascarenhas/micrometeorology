@@ -1,11 +1,11 @@
-import netCDF4
-import numpy as np
-from datetime import datetime, timezone
-from warnings import filterwarnings
-import matplotlib.pyplot as plt
+from datetime import UTC, datetime
 from math import sqrt
+from warnings import filterwarnings
+
+import matplotlib.pyplot as plt
+import numpy as np
 from mpl_toolkits.basemap import Basemap
-import pandas as pd
+
 filterwarnings('ignore')
 
 def getLowHigh(variable):
@@ -43,20 +43,20 @@ def print_points(dataset, lat, lon, name, day):
                 latCoord = a[i][0]; longCoord = a[i][1]
 
         #print("LambMiM = lat = {} long = {}".format(latCoord,longCoord))
-        print("{}\nfound: lat = {:0.4f} long = {:0.4f} | matrix coordinates = {} | {}".format(name,ncoord[0][0], ncoord[0][1], latCoord, longCoord))
+        print(f"{name}\nfound: lat = {ncoord[0][0]:0.4f} long = {ncoord[0][1]:0.4f} | matrix coordinates = {latCoord} | {longCoord}")
         i, j = latCoord, longCoord
         nlat = [ncoord[0][0], matrix[i+3,j+2][0], matrix[i,j+3][0]]
         nlon = [ncoord[0][1], matrix[i+2,j+2][1], matrix[i,j+3][1]]
 
     except IndexError:
-        print('File {i} is out of shape!'.format(i=name))
+        print(f'File {name} is out of shape!')
 
         xlat = dataset.variables['XLAT'][:]
         xlong = dataset.variables['XLONG'][:]
         xlat = xlat[0:1, :, :].squeeze()
         xlong = xlong[0:1, :, :].squeeze()
         id = xlat.shape
-        print('Dim = {}\n'.format(id))
+        print(f'Dim = {id}\n')
         return 0, 0
 
     data = dataset
@@ -71,7 +71,7 @@ def print_points(dataset, lat, lon, name, day):
     for i,time in enumerate(times_array):
         currentTime = b''.join(time.tolist()).decode('UTF-8')
         current_date = datetime.strptime(currentTime, '%Y-%m-%d_%H:%M:%S')
-        cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
+        cd = current_date.replace(tzinfo=UTC).astimezone(tz=None)
         if cd.day == day and cd.hour == 12:
             tmp = dataset.variables['LU_INDEX'][:,:,:].squeeze()
             #tmp = dataset.variables['LANDMASK'][:,:,:].squeeze()
@@ -98,7 +98,7 @@ def print_points(dataset, lat, lon, name, day):
 
     m.drawparallels(np.arange(llat, hlat,abs(hlat-llat)/7), linewidth=0, labels=[1,0,0,0], color='r',zorder=0, fmt="%.1f", fontsize=14)
     m.drawmeridians(np.arange(llong, hlong,abs(hlong-llong)/5), linewidth=0, labels=[0,0,0,1], color='r',zorder=0, fmt="%.1f", fontsize=14)
-    
+
 
     #m.contourf(x,y, np.squeeze(LH), alpha=0.4, cmap='jet', vmin=varmin, vmax=varmax)
     m.pcolormesh(x,y, np.squeeze(LH), alpha=0.4, cmap='jet_r', vmin=varmin, vmax=varmax)
@@ -107,7 +107,7 @@ def print_points(dataset, lat, lon, name, day):
     print(nlon)
     x,y = m(nlon,nlat)
     m.plot(x,y,'o',color='black')
-    
+
     cb = plt.colorbar(shrink=0.5, pad=0.04)
     cb.ax.tick_params(labelsize=10)
     #plt.savefig(out_path+name+var+".png",bbox_inches='tight')

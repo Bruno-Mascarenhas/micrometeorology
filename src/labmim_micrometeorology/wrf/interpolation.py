@@ -173,21 +173,25 @@ def compute_wind_vectors_at_height(
     """
     nt, _, ny, nx = u_central.shape
 
-    # Average U/V across time steps
-    u_target = np.full((ny, nx), np.nan)
-    v_target = np.full((ny, nx), np.nan)
+    # Running accumulator — avoids allocating stacked arrays each iteration
+    u_sum = np.zeros((ny, nx), dtype=np.float64)
+    v_sum = np.zeros((ny, nx), dtype=np.float64)
+    count = np.zeros((ny, nx), dtype=np.int32)
 
     for t in range(nt):
         u_t = vertical_interpolate(u_central[t], height_adjusted[t], target_height)
         v_t = vertical_interpolate(v_central[t], height_adjusted[t], target_height)
-        if np.all(np.isnan(u_target)):
-            u_target = u_t
-            v_target = v_t
-        else:
-            u_target = np.nanmean([u_target, u_t], axis=0)
-            v_target = np.nanmean([v_target, v_t], axis=0)
+        valid = ~np.isnan(u_t)
+        u_sum[valid] += u_t[valid]
+        v_sum[valid] += v_t[valid]
+        count[valid] += 1
 
-    magnitude = np.sqrt(u_target**2 + v_target**2)
+    # Avoid division by zero
+    with np.errstate(invalid="ignore"):
+        u_target = np.where(count > 0, u_sum / count, np.nan)
+        v_target = np.where(count > 0, v_sum / count, np.nan)
+
+    magnitude = np.hypot(u_target, v_target)
     angle = np.arctan2(u_target, v_target) * 180.0 / np.pi
     angle = np.where(angle < 0, angle + 360.0, angle)
 

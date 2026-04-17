@@ -1,45 +1,40 @@
-# Micrometeorology Monorepo
+# LabMiM Micrometeorology & Solar Radiation Intelligence
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Ruff](https://img.shields.io/badge/linter-ruff-261230.svg)](https://docs.astral.sh/ruff/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Monorepo containing two Python packages for atmospheric science research:
+An advanced scientific computing suite for atmospheric science research, maintained by the Micrometeorology Laboratory (LabMiM) at UFBA. This repository unifies data processing, geospatial visualization, and machine learning pipelines into two core packages:
 
 | Package | Purpose |
 |---|---|
-| **`labmim_micrometeorology`** | Sensor data ingestion, WRF output analysis, parallel figure generation, GeoJSON export, and statistical comparison |
-| **`solrad_correction`** | ML-based bias correction of WRF solar radiation (SVM, LSTM, Transformer) |
+| **`labmim_micrometeorology`** | High-performance WRF output analysis, interactive WebGIS grid generation, sensor data ingestion, and statistical climatology |
+| **`solrad_correction`** | Machine learning pipeline for bias correction of WRF diffuse solar radiation (SVM, LSTM, Transformer architectures) |
 
-> 📘 Detailed per-package documentation lives in [`docs/`](docs/).
+> 📘 Detailed technical documentation for each package is located in the [`docs/`](docs/) directory.
 
 ---
 
-## Repository Layout
+## Repository Architecture
 
 ```
 src/
-├── labmim_micrometeorology/      # Sensor ingestion, calibration, WRF maps, metrics
+├── labmim_micrometeorology/      # Core data pipelines, WRF spatial processing, and APIs
 │   ├── common/                   # Cross-platform config, logging, types
-│   ├── sensors/                  # Campbell Scientific .dat processing
-│   ├── stats/                    # Metrics, comparison, climatology, radiation indices
-│   └── wrf/                      # NetCDF reader, Cartopy plotting, parallel batch, GeoJSON, animation
-└── solrad_correction/            # ML correction pipeline (config → train → evaluate)
-    ├── models/                   # SVM, LSTM, Transformer (BaseRegressorModel interface)
-    ├── training/                 # Trainer, progress tracking, early stopping
-    └── evaluation/               # Metrics, reports, experiment comparison
+│   ├── sensors/                  # Datalogger ingestion and calibration algorithms
+│   ├── stats/                    # Statistical comparison and climatological metrics
+│   └── wrf/                      # High-speed NetCDF parsing, GeoJSON export, interpolation
+└── solrad_correction/            # Deep learning bias correction pipeline
+    ├── models/                   # Neural architectures (SVM, LSTM, Transformer)
+    ├── training/                 # PyTorch training loops and early stopping
+    └── evaluation/               # Experiment reporting and validation metrics
 
-configs/
-├── micromet/                     # Sensor & WRF settings, calibrations
-└── tcc/experiments/              # Experiment YAML configs
-
-scripts/
-├── micromet/                     # CLIs: process_wrf_figures, process_wrf_geojson, run_wrf_local, etc.
-└── wrf/                          # Bash automation for workstations
-
-tests/                            # 53 tests (micromet + tcc)
-docs/                             # Per-package documentation
-legacy/                           # Archived original scripts (Basemap-era)
+configs/                          # YAML environments for pipelines and ML experiments
+scripts/                          # CLI automation tools and Bash workflows
+site/                             # High-performance Vanilla JS WebGIS Interactive Maps
+tests/                            # Comprehensive Pytest suite
+docs/                             # In-depth package documentation
+legacy/                           # Archived Cartopy/Basemap scripts
 ```
 
 ---
@@ -48,94 +43,70 @@ legacy/                           # Archived original scripts (Basemap-era)
 
 Requires **Python ≥ 3.11**.
 
-### Micrometeorology only
+### Base Scientific Suite
 
 ```bash
 pip install -e "."
 ```
 
-### Micrometeorology + video generation (WebM)
-
-```bash
-pip install -e ".[video]"
-```
-
-### Micrometeorology + ML correction (CPU)
+### Machine Learning Environment (CPU)
 
 ```bash
 pip install -e ".[tcc]"
 ```
 
-### Micrometeorology + ML correction (CUDA)
+### Machine Learning Environment (CUDA)
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu121
 pip install -e ".[tcc-cuda]"
 ```
 
-### Development (adds pytest, ruff, mypy, pre-commit)
+### Development Environment
 
 ```bash
-pip install -e ".[dev]"
-# or together:
 pip install -e ".[dev,tcc,video]"
-```
-
-### Cartopy shapefiles
-
-Map generation requires Natural Earth data (downloaded on first use):
-
-```bash
-python -c "import cartopy; cartopy.io.shapereader.natural_earth(resolution='10m', category='cultural', name='admin_0_countries')"
 ```
 
 ---
 
 ## Quick Start
 
-### WRF parallel figure generation
+### 1. Generate Interactive WebGIS Grids (Primary Workflow)
 
-```bash
-# Single domain
-labmim-wrf-figures -d wrfout_d03_2024-01-01 -o output/figures/ -v temperature -v wind
-
-# Multiple domains (4 files → ~2300 figures in parallel)
-labmim-wrf-figures --wrf-dir /path/to/wrfout/ --date 20240101 \
-    -D 1 -D 4 -v temperature -v wind -v rain -v SWDOWN \
-    -o output/figures/ --workers 44 --also-video
-```
-
-### GeoJSON/JSON for the site
+The main visualization output for LabMiM is the interactive site frontend. This command extracts spatial data from WRF NetCDF outputs into highly optimized JSON payloads for the web interface.
 
 ```bash
 labmim-wrf-geojson --wrf-dir /path/to/wrfout/ --date 20240101 \
     -D 1 -D 4 -o site/JSON -g site/GeoJSON --workers 44
 ```
 
-### Local testing (all-in-one)
-
-```bash
-python scripts/micromet/run_wrf_local.py \
-    --wrf-dir /path/to/wrfout/ --date 20240101 \
-    -D 1 -D 4 -o output/wrf_local/ --also-video
-```
-
-### Sensor data processing
+### 2. Sensor Data Processing & Calibration
 
 ```bash
 labmim-sensor-process --input data/raw/ --output data/hourly/
 ```
 
-### Metrics between datasets
+### 3. Statistical Comparison (WRF vs Observations)
 
 ```bash
 labmim-metrics -a salvador.dat -b rio.dat -o metrics.csv
 ```
 
-### Run an ML experiment
+### 4. Machine Learning Bias Correction
 
 ```bash
 solrad-run --config configs/tcc/experiments/svm_hourly.yaml
+```
+
+### 5. Static Cartopy Map Generation [Legacy Workflow]
+
+If you need static `.png` maps or `.webm` animations for publications instead of the interactive website, you can use the parallel batch renderer:
+
+```bash
+labmim-wrf-figures --wrf-dir /path/to/wrfout/ --date 20240101 \
+    -D 1 -D 4 -v temperature -v wind -v rain -v SWDOWN \
+    -o output/figures/ --workers 44 --also-video
 ```
 
 ---

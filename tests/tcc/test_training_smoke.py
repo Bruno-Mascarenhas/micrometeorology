@@ -89,8 +89,12 @@ class TestTransformerSmoke:
         )
 
         model = TransformerRegressor(
-            input_size=4, d_model=16, nhead=2,
-            num_encoder_layers=1, dim_feedforward=32, device="cpu",
+            input_size=4,
+            d_model=16,
+            nhead=2,
+            num_encoder_layers=1,
+            dim_feedforward=32,
+            device="cpu",
         )
         model.fit(train_ds, val_ds, config)
         preds = model.predict(val_ds)

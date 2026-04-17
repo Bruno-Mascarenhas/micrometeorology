@@ -64,7 +64,9 @@ class Settings(BaseSettings):
     output_dir: Path = Field(default=Path("output"), description="Output directory")
     figures_dir: Path = Field(default=Path("output/figures"), description="Figure output directory")
     shapes_dir: Path = Field(default=Path("shapes_BR_cities"), description="Shapefile directory")
-    configs_dir: Path = Field(default=Path("configs/micromet"), description="Configuration directory")
+    configs_dir: Path = Field(
+        default=Path("configs/micromet"), description="Configuration directory"
+    )
 
     # WRF defaults
     wrf_default_variables: list[str] = Field(

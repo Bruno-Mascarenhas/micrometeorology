@@ -43,22 +43,21 @@ def read_dataset(
 
     if timestamp_columns and all(c in df.columns for c in timestamp_columns):
         df.index = pd.to_datetime(df[timestamp_columns])
-        df.drop(columns=timestamp_columns, inplace=True, errors="ignore")
+        df = df.drop(columns=timestamp_columns, errors="ignore")
     elif "TIMESTAMP" in df.columns:
         df.index = pd.to_datetime(df["TIMESTAMP"])
-        df.drop(columns=["TIMESTAMP"], inplace=True, errors="ignore")
+        df = df.drop(columns=["TIMESTAMP"], errors="ignore")
     elif parse_dates:
         # Try combining year/month/day/hour if present
         dt_cols = [c for c in ("year", "month", "day", "hour") if c in df.columns]
         if len(dt_cols) >= 3:
             df.index = pd.to_datetime(df[dt_cols])
-            df.drop(columns=dt_cols, inplace=True, errors="ignore")
+            df = df.drop(columns=dt_cols, errors="ignore")
 
     df.index.name = None
 
     # Coerce to numeric
-    for col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.apply(pd.to_numeric, errors="coerce")
 
     return df
 
@@ -118,11 +117,13 @@ def compare_all_variables(paired_df: pd.DataFrame) -> pd.DataFrame:
     Returns a DataFrame with metrics as rows and variables as columns.
     """
     # Find variable names from column suffixes
-    variables = sorted({
-        c.replace("_obs", "")
-        for c in paired_df.columns
-        if c.endswith("_obs") and c.replace("_obs", "_model") in paired_df.columns
-    })
+    variables = sorted(
+        {
+            c.replace("_obs", "")
+            for c in paired_df.columns
+            if c.endswith("_obs") and c.replace("_obs", "_model") in paired_df.columns
+        }
+    )
 
     results: dict[str, dict[str, float]] = {}
     for var in variables:

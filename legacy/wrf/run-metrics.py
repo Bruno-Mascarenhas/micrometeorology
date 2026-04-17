@@ -1,9 +1,8 @@
-from comparissons import PairDf, generate_metrics, generate_distributions, generate_mean, area_graph
-import pandas as pd 
-import numpy as np 
-from warnings import filterwarnings
 from datetime import datetime
-from sys import exit
+from warnings import filterwarnings
+
+from comparissons import area_graph
+
 filterwarnings('ignore')
 
 #configs for ssa runs
@@ -80,7 +79,7 @@ for case in params:
 
 #definitions for area graphs
 params = ['sfcpblz2230/','sfcpblz1130/','sfcpblz1730/']
-variables = 'T ur q WS Sw_dw H LE ustar'.split()
+variables = ['T', 'ur', 'q', 'WS', 'Sw_dw', 'H', 'LE', 'ustar']
 
 obs = {}
 for x in real:

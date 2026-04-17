@@ -4,12 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "labmim-micrometeorology"
-version = "1.1.0"
+version = "1.3.1"
 description = "LabMiM/UFBA micrometeorology data processing, WRF output analysis, solar radiation bias correction, and ML-based model evaluation."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
 authors = [
+    {name = "Bruno Mascarenhas", email = "brunomasck@gmail.com"},
     {name = "LabMiM - UFBA"},
 ]
 keywords = ["micrometeorology", "WRF", "netcdf", "cartopy", "geospatial", "solar-radiation", "bias-correction"]
@@ -19,23 +20,24 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Atmospheric Science",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "numpy>=1.26",
-    "pandas>=2.1",
-    "xarray>=2024.1",
-    "netCDF4>=1.6",
-    "matplotlib>=3.8",
-    "cartopy>=0.22",
-    "seaborn>=0.13",
-    "scikit-learn>=1.4",
-    "scipy>=1.12",
+    "numpy>=2.0",
+    "pandas>=3.0",
+    "xarray>=2024.6",
+    "netCDF4>=1.7.4",
+    "matplotlib>=3.9",
+    "cartopy>=0.23",
+    "seaborn>=0.13.2",
+    "scikit-learn>=1.5",
+    "scipy>=1.13",
     "click>=8.1",
-    "pydantic>=2.5",
-    "pydantic-settings>=2.1",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
     "pyyaml>=6.0",
-    "imageio>=2.33",
+    "imageio>=2.34",
 ]
 
 [project.optional-dependencies]
@@ -47,11 +49,11 @@ dev = [
     "pandas-stubs",
 ]
 video = [
-    "moviepy>=1.0",
+    "moviepy>=2.2",
 ]
 # TCC: ML-based solar radiation correction (CPU-only PyTorch)
 tcc = [
-    "torch>=2.1",
+    "torch>=2.3",
     "joblib>=1.3",
     "tqdm>=4.66",
 ]
@@ -63,12 +65,12 @@ tcc-cuda = [
 
 [project.scripts]
 # Micrometeorology CLIs
-labmim-wrf-figures = "labmim_micrometeorology.cli:wrf_figures"
-labmim-wrf-geojson = "labmim_micrometeorology.cli:wrf_geojson"
-labmim-sensor-process = "labmim_micrometeorology.cli:sensor_process"
-labmim-site-graphs = "labmim_micrometeorology.cli:site_graphs"
-labmim-comparison = "labmim_micrometeorology.cli:comparison"
-labmim-metrics = "labmim_micrometeorology.cli:metrics"
+labmim-wrf-figures = "labmim_micrometeorology.cli.process_wrf_figures:main"
+labmim-wrf-geojson = "labmim_micrometeorology.cli.process_wrf_geojson:main"
+labmim-sensor-process = "labmim_micrometeorology.cli.process_sensor_data:main"
+labmim-site-graphs = "labmim_micrometeorology.cli.generate_site_graphs:main"
+labmim-comparison = "labmim_micrometeorology.cli.run_comparison:main"
+labmim-metrics = "labmim_micrometeorology.cli.run_metrics:main"
 # TCC CLIs
 solrad-run = "solrad_correction.cli:run_experiment_cli"
 

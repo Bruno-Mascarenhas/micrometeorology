@@ -1,6 +1,6 @@
-from netcdfUtils import *
-from sys import exit
 import glob
+
+from netcdfUtils import *
 
 path = '/disco4/coralsol/taoan/wrf-longo-periodo'
 

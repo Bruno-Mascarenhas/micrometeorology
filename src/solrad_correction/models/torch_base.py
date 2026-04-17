@@ -80,7 +80,11 @@ class TorchRegressorModel(BaseRegressorModel):
         self._module.to(self._device)
 
         if hasattr(data, "X"):
-            x_input = data.X if isinstance(data.X, torch.Tensor) else torch.tensor(data.X, dtype=torch.float32)
+            x_input = (
+                data.X
+                if isinstance(data.X, torch.Tensor)
+                else torch.tensor(data.X, dtype=torch.float32)
+            )
         else:
             x_input = torch.tensor(np.asarray(data), dtype=torch.float32)
 
@@ -95,7 +99,11 @@ class TorchRegressorModel(BaseRegressorModel):
 
         config_dict = None
         if hasattr(self, "_config") and self._config is not None:
-            config_dict = dataclasses.asdict(self._config) if dataclasses.is_dataclass(self._config) else self._config
+            config_dict = (
+                dataclasses.asdict(self._config)
+                if dataclasses.is_dataclass(self._config)
+                else self._config
+            )
 
         save_torch_checkpoint(
             model_state=self._module.state_dict(),

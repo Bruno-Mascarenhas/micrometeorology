@@ -38,11 +38,15 @@ from labmim_micrometeorology.wrf.batch import default_workers
 @click.option("--wrf-dir", default=None, type=click.Path(), help="Directory with wrfout files.")
 @click.option("--date", default=None, help="Simulation date YYYYMMDD.")
 @click.option("--domains", "-D", type=int, multiple=True, default=None, help="Domain numbers.")
-@click.option("--output", "-o", default="output/wrf_local", type=click.Path(), help="Base output dir.")
+@click.option(
+    "--output", "-o", default="output/wrf_local", type=click.Path(), help="Base output dir."
+)
 @click.option("--variables", "-v", multiple=True, default=None, help="Variables to plot.")
 @click.option("--shapes-dir", default=None, help="Municipality shapefiles dir.")
 @click.option("--skip-first", default=0, type=int, help="Time steps to skip.")
-@click.option("--workers", "-w", default=None, type=int, help=f"Workers (default: {default_workers()}).")
+@click.option(
+    "--workers", "-w", default=None, type=int, help=f"Workers (default: {default_workers()})."
+)
 @click.option("--dpi", default=100, type=int, help="Image DPI.")
 @click.option("--no-figures", is_flag=True, help="Skip figure generation (only JSON/GeoJSON).")
 @click.option("--no-geojson", is_flag=True, help="Skip GeoJSON/JSON generation.")
@@ -82,17 +86,22 @@ def main(
     # Phase 1: Figures
     if not no_figures:
         click.echo("\n── Phase 1: Figure Generation ──")
-        from scripts.micromet.process_wrf_figures import (
+        from labmim_micrometeorology.cli.process_wrf_figures import (
             _build_tasks_for_domain,
             _resolve_wrfout_paths,
         )
-
         from labmim_micrometeorology.wrf import reader
         from labmim_micrometeorology.wrf.batch import FigureTask, run_figure_tasks
 
         default_vars = [
-            "temperature", "pressure", "wind", "rain",
-            "vapor", "HFX", "LH", "SWDOWN",
+            "temperature",
+            "pressure",
+            "wind",
+            "rain",
+            "vapor",
+            "HFX",
+            "LH",
+            "SWDOWN",
         ]
         var_list = list(variables) if variables else default_vars
         paths = _resolve_wrfout_paths(wrf_dir, date, domains, dataset)
@@ -106,7 +115,12 @@ def main(
             click.echo(f"  Loading {wrf_path.name}...")
             with reader.WRFDataset(wrf_path) as ds:
                 tasks = _build_tasks_for_domain(
-                    ds, var_list, str(figures_dir), shapes_dir, skip_first, dpi,
+                    ds,
+                    var_list,
+                    str(figures_dir),
+                    shapes_dir,
+                    skip_first,
+                    dpi,
                 )
                 all_fig_tasks.extend(tasks)
                 click.echo(f"    → {len(tasks)} frames queued")
@@ -120,19 +134,24 @@ def main(
     # Phase 2: GeoJSON / JSON
     if not no_geojson:
         click.echo("\n── Phase 2: GeoJSON & JSON Generation ──")
-        from scripts.micromet.process_wrf_geojson import (
+        from labmim_micrometeorology.cli.process_wrf_geojson import (
             _build_json_tasks_for_domain,
         )
-        from scripts.micromet.process_wrf_geojson import (
+        from labmim_micrometeorology.cli.process_wrf_geojson import (
             _resolve_wrfout_paths as _resolve_geo,
         )
-
         from labmim_micrometeorology.wrf import reader as reader2
         from labmim_micrometeorology.wrf.batch import JsonTask, run_json_tasks
 
         default_vars = [
-            "temperature", "pressure", "wind", "rain",
-            "vapor", "HFX", "LH", "SWDOWN",
+            "temperature",
+            "pressure",
+            "wind",
+            "rain",
+            "vapor",
+            "HFX",
+            "LH",
+            "SWDOWN",
         ]
         var_list = list(variables) if variables else default_vars
         paths = _resolve_geo(wrf_dir, date, domains, dataset)
@@ -142,7 +161,11 @@ def main(
             click.echo(f"  Loading {wrf_path.name}...")
             with reader2.WRFDataset(wrf_path) as ds:
                 tasks = _build_json_tasks_for_domain(
-                    ds, var_list, str(json_dir), str(geojson_dir), skip_first,
+                    ds,
+                    var_list,
+                    str(json_dir),
+                    str(geojson_dir),
+                    skip_first,
                 )
                 all_json_tasks.extend(tasks)
                 click.echo(f"    → {len(tasks)} JSON files queued")

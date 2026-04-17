@@ -68,9 +68,7 @@ def apply_calibrations(
             logger.info("  %s [%s → %s]: set to NaN (%s)", col, start.date(), end.date(), desc)
         else:
             df.loc[mask, col] *= factor
-            logger.info(
-                "  %s [%s → %s]: × %.10f (%s)", col, start.date(), end.date(), factor, desc
-            )
+            logger.info("  %s [%s → %s]: × %.10f (%s)", col, start.date(), end.date(), factor, desc)
 
     return df
 
@@ -108,7 +106,9 @@ def unify_sensor_columns(
                 logger.warning("Column %s not found for unified variable %s", col, unified_name)
                 continue
 
-            start = pd.Timestamp(mapping["start_date"]) if mapping.get("start_date") else df.index.min()
+            start = (
+                pd.Timestamp(mapping["start_date"]) if mapping.get("start_date") else df.index.min()
+            )
             end = pd.Timestamp(mapping["end_date"]) if mapping.get("end_date") else df.index.max()
 
             mask = (df.index >= start) & (df.index <= end)

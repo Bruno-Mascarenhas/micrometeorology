@@ -42,8 +42,14 @@ from labmim_micrometeorology.wrf.batch import (
 
 # Default variables when none specified
 DEFAULT_VARS = [
-    "temperature", "pressure", "wind", "rain",
-    "vapor", "HFX", "LH", "SWDOWN",
+    "temperature",
+    "pressure",
+    "wind",
+    "rain",
+    "vapor",
+    "HFX",
+    "LH",
+    "SWDOWN",
 ]
 
 # Variables that exist in the pipeline but don't have figure renderers yet.
@@ -127,15 +133,27 @@ def _build_tasks_for_domain(
                 i = meta["index"]
                 data = vmod.extract_temperature_step(t2[i : i + 1, :, :])
                 pressure = np.squeeze(psfc[i : i + 1, :, :])
-                tasks.append(FigureTask(
-                    lon=lon, lat=lat, data=data, vmin=vmin, vmax=vmax,
-                    cmap_name=cmap, overlay_data=pressure,
-                    overlay_levels=[880, 900, 950, 1000, 1013],
-                    u=None, v=None,
-                    title=f"Temperature (°C){meta['label']}",
-                    output_path=str(Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"),
-                    map_config=mc, dpi=dpi, saturation=2.0,
-                ))
+                tasks.append(
+                    FigureTask(
+                        lon=lon,
+                        lat=lat,
+                        data=data,
+                        vmin=vmin,
+                        vmax=vmax,
+                        cmap_name=cmap,
+                        overlay_data=pressure,
+                        overlay_levels=[880, 900, 950, 1000, 1013],
+                        u=None,
+                        v=None,
+                        title=f"Temperature (°C){meta['label']}",
+                        output_path=str(
+                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
+                        ),
+                        map_config=mc,
+                        dpi=dpi,
+                        saturation=2.0,
+                    )
+                )
 
         elif var_name == WRFVariable.WIND:
             u10, v10, vmin, vmax = vmod.extract_wind(ds)
@@ -145,15 +163,28 @@ def _build_tasks_for_domain(
                 i = meta["index"]
                 u = np.squeeze(u10[i : i + 1])
                 v = np.squeeze(v10[i : i + 1])
-                speed = np.sqrt(u**2 + v**2)
-                tasks.append(FigureTask(
-                    lon=lon, lat=lat, data=speed, vmin=vmin, vmax=vmax,
-                    cmap_name=cmap, overlay_data=None, overlay_levels=None,
-                    u=u, v=v,
-                    title=f"Wind 10m (m/s){meta['label']}",
-                    output_path=str(Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"),
-                    map_config=mc, dpi=dpi, saturation=2.0,
-                ))
+                speed = np.hypot(u, v)
+                tasks.append(
+                    FigureTask(
+                        lon=lon,
+                        lat=lat,
+                        data=speed,
+                        vmin=vmin,
+                        vmax=vmax,
+                        cmap_name=cmap,
+                        overlay_data=None,
+                        overlay_levels=None,
+                        u=u,
+                        v=v,
+                        title=f"Wind 10m (m/s){meta['label']}",
+                        output_path=str(
+                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
+                        ),
+                        map_config=mc,
+                        dpi=dpi,
+                        saturation=2.0,
+                    )
+                )
 
         elif var_name == WRFVariable.RAIN:
             total, vmin, vmax = vmod.extract_rain(ds)
@@ -162,14 +193,27 @@ def _build_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.extract_rain_step(total, i)
-                tasks.append(FigureTask(
-                    lon=lon, lat=lat, data=data, vmin=vmin, vmax=vmax,
-                    cmap_name=cmap, overlay_data=None, overlay_levels=None,
-                    u=None, v=None,
-                    title=f"Rain (mm){meta['label']}",
-                    output_path=str(Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"),
-                    map_config=mc, dpi=dpi, saturation=2.0,
-                ))
+                tasks.append(
+                    FigureTask(
+                        lon=lon,
+                        lat=lat,
+                        data=data,
+                        vmin=vmin,
+                        vmax=vmax,
+                        cmap_name=cmap,
+                        overlay_data=None,
+                        overlay_levels=None,
+                        u=None,
+                        v=None,
+                        title=f"Rain (mm){meta['label']}",
+                        output_path=str(
+                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
+                        ),
+                        map_config=mc,
+                        dpi=dpi,
+                        saturation=2.0,
+                    )
+                )
 
         elif var_name == WRFVariable.SWDOWN:
             # Solar radiation — skip nighttime (local hours 0-5 and 19-23)
@@ -182,14 +226,27 @@ def _build_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = np.squeeze(var_data[i : i + 1, :, :])
-                tasks.append(FigureTask(
-                    lon=lon, lat=lat, data=data, vmin=vmin, vmax=vmax,
-                    cmap_name=cmap, overlay_data=None, overlay_levels=None,
-                    u=None, v=None,
-                    title=f"SWDOWN (W/m²){meta['label']}",
-                    output_path=str(Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"),
-                    map_config=mc, dpi=dpi, saturation=2.0,
-                ))
+                tasks.append(
+                    FigureTask(
+                        lon=lon,
+                        lat=lat,
+                        data=data,
+                        vmin=vmin,
+                        vmax=vmax,
+                        cmap_name=cmap,
+                        overlay_data=None,
+                        overlay_levels=None,
+                        u=None,
+                        v=None,
+                        title=f"SWDOWN (W/m²){meta['label']}",
+                        output_path=str(
+                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
+                        ),
+                        map_config=mc,
+                        dpi=dpi,
+                        saturation=2.0,
+                    )
+                )
 
         else:
             # Generic scalar (HFX, LH, pressure, vapor)
@@ -209,14 +266,27 @@ def _build_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = np.squeeze(var_data[i : i + 1, :, :])
-                tasks.append(FigureTask(
-                    lon=lon, lat=lat, data=data, vmin=vmin, vmax=vmax,
-                    cmap_name=cmap, overlay_data=None, overlay_levels=None,
-                    u=None, v=None,
-                    title=f"{nc_suffix}{meta['label']}",
-                    output_path=str(Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"),
-                    map_config=mc, dpi=dpi, saturation=2.0,
-                ))
+                tasks.append(
+                    FigureTask(
+                        lon=lon,
+                        lat=lat,
+                        data=data,
+                        vmin=vmin,
+                        vmax=vmax,
+                        cmap_name=cmap,
+                        overlay_data=None,
+                        overlay_levels=None,
+                        u=None,
+                        v=None,
+                        title=f"{nc_suffix}{meta['label']}",
+                        output_path=str(
+                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
+                        ),
+                        map_config=mc,
+                        dpi=dpi,
+                        saturation=2.0,
+                    )
+                )
 
     return tasks
 
@@ -225,12 +295,25 @@ def _build_tasks_for_domain(
 @click.option("--dataset", "-d", default=None, type=click.Path(), help="Single WRF NetCDF file.")
 @click.option("--wrf-dir", default=None, type=click.Path(), help="Directory with wrfout files.")
 @click.option("--date", default=None, help="Simulation date YYYYMMDD.")
-@click.option("--domains", "-D", type=int, multiple=True, default=None, help="Domain numbers (e.g. -D 1 -D 4).")
+@click.option(
+    "--domains",
+    "-D",
+    type=int,
+    multiple=True,
+    default=None,
+    help="Domain numbers (e.g. -D 1 -D 4).",
+)
 @click.option("--output", "-o", default="output/figures", type=click.Path(), help="Output dir.")
 @click.option("--variables", "-v", multiple=True, default=None, help="Variables to plot.")
 @click.option("--shapes-dir", default=None, help="Municipality shapefiles dir.")
 @click.option("--skip-first", default=0, type=int, help="Time steps to skip.")
-@click.option("--workers", "-w", default=None, type=int, help=f"Parallel workers (default: {default_workers()}).")
+@click.option(
+    "--workers",
+    "-w",
+    default=None,
+    type=int,
+    help=f"Parallel workers (default: {default_workers()}).",
+)
 @click.option("--dpi", default=100, type=int, help="Image DPI.")
 @click.option("--also-video", is_flag=True, help="Also generate WebM videos.")
 @click.option("--log-level", default="INFO", help="Logging level.")

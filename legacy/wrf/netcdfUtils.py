@@ -1,12 +1,13 @@
-import xarray as xr
-import pandas as pd 
-import numpy as np
-import netCDF4
-from datetime import datetime, timezone
-from warnings import filterwarnings
-from math import sqrt
 import os
-import sys
+from datetime import UTC, datetime
+from math import sqrt
+from warnings import filterwarnings
+
+import netCDF4
+import numpy as np
+import pandas as pd
+import xarray as xr
+
 filterwarnings('ignore')
 
 __location__ = os.path.realpath(os.path.join(os.getcwd(), os.path.dirname(__file__)))
@@ -60,19 +61,19 @@ def getLatLon(dataset,lat,lon,name):
                 latCoord = a[i][0]; longCoord = a[i][1]
 
         #print("LambMiM = lat = {} long = {}".format(latCoord,longCoord))
-        print("{}\nfound: lat = {:0.4f} long = {:0.4f} | matrix coordinates = {} | {}".format(name,ncoord[0][0], ncoord[0][1], latCoord, longCoord))
+        print(f"{name}\nfound: lat = {ncoord[0][0]:0.4f} long = {ncoord[0][1]:0.4f} | matrix coordinates = {latCoord} | {longCoord}")
 
         return latCoord, longCoord
 
     except IndexError:
-        print('File {i} is out of shape!'.format(i=name))
+        print(f'File {name} is out of shape!')
 
         xlat = dataset.variables['XLAT'][:]
         xlong = dataset.variables['XLONG'][:]
         xlat = xlat[0:1, :, :].squeeze()
         xlong = xlong[0:1, :, :].squeeze()
         id = xlat.shape
-        print('Dim = {}\n'.format(id))
+        print(f'Dim = {id}\n')
         return 0, 0
 
 def merge(fpath,fprefix,name):
@@ -120,7 +121,7 @@ def generateSeries(files,stations,foutput):
 
             it = 0
 
-            header = 'year,month,day,hour,T,q,pressure,u,v,Sw_dw,Lwdw_atm,H,LE,G,ustar,TSM,PBLH,ALBD,EMISS'.split(',')
+            header = ['year', 'month', 'day', 'hour', 'T', 'q', 'pressure', 'u', 'v', 'Sw_dw', 'Lwdw_atm', 'H', 'LE', 'G', 'ustar', 'TSM', 'PBLH', 'ALBD', 'EMISS']
             serie = {}
             for el in header:
                 serie[el] = []
@@ -129,15 +130,15 @@ def generateSeries(files,stations,foutput):
                 try:
                     currentTime = b''.join(time.tolist()).decode('UTF-8')
                     current_date = datetime.strptime(currentTime,'%Y-%m-%d_%H:%M:%S')
-                    cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
+                    cd = current_date.replace(tzinfo=UTC).astimezone(tz=None)
                 except:
                     continue
 
                 serie['year'].append(int(cd.year));    serie['month'].append(int(cd.month));    serie['day'].append(int(cd.day));    serie['hour'].append(int(cd.hour))
-                
+
                 temp_array = temp[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
                 serie['T'].append(temp_array[it:it + 1][0]-273.15)
-                
+
 
                 u10_array = u10[:, latCoord:latCoord+1, longCoord:longCoord+1].squeeze()
                 serie['u'].append(u10_array[it:it + 1][0])
@@ -188,7 +189,7 @@ def generateSeries(files,stations,foutput):
 
                 it+=1
 
-        
+
         df = pd.DataFrame(serie)
 
         sigma = 5.670367*(10**-8)
@@ -199,11 +200,11 @@ def generateSeries(files,stations,foutput):
         df['ur'] = (df['e']/df['es'])*100
         df['q'] *= 1000
         df['pressure'] /= 100
-        df['e'] /= 100  
+        df['e'] /= 100
         df['WD'] = 180/np.pi*np.arctan2(df['u'],df['v'])+180
 
         df['Swup_atm'] = df['ALBD'] * df['Sw_dw']
         df['Lwup_atm'] = (df['EMISS']*sigma)*(df['T']**4)
-        
-        df = df[header+'WS WD e es ur Swup_atm Lwup_atm'.split()]
+
+        df = df[header+['WS', 'WD', 'e', 'es', 'ur', 'Swup_atm', 'Lwup_atm']]
         df.to_csv(foutput+name+'.dat',sep=',',index=False,na_rep='nan',float_format='%.7f')

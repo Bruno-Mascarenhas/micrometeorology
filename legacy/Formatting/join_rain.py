@@ -1,8 +1,7 @@
-import pandas as pd 
-import numpy as np
-import matplotlib.pyplot as plt
 from functools import reduce
-from datetime import datetime
+
+import numpy as np
+import pandas as pd
 
 names = ['LBM_rain_2016.dat','LBM_rain_2017.dat','LBM_rain_2018_2019.dat','LBM_rain_2019.dat','LBM_rain_2020.dat']
 
@@ -10,7 +9,7 @@ dfs = []
 
 for name in names:
     tmp = pd.read_csv(name,sep=',',low_memory=False)
-    tmp.drop(columns='rtime(9) rtime(1) rtime(4) rtime(5) RECORD'.split(), inplace=True)
+    tmp.drop(columns=['rtime(9)', 'rtime(1)', 'rtime(4)', 'rtime(5)', 'RECORD'], inplace=True)
     for col in tmp.columns:
         if 'TIMESTAMP' not in col:
             tmp[col] = tmp[col].astype(np.float64)

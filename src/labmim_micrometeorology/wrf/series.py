@@ -31,7 +31,7 @@ def find_nearest_indices(
 
     Uses Euclidean distance on the lat/lon arrays.
     """
-    dist = np.sqrt((lat_grid - target_lat) ** 2 + (lon_grid - target_lon) ** 2)
+    dist = np.hypot(lat_grid - target_lat, lon_grid - target_lon)
     idx = np.unravel_index(np.argmin(dist), dist.shape)
     return int(idx[0]), int(idx[1])
 
@@ -66,47 +66,55 @@ def extract_point_series(
 
     for fpath in files:
         logger.info("Extracting from %s", fpath.name)
-        ds = xr.open_dataset(str(fpath))
+        with xr.open_dataset(str(fpath)) as ds:
+            # Grid coordinates (first time step)
+            lat_grid = ds["XLAT"].isel(Time=0).values
+            lon_grid = ds["XLONG"].isel(Time=0).values
+            row, col = find_nearest_indices(lat_grid, lon_grid, target_lat, target_lon)
+            logger.debug(
+                "Nearest grid point: row=%d, col=%d (lat=%.4f, lon=%.4f)",
+                row,
+                col,
+                float(lat_grid[row, col]),
+                float(lon_grid[row, col]),
+            )
 
-        # Grid coordinates (first time step)
-        lat_grid = ds["XLAT"].isel(Time=0).values
-        lon_grid = ds["XLONG"].isel(Time=0).values
-        row, col = find_nearest_indices(lat_grid, lon_grid, target_lat, target_lon)
-        logger.debug(
-            "Nearest grid point: row=%d, col=%d (lat=%.4f, lon=%.4f)",
-            row,
-            col,
-            float(lat_grid[row, col]),
-            float(lon_grid[row, col]),
-        )
-
-        # Parse times
-        times_raw = ds["Times"].values
-        for t_idx in range(len(times_raw)):
-            time_bytes = times_raw[t_idx]
-            if isinstance(time_bytes, np.ndarray):
-                time_str = b"".join(time_bytes).decode("UTF-8")
-            else:
-                time_str = str(time_bytes)
+            # Parse times
+            times_raw = ds["Times"].values
             try:
-                dt = pd.Timestamp(time_str.replace("_", " "))
+                if isinstance(times_raw[0], np.ndarray):
+                    times_str = [b"".join(t).decode("UTF-8").replace("_", " ") for t in times_raw]
+                else:
+                    times_str = [str(t).replace("_", " ") for t in times_raw]
             except Exception:
+                times_str = [str(t).replace("_", " ") for t in times_raw]
+
+            time_idx = pd.to_datetime(times_str, errors="coerce")
+
+            # Extract spatial slice for all times and convert to DataFrame
+            # Filter variables that exist in the dataset
+            valid_vars = [v for v in variables if v in ds]
+            if not valid_vars:
                 continue
 
-            record: dict = {"time": dt}
-            for vname in variables:
-                if vname in ds:
-                    val = ds[vname].isel(Time=t_idx)
-                    # Handle different dimensionalities
-                    if "south_north" in val.dims and "west_east" in val.dims:
-                        record[vname] = float(val.isel(south_north=row, west_east=col).values)
-                    else:
-                        record[vname] = float(val.values)
-            all_records.append(record)
+            # Handle variables that have spatial dims and those that don't
+            extracted = {}
+            for vname in valid_vars:
+                val = ds[vname]
+                if "south_north" in val.dims and "west_east" in val.dims:
+                    extracted[vname] = val.isel(south_north=row, west_east=col).values
+                else:
+                    extracted[vname] = val.values
 
-        ds.close()
+            # Combine into DataFrame
+            df_part = pd.DataFrame(extracted, index=time_idx)
+            all_records.append(df_part)
 
-    df = pd.DataFrame(all_records)
-    if "time" in df.columns:
-        df = df.set_index("time").sort_index()
-    return df
+    if not all_records:
+        return pd.DataFrame()
+
+    df = pd.concat(all_records)
+    df.index.name = "time"
+    # Drop rows with NaT index which might happen on failed parses
+    df = df[df.index.notnull()]
+    return df.sort_index()

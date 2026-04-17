@@ -1,12 +1,10 @@
-import numpy as np
 import math
-from datetime import datetime
-from datetime import timedelta
-from matplotlib.dates import date2num
-import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+
 import matplotlib.dates as mdates
-import matplotlib.cm as cm
-import os
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.dates import date2num
 
 #Definindo Variáveis
 #__location__ = os.path.realpath(os.path.join(os.getcwd(), os.path.dirname(__file__)))

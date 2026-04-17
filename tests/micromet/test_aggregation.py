@@ -49,8 +49,25 @@ class TestAggregateToHourly:
     def test_min_samples_filter(self):
         """If fewer than min_samples valid values exist, result should be NaN."""
         idx = pd.date_range("2024-01-01 00:00", "2024-01-01 00:55", freq="5min")
-        data = pd.DataFrame({"Temp": [25.0, np.nan, np.nan, np.nan, np.nan, np.nan,
-                                       np.nan, np.nan, np.nan, np.nan, np.nan, np.nan]}, index=idx)
+        data = pd.DataFrame(
+            {
+                "Temp": [
+                    25.0,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                ]
+            },
+            index=idx,
+        )
         result = aggregate_to_hourly(data, min_samples=6)
         assert np.isnan(result["Temp"].iloc[0])
 
@@ -63,3 +80,8 @@ class TestAggregateToHourly:
         # Direction should be between 0 and 360
         for val in result["WD_WXT"].dropna():
             assert 0 <= val < 360
+
+        # Ensure hours are distinct (no global mean flattening bug)
+        dir1 = result["WD_WXT"].iloc[0]
+        dir2 = result["WD_WXT"].iloc[1]
+        assert abs(dir1 - dir2) > 1.0, f"Hours 1 and 2 identical: {dir1} == {dir2}"

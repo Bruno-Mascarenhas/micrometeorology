@@ -2,7 +2,6 @@ name: lstm_hourly_baseline
 description: >
   Baseline LSTM experiment using hourly sensor data with 24-step windows.
 seed: 42
-
 data:
   hourly_data_path: data/hourly/sensor_data.csv
   target_column: SW_dif

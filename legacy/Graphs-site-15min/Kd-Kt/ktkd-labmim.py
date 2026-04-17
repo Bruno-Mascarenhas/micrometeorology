@@ -1,12 +1,10 @@
-import seaborn as sns
-import pandas as pd 
-import numpy as np 
-import matplotlib.pyplot as plt 
-from datetime import datetime, timedelta
-from scipy import stats
+from datetime import timedelta
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
 plt.style.use('seaborn-whitegrid')
-from sys import exit 
-import scipy
 
 #labmim = pd.read_csv(filepath_or_buffer='/home/labmim/meteorologia/estacoes/rms/labmim_completo_controle.dat',sep=';')
 labmim = pd.read_csv('/home/labmim/meteorologia/estacoes/rms/labmim_completo_controle2020.dat',sep=';')
@@ -121,7 +119,7 @@ for i in range(1,len(kt)-1):
     now = time[i]
     nextt = time[i] + timedelta(hours=1)
     prev =  time[i] - timedelta(hours=1)
-    
+
     if now.hour == 6:
         if time[i+1] == nextt:
             psi.append(kt[i+1])
@@ -165,8 +163,8 @@ dados['model_marquesfh'] = model2
 dados['model_ridley'] = model3
 
 dados['year'] = dados.index.year
-dados['month'] = dados.index.month 
-dados['day'] = dados.index.day 
+dados['month'] = dados.index.month
+dados['day'] = dados.index.day
 dados['hour'] = dados.index.hour
 
 ##############################################################
@@ -187,5 +185,5 @@ plt.show()
 
 
 #Organização e exportação da tabela dos dados usados
-dados = dados['year month day hour sw_dw sw_dif sw_top kt ktday kd ast elev psi model_lemos model_marquesfh model_ridley'.split()]
+dados = dados[['year', 'month', 'day', 'hour', 'sw_dw', 'sw_dif', 'sw_top', 'kt', 'ktday', 'kd', 'ast', 'elev', 'psi', 'model_lemos', 'model_marquesfh', 'model_ridley']]
 dados.to_csv('ktkd_labmim.dat',na_rep='nan',sep=';',index=False)

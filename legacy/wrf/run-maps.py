@@ -1,5 +1,5 @@
+
 from mapsGenerator import *
-from sys import exit
 
 #configs for ssa runs
 """
@@ -20,7 +20,7 @@ cases = ['teste/']
 base = 'wrfout_xxx_2013-'
 
 #months = '01 02 03 04 05 06 07 08 09 10 11 12'.split()
-months = '01'.split()
+months = ['01']
 
 arqs = [base+x+'-'+months[0] for x in months]
 #month = [['01-01','02-01','03-01'],['06-01','07-01','08-01']]

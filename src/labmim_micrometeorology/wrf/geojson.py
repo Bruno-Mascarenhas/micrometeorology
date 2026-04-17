@@ -68,29 +68,35 @@ def create_grid_geojson(
                 lon_left = float((lon[i, j - 1] + lon[i, j]) / 2)
                 lon_right = float((lon[i, j] + lon[i, j + 1]) / 2)
 
-            polygon_coords = [[
-                [round(lon_left, 10), round(lat_bottom, 10)],
-                [round(lon_right, 10), round(lat_bottom, 10)],
-                [round(lon_right, 10), round(lat_top, 10)],
-                [round(lon_left, 10), round(lat_top, 10)],
-                [round(lon_left, 10), round(lat_bottom, 10)],
-            ]]
+            polygon_coords = [
+                [
+                    [round(lon_left, 10), round(lat_bottom, 10)],
+                    [round(lon_right, 10), round(lat_bottom, 10)],
+                    [round(lon_right, 10), round(lat_top, 10)],
+                    [round(lon_left, 10), round(lat_top, 10)],
+                    [round(lon_left, 10), round(lat_bottom, 10)],
+                ]
+            ]
 
-            features.append({
-                "type": "Feature",
-                "geometry": {"type": "Polygon", "coordinates": polygon_coords},
-                "properties": {"linear_index": int(i * n_cols + j)},
-            })
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Polygon", "coordinates": polygon_coords},
+                    "properties": {"linear_index": int(i * n_cols + j)},
+                }
+            )
 
     metadata = {
         "resolucao_m": [float(resolution_x), float(resolution_y)],
     }
 
-    return OrderedDict([
-        ("type", "FeatureCollection"),
-        ("metadata", metadata),
-        ("features", features),
-    ])
+    return OrderedDict(
+        [
+            ("type", "FeatureCollection"),
+            ("metadata", metadata),
+            ("features", features),
+        ]
+    )
 
 
 def create_values_json(
@@ -115,19 +121,11 @@ def create_values_json(
     """
     arr = var.filled(np.nan) if isinstance(var, np.ma.MaskedArray) else np.asarray(var)
 
-    flat = arr.flatten()
-    values_rounded: list[float | None] = []
-    for v in flat:
-        try:
-            if np.isnan(v):
-                values_rounded.append(None)
-            else:
-                values_rounded.append(float(np.round(v, 2)))
-        except Exception:
-            try:
-                values_rounded.append(float(v))
-            except Exception:
-                values_rounded.append(None)
+    # Vectorized: round, flatten, convert to Python list in one pass
+    flat = np.round(arr.astype(np.float64), 2).ravel()
+    values_rounded: list[float | None] = [
+        None if v != v else v for v in flat.tolist()
+    ]  # NaN != NaN
 
     # Date formatting
     if date_time is None:
@@ -149,6 +147,65 @@ def create_values_json(
         metadata["wind"] = wind_data
 
     return {"metadata": metadata, "values": values_rounded}
+
+
+def create_wind_vectors_json(
+    u: NDArray,
+    v: NDArray,
+    date_time: datetime | None,
+    downsampling: int = 4,
+) -> dict[str, Any]:
+    """Build a standalone wind-vectors JSON payload (no grid values).
+
+    Used to provide wind arrow overlays for ANY variable on the
+    interactive maps, without embedding wind data in every variable's
+    JSON file.
+
+    Parameters
+    ----------
+    u, v:
+        2-D arrays of wind components (m/s) for a single time step.
+    date_time:
+        Forecast datetime (local).
+    downsampling:
+        Stride for spatial downsampling of the arrow grid.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+
+    magnitude = np.hypot(u, v)
+    # Meteorological convention: angle is direction wind comes FROM
+    angle = np.degrees(np.arctan2(u, v))
+    angle = np.where(angle < 0, angle + 360.0, angle)
+
+    ny, nx = u.shape
+    ds_angles: list[float] = []
+    ds_magnitudes: list[float] = []
+    ds_indices: list[int] = []
+
+    for i in range(0, ny, downsampling):
+        for j in range(0, nx, downsampling):
+            if not np.isnan(angle[i, j]):
+                ds_indices.append(int(i * nx + j))
+                ds_angles.append(round(float(angle[i, j]), 1))
+                ds_magnitudes.append(round(float(magnitude[i, j]), 2))
+
+    # Date formatting
+    if date_time is None:
+        date_str = "N/A"
+    else:
+        try:
+            dt = date_time.replace(minute=0, second=0, microsecond=0, tzinfo=None)
+            date_str = dt.strftime("%d/%m/%Y %H:%M:%S")
+        except Exception:
+            date_str = str(date_time)
+
+    return {
+        "metadata": {"date_time": date_str},
+        "downsampled_angles": ds_angles,
+        "downsampled_magnitudes": ds_magnitudes,
+        "downsampled_linear_indices": ds_indices,
+    }
 
 
 # ---------------------------------------------------------------------------

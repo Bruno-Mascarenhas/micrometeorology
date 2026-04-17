@@ -1,8 +1,8 @@
-import pandas as pd 
-import numpy as np
-import matplotlib.pyplot as plt
-from functools import reduce
 from datetime import datetime
+from functools import reduce
+
+import numpy as np
+import pandas as pd
 
 names = ['LBM_lenta_2016.dat','LBM_lenta_2017.dat','LBM_lenta_2018_1.dat','LBM_lenta_2018_2.dat',
         'LBM_lenta_2019.dat','LBM_lenta_2019_2.dat','LBM_lenta_2019_3.dat','LBM_lenta_2019_4.dat','LBM_lenta_2020.dat']
@@ -19,7 +19,7 @@ for name in names:
             tmp[col] = tmp[col].astype(np.float64)
     tmp.index = pd.to_datetime(tmp['TIMESTAMP'])
     tmp.index.name = None
-    tmp.drop(columns='RECORD rtime batt_volt'.split(), inplace=True)
+    tmp.drop(columns=['RECORD', 'rtime', 'batt_volt'], inplace=True)
     dfs.append(tmp)
 
 dfT = reduce(lambda left, right: pd.merge_ordered(left,right),dfs)

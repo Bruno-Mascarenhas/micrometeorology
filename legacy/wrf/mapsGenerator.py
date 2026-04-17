@@ -1,15 +1,12 @@
 # -*- Coding: UTF-8 -*-
-#coding: utf-8
-import numpy as np
-import netCDF4
-from datetime import timezone
-from datetime import datetime
-import os
-import matplotlib.pyplot as plt
-from mpl_toolkits.basemap import Basemap
-import json
-from sys import exit
+from datetime import UTC, datetime
 from warnings import filterwarnings
+
+import matplotlib.pyplot as plt
+import netCDF4
+import numpy as np
+from mpl_toolkits.basemap import Basemap
+
 filterwarnings('ignore')
 
 colormap = {'temperature':'jet','wind':'PuBu','vapor':'jet_r','pressure':'Blues','rain':'jet','HFX':'jet','LH':'jet','SWDOWN':'jet'}
@@ -38,7 +35,7 @@ def getLowHighWind(variable1, variable2):
 def drawMapSeason(variables, files_path, out_path, name, hour):
     colormap = {'T':'jet','wind':'PuBu','q':'jet_r','pressure':'Blues','precip':'jet','hfx':'jet','lh':'jet','sw_dw':'jet'}
     #variables = T,q,wind
-    
+
     data = netCDF4.Dataset(files_path[0])
     xlat, xlong = data.variables['XLAT'][:,:,:], data.variables['XLONG'][:,:,:]
     lon, lat = xlong[:1, :,:].squeeze(), xlat[:1, :, :].squeeze()
@@ -55,7 +52,7 @@ def drawMapSeason(variables, files_path, out_path, name, hour):
                 for i,time in enumerate(times_array):
                     currentTime = b''.join(time.tolist()).decode('UTF-8')
                     current_date = datetime.strptime(currentTime, '%Y-%m-%d_%H:%M:%S')
-                    cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
+                    cd = current_date.replace(tzinfo=UTC).astimezone(tz=None)
                     if cd.hour == hour:
                         tmp = dataset.variables['T2'][:,:,:].squeeze()
                         celcius = tmp[i:i+1,:,:] - 273.15
@@ -69,7 +66,7 @@ def drawMapSeason(variables, files_path, out_path, name, hour):
 
             plt.figure(figsize=(8,6))
             #plt.title('Temperatura (2 m)',fontsize=12)
-            plt.suptitle("$^\circ\mathcal{C}$", fontsize=18, ha='center', x=0.79, y=0.75)
+            plt.suptitle(r"$^\circ\mathcal{C}$", fontsize=18, ha='center', x=0.79, y=0.75)
             plt.xlabel('Long (°)', fontsize=14, labelpad=25)
             plt.ylabel('Lat (°)', fontsize=14, labelpad=60)
 
@@ -95,13 +92,13 @@ def drawMapSeason(variables, files_path, out_path, name, hour):
             umidade = None; cont = 0
             for file in files_path:
                 dataset = netCDF4.Dataset(file)
-                
+
                 times_array = dataset.variables['Times'][:]
 
                 for i,time in enumerate(times_array):
                     currentTime = b''.join(time.tolist()).decode('UTF-8')
                     current_date = datetime.strptime(currentTime, '%Y-%m-%d_%H:%M:%S')
-                    cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
+                    cd = current_date.replace(tzinfo=UTC).astimezone(tz=None)
                     if cd.hour == hour:
                         tmp = dataset.variables['Q2'][:,:,:].squeeze()
                         q2 = tmp[i:i+1,:,:] * 1000
@@ -110,7 +107,7 @@ def drawMapSeason(variables, files_path, out_path, name, hour):
                         else:
                             umidade += q2
                         cont+=1
-            
+
             umidade = umidade/cont
             varmin, varmax = getLowHigh(umidade)
 
@@ -140,13 +137,13 @@ def drawMapSeason(variables, files_path, out_path, name, hour):
             u = None; v = None; cont = 0
             for file in files_path:
                 dataset = netCDF4.Dataset(file)
-    
+
                 times_array = dataset.variables['Times'][:]
 
                 for i,time in enumerate(times_array):
                     currentTime = b''.join(time.tolist()).decode('UTF-8')
                     current_date = datetime.strptime(currentTime, '%Y-%m-%d_%H:%M:%S')
-                    cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
+                    cd = current_date.replace(tzinfo=UTC).astimezone(tz=None)
                     if cd.hour == hour:
                         var1 = dataset.variables['U10'][:,:,:].squeeze()
                         var2 = dataset.variables['V10'][:,:,:].squeeze()
@@ -179,7 +176,7 @@ def drawMapSeason(variables, files_path, out_path, name, hour):
 
             widths = np.linspace(0, 2, xx.size)
             nx = x[points];ny = y[points]; nu = u[points];nv = v[points]
-            
+
             #ssa configs
             #"""
             if 'd01' in name:
@@ -221,13 +218,13 @@ def drawMapSeason(variables, files_path, out_path, name, hour):
 def drawBreezeWind(file, out_path, name, qtd):
     colormap = {'T':'jet','wind':'PuBu','q':'jet_r','pressure':'Blues','precip':'jet','hfx':'jet','lh':'jet','sw_dw':'jet'}
     #variables = T,q,wind
-    
+
     data = netCDF4.Dataset(file)
     xlat, xlong = data.variables['XLAT'][:,:,:], data.variables['XLONG'][:,:,:]
     lon, lat = xlong[:1, :,:].squeeze(), xlat[:1, :, :].squeeze()
     hlat, llat = np.amax(xlat), np.amin(xlat)
     hlong, llong = np.amax(xlong), np.amin(xlong)
-    
+
     u = None; v = None; cont = 0
     dataset = data
 
@@ -240,8 +237,8 @@ def drawBreezeWind(file, out_path, name, qtd):
 
         currentTime = b''.join(time.tolist()).decode('UTF-8')
         current_date = datetime.strptime(currentTime, '%Y-%m-%d_%H:%M:%S')
-        cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
-        if cd < datetime(year=2014,month=12,day=3,tzinfo=timezone.utc).astimezone(tz=None):
+        cd = current_date.replace(tzinfo=UTC).astimezone(tz=None)
+        if cd < datetime(year=2014,month=12,day=3,tzinfo=UTC).astimezone(tz=None):
             continue
         var1 = dataset.variables['U10'][:,:,:].squeeze()
         var2 = dataset.variables['V10'][:,:,:].squeeze()
@@ -313,7 +310,7 @@ def drawBreezeHumidity(file, out_path, name, qtd):
     lon, lat = xlong[:1, :,:].squeeze(), xlat[:1, :, :].squeeze()
     hlat, llat = np.amax(xlat), np.amin(xlat)
     hlong, llong = np.amax(xlong), np.amin(xlong)
-    
+
     u = None; v = None; cont = 0
     dataset = data
 
@@ -326,8 +323,8 @@ def drawBreezeHumidity(file, out_path, name, qtd):
 
         currentTime = b''.join(time.tolist()).decode('UTF-8')
         current_date = datetime.strptime(currentTime, '%Y-%m-%d_%H:%M:%S')
-        cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
-        if cd < datetime(year=2014,month=12,day=3,tzinfo=timezone.utc).astimezone(tz=None):
+        cd = current_date.replace(tzinfo=UTC).astimezone(tz=None)
+        if cd < datetime(year=2014,month=12,day=3,tzinfo=UTC).astimezone(tz=None):
             continue
         tmp = dataset.variables['Q2'][:,:,:].squeeze()
         umidade = tmp[i:i+1,:,:] * 1000
@@ -340,7 +337,7 @@ def drawBreezeHumidity(file, out_path, name, qtd):
         plt.suptitle("$g/kg \frac{m}{s}$", fontsize=18, ha='center', x=0.80, y=0.75)
         plt.xlabel('Long (°)', fontsize=14, labelpad=25)
         plt.ylabel('Lat (°)', fontsize=14, labelpad=60)
-    
+
         m = Basemap(rsphere=(6378137.00,6356752.3142),resolution='f',projection='merc',llcrnrlon= llong, llcrnrlat= llat, urcrnrlon= hlong, urcrnrlat= hlat)
 
         x,y = m(lon, lat)
@@ -348,9 +345,9 @@ def drawBreezeHumidity(file, out_path, name, qtd):
         m.drawcoastlines()
         m.drawparallels(np.arange(llat, hlat,abs(hlat-llat)/7), linewidth=0, labels=[1,0,0,0], color='r',zorder=0, fmt="%.1f", fontsize=14)
         m.drawmeridians(np.arange(llong, hlong,abs(hlong-llong)/5), linewidth=0, labels=[0,0,0,1], color='r',zorder=0, fmt="%.1f", fontsize=14)
-   
+
         m.contourf(x,y, np.squeeze(umidade), alpha=0.4, cmap=colormap['q'], vmin=8, vmax=22)
-    
+
         m.pcolormesh(x,y, np.squeeze(umidade), alpha=0.4, cmap=colormap['q'], vmin=8, vmax=22)
 
         cb = plt.colorbar(shrink=0.5, pad=0.04)

@@ -1,21 +1,21 @@
 # -*- Coding: UTF-8 -*-
-#coding: utf-8
-from multiprocessing import Pool
-from itertools import product
-import numpy as np
-import netCDF4
-from datetime import timezone, datetime
-import os
-import matplotlib.pyplot as plt
-from mpl_toolkits.basemap import Basemap
-from utility import getFileNames
-from warnings import filterwarnings
-import imageio
-import moviepy.editor as mp
 import glob
+import os
 import sys
-from wrf import getvar, interplevel
+from datetime import UTC, datetime
+from itertools import product
+from multiprocessing import Pool
+from warnings import filterwarnings
+
+import imageio
 import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
+import moviepy.editor as mp
+import netCDF4
+import numpy as np
+from mpl_toolkits.basemap import Basemap
+from wrf import interplevel
+
 #import pdb
 filterwarnings('ignore')
 #print (np.__version__)
@@ -39,7 +39,7 @@ def getLowHigh(variable):
 def getLowHighWind(variable1, variable2):
     varflat1, varflat2 = variable1[1:,:].flatten(), variable2[1:,:].flatten()
     speed = np.sqrt(varflat1*varflat1 + varflat2*varflat2)   #speed² = U² + V²
-    varlow , varhigh = np.amin(speed), np.amax(speed) 
+    varlow , varhigh = np.amin(speed), np.amax(speed)
     return varlow, varhigh
 
 #funcao que calcula a velocidade minima e maxima da chuva
@@ -69,13 +69,13 @@ def drawmap(tipo,dataset):
     WRFoutput = sys.argv[2]+'/'
     grade = dataset[dataset.find('d0'):dataset.find('d0')+3]; grade = grade.upper()
     dataset = netCDF4.Dataset(dataset)
-    times_array = dataset.variables['Times'][:]  
+    times_array = dataset.variables['Times'][:]
     dates = []; datesStr = []; names = []
 
     map = {'HFX':'HFX','LH':'LH','pressure':'PRES','rain':'RAIN','SWDOWN':'SWDOWN','temperature':'TEMP','vapor':'VAPOR','wind':'WIND','weibull':'K_WEIB',f'poteolico{tipo[9:]}':f'POT_EOLICO_{tipo[9:]}M'}
     week = {1:'Segunda',2:'Terça',3:'Quarta',4:'Quinta',5:'Sexta',6:'Sábado',7:'Domingo'}
     #desc = {'HFX':'Calor Sensível','pressure':'Pressão Atmosférica (Nível do Mar)','rain':'Precipitação','SWDOWN':'Radiação Global','temperature':'Temperatura (2 m)','vapor':'Umidade Específica','wind':'Velocidade do Vento (10 m)'}
-    
+
     month = str(datetime.now().month); day = str(datetime.now().day)
     day = sys.argv[3]
     month = sys.argv[4]
@@ -88,20 +88,20 @@ def drawmap(tipo,dataset):
     today = str(year+month+day)
     print(f'    + PYTHON - data do arquivo: {today}')
 
-    #data do inicio da analise + data e horario da previsao  
+    #data do inicio da analise + data e horario da previsao
     it = 0
     for time in times_array:
         currentTime = b''.join(time.tolist()).decode('UTF-8')
         current_date = datetime.strptime(currentTime, '%Y-%m-%d_%H:%M:%S')
         if it == 0:
             start = current_date.strftime("%d/%m/%Y %H") + " (UTC)\n"   #data de inicio da analise
-            cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)   #data e horario da previsao
+            cd = current_date.replace(tzinfo=UTC).astimezone(tz=None)   #data e horario da previsao
             datesStr.append("\nInício Análise: "+start+"Previsão: "+cd.strftime("%d/%m/%Y %H")+"HL ("+week[cd.isoweekday()]+")")
             names.append(grade+"_"+map[tipo]+"_"+toNum(it))
             it+=1
             continue
-        cd = current_date.replace(tzinfo=timezone.utc).astimezone(tz=None)
-        #graficos de radiacao solar so sao gerados entre 6h e 18h 
+        cd = current_date.replace(tzinfo=UTC).astimezone(tz=None)
+        #graficos de radiacao solar so sao gerados entre 6h e 18h
         if tipo == 'SWDOWN' and (cd.hour < 6 or cd.hour > 18):
             datesStr.append("\nInício Análise: "+start+"Previsão: "+cd.strftime("%d/%m/%Y %H")+"HL ("+week[cd.isoweekday()]+")")
             names.append(grade+"_"+map[tipo]+"_"+toNum(it))
@@ -120,7 +120,7 @@ def drawmap(tipo,dataset):
             hlat, llat = np.amax(xlat), np.amin(xlat)   #valor maximo e minimo da latitude (eixo y do grafico)
             hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
             var = dataset.variables['T2'][:,:,:].squeeze()   #variavel = temperatura
-            varmin, varmax = getLowHigh(var);   #valor minimo e maximo da temperatura
+            varmin, varmax = getLowHigh(var)   #valor minimo e maximo da temperatura
             varmax = varmax - 273;        varmin = varmin - 273   #conversao de K para C°
             var2 = dataset.variables['PSFC'][:,:,:].squeeze()   #variavel = pressao
             var2 /= 100
@@ -135,7 +135,7 @@ def drawmap(tipo,dataset):
                 #plotagem do grafico
                 fig, ax = plt.subplots(figsize=(8,6))
                 plt.title('Temperatura do Ar em 2m / Pressão Atm. Superfície ' + datesStr[i], fontsize=12)
-                plt.suptitle("$^\circ\mathcal{C}$", fontsize=14, ha='center', x=0.79, y=0.75)
+                plt.suptitle(r"$^\circ\mathcal{C}$", fontsize=14, ha='center', x=0.79, y=0.75)
                 plt.xlabel('Longitude', fontsize=11, labelpad=25)
                 plt.ylabel('Latitude', fontsize=11, labelpad=60)
 
@@ -144,30 +144,30 @@ def drawmap(tipo,dataset):
                                                                                                 urcrnrlon= hlong, urcrnrlat= hlat)
 
                 x,y = m(lon, lat)
-                
+
                 #desenha o contorno da costa
                 if 'D03' in grade:
                     m.drawcoastlines(linewidth=2)
                 elif 'D04' in grade:
-                    m.drawcoastlines(linewidth=3)   
+                    m.drawcoastlines(linewidth=3)
                 else:
                     m.drawcoastlines(linewidth=1)
-                    
+
                 #desenha as divisoes dos estados
                 if 'D03' in grade:
                     m.drawstates(linewidth=2)
                 else:
                     m.drawstates(linewidth=1)
-                
+
                 #desenha as divisoes dos municipios
                 if 'D03' in grade or 'D04' in grade:
                     m.readshapefile(dir_scriptpy + 'shapes_BR_cities/BRMUE250GC_SIR',name='mapa')
-        
+
                 #desenha os paralelos e meridianos
                 m.drawparallels(np.arange(llat, hlat,abs(hlat-llat)/10), linewidth=0.001, labels=[1,0,0,0], color='r',zorder=0, fmt="%.2f")
                 m.drawmeridians(np.arange(llong, hlong,abs(hlong-llong)/5), linewidth=0.001, labels=[0,0,0,1], color='r',zorder=0, fmt="%.2f")
 
-                #cria o mapa de cor da temperatura 
+                #cria o mapa de cor da temperatura
                 m.contourf(x,y, np.squeeze(celcius), alpha=0.4, cmap=cmap_saturado(colormap[tipo],2), vmin=varmin, vmax=varmax)
                 m.pcolor(x,y, np.squeeze(celcius), alpha=0.4, cmap=cmap_saturado(colormap[tipo],2), vmin=varmin, vmax=varmax)
                 cb = plt.colorbar(shrink=0.5, pad=0.04)
@@ -177,21 +177,21 @@ def drawmap(tipo,dataset):
                 levels = [880,900,950,1000,1013]
                 p = m.contour(x,y, np.squeeze(pressure), levels,linewidths=0.8, colors='black')
                 plt.clabel(p,colors='black',fmt='%.0f')
-                
+
                 #salva a imagem
                 #plt.savefig(path + names[i] +".png",bbox_inches='tight')
                 plt.savefig(WRFoutput + names[i] +".png")
-                print(f'    + PYTHON - ' + WRFoutput + names[i] +".png")
+                print('    + PYTHON - ' + WRFoutput + names[i] +".png")
                 plt.close()
-    
-        #grafico da pressao 
+
+        #grafico da pressao
         elif tipo == 'pressure':
             xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
             lon, lat = xlong[:1, :,:].squeeze(), xlat[:1, :, :].squeeze()
             hlat, llat = np.amax(xlat), np.amin(xlat)   #valor maximo e minimo da latitude (eixo y do grafico)
             hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
             var = dataset.variables['PSFC'][:,:,:].squeeze()   #variavel = pressao
-            varmin, varmax = getLowHigh(var);   #valor minimo e maximo da pressao
+            varmin, varmax = getLowHigh(var)   #valor minimo e maximo da pressao
             varmax = varmax/100;        varmin = varmin/100
 
             for i,date in dates:
@@ -217,10 +217,10 @@ def drawmap(tipo,dataset):
                 if 'D03' in grade:
                     m.drawcoastlines(linewidth=2)
                 elif 'D04' in grade:
-                    m.drawcoastlines(linewidth=3)   
+                    m.drawcoastlines(linewidth=3)
                 else:
                     m.drawcoastlines(linewidth=1)
-                    
+
                 #desenha as divisoes dos estados
                 if 'D03' in grade:
                     m.drawstates(linewidth=2)
@@ -230,11 +230,11 @@ def drawmap(tipo,dataset):
                 #desenha as divisoes dos municipios
                 if 'D03' in grade or 'D04' in grade:
                     m.readshapefile(dir_scriptpy + 'shapes_BR_cities/BRMUE250GC_SIR',name='mapa')
-                
+
                 #desenha os paralelos e meridianos
                 m.drawparallels(np.arange(llat, hlat,abs(hlat-llat)/10), linewidth=0.001, labels=[1,0,0,0], color='r',zorder=0, fmt="%.2f")
                 m.drawmeridians(np.arange(llong, hlong,abs(hlong-llong)/5), linewidth=0.001, labels=[0,0,0,1], color='r',zorder=0, fmt="%.2f")
-                
+
                 #cria o mapa de cor da pressao
                 m.contourf(x,y, np.squeeze(mbar), alpha=0.4, cmap=cmap_saturado(colormap[tipo],2), vmin=varmin, vmax=varmax)
                 m.pcolor(x,y, np.squeeze(mbar), alpha=0.4, cmap=cmap_saturado(colormap[tipo],2), vmin=varmin, vmax=varmax)
@@ -244,9 +244,9 @@ def drawmap(tipo,dataset):
                 #salva a imagem
                 #plt.savefig(path + names[i] +".png",bbox_inches='tight')
                 plt.savefig(WRFoutput + names[i] +".png")
-                print(f'    + PYTHON - ' + WRFoutput + names[i] +".png")            
+                print('    + PYTHON - ' + WRFoutput + names[i] +".png")
                 plt.close()
-        
+
         #grafico da umidade especifica
         elif tipo == 'vapor':
             xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
@@ -254,7 +254,7 @@ def drawmap(tipo,dataset):
             hlat, llat = np.amax(xlat), np.amin(xlat)   #valor maximo e minimo da latitude (eixo y do grafico)
             hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
             var = dataset.variables['Q2'][:,:,:].squeeze()   #variavel = umidade especifica
-            varmin, varmax = getLowHigh(var);   #valor minimo e maximo da umidade especifica
+            varmin, varmax = getLowHigh(var)   #valor minimo e maximo da umidade especifica
             varmax = varmax*1000;        varmin = varmin*1000
 
             for i,date in dates:
@@ -280,10 +280,10 @@ def drawmap(tipo,dataset):
                 if 'D03' in grade:
                     m.drawcoastlines(linewidth=2)
                 elif 'D04' in grade:
-                    m.drawcoastlines(linewidth=3)   
+                    m.drawcoastlines(linewidth=3)
                 else:
                     m.drawcoastlines(linewidth=1)
-                    
+
                 #desenha as divisoes dos estados
                 if 'D03' in grade:
                     m.drawstates(linewidth=2)
@@ -306,9 +306,9 @@ def drawmap(tipo,dataset):
                 #salva a imagem
                 #plt.savefig(path + names[i] +".png",bbox_inches='tight')
                 plt.savefig(WRFoutput + names[i] +".png")
-                print(f'    + PYTHON - ' + WRFoutput + names[i] +".png")
+                print('    + PYTHON - ' + WRFoutput + names[i] +".png")
                 plt.close()
-        
+
         #grafico da velocidade do vento
         elif tipo == 'wind':
             xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
@@ -328,13 +328,13 @@ def drawmap(tipo,dataset):
                 #plotagem do grafico
                 fig, ax = plt.subplots(figsize=(8,6))
                 plt.title('Velocidade do Vento em 10m ' + datesStr[i], fontsize=12)
-                plt.suptitle(r'$\frac{m}{s}$', fontsize=17, ha='center', x=0.79, y=0.75)            
+                plt.suptitle(r'$\frac{m}{s}$', fontsize=17, ha='center', x=0.79, y=0.75)
                 plt.xlabel('Longitude', fontsize=11, labelpad=25)
                 plt.ylabel('Latitude', fontsize=11, labelpad=60)
 
                 #cria o objeto basemap (mapa)
-                m = Basemap(rsphere=(6378137.00,6356752.3142),resolution='f', projection='merc',llcrnrlon= llong, llcrnrlat= llat,urcrnrlon= hlong, urcrnrlat= hlat,ax=ax)                                                                                     
-                
+                m = Basemap(rsphere=(6378137.00,6356752.3142),resolution='f', projection='merc',llcrnrlon= llong, llcrnrlat= llat,urcrnrlon= hlong, urcrnrlat= hlat,ax=ax)
+
                 x,y = m(lon, lat)
                 yy = np.arange(0, y.shape[0], 3)
                 xx = np.arange(0, x.shape[1], 3)
@@ -353,7 +353,7 @@ def drawmap(tipo,dataset):
                 points = tuple(np.meshgrid(yy, xx))
                 nx = x[points];            ny = y[points];            nu = u[points];            nv = v[points]
                 #x[points], y[points], u[points], v[points]
-            
+
                 #mapa vetorial (setas) indicando direcao e velocidade do vento
                 if 'D01' in grade:
                     Q = m.quiver(nx[::2,::2],ny[::2,::2] ,nu[::2,::2] ,nv[::2,::2] , scale_units='xy', width=0.0035,scale=0.0001)
@@ -376,10 +376,10 @@ def drawmap(tipo,dataset):
                 if 'D03' in grade:
                     m.drawcoastlines(linewidth=2)
                 elif 'D04' in grade:
-                    m.drawcoastlines(linewidth=3)   
+                    m.drawcoastlines(linewidth=3)
                 else:
                     m.drawcoastlines(linewidth=1)
-                    
+
                 #desenha as divisoes dos estados
                 if 'D03' in grade:
                     m.drawstates(linewidth=2)
@@ -402,7 +402,7 @@ def drawmap(tipo,dataset):
                 #salva a imagem
                 #plt.savefig(path + names[i] +".png",bbox_inches='tight')
                 plt.savefig(WRFoutput + names[i] +".png")
-                print(f'    + PYTHON - ' + WRFoutput + names[i] +".png")
+                print('    + PYTHON - ' + WRFoutput + names[i] +".png")
                 plt.close()
 
         #grafico da precipitacao acumulada
@@ -419,7 +419,7 @@ def drawmap(tipo,dataset):
             for i,date in dates:
                 if i == it-1:
                     break
-                
+
                 # mm = var[i:i+1,:,:]
 
                 if i == 1:
@@ -444,10 +444,10 @@ def drawmap(tipo,dataset):
                 if 'D03' in grade:
                     m.drawcoastlines(linewidth=2)
                 elif 'D04' in grade:
-                    m.drawcoastlines(linewidth=3)   
+                    m.drawcoastlines(linewidth=3)
                 else:
                     m.drawcoastlines(linewidth=1)
-                    
+
                 #desenha as divisoes dos estados
                 if 'D03' in grade:
                     m.drawstates(linewidth=2)
@@ -462,18 +462,18 @@ def drawmap(tipo,dataset):
                 m.drawparallels(np.arange(llat, hlat,abs(hlat-llat)/10), linewidth=0.001, labels=[1,0,0,0], color='r',zorder=0, fmt="%.2f")
                 m.drawmeridians(np.arange(llong, hlong,abs(hlong-llong)/5), linewidth=0.001, labels=[0,0,0,1], color='r',zorder=0, fmt="%.2f")
 
-                #mapa de cor da precipitacao           
+                #mapa de cor da precipitacao
                 m.contourf(x,y, np.squeeze(mm), alpha = 0.4, cmap = cmap_saturado(colormap[tipo],2), vmin=varmin, vmax=varmax)
-                m.pcolor(x,y, np.squeeze(mm), alpha = 0.4, cmap = cmap_saturado(colormap[tipo],2), vmin=varmin, vmax=varmax)      
+                m.pcolor(x,y, np.squeeze(mm), alpha = 0.4, cmap = cmap_saturado(colormap[tipo],2), vmin=varmin, vmax=varmax)
                 cb = plt.colorbar(shrink=0.5, pad=0.04)
                 cb.ax.tick_params(labelsize=10)
-                
+
                 #salva a imagem
                 #plt.savefig(path + names[i] +".png",bbox_inches='tight')
                 plt.savefig(WRFoutput + names[i] +".png")
-                print(f'    + PYTHON - ' + WRFoutput + names[i] +".png")   #breno esteve aqui
+                print('    + PYTHON - ' + WRFoutput + names[i] +".png")   #breno esteve aqui
                 plt.close()
-        
+
         #grafico do calor sensivel
         elif tipo == 'HFX':
             xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
@@ -481,7 +481,7 @@ def drawmap(tipo,dataset):
             hlat, llat = np.amax(xlat), np.amin(xlat)   #valor maximo e minimo da latitude (eixo y do grafico)
             hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
             var = dataset.variables['HFX'][:,:,:].squeeze()
-            varmin, varmax = getLowHigh(var);   #valor minimo e maximo da 
+            varmin, varmax = getLowHigh(var)   #valor minimo e maximo da
 
             for i,date in dates:
                 if i == it-1:
@@ -506,10 +506,10 @@ def drawmap(tipo,dataset):
                 if 'D03' in grade:
                     m.drawcoastlines(linewidth=2)
                 elif 'D04' in grade:
-                    m.drawcoastlines(linewidth=3)   
+                    m.drawcoastlines(linewidth=3)
                 else:
                     m.drawcoastlines(linewidth=1)
-                    
+
                 #desenha as divisoes dos estados
                 if 'D03' in grade:
                     m.drawstates(linewidth=2)
@@ -524,7 +524,7 @@ def drawmap(tipo,dataset):
                 m.drawparallels(np.arange(llat, hlat,abs(hlat-llat)/10), linewidth=0.001, labels=[1,0,0,0], color='r',zorder=0, fmt="%.2f")
                 m.drawmeridians(np.arange(llong, hlong,abs(hlong-llong)/5), linewidth=0.001, labels=[0,0,0,1], color='r',zorder=0, fmt="%.2f")
 
-                #mapa de cor do calor sensivel 
+                #mapa de cor do calor sensivel
                 m.contourf(x,y, np.squeeze(mm), alpha = 0.4, cmap = cmap_saturado(colormap[tipo],2), vmin=varmin, vmax=varmax)
                 m.pcolor(x,y, np.squeeze(mm), alpha = 0.4, cmap = cmap_saturado(colormap[tipo],2), vmin=varmin, vmax=varmax)
                 cb = plt.colorbar(shrink=0.5, pad=0.04)
@@ -533,9 +533,9 @@ def drawmap(tipo,dataset):
                 #salva a imagem
                 #plt.savefig(path + names[i] +".png",bbox_inches='tight')]
                 plt.savefig(WRFoutput + names[i] +".png")
-                print(f'    + PYTHON - ' + WRFoutput + names[i] +".png")
+                print('    + PYTHON - ' + WRFoutput + names[i] +".png")
                 plt.close()
-        
+
         #grafico do calor latente
         elif tipo == 'LH':
             xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
@@ -543,7 +543,7 @@ def drawmap(tipo,dataset):
             hlat, llat = np.amax(xlat), np.amin(xlat)   #valor maximo e minimo da latitude (eixo y do grafico)
             hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
             var = dataset.variables['LH'][:,:,:].squeeze()
-            varmin, varmax = getLowHigh(var);   #valor minimo e maximo da 
+            varmin, varmax = getLowHigh(var)   #valor minimo e maximo da
 
             for i,date in dates:
                 if i == it-1:
@@ -569,7 +569,7 @@ def drawmap(tipo,dataset):
                     m.drawcoastlines(linewidth=2)
                 else:
                     m.drawcoastlines(linewidth=1)
-                    
+
                 #desenha as divisoes dos estados
                 if 'D03' in grade:
                     m.drawstates(linewidth=2)
@@ -584,7 +584,7 @@ def drawmap(tipo,dataset):
                 if 'D03' in grade or 'D04' in grade:
                     m.readshapefile(dir_scriptpy + 'shapes_BR_cities/BRMUE250GC_SIR',name='mapa')
 
-                #mapa de cor do calor latente 
+                #mapa de cor do calor latente
                 m.contourf(x,y, np.squeeze(mm), alpha = 0.4, cmap = cmap_saturado(colormap[tipo],2), vmin=varmin, vmax=varmax)
                 m.pcolor(x,y, np.squeeze(mm), alpha = 0.4, cmap = cmap_saturado(colormap[tipo],2), vmin=varmin, vmax=varmax)
                 cb = plt.colorbar(shrink=0.5, pad=0.04)
@@ -593,7 +593,7 @@ def drawmap(tipo,dataset):
                 #salva a imagem
                 #plt.savefig(path + names[i] +".png",bbox_inches='tight')
                 plt.savefig(WRFoutput + names[i] +".png")
-                print(f'    + PYTHON - ' + WRFoutput + names[i] +".png")
+                print('    + PYTHON - ' + WRFoutput + names[i] +".png")
 
                 plt.close()
 
@@ -604,7 +604,7 @@ def drawmap(tipo,dataset):
             hlat, llat = np.amax(xlat), np.amin(xlat)   #valor maximo e minimo da latitude (eixo y do grafico)
             hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
             var = dataset.variables['SWDOWN'][:,:,:].squeeze()
-            varmin, varmax = getLowHigh(var);   #valor minimo e maximo da 
+            varmin, varmax = getLowHigh(var)   #valor minimo e maximo da
 
             for i,date in dates:
                 if i == it-1:
@@ -629,10 +629,10 @@ def drawmap(tipo,dataset):
                 if 'D03' in grade:
                     m.drawcoastlines(linewidth=2)
                 elif 'D04' in grade:
-                    m.drawcoastlines(linewidth=3)   
+                    m.drawcoastlines(linewidth=3)
                 else:
                     m.drawcoastlines(linewidth=1)
-                    
+
                 #desenha as divisoes dos estados
                 if 'D03' in grade:
                     m.drawstates(linewidth=2)
@@ -647,7 +647,7 @@ def drawmap(tipo,dataset):
                 m.drawparallels(np.arange(llat, hlat,abs(hlat-llat)/10), linewidth=0.001, labels=[1,0,0,0], color='r',zorder=0, fmt="%.2f")
                 m.drawmeridians(np.arange(llong, hlong,abs(hlong-llong)/5), linewidth=0.001, labels=[0,0,0,1], color='r',zorder=0, fmt="%.2f")
 
-                #mapa de cor da radiacao solar 
+                #mapa de cor da radiacao solar
                 m.contourf(x,y, np.squeeze(mm), alpha = 0.4, cmap = cmap_saturado(colormap[tipo],2), vmin=varmin, vmax=varmax)
                 m.pcolor(x,y, np.squeeze(mm), alpha = 0.4, cmap = cmap_saturado(colormap[tipo],2), vmin=varmin, vmax=varmax)
                 cb = plt.colorbar(shrink=0.5, pad=0.04)
@@ -656,10 +656,10 @@ def drawmap(tipo,dataset):
                 #salva a imagem
                 #plt.savefig(path + names[i] +".png",bbox_inches='tight')
                 plt.savefig(WRFoutput + names[i] +".png")
-                print(f'    + PYTHON - ' + WRFoutput + names[i] +".png")   #breno esteve aqui
+                print('    + PYTHON - ' + WRFoutput + names[i] +".png")   #breno esteve aqui
 
                 plt.close()
-        
+
         #grafico fator k de weibull
         elif tipo == 'weibull':
             xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
@@ -668,35 +668,35 @@ def drawmap(tipo,dataset):
             hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
             U = dataset.variables['U'][:].squeeze(); V = dataset.variables['V'][:].squeeze()  #velocidades horizontais e verticais do vento na borda das grades
             #interpolacao das velocidades para representarem os valores nos centros das grades
-            U_central = (U[:, :, :, :-1] + U[:, :, :, 1:])/2; V_central = (V[:, :, :-1, :] + V[:, :, 1:, :])/2;       
+            U_central = (U[:, :, :, :-1] + U[:, :, :, 1:])/2; V_central = (V[:, :, :-1, :] + V[:, :, 1:, :])/2
             speed4d = np.empty_like(U_central) #matriz das velocidades resultantes (4d)
             speed3d = np.empty_like(U_central[:,0,:,:]) #matriz das velocidades resultantes para uma altura especifica (3d)
             fator_k = np.empty_like(U_central[0,0,:,:]) #matriz do fator K de weibull
-            
+
             ph = dataset.variables['PH'][:].squeeze(); phb = dataset.variables['PHB'][:].squeeze()  #alturas potencias
-            hgt = dataset.variables['HGT'][:].squeeze() #altura do terreno 
-            
+            hgt = dataset.variables['HGT'][:].squeeze() #altura do terreno
+
             geopot_total = ph + phb      #geopotencial total (media + variação)
             altura = geopot_total / 9.81        #altura das extremidades dos niveis (em relaçao ao nivel do mar)
             #interpolacao das velocidades para representarem os valores no meio dos niveis
             altura_central = (altura[:, :-1, :, :] + altura[:, 1:, :, :])/2
-            
+
             #ajustando a altura para considerar o nivel do terreno
-            altura_ajustada = np.empty_like(altura_central)       
+            altura_ajustada = np.empty_like(altura_central)
             for i in range(altura_ajustada.shape[0]):
                 for j in range(altura_ajustada.shape[1]):
                     altura_ajustada[i,j,:,:] = altura_central[i,j,:,:] - hgt[i,:,:]
-                
-            #calculo do mapa de velocidade resultante do vento para cada hora analisada em todas os niveis de altura 
+
+            #calculo do mapa de velocidade resultante do vento para cada hora analisada em todas os niveis de altura
             for i in range(speed4d.shape[0]):
                 u = U_central[i:i+1,:,:,:].squeeze()
                 v = V_central[i:i+1,:,:,:].squeeze()
                 speed4d[i,:,:,:] = np.sqrt(u*u + v*v)
-            
+
             #calculo do mapa de velocidade resultante do vento para cada hora analisada em um nivel de altura especificado
             for i in range(speed3d.shape[0]):
                 speed3d[i,:,:] = interplevel(speed4d[i,:,:,:], altura_ajustada[i,:,:,:], 100)
-            
+
             #corrigindo falhas na interpolaçao
             for i in range(speed3d.shape[0]):
                 for k in range(speed3d.shape[1]):
@@ -704,10 +704,10 @@ def drawmap(tipo,dataset):
                         if np.isnan(speed3d[i,k,j]) == True:
                             for a in range(altura_ajustada.shape[1]):
                                 if altura_desejada > altura_ajustada[i,a,k,j]:
-                                    nivel_inf_altura = a                  
+                                    nivel_inf_altura = a
                             speed3d[i,k,j] = speed4d[i,nivel_inf_altura,k,j] + (altura_desejada-altura_ajustada[i,nivel_inf_altura,k,j])*\
                             (speed4d[i,nivel_inf_altura+1,k,j]-speed4d[i,nivel_inf_altura,k,j])/(altura_ajustada[i,nivel_inf_altura+1,k,j]-altura_ajustada[i,nivel_inf_altura,k,j])
-            
+
             #calculo do fator k de weibull em cada ponto do mapa para todo o periodo analisado
             for k in range(fator_k.shape[0]):
                 for j in range(fator_k.shape[1]):
@@ -716,13 +716,13 @@ def drawmap(tipo,dataset):
             #plotagem do grafico
             fig, ax = plt.subplots(figsize=(8,6))
             plt.title('Fator de forma de Weibull' + datesStr[-1], fontsize=12)
-            plt.suptitle('k', fontsize=15, x=0.79, y=0.75)            
+            plt.suptitle('k', fontsize=15, x=0.79, y=0.75)
             plt.xlabel('Longitude', fontsize=11, labelpad=25)
             plt.ylabel('Latitude', fontsize=11, labelpad=60)
 
             #cria o objeto basemap (mapa)
-            m = Basemap(rsphere=(6378137.00,6356752.3142),resolution='f', projection='merc',llcrnrlon= llong, llcrnrlat= llat,urcrnrlon= hlong, urcrnrlat= hlat,ax=ax)                                                                                     
-            
+            m = Basemap(rsphere=(6378137.00,6356752.3142),resolution='f', projection='merc',llcrnrlon= llong, llcrnrlat= llat,urcrnrlon= hlong, urcrnrlat= hlat,ax=ax)
+
             x,y = m(lon, lat)
 
             #mapa de cor do fator k
@@ -738,10 +738,10 @@ def drawmap(tipo,dataset):
             if 'D03' in grade:
                 m.drawcoastlines(linewidth=2)
             elif 'D04' in grade:
-                m.drawcoastlines(linewidth=3)   
+                m.drawcoastlines(linewidth=3)
             else:
                 m.drawcoastlines(linewidth=1)
-                
+
             #desenha as divisoes dos estados
             if 'D03' in grade:
                 m.drawstates(linewidth=2)
@@ -764,10 +764,10 @@ def drawmap(tipo,dataset):
             #salva a imagem
             #plt.savefig(path + names[i] +".png",bbox_inches='tight')
             plt.savefig(WRFoutput + grade + "_K_WEIBULL.png")
-            print(f'    + PYTHON - ' + WRFoutput + grade + "_K_WEIBULL.png")
+            print('    + PYTHON - ' + WRFoutput + grade + "_K_WEIBULL.png")
             plt.close()
 
-        #grafico potencial eolico  
+        #grafico potencial eolico
         elif 'poteolico' in tipo:
             xlat, xlong = dataset.variables['XLAT'][:,:,:], dataset.variables['XLONG'][:,:,:]
             lon, lat = xlong[:1, :,:].squeeze(), xlat[:1, :, :].squeeze()
@@ -775,7 +775,7 @@ def drawmap(tipo,dataset):
             hlong, llong = np.amax(xlong), np.amin(xlong)   #valor maximo e minimo da longitude (eixo x do grafico)
 
             U = dataset.variables['U'][:].squeeze(); V = dataset.variables['V'][:].squeeze()  #velocidades horizontais e verticais do vento na borda das grades
-            U_central = (U[:, :, :, :-1] + U[:, :, :, 1:])/2; V_central = (V[:, :, :-1, :] + V[:, :, 1:, :])/2;   #interpolacao das velocidades para representarem os valores nos centros das grades     
+            U_central = (U[:, :, :, :-1] + U[:, :, :, 1:])/2; V_central = (V[:, :, :-1, :] + V[:, :, 1:, :])/2   #interpolacao das velocidades para representarem os valores nos centros das grades
 
             speed4d = np.empty_like(U_central) #matriz das velocidades resultantes (4d)
             speed3d = np.empty_like(U_central[:,0,:,:]) #matriz das velocidades resultantes para uma altura especifica (3d)
@@ -783,14 +783,14 @@ def drawmap(tipo,dataset):
 
 
             ph = dataset.variables['PH'][:].squeeze(); phb = dataset.variables['PHB'][:].squeeze()  #alturas potencias
-            hgt = dataset.variables['HGT'][:].squeeze() #altura do terreno 
+            hgt = dataset.variables['HGT'][:].squeeze() #altura do terreno
             geopot_total = ph + phb    #geopotencial total (media + variação)
             altura = geopot_total / 9.81      #altura das extremidades dos niveis (em relaçao ao nivel do mar)
             altura_central = (altura[:, :-1, :, :] + altura[:, 1:, :, :])/2    #interpolacao das velocidades para representarem os valores no meio dos niveis
 
 
             #ajustando a altura para considerar o nivel do terreno
-            altura_ajustada = np.empty_like(altura_central)       
+            altura_ajustada = np.empty_like(altura_central)
             for i in range(altura_ajustada.shape[0]):
                 for j in range(altura_ajustada.shape[1]):
                     altura_ajustada[i,j,:,:] = altura_central[i,j,:,:] - hgt[i,:,:]
@@ -798,7 +798,7 @@ def drawmap(tipo,dataset):
             #altura media de todos os pontos de cada nivel (referente ao meio do nivel)
             altura_media = [np.mean(altura_ajustada[:,i,:,:]) for i in range(altura_ajustada.shape[1])]
             # print(altura_media,np.size(altura_media))
-                
+
             altura_desejada = int(tipo[9:]) #altura escolhida no comando de rodar o script
 
             #valores minimo e maximo da escala das figuras
@@ -807,7 +807,7 @@ def drawmap(tipo,dataset):
                     nivel_inf_altura = i
             # varmin,_ = getLowHighWind(U_central[:,nivel_inf_altura,:,:],V_central[:,nivel_inf_altura,:,:])
             # _,varmax = getLowHighWind(U_central[:,nivel_inf_altura+1,:,:],V_central[:,nivel_inf_altura+1,:,:])
-            
+
             speed4d = np.sqrt(U_central**2+V_central**2)
             # calculo do mapa de velocidade resultante do vento para cada hora analisada em um nivel de altura especificado
             for i in range(speed3d.shape[0]):
@@ -818,12 +818,12 @@ def drawmap(tipo,dataset):
             for i,date in dates:
                 if i == it-1:
                     break
-                
-                #calculo do mapa de velocidade resultante do vento para cada hora analisada em todas os niveis de altura 
+
+                #calculo do mapa de velocidade resultante do vento para cada hora analisada em todas os niveis de altura
                 u = U_central[i:i+1,:,:,:].squeeze()
                 v = V_central[i:i+1,:,:,:].squeeze()
                 speed3d = np.sqrt(u*u + v*v)
-                
+
                 #calculo do mapa de velocidade resultante do vento para cada hora analisada em um nivel de altura especificado (interpolaçao)
                 pot_eolico = interplevel(speed3d, altura_ajustada[i,:,:,:], altura_desejada)
 
@@ -833,7 +833,7 @@ def drawmap(tipo,dataset):
                         if np.isnan(pot_eolico[k,j]) == True:
                             for a in range(altura_ajustada.shape[1]):
                                 if altura_desejada > altura_ajustada[i,a,k,j]:
-                                    nivel_inf_altura = a                  
+                                    nivel_inf_altura = a
                             pot_eolico[k,j] = speed3d[nivel_inf_altura,k,j] + (altura_desejada-altura_ajustada[nivel_inf_altura,k,j])*\
                             (speed3d[nivel_inf_altura+1,k,j]-speed3d[nivel_inf_altura,k,j])/(altura_ajustada[nivel_inf_altura+1,k,j]-altura_ajustada[nivel_inf_altura,k,j])
 
@@ -841,14 +841,14 @@ def drawmap(tipo,dataset):
                 #plotagem do grafico
                 fig, ax = plt.subplots(figsize=(8,6))
                 plt.title(f'Potencial eólico a {altura_desejada}m de altura' + datesStr[i], fontsize=12)
-                plt.suptitle(r'$\frac{m}{s}$', fontsize=15, x=0.79, y=0.75)            
+                plt.suptitle(r'$\frac{m}{s}$', fontsize=15, x=0.79, y=0.75)
                 plt.xlabel('Longitude', fontsize=11, labelpad=25)
                 plt.ylabel('Latitude', fontsize=11, labelpad=60)
 
-                
+
                 #cria o objeto basemap (mapa)
-                m = Basemap(rsphere=(6378137.00,6356752.3142),resolution='f', projection='merc',llcrnrlon= llong, llcrnrlat= llat,urcrnrlon= hlong, urcrnrlat= hlat,ax=ax)                                                                                     
-                
+                m = Basemap(rsphere=(6378137.00,6356752.3142),resolution='f', projection='merc',llcrnrlon= llong, llcrnrlat= llat,urcrnrlon= hlong, urcrnrlat= hlat,ax=ax)
+
                 x,y = m(lon, lat)
 
                 #mapa do potencial eolico
@@ -861,10 +861,10 @@ def drawmap(tipo,dataset):
                 if 'D03' in grade:
                     m.drawcoastlines(linewidth=2)
                 elif 'D04' in grade:
-                    m.drawcoastlines(linewidth=3)   
+                    m.drawcoastlines(linewidth=3)
                 else:
                     m.drawcoastlines(linewidth=1)
-                    
+
                 #desenha as divisoes dos estados
                 if 'D03' in grade:
                     m.drawstates(linewidth=2)
@@ -887,7 +887,7 @@ def drawmap(tipo,dataset):
                 #salva a imagem
                 #plt.savefig(path + names[i] +".png",bbox_inches='tight')
                 plt.savefig(WRFoutput + names[i] +".png")
-                print(f'    + PYTHON - ' + WRFoutput + names[i] +".png")
+                print('    + PYTHON - ' + WRFoutput + names[i] +".png")
                 plt.close()
     except Exception as err:
         _, _, exc_tb = sys.exc_info()
@@ -916,11 +916,11 @@ def generateGifs(name, files, path_output):
         print("gif err: ", err)
 
 if __name__ == '__main__':
-    
+
     #graphs.png for each hour (define quais tipos (variaveis) de graficos seram gerados)
-    #args = ['temperature','pressure','vapor','wind','rain','HFX','LH','SWDOWN'] 
+    #args = ['temperature','pressure','vapor','wind','rain','HFX','LH','SWDOWN']
     args = [arg for arg in sys.argv[13:]] #variaveis de saida
-    #caminho de input dos dados wrf 
+    #caminho de input dos dados wrf
     #pathX = ['/home/murilo/leal/mapas/wrfout_d0X_2024-06-19_00_00_00']
 
 
@@ -931,11 +931,11 @@ if __name__ == '__main__':
 
     #dir_scriptpy $WRFoutput $day $month $year $FIGini $FIGfim $path1 $path2 $path3 $path4 $path5
 
-    print(f' ')
-    print(f'    ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐')
-    print(f'    + PYTHON - EXECUTANDO O PYTHON')
-    print(f'    └──────────────────────────────────────────────────────────────────────────────────────────────────────────┘')
-    print(f' ')
+    print(' ')
+    print('    ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐')
+    print('    + PYTHON - EXECUTANDO O PYTHON')
+    print('    └──────────────────────────────────────────────────────────────────────────────────────────────────────────┘')
+    print(' ')
 
 
     print(f'    + PYTHON - dir_scriptpy = {sys.argv[1]}')
@@ -952,15 +952,15 @@ if __name__ == '__main__':
     print(f'    + PYTHON - path5        = {sys.argv[12]}')
     [print(f'    + PYTHON - variavel_saida_{i+1}        = {args[i]}') for i in range(np.size(args))]
 
-    #define de quais arquivos wrf serao gerados as imagens 
+    #define de quais arquivos wrf serao gerados as imagens
     num_min_dom= int(sys.argv[6]) #inicio - wrf_d+num_min_dom
     num_max_dom= int(sys.argv[7]) #fim - wrf_d+num_max_dom
-    
+
     #num_min_dom <= num_max_dom
     if num_min_dom > num_max_dom:
         print('    + PYTHON - O primeiro argumento wrf deve ser menor ou igual ao segundo')
         exit()
-    #se num_min_dom == num_max_dom, gera os graficos correspondente a apenas um arquivo wrf 
+    #se num_min_dom == num_max_dom, gera os graficos correspondente a apenas um arquivo wrf
     elif num_min_dom == num_max_dom:
         files = [sys.argv[7+num_min_dom]]
         #files = path
@@ -985,7 +985,7 @@ if __name__ == '__main__':
     for i in range(np.size(args)):
         if 'poteolico' in args[i]:
             map[f'poteolico{args[i][9:]}'] = f'POT_EOLICO_{args[i][9:]}M'
-    
+
     # names = ['_RAIN','_SWDOWN','_TEMP','_VAPOR','_WIND']
     names = ['_' + map[arg] for arg in args] #variaveis para quais seram geradas os .webm
     grade = ['D01','D02','D03','D04','D05']  #grades escolhidas
@@ -993,7 +993,7 @@ if __name__ == '__main__':
     files = [(g+n[1:], WRFoutput+g+n, WRFoutput) for g in grade for n in names]
 
     try:
-        processes.starmap(generateGifs,files)   #executa a funcao de criacao dos videos 
+        processes.starmap(generateGifs,files)   #executa a funcao de criacao dos videos
         processes.close()
     except Exception as err:
         print(err)

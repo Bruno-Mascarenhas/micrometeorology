@@ -35,7 +35,9 @@ def save_predictions(
     import numpy as np  # noqa: TC002
     import pandas as pd  # noqa: TC002
 
-    df = pd.DataFrame({"y_true": np.asarray(y_true).flatten(), "y_pred": np.asarray(y_pred).flatten()})
+    df = pd.DataFrame(
+        {"y_true": np.asarray(y_true).flatten(), "y_pred": np.asarray(y_pred).flatten()}
+    )
     if index is not None and len(index) == len(df):
         df.index = index
     p = Path(path)

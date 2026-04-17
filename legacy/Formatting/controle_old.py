@@ -1,8 +1,9 @@
-import pandas as pd 
-import numpy as np 
-import matplotlib.pyplot as plt 
-from datetime import datetime, timedelta
-import warnings 
+import warnings
+from datetime import timedelta
+
+import numpy as np
+import pandas as pd
+
 warnings.filterwarnings('ignore')
 
 df = pd.read_csv('LBM_bruto_premed.dat',sep=',')
@@ -69,7 +70,7 @@ while start <= end:
         means['WD_WXT'].append(np.fmod(3*(np.pi/2) - alfa, 2*np.pi)*(180/np.pi))
     else:
         means['WD_WXT'].append(np.nan)
-    
+
     if len(tmpSkip[3])>=6 and len(tmpSkip[4])>=6:
         alfa = np.arctan2(np.mean(tmpSkip[4]),np.mean(tmpSkip[3]))
         means['WindDir_WVT'].append(np.fmod(3*(np.pi/2) - alfa, 2*np.pi)*(180/np.pi))
@@ -77,7 +78,7 @@ while start <= end:
         means['WindDir_WVT'].append(np.nan)
 
     if i%1000==0:
-        print('Current progress: {}'.format((i/(total/12))*100))
+        print(f'Current progress: {(i/(total/12))*100}')
     start = next_date
     i+=1
 

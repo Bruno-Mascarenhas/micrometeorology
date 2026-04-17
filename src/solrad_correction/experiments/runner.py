@@ -74,7 +74,10 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
         from solrad_correction.features.engineering import add_rolling_features
 
         df = add_rolling_features(
-            df, config.data.feature_columns, config.features.rolling_windows, config.features.rolling_aggs
+            df,
+            config.data.feature_columns,
+            config.features.rolling_windows,
+            config.features.rolling_aggs,
         )
 
     # Determine final feature columns
@@ -82,7 +85,9 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
     if config.data.feature_columns:
         # Use specified + generated
         base = set(config.data.feature_columns)
-        feature_cols = [c for c in df.columns if c in base or any(c.startswith(f"{b}_") for b in base)]
+        feature_cols = [
+            c for c in df.columns if c in base or any(c.startswith(f"{b}_") for b in base)
+        ]
         feature_cols = [c for c in feature_cols if c != config.data.target_column]
 
     # ── 3. Split ──
@@ -128,17 +133,27 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
 
         seq_len = config.model.sequence_length
 
-        train_x, train_y = create_sequences(train_pp[feature_cols].values, train_pp[config.data.target_column].values, seq_len)
-        val_x, val_y = create_sequences(val_pp[feature_cols].values, val_pp[config.data.target_column].values, seq_len)
-        test_x, test_y = create_sequences(test_pp[feature_cols].values, test_pp[config.data.target_column].values, seq_len)
+        train_x, train_y = create_sequences(
+            train_pp[feature_cols].values, train_pp[config.data.target_column].values, seq_len
+        )
+        val_x, val_y = create_sequences(
+            val_pp[feature_cols].values, val_pp[config.data.target_column].values, seq_len
+        )
+        test_x, test_y = create_sequences(
+            test_pp[feature_cols].values, test_pp[config.data.target_column].values, seq_len
+        )
 
         train_seq = SequenceDataset(train_x, train_y)
         val_seq = SequenceDataset(val_x, val_y)
         test_seq = SequenceDataset(test_x, test_y)
 
         # Save datasets
-        SequenceDatasetMeta(X_raw=train_x, y_raw=train_y, feature_names=feature_cols, sequence_length=seq_len).save(exp_dir / "datasets" / "train")
-        SequenceDatasetMeta(X_raw=test_x, y_raw=test_y, feature_names=feature_cols, sequence_length=seq_len).save(exp_dir / "datasets" / "test")
+        SequenceDatasetMeta(
+            X_raw=train_x, y_raw=train_y, feature_names=feature_cols, sequence_length=seq_len
+        ).save(exp_dir / "datasets" / "train")
+        SequenceDatasetMeta(
+            X_raw=test_x, y_raw=test_y, feature_names=feature_cols, sequence_length=seq_len
+        ).save(exp_dir / "datasets" / "test")
 
         input_size = train_x.shape[2]
 

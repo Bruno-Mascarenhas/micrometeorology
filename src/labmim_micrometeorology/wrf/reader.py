@@ -33,7 +33,8 @@ class WRFDataset:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self._ds = netCDF4.Dataset(str(self.path))
+        self._ds = netCDF4.Dataset(str(self.path), mode="r")
+        self._ds.set_auto_mask(False)  # Return plain ndarray, not MaskedArray
         self._grid_level = self._detect_grid_level()
         logger.info("Opened WRF dataset: %s (grid %s)", self.path.name, self._grid_level)
 
@@ -65,21 +66,19 @@ class WRFDataset:
 
     def read_grid(self) -> tuple[NDArray, NDArray]:
         """Return ``(lon, lat)`` 2-D arrays for the first time step."""
-        xlat = self._ds.variables["XLAT"][:, :, :]
-        xlong = self._ds.variables["XLONG"][:, :, :]
-        lon = np.squeeze(xlong[:1, :, :])
-        lat = np.squeeze(xlat[:1, :, :])
+        lon = np.asarray(self._ds.variables["XLONG"][0, :, :])
+        lat = np.asarray(self._ds.variables["XLAT"][0, :, :])
         return lon, lat
 
     def grid_bounds(self) -> tuple[float, float, float, float]:
         """Return ``(lon_min, lon_max, lat_min, lat_max)``."""
-        xlat = self._ds.variables["XLAT"][:, :, :]
-        xlong = self._ds.variables["XLONG"][:, :, :]
+        lat = np.asarray(self._ds.variables["XLAT"][0, :, :])
+        lon = np.asarray(self._ds.variables["XLONG"][0, :, :])
         return (
-            float(np.amin(xlong)),
-            float(np.amax(xlong)),
-            float(np.amin(xlat)),
-            float(np.amax(xlat)),
+            float(np.amin(lon)),
+            float(np.amax(lon)),
+            float(np.amin(lat)),
+            float(np.amax(lat)),
         )
 
     # ------------------------------------------------------------------
@@ -88,11 +87,12 @@ class WRFDataset:
 
     def parse_times(self) -> list[datetime]:
         """Parse the ``Times`` variable into a list of UTC ``datetime`` objects."""
-        times_array = self._ds.variables["Times"][:]
+        times_var = self._ds.variables["Times"]
+        # chartostring converts char array (ntimes, nchars) → string array (ntimes,)
+        time_strings = netCDF4.chartostring(times_var[:])
         result: list[datetime] = []
-        for time_chars in times_array:
-            time_str = b"".join(time_chars.tolist()).decode("UTF-8")
-            dt = datetime.strptime(time_str, "%Y-%m-%d_%H:%M:%S")
+        for ts in time_strings:
+            dt = datetime.strptime(str(ts), "%Y-%m-%d_%H:%M:%S")
             dt = dt.replace(tzinfo=UTC)
             result.append(dt)
         return result
@@ -124,23 +124,27 @@ class WRFDataset:
             suffix = f"{grade}_{i:03d}"
 
             if i < skip_first_n:
-                entries.append({
-                    "index": i,
-                    "datetime_utc": dt_utc,
-                    "datetime_local": dt_local,
-                    "label": label,
-                    "name_suffix": suffix,
-                    "skip": True,
-                })
+                entries.append(
+                    {
+                        "index": i,
+                        "datetime_utc": dt_utc,
+                        "datetime_local": dt_local,
+                        "label": label,
+                        "name_suffix": suffix,
+                        "skip": True,
+                    }
+                )
             else:
-                entries.append({
-                    "index": i,
-                    "datetime_utc": dt_utc,
-                    "datetime_local": dt_local,
-                    "label": label,
-                    "name_suffix": suffix,
-                    "skip": False,
-                })
+                entries.append(
+                    {
+                        "index": i,
+                        "datetime_utc": dt_utc,
+                        "datetime_local": dt_local,
+                        "label": label,
+                        "name_suffix": suffix,
+                        "skip": False,
+                    }
+                )
         return entries
 
     # ------------------------------------------------------------------

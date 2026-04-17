@@ -84,7 +84,8 @@ class ExpandingWindowSplit:
         self.step = step or val_size
 
     def split(
-        self, df: pd.DataFrame,
+        self,
+        df: pd.DataFrame,
     ) -> Generator[tuple[np.ndarray, np.ndarray], None, None]:
         """Yield ``(train_idx, val_idx)`` tuples."""
         n = len(df)
@@ -108,7 +109,8 @@ class TimeSeriesKFold:
         self.n_splits = n_splits
 
     def split(
-        self, df: pd.DataFrame,
+        self,
+        df: pd.DataFrame,
     ) -> Generator[tuple[np.ndarray, np.ndarray], None, None]:
         """Yield ``(train_idx, val_idx)`` tuples."""
         n = len(df)

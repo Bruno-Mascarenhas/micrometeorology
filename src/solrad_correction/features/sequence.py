@@ -41,12 +41,12 @@ def create_sequences(
         raise ValueError(f"sequence_length ({sequence_length}) >= data length ({len(x)})")
 
     n = len(x) - sequence_length
-    x_out = np.empty((n, sequence_length, x.shape[1]), dtype=np.float32)
-    y_out = np.empty(n, dtype=np.float32)
 
-    for i in range(n):
-        x_out[i] = x[i : i + sequence_length]
-        y_out[i] = y[i + sequence_length]
+    # sliding_window_view creates a zero-copy strided view — much faster than a Python loop
+    x_windows = np.lib.stride_tricks.sliding_window_view(x, sequence_length, axis=0)
+    # x_windows shape: (n, n_features, sequence_length) — need to transpose to (n, seq_len, n_features)
+    x_out = np.ascontiguousarray(x_windows[:n].transpose(0, 2, 1), dtype=np.float32)
+    y_out = y[sequence_length:].astype(np.float32)
 
     return x_out, y_out
 

@@ -1,10 +1,10 @@
 
+from datetime import datetime, timedelta
+
+import numpy as np
 import pandas as pd
-import numpy as np 
-import matplotlib.pyplot as plt 
-from datetime import timedelta, datetime
 from numpy import rad2deg
-from sys import exit
+
 
 def count_data(data):
     ans = 0

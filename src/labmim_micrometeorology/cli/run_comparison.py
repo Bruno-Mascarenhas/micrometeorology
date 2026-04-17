@@ -66,11 +66,13 @@ def main(
 
     # Plots
     if plots:
-        variables = sorted({
-            c.replace("_obs", "")
-            for c in paired.columns
-            if c.endswith("_obs") and c.replace("_obs", "_model") in paired.columns
-        })
+        variables = sorted(
+            {
+                c.replace("_obs", "")
+                for c in paired.columns
+                if c.endswith("_obs") and c.replace("_obs", "_model") in paired.columns
+            }
+        )
         for var in variables:
             plot_comparison(paired, var, output_path=out_dir / f"comparison_{var}.png")
         click.echo(f"✓ Plots saved to {out_dir}")

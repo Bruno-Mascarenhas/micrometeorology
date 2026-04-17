@@ -134,9 +134,15 @@ def _render_figure(task: FigureTask) -> str:
         # Wind field
         speed = task.data
         mesh = ax.pcolormesh(
-            task.lon, task.lat, speed,
-            alpha=0.4, cmap=cmap, vmin=task.vmin, vmax=task.vmax,
-            transform=transform, shading="auto",
+            task.lon,
+            task.lat,
+            speed,
+            alpha=0.4,
+            cmap=cmap,
+            vmin=task.vmin,
+            vmax=task.vmax,
+            transform=transform,
+            shading="auto",
         )
         cb = plt.colorbar(mesh, ax=ax, shrink=0.5, pad=0.04)
         cb.ax.tick_params(labelsize=10)
@@ -149,14 +155,22 @@ def _render_figure(task: FigureTask) -> str:
             task.lat[::stride, ::stride],
             task.u[::stride, ::stride],
             task.v[::stride, ::stride],
-            transform=transform, scale=50, width=0.003,
+            transform=transform,
+            scale=50,
+            width=0.003,
         )
     else:
         # Scalar field — single pcolormesh (no double contourf+pcolor)
         mesh = ax.pcolormesh(
-            task.lon, task.lat, task.data,
-            alpha=0.4, cmap=cmap, vmin=task.vmin, vmax=task.vmax,
-            transform=transform, shading="auto",
+            task.lon,
+            task.lat,
+            task.data,
+            alpha=0.4,
+            cmap=cmap,
+            vmin=task.vmin,
+            vmax=task.vmax,
+            transform=transform,
+            shading="auto",
         )
         cb = plt.colorbar(mesh, ax=ax, shrink=0.5, pad=0.04)
         cb.ax.tick_params(labelsize=10)
@@ -165,8 +179,12 @@ def _render_figure(task: FigureTask) -> str:
     if task.overlay_data is not None:
         levels = task.overlay_levels or [880, 900, 950, 1000, 1013]
         cs = ax.contour(
-            task.lon, task.lat, task.overlay_data,
-            levels=levels, linewidths=0.8, colors="black",
+            task.lon,
+            task.lat,
+            task.overlay_data,
+            levels=levels,
+            linewidths=0.8,
+            colors="black",
             transform=transform,
         )
         ax.clabel(cs, colors="black", fmt="%.0f")
@@ -188,13 +206,11 @@ def _write_json(task: JsonTask) -> str:
     arr = task.data
     arr = arr.filled(np.nan) if hasattr(arr, "filled") else np.asarray(arr, dtype=float)
 
-    flat = arr.flatten()
-    values: list[float | None] = []
-    for v in flat:
-        if np.isnan(v):
-            values.append(None)
-        else:
-            values.append(round(float(v), 2))
+    # Vectorized: round, flatten, convert to Python list in one call
+    flat = np.round(arr.astype(np.float64), 2).ravel()
+    values = flat.tolist()
+    # Replace NaN (which becomes None-incompatible float('nan')) with None for JSON
+    values = [None if v != v else v for v in values]  # NaN != NaN is True
 
     scale_values = [round(float(x), 2) for x in np.linspace(task.scale_min, task.scale_max, 6)]
 
@@ -289,14 +305,23 @@ def run_figure_tasks(
                     eta = (total - done) / rate if rate > 0 else 0
                     logger.info(
                         "  Progress: %d/%d (%.0f%%) — %.1f img/s — ETA: %.0fs",
-                        done, total, 100 * done / total, rate, eta,
+                        done,
+                        total,
+                        100 * done / total,
+                        rate,
+                        eta,
                     )
             except Exception:
                 idx = futures[future]
                 logger.exception("Failed to render task %d", idx)
 
     elapsed = time.perf_counter() - t0
-    logger.info("✓ Rendered %d figures in %.1fs (%.1f img/s)", len(paths), elapsed, len(paths) / elapsed if elapsed > 0 else 0)
+    logger.info(
+        "✓ Rendered %d figures in %.1fs (%.1f img/s)",
+        len(paths),
+        elapsed,
+        len(paths) / elapsed if elapsed > 0 else 0,
+    )
     return paths
 
 

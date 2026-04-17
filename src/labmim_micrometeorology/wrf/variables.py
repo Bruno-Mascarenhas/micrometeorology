@@ -34,7 +34,7 @@ def get_low_high_wind(u: NDArray, v: NDArray) -> tuple[float, float]:
     """Return ``(min, max)`` wind speed from U/V arrays (skip first step)."""
     flat_u = u[1:, :].flatten()
     flat_v = v[1:, :].flatten()
-    speed = np.sqrt(flat_u**2 + flat_v**2)
+    speed = np.hypot(flat_u, flat_v)
     return float(np.nanmin(speed)), float(np.nanmax(speed))
 
 
@@ -156,13 +156,12 @@ def compute_adjusted_heights(ds: WRFDataset) -> tuple[NDArray, NDArray, NDArray,
     # Midpoint heights
     height_central = (height[:, :-1, :, :] + height[:, 1:, :, :]) / 2.0
 
-    # Adjust for terrain
-    height_adjusted = np.empty_like(height_central)
-    for t in range(height_adjusted.shape[0]):
-        for lev in range(height_adjusted.shape[1]):
-            height_adjusted[t, lev, :, :] = height_central[t, lev, :, :] - hgt[t, :, :]
+    # Adjust for terrain — vectorized broadcast (hgt is 3-D: time, ny, nx)
+    # height_central is 4-D: time, level, ny, nx
+    # Broadcasting hgt[:, np.newaxis, :, :] aligns the level axis automatically
+    height_adjusted = height_central - hgt[:, np.newaxis, :, :]
 
     # Speed at all levels
-    speed_4d = np.sqrt(u_central**2 + v_central**2)
+    speed_4d = np.hypot(u_central, v_central)
 
     return u_central, v_central, height_adjusted, speed_4d

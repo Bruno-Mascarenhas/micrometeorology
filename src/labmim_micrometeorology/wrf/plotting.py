@@ -153,7 +153,9 @@ def plot_wind_field(
     cmap = saturated_cmap(cmap_name, saturation)
     transform = ccrs.PlateCarree()
 
-    ax.contourf(lon, lat, speed, alpha=alpha, cmap="Blues", vmin=vmin, vmax=vmax, transform=transform)
+    ax.contourf(
+        lon, lat, speed, alpha=alpha, cmap="Blues", vmin=vmin, vmax=vmax, transform=transform
+    )
     mesh = ax.pcolormesh(
         lon, lat, speed, alpha=alpha, cmap=cmap, vmin=vmin, vmax=vmax, transform=transform
     )
@@ -162,10 +164,12 @@ def plot_wind_field(
 
     # Sub-sample for quiver
     stride = {
-        GridLevel.D01: 6, GridLevel.D02: 3, GridLevel.D03: 4, GridLevel.D04: 4, GridLevel.D05: 4,
-    }.get(
-        grid_level, 4
-    )
+        GridLevel.D01: 6,
+        GridLevel.D02: 3,
+        GridLevel.D03: 4,
+        GridLevel.D04: 4,
+        GridLevel.D05: 4,
+    }.get(grid_level, 4)
     ax.quiver(
         lon[::stride, ::stride],
         lat[::stride, ::stride],
@@ -188,7 +192,9 @@ def plot_contour_overlay(
     if levels is None:
         levels = [880, 900, 950, 1000, 1013]
     transform = ccrs.PlateCarree()
-    cs = ax.contour(lon, lat, data, levels=levels, linewidths=0.8, colors="black", transform=transform)
+    cs = ax.contour(
+        lon, lat, data, levels=levels, linewidths=0.8, colors="black", transform=transform
+    )
     ax.clabel(cs, colors="black", fmt="%.0f")
 
 

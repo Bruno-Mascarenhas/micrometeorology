@@ -1,6 +1,5 @@
-import pandas as pd 
-import numpy as np 
-import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
 df = pd.read_csv('lbm_horario_completo.dat',sep=',')
 df.index = pd.to_datetime(df['TIMESTAMP'])
@@ -32,12 +31,12 @@ df.drop(columns=['PSP1_Wm2','CM3Up_Wm2','CMP21_Wm2','u_WVT','v_WVT','u_WXT','v_W
 
 
 teo = pd.read_csv('arquivo_radiação_teórica_labmim.csv',sep=';')
-teo.index = pd.to_datetime(teo['year month day hour minute'.split()])
-teo.drop(columns='lon lat alt ano_r n_dia_r'.split(),inplace=True)
+teo.index = pd.to_datetime(teo[['year', 'month', 'day', 'hour', 'minute']])
+teo.drop(columns=['lon', 'lat', 'alt', 'ano_r', 'n_dia_r'],inplace=True)
 teo = teo[df.index[0]:df.index[-1]]
 
 df = pd.merge_ordered(teo,df)
 
-df = df['year;month;day;hour;T;Td;ur;pressure;WD;WS;u;v;precip;Sw_dw;Sw_up;Lw_dw;Lw_up;Sw_par;Sw_dif;Temp_WXT;RH_WXT;Net_CNR1;Net_NRLite;oc_topo;decl_rad;elev_solar;ang_hor;ang_zen;ang_hor_por;nascer_h;por_h;ast_h;fc'.split(';')]
+df = df[['year', 'month', 'day', 'hour', 'T', 'Td', 'ur', 'pressure', 'WD', 'WS', 'u', 'v', 'precip', 'Sw_dw', 'Sw_up', 'Lw_dw', 'Lw_up', 'Sw_par', 'Sw_dif', 'Temp_WXT', 'RH_WXT', 'Net_CNR1', 'Net_NRLite', 'oc_topo', 'decl_rad', 'elev_solar', 'ang_hor', 'ang_zen', 'ang_hor_por', 'nascer_h', 'por_h', 'ast_h', 'fc']]
 
 df.to_csv('labmim_horario_final.dat',index=False,sep=',',na_rep='nan',float_format='%.3f')

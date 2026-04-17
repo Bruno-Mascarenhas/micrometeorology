@@ -245,7 +245,17 @@ print(metrics)
 
 ## CLI (Command Line)
 
-### Figures (parallel)
+### GeoJSON/JSON for Interactive WebGIS (Primary)
+
+```bash
+labmim-wrf-geojson --wrf-dir /path/to/wrfout/ --date 20240101 \
+    -D 1 -D 4 -o site/JSON -g site/GeoJSON \
+    -v temperature -v wind --workers 44
+```
+
+### Figures (Static Maps & Video - Legacy)
+
+> Note: The interactive site is now the primary map output. Use this command only if you specifically need `.png` images or `.webm` videos.
 
 ```bash
 # Single domain
@@ -255,14 +265,6 @@ labmim-wrf-figures -d wrfout_d03_2024-01-01 -o output/figures/ -v temperature -v
 labmim-wrf-figures --wrf-dir /path/to/wrfout/ --date 20240101 \
     -D 1 -D 4 -v temperature -v wind -v rain -v SWDOWN \
     -o output/figures/ --workers 44 --also-video
-```
-
-### GeoJSON/JSON (parallel)
-
-```bash
-labmim-wrf-geojson --wrf-dir /path/to/wrfout/ --date 20240101 \
-    -D 1 -D 4 -o site/JSON -g site/GeoJSON \
-    -v temperature -v wind --workers 44
 ```
 
 ### Local testing (all-in-one)

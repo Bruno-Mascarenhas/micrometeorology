@@ -5,7 +5,7 @@
  */
 
 body {
-  font-family: 'Lato', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-family: "Lato", "Helvetica Neue", Helvetica, Arial, sans-serif;
 }
 
 h1,
@@ -14,12 +14,12 @@ h3,
 h4,
 h5,
 h6 {
-  font-family: 'Lato', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-family: "Lato", "Helvetica Neue", Helvetica, Arial, sans-serif;
   font-weight: 700;
 }
 
 .text-ligthblue {
-  color: #B0E0E6; 
+  color: #b0e0e6;
 }
 
 .text-lightdark {
@@ -27,11 +27,11 @@ h6 {
 }
 
 .text-lightsecondary {
-  color: #5A5B8C;
+  color: #5a5b8c;
 }
 
 .text-darkwhite {
-  color: #F1F1F1;
+  color: #f1f1f1;
 }
 
 header.masthead {
@@ -43,14 +43,20 @@ header.masthead {
 
 header.masthead .overlay {
   position: absolute;
-  background: rgb(50,136,157);
-  background: linear-gradient(133deg, rgba(50,136,157,1) 23%, rgba(69,169,201,1) 35%, rgba(178,231,233,1) 44%, rgba(243,249,255,1) 61%, rgba(255,255,255,1) 84%); 
+  background: rgb(50, 136, 157);
+  background: linear-gradient(
+    133deg,
+    rgba(50, 136, 157, 1) 23%,
+    rgba(69, 169, 201, 1) 35%,
+    rgba(178, 231, 233, 1) 44%,
+    rgba(243, 249, 255, 1) 61%,
+    rgba(255, 255, 255, 1) 84%
+  );
   height: 346px;
   width: 100%;
   top: 0;
   left: 0;
 }
-
 
 header.masthead h1 {
   font-size: 2rem;
@@ -71,17 +77,31 @@ header.masthead h1 {
   }
 
   header.masthead .overlay {
-     background: rgb(50,136,157) !important;
-     background: linear-gradient(180deg, rgba(50,136,157,1) 23%, rgba(69,169,201,1) 47%, rgba(178,231,233,1) 59%, rgba(243,249,255,1) 68%, rgba(255,255,255,1) 84%) !important;
-     height: 500px; 
+    background: rgb(50, 136, 157) !important;
+    background: linear-gradient(
+      180deg,
+      rgba(50, 136, 157, 1) 23%,
+      rgba(69, 169, 201, 1) 47%,
+      rgba(178, 231, 233, 1) 59%,
+      rgba(243, 249, 255, 1) 68%,
+      rgba(255, 255, 255, 1) 84%
+    ) !important;
+    height: 500px;
   }
 }
 
 @media (max-width: 768px) {
   header.masthead .overlay {
-     background: rgb(50,136,157) !important;
-     background: linear-gradient(180deg, rgba(50,136,157,1) 23%, rgba(69,169,201,1) 47%, rgba(178,231,233,1) 59%, rgba(243,249,255,1) 68%, rgba(255,255,255,1) 84%) !important;
-     height: 500px; 
+    background: rgb(50, 136, 157) !important;
+    background: linear-gradient(
+      180deg,
+      rgba(50, 136, 157, 1) 23%,
+      rgba(69, 169, 201, 1) 47%,
+      rgba(178, 231, 233, 1) 59%,
+      rgba(243, 249, 255, 1) 68%,
+      rgba(255, 255, 255, 1) 84%
+    ) !important;
+    height: 500px;
   }
 }
 

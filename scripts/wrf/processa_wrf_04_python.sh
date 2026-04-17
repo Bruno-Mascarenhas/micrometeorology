@@ -77,8 +77,8 @@ echo "    + PYTHON - Phase 1 complete"
 # ─── Phase 2: Generate GeoJSON + JSON for site ──────────────────────────────
 
 # Determine site output paths
-dir_maps=${dir_local}/d-interative-map/wrf-map-utils
-path_geojson=${dir_maps}/geoJSON
+dir_maps=${dir_local}/site
+path_geojson=${dir_maps}/GeoJSON
 path_json=${dir_maps}/JSON
 
 echo "    + PYTHON - Phase 2: Generating GeoJSON and JSON..."

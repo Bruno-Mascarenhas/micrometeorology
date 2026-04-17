@@ -30,7 +30,9 @@ class TestSVMInterface:
     def synthetic_data(self):
         rng = np.random.default_rng(42)
         features = rng.normal(0, 1, (100, 5)).astype(np.float32)
-        targets = (features[:, 0] * 2 + features[:, 1] - 0.5 * features[:, 2] + rng.normal(0, 0.1, 100)).astype(np.float32)
+        targets = (
+            features[:, 0] * 2 + features[:, 1] - 0.5 * features[:, 2] + rng.normal(0, 0.1, 100)
+        ).astype(np.float32)
         return TabularDataset(X=features, y=targets, feature_names=[f"f{i}" for i in range(5)])
 
     def test_fit_predict(self, synthetic_data):

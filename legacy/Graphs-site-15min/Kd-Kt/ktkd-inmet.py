@@ -1,16 +1,16 @@
-import seaborn as sns
-import pandas as pd 
-import numpy as np 
-import matplotlib.pyplot as plt 
-from datetime import datetime, timedelta
-from scipy import stats
+from datetime import timedelta
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
 plt.style.use('seaborn-whitegrid')
-import scipy
 import warnings
+
 warnings.filterwarnings('ignore')
 
 #######################################################################################
-# pareando inmet com os dados teóricos 
+# pareando inmet com os dados teóricos
 #######################################################################################
 inmet = pd.read_csv('SSA_inmet_completo.dat', sep=',')
 inmet.index = pd.to_datetime(inmet[['year','month','day','hour']])
@@ -28,7 +28,7 @@ for i, kt in enumerate(inmet['kt']):
             dados[x].append(inmet[x][i])
 
 dados = pd.DataFrame(dados)
-dados.index = pd.to_datetime(dados['year month day hour'.split()])
+dados.index = pd.to_datetime(dados[['year', 'month', 'day', 'hour']])
 
 #########################################################################
 # Calculo do kt diario
@@ -67,7 +67,7 @@ for i in range(1,len(kt)-1):
     now = time[i]
     nextt = time[i] + timedelta(hours=1)
     prev =  time[i] - timedelta(hours=1)
-    
+
     if now.hour == 6:
         if time[i+1] == nextt:
             psi.append(kt[i+1])
@@ -126,6 +126,6 @@ plt.legend()
 plt.savefig('ktkdmodel.png',dpi=300,bbox_inches='tight')
 plt.show()
 
-dados = dados['year;month;day;hour;u;v;e;fc;kt;precip;pressure;Td;q;Sw_dw;T;theta;ur;WD;WS;ang_hor;ang_hor_por;ang_zen;ast_h;decl_rad;elev_solar;nascer_h;oc_topo;por_h;ktday;psi;model1;model2;model3;sw_dif1;sw_dif2;sw_dif3'.split(';')]
+dados = dados[['year', 'month', 'day', 'hour', 'u', 'v', 'e', 'fc', 'kt', 'precip', 'pressure', 'Td', 'q', 'Sw_dw', 'T', 'theta', 'ur', 'WD', 'WS', 'ang_hor', 'ang_hor_por', 'ang_zen', 'ast_h', 'decl_rad', 'elev_solar', 'nascer_h', 'oc_topo', 'por_h', 'ktday', 'psi', 'model1', 'model2', 'model3', 'sw_dif1', 'sw_dif2', 'sw_dif3']]
 #print(dados.head())
 dados.to_csv('ktkd_SSA_inmet.dat',na_rep='nan',sep=';',index=False)

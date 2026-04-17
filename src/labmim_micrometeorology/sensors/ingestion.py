@@ -66,23 +66,22 @@ def read_campbell_dat(
 
     # Set timestamp index
     if timestamp_column in df.columns:
-        df.index = pd.to_datetime(df[timestamp_column])
+        df.index = pd.to_datetime(df[timestamp_column], format="ISO8601")
         df.index.name = None
-        df.drop(columns=[timestamp_column], inplace=True)
+        df = df.drop(columns=[timestamp_column])
 
     # Drop requested columns (only those that actually exist)
     if drop_columns:
         existing = [c for c in drop_columns if c in df.columns]
         if existing:
-            df.drop(columns=existing, inplace=True)
+            df = df.drop(columns=existing)
 
     # Coerce all columns to float (handles mixed-type columns from header changes)
-    for col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.apply(pd.to_numeric, errors="coerce")
 
     # Sentinel value → NaN
     if sentinel_value is not None:
-        df[df <= sentinel_value] = np.nan
+        df = df.mask(df <= sentinel_value)
 
     logger.info("  → %d rows, %d columns", len(df), len(df.columns))
     return df
@@ -119,7 +118,9 @@ def merge_dat_files(
         merged.index.name = None
         merged.drop(columns=["TIMESTAMP"], inplace=True)
 
-    logger.info("Merged %d files → %d rows, %d columns", len(paths), len(merged), len(merged.columns))
+    logger.info(
+        "Merged %d files → %d rows, %d columns", len(paths), len(merged), len(merged.columns)
+    )
     return merged
 
 

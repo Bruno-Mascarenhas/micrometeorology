@@ -18,44 +18,43 @@
 #
 
 calibrations:
-
   # ── CMP21 (diffuse shortwave pyranometer) ──────────────────────────────
   - column: CMP21_Wm2_Avg
     start_date: null
     end_date: "2019-10-12"
-    factor: null              # Set entire column to NaN (sensor not installed)
+    factor: null # Set entire column to NaN (sensor not installed)
     description: "CMP21 not installed before 2019-10-12; data is invalid"
 
   - column: CMP21_Wm2_Avg
     start_date: "2019-10-13"
     end_date: null
-    factor: 0.9852941176       # 9.38 / 9.52
+    factor: 0.9852941176 # 9.38 / 9.52
     description: "CMP21 sensitivity correction: 9.38 / 9.52"
 
   # ── CM3Up (global shortwave, upward-facing CNR1 component) ─────────────
   - column: CM3Up_Wm2_Avg
     start_date: null
     end_date: "2018-12-31"
-    factor: 0.9694162150       # 10.46 / 10.79
+    factor: 0.9694162150 # 10.46 / 10.79
     description: "CM3Up pre-2019 sensitivity: 10.46 / 10.79"
 
   - column: CM3Up_Wm2_Avg
     start_date: "2019-01-01"
     end_date: null
-    factor: 1.0057692308       # 10.46 / 10.4
+    factor: 1.0057692308 # 10.46 / 10.4
     description: "CM3Up post-2019 sensitivity: 10.46 / 10.4"
 
   # ── PSP1 (Eppley PSP pyranometer) ──────────────────────────────────────
   - column: PSP1_Wm2_Avg
     start_date: "2018-01-01"
     end_date: "2018-12-31"
-    factor: 0.9383408072       # 8.37 / 8.92
+    factor: 0.9383408072 # 8.37 / 8.92
     description: "PSP1 2018 sensitivity: 8.37 / 8.92"
 
   - column: PSP1_Wm2_Avg
     start_date: "2019-01-01"
     end_date: null
-    factor: 1.0926892950       # 8.37 / 7.66
+    factor: 1.0926892950 # 8.37 / 7.66
     description: "PSP1 post-2019 sensitivity: 8.37 / 7.66"
 
   # ── Sensor switch dates (instrument unification) ───────────────────────

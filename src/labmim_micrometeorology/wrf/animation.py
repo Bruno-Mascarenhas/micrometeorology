@@ -72,7 +72,7 @@ def create_webm_from_images(
         Frames per second.
     """
     try:
-        from moviepy.editor import ImageSequenceClip
+        from moviepy import ImageSequenceClip
     except ImportError as exc:
         raise ImportError(
             "moviepy is required for WebM creation.  "
@@ -104,7 +104,7 @@ def gif_to_webm(
     Requires the ``video`` optional dependency (``pip install labmim-micrometeorology[video]``).
     """
     try:
-        from moviepy.editor import VideoFileClip
+        from moviepy import VideoFileClip
     except ImportError as exc:
         raise ImportError(
             "moviepy is required for video conversion.  "

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import logging
+from typing import TYPE_CHECKING, Callable
 
 import torch
 from torch import nn
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
+
+logger = logging.getLogger(__name__)
 
 
 def train_one_epoch(
@@ -17,7 +20,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
     device: str,
-    progress_callback: callable | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> float:
     """Run one training epoch.
 

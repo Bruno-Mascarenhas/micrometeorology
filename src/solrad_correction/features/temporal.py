@@ -36,11 +36,12 @@ def add_cyclic_encoding(
     period:
         The natural period (e.g. 24 for hours, 365 for day_of_year).
     """
-    out = df.copy()
-    values = 2 * np.pi * out[column] / period
-    out[f"{column}_sin"] = np.sin(values)
-    out[f"{column}_cos"] = np.cos(values)
-    return out
+    values = 2 * np.pi * df[column] / period
+    new_cols = {
+        f"{column}_sin": np.sin(values),
+        f"{column}_cos": np.cos(values),
+    }
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
 def add_all_cyclic_encodings(df: pd.DataFrame) -> pd.DataFrame:
@@ -49,11 +50,21 @@ def add_all_cyclic_encodings(df: pd.DataFrame) -> pd.DataFrame:
     Expects columns: ``hour``, ``day_of_year``, ``month``.
     Call ``add_temporal_features()`` first.
     """
-    out = df.copy()
-    if "hour" in out.columns:
-        out = add_cyclic_encoding(out, "hour", 24.0)
-    if "day_of_year" in out.columns:
-        out = add_cyclic_encoding(out, "day_of_year", 365.25)
-    if "month" in out.columns:
-        out = add_cyclic_encoding(out, "month", 12.0)
-    return out
+    new_cols = {}
+
+    if "hour" in df.columns:
+        val = 2 * np.pi * df["hour"] / 24.0
+        new_cols["hour_sin"] = np.sin(val)
+        new_cols["hour_cos"] = np.cos(val)
+    if "day_of_year" in df.columns:
+        val = 2 * np.pi * df["day_of_year"] / 365.25
+        new_cols["day_of_year_sin"] = np.sin(val)
+        new_cols["day_of_year_cos"] = np.cos(val)
+    if "month" in df.columns:
+        val = 2 * np.pi * df["month"] / 12.0
+        new_cols["month_sin"] = np.sin(val)
+        new_cols["month_cos"] = np.cos(val)
+
+    if new_cols:
+        return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    return df.copy()
