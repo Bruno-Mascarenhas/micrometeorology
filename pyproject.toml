@@ -8,7 +8,7 @@ version = "1.3.1"
 description = "LabMiM/UFBA micrometeorology data processing, WRF output analysis, solar radiation bias correction, and ML-based model evaluation."
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 authors = [
     {name = "Bruno Mascarenhas", email = "brunomasck@gmail.com"},
     {name = "LabMiM - UFBA"},
@@ -18,9 +18,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
 ]
 dependencies = [
@@ -38,6 +36,7 @@ dependencies = [
     "pydantic-settings>=2.3",
     "pyyaml>=6.0",
     "imageio>=2.34",
+    "pyarrow>=15.0",
 ]
 
 [project.optional-dependencies]
@@ -47,15 +46,17 @@ dev = [
     "mypy>=1.8",
     "pre-commit>=3.6",
     "pandas-stubs",
+    "pytest-xdist>=3.5",
 ]
 video = [
     "moviepy>=2.2",
 ]
 # TCC: ML-based solar radiation correction (CPU-only PyTorch)
 tcc = [
-    "torch>=2.3",
+    "torch>=2.6.0",
     "joblib>=1.3",
     "tqdm>=4.66",
+    "tensorboard>=2.14",
 ]
 # TCC with CUDA support (install separately: pip install torch --index-url https://download.pytorch.org/whl/cu121)
 tcc-cuda = [
@@ -65,25 +66,23 @@ tcc-cuda = [
 
 [project.scripts]
 # Micrometeorology CLIs
-labmim-wrf-figures = "labmim_micrometeorology.cli.process_wrf_figures:main"
-labmim-wrf-geojson = "labmim_micrometeorology.cli.process_wrf_geojson:main"
-labmim-sensor-process = "labmim_micrometeorology.cli.process_sensor_data:main"
-labmim-site-graphs = "labmim_micrometeorology.cli.generate_site_graphs:main"
-labmim-comparison = "labmim_micrometeorology.cli.run_comparison:main"
-labmim-metrics = "labmim_micrometeorology.cli.run_metrics:main"
+labmim-wrf-figures = "micrometeorology.cli.render_wrf_maps:main"
+labmim-wrf-geojson = "micrometeorology.cli.export_wrf_geojson:main"
+labmim-sensor-process = "micrometeorology.cli.ingest_sensor_data:main"
+labmim-comparison = "micrometeorology.cli.compare_wrf_observations:main"
+labmim-metrics = "micrometeorology.cli.compute_metrics:main"
 # TCC CLIs
 solrad-run = "solrad_correction.cli:run_experiment_cli"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/labmim_micrometeorology", "src/solrad_correction"]
+packages = ["src/micrometeorology", "src/solrad_correction"]
 
 [tool.ruff]
 src = ["src"]
-target-version = "py311"
+target-version = "py314"
 line-length = 100
 exclude = [
     "legacy",
-    "site",
     ".venv",
     "venv",
     "env",
@@ -101,21 +100,37 @@ select = [
     "B",    # flake8-bugbear
     "SIM",  # flake8-simplify
     "TCH",  # flake8-type-checking
+    "PERF", # perflint — catch performance anti-patterns
+    "RUF",  # ruff-specific rules
+    "C4",   # flake8-comprehensions
+    "ARG",  # flake8-unused-arguments
+    "PT",   # flake8-pytest-style
+    "PD",   # pandas-vet
 ]
 ignore = [
     "E501",  # line too long (handled by formatter)
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["labmim_micrometeorology", "solrad_correction"]
+known-first-party = ["micrometeorology", "solrad_correction"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+strict_equality = true
+extra_checks = true
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]

@@ -8,7 +8,7 @@ An advanced scientific computing suite for atmospheric science research, maintai
 
 | Package | Purpose |
 |---|---|
-| **`labmim_micrometeorology`** | High-performance WRF output analysis, interactive WebGIS grid generation, sensor data ingestion, and statistical climatology |
+| **`micrometeorology`** | High-performance WRF output analysis, data export, sensor data ingestion, and statistical climatology |
 | **`solrad_correction`** | Machine learning pipeline for bias correction of WRF diffuse solar radiation (SVM, LSTM, Transformer architectures) |
 
 > 📘 Detailed technical documentation for each package is located in the [`docs/`](docs/) directory.
@@ -19,7 +19,7 @@ An advanced scientific computing suite for atmospheric science research, maintai
 
 ```
 src/
-├── labmim_micrometeorology/      # Core data pipelines, WRF spatial processing, and APIs
+├── micrometeorology/      # Core data pipelines, WRF spatial processing, and APIs
 │   ├── common/                   # Cross-platform config, logging, types
 │   ├── sensors/                  # Datalogger ingestion and calibration algorithms
 │   ├── stats/                    # Statistical comparison and climatological metrics
@@ -31,7 +31,6 @@ src/
 
 configs/                          # YAML environments for pipelines and ML experiments
 scripts/                          # CLI automation tools and Bash workflows
-site/                             # High-performance Vanilla JS WebGIS Interactive Maps
 tests/                            # Comprehensive Pytest suite
 docs/                             # In-depth package documentation
 legacy/                           # Archived Cartopy/Basemap scripts
@@ -72,13 +71,13 @@ pip install -e ".[dev,tcc,video]"
 
 ## Quick Start
 
-### 1. Generate Interactive WebGIS Grids (Primary Workflow)
+### 1. Export WRF Grid Data (Primary Workflow)
 
-The main visualization output for LabMiM is the interactive site frontend. This command extracts spatial data from WRF NetCDF outputs into highly optimized JSON payloads for the web interface.
+This command extracts spatial data from WRF NetCDF outputs into highly optimized JSON and GeoJSON payloads for external visualization tools.
 
 ```bash
 labmim-wrf-geojson --wrf-dir /path/to/wrfout/ --date 20240101 \
-    -D 1 -D 4 -o site/JSON -g site/GeoJSON --workers 44
+    -D 1 -D 4 -o output/JSON -g output/GeoJSON --workers 44
 ```
 
 ### 2. Sensor Data Processing & Calibration
@@ -99,9 +98,9 @@ labmim-metrics -a salvador.dat -b rio.dat -o metrics.csv
 solrad-run --config configs/tcc/experiments/svm_hourly.yaml
 ```
 
-### 5. Static Cartopy Map Generation [Legacy Workflow]
+### 5. Static Cartopy Map Generation
 
-If you need static `.png` maps or `.webm` animations for publications instead of the interactive website, you can use the parallel batch renderer:
+If you need static `.png` maps or `.webm` animations for publications, you can use the parallel batch renderer:
 
 ```bash
 labmim-wrf-figures --wrf-dir /path/to/wrfout/ --date 20240101 \
@@ -126,7 +125,7 @@ ruff check src/ tests/    # lint
 
 | Document | Contents |
 |---|---|
-| [`docs/labmim_micrometeorology.md`](docs/labmim_micrometeorology.md) | Sensor ingestion, calibration, aggregation, WRF parallel pipeline, batch rendering, statistics, CLI reference, FAQ |
+| [`docs/micrometeorology.md`](docs/micrometeorology.md) | Sensor ingestion, calibration, aggregation, WRF parallel pipeline, batch rendering, statistics, CLI reference, FAQ |
 | [`docs/solrad_correction.md`](docs/solrad_correction.md) | Model types (SVM/LSTM/Transformer), experiment configs, transfer learning, data leakage prevention, feature engineering, FAQ |
 
 ---

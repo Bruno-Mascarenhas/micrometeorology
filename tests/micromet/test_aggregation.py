@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from labmim_micrometeorology.sensors.aggregation import aggregate_to_hourly
+from micrometeorology.sensors.aggregation import aggregate_to_hourly
 
 
 @pytest.fixture

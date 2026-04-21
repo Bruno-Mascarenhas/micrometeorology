@@ -20,7 +20,7 @@ class TestCreateSequences:
         """The target for each sequence should be the value AFTER the window."""
         features = np.arange(50).reshape(50, 1).astype(float)
         target = np.arange(50).astype(float) * 10
-        x_seq, y_seq = create_sequences(features, target, sequence_length=5)
+        _x_seq, y_seq = create_sequences(features, target, sequence_length=5)
         # First sequence: features[0:5], target should be target[5]
         assert y_seq[0] == pytest.approx(50.0)
         # Last sequence: features[44:49], target should be target[49]
@@ -29,7 +29,7 @@ class TestCreateSequences:
     def test_sequence_content(self):
         features = np.arange(20).reshape(20, 1).astype(float)
         target = np.ones(20)
-        x_seq, y_seq = create_sequences(features, target, sequence_length=3)
+        x_seq, _y_seq = create_sequences(features, target, sequence_length=3)
         # First window should be [0, 1, 2]
         np.testing.assert_array_equal(x_seq[0, :, 0], [0, 1, 2])
         # Second window should be [1, 2, 3]

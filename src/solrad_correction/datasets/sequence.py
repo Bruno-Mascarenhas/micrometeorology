@@ -19,7 +19,7 @@ class SequenceDataset(Dataset):
     - ``y_target``: scalar tensor (regression target at end of window)
     """
 
-    def __init__(self, features: np.ndarray, targets: np.ndarray) -> None:  # noqa: N803
+    def __init__(self, features: np.ndarray, targets: np.ndarray) -> None:
         """
         Parameters
         ----------
@@ -28,8 +28,8 @@ class SequenceDataset(Dataset):
         targets:
             1-D array of shape ``(n_samples,)``.
         """
-        self.X = torch.tensor(features, dtype=torch.float32)
-        self.y = torch.tensor(targets, dtype=torch.float32)
+        self.X = torch.from_numpy(np.ascontiguousarray(features, dtype=np.float32))
+        self.y = torch.from_numpy(np.ascontiguousarray(targets, dtype=np.float32))
 
     def __len__(self) -> int:
         return len(self.X)
@@ -89,5 +89,5 @@ class SequenceDatasetMeta:
             y_raw=targets,
             feature_names=feature_names,
             sequence_length=seq_len,
-            index=index,
+            index=index,  # type: ignore
         )

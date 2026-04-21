@@ -39,7 +39,7 @@ class ExperimentReport:
 
         # Training history
         if self.train_history:
-            import pandas as pd  # noqa: TC002
+            import pandas as pd
 
             history_df = pd.DataFrame(self.train_history)
             history_df.to_csv(out / "training_history.csv", index_label="epoch")

@@ -6,10 +6,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore
 
 
-@dataclass
+@dataclass(slots=True)
 class DataConfig:
     """Data loading and preparation settings."""
 
@@ -29,7 +29,7 @@ class DataConfig:
     station_lon: float = -38.51
 
 
-@dataclass
+@dataclass(slots=True)
 class SplitConfig:
     """Train / validation / test split settings."""
 
@@ -39,7 +39,7 @@ class SplitConfig:
     shuffle: bool = False  # Default: chronological (no shuffle for time series)
 
 
-@dataclass
+@dataclass(slots=True)
 class PreprocessConfig:
     """Preprocessing pipeline settings."""
 
@@ -48,7 +48,7 @@ class PreprocessConfig:
     drop_na_threshold: float = 0.5  # Drop columns with > 50% NaN
 
 
-@dataclass
+@dataclass(slots=True)
 class FeatureConfig:
     """Feature engineering settings."""
 
@@ -60,11 +60,15 @@ class FeatureConfig:
     add_diffs: bool = False  # first differences
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelConfig:
     """Model-specific hyperparameters."""
 
     model_type: str = "svm"  # "svm", "lstm", "transformer"
+
+    # Checkpointing / Logging
+    pretrained_path: str | None = None
+    log_dir: str | None = None
 
     # SVM
     svm_kernel: str = "rbf"
@@ -94,9 +98,6 @@ class ModelConfig:
     max_epochs: int = 100
     patience: int = 10  # early stopping
     min_delta: float = 1e-4
-
-    # Transfer learning
-    pretrained_path: str | None = None  # Path to load weights from
 
 
 @dataclass

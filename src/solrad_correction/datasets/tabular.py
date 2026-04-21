@@ -45,12 +45,12 @@ class TabularDataset:
         drop_na:
             If True, drop rows with any NaN in features or target.
         """
-        subset = df[feature_columns + [target_column]].copy()
+        subset = df[[*feature_columns, target_column]].copy()
         if drop_na:
             subset = subset.dropna()
 
-        features = subset[feature_columns].values.astype(np.float32)
-        targets = subset[target_column].values.astype(np.float32)
+        features = subset[feature_columns].to_numpy().astype(np.float32)
+        targets = subset[target_column].to_numpy().astype(np.float32)
         index = subset.index if isinstance(subset.index, pd.DatetimeIndex) else None
 
         return cls(X=features, y=targets, feature_names=list(feature_columns), index=index)
@@ -87,4 +87,4 @@ class TabularDataset:
             idx_df = pd.read_csv(idx_path)
             index = pd.to_datetime(idx_df.iloc[:, 0])
 
-        return cls(X=features, y=targets, feature_names=feature_names, index=index)
+        return cls(X=features, y=targets, feature_names=feature_names, index=index)  # type: ignore

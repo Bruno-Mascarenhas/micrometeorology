@@ -58,7 +58,7 @@ class PreprocessingPipeline:
 
         # Imputation fill values (learned from train)
         if self.impute_strategy == "mean":
-            self._fill_values = df_clean.mean().to_dict()
+            self._fill_values = df_clean.mean().to_dict()  # type: ignore
         elif self.impute_strategy == "ffill":
             self._fill_values = {}  # ffill doesn't need pre-computed values
 
@@ -126,9 +126,9 @@ class PreprocessingPipeline:
     def inverse_transform_column(self, values: np.ndarray, column: str) -> np.ndarray:
         """Inverse-transform a single column (e.g. to get predictions in original scale)."""
         if self.scaler_type == "standard" and self._mean is not None and self._std is not None:
-            return values * self._std[column] + self._mean[column]
+            return values * self._std[column] + self._mean[column]  # type: ignore
         elif self.scaler_type == "minmax" and self._min is not None and self._max is not None:
-            return values * (self._max[column] - self._min[column]) + self._min[column]
+            return values * (self._max[column] - self._min[column]) + self._min[column]  # type: ignore
         return values
 
     def save(self, path: str | Path) -> None:

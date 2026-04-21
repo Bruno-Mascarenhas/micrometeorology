@@ -13,7 +13,7 @@ from datetime import datetime
 import numpy as np
 import pytest
 
-from labmim_micrometeorology.wrf.geojson import (
+from micrometeorology.wrf.geojson import (
     create_grid_geojson,
     create_values_json,
     create_wind_vectors_json,
@@ -24,27 +24,27 @@ from labmim_micrometeorology.wrf.geojson import (
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
+@pytest.fixture
 def sample_grid() -> tuple[np.ndarray, np.ndarray]:
-    """Small 4×5 lon/lat grid for testing."""
+    """Small 4x5 lon/lat grid for testing."""
     ny, nx = 4, 5
     lon = np.linspace(-40, -38, nx)[np.newaxis, :].repeat(ny, axis=0)
     lat = np.linspace(-14, -12, ny)[:, np.newaxis].repeat(nx, axis=1)
     return lon, lat
 
 
-@pytest.fixture()
+@pytest.fixture
 def sample_values_2d() -> np.ndarray:
-    """4×5 array with some NaN values."""
+    """4x5 array with some NaN values."""
     arr = np.arange(20, dtype=np.float64).reshape(4, 5)
     arr[0, 0] = np.nan
     arr[2, 3] = np.nan
     return arr
 
 
-@pytest.fixture()
+@pytest.fixture
 def sample_wind_2d() -> tuple[np.ndarray, np.ndarray]:
-    """4×5 U/V wind component arrays."""
+    """4x5 U/V wind component arrays."""
     rng = np.random.default_rng(42)
     u = rng.uniform(-5, 5, size=(4, 5))
     v = rng.uniform(-5, 5, size=(4, 5))

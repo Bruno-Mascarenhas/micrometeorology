@@ -22,7 +22,7 @@ def save_json(data: dict, path: str | Path) -> None:
 def load_json(path: str | Path) -> dict:
     """Load a JSON file."""
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        return json.load(f)  # type: ignore
 
 
 def save_predictions(
@@ -32,8 +32,8 @@ def save_predictions(
     index: pd.DatetimeIndex | None = None,
 ) -> None:
     """Save ground truth and predictions as CSV."""
-    import numpy as np  # noqa: TC002
-    import pandas as pd  # noqa: TC002
+    import numpy as np
+    import pandas as pd
 
     df = pd.DataFrame(
         {"y_true": np.asarray(y_true).flatten(), "y_pred": np.asarray(y_pred).flatten()}

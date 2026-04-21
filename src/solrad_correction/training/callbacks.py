@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 class EarlyStopping:
     """Stop training when a monitored metric stops improving.
 
+    Uses ``__slots__`` for reduced memory overhead.
+
     Parameters
     ----------
     patience:
@@ -25,6 +27,8 @@ class EarlyStopping:
         ``"min"`` for loss-like metrics (lower is better),
         ``"max"`` for accuracy-like metrics (higher is better).
     """
+
+    __slots__ = ("best_score", "counter", "min_delta", "mode", "patience", "should_stop")
 
     def __init__(self, patience: int = 10, min_delta: float = 1e-4, mode: str = "min") -> None:
         self.patience = patience

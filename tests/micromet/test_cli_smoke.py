@@ -1,12 +1,12 @@
 import pytest
 from click.testing import CliRunner
 
-from labmim_micrometeorology.cli.generate_site_graphs import main as site_graphs_main
-from labmim_micrometeorology.cli.process_sensor_data import main as sensor_process_main
-from labmim_micrometeorology.cli.process_wrf_figures import main as wrf_figures_main
-from labmim_micrometeorology.cli.process_wrf_geojson import main as wrf_geojson_main
-from labmim_micrometeorology.cli.run_comparison import main as comparison_main
-from labmim_micrometeorology.cli.run_metrics import main as metrics_main
+from micrometeorology.cli.compare_wrf_observations import main as comparison_main
+from micrometeorology.cli.compute_metrics import main as metrics_main
+from micrometeorology.cli.export_wrf_geojson import main as wrf_geojson_main
+from micrometeorology.cli.ingest_sensor_data import main as sensor_process_main
+from micrometeorology.cli.plot_station_graphs import main as site_graphs_main
+from micrometeorology.cli.render_wrf_maps import main as wrf_figures_main
 from solrad_correction.cli import run_experiment_cli
 
 
@@ -17,7 +17,7 @@ def runner():
 
 
 @pytest.mark.parametrize(
-    "command_fn, name",
+    ("command_fn", "name"),
     [
         (wrf_figures_main, "labmim-wrf-figures"),
         (wrf_geojson_main, "labmim-wrf-geojson"),

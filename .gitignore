@@ -63,6 +63,8 @@ coverage.xml
 # ==============================================================================
 /data/
 /logs/
+/runs/
+/tb_logs/
 *.nc
 *.nc4
 *.hdf
@@ -79,17 +81,6 @@ coverage.xml
 *.joblib
 *.pkl
 
-# ==============================================================================
-# Web App & Frontend Generated Files
-# ==============================================================================
-# Ensure generated payload data is NOT tracked, but source files remain
-site/JSON/
-site/GeoJSON/
-site/videos/
-site/figuras/
-site/*.webm
-site/*.mp4
-site/*.gif
 
 # ==============================================================================
 # Output Images

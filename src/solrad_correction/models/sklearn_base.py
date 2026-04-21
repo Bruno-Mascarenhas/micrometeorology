@@ -33,7 +33,7 @@ class SklearnRegressorModel(BaseRegressorModel):
         self,
         train_data: TabularDataset,
         val_data: TabularDataset | None = None,
-        config: ModelConfig | None = None,
+        _config: ModelConfig | None = None,
     ) -> SklearnRegressorModel:
         """Fit the sklearn estimator on tabular data."""
         logger.info("Training %s on %d samples", self.name, len(train_data))
@@ -48,7 +48,7 @@ class SklearnRegressorModel(BaseRegressorModel):
     def predict(self, data: TabularDataset | np.ndarray) -> np.ndarray:
         """Predict using the fitted estimator."""
         x_input = data.X if hasattr(data, "X") else np.asarray(data)
-        return self._estimator.predict(x_input).astype(np.float32)
+        return self._estimator.predict(x_input).astype(np.float32)  # type: ignore
 
     def save(self, path: str | Path) -> None:
         """Save model via joblib."""

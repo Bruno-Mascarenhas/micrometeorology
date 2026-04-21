@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from labmim_micrometeorology.sensors.wind import (
+from micrometeorology.sensors.wind import (
     vector_mean_direction,
     wind_components,
     wind_speed_from_components,
@@ -56,18 +56,18 @@ class TestVectorMeanDirection:
         assert mean_dir < 10.0 or mean_dir > 350.0
 
     def test_elementwise_direction(self):
-        from labmim_micrometeorology.sensors.wind import wind_direction_from_components
+        from micrometeorology.sensors.wind import wind_direction_from_components
 
         speeds = np.array([1.0, 1.0, 1.0])
         dirs = np.array([0.0, 90.0, 180.0])
         u, v = wind_components(speeds, dirs)
         out_dirs = wind_direction_from_components(u, v)
-        assert out_dirs.shape == (3,)
-        assert out_dirs[0] == pytest.approx(0.0, abs=0.1) or out_dirs[0] == pytest.approx(
+        assert out_dirs.shape == (3,)  # type: ignore
+        assert out_dirs[0] == pytest.approx(0.0, abs=0.1) or out_dirs[0] == pytest.approx(  # type: ignore
             360.0, abs=0.1
         )
-        assert out_dirs[1] == pytest.approx(90.0, abs=0.1)
-        assert out_dirs[2] == pytest.approx(180.0, abs=0.1)
+        assert out_dirs[1] == pytest.approx(90.0, abs=0.1)  # type: ignore
+        assert out_dirs[2] == pytest.approx(180.0, abs=0.1)  # type: ignore
 
 
 class TestWindSpeed:

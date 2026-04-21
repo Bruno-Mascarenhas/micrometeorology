@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -35,7 +35,7 @@ class PositionalEncoding(nn.Module):
         pe = pe.unsqueeze(0)  # (1, max_len, d_model)
         self.register_buffer("pe", pe)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Any:
         """Add positional encoding to input.
 
         Parameters
@@ -43,7 +43,7 @@ class PositionalEncoding(nn.Module):
         x:
             Tensor of shape ``(batch, seq_len, d_model)``.
         """
-        x = x + self.pe[:, : x.size(1)]
+        x = x + self.pe[:, : x.size(1)]  # type: ignore
         return self.dropout(x)
 
 
@@ -92,7 +92,7 @@ class TimeSeriesTransformer(nn.Module):
             nn.Linear(d_model // 2, 1),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Any:
         """Forward pass.
 
         Parameters

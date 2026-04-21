@@ -71,11 +71,13 @@ class TorchRegressorModel(BaseRegressorModel):
             config=config,
             start_epoch=self._start_epoch,
         )
-        self._module, history = trainer.train(train_data, val_data)
+        self._module, _history = trainer.train(train_data, val_data)
         return self
 
     def predict(self, data: SequenceDataset | np.ndarray) -> np.ndarray:
-        """Generate predictions in eval mode."""
+        """Generate predictions using a batched DataLoader to prevent OOM."""
+        from torch.utils.data import DataLoader, TensorDataset
+
         self._module.eval()
         self._module.to(self._device)
 
@@ -88,10 +90,25 @@ class TorchRegressorModel(BaseRegressorModel):
         else:
             x_input = torch.tensor(np.asarray(data), dtype=torch.float32)
 
-        with torch.no_grad():
-            preds = self._module(x_input.to(self._device))
+        # Use TensorDataset and DataLoader for batched inference
+        dataset = TensorDataset(x_input)
 
-        return preds.cpu().numpy().flatten()
+        # Batch size defaults to a reasonable number if not specified in config
+        batch_size = getattr(self, "_config", None)
+        bs = batch_size.batch_size if hasattr(batch_size, "batch_size") else 256  # type: ignore
+
+        loader = DataLoader(dataset, batch_size=bs, shuffle=False)
+        all_preds = []
+
+        with torch.no_grad():
+            device_type = "cuda" if "cuda" in self._device else "cpu"
+            for batch in loader:
+                batch_x = batch[0].to(self._device, non_blocking=True)
+                with torch.autocast(device_type=device_type, enabled="cuda" in self._device):
+                    preds = self._module(batch_x)
+                all_preds.append(preds.cpu().numpy().flatten())
+
+        return np.concatenate(all_preds)
 
     def save(self, path: str | Path) -> None:
         """Save model checkpoint (state_dict + config for transfer learning)."""
@@ -100,7 +117,7 @@ class TorchRegressorModel(BaseRegressorModel):
         config_dict = None
         if hasattr(self, "_config") and self._config is not None:
             config_dict = (
-                dataclasses.asdict(self._config)
+                dataclasses.asdict(self._config)  # type: ignore
                 if dataclasses.is_dataclass(self._config)
                 else self._config
             )

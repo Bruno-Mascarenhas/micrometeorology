@@ -51,7 +51,7 @@ class TestPreprocessingPipeline:
         train_std_a = train_df["A"].std()
 
         expected_test_a = (test_df["A"] - train_mean_a) / train_std_a
-        np.testing.assert_array_almost_equal(test_out["A"].values, expected_test_a.values)
+        np.testing.assert_array_almost_equal(test_out["A"].values, expected_test_a.values)  # type: ignore
 
     def test_leakage_prevention_imputation(self, train_df, test_df):
         pipeline = PreprocessingPipeline(
@@ -98,5 +98,5 @@ class TestPreprocessingPipeline:
         assert out["A"].min() == 0.0
         assert out["A"].max() == 1.0
 
-        recovered = pipeline.inverse_transform_column(out["A"].values, "A")
+        recovered = pipeline.inverse_transform_column(out["A"].values, "A")  # type: ignore
         np.testing.assert_array_almost_equal(recovered, train_df.loc[out.index, "A"].values)

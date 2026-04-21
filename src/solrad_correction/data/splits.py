@@ -86,7 +86,7 @@ class ExpandingWindowSplit:
     def split(
         self,
         df: pd.DataFrame,
-    ) -> Generator[tuple[np.ndarray, np.ndarray], None, None]:
+    ) -> Generator[tuple[np.ndarray, np.ndarray]]:
         """Yield ``(train_idx, val_idx)`` tuples."""
         n = len(df)
         start = self.initial_train_size
@@ -111,7 +111,7 @@ class TimeSeriesKFold:
     def split(
         self,
         df: pd.DataFrame,
-    ) -> Generator[tuple[np.ndarray, np.ndarray], None, None]:
+    ) -> Generator[tuple[np.ndarray, np.ndarray]]:
         """Yield ``(train_idx, val_idx)`` tuples."""
         n = len(df)
         fold_size = n // (self.n_splits + 1)

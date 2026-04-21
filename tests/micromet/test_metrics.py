@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from labmim_micrometeorology.stats.metrics import (
+from micrometeorology.stats.metrics import (
     compute_all,
     correlation,
     d_index,

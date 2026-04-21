@@ -54,13 +54,13 @@ class BaseRegressorModel(ABC):
     def evaluate(
         self,
         data: Any,
-        metrics: dict[str, callable] | None = None,
+        metrics: dict[str, callable] | None = None,  # type: ignore
     ) -> dict[str, float]:
         """Evaluate the model on a dataset.
 
         Default implementation: predict then compute metrics.
         """
-        from labmim_micrometeorology.stats.metrics import ALL_METRICS
+        from micrometeorology.stats.metrics import ALL_METRICS
 
         if metrics is None:
             metrics = ALL_METRICS

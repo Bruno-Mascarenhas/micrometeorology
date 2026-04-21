@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from sklearn.svm import SVR
+from sklearn.svm import SVR  # type: ignore
 
 from solrad_correction.models.sklearn_base import SklearnRegressorModel
 

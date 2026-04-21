@@ -1,4 +1,4 @@
-"""Regression metrics — reuses labmim_micrometeorology and adds MAPE."""
+"""Regression metrics — reuses micrometeorology and adds MAPE."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 # Re-export from the micrometeorology package
-from labmim_micrometeorology.stats.metrics import (  # noqa: E402
+from micrometeorology.stats.metrics import (
     correlation,
     d_index,
     mae,

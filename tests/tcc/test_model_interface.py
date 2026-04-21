@@ -14,7 +14,7 @@ class TestBaseInterface:
     def test_is_abstract(self):
         """BaseRegressorModel cannot be instantiated directly."""
         with pytest.raises(TypeError):
-            BaseRegressorModel()
+            BaseRegressorModel()  # type: ignore
 
     def test_svm_has_required_methods(self):
         model = SVMRegressor()

@@ -41,7 +41,7 @@ class TestTemporalSplit:
         assert val.index.max() < test.index.min()
 
     def test_invalid_ratios(self, time_series_df):
-        with pytest.raises(ValueError, match="sum to 1.0"):
+        with pytest.raises(ValueError, match=r"sum to 1\.0"):
             temporal_train_val_test_split(time_series_df, 0.5, 0.5, 0.5)
 
 

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from labmim_micrometeorology.sensors.calibration import apply_calibrations, unify_sensor_columns
+from micrometeorology.sensors.calibration import apply_calibrations, unify_sensor_columns
 
 
 @pytest.fixture

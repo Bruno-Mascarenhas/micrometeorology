@@ -100,7 +100,7 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
         scaler_type=config.preprocess.scaler_type,
         impute_strategy=config.preprocess.impute_strategy,
     )
-    all_cols = feature_cols + [config.data.target_column]
+    all_cols = [*feature_cols, config.data.target_column]
     train_pp = pipeline.fit_transform(train_df[all_cols])
     val_pp = pipeline.transform(val_df[all_cols])
     test_pp = pipeline.transform(test_df[all_cols])
@@ -121,10 +121,10 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
         from solrad_correction.models.svm import SVMRegressor
 
         model = SVMRegressor.from_config(config.model)
-        model.fit(train_ds, val_ds, config.model)
+        model.fit(train_ds, val_ds, config.model)  # type: ignore
         model.save(exp_dir / "model.joblib")
 
-        y_pred = model.predict(test_ds)
+        y_pred = model.predict(test_ds)  # type: ignore
         y_true = test_ds.y
 
     elif model_type in ("lstm", "transformer"):
@@ -134,13 +134,19 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
         seq_len = config.model.sequence_length
 
         train_x, train_y = create_sequences(
-            train_pp[feature_cols].values, train_pp[config.data.target_column].values, seq_len
+            train_pp[feature_cols].values,  # type: ignore
+            train_pp[config.data.target_column].values,  # type: ignore
+            seq_len,  # type: ignore
         )
         val_x, val_y = create_sequences(
-            val_pp[feature_cols].values, val_pp[config.data.target_column].values, seq_len
+            val_pp[feature_cols].values,  # type: ignore
+            val_pp[config.data.target_column].values,  # type: ignore
+            seq_len,  # type: ignore
         )
         test_x, test_y = create_sequences(
-            test_pp[feature_cols].values, test_pp[config.data.target_column].values, seq_len
+            test_pp[feature_cols].values,  # type: ignore
+            test_pp[config.data.target_column].values,  # type: ignore
+            seq_len,  # type: ignore
         )
 
         train_seq = SequenceDataset(train_x, train_y)
@@ -160,16 +166,16 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
         if model_type == "lstm":
             from solrad_correction.models.lstm import LSTMRegressor
 
-            model = LSTMRegressor.from_config(config.model, input_size)
+            model = LSTMRegressor.from_config(config.model, input_size)  # type: ignore
         else:
             from solrad_correction.models.transformer import TransformerRegressor
 
-            model = TransformerRegressor.from_config(config.model, input_size)
+            model = TransformerRegressor.from_config(config.model, input_size)  # type: ignore
 
-        model.fit(train_seq, val_seq, config.model)
+        model.fit(train_seq, val_seq, config.model)  # type: ignore
         model.save(exp_dir / "model.pt")
 
-        y_pred = model.predict(test_seq)
+        y_pred = model.predict(test_seq)  # type: ignore
         y_true = test_y
 
     else:

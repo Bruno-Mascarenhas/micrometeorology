@@ -50,7 +50,7 @@ def save_torch_checkpoint(
 
 
 def load_torch_checkpoint(path: str | Path) -> dict:
-    """Load a PyTorch checkpoint."""
+    """Load a PyTorch checkpoint securely."""
     import torch
 
-    return torch.load(path, map_location="cpu", weights_only=False)
+    return torch.load(path, map_location="cpu", weights_only=True)  # type: ignore
