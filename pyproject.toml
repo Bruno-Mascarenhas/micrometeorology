@@ -71,6 +71,7 @@ labmim-wrf-geojson = "micrometeorology.cli.export_wrf_geojson:main"
 labmim-sensor-process = "micrometeorology.cli.ingest_sensor_data:main"
 labmim-comparison = "micrometeorology.cli.compare_wrf_observations:main"
 labmim-metrics = "micrometeorology.cli.compute_metrics:main"
+labmim-station-graphs = "micrometeorology.cli.generate_station_graphs:main"
 # TCC CLIs
 solrad-run = "solrad_correction.cli:run_experiment_cli"
 

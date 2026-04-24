@@ -111,5 +111,5 @@ def aggregate_to_hourly(
 
     out = pd.DataFrame(results)
     out.index.name = None
-    logger.info("Aggregated %d rows → %d rows (%s)", len(df), len(out), freq)
+    logger.info("Aggregated %d rows -> %d rows (%s)", len(df), len(out), freq)
     return out

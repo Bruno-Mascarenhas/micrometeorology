@@ -61,7 +61,6 @@ def read_campbell_dat(
         skiprows=skip_rows,
         low_memory=False,
         parse_dates=False,
-        engine="pyarrow",
     )
 
     # Set timestamp index
@@ -81,11 +80,11 @@ def read_campbell_dat(
     if len(obj_cols) > 0:
         df[obj_cols] = df[obj_cols].apply(pd.to_numeric, errors="coerce")
 
-    # Sentinel value → NaN
+    # Sentinel value -> NaN
     if sentinel_value is not None:
         df = df.mask(df <= sentinel_value)
 
-    logger.info("  → %d rows, %d columns", len(df), len(df.columns))
+    logger.info("  -> %d rows, %d columns", len(df), len(df.columns))
     return df
 
 
@@ -118,7 +117,7 @@ def merge_dat_files(
         merged = merged.loc[~merged.index.duplicated(keep="first")]
 
     logger.info(
-        "Merged %d files → %d rows, %d columns", len(paths), len(merged), len(merged.columns)
+        "Merged %d files -> %d rows, %d columns", len(paths), len(merged), len(merged.columns)
     )
     return merged
 
@@ -145,6 +144,6 @@ def apply_physical_limits(
         mask = (df[col] < lower) | (df[col] > upper)
         n_bad = mask.sum()
         if n_bad > 0:
-            logger.debug("  %s: %d values outside [%.1f, %.1f] → NaN", col, n_bad, lower, upper)
+            logger.debug("  %s: %d values outside [%.1f, %.1f] -> NaN", col, n_bad, lower, upper)
             df.loc[mask, col] = np.nan
     return df
