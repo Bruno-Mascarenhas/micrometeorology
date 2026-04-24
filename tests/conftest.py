@@ -13,7 +13,7 @@ import os
 import sys
 
 
-def pytest_configure(config):
+def pytest_configure(config):  # noqa: ARG001
     """Register extra DLL search paths and pre-load torch on Windows."""
     if sys.platform == "win32":
         # Prevent OMP: Error #15 (dual OpenMP runtime init)
