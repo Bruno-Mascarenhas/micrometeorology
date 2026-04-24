@@ -21,10 +21,7 @@ import click
 import numpy as np
 
 from micrometeorology.common.logging import setup_logging
-from micrometeorology.common.types import (
-    VARIABLE_NETCDF_MAP,
-    WRFVariable,
-)
+from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import geojson, reader
 from micrometeorology.wrf import variables as vmod
 from micrometeorology.wrf.batch import JsonTask, default_workers, run_json_tasks

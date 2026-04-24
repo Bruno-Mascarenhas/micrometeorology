@@ -14,7 +14,7 @@ def main() -> None:
     """Run the WRF post-processing pipeline on all available data."""
     setup_logging(level="INFO")
 
-    data_dir = Path("data")
+    data_dir = Path("/home/models/WRF/wrf-op/d-output/20260330/wrf01")
     output_json = Path("output/wrf_json")
     output_geojson = Path("output/wrf_geojson")
     output_figures = Path("output/wrf_figures")
@@ -54,20 +54,20 @@ def main() -> None:
             logger.error("Error running export for %s: %s", f, e)
 
         # 2. Render maps
-        cmd_render = [
-            "python",
-            "-m",
-            "micrometeorology.cli.render_wrf_maps",
-            "--dataset",
-            f,
-            "-o",
-            str(output_figures),
-        ]
-        logger.info("Running: %s", " ".join(cmd_render))
-        try:
-            subprocess.run(cmd_render, check=True)
-        except subprocess.CalledProcessError as e:
-            logger.error("Error running render for %s: %s", f, e)
+        # cmd_render = [
+        #     "python",
+        #     "-m",
+        #     "micrometeorology.cli.render_wrf_maps",
+        #     "--dataset",
+        #     f,
+        #     "-o",
+        #     str(output_figures),
+        # ]
+        # logger.info("Running: %s", " ".join(cmd_render))
+        # try:
+        #     subprocess.run(cmd_render, check=True)
+        # except subprocess.CalledProcessError as e:
+        #     logger.error("Error running render for %s: %s", f, e)
 
 
 if __name__ == "__main__":

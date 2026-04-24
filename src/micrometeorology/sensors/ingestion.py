@@ -68,6 +68,8 @@ def read_campbell_dat(
         df.index = pd.to_datetime(df[timestamp_column], format="ISO8601")
         df.index.name = None
         df = df.drop(columns=[timestamp_column])
+        # Drop duplicated timestamps keeping the first occurrence
+        df = df.loc[~df.index.duplicated(keep="first")]
 
     # Drop requested columns (only those that actually exist)
     if drop_columns:

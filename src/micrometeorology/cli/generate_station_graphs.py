@@ -16,9 +16,9 @@ Usage::
 
     # With optional WRF overlay:
     python -m micrometeorology.cli.generate_station_graphs \
-        --lenta data/LBM_lenta_2022.dat \
-        --rain  data/LBM_rain_2022.dat  \
-        --wrf   data/formatado/series_operacional.dat \
+        --lenta data/LBM_lenta_2025.dat \
+        --rain  data/LBM_rain_2025.dat  \
+        --wrf   data/series_operacional.dat \
         --output-dir output/figures
 """
 
@@ -92,7 +92,7 @@ RH_WXT_OFFSET = 10.339
 # Maps graph -> WRF column name.  The WRF file has the first 4 columns as
 # year, month, day, hour for datetime construction, then variable columns.
 WRF_COLUMNS = {
-    "radiacao_difusa": "Sw_dw",
+    "radiacao_difusa": "Swdw",
     "temperatura": "T",
     "umidade": "ur",
     "pressao": "pressure",
@@ -235,7 +235,7 @@ def _plot_radiacao_liq(
     if col in hourly.columns:
         ax.plot(hourly.index, hourly[col], "-vr", label="RN 1h")
 
-    ax.set_ylim(-200, 800)
+    ax.set_ylim(-200, 900)
     setup_date_axis(ax)
     plt.ylabel(
         "Radiacao Liquida (W/m\u00b2)",
@@ -526,8 +526,12 @@ def _plot_precipitacao(
     help="Optional: path to WRF series_operacional.dat for model overlay.",
 )
 @click.option(
-    "--last-days", default=7, type=int, show_default=True, help="Number of recent days to plot."
+    "--start-date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    default=None,
+    help="Initial date for the plot (YYYY-MM-DD). If omitted, defaults to today minus 'days'.",
 )
+@click.option("--days", default=7, type=int, show_default=True, help="Number of days to plot.")
 @click.option(
     "--rh-offset",
     default=RH_WXT_OFFSET,
@@ -541,7 +545,8 @@ def main(
     rain: str,
     output_dir: str,
     wrf_path: str | None,
-    last_days: int,
+    start_date: datetime | None,
+    days: int,
     rh_offset: float,
     log_level: str,
 ) -> None:
@@ -592,17 +597,15 @@ def main(
         df_lenta[RAIN_COLUMN] = df_rain[RAIN_COLUMN].reindex(df_lenta.index)
 
     # ------------------------------------------------------------------
-    # 3. Filter to last N days
+    # 3. Filter by date range
     # ------------------------------------------------------------------
-    date_end = pd.Timestamp(now)
-
-    # If current time is beyond the data range, fall back to data end
-    data_max = df_lenta.index.max()
-    if date_end > data_max:
-        logger.info("Current date beyond data range; using data end: %s", data_max)
-        date_end = data_max
-
-    date_start = date_end - pd.Timedelta(days=last_days)
+    if start_date is not None:
+        date_start = pd.Timestamp(start_date)
+        date_end = date_start + pd.Timedelta(days=days)
+    else:
+        # Always plot from today - days to today if no start_date is given
+        date_end = pd.Timestamp(now)
+        date_start = date_end - pd.Timedelta(days=days)
 
     mask_lenta = (df_lenta.index >= date_start) & (df_lenta.index <= date_end)
     mask_rain = (df_rain.index >= date_start) & (df_rain.index <= date_end)
@@ -611,7 +614,7 @@ def main(
     raw_rain = df_rain.loc[mask_rain].copy()
 
     click.echo(
-        f"  filtered to last {last_days} days: {len(raw)} rows (lenta), {len(raw_rain)} rows (rain)"
+        f"  filtered for {days} days ({date_start.date()} to {date_end.date()}): {len(raw)} rows (lenta), {len(raw_rain)} rows (rain)"
     )
 
     if raw.empty:
