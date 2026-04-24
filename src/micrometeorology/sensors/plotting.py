@@ -41,14 +41,22 @@ def add_labmim_watermark(
 ) -> None:
     """Add the LabMiM/UFBA watermark text centred on the axes."""
     ax.text(
-        0.5, 0.55, line1,
-        fontsize=WATERMARK_FONTSIZE, color=WATERMARK_COLOR,
-        horizontalalignment="center", transform=ax.transAxes,
+        0.5,
+        0.55,
+        line1,
+        fontsize=WATERMARK_FONTSIZE,
+        color=WATERMARK_COLOR,
+        horizontalalignment="center",
+        transform=ax.transAxes,
     )
     ax.text(
-        0.5, 0.45, line2,
-        fontsize=WATERMARK_FONTSIZE, color=WATERMARK_COLOR,
-        horizontalalignment="center", transform=ax.transAxes,
+        0.5,
+        0.45,
+        line2,
+        fontsize=WATERMARK_FONTSIZE,
+        color=WATERMARK_COLOR,
+        horizontalalignment="center",
+        transform=ax.transAxes,
     )
 
 
@@ -63,9 +71,13 @@ def setup_date_axis(ax) -> None:
 def add_timestamp_label(ax, dt) -> None:
     """Add a date/time label in the top-right corner of the axes."""
     ax.text(
-        1.0, 0.95, dt.strftime("%Y-%m-%d %H:%M"),
-        fontsize=10, color="black",
-        horizontalalignment="right", transform=ax.transAxes,
+        1.0,
+        0.95,
+        dt.strftime("%Y-%m-%d %H:%M"),
+        fontsize=10,
+        color="black",
+        horizontalalignment="right",
+        transform=ax.transAxes,
     )
 
 
@@ -73,7 +85,10 @@ def add_top_legend(ax, *, ncol: int = 3, loc: int = 3) -> None:
     """Add a legend bar along the top edge of the axes."""
     ax.legend(
         bbox_to_anchor=(0.0, 1.0, 1.0, 0.1),
-        loc=loc, ncol=ncol, mode="expand", borderaxespad=0.0,
+        loc=loc,
+        ncol=ncol,
+        mode="expand",
+        borderaxespad=0.0,
     )
 
 

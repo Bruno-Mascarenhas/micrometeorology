@@ -56,15 +56,28 @@ logger = logging.getLogger(__name__)
 
 # Columns to drop from the slow (lenta) file -- raw millivolt / admin columns
 LENTA_DROP_COLUMNS = [
-    "RECORD", "rtime", "batt_volt", "panel_temp",
-    "CM3Up_mv_Avg", "CG3Up_mv_Avg", "CM3Dn_mv_Avg", "CG3Dn_mv_Avg",
-    "CNR1TK_Avg", "NRLite_Wm2_Avg", "NRLite_Wm2Cr_Avg",
-    "CMP21_Avg", "PAR_Den_Avg",
+    "RECORD",
+    "rtime",
+    "batt_volt",
+    "panel_temp",
+    "CM3Up_mv_Avg",
+    "CG3Up_mv_Avg",
+    "CM3Dn_mv_Avg",
+    "CG3Dn_mv_Avg",
+    "CNR1TK_Avg",
+    "NRLite_Wm2_Avg",
+    "NRLite_Wm2Cr_Avg",
+    "CMP21_Avg",
+    "PAR_Den_Avg",
 ]
 
 # Columns to drop from the rain file
 RAIN_DROP_COLUMNS = [
-    "RECORD", "rtime(9)", "rtime(1)", "rtime(4)", "rtime(5)",
+    "RECORD",
+    "rtime(9)",
+    "rtime(1)",
+    "rtime(4)",
+    "rtime(5)",
 ]
 
 # Precipitation column
@@ -115,8 +128,7 @@ def read_wrf_series(path: str | Path) -> pd.DataFrame:
     return wrf
 
 
-def _plot_wrf_overlay(ax, wrf: pd.DataFrame | None, col: str,
-                      label: str = "wrf 1h") -> None:
+def _plot_wrf_overlay(ax, wrf: pd.DataFrame | None, col: str, label: str = "wrf 1h") -> None:
     """Add a dashed black WRF overlay line if data is available."""
     if wrf is None or col not in wrf.columns:
         return
@@ -128,9 +140,13 @@ def _plot_wrf_overlay(ax, wrf: pd.DataFrame | None, col: str,
 # ---------------------------------------------------------------------------
 
 
-def _plot_radiacao_difusa(raw: pd.DataFrame, hourly: pd.DataFrame,
-                          out_dir: Path, dt: datetime,
-                          wrf: pd.DataFrame | None = None) -> None:
+def _plot_radiacao_difusa(
+    raw: pd.DataFrame,
+    hourly: pd.DataFrame,
+    out_dir: Path,
+    dt: datetime,
+    wrf: pd.DataFrame | None = None,
+) -> None:
     """Graph 1 -- Solar Radiation (SW global + diffuse)."""
     fig, ax = create_figure()
 
@@ -138,31 +154,31 @@ def _plot_radiacao_difusa(raw: pd.DataFrame, hourly: pd.DataFrame,
     col_df = "CMP21_Wm2_Avg"
 
     if col_sw in raw.columns:
-        ax.plot(raw.index, raw[col_sw], "o", color="yellow", markersize=6,
-                label="Media 5 min")
+        ax.plot(raw.index, raw[col_sw], "o", color="yellow", markersize=6, label="Media 5 min")
     if col_df in raw.columns:
-        ax.plot(raw.index, raw[col_df], "o", color="silver", markersize=6,
-                label="Media 5 min")
+        ax.plot(raw.index, raw[col_df], "o", color="silver", markersize=6, label="Media 5 min")
     if col_sw in hourly.columns:
         ax.plot(hourly.index, hourly[col_sw], "-vr", label="SW_dw 1h")
     if col_df in hourly.columns:
         ax.plot(hourly.index, hourly[col_df], "-db", label="SW_df 1h")
 
-    _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["radiacao_difusa"],
-                      label="SW_dw-wrf 1h")
+    _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["radiacao_difusa"], label="SW_dw-wrf 1h")
 
     ax.set_ylim(0, 1360)
     setup_date_axis(ax)
-    plt.ylabel("Radiacao Solar (W/m\u00b2)", fontsize=12,
-               horizontalalignment="center", verticalalignment="center")
+    plt.ylabel(
+        "Radiacao Solar (W/m\u00b2)",
+        fontsize=12,
+        horizontalalignment="center",
+        verticalalignment="center",
+    )
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=4)
     save_figure(fig, out_dir / "radiacao_difusa.png")
 
 
-def _plot_balanco(raw: pd.DataFrame, hourly: pd.DataFrame,
-                  out_dir: Path, dt: datetime) -> None:
+def _plot_balanco(raw: pd.DataFrame, hourly: pd.DataFrame, out_dir: Path, dt: datetime) -> None:
     """Graph 2 -- Radiation Balance (all four components)."""
     fig, ax = create_figure()
 
@@ -193,16 +209,21 @@ def _plot_balanco(raw: pd.DataFrame, hourly: pd.DataFrame,
 
     ax.set_ylim(-750, 1200)
     setup_date_axis(ax)
-    plt.ylabel("Balanco de Radiacao (W/m\u00b2)", fontsize=12,
-               horizontalalignment="center", verticalalignment="center")
+    plt.ylabel(
+        "Balanco de Radiacao (W/m\u00b2)",
+        fontsize=12,
+        horizontalalignment="center",
+        verticalalignment="center",
+    )
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=4)
     save_figure(fig, out_dir / "balanco.png")
 
 
-def _plot_radiacao_liq(raw: pd.DataFrame, hourly: pd.DataFrame,
-                       out_dir: Path, dt: datetime) -> None:
+def _plot_radiacao_liq(
+    raw: pd.DataFrame, hourly: pd.DataFrame, out_dir: Path, dt: datetime
+) -> None:
     """Graph 3 -- Net Radiation."""
     col = "Net_Wm2_Avg"
     if col not in raw.columns:
@@ -210,23 +231,27 @@ def _plot_radiacao_liq(raw: pd.DataFrame, hourly: pd.DataFrame,
         return
 
     fig, ax = create_figure()
-    ax.plot(raw.index, raw[col], "o", color="silver", markersize=6,
-            label="Media 5 min")
+    ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
     if col in hourly.columns:
         ax.plot(hourly.index, hourly[col], "-vr", label="RN 1h")
 
     ax.set_ylim(-200, 800)
     setup_date_axis(ax)
-    plt.ylabel("Radiacao Liquida (W/m\u00b2)", fontsize=12,
-               horizontalalignment="center", verticalalignment="center")
+    plt.ylabel(
+        "Radiacao Liquida (W/m\u00b2)",
+        fontsize=12,
+        horizontalalignment="center",
+        verticalalignment="center",
+    )
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=4)
     save_figure(fig, out_dir / "radiacao_liq.png")
 
 
-def _plot_radiacao_par(raw: pd.DataFrame, hourly: pd.DataFrame,
-                       out_dir: Path, dt: datetime) -> None:
+def _plot_radiacao_par(
+    raw: pd.DataFrame, hourly: pd.DataFrame, out_dir: Path, dt: datetime
+) -> None:
     """Graph 4 -- PAR Radiation."""
     col = "PAR_Wm2_Avg"
     if col not in raw.columns:
@@ -234,24 +259,31 @@ def _plot_radiacao_par(raw: pd.DataFrame, hourly: pd.DataFrame,
         return
 
     fig, ax = create_figure()
-    ax.plot(raw.index, raw[col], "o", color="silver", markersize=6,
-            label="Media 5 min")
+    ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
     if col in hourly.columns:
         ax.plot(hourly.index, hourly[col], "-*g", label="Media 1 h")
 
     ax.set_ylim(0, 500)
     setup_date_axis(ax)
-    plt.ylabel("Radiacao PAR (W/m\u00b2)", fontsize=12,
-               horizontalalignment="center", verticalalignment="center")
+    plt.ylabel(
+        "Radiacao PAR (W/m\u00b2)",
+        fontsize=12,
+        horizontalalignment="center",
+        verticalalignment="center",
+    )
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=2)
     save_figure(fig, out_dir / "radiacao_par.png")
 
 
-def _plot_temperatura(raw: pd.DataFrame, hourly: pd.DataFrame,
-                      out_dir: Path, dt: datetime,
-                      wrf: pd.DataFrame | None = None) -> None:
+def _plot_temperatura(
+    raw: pd.DataFrame,
+    hourly: pd.DataFrame,
+    out_dir: Path,
+    dt: datetime,
+    wrf: pd.DataFrame | None = None,
+) -> None:
     """Graph 5 -- Air Temperature (WXT + CS215)."""
     fig, ax = create_figure()
 
@@ -259,8 +291,7 @@ def _plot_temperatura(raw: pd.DataFrame, hourly: pd.DataFrame,
     col_cs = "Temp1_Avg"
 
     if col_wxt in raw.columns:
-        ax.plot(raw.index, raw[col_wxt], "o", color="silver", markersize=6,
-                label="Media 5 min")
+        ax.plot(raw.index, raw[col_wxt], "o", color="silver", markersize=6, label="Media 5 min")
     if col_cs in raw.columns:
         ax.plot(raw.index, raw[col_cs], "o", color="silver", markersize=6)
     if col_wxt in hourly.columns:
@@ -272,17 +303,26 @@ def _plot_temperatura(raw: pd.DataFrame, hourly: pd.DataFrame,
 
     ax.set_ylim(18, 32)
     setup_date_axis(ax)
-    plt.ylabel("Temperatura do Ar (\u00b0C)", fontsize=12,
-               horizontalalignment="center", verticalalignment="center")
+    plt.ylabel(
+        "Temperatura do Ar (\u00b0C)",
+        fontsize=12,
+        horizontalalignment="center",
+        verticalalignment="center",
+    )
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=3)
     save_figure(fig, out_dir / "temperatura.png")
 
 
-def _plot_umidade(raw: pd.DataFrame, hourly: pd.DataFrame,
-                  out_dir: Path, dt: datetime, rh_offset: float,
-                  wrf: pd.DataFrame | None = None) -> None:
+def _plot_umidade(
+    raw: pd.DataFrame,
+    hourly: pd.DataFrame,
+    out_dir: Path,
+    dt: datetime,
+    rh_offset: float,
+    wrf: pd.DataFrame | None = None,
+) -> None:
     """Graph 6 -- Relative Humidity (WXT + CS215)."""
     fig, ax = create_figure()
 
@@ -290,13 +330,18 @@ def _plot_umidade(raw: pd.DataFrame, hourly: pd.DataFrame,
     col_cs = "RH1_Avg"
 
     if col_wxt in raw.columns:
-        ax.plot(raw.index, raw[col_wxt] + rh_offset, "o", color="silver",
-                markersize=6, label="Media 5 min")
+        ax.plot(
+            raw.index,
+            raw[col_wxt] + rh_offset,
+            "o",
+            color="silver",
+            markersize=6,
+            label="Media 5 min",
+        )
     if col_cs in raw.columns:
         ax.plot(raw.index, raw[col_cs], "o", color="silver", markersize=6)
     if col_wxt in hourly.columns:
-        ax.plot(hourly.index, hourly[col_wxt] + rh_offset, "s-b",
-                label="WXT 1h")
+        ax.plot(hourly.index, hourly[col_wxt] + rh_offset, "s-b", label="WXT 1h")
     if col_cs in hourly.columns:
         ax.plot(hourly.index, hourly[col_cs], "s-r", label="CS215 1h")
 
@@ -304,20 +349,34 @@ def _plot_umidade(raw: pd.DataFrame, hourly: pd.DataFrame,
 
     ax.set_ylim(50, 100)
     setup_date_axis(ax)
-    plt.ylabel("Umidade Relativa do Ar (%)", fontsize=12,
-               horizontalalignment="center", verticalalignment="center")
+    plt.ylabel(
+        "Umidade Relativa do Ar (%)",
+        fontsize=12,
+        horizontalalignment="center",
+        verticalalignment="center",
+    )
     # v3 legacy: humidity timestamp at bottom-right (0.88, 0.05)
-    ax.text(0.88, 0.05, dt.strftime("%Y-%m-%d %H:%M"),
-            fontsize=10, color="black",
-            horizontalalignment="center", transform=ax.transAxes)
+    ax.text(
+        0.88,
+        0.05,
+        dt.strftime("%Y-%m-%d %H:%M"),
+        fontsize=10,
+        color="black",
+        horizontalalignment="center",
+        transform=ax.transAxes,
+    )
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=3)
     save_figure(fig, out_dir / "umidade.png")
 
 
-def _plot_pressao(raw: pd.DataFrame, hourly: pd.DataFrame,
-                  out_dir: Path, dt: datetime,
-                  wrf: pd.DataFrame | None = None) -> None:
+def _plot_pressao(
+    raw: pd.DataFrame,
+    hourly: pd.DataFrame,
+    out_dir: Path,
+    dt: datetime,
+    wrf: pd.DataFrame | None = None,
+) -> None:
     """Graph 7 -- Atmospheric Pressure."""
     col = "Pmb_WXT"
     if col not in raw.columns:
@@ -325,8 +384,7 @@ def _plot_pressao(raw: pd.DataFrame, hourly: pd.DataFrame,
         return
 
     fig, ax = create_figure()
-    ax.plot(raw.index, raw[col], "o", color="silver", markersize=6,
-            label="Media 5 min")
+    ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
     if col in hourly.columns:
         ax.plot(hourly.index, hourly[col], "s-b", label="Media 1h")
 
@@ -334,17 +392,25 @@ def _plot_pressao(raw: pd.DataFrame, hourly: pd.DataFrame,
 
     ax.set_ylim(1000, 1030)
     setup_date_axis(ax)
-    plt.ylabel("Pressao Atmosferica (hPa)", fontsize=12,
-               horizontalalignment="center", verticalalignment="center")
+    plt.ylabel(
+        "Pressao Atmosferica (hPa)",
+        fontsize=12,
+        horizontalalignment="center",
+        verticalalignment="center",
+    )
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=3)
     save_figure(fig, out_dir / "pressao.png")
 
 
-def _plot_velocidade(raw: pd.DataFrame, hourly: pd.DataFrame,
-                     out_dir: Path, dt: datetime,
-                     wrf: pd.DataFrame | None = None) -> None:
+def _plot_velocidade(
+    raw: pd.DataFrame,
+    hourly: pd.DataFrame,
+    out_dir: Path,
+    dt: datetime,
+    wrf: pd.DataFrame | None = None,
+) -> None:
     """Graph 8 -- Wind Speed."""
     col = "WS_WXT_Avg"
     if col not in raw.columns:
@@ -352,8 +418,7 @@ def _plot_velocidade(raw: pd.DataFrame, hourly: pd.DataFrame,
         return
 
     fig, ax = create_figure()
-    ax.plot(raw.index, raw[col], "o", color="silver", markersize=6,
-            label="Media 5 min")
+    ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
     if col in hourly.columns:
         ax.plot(hourly.index, hourly[col], "-*k", label="WXT 1h")
 
@@ -361,17 +426,25 @@ def _plot_velocidade(raw: pd.DataFrame, hourly: pd.DataFrame,
 
     ax.set_ylim(0, 10)
     setup_date_axis(ax)
-    plt.ylabel("Velocidade do Vento (m/s)", fontsize=12,
-               horizontalalignment="center", verticalalignment="center")
+    plt.ylabel(
+        "Velocidade do Vento (m/s)",
+        fontsize=12,
+        horizontalalignment="center",
+        verticalalignment="center",
+    )
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=3)
     save_figure(fig, out_dir / "velocidade.png")
 
 
-def _plot_direcao(raw: pd.DataFrame, hourly: pd.DataFrame,
-                  out_dir: Path, dt: datetime,
-                  wrf: pd.DataFrame | None = None) -> None:
+def _plot_direcao(
+    raw: pd.DataFrame,
+    hourly: pd.DataFrame,
+    out_dir: Path,
+    dt: datetime,
+    wrf: pd.DataFrame | None = None,
+) -> None:
     """Graph 9 -- Wind Direction."""
     col = "WD_WXT_Avg"
     if col not in raw.columns:
@@ -379,24 +452,28 @@ def _plot_direcao(raw: pd.DataFrame, hourly: pd.DataFrame,
         return
 
     fig, ax = create_figure()
-    ax.plot(raw.index, raw[col], "o", color="silver", markersize=6,
-            label="Media 5 min")
+    ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
     if col in hourly.columns:
         ax.plot(hourly.index, hourly[col], "*k", label="WXT 1h")
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["direcao"])
 
     setup_date_axis(ax)
-    plt.ylabel("Direcao do Vento (\u00b0)", fontsize=12,
-               horizontalalignment="center", verticalalignment="center")
+    plt.ylabel(
+        "Direcao do Vento (\u00b0)",
+        fontsize=12,
+        horizontalalignment="center",
+        verticalalignment="center",
+    )
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=3)
     save_figure(fig, out_dir / "direcao.png")
 
 
-def _plot_precipitacao(raw_rain: pd.DataFrame, hourly: pd.DataFrame,
-                       out_dir: Path, dt: datetime) -> None:
+def _plot_precipitacao(
+    raw_rain: pd.DataFrame, hourly: pd.DataFrame, out_dir: Path, dt: datetime
+) -> None:
     """Graph 10 -- Precipitation."""
     col = RAIN_COLUMN
     if col not in raw_rain.columns:
@@ -404,16 +481,15 @@ def _plot_precipitacao(raw_rain: pd.DataFrame, hourly: pd.DataFrame,
         return
 
     fig, ax = create_figure()
-    ax.plot(raw_rain.index, raw_rain[col], "-", color="grey", lw=2,
-            label="Acumulada 5 min")
+    ax.plot(raw_rain.index, raw_rain[col], "-", color="grey", lw=2, label="Acumulada 5 min")
     if col in hourly.columns:
-        ax.plot(hourly.index, hourly[col], "o", color="blue", markersize=3,
-                label="Acumulada 1h")
+        ax.plot(hourly.index, hourly[col], "o", color="blue", markersize=3, label="Acumulada 1h")
 
     ax.set_ylim(0, 30)
     setup_date_axis(ax)
-    plt.ylabel("Precipitacao (mm)", fontsize=12,
-               horizontalalignment="center", verticalalignment="center")
+    plt.ylabel(
+        "Precipitacao (mm)", fontsize=12, horizontalalignment="center", verticalalignment="center"
+    )
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=3, loc=1)
@@ -426,21 +502,40 @@ def _plot_precipitacao(raw_rain: pd.DataFrame, hourly: pd.DataFrame,
 
 
 @click.command()
-@click.option("--lenta", "-l", required=True, type=click.Path(exists=True),
-              help="Path to LBM_lenta_YYYY.dat (slow sensor data).")
-@click.option("--rain", "-r", required=True, type=click.Path(exists=True),
-              help="Path to LBM_rain_YYYY.dat (precipitation data).")
-@click.option("--output-dir", "-o", required=True,
-              help="Output directory for graph PNGs.")
-@click.option("--wrf", "-w", "wrf_path", default=None,
-              type=click.Path(exists=True),
-              help="Optional: path to WRF series_operacional.dat for model overlay.")
-@click.option("--last-days", default=7, type=int, show_default=True,
-              help="Number of recent days to plot.")
-@click.option("--rh-offset", default=RH_WXT_OFFSET, type=float, show_default=True,
-              help="Additive bias correction for RH_WXT sensor.")
-@click.option("--log-level", default="INFO", show_default=True,
-              help="Logging level.")
+@click.option(
+    "--lenta",
+    "-l",
+    required=True,
+    type=click.Path(exists=True),
+    help="Path to LBM_lenta_YYYY.dat (slow sensor data).",
+)
+@click.option(
+    "--rain",
+    "-r",
+    required=True,
+    type=click.Path(exists=True),
+    help="Path to LBM_rain_YYYY.dat (precipitation data).",
+)
+@click.option("--output-dir", "-o", required=True, help="Output directory for graph PNGs.")
+@click.option(
+    "--wrf",
+    "-w",
+    "wrf_path",
+    default=None,
+    type=click.Path(exists=True),
+    help="Optional: path to WRF series_operacional.dat for model overlay.",
+)
+@click.option(
+    "--last-days", default=7, type=int, show_default=True, help="Number of recent days to plot."
+)
+@click.option(
+    "--rh-offset",
+    default=RH_WXT_OFFSET,
+    type=float,
+    show_default=True,
+    help="Additive bias correction for RH_WXT sensor.",
+)
+@click.option("--log-level", default="INFO", show_default=True, help="Logging level.")
 def main(
     lenta: str,
     rain: str,
@@ -515,8 +610,9 @@ def main(
     raw = df_lenta.loc[mask_lenta].copy()
     raw_rain = df_rain.loc[mask_rain].copy()
 
-    click.echo(f"  filtered to last {last_days} days: {len(raw)} rows (lenta), "
-               f"{len(raw_rain)} rows (rain)")
+    click.echo(
+        f"  filtered to last {last_days} days: {len(raw)} rows (lenta), {len(raw_rain)} rows (rain)"
+    )
 
     if raw.empty:
         click.echo("[!] No data in the requested date range -- nothing to plot.")

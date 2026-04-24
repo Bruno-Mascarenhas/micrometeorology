@@ -112,6 +112,9 @@ def main():
 
     # 3. Inicializa o Modelo escolhido
     logger.info(f"Iniciando {args.model_type.upper()} com AMP (Automatic Mixed Precision)")
+
+    model: LSTMRegressor | TransformerRegressor
+
     if args.model_type == "lstm":
         config.lstm_hidden_size = args.hidden_size
         config.lstm_num_layers = args.layers

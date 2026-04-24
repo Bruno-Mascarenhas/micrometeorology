@@ -126,6 +126,7 @@ warn_unused_ignores = false
 strict_equality = true
 extra_checks = true
 ignore_missing_imports = true
+exclude = ["^legacy/"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

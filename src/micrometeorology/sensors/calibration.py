@@ -68,7 +68,9 @@ def apply_calibrations(
             logger.info("  %s [%s -> %s]: set to NaN (%s)", col, start.date(), end.date(), desc)
         else:
             df.loc[mask, col] *= factor
-            logger.info("  %s [%s -> %s]: x %.10f (%s)", col, start.date(), end.date(), factor, desc)
+            logger.info(
+                "  %s [%s -> %s]: x %.10f (%s)", col, start.date(), end.date(), factor, desc
+            )
 
     return df
 

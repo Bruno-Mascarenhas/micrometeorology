@@ -13,7 +13,7 @@ import os
 import sys
 
 
-def pytest_configure(_config):
+def pytest_configure(config):
     """Register extra DLL search paths and pre-load torch on Windows."""
     if sys.platform == "win32":
         # Prevent OMP: Error #15 (dual OpenMP runtime init)
