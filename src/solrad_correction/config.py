@@ -98,6 +98,8 @@ class ModelConfig:
     max_epochs: int = 100
     patience: int = 10  # early stopping
     min_delta: float = 1e-4
+    torch_compile: bool = False
+    evaluation_policy: str = "model_native"  # "model_native" or "common_sequence_horizon"
 
 
 @dataclass

@@ -35,6 +35,7 @@ class PreprocessingPipeline:
         self._fitted = False
         self._columns: list[str] = []
         self._fill_values: dict[str, float] = {}
+        self._last_values: dict[str, float] = {}
         self._mean: pd.Series | None = None
         self._std: pd.Series | None = None
         self._min: pd.Series | None = None
@@ -57,10 +58,11 @@ class PreprocessingPipeline:
         self._columns = list(df_clean.columns)
 
         # Imputation fill values (learned from train)
+        self._fill_values = df_clean.mean().to_dict()  # type: ignore
+        self._last_values = df_clean.ffill().iloc[-1].to_dict() if not df_clean.empty else {}  # type: ignore
+
         if self.impute_strategy == "mean":
             self._fill_values = df_clean.mean().to_dict()  # type: ignore
-        elif self.impute_strategy == "ffill":
-            self._fill_values = {}  # ffill doesn't need pre-computed values
 
         # Scaler parameters
         if self.scaler_type == "standard":
@@ -105,11 +107,12 @@ class PreprocessingPipeline:
         if self.impute_strategy == "drop":
             out = out.dropna()
         elif self.impute_strategy == "ffill":
-            out = out.ffill().bfill()
+            out = out.ffill().fillna(self._last_values).fillna(self._fill_values)
         elif self.impute_strategy == "mean":
             out = out.fillna(self._fill_values)
         elif self.impute_strategy == "interpolate":
-            out = out.interpolate(method="time").bfill().ffill()
+            # Keep transform causal: never use later val/test rows to fill earlier rows.
+            out = out.ffill().fillna(self._last_values).fillna(self._fill_values)
 
         # Scaling
         if self.scaler_type == "standard" and self._mean is not None and self._std is not None:
@@ -141,6 +144,7 @@ class PreprocessingPipeline:
             "drop_na_threshold": self.drop_na_threshold,
             "columns": self._columns,
             "fill_values": self._fill_values,
+            "last_values": self._last_values,
             "mean": self._mean,
             "std": self._std,
             "min": self._min,
@@ -164,6 +168,7 @@ class PreprocessingPipeline:
         )
         pipeline._columns = state["columns"]
         pipeline._fill_values = state["fill_values"]
+        pipeline._last_values = state.get("last_values", {})
         pipeline._mean = state["mean"]
         pipeline._std = state["std"]
         pipeline._min = state["min"]

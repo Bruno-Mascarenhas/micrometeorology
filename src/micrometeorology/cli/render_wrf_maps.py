@@ -15,12 +15,25 @@ Usage::
     # All variables, generate WebM videos too
     labmim-wrf-figures --wrf-dir /path/to/ --date 20240101 \\
         --domains 1 4 -o output/ --also-video
+
+    # Auto mode chooses eager for tiny files and lazy for large/chunked inputs
+    labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
+        -o output/figures
+
+    # Force old eager behavior
+    labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
+        -o output/figures --reader eager --chunks none
+
+    # Force xarray-backed lazy reader
+    labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
+        -o output/figures --reader lazy --chunks none
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
+from typing import cast
 
 import click
 import numpy as np
@@ -38,6 +51,11 @@ from micrometeorology.wrf.batch import (
     build_map_config,
     default_workers,
     run_figure_tasks,
+)
+from micrometeorology.wrf.execution import (
+    ReaderRequest,
+    format_wrf_execution_plan,
+    resolve_wrf_execution_plan,
 )
 
 # Default variables when none specified
@@ -102,7 +120,7 @@ def _resolve_wrfout_paths(
 
 
 def _build_tasks_for_domain(
-    ds: reader.WRFDataset,
+    ds: reader.WRFReader,
     var_list: list[str],
     output_dir: str,
     shapes_dir: str | None,
@@ -111,7 +129,12 @@ def _build_tasks_for_domain(
 ) -> list[FigureTask]:
     """Build all FigureTasks for a single domain file."""
     lon, lat = ds.read_grid()
-    bounds = ds.grid_bounds()
+    bounds = (
+        float(np.amin(lon)),
+        float(np.amax(lon)),
+        float(np.amin(lat)),
+        float(np.amax(lat)),
+    )
     grid = ds.grid_level.value
     mc = build_map_config(grid, bounds, shapes_dir)
     time_meta = ds.build_date_metadata(skip_first_n=skip_first)
@@ -308,6 +331,20 @@ def _build_tasks_for_domain(
 @click.option("--shapes-dir", default=None, help="Municipality shapefiles dir.")
 @click.option("--skip-first", default=0, type=int, help="Time steps to skip.")
 @click.option(
+    "--reader",
+    "reader_backend",
+    default="auto",
+    type=click.Choice(["auto", "eager", "lazy"]),
+    show_default=True,
+    help="WRF reader backend. Auto chooses eager for small inputs and lazy for large/chunked inputs.",
+)
+@click.option(
+    "--chunks",
+    default="auto",
+    show_default=True,
+    help="Lazy-reader chunks: 'auto', 'none', or comma-separated dim=size pairs.",
+)
+@click.option(
     "--workers",
     "-w",
     default=None,
@@ -326,6 +363,8 @@ def main(
     variables: tuple[str, ...],
     shapes_dir: str | None,
     skip_first: int,
+    reader_backend: str,
+    chunks: str,
     workers: int | None,
     dpi: int,
     also_video: bool,
@@ -337,6 +376,16 @@ def main(
     var_list = list(variables) if variables else DEFAULT_VARS
     var_list = _normalize_var_list(var_list)
     paths = _resolve_wrfout_paths(wrf_dir, date, domains, dataset)
+    try:
+        plan = resolve_wrf_execution_plan(
+            paths=paths,
+            workflow="figures",
+            reader_request=cast("ReaderRequest", reader_backend),
+            chunks_request=chunks,
+            workers=workers,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
     if not paths:
         click.echo("No WRF files found.")
@@ -344,14 +393,18 @@ def main(
 
     click.echo(f"Files: {[p.name for p in paths]}")
     click.echo(f"Variables: {var_list}")
-    click.echo(f"Workers: {workers or default_workers()}")
     click.echo(f"Output: {output}")
+    click.echo(format_wrf_execution_plan(plan))
 
     # Phase 1: Build all tasks (serial — fast, I/O-bound NetCDF reads)
     all_tasks: list[FigureTask] = []
     for wrf_path in paths:
         click.echo(f"\nLoading {wrf_path.name}...")
-        with reader.WRFDataset(wrf_path) as ds:
+        with reader.open_wrf_dataset(
+            wrf_path,
+            reader=plan.reader,
+            chunks=plan.chunks,
+        ) as ds:
             tasks = _build_tasks_for_domain(ds, var_list, output, shapes_dir, skip_first, dpi)
             all_tasks.extend(tasks)
             click.echo(f"  → {len(tasks)} frames queued")
@@ -359,7 +412,7 @@ def main(
     click.echo(f"\nTotal frames: {len(all_tasks)}")
 
     # Phase 2: Parallel rendering
-    png_paths = run_figure_tasks(all_tasks, workers=workers)
+    png_paths = run_figure_tasks(all_tasks, workers=plan.workers)
 
     click.echo(f"\n✓ Generated {len(png_paths)} figures")
 
@@ -378,7 +431,7 @@ def main(
             else:
                 grouped[stem].append(p)
 
-        webm_paths = batch_create_webm(grouped, output, fps=2, workers=workers)
+        webm_paths = batch_create_webm(grouped, output, fps=2, workers=plan.workers)
         click.echo(f"✓ Generated {len(webm_paths)} videos")
 
     click.echo("\n✓ Done")

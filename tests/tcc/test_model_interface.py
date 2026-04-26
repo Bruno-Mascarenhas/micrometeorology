@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -50,17 +52,20 @@ class TestSVMInterface:
         assert "MAE" in metrics
         assert "R²" in metrics
 
-    def test_save_load(self, synthetic_data, tmp_path):
+    def test_save_load(self, synthetic_data):
         model = SVMRegressor(kernel="rbf", C=10.0)
         model.fit(synthetic_data)
         preds_before = model.predict(synthetic_data)
 
-        path = tmp_path / "svm_test.joblib"
-        model.save(path)
+        path = Path("scratch") / "svm_test.joblib"
+        try:
+            model.save(path)
 
-        loaded = SVMRegressor.load(path)
-        preds_after = loaded.predict(synthetic_data)
-        np.testing.assert_array_almost_equal(preds_before, preds_after)
+            loaded = SVMRegressor.load(path)
+            preds_after = loaded.predict(synthetic_data)
+            np.testing.assert_array_almost_equal(preds_before, preds_after)
+        finally:
+            path.unlink(missing_ok=True)
 
     def test_name(self):
         model = SVMRegressor(kernel="rbf")

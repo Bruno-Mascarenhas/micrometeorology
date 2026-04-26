@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from solrad_correction.features.sequence import create_sequences
+from solrad_correction.datasets.tabular import TabularDataset
+from solrad_correction.features.sequence import create_sequences, create_sequences_index
 
 
 class TestCreateSequences:
@@ -46,3 +48,19 @@ class TestCreateSequences:
         target = np.random.randn(8)
         with pytest.raises(ValueError, match="same length"):
             create_sequences(features, target, sequence_length=3)
+
+    def test_sequence_target_index_starts_after_window(self):
+        index = pd.date_range("2024-01-01", periods=10, freq="1h")
+
+        seq_index = create_sequences_index(index, sequence_length=3)
+
+        assert seq_index.equals(index[3:])
+
+    def test_tabular_dataset_preserves_full_index(self):
+        index = pd.date_range("2024-01-01", periods=10, freq="1h")
+        df = pd.DataFrame({"feature": np.arange(10), "target": np.arange(10)}, index=index)
+
+        dataset = TabularDataset.from_dataframe(df, ["feature"], "target")
+
+        assert dataset.index is not None
+        assert dataset.index.equals(index)

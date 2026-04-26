@@ -253,6 +253,52 @@ labmim-wrf-geojson --wrf-dir /path/to/wrfout/ --date 20240101 \
     -v temperature -v wind --workers 44
 ```
 
+The default WRF execution mode is now adaptive:
+
+```bash
+--reader auto --chunks auto --worker-backend auto
+```
+
+Auto mode resolves a deterministic execution plan and prints it before work
+starts. Small or single-worker jobs use the eager `netCDF4` reader and pickle
+payloads. Large files, explicit chunk dimensions, or large multi-worker JSON
+payloads can resolve to the xarray-backed lazy reader and memmap worker payloads.
+
+To force the previous fixed behavior:
+
+```bash
+labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
+    -o output/JSON -g output/GeoJSON \
+    --reader eager --chunks none --worker-backend pickle
+```
+
+For large files, the xarray-backed reader can select variables before
+materializing arrays:
+
+```bash
+labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
+    -o output/JSON -g output/GeoJSON \
+    --reader lazy --chunks none
+```
+
+`--chunks auto` or explicit chunk pairs such as
+`--chunks Time=1,south_north=256,west_east=256` are accepted only with
+`--reader lazy`. Auto mode disables chunking when dask-backed xarray chunking is
+not available; explicit chunk dimensions raise a clear error in that case.
+
+Large JSON exports can avoid repeatedly pickling arrays into process workers by
+using the memmap payload backend:
+
+```bash
+labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
+    -o output/JSON -g output/GeoJSON \
+    --worker-backend memmap --tmp-dir scratch/wrf-json
+```
+
+`memmap` may be slower for tiny or single-worker jobs because arrays must first
+be materialized as temporary `.npy` files. The resolver keeps those jobs on the
+serial/pickle path unless memmap is explicitly requested.
+
 ### Figures (Static Maps & Video)
 
 ```bash
@@ -265,6 +311,16 @@ labmim-wrf-figures --wrf-dir /path/to/wrfout/ --date 20240101 \
     -o output/figures/ --workers 44 --also-video
 ```
 
+Figures also support adaptive reader planning during task construction:
+
+```bash
+labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
+    -o output/figures --reader auto --chunks auto
+```
+
+Figure rendering still sends per-frame arrays to renderer workers; the memmap
+payload backend applies to JSON writing, not figure rendering.
+
 ### Local testing (all-in-one)
 
 ```bash
@@ -272,6 +328,15 @@ python scripts/micromet/run_wrf_local.py \
     --wrf-dir /path/to/wrfout/ --date 20240101 \
     -D 1 -D 4 -v temperature -v wind -v rain \
     -o output/wrf_local/ --workers 8 --also-video
+```
+
+The all-in-one command exposes the same adaptive reader controls and JSON memmap
+backend:
+
+```bash
+python scripts/micromet/run_wrf_local.py \
+    --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
+    -o output/wrf_local --reader auto --json-worker-backend auto
 ```
 
 ### Sensor processing

@@ -19,6 +19,21 @@ Usage::
         --dataset wrfout_d03_2026-04-09_00:00:00 \\
         --output output/test/ \\
         --also-video
+
+    # Auto mode chooses eager/pickle for tiny work and lazy/memmap for large work
+    python scripts/micromet/run_wrf_local.py \\
+        --dataset /path/to/wrfout_d03_2026-04-09_00:00:00 \\
+        --output output/test/
+
+    # Force old eager/pickle behavior
+    python scripts/micromet/run_wrf_local.py \\
+        --dataset /path/to/wrfout_d03_2026-04-09_00:00:00 \\
+        --output output/test/ --reader eager --chunks none --json-worker-backend pickle
+
+    # Force lazy reader plus memmap JSON worker payloads
+    python scripts/micromet/run_wrf_local.py \\
+        --dataset /path/to/wrfout_d03_2026-04-09_00:00:00 \\
+        --output output/test/ --reader lazy --json-worker-backend memmap
 """
 
 from __future__ import annotations
@@ -26,11 +41,19 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import cast
 
 import click
 
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.wrf.batch import default_workers
+from micrometeorology.wrf.execution import (
+    JsonWorkerRequest,
+    ReaderRequest,
+    estimate_json_payload_bytes,
+    format_wrf_execution_plan,
+    resolve_wrf_execution_plan,
+)
 
 
 @click.command()
@@ -45,12 +68,41 @@ from micrometeorology.wrf.batch import default_workers
 @click.option("--shapes-dir", default=None, help="Municipality shapefiles dir.")
 @click.option("--skip-first", default=0, type=int, help="Time steps to skip.")
 @click.option(
+    "--reader",
+    "reader_backend",
+    default="auto",
+    type=click.Choice(["auto", "eager", "lazy"]),
+    show_default=True,
+    help="WRF reader backend. Auto chooses eager for small inputs and lazy for large/chunked inputs.",
+)
+@click.option(
+    "--chunks",
+    default="auto",
+    show_default=True,
+    help="Lazy-reader chunks: 'auto', 'none', or comma-separated dim=size pairs.",
+)
+@click.option(
     "--workers", "-w", default=None, type=int, help=f"Workers (default: {default_workers()})."
 )
 @click.option("--dpi", default=100, type=int, help="Image DPI.")
 @click.option("--no-figures", is_flag=True, help="Skip figure generation (only JSON/GeoJSON).")
 @click.option("--no-geojson", is_flag=True, help="Skip GeoJSON/JSON generation.")
 @click.option("--also-video", is_flag=True, help="Generate WebM videos from figures.")
+@click.option(
+    "--json-worker-backend",
+    default="auto",
+    type=click.Choice(["auto", "pickle", "memmap"]),
+    show_default=True,
+    help="JSON worker payload backend. Auto uses pickle for small/serial work and memmap for large multi-worker exports.",
+)
+@click.option(
+    "--json-tmp-dir",
+    "--tmp-dir",
+    "json_tmp_dir",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Parent directory for temporary memmap payloads in JSON phase.",
+)
 @click.option("--log-level", default="INFO", help="Logging level.")
 def main(
     dataset: str | None,
@@ -61,15 +113,20 @@ def main(
     variables: tuple[str, ...],
     shapes_dir: str | None,
     skip_first: int,
+    reader_backend: str,
+    chunks: str,
     workers: int | None,
     dpi: int,
     no_figures: bool,
     no_geojson: bool,
     also_video: bool,
+    json_worker_backend: str,
+    json_tmp_dir: str | None,
     log_level: str,
 ) -> None:
     """Run WRF processing locally: figures + GeoJSON + WebM."""
     setup_logging(log_level)
+    from micrometeorology.wrf import reader as wrf_reader
 
     base_out = Path(output)
     figures_dir = base_out / "figures"
@@ -90,7 +147,6 @@ def main(
             _build_tasks_for_domain,
             _resolve_wrfout_paths,
         )
-        from micrometeorology.wrf import reader
         from micrometeorology.wrf.batch import FigureTask, run_figure_tasks
 
         default_vars = [
@@ -109,12 +165,27 @@ def main(
         if not paths:
             click.echo("No WRF files found.")
             return
+        try:
+            figure_plan = resolve_wrf_execution_plan(
+                paths=paths,
+                workflow="figures",
+                reader_request=cast("ReaderRequest", reader_backend),
+                chunks_request=chunks,
+                workers=workers,
+            )
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+        click.echo(format_wrf_execution_plan(figure_plan))
 
         all_fig_tasks: list[FigureTask] = []
         for wrf_path in paths:
             click.echo(f"  Loading {wrf_path.name}...")
-            with reader.WRFDataset(wrf_path) as ds:
-                tasks = _build_tasks_for_domain(
+            with wrf_reader.open_wrf_dataset(
+                wrf_path,
+                reader=figure_plan.reader,
+                chunks=figure_plan.chunks,
+            ) as ds:
+                figure_tasks = _build_tasks_for_domain(
                     ds,
                     var_list,
                     str(figures_dir),
@@ -122,11 +193,11 @@ def main(
                     skip_first,
                     dpi,
                 )
-                all_fig_tasks.extend(tasks)
-                click.echo(f"    → {len(tasks)} frames queued")
+                all_fig_tasks.extend(figure_tasks)
+                click.echo(f"    → {len(figure_tasks)} frames queued")
 
         click.echo(f"  Total: {len(all_fig_tasks)} frames")
-        png_paths = run_figure_tasks(all_fig_tasks, workers=workers)
+        png_paths = run_figure_tasks(all_fig_tasks, workers=figure_plan.workers)
         click.echo(f"  ✓ {len(png_paths)} figures generated")
     else:
         png_paths = []
@@ -140,7 +211,6 @@ def main(
         from micrometeorology.cli.export_wrf_geojson import (
             _resolve_wrfout_paths as _resolve_geo,
         )
-        from micrometeorology.wrf import reader as reader2
         from micrometeorology.wrf.batch import JsonTask, run_json_tasks
 
         default_vars = [
@@ -155,23 +225,61 @@ def main(
         ]
         var_list = list(variables) if variables else default_vars
         paths = _resolve_geo(wrf_dir, date, domains, dataset)
+        try:
+            json_plan = resolve_wrf_execution_plan(
+                paths=paths,
+                workflow="json",
+                reader_request=cast("ReaderRequest", reader_backend),
+                chunks_request=chunks,
+                json_worker_request=cast("JsonWorkerRequest", json_worker_backend),
+                workers=workers,
+                tmp_dir=json_tmp_dir,
+            )
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+        click.echo(format_wrf_execution_plan(json_plan))
 
         all_json_tasks: list[JsonTask] = []
         for wrf_path in paths:
             click.echo(f"  Loading {wrf_path.name}...")
-            with reader2.WRFDataset(wrf_path) as ds:
-                tasks = _build_json_tasks_for_domain(  # type: ignore
+            with wrf_reader.open_wrf_dataset(
+                wrf_path,
+                reader=json_plan.reader,
+                chunks=json_plan.chunks,
+            ) as ds:
+                json_tasks = _build_json_tasks_for_domain(
                     ds,
                     var_list,
                     str(json_dir),
                     str(geojson_dir),
                     skip_first,
                 )
-                all_json_tasks.extend(tasks)  # type: ignore
-                click.echo(f"    → {len(tasks)} JSON files queued")
+                all_json_tasks.extend(json_tasks)
+                click.echo(f"    → {len(json_tasks)} JSON files queued")
 
         click.echo(f"  Total: {len(all_json_tasks)} JSON files")
-        json_paths = run_json_tasks(all_json_tasks, workers=workers)
+        try:
+            final_json_plan = resolve_wrf_execution_plan(
+                paths=paths,
+                workflow="json",
+                reader_request=cast("ReaderRequest", json_plan.reader),
+                chunks_request=chunks,
+                json_worker_request=cast("JsonWorkerRequest", json_worker_backend),
+                workers=json_plan.workers,
+                tmp_dir=json_tmp_dir,
+                estimated_json_payload_bytes=estimate_json_payload_bytes(all_json_tasks),
+                json_task_count=len(all_json_tasks),
+            )
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+        if final_json_plan != json_plan:
+            click.echo(format_wrf_execution_plan(final_json_plan))
+        json_paths = run_json_tasks(
+            all_json_tasks,
+            workers=final_json_plan.workers,
+            backend=final_json_plan.json_worker_backend,
+            tmp_dir=final_json_plan.tmp_dir,
+        )
         click.echo(f"  ✓ {len(json_paths)} JSON files generated")
 
     # Phase 3: WebM Videos
@@ -188,7 +296,8 @@ def main(
             else:
                 grouped[stem].append(p)
 
-        webm_paths = batch_create_webm(grouped, str(video_dir), fps=2, workers=workers)
+        video_workers = figure_plan.workers if not no_figures else workers
+        webm_paths = batch_create_webm(grouped, str(video_dir), fps=2, workers=video_workers)
         click.echo(f"  ✓ {len(webm_paths)} videos generated")
 
     elapsed = time.perf_counter() - t0

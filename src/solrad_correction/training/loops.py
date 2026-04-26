@@ -88,7 +88,7 @@ def evaluate_epoch(
     total_loss = 0.0
     n_batches = len(dataloader)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for x_batch, y_batch in dataloader:
             x_batch = x_batch.to(device, non_blocking=True)
             y_batch = y_batch.to(device, non_blocking=True).unsqueeze(-1)

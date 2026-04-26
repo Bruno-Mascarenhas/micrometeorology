@@ -229,8 +229,25 @@ This loads the weights from `lstm_v1` and trains for an additional 50 epochs. Th
 
 - `model_state_dict` (model weights)
 - `optimizer_state_dict` (optimizer state)
+- `scheduler_state_dict` (if a scheduler is active)
+- `scaler_state_dict` (if AMP scaling is active)
 - `epoch` (epoch it stopped at)
 - `config` (architecture parameters for reconstruction)
+
+Older checkpoints that contain only model weights still load; optimizer,
+scheduler, and scaler state are restored only when present.
+
+### PyTorch Compile
+
+`torch.compile` is opt-in because compile overhead is workload- and platform-
+dependent. Keep it disabled for short CPU experiments and enable it explicitly
+for longer GPU runs after a smoke test:
+
+```yaml
+model:
+  model_type: lstm
+  torch_compile: true
+```
 
 ---
 
@@ -272,6 +289,34 @@ The target is always **after** the end of the window.
 ### 4. Serialized Pipeline
 
 The preprocessing state is saved with each experiment (`preprocessing_pipeline.joblib`), ensuring that the exact same transform can be applied to future data.
+
+---
+
+## Evaluation Policy
+
+By default, metrics preserve each model's native test row set:
+
+```yaml
+model:
+  evaluation_policy: model_native
+```
+
+This means SVM evaluates the full processed test set, while LSTM and Transformer
+evaluate sequence targets starting at `sequence_length`. Use this default when
+you want backward-compatible metrics or model-specific production behavior.
+
+For fair side-by-side SVM/LSTM/Transformer comparison, align SVM metrics to the
+same target horizon used by sequence models:
+
+```yaml
+model:
+  evaluation_policy: common_sequence_horizon
+  sequence_length: 24
+```
+
+`common_sequence_horizon` intentionally changes the SVM metric row set. The
+prediction CSV index follows the selected policy, so metric row counts and
+timestamps remain explicit and reproducible.
 
 ---
 

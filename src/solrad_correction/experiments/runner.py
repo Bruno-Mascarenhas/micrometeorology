@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from solrad_correction.data.preprocessing import PreprocessingPipeline
 from solrad_correction.data.splits import temporal_train_val_test_split
@@ -14,9 +14,46 @@ from solrad_correction.evaluation.reports import ExperimentReport, save_experime
 from solrad_correction.utils.seeds import set_global_seed
 
 if TYPE_CHECKING:
+    import pandas as pd
+
     from solrad_correction.config import ExperimentConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _prediction_index_for_policy(
+    index: pd.DatetimeIndex,
+    *,
+    model_type: str,
+    sequence_length: int,
+    evaluation_policy: str,
+) -> pd.DatetimeIndex | None:
+    """Return prediction index for explicit non-default evaluation policies."""
+    if evaluation_policy == "model_native":
+        return None
+    if evaluation_policy != "common_sequence_horizon":
+        raise ValueError(f"Unknown evaluation_policy: {evaluation_policy}")
+
+    if model_type == "svm":
+        return index[sequence_length:]
+    return index[sequence_length:]
+
+
+def _test_frame_for_policy(
+    test_df: pd.DataFrame,
+    *,
+    model_type: str,
+    sequence_length: int,
+    evaluation_policy: str,
+) -> pd.DataFrame:
+    """Apply explicit evaluation row policy without changing default behavior."""
+    if evaluation_policy == "model_native":
+        return test_df
+    if evaluation_policy != "common_sequence_horizon":
+        raise ValueError(f"Unknown evaluation_policy: {evaluation_policy}")
+    if model_type == "svm":
+        return test_df.iloc[sequence_length:]
+    return test_df
 
 
 def run_experiment(config: ExperimentConfig) -> ExperimentReport:
@@ -80,6 +117,11 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
             config.features.rolling_aggs,
         )
 
+    if config.features.add_diffs:
+        from solrad_correction.features.engineering import add_diff_features
+
+        df = add_diff_features(df, config.data.feature_columns)
+
     # Determine final feature columns
     feature_cols = [c for c in df.columns if c != config.data.target_column]
     if config.data.feature_columns:
@@ -92,13 +134,18 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
 
     # ── 3. Split ──
     train_df, val_df, test_df = temporal_train_val_test_split(
-        df, config.split.train_ratio, config.split.val_ratio, config.split.test_ratio
+        df,
+        config.split.train_ratio,
+        config.split.val_ratio,
+        config.split.test_ratio,
+        shuffle=config.split.shuffle,
     )
 
     # ── 4. Preprocess ──
     pipeline = PreprocessingPipeline(
         scaler_type=config.preprocess.scaler_type,
         impute_strategy=config.preprocess.impute_strategy,
+        drop_na_threshold=config.preprocess.drop_na_threshold,
     )
     all_cols = [*feature_cols, config.data.target_column]
     train_pp = pipeline.fit_transform(train_df[all_cols])
@@ -109,11 +156,18 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
 
     # ── 5. Build datasets & train ──
     model_type = config.model.model_type.lower()
+    eval_policy = config.model.evaluation_policy
 
     if model_type == "svm":
         train_ds = TabularDataset.from_dataframe(train_pp, feature_cols, config.data.target_column)
         val_ds = TabularDataset.from_dataframe(val_pp, feature_cols, config.data.target_column)
-        test_ds = TabularDataset.from_dataframe(test_pp, feature_cols, config.data.target_column)
+        test_eval_pp = _test_frame_for_policy(
+            test_pp,
+            model_type=model_type,
+            sequence_length=config.model.sequence_length,
+            evaluation_policy=eval_policy,
+        )
+        test_ds = TabularDataset.from_dataframe(test_eval_pp, feature_cols, config.data.target_column)
 
         train_ds.save(exp_dir / "datasets" / "train")
         test_ds.save(exp_dir / "datasets" / "test")
@@ -126,6 +180,12 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
 
         y_pred = model.predict(test_ds)  # type: ignore
         y_true = test_ds.y
+        prediction_index = _prediction_index_for_policy(
+            cast("pd.DatetimeIndex", test_pp.index),
+            model_type=model_type,
+            sequence_length=config.model.sequence_length,
+            evaluation_policy=eval_policy,
+        )
 
     elif model_type in ("lstm", "transformer"):
         from solrad_correction.datasets.sequence import SequenceDataset, SequenceDatasetMeta
@@ -177,6 +237,12 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
 
         y_pred = model.predict(test_seq)  # type: ignore
         y_true = test_y
+        prediction_index = _prediction_index_for_policy(
+            cast("pd.DatetimeIndex", test_pp.index),
+            model_type=model_type,
+            sequence_length=seq_len,
+            evaluation_policy=eval_policy,
+        )
 
     else:
         raise ValueError(f"Unknown model type: {model_type}")
@@ -195,7 +261,7 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
         config=dataclasses.asdict(config),
     )
 
-    save_experiment_results(report, y_true_orig, y_pred_orig, exp_dir)
+    save_experiment_results(report, y_true_orig, y_pred_orig, exp_dir, index=prediction_index)
     report.print_summary()
 
     return report

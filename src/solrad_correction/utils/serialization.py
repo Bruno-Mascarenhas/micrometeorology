@@ -31,6 +31,9 @@ def save_torch_checkpoint(
     config: dict | None,
     epoch: int,
     path: str | Path,
+    *,
+    scheduler_state: dict | None = None,
+    scaler_state: dict | None = None,
 ) -> None:
     """Save a PyTorch checkpoint."""
     import torch
@@ -43,6 +46,10 @@ def save_torch_checkpoint(
     }
     if optimizer_state is not None:
         checkpoint["optimizer_state_dict"] = optimizer_state
+    if scheduler_state is not None:
+        checkpoint["scheduler_state_dict"] = scheduler_state
+    if scaler_state is not None:
+        checkpoint["scaler_state_dict"] = scaler_state
     if config is not None:
         checkpoint["config"] = config
     torch.save(checkpoint, p)

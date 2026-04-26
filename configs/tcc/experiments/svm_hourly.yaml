@@ -33,6 +33,9 @@ features:
 
 model:
   model_type: svm
+  # model_native preserves previous SVM metrics on the full processed test set.
+  # Use common_sequence_horizon for fair comparison with LSTM/Transformer windows.
+  evaluation_policy: model_native
   svm_kernel: rbf
   svm_c: 10.0
   svm_epsilon: 0.1

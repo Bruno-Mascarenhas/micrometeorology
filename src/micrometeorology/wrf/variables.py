@@ -14,7 +14,7 @@ import numpy as np
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
-    from micrometeorology.wrf.reader import WRFDataset
+    from micrometeorology.wrf.reader import WRFReader
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +26,14 @@ logger = logging.getLogger(__name__)
 
 def get_low_high(variable: NDArray) -> tuple[float, float]:
     """Return ``(min, max)`` of a 3-D variable, skipping the first time step."""
-    flat = variable[1:, :].flatten()
+    flat = variable[1:, :].ravel()
     return float(np.nanmin(flat)), float(np.nanpercentile(flat, 98))
 
 
 def get_low_high_wind(u: NDArray, v: NDArray) -> tuple[float, float]:
     """Return ``(min, max)`` wind speed from U/V arrays (skip first step)."""
-    flat_u = u[1:, :].flatten()
-    flat_v = v[1:, :].flatten()
+    flat_u = u[1:, :].ravel()
+    flat_v = v[1:, :].ravel()
     speed = np.hypot(flat_u, flat_v)
     return float(np.nanmin(speed)), float(np.nanmax(speed))
 
@@ -45,12 +45,12 @@ def get_low_high_rain(variable: NDArray) -> tuple[float, float]:
     """
     arr = np.asarray(variable)
     if arr.ndim < 3:
-        flat = arr.flatten()
+        flat = arr.ravel()
         return float(np.nanmin(flat)), float(np.nanmax(flat))
     diffs = np.diff(arr, axis=0)
     if diffs.size == 0:
         return 0.0, 0.0
-    flat = diffs.flatten()
+    flat = diffs.ravel()
     return float(np.nanmin(flat)), float(np.nanmax(flat))
 
 
@@ -59,7 +59,7 @@ def get_low_high_rain(variable: NDArray) -> tuple[float, float]:
 # ---------------------------------------------------------------------------
 
 
-def extract_temperature(ds: WRFDataset) -> tuple[NDArray, NDArray, float, float]:
+def extract_temperature(ds: WRFReader) -> tuple[NDArray, NDArray, float, float]:
     """Extract 2-m temperature (°C) and surface pressure (hPa).
 
     Returns ``(temperature_3d, pressure_3d, temp_min, temp_max)`` where
@@ -80,21 +80,21 @@ def extract_temperature_step(t2_step: NDArray) -> NDArray:
     return np.squeeze(t2_step) - 273.15
 
 
-def extract_pressure(ds: WRFDataset) -> tuple[NDArray, float, float]:
+def extract_pressure(ds: WRFReader) -> tuple[NDArray, float, float]:
     """Extract surface pressure (hPa)."""
     psfc = ds.get_variable("PSFC")
     p_min, p_max = get_low_high(psfc)
     return psfc / 100.0, p_min / 100.0, p_max / 100.0
 
 
-def extract_vapor(ds: WRFDataset) -> tuple[NDArray, float, float]:
+def extract_vapor(ds: WRFReader) -> tuple[NDArray, float, float]:
     """Extract 2-m specific humidity (g/kg)."""
     q2 = ds.get_variable("Q2")
     q_min, q_max = get_low_high(q2)
     return q2 * 1000.0, q_min * 1000.0, q_max * 1000.0
 
 
-def extract_wind(ds: WRFDataset) -> tuple[NDArray, NDArray, float, float]:
+def extract_wind(ds: WRFReader) -> tuple[NDArray, NDArray, float, float]:
     """Extract 10-m U/V wind components and compute speed bounds."""
     u10 = ds.get_variable("U10")
     v10 = ds.get_variable("V10")
@@ -102,7 +102,7 @@ def extract_wind(ds: WRFDataset) -> tuple[NDArray, NDArray, float, float]:
     return u10, v10, ws_min, ws_max
 
 
-def extract_rain(ds: WRFDataset) -> tuple[NDArray, float, float]:
+def extract_rain(ds: WRFReader) -> tuple[NDArray, float, float]:
     """Extract total precipitation (convective + non-convective, cumulative)."""
     rainc = ds.get_variable("RAINC")
     rainnc = ds.get_variable("RAINNC")
@@ -118,7 +118,7 @@ def extract_rain_step(total: NDArray, i: int) -> NDArray:
     return np.squeeze(total[i : i + 1, :, :]) - np.squeeze(total[i - 1 : i, :, :])  # type: ignore
 
 
-def extract_scalar(ds: WRFDataset, var_name: str) -> tuple[NDArray, float, float]:
+def extract_scalar(ds: WRFReader, var_name: str) -> tuple[NDArray, float, float]:
     """Generic extractor for scalar fields (HFX, LH, SWDOWN)."""
     var = ds.get_variable(var_name)
     v_min, v_max = get_low_high(var)
@@ -130,7 +130,7 @@ def extract_scalar(ds: WRFDataset, var_name: str) -> tuple[NDArray, float, float
 # ---------------------------------------------------------------------------
 
 
-def compute_adjusted_heights(ds: WRFDataset) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+def compute_adjusted_heights(ds: WRFReader) -> tuple[NDArray, NDArray, NDArray, NDArray]:
     """Compute adjusted heights above terrain for vertical interpolation.
 
     Returns ``(U_central, V_central, height_adjusted, speed_4d)`` where:

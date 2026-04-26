@@ -40,6 +40,9 @@ class TorchRegressorModel(BaseRegressorModel):
     def __init__(self, device: str | None = None) -> None:
         self._device = device or get_device()
         self._start_epoch = 0
+        self._optimizer_state: dict[str, Any] | None = None
+        self._scheduler_state: dict[str, Any] | None = None
+        self._scaler_state: dict[str, Any] | None = None
         logger.info("Device: %s", self._device)
 
     def _build_module(self, **kwargs: Any) -> nn.Module:
@@ -51,6 +54,9 @@ class TorchRegressorModel(BaseRegressorModel):
         checkpoint = load_torch_checkpoint(path)
         self._module.load_state_dict(checkpoint["model_state_dict"])
         self._start_epoch = checkpoint.get("epoch", 0)
+        self._optimizer_state = checkpoint.get("optimizer_state_dict")
+        self._scheduler_state = checkpoint.get("scheduler_state_dict")
+        self._scaler_state = checkpoint.get("scaler_state_dict")
         logger.info("Loaded pretrained weights from %s (epoch %d)", path, self._start_epoch)
 
     def fit(
@@ -70,8 +76,16 @@ class TorchRegressorModel(BaseRegressorModel):
             device=self._device,
             config=config,
             start_epoch=self._start_epoch,
+            optimizer_state=self._optimizer_state,
+            scheduler_state=self._scheduler_state,
+            scaler_state=self._scaler_state,
         )
         self._module, _history = trainer.train(train_data, val_data)
+        self._start_epoch = trainer.completed_epochs
+        self._optimizer_state = trainer.optimizer_state
+        self._scheduler_state = trainer.scheduler_state
+        self._scaler_state = trainer.scaler_state
+        self._config = config
         return self
 
     def predict(self, data: SequenceDataset | np.ndarray) -> np.ndarray:
@@ -100,7 +114,7 @@ class TorchRegressorModel(BaseRegressorModel):
         loader = DataLoader(dataset, batch_size=bs, shuffle=False)
         all_preds = []
 
-        with torch.no_grad():
+        with torch.inference_mode():
             device_type = "cuda" if "cuda" in self._device else "cpu"
             for batch in loader:
                 batch_x = batch[0].to(self._device, non_blocking=True)
@@ -124,10 +138,12 @@ class TorchRegressorModel(BaseRegressorModel):
 
         save_torch_checkpoint(
             model_state=self._module.state_dict(),
-            optimizer_state=None,
+            optimizer_state=getattr(self, "_optimizer_state", None),
             config=config_dict,
             epoch=getattr(self, "_start_epoch", 0),
             path=path,
+            scheduler_state=getattr(self, "_scheduler_state", None),
+            scaler_state=getattr(self, "_scaler_state", None),
         )
 
     @classmethod
@@ -140,5 +156,8 @@ class TorchRegressorModel(BaseRegressorModel):
         instance = cls.__new__(cls)
         instance._device = get_device()
         instance._start_epoch = checkpoint.get("epoch", 0)
+        instance._optimizer_state = checkpoint.get("optimizer_state_dict")
+        instance._scheduler_state = checkpoint.get("scheduler_state_dict")
+        instance._scaler_state = checkpoint.get("scaler_state_dict")
         # Subclass must call _build_module and load_state_dict
         return instance

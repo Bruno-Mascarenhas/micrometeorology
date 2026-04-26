@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -35,6 +37,7 @@ class TestLSTMSmoke:
         pytest.importorskip("torch")
         from solrad_correction.datasets.sequence import SequenceDataset
         from solrad_correction.models.lstm import LSTMRegressor
+        from solrad_correction.utils.serialization import load_torch_checkpoint
 
         # Synthetic sequence data
         rng = np.random.default_rng(42)
@@ -60,6 +63,42 @@ class TestLSTMSmoke:
         model.fit(train_ds, val_ds, config)
         preds = model.predict(val_ds)
         assert preds.shape == (50,)
+
+        checkpoint_path = Path("scratch") / "lstm_smoke_checkpoint.pt"
+        try:
+            model.save(checkpoint_path)
+            checkpoint = load_torch_checkpoint(checkpoint_path)
+            assert checkpoint["epoch"] == 2
+            assert "optimizer_state_dict" in checkpoint
+            assert "scheduler_state_dict" in checkpoint
+
+            loaded = LSTMRegressor.load(checkpoint_path)
+            loaded_preds = loaded.predict(val_ds)
+            assert loaded_preds.shape == (50,)
+
+            resume_config = ModelConfig(
+                model_type="lstm",
+                lstm_hidden_size=16,
+                lstm_num_layers=1,
+                max_epochs=1,
+                batch_size=32,
+                patience=5,
+                pretrained_path=str(checkpoint_path),
+            )
+            resumed = LSTMRegressor(input_size=5, hidden_size=16, num_layers=1, device="cpu")
+            resumed.fit(train_ds, val_ds, resume_config)
+
+            resumed_path = Path("scratch") / "lstm_resumed_checkpoint.pt"
+            try:
+                resumed.save(resumed_path)
+                resumed_checkpoint = load_torch_checkpoint(resumed_path)
+                assert resumed_checkpoint["epoch"] == 3
+                assert "optimizer_state_dict" in resumed_checkpoint
+                assert "scheduler_state_dict" in resumed_checkpoint
+            finally:
+                resumed_path.unlink(missing_ok=True)
+        finally:
+            checkpoint_path.unlink(missing_ok=True)
 
 
 class TestTransformerSmoke:

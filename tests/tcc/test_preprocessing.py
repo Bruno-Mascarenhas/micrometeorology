@@ -100,3 +100,26 @@ class TestPreprocessingPipeline:
 
         recovered = pipeline.inverse_transform_column(out["A"].values, "A")  # type: ignore
         np.testing.assert_array_almost_equal(recovered, train_df.loc[out.index, "A"].values)
+
+    def test_ffill_transform_does_not_backfill_from_future_rows(self):
+        train = pd.DataFrame({"A": [1.0, 2.0, 3.0]})
+        test = pd.DataFrame({"A": [np.nan, 100.0]})
+
+        pipeline = PreprocessingPipeline(scaler_type="none", impute_strategy="ffill")
+        pipeline.fit(train)
+
+        out = pipeline.transform(test)
+
+        assert out["A"].iloc[0] == 3.0
+        assert out["A"].iloc[1] == 100.0
+
+    def test_interpolate_transform_is_causal(self):
+        train = pd.DataFrame({"A": [1.0, 2.0, 3.0]})
+        test = pd.DataFrame({"A": [10.0, np.nan, 100.0]})
+
+        pipeline = PreprocessingPipeline(scaler_type="none", impute_strategy="interpolate")
+        pipeline.fit(train)
+
+        out = pipeline.transform(test)
+
+        assert out["A"].iloc[1] == 10.0

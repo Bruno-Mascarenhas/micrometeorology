@@ -134,6 +134,9 @@ class LSTMRegressor(TorchRegressorModel):
         )
         instance._module.load_state_dict(checkpoint["model_state_dict"])
         instance._start_epoch = checkpoint.get("epoch", 0)
+        instance._optimizer_state = checkpoint.get("optimizer_state_dict")
+        instance._scheduler_state = checkpoint.get("scheduler_state_dict")
+        instance._scaler_state = checkpoint.get("scaler_state_dict")
         return instance
 
     def save(self, path: str | Path) -> None:
@@ -142,8 +145,10 @@ class LSTMRegressor(TorchRegressorModel):
 
         save_torch_checkpoint(
             model_state=self._module.state_dict(),
-            optimizer_state=None,
+            optimizer_state=getattr(self, "_optimizer_state", None),
             config=self._config_kwargs,
             epoch=self._start_epoch,
             path=path,
+            scheduler_state=getattr(self, "_scheduler_state", None),
+            scaler_state=getattr(self, "_scaler_state", None),
         )

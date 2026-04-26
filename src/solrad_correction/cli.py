@@ -1,4 +1,19 @@
-"""CLI entry point for solrad_correction experiments."""
+"""CLI entry point for solrad_correction experiments.
+
+Examples
+--------
+Run the default config:
+    solrad-run --config configs/tcc/experiments/svm_hourly.yaml
+
+Fair SVM/LSTM/Transformer comparison:
+    set model.evaluation_policy: common_sequence_horizon in the YAML.
+
+Opt into PyTorch compilation for longer neural-network runs:
+    set model.torch_compile: true in the YAML.
+
+Resume from a checkpoint:
+    set model.pretrained_path: output/experiments/lstm_v1/model.pt.
+"""
 
 from __future__ import annotations
 
@@ -26,6 +41,7 @@ def run_experiment_cli(config: str, name: str | None, output: str | None) -> Non
 
     click.echo(f"Experiment: {cfg.name}")
     click.echo(f"Model:      {cfg.model.model_type}")
+    click.echo(f"Eval policy:{cfg.model.evaluation_policy:>16}")
     click.echo(f"Output:     {cfg.experiment_dir}")
 
     run_experiment(cfg)

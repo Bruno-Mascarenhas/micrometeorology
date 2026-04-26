@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import tempfile
 import time
+import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import numpy as np
 
@@ -27,6 +30,8 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
+
+JsonWorkerBackend = Literal["pickle", "memmap"]
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +89,17 @@ class JsonTask(NamedTuple):
     """Lightweight description of a JSON file to write."""
 
     data: NDArray
+    scale_min: float
+    scale_max: float
+    date_str: str
+    output_path: str
+    wind_data: dict | None
+
+
+class JsonMemmapTask(NamedTuple):
+    """JSON task with array data stored in a temporary ``.npy`` file."""
+
+    data_path: str
     scale_min: float
     scale_max: float
     date_str: str
@@ -199,11 +215,18 @@ def _render_figure(task: FigureTask) -> str:
     return str(out)
 
 
-def _write_json(task: JsonTask) -> str:
-    """Write a single JSON file. Runs in a worker process."""
+def _write_json_payload(
+    arr: NDArray,
+    *,
+    scale_min: float,
+    scale_max: float,
+    date_str: str,
+    output_path: str,
+    wind_data: dict | None,
+) -> str:
+    """Write a single values JSON payload from an ndarray-like object."""
     import json
 
-    arr = task.data
     arr = arr.filled(np.nan) if hasattr(arr, "filled") else np.asarray(arr, dtype=float)
 
     # Vectorized: round, flatten, convert to Python list in one call
@@ -214,23 +237,48 @@ def _write_json(task: JsonTask) -> str:
     for idx in nan_indices:
         values[idx] = None
 
-    scale_values = [round(float(x), 2) for x in np.linspace(task.scale_min, task.scale_max, 6)]
+    scale_values = [round(float(x), 2) for x in np.linspace(scale_min, scale_max, 6)]
 
     metadata: dict[str, Any] = {
         "scale_values": scale_values,
-        "date_time": task.date_str,
+        "date_time": date_str,
     }
-    if task.wind_data is not None:
-        metadata["wind"] = task.wind_data
+    if wind_data is not None:
+        metadata["wind"] = wind_data
 
     payload = {"metadata": metadata, "values": values}
 
-    out = Path(task.output_path)
+    out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         json.dump(payload, f, separators=(",", ":"), ensure_ascii=False)
 
     return str(out)
+
+
+def _write_json(task: JsonTask) -> str:
+    """Write a single JSON file. Runs in a worker process."""
+    return _write_json_payload(
+        task.data,
+        scale_min=task.scale_min,
+        scale_max=task.scale_max,
+        date_str=task.date_str,
+        output_path=task.output_path,
+        wind_data=task.wind_data,
+    )
+
+
+def _write_json_memmap(task: JsonMemmapTask) -> str:
+    """Write a JSON file from a memmap-backed task. Runs in a worker process."""
+    arr = np.load(task.data_path, mmap_mode="r")
+    return _write_json_payload(
+        arr,
+        scale_min=task.scale_min,
+        scale_max=task.scale_max,
+        date_str=task.date_str,
+        output_path=task.output_path,
+        wind_data=task.wind_data,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +378,9 @@ def run_figure_tasks(
 def run_json_tasks(
     tasks: list[JsonTask],
     workers: int | None = None,
+    *,
+    backend: JsonWorkerBackend = "pickle",
+    tmp_dir: str | Path | None = None,
 ) -> list[str]:
     """Execute JSON writing tasks in parallel.
 
@@ -339,6 +390,13 @@ def run_json_tasks(
         List of ``JsonTask`` to write.
     workers:
         Number of parallel workers. Defaults to ``cpu_count - 4``.
+    backend:
+        ``"pickle"`` sends arrays directly to workers (legacy behavior).
+        ``"memmap"`` stores arrays in temporary ``.npy`` files and sends
+        lightweight file references, reducing process-pool IPC payload size.
+    tmp_dir:
+        Parent directory for temporary memmap payloads when backend is
+        ``"memmap"``. A per-run subdirectory is created and removed.
 
     Returns
     -------
@@ -349,10 +407,24 @@ def run_json_tasks(
     n_workers = min(n_workers, len(tasks)) if tasks else 1
     total = len(tasks)
 
-    logger.info("Writing %d JSON files with %d workers", total, n_workers)
+    if backend not in {"pickle", "memmap"}:
+        raise ValueError(f"Unknown JSON worker backend: {backend}")
+
+    logger.info("Writing %d JSON files with %d workers (%s backend)", total, n_workers, backend)
     t0 = time.perf_counter()
 
     paths: list[str] = []
+    if not tasks:
+        return paths
+
+    if backend == "memmap":
+        return _run_json_tasks_memmap(tasks, n_workers, tmp_dir, t0)
+
+    if n_workers == 1:
+        paths = [_write_json(task) for task in tasks]
+        elapsed = time.perf_counter() - t0
+        logger.info("✓ Wrote %d JSON files in %.1fs", len(paths), elapsed)
+        return paths
 
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
         futures = {pool.submit(_write_json, task): i for i, task in enumerate(tasks)}
@@ -362,6 +434,66 @@ def run_json_tasks(
             except Exception:
                 idx = futures[future]
                 logger.exception("Failed to write JSON task %d", idx)
+
+    elapsed = time.perf_counter() - t0
+    logger.info("✓ Wrote %d JSON files in %.1fs", len(paths), elapsed)
+    return paths
+
+
+def _run_json_tasks_memmap(
+    tasks: list[JsonTask],
+    n_workers: int,
+    tmp_dir: str | Path | None,
+    t0: float,
+) -> list[str]:
+    """Materialize JSON task arrays to temporary .npy files and process by reference."""
+    parent: Path | None = Path(tmp_dir) if tmp_dir is not None else None
+    if parent is None:
+        run_dir_ctx = tempfile.TemporaryDirectory(prefix="labmim-json-memmap-")
+        run_dir = Path(run_dir_ctx.name)
+    else:
+        parent.mkdir(parents=True, exist_ok=True)
+        run_dir_ctx = None
+        run_dir = parent / f"labmim-json-memmap-{uuid.uuid4().hex}"
+        run_dir.mkdir(parents=True, exist_ok=False)
+
+    paths: list[str] = []
+    try:
+        memmap_tasks: list[JsonMemmapTask] = []
+        for idx, task in enumerate(tasks):
+            data_path = run_dir / f"task_{idx:06d}.npy"
+            data = task.data.filled(np.nan) if hasattr(task.data, "filled") else task.data
+            np.save(data_path, np.asarray(data), allow_pickle=False)
+            memmap_tasks.append(
+                JsonMemmapTask(
+                    data_path=str(data_path),
+                    scale_min=task.scale_min,
+                    scale_max=task.scale_max,
+                    date_str=task.date_str,
+                    output_path=task.output_path,
+                    wind_data=task.wind_data,
+                )
+            )
+
+        if n_workers == 1:
+            paths = [_write_json_memmap(task) for task in memmap_tasks]
+        else:
+            with ProcessPoolExecutor(max_workers=n_workers) as pool:
+                futures = {
+                    pool.submit(_write_json_memmap, task): i
+                    for i, task in enumerate(memmap_tasks)
+                }
+                for future in as_completed(futures):
+                    try:
+                        paths.append(future.result())
+                    except Exception:
+                        idx = futures[future]
+                        logger.exception("Failed to write memmap JSON task %d", idx)
+    finally:
+        if run_dir_ctx is not None:
+            run_dir_ctx.cleanup()
+        else:
+            shutil.rmtree(run_dir, ignore_errors=True)
 
     elapsed = time.perf_counter() - t0
     logger.info("✓ Wrote %d JSON files in %.1fs", len(paths), elapsed)

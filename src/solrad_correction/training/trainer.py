@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import TYPE_CHECKING
+import platform
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -14,7 +15,6 @@ from torch.utils.tensorboard import SummaryWriter
 from solrad_correction.training.callbacks import EarlyStopping
 from solrad_correction.training.loops import evaluate_epoch, train_one_epoch
 from solrad_correction.training.progress import TrainingProgress
-from solrad_correction.utils.seeds import set_global_seed
 
 if TYPE_CHECKING:
     from solrad_correction.config import ModelConfig
@@ -40,11 +40,17 @@ class Trainer:
         device: str = "cpu",
         config: ModelConfig | None = None,
         start_epoch: int = 0,
+        optimizer_state: dict[str, Any] | None = None,
+        scheduler_state: dict[str, Any] | None = None,
+        scaler_state: dict[str, Any] | None = None,
     ) -> None:
         self.model: nn.Module = model  # type: ignore
         self.device = device
         self.config = config
         self.start_epoch = start_epoch
+        self._resume_optimizer_state = optimizer_state
+        self._resume_scheduler_state = scheduler_state
+        self._resume_scaler_state = scaler_state
 
         # Defaults from config
         self.lr = config.learning_rate if config else 1e-3
@@ -53,7 +59,10 @@ class Trainer:
         self.batch_size = config.batch_size if config else 32
         self.patience = config.patience if config else 10
         self.min_delta = config.min_delta if config else 1e-4
-        self.seed = 42
+        self.completed_epochs = start_epoch
+        self.optimizer_state: dict[str, Any] | None = None
+        self.scheduler_state: dict[str, Any] | None = None
+        self.scaler_state: dict[str, Any] | None = None
 
     def train(
         self,
@@ -65,11 +74,10 @@ class Trainer:
         Returns ``(trained_model, history)`` where history contains
         per-epoch losses.
         """
-        set_global_seed(self.seed)
         self.model.to(self.device)
 
         # Optimize with torch.compile if supported (PyTorch 2.0+)
-        if hasattr(torch, "compile"):
+        if self.config and self.config.torch_compile and hasattr(torch, "compile"):
             try:
                 self.model = torch.compile(self.model)  # type: ignore
                 logger.info("Successfully applied torch.compile to the model")
@@ -77,7 +85,10 @@ class Trainer:
                 logger.debug("torch.compile not supported or failed: %s", e)
 
         # High-performance dataloading
-        num_workers = min(4, torch.get_num_threads())
+        if self.device == "cpu" or platform.system() == "Windows":
+            num_workers = 0
+        else:
+            num_workers = min(4, torch.get_num_threads())
         pin_memory = self.device != "cpu"
 
         train_loader = DataLoader(
@@ -118,6 +129,27 @@ class Trainer:
             optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-6
         )
 
+        if self._resume_optimizer_state is not None:
+            try:
+                optimizer.load_state_dict(self._resume_optimizer_state)
+                logger.info("Restored optimizer state from checkpoint")
+            except (RuntimeError, ValueError) as exc:
+                logger.warning("Skipping incompatible optimizer state: %s", exc)
+
+        if self._resume_scheduler_state is not None:
+            try:
+                scheduler.load_state_dict(self._resume_scheduler_state)
+                logger.info("Restored scheduler state from checkpoint")
+            except (RuntimeError, ValueError) as exc:
+                logger.warning("Skipping incompatible scheduler state: %s", exc)
+
+        if scaler is not None and self._resume_scaler_state is not None:
+            try:
+                scaler.load_state_dict(self._resume_scaler_state)
+                logger.info("Restored AMP scaler state from checkpoint")
+            except (RuntimeError, ValueError) as exc:
+                logger.warning("Skipping incompatible AMP scaler state: %s", exc)
+
         # TensorBoard Tracking
         writer = None
         if self.config and self.config.log_dir:
@@ -134,9 +166,13 @@ class Trainer:
         # In-Memory Best Checkpointing
         best_loss = float("inf")
         best_state_dict = copy.deepcopy(self.model.state_dict())
+        best_optimizer_state = copy.deepcopy(optimizer.state_dict())
+        best_scheduler_state = copy.deepcopy(scheduler.state_dict())
+        best_scaler_state = copy.deepcopy(scaler.state_dict()) if scaler is not None else None
 
         total_epochs = self.start_epoch + self.max_epochs
         for epoch in range(self.start_epoch, total_epochs):
+            self.completed_epochs = epoch + 1
             progress.start_epoch(epoch)
 
             # Train
@@ -173,6 +209,9 @@ class Trainer:
             if monitor < best_loss:
                 best_loss = monitor
                 best_state_dict = copy.deepcopy(self.model.state_dict())
+                best_optimizer_state = copy.deepcopy(optimizer.state_dict())
+                best_scheduler_state = copy.deepcopy(scheduler.state_dict())
+                best_scaler_state = copy.deepcopy(scaler.state_dict()) if scaler is not None else None
 
             extra = ""
             # Early stopping
@@ -190,5 +229,13 @@ class Trainer:
         # Restore best weights before returning
         logger.info("Restoring best model weights (loss=%.6f)", best_loss)
         self.model.load_state_dict(best_state_dict)
+        optimizer.load_state_dict(best_optimizer_state)
+        scheduler.load_state_dict(best_scheduler_state)
+        if scaler is not None and best_scaler_state is not None:
+            scaler.load_state_dict(best_scaler_state)
+
+        self.optimizer_state = optimizer.state_dict()
+        self.scheduler_state = scheduler.state_dict()
+        self.scaler_state = scaler.state_dict() if scaler is not None else None
 
         return self.model, history

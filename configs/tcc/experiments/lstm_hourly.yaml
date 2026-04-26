@@ -21,15 +21,20 @@ split:
 preprocess:
   scaler_type: standard
   impute_strategy: drop
+  drop_na_threshold: 0.5
 
 features:
   lag_steps: []
   rolling_windows: []
   add_temporal: true
   cyclic_encoding: true
+  add_diffs: false
 
 model:
   model_type: lstm
+  # model_native preserves previous LSTM metrics on sequence target rows.
+  # Use common_sequence_horizon across SVM/LSTM/Transformer comparison runs.
+  evaluation_policy: model_native
   lstm_hidden_size: 64
   lstm_num_layers: 2
   lstm_dropout: 0.1
@@ -39,5 +44,6 @@ model:
   weight_decay: 0.00001
   max_epochs: 100
   patience: 10
+  torch_compile: false
 
 output_dir: output/experiments

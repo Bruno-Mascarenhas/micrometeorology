@@ -11,11 +11,28 @@ Usage::
     # Multiple domains
     labmim-wrf-geojson --wrf-dir /path/to/wrfout/ --date 20240101 \\
         --domains 1 4 -o output/JSON -g output/GeoJSON --workers 44
+
+    # Auto mode chooses eager/pickle for tiny work and lazy/memmap for large work
+    labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
+        -o output/JSON -g output/GeoJSON
+
+    # Force old eager/pickle behavior
+    labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
+        -o output/JSON -g output/GeoJSON --reader eager --chunks none --worker-backend pickle
+
+    # Force xarray-backed lazy reader
+    labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
+        -o output/JSON -g output/GeoJSON --reader lazy --chunks none
+
+    # Force memmap worker references for large JSON exports
+    labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
+        -o output/JSON -g output/GeoJSON --worker-backend memmap --tmp-dir scratch/wrf-json
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import click
 import numpy as np
@@ -24,7 +41,18 @@ from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import geojson, reader
 from micrometeorology.wrf import variables as vmod
-from micrometeorology.wrf.batch import JsonTask, default_workers, run_json_tasks
+from micrometeorology.wrf.batch import (
+    JsonTask,
+    default_workers,
+    run_json_tasks,
+)
+from micrometeorology.wrf.execution import (
+    JsonWorkerRequest,
+    ReaderRequest,
+    estimate_json_payload_bytes,
+    format_wrf_execution_plan,
+    resolve_wrf_execution_plan,
+)
 from micrometeorology.wrf.geojson import create_wind_vectors_json
 from micrometeorology.wrf.interpolation import (
     compute_wind_vectors_at_height,
@@ -104,7 +132,7 @@ def _format_datetime(dt) -> str:
 
 
 def _build_json_tasks_for_domain(
-    ds: reader.WRFDataset,
+    ds: reader.WRFReader,
     var_list: list[str],
     json_dir: str,
     geojson_dir: str,
@@ -311,11 +339,40 @@ def _build_json_tasks_for_domain(
 @click.option("--variables", "-v", multiple=True, default=None, help="Variables to process.")
 @click.option("--skip-first", default=0, type=int, help="Time steps to skip.")
 @click.option(
+    "--reader",
+    "reader_backend",
+    default="auto",
+    type=click.Choice(["auto", "eager", "lazy"]),
+    show_default=True,
+    help="WRF reader backend. Auto chooses eager for small inputs and lazy for large/chunked inputs.",
+)
+@click.option(
+    "--chunks",
+    default="auto",
+    show_default=True,
+    help="Lazy-reader chunks: 'auto', 'none', or comma-separated dim=size pairs.",
+)
+@click.option(
     "--workers",
     "-w",
     default=None,
     type=int,
     help=f"Parallel workers (default: {default_workers()}).",
+)
+@click.option(
+    "--worker-backend",
+    "worker_backend",
+    default="auto",
+    type=click.Choice(["auto", "pickle", "memmap"]),
+    show_default=True,
+    help="JSON worker payload backend. Auto uses pickle for small/serial work and memmap for large multi-worker exports.",
+)
+@click.option(
+    "--tmp-dir",
+    "tmp_dir",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Parent directory for temporary memmap payloads when --worker-backend memmap.",
 )
 @click.option("--log-level", default="INFO", help="Logging level.")
 def main(
@@ -327,7 +384,11 @@ def main(
     geojson_dir: str,
     variables: tuple[str, ...],
     skip_first: int,
+    reader_backend: str,
+    chunks: str,
     workers: int | None,
+    worker_backend: str,
+    tmp_dir: str | None,
     log_level: str,
 ) -> None:
     """Generate GeoJSON and value JSON files with parallel writing."""
@@ -336,6 +397,18 @@ def main(
     var_list = list(variables) if variables else DEFAULT_VARS
     var_list = _normalize_var_list(var_list)
     paths = _resolve_wrfout_paths(wrf_dir, date, domains, dataset)
+    try:
+        initial_plan = resolve_wrf_execution_plan(
+            paths=paths,
+            workflow="json",
+            reader_request=cast("ReaderRequest", reader_backend),
+            chunks_request=chunks,
+            json_worker_request=cast("JsonWorkerRequest", worker_backend),
+            workers=workers,
+            tmp_dir=tmp_dir,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
     if not paths:
         click.echo("No WRF files found.")
@@ -343,21 +416,46 @@ def main(
 
     click.echo(f"Files: {[p.name for p in paths]}")
     click.echo(f"Variables: {var_list}")
-    click.echo(f"Workers: {workers or default_workers()}")
+    click.echo(format_wrf_execution_plan(initial_plan))
 
     # Build all tasks
     all_tasks: list[JsonTask] = []
     for wrf_path in paths:
         click.echo(f"\nLoading {wrf_path.name}...")
-        with reader.WRFDataset(wrf_path) as ds:
+        with reader.open_wrf_dataset(
+            wrf_path,
+            reader=initial_plan.reader,
+            chunks=initial_plan.chunks,
+        ) as ds:
             tasks = _build_json_tasks_for_domain(ds, var_list, output_dir, geojson_dir, skip_first)
             all_tasks.extend(tasks)
             click.echo(f"  → {len(tasks)} JSON files queued")
 
     click.echo(f"\nTotal JSON files: {len(all_tasks)}")
+    try:
+        final_plan = resolve_wrf_execution_plan(
+            paths=paths,
+            workflow="json",
+            reader_request=cast("ReaderRequest", initial_plan.reader),
+            chunks_request=chunks,
+            json_worker_request=cast("JsonWorkerRequest", worker_backend),
+            workers=initial_plan.workers,
+            tmp_dir=tmp_dir,
+            estimated_json_payload_bytes=estimate_json_payload_bytes(all_tasks),
+            json_task_count=len(all_tasks),
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    if final_plan != initial_plan:
+        click.echo(format_wrf_execution_plan(final_plan))
 
     # Parallel JSON writing
-    json_paths = run_json_tasks(all_tasks, workers=workers)
+    json_paths = run_json_tasks(
+        all_tasks,
+        workers=final_plan.workers,
+        backend=final_plan.json_worker_backend,
+        tmp_dir=final_plan.tmp_dir,
+    )
     click.echo(f"\n✓ Generated {len(json_paths)} JSON files")
     click.echo("✓ Done")
 
