@@ -434,10 +434,14 @@ def _plot_velocidade(
     if col in raw.columns:
         ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
     if col_ws1 in raw.columns:
-        ax.plot(raw.index, raw[col_ws1], "o", color="silver", markersize=6, label="Media 5 min (WS1)")
+        ax.plot(
+            raw.index, raw[col_ws1], "o", color="silver", markersize=6, label="Media 5 min (WS1)"
+        )
     if col_ws2 in raw.columns:
-        ax.plot(raw.index, raw[col_ws2], "o", color="silver", markersize=6, label="Media 5 min (WS2)")
-    
+        ax.plot(
+            raw.index, raw[col_ws2], "o", color="silver", markersize=6, label="Media 5 min (WS2)"
+        )
+
     if col in hourly.columns:
         ax.plot(hourly.index, hourly[col], "-*k", label="WXT 1h")
     if col_ws1 in hourly.columns:
@@ -480,10 +484,14 @@ def _plot_direcao(
     if col in raw.columns:
         ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
     if col_wd1 in raw.columns:
-        ax.plot(raw.index, raw[col_wd1], "o", color="silver", markersize=6, label="Media 5 min (WD1)")
+        ax.plot(
+            raw.index, raw[col_wd1], "o", color="silver", markersize=6, label="Media 5 min (WD1)"
+        )
     if col_wd2 in raw.columns:
-        ax.plot(raw.index, raw[col_wd2], "o", color="silver", markersize=6, label="Media 5 min (WD2)")
-        
+        ax.plot(
+            raw.index, raw[col_wd2], "o", color="silver", markersize=6, label="Media 5 min (WD2)"
+        )
+
     if col in hourly.columns:
         ax.plot(hourly.index, hourly[col], "*k", label="WXT 1h")
     if col_wd1 in hourly.columns:
@@ -668,11 +676,7 @@ def main(
     click.echo("Computing hourly aggregates...")
 
     wind_dir_cols = ["WD_WXT_Avg", "WindDir1_GMX", "WindDir"]
-    wind_speed_map = {
-        "WD_WXT_Avg": "WS_WXT_Avg",
-        "WindDir1_GMX": "WS1_ms_GMX",
-        "WindDir": "WS_ms"
-    }
+    wind_speed_map = {"WD_WXT_Avg": "WS_WXT_Avg", "WindDir1_GMX": "WS1_ms_GMX", "WindDir": "WS_ms"}
     sum_cols = [RAIN_COLUMN]
 
     # Filter to only columns that actually exist
