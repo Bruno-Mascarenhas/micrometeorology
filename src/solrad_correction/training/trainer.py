@@ -18,7 +18,7 @@ from solrad_correction.training.progress import TrainingProgress
 
 if TYPE_CHECKING:
     from solrad_correction.config import ModelConfig
-    from solrad_correction.datasets.sequence import SequenceDataset
+    from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +66,8 @@ class Trainer:
 
     def train(
         self,
-        train_data: SequenceDataset,
-        val_data: SequenceDataset | None = None,
+        train_data: SequenceDataset | WindowedSequenceDataset,
+        val_data: SequenceDataset | WindowedSequenceDataset | None = None,
     ) -> tuple[nn.Module, dict]:
         """Run the full training loop.
 
@@ -211,7 +211,9 @@ class Trainer:
                 best_state_dict = copy.deepcopy(self.model.state_dict())
                 best_optimizer_state = copy.deepcopy(optimizer.state_dict())
                 best_scheduler_state = copy.deepcopy(scheduler.state_dict())
-                best_scaler_state = copy.deepcopy(scaler.state_dict()) if scaler is not None else None
+                best_scaler_state = (
+                    copy.deepcopy(scaler.state_dict()) if scaler is not None else None
+                )
 
             extra = ""
             # Early stopping

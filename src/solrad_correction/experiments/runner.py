@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import dataclasses
 import logging
+import time
 from typing import TYPE_CHECKING, cast
 
 from solrad_correction.data.preprocessing import PreprocessingPipeline
@@ -11,6 +11,7 @@ from solrad_correction.data.splits import temporal_train_val_test_split
 from solrad_correction.datasets.tabular import TabularDataset
 from solrad_correction.evaluation.metrics import compute_regression_metrics
 from solrad_correction.evaluation.reports import ExperimentReport, save_experiment_results
+from solrad_correction.utils.metadata import collect_run_metadata
 from solrad_correction.utils.seeds import set_global_seed
 
 if TYPE_CHECKING:
@@ -71,6 +72,9 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
 
     Returns an ExperimentReport.
     """
+    config.validate()
+    experiment_started = time.monotonic()
+    training_duration_seconds: float | None = None
     set_global_seed(config.seed)
     exp_dir = config.experiment_dir
     exp_dir.mkdir(parents=True, exist_ok=True)
@@ -167,7 +171,9 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
             sequence_length=config.model.sequence_length,
             evaluation_policy=eval_policy,
         )
-        test_ds = TabularDataset.from_dataframe(test_eval_pp, feature_cols, config.data.target_column)
+        test_ds = TabularDataset.from_dataframe(
+            test_eval_pp, feature_cols, config.data.target_column
+        )
 
         train_ds.save(exp_dir / "datasets" / "train")
         test_ds.save(exp_dir / "datasets" / "test")
@@ -175,7 +181,9 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
         from solrad_correction.models.svm import SVMRegressor
 
         model = SVMRegressor.from_config(config.model)
+        training_started = time.monotonic()
         model.fit(train_ds, val_ds, config.model)  # type: ignore
+        training_duration_seconds = time.monotonic() - training_started
         model.save(exp_dir / "model.joblib")
 
         y_pred = model.predict(test_ds)  # type: ignore
@@ -188,40 +196,25 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
         )
 
     elif model_type in ("lstm", "transformer"):
-        from solrad_correction.datasets.sequence import SequenceDataset, SequenceDatasetMeta
-        from solrad_correction.features.sequence import create_sequences
+        from solrad_correction.datasets.sequence import WindowedSequenceDataset
 
         seq_len = config.model.sequence_length
 
-        train_x, train_y = create_sequences(
-            train_pp[feature_cols].values,  # type: ignore
-            train_pp[config.data.target_column].values,  # type: ignore
-            seq_len,  # type: ignore
-        )
-        val_x, val_y = create_sequences(
-            val_pp[feature_cols].values,  # type: ignore
-            val_pp[config.data.target_column].values,  # type: ignore
-            seq_len,  # type: ignore
-        )
-        test_x, test_y = create_sequences(
-            test_pp[feature_cols].values,  # type: ignore
-            test_pp[config.data.target_column].values,  # type: ignore
-            seq_len,  # type: ignore
-        )
+        train_features = train_pp[feature_cols].to_numpy()
+        train_target = train_pp[config.data.target_column].to_numpy()
+        val_features = val_pp[feature_cols].to_numpy()
+        val_target = val_pp[config.data.target_column].to_numpy()
+        test_features = test_pp[feature_cols].to_numpy()
+        test_target = test_pp[config.data.target_column].to_numpy()
 
-        train_seq = SequenceDataset(train_x, train_y)
-        val_seq = SequenceDataset(val_x, val_y)
-        test_seq = SequenceDataset(test_x, test_y)
+        train_seq = WindowedSequenceDataset(train_features, train_target, seq_len)
+        val_seq = WindowedSequenceDataset(val_features, val_target, seq_len)
+        test_seq = WindowedSequenceDataset(test_features, test_target, seq_len)
 
-        # Save datasets
-        SequenceDatasetMeta(
-            X_raw=train_x, y_raw=train_y, feature_names=feature_cols, sequence_length=seq_len
-        ).save(exp_dir / "datasets" / "train")
-        SequenceDatasetMeta(
-            X_raw=test_x, y_raw=test_y, feature_names=feature_cols, sequence_length=seq_len
-        ).save(exp_dir / "datasets" / "test")
+        train_seq.save(exp_dir / "datasets" / "train", feature_names=feature_cols)
+        test_seq.save(exp_dir / "datasets" / "test", feature_names=feature_cols)
 
-        input_size = train_x.shape[2]
+        input_size = train_features.shape[1]
 
         if model_type == "lstm":
             from solrad_correction.models.lstm import LSTMRegressor
@@ -232,11 +225,13 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
 
             model = TransformerRegressor.from_config(config.model, input_size)  # type: ignore
 
+        training_started = time.monotonic()
         model.fit(train_seq, val_seq, config.model)  # type: ignore
+        training_duration_seconds = time.monotonic() - training_started
         model.save(exp_dir / "model.pt")
 
         y_pred = model.predict(test_seq)  # type: ignore
-        y_true = test_y
+        y_true = test_seq.target_values()
         prediction_index = _prediction_index_for_policy(
             cast("pd.DatetimeIndex", test_pp.index),
             model_type=model_type,
@@ -258,7 +253,14 @@ def run_experiment(config: ExperimentConfig) -> ExperimentReport:
         experiment_name=config.name,
         model_name=model_type,
         metrics=metrics,
-        config=dataclasses.asdict(config),
+        config=config.to_dict(),
+        train_history=getattr(model, "training_history", {}),
+        metadata=collect_run_metadata(
+            config=config,
+            model=model,
+            started_at=experiment_started,
+            training_duration_seconds=training_duration_seconds,
+        ),
     )
 
     save_experiment_results(report, y_true_orig, y_pred_orig, exp_dir, index=prediction_index)

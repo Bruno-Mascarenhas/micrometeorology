@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -123,18 +124,52 @@ class ExperimentConfig:
     def experiment_dir(self) -> Path:
         return Path(self.output_dir) / self.name
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return the resolved config as plain Python data."""
+        return dataclasses.asdict(self)
+
+    def validate(self) -> None:
+        """Validate configuration values that can be checked before data loading."""
+        errors: list[str] = []
+
+        model_type = self.model.model_type.lower()
+        if model_type not in {"svm", "lstm", "transformer"}:
+            errors.append("model.model_type must be one of: svm, lstm, transformer")
+
+        if self.model.evaluation_policy not in {"model_native", "common_sequence_horizon"}:
+            errors.append(
+                "model.evaluation_policy must be one of: model_native, common_sequence_horizon"
+            )
+
+        split_total = self.split.train_ratio + self.split.val_ratio + self.split.test_ratio
+        if abs(split_total - 1.0) > 1e-6:
+            errors.append(f"split ratios must sum to 1.0, got {split_total:.4f}")
+        if min(self.split.train_ratio, self.split.val_ratio, self.split.test_ratio) < 0:
+            errors.append("split ratios must be non-negative")
+
+        if self.model.sequence_length <= 0:
+            errors.append("model.sequence_length must be positive")
+        if self.model.batch_size <= 0:
+            errors.append("model.batch_size must be positive")
+        if self.model.max_epochs <= 0:
+            errors.append("model.max_epochs must be positive")
+
+        if self.model.tf_d_model <= 0:
+            errors.append("model.tf_d_model must be positive")
+        if self.model.tf_nhead <= 0:
+            errors.append("model.tf_nhead must be positive")
+        elif self.model.tf_d_model % self.model.tf_nhead != 0:
+            errors.append("model.tf_d_model must be divisible by model.tf_nhead")
+
+        if errors:
+            joined = "\n".join(f"- {error}" for error in errors)
+            raise ValueError(f"Invalid experiment config:\n{joined}")
+
     def save(self, path: str | Path) -> None:
         """Save config to YAML."""
-        import dataclasses
-
-        def _to_dict(obj: Any) -> Any:
-            if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-                return {k: _to_dict(v) for k, v in dataclasses.asdict(obj).items()}
-            return obj
-
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
-            yaml.dump(_to_dict(self), f, default_flow_style=False, sort_keys=False)
+            yaml.dump(self.to_dict(), f, default_flow_style=False, sort_keys=False)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ExperimentConfig:

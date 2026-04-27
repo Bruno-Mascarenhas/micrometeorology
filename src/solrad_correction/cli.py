@@ -17,6 +17,8 @@ Resume from a checkpoint:
 
 from __future__ import annotations
 
+import json
+
 import click
 
 from solrad_correction.config import ExperimentConfig
@@ -28,7 +30,17 @@ from solrad_correction.config import ExperimentConfig
 )
 @click.option("--name", "-n", default=None, help="Override experiment name.")
 @click.option("--output", "-o", default=None, help="Override output directory.")
-def run_experiment_cli(config: str, name: str | None, output: str | None) -> None:
+@click.option("--validate-config", is_flag=True, help="Validate config and exit without training.")
+@click.option(
+    "--print-config", "print_config", is_flag=True, help="Print resolved config and exit."
+)
+def run_experiment_cli(
+    config: str,
+    name: str | None,
+    output: str | None,
+    validate_config: bool,
+    print_config: bool,
+) -> None:
     """Run a solrad_correction experiment from a YAML config file."""
     from solrad_correction.experiments.runner import run_experiment
 
@@ -38,6 +50,19 @@ def run_experiment_cli(config: str, name: str | None, output: str | None) -> Non
         cfg.name = name
     if output:
         cfg.output_dir = output
+
+    try:
+        cfg.validate()
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if print_config:
+        click.echo(json.dumps(cfg.to_dict(), indent=2, ensure_ascii=False, default=str))
+        return
+
+    if validate_config:
+        click.echo("Config is valid.")
+        return
 
     click.echo(f"Experiment: {cfg.name}")
     click.echo(f"Model:      {cfg.model.model_type}")

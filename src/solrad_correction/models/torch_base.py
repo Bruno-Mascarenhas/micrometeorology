@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from solrad_correction.config import ModelConfig
-    from solrad_correction.datasets.sequence import SequenceDataset
+    from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +61,8 @@ class TorchRegressorModel(BaseRegressorModel):
 
     def fit(
         self,
-        train_data: SequenceDataset,
-        val_data: SequenceDataset | None = None,
+        train_data: SequenceDataset | WindowedSequenceDataset,
+        val_data: SequenceDataset | WindowedSequenceDataset | None = None,
         config: ModelConfig | None = None,
     ) -> TorchRegressorModel:
         """Train using the standard training loop with progress display."""
@@ -80,32 +80,33 @@ class TorchRegressorModel(BaseRegressorModel):
             scheduler_state=self._scheduler_state,
             scaler_state=self._scaler_state,
         )
-        self._module, _history = trainer.train(train_data, val_data)
+        self._module, history = trainer.train(train_data, val_data)
         self._start_epoch = trainer.completed_epochs
         self._optimizer_state = trainer.optimizer_state
         self._scheduler_state = trainer.scheduler_state
         self._scaler_state = trainer.scaler_state
+        self._history = history
         self._config = config
         return self
 
-    def predict(self, data: SequenceDataset | np.ndarray) -> np.ndarray:
+    @property
+    def training_history(self) -> dict[str, list[float]]:
+        """Training history from the latest fit call."""
+        return getattr(self, "_history", {})
+
+    def predict(self, data: SequenceDataset | WindowedSequenceDataset | np.ndarray) -> np.ndarray:
         """Generate predictions using a batched DataLoader to prevent OOM."""
-        from torch.utils.data import DataLoader, TensorDataset
+        from torch.utils.data import DataLoader, Dataset, TensorDataset
 
         self._module.eval()
         self._module.to(self._device)
 
-        if hasattr(data, "X"):
-            x_input = (
-                data.X
-                if isinstance(data.X, torch.Tensor)
-                else torch.tensor(data.X, dtype=torch.float32)
-            )
+        dataset: Dataset
+        if self._is_torch_dataset(data):
+            dataset = cast("Dataset", data)
         else:
             x_input = torch.tensor(np.asarray(data), dtype=torch.float32)
-
-        # Use TensorDataset and DataLoader for batched inference
-        dataset = TensorDataset(x_input)
+            dataset = TensorDataset(x_input)
 
         # Batch size defaults to a reasonable number if not specified in config
         batch_size = getattr(self, "_config", None)
@@ -117,12 +118,19 @@ class TorchRegressorModel(BaseRegressorModel):
         with torch.inference_mode():
             device_type = "cuda" if "cuda" in self._device else "cpu"
             for batch in loader:
-                batch_x = batch[0].to(self._device, non_blocking=True)
+                batch_x = batch[0] if isinstance(batch, list | tuple) else batch
+                batch_x = batch_x.to(self._device, non_blocking=True)
                 with torch.autocast(device_type=device_type, enabled="cuda" in self._device):
                     preds = self._module(batch_x)
                 all_preds.append(preds.cpu().numpy().flatten())
 
         return np.concatenate(all_preds)
+
+    @staticmethod
+    def _is_torch_dataset(data: object) -> bool:
+        from torch.utils.data import Dataset
+
+        return isinstance(data, Dataset)
 
     def save(self, path: str | Path) -> None:
         """Save model checkpoint (state_dict + config for transfer learning)."""

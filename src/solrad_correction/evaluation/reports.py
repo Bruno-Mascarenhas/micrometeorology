@@ -25,6 +25,7 @@ class ExperimentReport:
     metrics: dict[str, float] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
     train_history: dict[str, list[float]] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def save(self, output_dir: str | Path) -> None:
         """Save full report to the experiment directory."""
@@ -43,6 +44,9 @@ class ExperimentReport:
 
             history_df = pd.DataFrame(self.train_history)
             history_df.to_csv(out / "training_history.csv", index_label="epoch")
+
+        if self.metadata:
+            save_json(self.metadata, out / "metadata.json")
 
         logger.info("Report saved to %s", out)
 
