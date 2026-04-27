@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
-import copy
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 
 from solrad_correction.training.callbacks import EarlyStopping
+from solrad_correction.training.checkpoints import CheckpointManager
 from solrad_correction.training.dataloaders import DataLoaderSettings, resolve_dataloader_settings
+from solrad_correction.training.factories import (
+    create_criterion,
+    create_optimizer,
+    create_scheduler,
+    create_summary_writer,
+)
 from solrad_correction.training.loops import evaluate_epoch, train_one_epoch
 from solrad_correction.training.progress import TrainingProgress
+from solrad_correction.training.state import BestModelState, TrainingPlan, TrainingState
 
 if TYPE_CHECKING:
     from solrad_correction.config import ModelConfig, RuntimeConfig
@@ -56,14 +61,16 @@ class Trainer:
         self._resume_scheduler_state = scheduler_state
         self._resume_scaler_state = scaler_state
         self._checkpoint_config = checkpoint_config
+        self.plan = TrainingPlan.from_config(config)
+        self.state = TrainingState(completed_epochs=start_epoch)
 
         # Defaults from config
-        self.lr = config.learning_rate if config else 1e-3
-        self.weight_decay = config.weight_decay if config else 1e-5
-        self.max_epochs = config.max_epochs if config else 100
-        self.batch_size = config.batch_size if config else 32
-        self.patience = config.patience if config else 10
-        self.min_delta = config.min_delta if config else 1e-4
+        self.lr = self.plan.learning_rate
+        self.weight_decay = self.plan.weight_decay
+        self.max_epochs = self.plan.max_epochs
+        self.batch_size = self.plan.batch_size
+        self.patience = self.plan.patience
+        self.min_delta = self.plan.min_delta
         self.completed_epochs = start_epoch
         self.optimizer_state: dict[str, Any] | None = None
         self.scheduler_state: dict[str, Any] | None = None
@@ -108,43 +115,21 @@ class Trainer:
             except Exception as e:
                 logger.debug("torch.compile not supported or failed: %s", e)
 
-        train_loader = DataLoader(
-            train_data,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=settings.num_workers,
-            pin_memory=settings.pin_memory,
-            persistent_workers=settings.persistent_workers,
-            prefetch_factor=settings.prefetch_factor,
+        train_loader = self._build_loader(train_data, settings=settings, shuffle=True)
+        val_loader = (
+            self._build_loader(val_data, settings=settings, shuffle=False) if val_data else None
         )
 
-        val_loader = None
-        if val_data:
-            val_loader = DataLoader(
-                val_data,
-                batch_size=self.batch_size,
-                num_workers=settings.num_workers,
-                pin_memory=settings.pin_memory,
-                persistent_workers=settings.persistent_workers,
-                prefetch_factor=settings.prefetch_factor,
-            )
-
-        optimizer = torch.optim.Adam(
-            self.model.parameters(),
-            lr=self.lr,
-            weight_decay=self.weight_decay,
-        )
-        criterion = nn.MSELoss()
+        optimizer = create_optimizer(self.model, self.plan)
+        criterion = create_criterion()
         early_stop = EarlyStopping(patience=self.patience, min_delta=self.min_delta)
 
         # Automatic Mixed Precision (AMP)
         use_amp = settings.amp
-        scaler = torch.cuda.amp.GradScaler(enabled=True) if use_amp else None
+        scaler = torch.amp.GradScaler("cuda", enabled=True) if use_amp else None
 
         # Learning Rate Scheduler
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-6
-        )
+        scheduler = create_scheduler(optimizer)
 
         if self._resume_optimizer_state is not None:
             try:
@@ -168,9 +153,8 @@ class Trainer:
                 logger.warning("Skipping incompatible AMP scaler state: %s", exc)
 
         # TensorBoard Tracking
-        writer = None
-        if self.config and self.config.log_dir:
-            writer = SummaryWriter(log_dir=self.config.log_dir)
+        writer = create_summary_writer(self.config.log_dir if self.config else None)
+        if writer and self.config:
             logger.info("TensorBoard tracking enabled at %s", self.config.log_dir)
 
         progress = TrainingProgress(
@@ -178,26 +162,13 @@ class Trainer:
             start_epoch=self.start_epoch,
         )
 
-        history: dict[str, list[float]] = {"train_loss": [], "val_loss": []}
+        history = self.state.history
 
-        # In-Memory Best Checkpointing
-        best_loss = float("inf")
-        best_state_dict = copy.deepcopy(self.model.state_dict())
-        best_optimizer_state = copy.deepcopy(optimizer.state_dict())
-        best_scheduler_state = copy.deepcopy(scheduler.state_dict())
-        best_scaler_state = copy.deepcopy(scaler.state_dict()) if scaler is not None else None
-        checkpoint_dir = (
-            Path(self.runtime.checkpoint_dir)
-            if self.runtime is not None and self.runtime.checkpoint_dir
-            else None
+        best = BestModelState()
+        checkpoint_manager = CheckpointManager.from_runtime(
+            self.runtime,
+            checkpoint_config=self._checkpoint_config,
         )
-        checkpoint_every = (
-            self.runtime.checkpoint_every
-            if self.runtime is not None and self.runtime.checkpoint_every is not None
-            else 1
-        )
-        if checkpoint_dir is not None:
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         total_epochs = self.start_epoch + self.max_epochs
         for epoch in range(self.start_epoch, total_epochs):
@@ -241,39 +212,30 @@ class Trainer:
             # LR Scheduler step
             scheduler.step(monitor)
 
-            # In-Memory Checkpoint
-            if monitor < best_loss:
-                best_loss = monitor
-                self.best_metric = best_loss
-                self.best_epoch = epoch + 1
-                best_state_dict = copy.deepcopy(self.model.state_dict())
-                best_optimizer_state = copy.deepcopy(optimizer.state_dict())
-                best_scheduler_state = copy.deepcopy(scheduler.state_dict())
-                best_scaler_state = (
-                    copy.deepcopy(scaler.state_dict()) if scaler is not None else None
-                )
-                if checkpoint_dir is not None:
-                    self._save_checkpoint(
-                        checkpoint_dir / "best.pt",
+            # Best-model tracking keeps only CPU model weights in memory.
+            if best.capture_if_better(self.model, monitor, epoch + 1):
+                self.best_metric = best.metric
+                self.best_epoch = best.epoch
+                if checkpoint_manager.enabled:
+                    checkpoint_manager.save_best(
                         epoch=epoch + 1,
                         model=self.model,
                         optimizer=optimizer,
                         scheduler=scheduler,
                         scaler=scaler,
                         metric=monitor,
-                        kind="best",
+                        dataloader_settings=self.dataloader_settings,
                     )
 
-            if checkpoint_dir is not None and (epoch + 1) % checkpoint_every == 0:
-                self._save_checkpoint(
-                    checkpoint_dir / "last.pt",
+            if checkpoint_manager.should_save_last(epoch + 1):
+                checkpoint_manager.save_last(
                     epoch=epoch + 1,
                     model=self.model,
                     optimizer=optimizer,
                     scheduler=scheduler,
                     scaler=scaler,
                     metric=monitor,
-                    kind="last",
+                    dataloader_settings=self.dataloader_settings,
                 )
 
             extra = ""
@@ -290,46 +252,34 @@ class Trainer:
             writer.close()
 
         # Restore best weights before returning
-        logger.info("Restoring best model weights (loss=%.6f)", best_loss)
-        self.model.load_state_dict(best_state_dict)
-        optimizer.load_state_dict(best_optimizer_state)
-        scheduler.load_state_dict(best_scheduler_state)
-        if scaler is not None and best_scaler_state is not None:
-            scaler.load_state_dict(best_scaler_state)
+        logger.info("Restoring best model weights (loss=%.6f)", best.metric)
+        best.restore(self.model)
 
         self.optimizer_state = optimizer.state_dict()
         self.scheduler_state = scheduler.state_dict()
         self.scaler_state = scaler.state_dict() if scaler is not None else None
+        self.state.completed_epochs = self.completed_epochs
+        self.state.best_metric = self.best_metric
+        self.state.best_epoch = self.best_epoch
+        self.state.optimizer_state = self.optimizer_state
+        self.state.scheduler_state = self.scheduler_state
+        self.state.scaler_state = self.scaler_state
 
         return self.model, history
 
-    def _save_checkpoint(
+    def _build_loader(
         self,
-        path: Path,
+        dataset: SequenceDataset | WindowedSequenceDataset,
         *,
-        epoch: int,
-        model: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau,
-        scaler: torch.cuda.amp.GradScaler | None,
-        metric: float,
-        kind: str,
-    ) -> None:
-        from solrad_correction.utils.serialization import save_torch_checkpoint
-
-        save_torch_checkpoint(
-            model_state=model.state_dict(),
-            optimizer_state=optimizer.state_dict(),
-            config=self._checkpoint_config,
-            epoch=epoch,
-            path=path,
-            scheduler_state=scheduler.state_dict(),
-            scaler_state=scaler.state_dict() if scaler is not None else None,
-            metadata={
-                "checkpoint_kind": kind,
-                "monitor_metric": metric,
-                "dataloader": self.dataloader_settings.to_dict()
-                if self.dataloader_settings is not None
-                else {},
-            },
+        settings: DataLoaderSettings,
+        shuffle: bool,
+    ) -> DataLoader:
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=shuffle,
+            num_workers=settings.num_workers,
+            pin_memory=settings.pin_memory,
+            persistent_workers=settings.persistent_workers,
+            prefetch_factor=settings.prefetch_factor,
         )

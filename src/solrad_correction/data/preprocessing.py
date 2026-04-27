@@ -1,4 +1,4 @@
-"""Preprocessing pipeline with explicit fitted state and schema validation."""
+"""Current-schema preprocessing for leakage-safe solrad experiments."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class PreprocessingState:
-    """Serializable state learned from the training split only."""
+    """Serializable preprocessing state learned from the training split."""
 
-    version: int = 2
+    version: int = 3
     scaler_type: str = "standard"
     impute_strategy: str = "drop"
     drop_na_threshold: float = 0.5
@@ -33,7 +33,6 @@ class PreprocessingState:
     fitted: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        """Return JSON/joblib-safe state data."""
         return {
             "version": self.version,
             "scaler_type": self.scaler_type,
@@ -53,58 +52,28 @@ class PreprocessingState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PreprocessingState:
-        """Build state from the current or legacy serialized shape."""
-        if "input_columns" in data:
-            return cls(
-                version=int(data.get("version", 2)),
-                scaler_type=data["scaler_type"],
-                impute_strategy=data["impute_strategy"],
-                drop_na_threshold=float(data["drop_na_threshold"]),
-                input_columns=list(data.get("input_columns", [])),
-                output_columns=list(data.get("output_columns", [])),
-                feature_columns=list(data.get("feature_columns", [])),
-                target_column=data.get("target_column"),
-                row_counts=dict(data.get("row_counts", {})),
-                fill_values=_float_dict(data.get("fill_values", {})),
-                last_values=_float_dict(data.get("last_values", {})),
-                scaling={
-                    key: _float_dict(value) for key, value in data.get("scaling", {}).items()
-                },
-                dropped_columns=dict(data.get("dropped_columns", {})),
-                fitted=bool(data.get("fitted", False)),
-            )
-
-        # Compatibility with the previous joblib dictionary format.
-        columns = list(data.get("columns", []))
-        dropped = dict.fromkeys(
-            data.get("drop_cols", []), "legacy state: dropped during training preprocessing"
-        )
-        scaling: dict[str, dict[str, float]] = {}
-        if data.get("mean") is not None:
-            scaling["mean"] = _series_to_float_dict(data["mean"])
-        if data.get("std") is not None:
-            scaling["std"] = _series_to_float_dict(data["std"])
-        if data.get("min") is not None:
-            scaling["min"] = _series_to_float_dict(data["min"])
-        if data.get("max") is not None:
-            scaling["max"] = _series_to_float_dict(data["max"])
+        if int(data.get("version", 0)) != 3:
+            raise ValueError("Only preprocessing state version 3 is supported")
         return cls(
-            version=1,
-            scaler_type=data["scaler_type"],
-            impute_strategy=data["impute_strategy"],
+            version=3,
+            scaler_type=str(data["scaler_type"]),
+            impute_strategy=str(data["impute_strategy"]),
             drop_na_threshold=float(data["drop_na_threshold"]),
-            input_columns=[*columns, *dropped.keys()],
-            output_columns=columns,
+            input_columns=list(data["input_columns"]),
+            output_columns=list(data["output_columns"]),
+            feature_columns=list(data.get("feature_columns", [])),
+            target_column=data.get("target_column"),
+            row_counts={str(key): int(value) for key, value in data.get("row_counts", {}).items()},
             fill_values=_float_dict(data.get("fill_values", {})),
             last_values=_float_dict(data.get("last_values", {})),
-            scaling=scaling,
-            dropped_columns=dropped,
+            scaling={key: _float_dict(value) for key, value in data.get("scaling", {}).items()},
+            dropped_columns={str(k): str(v) for k, v in data.get("dropped_columns", {}).items()},
             fitted=bool(data.get("fitted", False)),
         )
 
 
-class PreprocessingPipeline:
-    """Stateful train-only preprocessing with strict transform validation."""
+class Preprocessor:
+    """Stateful train-only preprocessing with strict schema validation."""
 
     def __init__(
         self,
@@ -116,6 +85,10 @@ class PreprocessingPipeline:
         target_column: str | None = None,
         strict_schema: bool = True,
     ) -> None:
+        if scaler_type not in {"standard", "minmax", "none"}:
+            raise ValueError("scaler_type must be one of: standard, minmax, none")
+        if impute_strategy not in {"drop", "ffill", "mean", "interpolate"}:
+            raise ValueError("impute_strategy must be one of: drop, ffill, mean, interpolate")
         self.scaler_type = scaler_type
         self.impute_strategy = impute_strategy
         self.drop_na_threshold = drop_na_threshold
@@ -136,21 +109,17 @@ class PreprocessingPipeline:
 
     @property
     def state(self) -> PreprocessingState:
-        """Explicit fitted state."""
         return self._state
 
     @property
     def columns(self) -> list[str]:
-        """Columns retained after fit-time dropping."""
         return list(self._state.output_columns)
 
     @property
     def dropped_columns(self) -> dict[str, str]:
-        """Columns dropped during fit with reasons."""
         return dict(self._state.dropped_columns)
 
-    def fit(self, df: pd.DataFrame) -> PreprocessingPipeline:
-        """Fit preprocessing metadata on training data only."""
+    def fit(self, df: pd.DataFrame) -> Preprocessor:
         input_columns = list(df.columns)
         na_ratio = df.isna().mean()
         dropped = {
@@ -160,31 +129,13 @@ class PreprocessingPipeline:
         }
         df_clean = df.drop(columns=list(dropped), errors="ignore")
         output_columns = list(df_clean.columns)
-
         fill_values = _series_to_float_dict(df_clean.mean(numeric_only=True))
-        last_values = (
-            _series_to_float_dict(df_clean.ffill().iloc[-1]) if not df_clean.empty else {}
+        last_values = _series_to_float_dict(df_clean.ffill().iloc[-1]) if not df_clean.empty else {}
+        scaling = self._fit_scaling(df_clean)
+        fit_output_rows = (
+            len(df_clean.dropna()) if self.impute_strategy == "drop" else len(df_clean)
         )
-        scaling: dict[str, dict[str, float]] = {}
-        if self.scaler_type == "standard":
-            mean = df_clean.mean(numeric_only=True)
-            std = df_clean.std(numeric_only=True).replace(0, 1)
-            scaling["mean"] = _series_to_float_dict(mean)
-            scaling["std"] = _series_to_float_dict(std)
-        elif self.scaler_type == "minmax":
-            min_values = df_clean.min(numeric_only=True)
-            max_values = df_clean.max(numeric_only=True)
-            diff = max_values - min_values
-            max_values = min_values + diff.mask(diff == 0, 1)
-            scaling["min"] = _series_to_float_dict(min_values)
-            scaling["max"] = _series_to_float_dict(max_values)
-        elif self.scaler_type != "none":
-            raise ValueError("scaler_type must be one of: standard, minmax, none")
 
-        if self.impute_strategy not in {"drop", "ffill", "mean", "interpolate"}:
-            raise ValueError("impute_strategy must be one of: drop, ffill, mean, interpolate")
-
-        fit_output_rows = len(df_clean.dropna()) if self.impute_strategy == "drop" else len(df_clean)
         self._state = PreprocessingState(
             scaler_type=self.scaler_type,
             impute_strategy=self.impute_strategy,
@@ -206,41 +157,106 @@ class PreprocessingPipeline:
             fitted=True,
         )
         logger.info(
-            "Pipeline fitted: %d cols, dropped %d (>%.0f%% NaN), scaler=%s",
+            "Preprocessor fitted: %d cols, dropped %d, scaler=%s",
             len(output_columns),
             len(dropped),
-            self.drop_na_threshold * 100,
             self.scaler_type,
         )
         return self
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Transform data using fitted parameters."""
         if not self._state.fitted:
-            raise RuntimeError("Pipeline not fitted. Call fit() first.")
+            raise RuntimeError("Preprocessor not fitted. Call fit() first.")
         self._validate_transform_schema(df)
 
         out = df[self._state.output_columns].copy()
-        if self.impute_strategy == "drop":
-            out = out.dropna()
-        elif self.impute_strategy == "ffill":
-            out = out.ffill().fillna(self._state.last_values).fillna(self._state.fill_values)
-        elif self.impute_strategy == "mean":
-            out = out.fillna(self._state.fill_values)
-        elif self.impute_strategy == "interpolate":
-            # Keep transform causal: never use later val/test rows to fill earlier rows.
-            out = out.ffill().fillna(self._state.last_values).fillna(self._state.fill_values)
+        out = self._impute(out)
+        return self._scale(out)
 
+    def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        return self.fit(df).transform(df)
+
+    def inverse_transform_column(self, values: np.ndarray, column: str) -> np.ndarray:
+        if column not in self._state.output_columns:
+            raise ValueError(f"Column '{column}' is not part of fitted preprocessing output")
+        values = np.asarray(values, dtype=np.float64)
         if self.scaler_type == "standard":
-            out = (out - pd.Series(self._state.scaling["mean"])) / pd.Series(
+            return values * self._state.scaling["std"][column] + self._state.scaling["mean"][column]
+        if self.scaler_type == "minmax":
+            return (
+                values * (self._state.scaling["max"][column] - self._state.scaling["min"][column])
+                + self._state.scaling["min"][column]
+            )
+        return values
+
+    def to_state(self) -> PreprocessingState:
+        return self._state
+
+    @classmethod
+    def from_state(cls, state: PreprocessingState) -> Preprocessor:
+        pipeline = cls(
+            scaler_type=state.scaler_type,
+            impute_strategy=state.impute_strategy,
+            drop_na_threshold=state.drop_na_threshold,
+            feature_columns=state.feature_columns,
+            target_column=state.target_column,
+        )
+        pipeline._state = state
+        return pipeline
+
+    def save(self, path: str | Path) -> None:
+        import joblib
+
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(self._state.to_dict(), path)
+
+    def save_state_json(self, path: str | Path) -> None:
+        from solrad_correction.utils.io import save_json
+
+        save_json(self._state.to_dict(), path)
+
+    @classmethod
+    def load(cls, path: str | Path) -> Preprocessor:
+        import joblib
+
+        return cls.from_state(PreprocessingState.from_dict(joblib.load(path)))
+
+    def _fit_scaling(self, df: pd.DataFrame) -> dict[str, dict[str, float]]:
+        if self.scaler_type == "standard":
+            return {
+                "mean": _series_to_float_dict(df.mean(numeric_only=True)),
+                "std": _series_to_float_dict(df.std(numeric_only=True).replace(0, 1)),
+            }
+        if self.scaler_type == "minmax":
+            min_values = df.min(numeric_only=True)
+            max_values = df.max(numeric_only=True)
+            diff = max_values - min_values
+            max_values = min_values + diff.mask(diff == 0, 1)
+            return {
+                "min": _series_to_float_dict(min_values),
+                "max": _series_to_float_dict(max_values),
+            }
+        return {}
+
+    def _impute(self, df: pd.DataFrame) -> pd.DataFrame:
+        if self.impute_strategy == "drop":
+            return df.dropna()
+        if self.impute_strategy == "ffill":
+            return df.ffill().fillna(self._state.last_values).fillna(self._state.fill_values)
+        if self.impute_strategy == "mean":
+            return df.fillna(self._state.fill_values)
+        return df.ffill().fillna(self._state.last_values).fillna(self._state.fill_values)
+
+    def _scale(self, df: pd.DataFrame) -> pd.DataFrame:
+        if self.scaler_type == "standard":
+            return (df - pd.Series(self._state.scaling["mean"])) / pd.Series(
                 self._state.scaling["std"]
             )
-        elif self.scaler_type == "minmax":
-            out = (out - pd.Series(self._state.scaling["min"])) / pd.Series(
+        if self.scaler_type == "minmax":
+            return (df - pd.Series(self._state.scaling["min"])) / pd.Series(
                 _dict_subtract(self._state.scaling["max"], self._state.scaling["min"])
             )
-
-        return out
+        return df
 
     def _validate_transform_schema(self, df: pd.DataFrame) -> None:
         if not self.strict_schema:
@@ -255,52 +271,13 @@ class PreprocessingPipeline:
                 parts.append(f"missing columns: {missing}")
             if unexpected:
                 parts.append(f"unexpected columns: {unexpected}")
-            raise ValueError("Input schema does not match fitted preprocessing state; " + "; ".join(parts))
+            raise ValueError(
+                "Input schema does not match fitted preprocessing state; " + "; ".join(parts)
+            )
 
-    def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Fit on df and return transformed result."""
-        return self.fit(df).transform(df)
 
-    def inverse_transform_column(self, values: np.ndarray, column: str) -> np.ndarray:
-        """Inverse-transform a single column such as the target."""
-        if column not in self._state.output_columns:
-            raise ValueError(f"Column '{column}' is not part of fitted preprocessing output")
-        if self.scaler_type == "standard":
-            return values * self._state.scaling["std"][column] + self._state.scaling["mean"][column]
-        if self.scaler_type == "minmax":
-            return values * (
-                self._state.scaling["max"][column] - self._state.scaling["min"][column]
-            ) + self._state.scaling["min"][column]
-        return values
-
-    def save(self, path: str | Path) -> None:
-        """Save pipeline state as joblib."""
-        import joblib
-
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(self._state.to_dict(), path)
-
-    def save_state_json(self, path: str | Path) -> None:
-        """Save human-readable preprocessing state metadata."""
-        from solrad_correction.utils.io import save_json
-
-        save_json(self._state.to_dict(), path)
-
-    @classmethod
-    def load(cls, path: str | Path) -> PreprocessingPipeline:
-        """Load a previously saved pipeline."""
-        import joblib
-
-        state = PreprocessingState.from_dict(joblib.load(path))
-        pipeline = cls(
-            scaler_type=state.scaler_type,
-            impute_strategy=state.impute_strategy,
-            drop_na_threshold=state.drop_na_threshold,
-            feature_columns=state.feature_columns,
-            target_column=state.target_column,
-        )
-        pipeline._state = state
-        return pipeline
+class PreprocessingPipeline(Preprocessor):
+    """Backward-compatible public name for the current preprocessor."""
 
 
 def _series_to_float_dict(series: Any) -> dict[str, float]:

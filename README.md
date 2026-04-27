@@ -1,6 +1,6 @@
 # LabMiM Micrometeorology & Solar Radiation Intelligence
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
 [![Ruff](https://img.shields.io/badge/linter-ruff-261230.svg)](https://docs.astral.sh/ruff/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -40,7 +40,7 @@ legacy/                           # Archived Cartopy/Basemap scripts
 
 ## Installation
 
-Requires **Python ≥ 3.11**.
+Requires **Python >= 3.14**.
 
 ### Base Scientific Suite
 
@@ -134,6 +134,14 @@ solrad-run --config configs/tcc/experiments/svm_hourly.yaml
 Set `model.evaluation_policy: common_sequence_horizon` when comparing SVM
 against LSTM/Transformer metrics on the same sequence target horizon. The
 default `model_native` policy preserves previous metric semantics.
+
+For Colab GPU runs, use the same config with the Click-based remote entry point:
+
+```bash
+solrad-colab --config configs/tcc/experiments/lstm_hourly.yaml \
+    --output-dir /content/drive/MyDrive/LabMiM/experiments \
+    --device cuda --amp --num-workers 2
+```
 
 ### 5. Static Cartopy Map Generation
 

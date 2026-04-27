@@ -10,6 +10,8 @@ WRF (Weather Research and Forecasting) often exhibits systematic bias when estim
 
 ### Available Models
 
+Current public support is intentionally scoped to SVM, LSTM, and Transformer.
+
 | Model | Type | Input | When to Use |
 |---|---|---|---|
 | **SVM** | Scikit-learn (SVR) | Tabular (1 row = 1 sample) | Fast baseline, small datasets |
@@ -23,11 +25,10 @@ WRF (Weather Research and Forecasting) often exhibits systematic bias when estim
 ```
 src/solrad_correction/
 ├── __init__.py              # Version and docstring
-├── config.py                # Experiment configuration (dataclasses + YAML)
+├── config/                  # Modular config package + public facade
 ├── cli.py                   # CLI: solrad-run
 ├── data/
 │   ├── loaders.py           # CSV/Parquet loading, projection, dtype, row limits
-│   ├── alignment.py         # Temporal alignment sensor ↔ WRF
 │   ├── preprocessing.py     # Train-only fitted state + strict schema validation
 │   └── splits.py            # Chronological split, walk-forward, temporal K-fold
 ├── features/
@@ -35,8 +36,9 @@ src/solrad_correction/
 │   ├── temporal.py          # Hour, day of year, month + cyclic encoding (sin/cos)
 │   └── sequence.py          # Sliding windows construction for LSTM/Transformer
 ├── datasets/
-│   ├── tabular.py           # TabularDataset (X, y) + reproducible save/load
-│   └── sequence.py          # Dense and lazy windowed torch datasets + save/load
+│   ├── tabular.py           # TabularDataset (X, y)
+│   ├── sequence.py          # Dense and lazy windowed torch datasets
+│   └── serialization.py     # Dataset artifact serialization
 ├── models/
 │   ├── base.py              # BaseRegressorModel (ABC): unified interface
 │   ├── sklearn_base.py      # Wrapper for scikit-learn regressors
@@ -279,13 +281,44 @@ runtime:
   torch_compile: true
 ```
 
+### Google Colab GPU Training
+
+Use the Click-based Colab entry point for remote GPU runs. It uses the same
+override path and experiment runner as `solrad-run`, so local and Colab artifacts
+stay aligned.
+
+```bash
+pip install -e ".[tcc-cuda]"
+
+solrad-colab \
+  --config configs/tcc/experiments/lstm_hourly.yaml \
+  --output-dir /content/drive/MyDrive/LabMiM/experiments \
+  --device cuda \
+  --amp \
+  --num-workers 2
+```
+
+The compatibility script remains available:
+
+```bash
+python scripts/train_colab.py --config configs/tcc/experiments/lstm_hourly.yaml --device cuda --amp
+```
+
+Useful Colab management flags:
+
+- `--validate-config` checks YAML and overrides without training.
+- `--print-config` prints the resolved config for notebook inspection.
+- `--resume /path/to/checkpoints/last.pt` resumes optimizer, scheduler, scaler,
+  epoch, and model state.
+- `--limit-rows N` runs a small GPU smoke pass before a full training campaign.
+
 ---
 
 ## Data Leakage Prevention
 
 The package implements multiple protection layers:
 
-### 0. Format-aware Loading
+### 0. Format-aware Loading and Sensor Ingestion
 
 Preprocessed hourly inputs can be CSV or Parquet:
 
@@ -307,6 +340,20 @@ runtime:
 When `data.load_columns` is empty and `feature_columns` is set, the loader
 projects `feature_columns + target_column`. `data.load_columns` can be used for
 manual projection when a custom feature stage needs additional columns.
+
+Raw LabMiM sensor directories can be loaded through the micrometeorology
+ingestion, calibration, and aggregation stack before solrad preprocessing:
+
+```yaml
+data:
+  sensor_data_path: data/raw/salvador
+  sensor_pattern: "*.dat"
+  calibrations_path: configs/micromet/calibrations.yaml
+  resample_freq: 1h
+  sensor_min_samples: 6
+  target_column: SW_dif
+  feature_columns: [SWDOWN, T2, Q2, PSFC]
+```
 
 ### 1. Chronological Splitting
 
@@ -486,12 +533,13 @@ class MyModel(SklearnRegressorModel):
         return cls(param1=config.custom_param)
 ```
 
-3. Register it in `runner.py`:
+3. Register it in `models/registry.py`:
 
 ```python
-elif model_type == "mymodel":
-    model = MyModel.from_config(config.model)
+MODEL_REGISTRY["mymodel"] = ModelSpec(name="mymodel", kind="tabular")
 ```
+
+Add the matching factory branch in `build_model()` in the same registry module.
 
 For PyTorch, use `TorchRegressorModel` which automatically provides:
 - Automatic GPU/CPU detection
@@ -510,10 +558,6 @@ Yes. Change `target_column` and `feature_columns` in the YAML config. The packag
 ### Can I train with data from another city?
 
 Yes. Change `station_lat` and `station_lon` in the config and provide the corresponding data. The name `solrad_correction` is generic and not tied to any specific location.
-
-### What is `tolerance="30min"` in alignment?
-
-When aligning sensor (observation) data with WRF (model) data, timestamps might not match exactly. The tolerance allows pairing timestamps with up to a 30-minute difference.
 
 ### Do I need a GPU?
 

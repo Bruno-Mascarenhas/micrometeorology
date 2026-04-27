@@ -94,10 +94,7 @@ def _decode_wrf_time_strings(times_raw: Any) -> list[str]:
     """Decode WRF ``Times`` values from netCDF char arrays or xarray byte arrays."""
     arr = np.asarray(times_raw)
     if arr.ndim == 1 and arr.dtype.kind in {"S", "U", "O"}:
-        return [
-            ts.decode("ascii") if isinstance(ts, bytes | np.bytes_) else str(ts)
-            for ts in arr
-        ]
+        return [ts.decode("ascii") if isinstance(ts, bytes | np.bytes_) else str(ts) for ts in arr]
     return [str(ts) for ts in netCDF4.chartostring(arr)]
 
 

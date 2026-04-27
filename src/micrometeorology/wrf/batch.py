@@ -652,8 +652,7 @@ def _run_json_tasks_memmap(
         else:
             with ProcessPoolExecutor(max_workers=n_workers) as pool:
                 futures = {
-                    pool.submit(_write_json_memmap, task): i
-                    for i, task in enumerate(memmap_tasks)
+                    pool.submit(_write_json_memmap, task): i for i, task in enumerate(memmap_tasks)
                 }
                 for future in as_completed(futures):
                     try:

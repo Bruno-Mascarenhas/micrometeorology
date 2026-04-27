@@ -1,15 +1,12 @@
-"""Regression metrics — reuses micrometeorology and adds MAPE."""
+"""Regression metrics - reuses micrometeorology and adds MAPE."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
 
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
-
-# Re-export from the micrometeorology package
 from micrometeorology.stats.metrics import (
     correlation,
     d_index,
@@ -18,6 +15,12 @@ from micrometeorology.stats.metrics import (
     r_squared,
     rmse,
 )
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+#: Callable signature for a metric function: ``(observed, predicted) -> float``.
+MetricFn = Callable[["NDArray", "NDArray"], float]
 
 
 def mape(observed: NDArray, predicted: NDArray) -> float:
@@ -34,7 +37,7 @@ def mape(observed: NDArray, predicted: NDArray) -> float:
     return float(np.mean(np.abs((o - p) / o)) * 100)
 
 
-REGRESSION_METRICS = {
+REGRESSION_METRICS: dict[str, MetricFn] = {
     "RMSE": rmse,
     "MAE": mae,
     "MBE": mbe,

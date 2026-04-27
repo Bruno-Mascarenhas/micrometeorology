@@ -2,7 +2,8 @@
 
 The experiment runner uses ``load_table`` for preprocessed tabular inputs.
 It supports CSV and Parquet with format detection, column projection, date
-index parsing, dtype hints, and development row limits.
+index parsing, dtype hints, development row limits, and optional Parquet
+caching for CSV inputs.
 """
 
 from __future__ import annotations
@@ -18,7 +19,9 @@ logger = logging.getLogger(__name__)
 DataFormat = Literal["auto", "csv", "parquet"]
 
 
-def detect_table_format(path: str | Path, requested: DataFormat = "auto") -> Literal["csv", "parquet"]:
+def detect_table_format(
+    path: str | Path, requested: DataFormat = "auto"
+) -> Literal["csv", "parquet"]:
     """Resolve a table format from an explicit value or file suffix."""
     if requested != "auto":
         if requested not in {"csv", "parquet"}:
@@ -45,6 +48,7 @@ def load_table(
     datetime_index: bool = True,
     dtype_map: dict[str, str] | None = None,
     limit_rows: int | None = None,
+    cache_dir: str | Path | None = None,
 ) -> pd.DataFrame:
     """Load a CSV or Parquet table with projection and lightweight typing.
 
@@ -66,6 +70,10 @@ def load_table(
         Optional pandas dtype mapping for projected data columns.
     limit_rows:
         Optional positive row cap applied during read when supported.
+    cache_dir:
+        When set and the source is CSV, a Parquet cache is written to this
+        directory on first load.  Subsequent loads read the cache if it is
+        newer than the source file.
     """
     if limit_rows is not None and limit_rows <= 0:
         raise ValueError("limit_rows must be positive when set")
@@ -74,6 +82,25 @@ def load_table(
     p = Path(path)
     dtype_map = dtype_map or {}
     projected = list(dict.fromkeys(columns or []))
+
+    # Try Parquet cache for CSV sources
+    if fmt == "csv" and cache_dir is not None:
+        cache_path = _resolve_cache_path(p, cache_dir)
+        if _is_cache_fresh(p, cache_path):
+            logger.info("Loading from Parquet cache: %s", cache_path)
+            df = _read_parquet_table(
+                cache_path,
+                columns=projected or None,
+                datetime_column=datetime_column,
+                datetime_index=datetime_index,
+                limit_rows=limit_rows,
+            )
+            if dtype_map:
+                applicable = {k: v for k, v in dtype_map.items() if k in df.columns}
+                if applicable:
+                    df = df.astype(applicable)
+            logger.info("Loaded cached data: %d rows, %d cols", len(df), len(df.columns))
+            return df
 
     if fmt == "csv":
         df = _read_csv_table(
@@ -84,6 +111,10 @@ def load_table(
             dtype_map=dtype_map,
             limit_rows=limit_rows,
         )
+        # Write cache if requested (full CSV, no limit_rows / column projection)
+        if cache_dir is not None and limit_rows is None and not projected:
+            cache_path = _resolve_cache_path(p, cache_dir)
+            _write_cache(df, cache_path)
     else:
         df = _read_parquet_table(
             p,
@@ -99,6 +130,26 @@ def load_table(
 
     logger.info("Loaded %s data: %d rows, %d cols", fmt, len(df), len(df.columns))
     return df
+
+
+def _resolve_cache_path(source: Path, cache_dir: str | Path) -> Path:
+    """Derive the Parquet cache path for a CSV source."""
+    cd = Path(cache_dir)
+    return cd / (source.stem + ".parquet")
+
+
+def _is_cache_fresh(source: Path, cache: Path) -> bool:
+    """Return True if the cache file exists and is newer than the source."""
+    if not cache.exists():
+        return False
+    return cache.stat().st_mtime >= source.stat().st_mtime
+
+
+def _write_cache(df: pd.DataFrame, cache_path: Path) -> None:
+    """Write a DataFrame to Parquet cache."""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(cache_path, engine="pyarrow")
+    logger.info("Wrote Parquet cache: %s", cache_path)
 
 
 def _read_csv_table(
@@ -184,6 +235,8 @@ def load_sensor_raw(
     *,
     pattern: str = "*.dat",
     calibrations_path: str | Path | None = None,
+    resample_freq: str | None = None,
+    min_samples: int = 6,
 ) -> pd.DataFrame:
     """Load raw sensor data using the micrometeorology ingestion pipeline.
 
@@ -214,6 +267,11 @@ def load_sensor_raw(
         cals = load_calibrations(calibrations_path)
         df = apply_calibrations(df, cals)
 
+    if resample_freq:
+        from micrometeorology.sensors.aggregation import aggregate_to_hourly
+
+        df = aggregate_to_hourly(df, freq=resample_freq, min_samples=min_samples)
+
     logger.info("Loaded raw sensor data: %d rows, %d cols", len(df), len(df.columns))
     return df
 
@@ -227,6 +285,7 @@ def load_sensor_hourly(
     datetime_index: bool = True,
     dtype_map: dict[str, str] | None = None,
     limit_rows: int | None = None,
+    cache_dir: str | Path | None = None,
 ) -> pd.DataFrame:
     """Load preprocessed hourly sensor data from CSV or Parquet.
 
@@ -241,6 +300,7 @@ def load_sensor_hourly(
         datetime_index=datetime_index,
         dtype_map=dtype_map,
         limit_rows=limit_rows,
+        cache_dir=cache_dir,
     )
 
 

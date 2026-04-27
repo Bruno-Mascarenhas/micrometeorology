@@ -9,21 +9,21 @@ import numpy as np
 import torch
 from torch import nn
 
-from solrad_correction.models.base import BaseRegressorModel
+from solrad_correction.models.base import SequenceRegressorModel, TrainingResult
 from solrad_correction.utils.seeds import get_device
 from solrad_correction.utils.serialization import load_torch_checkpoint, save_torch_checkpoint
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from solrad_correction.config import ModelConfig, RuntimeConfig
+    from solrad_correction.config import ModelConfig
     from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
     from solrad_correction.training.dataloaders import DataLoaderSettings
 
 logger = logging.getLogger(__name__)
 
 
-class TorchRegressorModel(BaseRegressorModel):
+class TorchRegressorModel(SequenceRegressorModel):
     """Base for PyTorch sequential models (LSTM, Transformer, etc.).
 
     Subclasses must:
@@ -68,10 +68,12 @@ class TorchRegressorModel(BaseRegressorModel):
         train_data: SequenceDataset | WindowedSequenceDataset,
         val_data: SequenceDataset | WindowedSequenceDataset | None = None,
         config: ModelConfig | None = None,
-        runtime: RuntimeConfig | None = None,
-    ) -> TorchRegressorModel:
+        **kwargs: Any,
+    ) -> TrainingResult:
         """Train using the standard training loop with progress display."""
         from solrad_correction.training.trainer import Trainer
+
+        runtime = kwargs.get("runtime")
 
         if runtime and runtime.resume:
             self._load_resume_checkpoint(runtime.resume)
@@ -98,7 +100,7 @@ class TorchRegressorModel(BaseRegressorModel):
         self._history = history
         self._config = config
         self._runtime = runtime
-        return self
+        return TrainingResult(model=self, history=history)
 
     @property
     def training_history(self) -> dict[str, list[float]]:
@@ -138,15 +140,34 @@ class TorchRegressorModel(BaseRegressorModel):
         batch_size = getattr(self, "_config", None)
         bs = batch_size.batch_size if hasattr(batch_size, "batch_size") else 256  # type: ignore
 
-        loader = DataLoader(dataset, batch_size=bs, shuffle=False)
+        settings = self._dataloader_settings
+        if settings is not None and settings.num_workers > 0:
+            loader = DataLoader(
+                dataset,
+                batch_size=bs,
+                shuffle=False,
+                num_workers=settings.num_workers,
+                pin_memory=settings.pin_memory,
+                persistent_workers=settings.persistent_workers,
+                prefetch_factor=settings.prefetch_factor,
+            )
+        else:
+            loader = DataLoader(
+                dataset,
+                batch_size=bs,
+                shuffle=False,
+                num_workers=0,
+                pin_memory=False,
+            )
         all_preds = []
 
         with torch.inference_mode():
             device_type = "cuda" if "cuda" in self._device else "cpu"
+            use_amp = settings.amp if settings is not None else "cuda" in self._device
             for batch in loader:
                 batch_x = batch[0] if isinstance(batch, list | tuple) else batch
                 batch_x = batch_x.to(self._device, non_blocking=True)
-                with torch.autocast(device_type=device_type, enabled="cuda" in self._device):
+                with torch.autocast(device_type=device_type, enabled=use_amp):
                     preds = self._module(batch_x)
                 all_preds.append(preds.cpu().numpy().flatten())
 

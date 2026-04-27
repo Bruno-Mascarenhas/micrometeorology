@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @dataclass
@@ -60,31 +63,13 @@ class TabularDataset:
 
         Saves features, target, feature names, and index as NPZ + CSV.
         """
-        p = Path(path)
-        p.mkdir(parents=True, exist_ok=True)
-        np.savez(p / "data.npz", X=self.X, y=self.y)
+        from solrad_correction.datasets.serialization import save_tabular_dataset
 
-        # Save metadata
-        meta = pd.DataFrame({"feature_names": self.feature_names})
-        meta.to_csv(p / "feature_names.csv", index=False)
-
-        if self.index is not None:
-            pd.Series(self.index).to_csv(p / "index.csv", index=False)
+        save_tabular_dataset(self, path)
 
     @classmethod
     def load(cls, path: str | Path) -> TabularDataset:
         """Load a previously saved dataset."""
-        p = Path(path)
-        data = np.load(p / "data.npz")
-        features, targets = data["X"], data["y"]
+        from solrad_correction.datasets.serialization import load_tabular_dataset
 
-        meta = pd.read_csv(p / "feature_names.csv")
-        feature_names = meta["feature_names"].tolist()
-
-        index = None
-        idx_path = p / "index.csv"
-        if idx_path.exists():
-            idx_df = pd.read_csv(idx_path)
-            index = pd.to_datetime(idx_df.iloc[:, 0])
-
-        return cls(X=features, y=targets, feature_names=feature_names, index=index)  # type: ignore
+        return load_tabular_dataset(path)

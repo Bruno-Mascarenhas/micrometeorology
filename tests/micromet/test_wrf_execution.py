@@ -7,6 +7,8 @@ import shutil
 import uuid
 from pathlib import Path
 
+from typing import Any, cast
+
 import pytest
 from click.testing import CliRunner
 
@@ -24,9 +26,9 @@ def _scratch_file(name: str, size: int = 16) -> Path:
     return path
 
 
-def _read_json(path: Path) -> dict:
+def _read_json(path: Path) -> dict[str, Any]:
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        return cast(dict[str, Any], json.load(f))
 
 
 def test_auto_resolves_tiny_workload_to_eager_pickle():
@@ -180,7 +182,7 @@ def test_auto_chunks_without_dask_falls_back_to_unchunked_lazy():
 def test_resolved_plan_is_deterministic():
     path = _scratch_file("deterministic")
     try:
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "paths": [path],
             "workflow": "json",
             "workers": 4,
@@ -246,8 +248,6 @@ def test_wrf_geojson_auto_matches_old_explicit_eager_pickle_on_tiny_file():
         assert auto_result.exit_code == 0, auto_result.output
         assert "reader: eager" in auto_result.output
         assert "worker backend: serial" in auto_result.output
-        assert _read_json(auto_json / "D01_T2_000.json") == _read_json(
-            old_json / "D01_T2_000.json"
-        )
+        assert _read_json(auto_json / "D01_T2_000.json") == _read_json(old_json / "D01_T2_000.json")
     finally:
         shutil.rmtree(root, ignore_errors=True)

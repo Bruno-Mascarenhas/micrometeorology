@@ -71,6 +71,8 @@ def correlation(observed: NDArray, predicted: NDArray, clean: bool = True) -> fl
     o, p = _clean_pairs(observed, predicted) if clean else (observed, predicted)
     if len(o) < 2:
         return float("nan")
+    if np.isclose(np.std(o), 0.0) or np.isclose(np.std(p), 0.0):
+        return float("nan")
     corr = np.corrcoef(o, p)
     return float(corr[0, 1])
 

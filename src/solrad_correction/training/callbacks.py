@@ -3,11 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -64,43 +59,5 @@ class EarlyStopping:
                     "Early stopping at patience %d (best=%.6f)", self.patience, self.best_score
                 )
                 return True
-
-        return False
-
-
-class ModelCheckpoint:
-    """Save the best model based on a monitored metric.
-
-    Parameters
-    ----------
-    path:
-        File path for the checkpoint.
-    mode:
-        ``"min"`` or ``"max"`` — which direction is better.
-    """
-
-    def __init__(self, path: str | Path, mode: str = "min") -> None:
-        self.path = Path(path)
-        self.mode = mode
-        self.best_score: float | None = None
-
-    def __call__(self, metric: float, save_fn: Callable) -> bool:
-        """Check and save if this is the best model so far.
-
-        Returns True if the model was saved.
-        """
-        if self.best_score is None:
-            self.best_score = metric
-            save_fn(self.path)
-            logger.info("Checkpoint saved: %.6f → %s", metric, self.path)
-            return True
-
-        improved = metric < self.best_score if self.mode == "min" else metric > self.best_score
-
-        if improved:
-            self.best_score = metric
-            save_fn(self.path)
-            logger.info("Checkpoint updated: %.6f → %s", metric, self.path)
-            return True
 
         return False

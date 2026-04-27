@@ -1,4 +1,4 @@
-"""Model serialization utilities — dispatch to joblib or torch."""
+"""Model serialization utilities dispatching to joblib or torch."""
 
 from __future__ import annotations
 

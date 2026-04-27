@@ -1,1 +1,1 @@
-"""Data access layer: loaders, alignment, preprocessing, and temporal splits."""
+"""Data access layer: loaders, preprocessing, and temporal splits."""

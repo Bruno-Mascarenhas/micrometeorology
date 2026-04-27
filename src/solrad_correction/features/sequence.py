@@ -30,7 +30,7 @@ def create_sequences(
     -------
     tuple of (x_sequences, y_targets)
         ``x_sequences``: shape ``(n_sequences, sequence_length, n_features)``
-        ``y_targets``: shape ``(n_sequences,)`` — the target at the *end* of each window.
+        ``y_targets``: shape ``(n_sequences,)``; the target at the end of each window.
     """
     x = np.asarray(features)
     y = np.asarray(target).flatten()
@@ -42,9 +42,9 @@ def create_sequences(
 
     n = len(x) - sequence_length
 
-    # sliding_window_view creates a zero-copy strided view — much faster than a Python loop
+    # sliding_window_view creates a zero-copy strided view.
     x_windows = np.lib.stride_tricks.sliding_window_view(x, sequence_length, axis=0)
-    # x_windows shape: (n, n_features, sequence_length) — need to transpose to (n, seq_len, n_features)
+    # x_windows shape: (n, n_features, sequence_length); transpose to (n, seq_len, n_features)
     x_out = np.ascontiguousarray(x_windows[:n].transpose(0, 2, 1), dtype=np.float32)
     y_out = y[sequence_length:].astype(np.float32)
 

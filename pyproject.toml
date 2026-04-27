@@ -75,6 +75,7 @@ labmim-metrics = "micrometeorology.cli.compute_metrics:main"
 labmim-station-graphs = "micrometeorology.cli.generate_station_graphs:main"
 # TCC CLIs
 solrad-run = "solrad_correction.cli:run_experiment_cli"
+solrad-colab = "solrad_correction.cli_colab:run_colab_cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/micrometeorology", "src/solrad_correction"]

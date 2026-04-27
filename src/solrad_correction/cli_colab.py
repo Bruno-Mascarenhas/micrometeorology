@@ -1,19 +1,4 @@
-"""CLI entry point for solrad_correction experiments.
-
-Examples
---------
-Run the default config:
-    solrad-run --config configs/tcc/experiments/svm_hourly.yaml
-
-Fair SVM/LSTM/Transformer comparison:
-    set model.evaluation_policy: common_sequence_horizon in the YAML.
-
-Opt into PyTorch compilation for longer neural-network runs:
-    set runtime.torch_compile: true in the YAML.
-
-Resume from a checkpoint:
-    set runtime.resume: output/experiments/lstm_v1/checkpoints/last.pt.
-"""
+"""Click command for Google Colab / remote GPU solrad training."""
 
 from __future__ import annotations
 
@@ -27,36 +12,32 @@ from solrad_correction.experiments.overrides import (
 )
 
 
-@click.command()
+@click.command(name="solrad-colab")
 @click.option(
-    "--config", "-c", required=False, type=click.Path(exists=True), help="Experiment config YAML."
+    "--config", "-c", required=True, type=click.Path(exists=True), help="Experiment YAML config."
 )
 @click.option("--name", "-n", default=None, help="Override experiment name.")
-@click.option("--output-dir", "-o", default=None, help="Override output directory.")
+@click.option("--output-dir", "-o", default=None, help="Drive-backed experiment output directory.")
 @click.option("--validate-config", is_flag=True, help="Validate config and exit without training.")
 @click.option(
     "--print-config", "print_config", is_flag=True, help="Print resolved config and exit."
 )
-@click.option(
-    "--dry-run", is_flag=True, help="Validate resolved config and exit without loading data."
-)
-@click.option("--smoke-test", is_flag=True, help="Run a small synthetic CPU-safe smoke experiment.")
 @click.option("--limit-rows", type=int, default=None, help="Limit loaded rows for development.")
 @click.option("--profile", is_flag=True, help="Write profile.json with stage timings.")
-@click.option("--device", type=click.Choice(["auto", "cpu", "cuda"]), default=None)
+@click.option("--device", type=click.Choice(["auto", "cpu", "cuda"]), default="cuda")
 @click.option("--num-workers", type=int, default=None)
 @click.option("--pin-memory/--no-pin-memory", default=None)
 @click.option("--amp/--no-amp", default=None)
 @click.option("--compile/--no-compile", "torch_compile", default=None)
-@click.option("--resume", type=click.Path(exists=True), default=None)
-def run_experiment_cli(
-    config: str | None,
+@click.option(
+    "--resume", type=click.Path(exists=True), default=None, help="Path to checkpoints/last.pt."
+)
+def run_colab_cli(
+    config: str,
     name: str | None,
     output_dir: str | None,
     validate_config: bool,
     print_config: bool,
-    dry_run: bool,
-    smoke_test: bool,
     limit_rows: int | None,
     profile: bool,
     device: str | None,
@@ -66,15 +47,11 @@ def run_experiment_cli(
     torch_compile: bool | None,
     resume: str | None,
 ) -> None:
-    """Run a solrad_correction experiment from a YAML config file."""
-    if not smoke_test and not config:
-        raise click.ClickException("--config is required unless --smoke-test is used")
-
-    overrides = ExperimentOverrides(
+    """Run a solrad neural-network experiment with Colab-friendly defaults."""
+    cfg = load_colab_config(
+        config=config,
         name=name,
         output_dir=output_dir,
-        dry_run=dry_run,
-        smoke_test=smoke_test,
         limit_rows=limit_rows,
         profile=profile,
         device=device,
@@ -84,7 +61,6 @@ def run_experiment_cli(
         torch_compile=torch_compile,
         resume=resume,
     )
-    cfg = load_config_with_overrides(config, smoke_test=smoke_test, overrides=overrides)
 
     try:
         cfg.validate()
@@ -99,13 +75,9 @@ def run_experiment_cli(
         click.echo("Config is valid.")
         return
 
-    if dry_run:
-        click.echo("Dry run: config is valid. No data was loaded and no training was run.")
-        return
-
     click.echo(f"Experiment: {cfg.name}")
     click.echo(f"Model:      {cfg.model.model_type}")
-    click.echo(f"Eval policy:{cfg.model.evaluation_policy:>16}")
+    click.echo(f"Device:     {cfg.runtime.device}")
     click.echo(f"Output:     {cfg.experiment_dir}")
 
     from solrad_correction.experiments.runner import run_experiment
@@ -113,5 +85,41 @@ def run_experiment_cli(
     run_experiment(cfg)
 
 
+def load_colab_config(
+    *,
+    config: str,
+    name: str | None = None,
+    output_dir: str | None = None,
+    limit_rows: int | None = None,
+    profile: bool = False,
+    device: str | None = "cuda",
+    num_workers: int | None = None,
+    pin_memory: bool | None = None,
+    amp: bool | None = None,
+    torch_compile: bool | None = None,
+    resume: str | None = None,
+):
+    """Load config with the same override path used by local CLI."""
+    return load_config_with_overrides(
+        config,
+        overrides=ExperimentOverrides(
+            name=name,
+            output_dir=output_dir,
+            limit_rows=limit_rows,
+            profile=profile,
+            device=device,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            amp=amp,
+            torch_compile=torch_compile,
+            resume=resume,
+        ),
+    )
+
+
+def main() -> None:
+    run_colab_cli()
+
+
 if __name__ == "__main__":
-    run_experiment_cli()
+    main()

@@ -71,7 +71,7 @@ class TrainingProgress:
         val_str = f"  val_loss={val_loss:.6f}" if val_loss is not None else ""
         sys.stdout.write(
             f"\r  Epoch {self.current_epoch + 1}/{self._initial_epoch + self.total_epochs} "
-            f"— train_loss={train_loss:.6f}{val_str} "
+            f"- train_loss={train_loss:.6f}{val_str} "
             f"({self._fmt_time(elapsed)}/epoch, ETA: {self._fmt_time(eta_total)})"
             f"{extra}\n"
         )
@@ -80,7 +80,7 @@ class TrainingProgress:
     def finish(self) -> None:
         """Print final training summary."""
         total = time.time() - self.training_start_time
-        print(f"\n✓ Training complete in {self._fmt_time(total)}")
+        print(f"\nTraining complete in {self._fmt_time(total)}")
 
     @staticmethod
     def _fmt_time(seconds: float) -> str:

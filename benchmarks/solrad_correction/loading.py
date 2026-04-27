@@ -7,6 +7,8 @@ import sys
 import time
 from pathlib import Path
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -56,7 +58,9 @@ def main() -> None:
 
 def _make_frame(rows: int, features: int) -> pd.DataFrame:
     rng = np.random.default_rng(42)
-    data = {f"f{i}": rng.normal(size=rows).astype("float32") for i in range(features)}
+    data: dict[str, Any] = {
+        f"f{i}": rng.normal(size=rows).astype("float32") for i in range(features)
+    }
     data["target"] = rng.normal(size=rows).astype("float32")
     data["timestamp"] = pd.date_range("2024-01-01", periods=rows, freq="1h")
     return pd.DataFrame(data)

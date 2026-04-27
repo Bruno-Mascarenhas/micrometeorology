@@ -22,7 +22,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
     device: str,
-    scaler: torch.cuda.amp.GradScaler | None = None,
+    scaler: torch.amp.GradScaler | None = None,
     clip_val: float | None = 1.0,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> float:

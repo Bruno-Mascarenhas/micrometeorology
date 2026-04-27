@@ -53,11 +53,11 @@ class TimeSeriesTransformer(nn.Module):
     Structure::
 
         Input (seq_len, input_size)
-            → Linear projection → d_model
-            → Positional encoding
-            → TransformerEncoder (N layers)
-            → Mean pooling over sequence
-            → Linear → ReLU → Linear → output (scalar)
+            -> Linear projection -> d_model
+            -> Positional encoding
+            -> TransformerEncoder (N layers)
+            -> Mean pooling over sequence
+            -> Linear -> ReLU -> Linear -> output (scalar)
     """
 
     def __init__(

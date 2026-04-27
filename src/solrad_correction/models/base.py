@@ -7,6 +7,7 @@ inherits from ``BaseRegressorModel`` to guarantee a consistent interface.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -15,10 +16,21 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from solrad_correction.config import ModelConfig
+    from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
+    from solrad_correction.datasets.tabular import TabularDataset
+    from solrad_correction.evaluation.metrics import MetricFn
+
+
+@dataclass
+class TrainingResult:
+    """Result of a model training session."""
+
+    model: BaseRegressorModel
+    history: dict[str, list[float]] = field(default_factory=dict)
 
 
 class BaseRegressorModel(ABC):
-    """Unified interface for all regressors — sklearn and PyTorch alike."""
+    """Unified interface for all regressors: sklearn and PyTorch alike."""
 
     @property
     @abstractmethod
@@ -31,7 +43,8 @@ class BaseRegressorModel(ABC):
         train_data: Any,
         val_data: Any | None = None,
         config: ModelConfig | None = None,
-    ) -> BaseRegressorModel:
+        **kwargs: Any,
+    ) -> TrainingResult:
         """Train the model.
 
         Parameters
@@ -42,6 +55,8 @@ class BaseRegressorModel(ABC):
             Optional validation data for early stopping / monitoring.
         config:
             Model configuration overrides.
+        **kwargs:
+            Additional training arguments (like runtime config).
         """
 
     @abstractmethod
@@ -54,24 +69,27 @@ class BaseRegressorModel(ABC):
     def evaluate(
         self,
         data: Any,
-        metrics: dict[str, callable] | None = None,  # type: ignore
+        metrics: dict[str, MetricFn] | None = None,
     ) -> dict[str, float]:
         """Evaluate the model on a dataset.
 
         Default implementation: predict then compute metrics.
         """
-        from micrometeorology.stats.metrics import ALL_METRICS
+        from solrad_correction.evaluation.metrics import REGRESSION_METRICS
 
         if metrics is None:
-            metrics = ALL_METRICS
+            metrics = REGRESSION_METRICS
 
         y_pred = self.predict(data)
 
-        # Extract ground truth
         if hasattr(data, "y"):
             y_true = np.asarray(data.y).flatten()
+        elif hasattr(data, "target_values"):
+            y_true = np.asarray(data.target_values()).flatten()
         else:
-            raise ValueError("Data must have a 'y' attribute for evaluation")
+            raise TypeError(
+                f"Data of type {type(data).__name__} does not expose y or target_values()"
+            )
 
         return {name: fn(y_true, y_pred) for name, fn in metrics.items()}
 
@@ -83,3 +101,39 @@ class BaseRegressorModel(ABC):
     @abstractmethod
     def load(cls, path: str | Path) -> BaseRegressorModel:
         """Load model from disk."""
+
+
+class TabularRegressorModel(BaseRegressorModel):
+    """Strictly typed interface for tabular models."""
+
+    @abstractmethod
+    def fit(
+        self,
+        train_data: TabularDataset,
+        val_data: TabularDataset | None = None,
+        config: ModelConfig | None = None,
+        **kwargs: Any,
+    ) -> TrainingResult:
+        """Train the model on tabular data."""
+
+    @abstractmethod
+    def predict(self, data: TabularDataset | np.ndarray) -> np.ndarray:
+        """Predict on tabular data."""
+
+
+class SequenceRegressorModel(BaseRegressorModel):
+    """Strictly typed interface for sequence models."""
+
+    @abstractmethod
+    def fit(
+        self,
+        train_data: SequenceDataset | WindowedSequenceDataset,
+        val_data: SequenceDataset | WindowedSequenceDataset | None = None,
+        config: ModelConfig | None = None,
+        **kwargs: Any,
+    ) -> TrainingResult:
+        """Train the model on sequential data."""
+
+    @abstractmethod
+    def predict(self, data: SequenceDataset | WindowedSequenceDataset | np.ndarray) -> np.ndarray:
+        """Predict on sequential data."""

@@ -54,13 +54,13 @@ class ExperimentReport:
 
     def print_summary(self) -> None:
         """Print a terminal-friendly summary."""
-        print(f"\n{'═' * 50}")
+        print(f"\n{'=' * 50}")
         print(f"  Experiment: {self.experiment_name}")
         print(f"  Model:      {self.model_name}")
-        print(f"{'─' * 50}")
+        print(f"{'-' * 50}")
         for name, value in self.metrics.items():
             print(f"  {name:>8s}: {value:.6f}")
-        print(f"{'═' * 50}")
+        print(f"{'=' * 50}")
 
 
 def save_experiment_results(

@@ -1,4 +1,4 @@
-"""Time-series-aware data splitting — no temporal leakage."""
+"""Time-series-aware data splitting with no temporal leakage."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def temporal_train_val_test_split(
 
     n = len(df)
     if shuffle:
-        logger.warning("⚠ Shuffling time-series data — this may cause data leakage!")
+        logger.warning("Shuffling time-series data may cause data leakage.")
         df = df.sample(frac=1.0)
     else:
         df = df.sort_index()
@@ -56,7 +56,7 @@ def temporal_train_val_test_split(
     test = df.iloc[val_end:]
 
     logger.info(
-        "Split: train=%d (%s→%s), val=%d, test=%d",
+        "Split: train=%d (%s to %s), val=%d, test=%d",
         len(train),
         train.index[0] if len(train) > 0 else "N/A",
         train.index[-1] if len(train) > 0 else "N/A",

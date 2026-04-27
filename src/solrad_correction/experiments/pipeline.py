@@ -5,51 +5,39 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from solrad_correction.data.preprocessing import PreprocessingPipeline
 from solrad_correction.data.splits import temporal_train_val_test_split
 from solrad_correction.datasets.tabular import TabularDataset
 from solrad_correction.evaluation.metrics import compute_regression_metrics
-from solrad_correction.evaluation.reports import ExperimentReport, save_experiment_results
-from solrad_correction.experiments.artifacts import ArtifactLayout, write_manifest
+from solrad_correction.evaluation.policy import align_test_frame, prediction_index
+from solrad_correction.evaluation.reports import ExperimentReport
+from solrad_correction.experiments.artifacts import ArtifactLayout
+from solrad_correction.experiments.results import (
+    DatasetBundle,
+    EvaluationResult,
+    ExperimentResult,
+    FeatureFrame,
+    LoadedData,
+    PredictionOutput,
+    PreprocessedSplits,
+    SplitFrames,
+    TrainingOutput,
+)
+from solrad_correction.experiments.writer import ExperimentWriter
 from solrad_correction.models.registry import build_model, get_model_spec
 from solrad_correction.training.dataloaders import resolve_device
-from solrad_correction.utils.io import save_json
 from solrad_correction.utils.metadata import collect_run_metadata
 from solrad_correction.utils.seeds import set_global_seed
 
 if TYPE_CHECKING:
-    import numpy as np
     import pandas as pd
 
     from solrad_correction.config import ExperimentConfig
     from solrad_correction.models.base import BaseRegressorModel
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class ProcessedSplits:
-    """Preprocessed train/validation/test frames plus state."""
-
-    train: pd.DataFrame
-    val: pd.DataFrame
-    test: pd.DataFrame
-    pipeline: PreprocessingPipeline
-    feature_cols: list[str]
-
-
-@dataclass(slots=True)
-class DatasetBundle:
-    """Datasets and evaluation payload for a model family."""
-
-    train: Any
-    val: Any | None
-    test: Any
-    input_size: int | None
-    y_true: np.ndarray
-    prediction_index: pd.DatetimeIndex | None
 
 
 @dataclass(slots=True)
@@ -66,39 +54,6 @@ class PipelineProfile:
             self.stage_seconds[name] = time.monotonic() - started
 
 
-def _prediction_index_for_policy(
-    index: pd.DatetimeIndex,
-    *,
-    model_type: str,
-    sequence_length: int,
-    evaluation_policy: str,
-) -> pd.DatetimeIndex | None:
-    """Return prediction index for explicit non-default evaluation policies."""
-    _ = model_type
-    if evaluation_policy == "model_native":
-        return None
-    if evaluation_policy != "common_sequence_horizon":
-        raise ValueError(f"Unknown evaluation_policy: {evaluation_policy}")
-    return index[sequence_length:]
-
-
-def _test_frame_for_policy(
-    test_df: pd.DataFrame,
-    *,
-    model_type: str,
-    sequence_length: int,
-    evaluation_policy: str,
-) -> pd.DataFrame:
-    """Apply explicit evaluation row policy without changing default behavior."""
-    if evaluation_policy == "model_native":
-        return test_df
-    if evaluation_policy != "common_sequence_horizon":
-        raise ValueError(f"Unknown evaluation_policy: {evaluation_policy}")
-    if model_type == "svm":
-        return test_df.iloc[sequence_length:]
-    return test_df
-
-
 def prepare_runtime(config: ExperimentConfig) -> None:
     """Resolve output-coupled runtime defaults in-place."""
     model_type = config.model.model_type.lower()
@@ -107,7 +62,7 @@ def prepare_runtime(config: ExperimentConfig) -> None:
         config.runtime.checkpoint_dir = str(layout.checkpoints_dir)
 
 
-def load_data(config: ExperimentConfig) -> pd.DataFrame:
+def load_data(config: ExperimentConfig) -> LoadedData:
     """Load configured input data."""
     if config.data.hourly_data_path:
         from solrad_correction.data.loaders import load_sensor_hourly
@@ -123,21 +78,29 @@ def load_data(config: ExperimentConfig) -> pd.DataFrame:
             datetime_index=config.data.datetime_index,
             dtype_map=config.data.dtype_map,
             limit_rows=config.runtime.limit_rows,
+            cache_dir=config.data.cache_dir,
         )
     elif config.data.sensor_data_path:
         from solrad_correction.data.loaders import load_sensor_raw
 
-        df = load_sensor_raw(config.data.sensor_data_path)
+        df = load_sensor_raw(
+            config.data.sensor_data_path,
+            pattern=config.data.sensor_pattern,
+            calibrations_path=config.data.calibrations_path,
+            resample_freq=config.data.resample_freq,
+            min_samples=config.data.sensor_min_samples,
+        )
         if config.runtime.limit_rows is not None:
             df = df.iloc[: config.runtime.limit_rows].copy()
     else:
         raise ValueError("No data path provided in config")
 
-    return df
+    return LoadedData(frame=df)
 
 
-def build_features(df: pd.DataFrame, config: ExperimentConfig) -> pd.DataFrame:
+def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame:
     """Apply feature engineering according to config."""
+    df = loaded.frame
     if config.features.add_temporal:
         from solrad_correction.features.temporal import (
             add_all_cyclic_encodings,
@@ -168,11 +131,6 @@ def build_features(df: pd.DataFrame, config: ExperimentConfig) -> pd.DataFrame:
 
         df = add_diff_features(df, config.data.feature_columns)
 
-    return df
-
-
-def select_feature_columns(df: pd.DataFrame, config: ExperimentConfig) -> list[str]:
-    """Resolve final feature columns after feature engineering."""
     feature_cols = [c for c in df.columns if c != config.data.target_column]
     if config.data.feature_columns:
         base = set(config.data.feature_columns)
@@ -180,61 +138,51 @@ def select_feature_columns(df: pd.DataFrame, config: ExperimentConfig) -> list[s
             c for c in df.columns if c in base or any(c.startswith(f"{b}_") for b in base)
         ]
         feature_cols = [c for c in feature_cols if c != config.data.target_column]
-    return feature_cols
+    return FeatureFrame(frame=df, feature_cols=feature_cols)
 
 
-def split_data(
-    config: ExperimentConfig, df: pd.DataFrame
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def split_data(config: ExperimentConfig, features: FeatureFrame) -> SplitFrames:
     """Split data chronologically according to config."""
-    return temporal_train_val_test_split(
-        df,
+    train, val, test = temporal_train_val_test_split(
+        features.frame,
         config.split.train_ratio,
         config.split.val_ratio,
         config.split.test_ratio,
         shuffle=config.split.shuffle,
     )
+    return SplitFrames(train=train, val=val, test=test)
 
 
 def preprocess_splits(
     config: ExperimentConfig,
-    feature_cols: list[str],
-    train_df: pd.DataFrame,
-    val_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-) -> ProcessedSplits:
+    features: FeatureFrame,
+    splits: SplitFrames,
+) -> PreprocessedSplits:
     """Fit preprocessing on train and transform all splits."""
     pipeline = PreprocessingPipeline(
         scaler_type=config.preprocess.scaler_type,
         impute_strategy=config.preprocess.impute_strategy,
         drop_na_threshold=config.preprocess.drop_na_threshold,
-        feature_columns=feature_cols,
+        feature_columns=features.feature_cols,
         target_column=config.data.target_column,
     )
-    all_cols = [*feature_cols, config.data.target_column]
-    train = pipeline.fit_transform(train_df[all_cols])
+    all_cols = [*features.feature_cols, config.data.target_column]
+    train = pipeline.fit_transform(splits.train[all_cols])
     if config.data.target_column not in train.columns:
         raise ValueError(
             f"Target column '{config.data.target_column}' was dropped during preprocessing"
         )
-    retained_features = [c for c in feature_cols if c in pipeline.columns]
-    return ProcessedSplits(
+    retained_features = [c for c in features.feature_cols if c in pipeline.columns]
+    return PreprocessedSplits(
         train=train,
-        val=pipeline.transform(val_df[all_cols]),
-        test=pipeline.transform(test_df[all_cols]),
+        val=pipeline.transform(splits.val[all_cols]),
+        test=pipeline.transform(splits.test[all_cols]),
         pipeline=pipeline,
         feature_cols=retained_features,
     )
 
 
-def save_preprocessing_state(config: ExperimentConfig, processed: ProcessedSplits) -> None:
-    """Persist preprocessing state."""
-    layout = ArtifactLayout.from_experiment_dir(config.experiment_dir)
-    processed.pipeline.save(layout.preprocessing_joblib)
-    processed.pipeline.save_state_json(layout.preprocessing_state)
-
-
-def build_datasets(config: ExperimentConfig, processed: ProcessedSplits) -> DatasetBundle:
+def build_datasets(config: ExperimentConfig, processed: PreprocessedSplits) -> DatasetBundle:
     """Build train/validation/test datasets and preserve artifact schemas."""
     model_type = config.model.model_type.lower()
     eval_policy = config.model.evaluation_policy
@@ -248,18 +196,14 @@ def build_datasets(config: ExperimentConfig, processed: ProcessedSplits) -> Data
         val_ds = TabularDataset.from_dataframe(
             processed.val, feature_cols, config.data.target_column
         )
-        test_eval = _test_frame_for_policy(
+        test_eval = align_test_frame(
             processed.test,
             model_type=model_type,
             sequence_length=config.model.sequence_length,
             evaluation_policy=eval_policy,
         )
         test_ds = TabularDataset.from_dataframe(test_eval, feature_cols, config.data.target_column)
-        layout = ArtifactLayout.from_experiment_dir(config.experiment_dir)
-        train_ds.save(layout.datasets_dir / "train")
-        val_ds.save(layout.datasets_dir / "val")
-        test_ds.save(layout.datasets_dir / "test")
-        prediction_index = _prediction_index_for_policy(
+        pred_index = prediction_index(
             cast("pd.DatetimeIndex", processed.test.index),
             model_type=model_type,
             sequence_length=config.model.sequence_length,
@@ -271,7 +215,7 @@ def build_datasets(config: ExperimentConfig, processed: ProcessedSplits) -> Data
             test=test_ds,
             input_size=None,
             y_true=test_ds.y,
-            prediction_index=prediction_index,
+            prediction_index=pred_index,
         )
 
     from solrad_correction.datasets.sequence import WindowedSequenceDataset
@@ -287,12 +231,7 @@ def build_datasets(config: ExperimentConfig, processed: ProcessedSplits) -> Data
     train_seq = WindowedSequenceDataset(train_features, train_target, seq_len)
     val_seq = WindowedSequenceDataset(val_features, val_target, seq_len)
     test_seq = WindowedSequenceDataset(test_features, test_target, seq_len)
-    layout = ArtifactLayout.from_experiment_dir(config.experiment_dir)
-    train_seq.save(layout.datasets_dir / "train", feature_names=feature_cols)
-    val_seq.save(layout.datasets_dir / "val", feature_names=feature_cols)
-    test_seq.save(layout.datasets_dir / "test", feature_names=feature_cols)
-
-    prediction_index = _prediction_index_for_policy(
+    pred_index = prediction_index(
         cast("pd.DatetimeIndex", processed.test.index),
         model_type=model_type,
         sequence_length=seq_len,
@@ -304,7 +243,7 @@ def build_datasets(config: ExperimentConfig, processed: ProcessedSplits) -> Data
         test=test_seq,
         input_size=train_features.shape[1],
         y_true=test_seq.target_values(),
-        prediction_index=prediction_index,
+        prediction_index=pred_index,
     )
 
 
@@ -318,47 +257,41 @@ def train_model(
     config: ExperimentConfig,
     model: BaseRegressorModel,
     bundle: DatasetBundle,
-) -> float:
-    """Train and persist the configured model."""
+) -> TrainingOutput:
+    """Train the configured model."""
     started = time.monotonic()
     if get_model_spec(config.model.model_type).kind == "sequence":
-        model.fit(bundle.train, bundle.val, config.model, runtime=config.runtime)  # type: ignore[call-arg]
-        model.save(ArtifactLayout.from_experiment_dir(config.experiment_dir).model_pt)
+        res = model.fit(bundle.train, bundle.val, config.model, runtime=config.runtime)
     else:
-        model.fit(bundle.train, bundle.val, config.model)
-        model.save(ArtifactLayout.from_experiment_dir(config.experiment_dir).model_joblib)
-    return time.monotonic() - started
+        res = model.fit(bundle.train, bundle.val, config.model)
+    return TrainingOutput(duration_seconds=time.monotonic() - started, result=res)
 
 
-def predict_model(model: BaseRegressorModel, bundle: DatasetBundle) -> np.ndarray:
+def predict_model(model: BaseRegressorModel, bundle: DatasetBundle) -> PredictionOutput:
     """Generate model predictions for the test dataset."""
-    return model.predict(bundle.test)
+    return PredictionOutput(
+        y_true=bundle.y_true,
+        y_pred=model.predict(bundle.test),
+        index=bundle.prediction_index,
+    )
 
 
 def evaluate_predictions(
-    processed: ProcessedSplits,
+    processed: PreprocessedSplits,
     config: ExperimentConfig,
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
+    predictions: PredictionOutput,
+) -> EvaluationResult:
     """Inverse-transform and compute regression metrics."""
-    y_true_orig = processed.pipeline.inverse_transform_column(y_true, config.data.target_column)
-    y_pred_orig = processed.pipeline.inverse_transform_column(y_pred, config.data.target_column)
+    y_true_orig = processed.pipeline.inverse_transform_column(
+        predictions.y_true,
+        config.data.target_column,
+    )
+    y_pred_orig = processed.pipeline.inverse_transform_column(
+        predictions.y_pred,
+        config.data.target_column,
+    )
     metrics = compute_regression_metrics(y_true_orig, y_pred_orig)
-    return y_true_orig, y_pred_orig, metrics
-
-
-def save_profile(config: ExperimentConfig, profile: PipelineProfile) -> None:
-    """Save optional stage timing profile."""
-    if config.runtime.profile:
-        save_json(
-            {
-                "schema_version": 1,
-                "stage_seconds": profile.stage_seconds,
-                "total_stage_seconds": sum(profile.stage_seconds.values()),
-            },
-            ArtifactLayout.from_experiment_dir(config.experiment_dir).profile,
-        )
+    return EvaluationResult(y_true=y_true_orig, y_pred=y_pred_orig, metrics=metrics)
 
 
 def run_pipeline(config: ExperimentConfig) -> ExperimentReport:
@@ -368,67 +301,59 @@ def run_pipeline(config: ExperimentConfig) -> ExperimentReport:
     experiment_started = time.monotonic()
     profile = PipelineProfile(stage_seconds={})
     set_global_seed(config.seed)
-    layout = ArtifactLayout.from_experiment_dir(config.experiment_dir)
-    layout.ensure_directories()
-    config.save(layout.config_yaml)
+    writer = ExperimentWriter.from_config(config)
+    writer.prepare()
 
-    df = profile.time_stage("load_data", load_data, config)
-    df = profile.time_stage("build_features", build_features, df, config)
-    feature_cols = profile.time_stage("select_feature_columns", select_feature_columns, df, config)
-    train_df, val_df, test_df = profile.time_stage("split_data", split_data, config, df)
+    loaded = profile.time_stage("load_data", load_data, config)
+    features = profile.time_stage("build_features", build_features, loaded, config)
+    splits = profile.time_stage("split_data", split_data, config, features)
     processed = profile.time_stage(
         "preprocess_splits",
         preprocess_splits,
         config,
-        feature_cols,
-        train_df,
-        val_df,
-        test_df,
+        features,
+        splits,
     )
-    profile.time_stage("save_preprocessing_state", save_preprocessing_state, config, processed)
     bundle = profile.time_stage("build_datasets", build_datasets, config, processed)
     model = profile.time_stage("build_model", build_configured_model, config, bundle)
-    training_duration = profile.time_stage("train_model", train_model, config, model, bundle)
-    y_pred = profile.time_stage("predict_model", predict_model, model, bundle)
-    y_true_orig, y_pred_orig, metrics = profile.time_stage(
+    training = profile.time_stage("train_model", train_model, config, model, bundle)
+    model = training.result.model
+    predictions = profile.time_stage("predict_model", predict_model, model, bundle)
+    evaluation = profile.time_stage(
         "evaluate_predictions",
         evaluate_predictions,
         processed,
         config,
-        bundle.y_true,
-        y_pred,
+        predictions,
     )
 
     report = ExperimentReport(
         experiment_name=config.name,
         model_name=config.model.model_type.lower(),
-        metrics=metrics,
+        metrics=evaluation.metrics,
         config=config.to_dict(),
-        train_history=getattr(model, "training_history", {}),
+        train_history=training.result.history,
         metadata=collect_run_metadata(
             config=config,
             model=model,
             started_at=experiment_started,
-            training_duration_seconds=training_duration,
+            training_duration_seconds=training.duration_seconds,
         ),
     )
-    profile.time_stage(
-        "save_experiment_results",
-        save_experiment_results,
-        report,
-        y_true_orig,
-        y_pred_orig,
-        config.experiment_dir,
-        bundle.prediction_index,
+    result = ExperimentResult(
+        report=report,
+        processed=processed,
+        datasets=bundle,
+        model=model,
+        predictions=predictions,
+        evaluation=evaluation,
     )
-    save_profile(config, profile)
-    write_manifest(
-        layout,
-        extra={
-            "experiment_name": config.name,
-            "model_type": config.model.model_type.lower(),
-            "profile_enabled": config.runtime.profile,
-        },
+    profile.time_stage(
+        "write_experiment_results",
+        writer.write_result,
+        config=config,
+        result=result,
+        profile=profile,
     )
     report.print_summary()
     return report

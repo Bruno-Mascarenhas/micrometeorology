@@ -1,0 +1,21 @@
+﻿tests\tcc\test_scientific_contracts.py:174: error: Argument 1 to "prediction_index" has incompatible type "Index[Any]"; expected "DatetimeIndex"  [arg-type]
+tests\tcc\test_scientific_contracts.py:194: error: Argument 1 to "prediction_index" has incompatible type "Index[Any]"; expected "DatetimeIndex"  [arg-type]
+tests\micromet\test_wrf_batch.py:23: error: Returning Any from function declared to return "dict[Any, Any]"  [no-any-return]
+benchmarks\solrad_correction\loading.py:61: error: Incompatible types in assignment (expression has type "DatetimeIndex", target has type "ndarray[tuple[Any, ...], dtype[Any]]")  [assignment]
+tests\tcc\test_io_contracts.py:84: error: Argument "source_format" to "load_sensor_hourly" has incompatible type "str"; expected "Literal['auto', 'csv', 'parquet']"  [arg-type]
+tests\micromet\test_wrf_execution.py:29: error: Returning Any from function declared to return "dict[Any, Any]"  [no-any-return]
+tests\micromet\test_wrf_execution.py:190: error: Argument 1 to "resolve_wrf_execution_plan" has incompatible type "**dict[str, object]"; expected "list[Path]"  [arg-type]
+tests\micromet\test_wrf_execution.py:190: error: Argument 1 to "resolve_wrf_execution_plan" has incompatible type "**dict[str, object]"; expected "Literal['figures', 'json', 'pipeline']"  [arg-type]
+tests\micromet\test_wrf_execution.py:190: error: Argument 1 to "resolve_wrf_execution_plan" has incompatible type "**dict[str, object]"; expected "Literal['auto', 'eager', 'lazy']"  [arg-type]
+tests\micromet\test_wrf_execution.py:190: error: Argument 1 to "resolve_wrf_execution_plan" has incompatible type "**dict[str, object]"; expected "str | None"  [arg-type]
+tests\micromet\test_wrf_execution.py:190: error: Argument 1 to "resolve_wrf_execution_plan" has incompatible type "**dict[str, object]"; expected "Literal['auto', 'serial', 'pickle', 'memmap']"  [arg-type]
+tests\micromet\test_wrf_execution.py:190: error: Argument 1 to "resolve_wrf_execution_plan" has incompatible type "**dict[str, object]"; expected "int | None"  [arg-type]
+tests\micromet\test_wrf_execution.py:190: error: Argument 1 to "resolve_wrf_execution_plan" has incompatible type "**dict[str, object]"; expected "str | Path | None"  [arg-type]
+tests\micromet\test_wrf_execution.py:190: error: Argument 1 to "resolve_wrf_execution_plan" has incompatible type "**dict[str, object]"; expected "int"  [arg-type]
+tests\micromet\test_wrf_execution.py:190: error: Argument 1 to "resolve_wrf_execution_plan" has incompatible type "**dict[str, object]"; expected "bool | None"  [arg-type]
+tests\tcc\test_cli_contracts.py:8: error: Library stubs not installed for "yaml"  [import-untyped]
+tests\tcc\test_cli_contracts.py:8: note: Hint: "python3 -m pip install types-PyYAML"
+tests\tcc\test_cli_contracts.py:8: note: (or run "mypy --install-types" to install all missing stub packages)
+tests\tcc\test_cli_contracts.py:8: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports
+tests\tcc\test_cli_contracts.py:16: error: The return type of a generator function should be "Generator" or one of its supertypes  [misc]
+Found 17 errors in 6 files (checked 121 source files)

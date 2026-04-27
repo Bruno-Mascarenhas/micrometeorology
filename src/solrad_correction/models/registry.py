@@ -27,6 +27,11 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
 }
 
 
+def supported_model_names() -> tuple[str, ...]:
+    """Return the supported public model names."""
+    return tuple(sorted(MODEL_REGISTRY))
+
+
 def get_model_spec(model_type: str) -> ModelSpec:
     """Return the registered spec for a model type."""
     key = model_type.lower()

@@ -166,16 +166,16 @@ class WindowedSequenceDataset(Dataset):
         index: pd.DatetimeIndex | None = None,
     ) -> None:
         """Save the lazy dataset backing arrays without materializing windows."""
-        WindowedSequenceDatasetMeta.from_dataset(
-            self,
-            feature_names=feature_names or [],
-            index=index,
-        ).save(path)
+        from solrad_correction.datasets.serialization import save_windowed_sequence_dataset
+
+        save_windowed_sequence_dataset(self, path, feature_names=feature_names, index=index)
 
     @classmethod
     def load(cls, path: str | Path) -> WindowedSequenceDataset:
         """Load a lazy dataset saved by ``WindowedSequenceDataset.save``."""
-        return WindowedSequenceDatasetMeta.load(path).to_torch_dataset()
+        from solrad_correction.datasets.serialization import load_windowed_sequence_dataset
+
+        return load_windowed_sequence_dataset(path)
 
 
 @dataclass
@@ -275,5 +275,3 @@ class WindowedSequenceDatasetMeta:
             target_offset=target_offset,
             index=index,  # type: ignore
         )
-
-

@@ -25,9 +25,9 @@ class LSTMNet(nn.Module):
     Structure::
 
         Input (seq_len, input_size)
-            → LSTM layers
-            → Last hidden state
-            → Linear → ReLU → Linear → output (scalar)
+            -> LSTM layers
+            -> Last hidden state
+            -> Linear -> ReLU -> Linear -> output (scalar)
     """
 
     def __init__(

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from solrad_correction.models.base import BaseRegressorModel
+from solrad_correction.models.base import TabularRegressorModel, TrainingResult
 from solrad_correction.utils.serialization import load_sklearn_model, save_sklearn_model
 
 if TYPE_CHECKING:
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class SklearnRegressorModel(BaseRegressorModel):
+class SklearnRegressorModel(TabularRegressorModel):
     """Wrapper for any scikit-learn regressor.
 
     Subclasses must set ``self._estimator`` in ``__init__``.
@@ -33,9 +33,11 @@ class SklearnRegressorModel(BaseRegressorModel):
         self,
         train_data: TabularDataset,
         val_data: TabularDataset | None = None,
-        _config: ModelConfig | None = None,
-    ) -> SklearnRegressorModel:
+        config: ModelConfig | None = None,
+        **kwargs: Any,
+    ) -> TrainingResult:
         """Fit the sklearn estimator on tabular data."""
+        _ = config, kwargs
         logger.info("Training %s on %d samples", self.name, len(train_data))
         self._estimator.fit(train_data.X, train_data.y)
 
@@ -43,7 +45,7 @@ class SklearnRegressorModel(BaseRegressorModel):
             val_metrics = self.evaluate(val_data)
             logger.info("Validation: %s", val_metrics)
 
-        return self
+        return TrainingResult(model=self)
 
     def predict(self, data: TabularDataset | np.ndarray) -> np.ndarray:
         """Predict using the fitted estimator."""
