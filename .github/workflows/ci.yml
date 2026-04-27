@@ -2,56 +2,57 @@ name: CI
 
 on:
   push:
-    branches: [ "master", "main" ]
+    branches: ["master", "main"]
   pull_request:
-    branches: [ "master", "main" ]
+    branches: ["master", "main"]
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     strategy:
       matrix:
         python-version: ["3.14"]
 
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install uv
-      uses: astral-sh/setup-uv@v4
-      with:
-        enable-cache: true
-        cache-dependency-glob: "pyproject.toml"
+      - uses: actions/checkout@v6
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
 
-    - name: Install dependencies
-      run: |
-        uv pip install --system torch --index-url https://download.pytorch.org/whl/cpu
-        uv pip install --system -e ".[dev,tcc]"
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
 
-    - name: Cache MyPy
-      uses: actions/cache@v4
-      with:
-        path: .mypy_cache
-        key: mypy-${{ runner.os }}-${{ hashFiles('**/*.py') }}
-        restore-keys: |
-          mypy-${{ runner.os }}-
+      - name: Install dependencies
+        run: |
+          uv pip install --system torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --system -e ".[dev,tcc]"
 
-    - name: Format with Ruff
-      run: |
-        ruff format --check .
+      - name: Cache MyPy
+        uses: actions/cache@v5
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ hashFiles('**/*.py') }}
+          restore-keys: |
+            mypy-${{ runner.os }}-
 
-    - name: Lint with Ruff
-      run: |
-        ruff check .
+      - name: Format with Ruff
+        run: |
+          ruff format --check .
 
-    - name: Typecheck with MyPy
-      run: |
-        mypy src tests
+      - name: Lint with Ruff
+        run: |
+          ruff check .
 
-    - name: Test with pytest
-      run: |
-        pytest -n auto --maxfail=1 -v tests/
+      - name: Typecheck with MyPy
+        run: |
+          mypy src tests
+
+      - name: Test with pytest
+        run: |
+          pytest -n auto --maxfail=1 -v tests/
