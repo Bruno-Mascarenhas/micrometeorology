@@ -67,6 +67,9 @@ pip install -e ".[tcc-cuda]"
 pip install -e ".[dev,tcc,video]"
 ```
 
+Dask-backed xarray chunking is included in the base dependencies for large WRF
+workloads.
+
 ---
 
 ## Quick Start
@@ -80,9 +83,9 @@ labmim-wrf-geojson --wrf-dir /path/to/wrfout/ --date 20240101 \
     -D 1 -D 4 -o output/JSON -g output/GeoJSON --workers 44
 ```
 
-WRF CLIs now default to adaptive `auto` performance mode. Small or serial jobs
-stay on the eager reader and pickle worker payloads; large multi-worker exports
-can resolve to the lazy reader and memmap payload references.
+WRF CLIs now default to adaptive `auto` performance mode. Small or single-worker
+jobs stay on the eager reader and serial JSON writer; larger multi-worker
+exports can resolve to the lazy reader and memmap payload references.
 When dask-backed xarray chunking is unavailable, auto mode keeps lazy reads
 unchunked instead of failing.
 
@@ -100,6 +103,14 @@ For large exports, you can still force lazy + memmap explicitly:
 labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
     -o output/JSON -g output/GeoJSON \
     --reader lazy --worker-backend memmap --tmp-dir scratch/wrf-json
+```
+
+Static map rendering also supports memmap-backed figure payloads:
+
+```bash
+labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
+    -o output/figures --reader lazy --chunks auto \
+    --worker-backend memmap --tmp-dir scratch/wrf-figures
 ```
 
 ### 2. Sensor Data Processing & Calibration

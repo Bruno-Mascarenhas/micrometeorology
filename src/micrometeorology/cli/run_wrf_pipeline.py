@@ -30,10 +30,11 @@ Usage::
         --dataset /path/to/wrfout_d03_2026-04-09_00:00:00 \\
         --output output/test/ --reader eager --chunks none --json-worker-backend pickle
 
-    # Force lazy reader plus memmap JSON worker payloads
+    # Force lazy reader plus memmap figure and JSON worker payloads
     python scripts/micromet/run_wrf_local.py \\
         --dataset /path/to/wrfout_d03_2026-04-09_00:00:00 \\
-        --output output/test/ --reader lazy --json-worker-backend memmap
+        --output output/test/ --reader lazy \\
+        --figure-worker-backend memmap --json-worker-backend memmap
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ from micrometeorology.wrf.batch import default_workers
 from micrometeorology.wrf.execution import (
     JsonWorkerRequest,
     ReaderRequest,
+    estimate_figure_payload_bytes,
     estimate_json_payload_bytes,
     format_wrf_execution_plan,
     resolve_wrf_execution_plan,
@@ -89,11 +91,24 @@ from micrometeorology.wrf.execution import (
 @click.option("--no-geojson", is_flag=True, help="Skip GeoJSON/JSON generation.")
 @click.option("--also-video", is_flag=True, help="Generate WebM videos from figures.")
 @click.option(
+    "--figure-worker-backend",
+    default="auto",
+    type=click.Choice(["auto", "serial", "pickle", "memmap"]),
+    show_default=True,
+    help="Figure worker payload backend.",
+)
+@click.option(
+    "--figure-tmp-dir",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Parent directory for temporary figure memmap payloads.",
+)
+@click.option(
     "--json-worker-backend",
     default="auto",
-    type=click.Choice(["auto", "pickle", "memmap"]),
+    type=click.Choice(["auto", "serial", "pickle", "memmap"]),
     show_default=True,
-    help="JSON worker payload backend. Auto uses pickle for small/serial work and memmap for large multi-worker exports.",
+    help="JSON worker payload backend. Auto uses serial for single-worker work and memmap for large multi-worker exports.",
 )
 @click.option(
     "--json-tmp-dir",
@@ -120,6 +135,8 @@ def main(
     no_figures: bool,
     no_geojson: bool,
     also_video: bool,
+    figure_worker_backend: str,
+    figure_tmp_dir: str | None,
     json_worker_backend: str,
     json_tmp_dir: str | None,
     log_level: str,
@@ -139,6 +156,8 @@ def main(
     click.echo("=" * 70)
     click.echo("  WRF Local Processing Pipeline")
     click.echo("=" * 70)
+
+    video_workers = workers
 
     # Phase 1: Figures
     if not no_figures:
@@ -171,7 +190,9 @@ def main(
                 workflow="figures",
                 reader_request=cast("ReaderRequest", reader_backend),
                 chunks_request=chunks,
+                json_worker_request=cast("JsonWorkerRequest", figure_worker_backend),
                 workers=workers,
+                tmp_dir=figure_tmp_dir,
             )
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
@@ -197,7 +218,29 @@ def main(
                 click.echo(f"    → {len(figure_tasks)} frames queued")
 
         click.echo(f"  Total: {len(all_fig_tasks)} frames")
-        png_paths = run_figure_tasks(all_fig_tasks, workers=figure_plan.workers)
+        try:
+            final_figure_plan = resolve_wrf_execution_plan(
+                paths=paths,
+                workflow="figures",
+                reader_request=cast("ReaderRequest", figure_plan.reader),
+                chunks_request=chunks,
+                json_worker_request=cast("JsonWorkerRequest", figure_worker_backend),
+                workers=figure_plan.workers,
+                tmp_dir=figure_tmp_dir,
+                estimated_json_payload_bytes=estimate_figure_payload_bytes(all_fig_tasks),
+                json_task_count=len(all_fig_tasks),
+            )
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+        if final_figure_plan != figure_plan:
+            click.echo(format_wrf_execution_plan(final_figure_plan))
+        png_paths = run_figure_tasks(
+            all_fig_tasks,
+            workers=final_figure_plan.workers,
+            backend=final_figure_plan.json_worker_backend,
+            tmp_dir=final_figure_plan.tmp_dir,
+        )
+        video_workers = final_figure_plan.workers
         click.echo(f"  ✓ {len(png_paths)} figures generated")
     else:
         png_paths = []
@@ -296,7 +339,6 @@ def main(
             else:
                 grouped[stem].append(p)
 
-        video_workers = figure_plan.workers if not no_figures else workers
         webm_paths = batch_create_webm(grouped, str(video_dir), fps=2, workers=video_workers)
         click.echo(f"  ✓ {len(webm_paths)} videos generated")
 

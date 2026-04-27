@@ -25,6 +25,7 @@ dependencies = [
     "numpy>=2.0",
     "pandas>=3.0",
     "xarray>=2024.6",
+    "dask[array]>=2026.0",
     "netCDF4>=1.7.4",
     "matplotlib>=3.9",
     "cartopy>=0.23",

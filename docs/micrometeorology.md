@@ -63,6 +63,8 @@ pip install -e ".[dev]"
 
 # With video generation (moviepy):
 pip install -e ".[video]"
+
+# Dask-backed xarray chunking is included in the base dependencies.
 ```
 
 ### Cartopy Shapefiles
@@ -260,8 +262,8 @@ The default WRF execution mode is now adaptive:
 ```
 
 Auto mode resolves a deterministic execution plan and prints it before work
-starts. Small or single-worker jobs use the eager `netCDF4` reader and pickle
-payloads. Large files, explicit chunk dimensions, or large multi-worker JSON
+starts. Small or single-worker jobs use the eager `netCDF4` reader and serial
+JSON writer. Large files, explicit chunk dimensions, or large multi-worker JSON
 payloads can resolve to the xarray-backed lazy reader and memmap worker payloads.
 
 To force the previous fixed behavior:
@@ -297,7 +299,7 @@ labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
 
 `memmap` may be slower for tiny or single-worker jobs because arrays must first
 be materialized as temporary `.npy` files. The resolver keeps those jobs on the
-serial/pickle path unless memmap is explicitly requested.
+serial path unless memmap is explicitly requested.
 
 ### Figures (Static Maps & Video)
 
@@ -315,11 +317,17 @@ Figures also support adaptive reader planning during task construction:
 
 ```bash
 labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
-    -o output/figures --reader auto --chunks auto
+    -o output/figures --reader auto --chunks auto --worker-backend auto
 ```
 
-Figure rendering still sends per-frame arrays to renderer workers; the memmap
-payload backend applies to JSON writing, not figure rendering.
+For large multi-worker render jobs, force memmap-backed figure payloads to avoid
+pickling each 2-D frame array into worker processes:
+
+```bash
+labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
+    -o output/figures --reader lazy --chunks auto \
+    --worker-backend memmap --tmp-dir scratch/wrf-figures
+```
 
 ### Local testing (all-in-one)
 

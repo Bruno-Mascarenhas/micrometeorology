@@ -22,11 +22,11 @@ Usage::
 
     # Force old eager behavior
     labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
-        -o output/figures --reader eager --chunks none
+        -o output/figures --reader eager --chunks none --worker-backend pickle
 
     # Force xarray-backed lazy reader
     labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
-        -o output/figures --reader lazy --chunks none
+        -o output/figures --reader lazy --chunks auto --worker-backend memmap
 """
 
 from __future__ import annotations
@@ -53,7 +53,9 @@ from micrometeorology.wrf.batch import (
     run_figure_tasks,
 )
 from micrometeorology.wrf.execution import (
+    JsonWorkerRequest,
     ReaderRequest,
+    estimate_figure_payload_bytes,
     format_wrf_execution_plan,
     resolve_wrf_execution_plan,
 )
@@ -155,12 +157,12 @@ def _build_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.extract_temperature_step(t2[i : i + 1, :, :])
-                pressure = np.squeeze(psfc[i : i + 1, :, :])
+                pressure = vmod.materialize_2d(psfc[i : i + 1, :, :])
                 tasks.append(
                     FigureTask(
                         lon=lon,
                         lat=lat,
-                        data=data,
+                        data=vmod.materialize_2d(data),
                         vmin=vmin,
                         vmax=vmax,
                         cmap_name=cmap,
@@ -184,8 +186,8 @@ def _build_tasks_for_domain(
                 if meta.get("skip"):
                     continue
                 i = meta["index"]
-                u = np.squeeze(u10[i : i + 1])
-                v = np.squeeze(v10[i : i + 1])
+                u = vmod.materialize_2d(u10[i : i + 1])
+                v = vmod.materialize_2d(v10[i : i + 1])
                 speed = np.hypot(u, v)
                 tasks.append(
                     FigureTask(
@@ -220,7 +222,7 @@ def _build_tasks_for_domain(
                     FigureTask(
                         lon=lon,
                         lat=lat,
-                        data=data,
+                        data=vmod.materialize_2d(data),
                         vmin=vmin,
                         vmax=vmax,
                         cmap_name=cmap,
@@ -248,7 +250,7 @@ def _build_tasks_for_domain(
                 if local_hour < 6 or local_hour > 18:
                     continue
                 i = meta["index"]
-                data = np.squeeze(var_data[i : i + 1, :, :])
+                data = vmod.materialize_2d(var_data[i : i + 1, :, :])
                 tasks.append(
                     FigureTask(
                         lon=lon,
@@ -288,7 +290,7 @@ def _build_tasks_for_domain(
                 if meta.get("skip"):
                     continue
                 i = meta["index"]
-                data = np.squeeze(var_data[i : i + 1, :, :])
+                data = vmod.materialize_2d(var_data[i : i + 1, :, :])
                 tasks.append(
                     FigureTask(
                         lon=lon,
@@ -351,6 +353,20 @@ def _build_tasks_for_domain(
     type=int,
     help=f"Parallel workers (default: {default_workers()}).",
 )
+@click.option(
+    "--worker-backend",
+    default="auto",
+    type=click.Choice(["auto", "serial", "pickle", "memmap"]),
+    show_default=True,
+    help="Figure worker payload backend. Auto uses serial for single-worker work and memmap for large multi-worker payloads.",
+)
+@click.option(
+    "--tmp-dir",
+    "tmp_dir",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Parent directory for temporary memmap payloads when --worker-backend memmap.",
+)
 @click.option("--dpi", default=100, type=int, help="Image DPI.")
 @click.option("--also-video", is_flag=True, help="Also generate WebM videos.")
 @click.option("--log-level", default="INFO", help="Logging level.")
@@ -366,6 +382,8 @@ def main(
     reader_backend: str,
     chunks: str,
     workers: int | None,
+    worker_backend: str,
+    tmp_dir: str | None,
     dpi: int,
     also_video: bool,
     log_level: str,
@@ -382,7 +400,9 @@ def main(
             workflow="figures",
             reader_request=cast("ReaderRequest", reader_backend),
             chunks_request=chunks,
+            json_worker_request=cast("JsonWorkerRequest", worker_backend),
             workers=workers,
+            tmp_dir=tmp_dir,
         )
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
@@ -410,9 +430,30 @@ def main(
             click.echo(f"  → {len(tasks)} frames queued")
 
     click.echo(f"\nTotal frames: {len(all_tasks)}")
+    try:
+        final_plan = resolve_wrf_execution_plan(
+            paths=paths,
+            workflow="figures",
+            reader_request=cast("ReaderRequest", plan.reader),
+            chunks_request=chunks,
+            json_worker_request=cast("JsonWorkerRequest", worker_backend),
+            workers=plan.workers,
+            tmp_dir=tmp_dir,
+            estimated_json_payload_bytes=estimate_figure_payload_bytes(all_tasks),
+            json_task_count=len(all_tasks),
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    if final_plan != plan:
+        click.echo(format_wrf_execution_plan(final_plan))
 
     # Phase 2: Parallel rendering
-    png_paths = run_figure_tasks(all_tasks, workers=plan.workers)
+    png_paths = run_figure_tasks(
+        all_tasks,
+        workers=final_plan.workers,
+        backend=final_plan.json_worker_backend,
+        tmp_dir=final_plan.tmp_dir,
+    )
 
     click.echo(f"\n✓ Generated {len(png_paths)} figures")
 
@@ -431,7 +472,7 @@ def main(
             else:
                 grouped[stem].append(p)
 
-        webm_paths = batch_create_webm(grouped, output, fps=2, workers=plan.workers)
+        webm_paths = batch_create_webm(grouped, output, fps=2, workers=final_plan.workers)
         click.echo(f"✓ Generated {len(webm_paths)} videos")
 
     click.echo("\n✓ Done")

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 ReaderRequest = Literal["auto", "eager", "lazy"]
-JsonWorkerRequest = Literal["auto", "pickle", "memmap"]
+JsonWorkerRequest = Literal["auto", "serial", "pickle", "memmap"]
 WorkflowKind = Literal["figures", "json", "pipeline"]
 
 LARGE_FILE_THRESHOLD_BYTES = 512 * 1024 * 1024
@@ -109,13 +109,13 @@ def _resolve_json_worker_backend(
     large_json_payload_threshold_bytes: int,
     many_json_tasks_threshold: int,
 ) -> tuple[JsonWorkerBackend, list[str]]:
-    if worker_request in {"pickle", "memmap"}:
+    if worker_request in {"serial", "pickle", "memmap"}:
         return cast("JsonWorkerBackend", worker_request), [
             f"JSON worker backend explicitly set to {worker_request}"
         ]
 
     if workers <= 1:
-        return "pickle", ["single worker uses serial JSON fast path"]
+        return "serial", ["single worker uses serial JSON fast path"]
 
     payload = estimated_json_payload_bytes or 0
     tasks = json_task_count or 0
@@ -167,26 +167,24 @@ def resolve_wrf_execution_plan(
         large_total_input_threshold_bytes=large_total_input_threshold_bytes,
     )
 
-    if json_worker_request == "pickle" and resolved_tmp_dir is not None:
+    if json_worker_request in {"serial", "pickle"} and resolved_tmp_dir is not None:
         raise ValueError("--tmp-dir is only valid with --worker-backend auto or memmap")
 
+    json_backend, json_reasons = _resolve_json_worker_backend(
+        worker_request=json_worker_request,
+        workers=resolved_workers,
+        estimated_json_payload_bytes=estimated_json_payload_bytes,
+        json_task_count=json_task_count,
+        large_json_payload_threshold_bytes=large_json_payload_threshold_bytes,
+        many_json_tasks_threshold=many_json_tasks_threshold,
+    )
+    reasons.extend(json_reasons)
     if workflow == "figures":
-        json_backend: JsonWorkerBackend = "pickle"
-        reasons.append("figure rendering does not use JSON worker backend")
-    else:
-        json_backend, json_reasons = _resolve_json_worker_backend(
-            worker_request=json_worker_request,
-            workers=resolved_workers,
-            estimated_json_payload_bytes=estimated_json_payload_bytes,
-            json_task_count=json_task_count,
-            large_json_payload_threshold_bytes=large_json_payload_threshold_bytes,
-            many_json_tasks_threshold=many_json_tasks_threshold,
-        )
-        reasons.extend(json_reasons)
-        if json_backend == "memmap" and resolved_tmp_dir is not None:
-            reasons.append(f"using user temporary directory {resolved_tmp_dir}")
-        elif json_backend == "memmap":
-            reasons.append("using system temporary directory for memmap payloads")
+        reasons.append("backend applies to figure payloads")
+    if json_backend == "memmap" and resolved_tmp_dir is not None:
+        reasons.append(f"using user temporary directory {resolved_tmp_dir}")
+    elif json_backend == "memmap":
+        reasons.append("using system temporary directory for memmap payloads")
 
     return WRFExecutionPlan(
         reader=resolved_reader,
@@ -207,6 +205,20 @@ def estimate_json_payload_bytes(tasks: Sequence[object]) -> int:
     return total
 
 
+def estimate_figure_payload_bytes(tasks: Sequence[object]) -> int:
+    """Estimate in-memory ndarray payload bytes for figure tasks."""
+    total = 0
+    for task in tasks:
+        seen: set[int] = set()
+        for attr in ("lon", "lat", "data", "overlay_data", "u", "v"):
+            data = getattr(task, attr, None)
+            if data is None or id(data) in seen:
+                continue
+            seen.add(id(data))
+            total += int(getattr(data, "nbytes", 0) or 0)
+    return total
+
+
 def format_wrf_execution_plan(plan: WRFExecutionPlan) -> str:
     """Return a user-facing multi-line execution-plan summary."""
     chunks = "none" if plan.chunks is None else str(plan.chunks)
@@ -215,7 +227,7 @@ def format_wrf_execution_plan(plan: WRFExecutionPlan) -> str:
         "WRF execution plan:\n"
         f"  reader: {plan.reader}\n"
         f"  chunks: {chunks}\n"
-        f"  json worker backend: {plan.json_worker_backend}\n"
+        f"  worker backend: {plan.json_worker_backend}\n"
         f"  workers: {plan.workers}\n"
         f"  tmp dir: {tmp_dir}\n"
         f"  reason: {plan.reason}"

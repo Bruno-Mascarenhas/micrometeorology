@@ -22,7 +22,7 @@ import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import numpy as np
 
@@ -31,7 +31,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-JsonWorkerBackend = Literal["pickle", "memmap"]
+WorkerBackend = Literal["serial", "pickle", "memmap"]
+JsonWorkerBackend = WorkerBackend
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +106,26 @@ class JsonMemmapTask(NamedTuple):
     date_str: str
     output_path: str
     wind_data: dict | None
+
+
+class FigureMemmapTask(NamedTuple):
+    """Figure task with array payloads stored in temporary ``.npy`` files."""
+
+    lon_path: str
+    lat_path: str
+    data_path: str
+    overlay_data_path: str | None
+    u_path: str | None
+    v_path: str | None
+    vmin: float
+    vmax: float
+    cmap_name: str
+    overlay_levels: list[float] | None
+    title: str
+    output_path: str
+    map_config: MapConfig
+    dpi: int
+    saturation: float
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +277,35 @@ def _write_json_payload(
     return str(out)
 
 
+def _load_memmap_array(path: str | None) -> NDArray | None:
+    if path is None:
+        return None
+    return cast("NDArray", np.load(path, mmap_mode="r"))
+
+
+def _render_figure_memmap(task: FigureMemmapTask) -> str:
+    """Render a figure from memmap-backed arrays."""
+    return _render_figure(
+        FigureTask(
+            lon=np.load(task.lon_path, mmap_mode="r"),
+            lat=np.load(task.lat_path, mmap_mode="r"),
+            data=np.load(task.data_path, mmap_mode="r"),
+            vmin=task.vmin,
+            vmax=task.vmax,
+            cmap_name=task.cmap_name,
+            overlay_data=_load_memmap_array(task.overlay_data_path),
+            overlay_levels=task.overlay_levels,
+            u=_load_memmap_array(task.u_path),
+            v=_load_memmap_array(task.v_path),
+            title=task.title,
+            output_path=task.output_path,
+            map_config=task.map_config,
+            dpi=task.dpi,
+            saturation=task.saturation,
+        )
+    )
+
+
 def _write_json(task: JsonTask) -> str:
     """Write a single JSON file. Runs in a worker process."""
     return _write_json_payload(
@@ -319,6 +369,9 @@ def default_workers() -> int:
 def run_figure_tasks(
     tasks: list[FigureTask],
     workers: int | None = None,
+    *,
+    backend: WorkerBackend = "pickle",
+    tmp_dir: str | Path | None = None,
 ) -> list[str]:
     """Execute figure rendering tasks in parallel.
 
@@ -338,10 +391,29 @@ def run_figure_tasks(
     n_workers = min(n_workers, len(tasks)) if tasks else 1
     total = len(tasks)
 
-    logger.info("Rendering %d figures with %d workers", total, n_workers)
+    if backend not in {"serial", "pickle", "memmap"}:
+        raise ValueError(f"Unknown figure worker backend: {backend}")
+
+    logger.info("Rendering %d figures with %d workers (%s backend)", total, n_workers, backend)
     t0 = time.perf_counter()
 
     paths: list[str] = []
+    if not tasks:
+        return paths
+
+    if backend == "serial" or (backend == "pickle" and n_workers == 1):
+        paths = [_render_figure(task) for task in tasks]
+        elapsed = time.perf_counter() - t0
+        logger.info(
+            "✓ Rendered %d figures in %.1fs (%.1f img/s)",
+            len(paths),
+            elapsed,
+            len(paths) / elapsed if elapsed > 0 else 0,
+        )
+        return paths
+
+    if backend == "memmap":
+        return _run_figure_tasks_memmap(tasks, n_workers, tmp_dir, t0)
 
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
         futures = {pool.submit(_render_figure, task): i for i, task in enumerate(tasks)}
@@ -391,6 +463,7 @@ def run_json_tasks(
     workers:
         Number of parallel workers. Defaults to ``cpu_count - 4``.
     backend:
+        ``"serial"`` writes in-process without creating worker processes.
         ``"pickle"`` sends arrays directly to workers (legacy behavior).
         ``"memmap"`` stores arrays in temporary ``.npy`` files and sends
         lightweight file references, reducing process-pool IPC payload size.
@@ -407,7 +480,7 @@ def run_json_tasks(
     n_workers = min(n_workers, len(tasks)) if tasks else 1
     total = len(tasks)
 
-    if backend not in {"pickle", "memmap"}:
+    if backend not in {"serial", "pickle", "memmap"}:
         raise ValueError(f"Unknown JSON worker backend: {backend}")
 
     logger.info("Writing %d JSON files with %d workers (%s backend)", total, n_workers, backend)
@@ -417,14 +490,14 @@ def run_json_tasks(
     if not tasks:
         return paths
 
-    if backend == "memmap":
-        return _run_json_tasks_memmap(tasks, n_workers, tmp_dir, t0)
-
-    if n_workers == 1:
+    if backend == "serial" or (backend == "pickle" and n_workers == 1):
         paths = [_write_json(task) for task in tasks]
         elapsed = time.perf_counter() - t0
         logger.info("✓ Wrote %d JSON files in %.1fs", len(paths), elapsed)
         return paths
+
+    if backend == "memmap":
+        return _run_json_tasks_memmap(tasks, n_workers, tmp_dir, t0)
 
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
         futures = {pool.submit(_write_json, task): i for i, task in enumerate(tasks)}
@@ -437,6 +510,105 @@ def run_json_tasks(
 
     elapsed = time.perf_counter() - t0
     logger.info("✓ Wrote %d JSON files in %.1fs", len(paths), elapsed)
+    return paths
+
+
+def _save_memmap_payload(
+    run_dir: Path,
+    name: str,
+    arr: NDArray | None,
+    cache: dict[int, str] | None = None,
+) -> str | None:
+    if arr is None:
+        return None
+    cache_key = id(arr)
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+    data_path = run_dir / f"{name}.npy"
+    np.save(data_path, np.asarray(arr), allow_pickle=False)
+    path_str = str(data_path)
+    if cache is not None:
+        cache[cache_key] = path_str
+    return path_str
+
+
+def _run_figure_tasks_memmap(
+    tasks: list[FigureTask],
+    n_workers: int,
+    tmp_dir: str | Path | None,
+    t0: float,
+) -> list[str]:
+    """Materialize figure task arrays to temporary .npy files and process by reference."""
+    parent: Path | None = Path(tmp_dir) if tmp_dir is not None else None
+    if parent is None:
+        run_dir_ctx = tempfile.TemporaryDirectory(prefix="labmim-figure-memmap-")
+        run_dir = Path(run_dir_ctx.name)
+    else:
+        parent.mkdir(parents=True, exist_ok=True)
+        run_dir_ctx = None
+        run_dir = parent / f"labmim-figure-memmap-{uuid.uuid4().hex}"
+        run_dir.mkdir(parents=True, exist_ok=False)
+
+    paths: list[str] = []
+    try:
+        grid_cache: dict[int, str] = {}
+        memmap_tasks: list[FigureMemmapTask] = []
+        for idx, task in enumerate(tasks):
+            prefix = f"task_{idx:06d}"
+            lon_path = _save_memmap_payload(run_dir, f"{prefix}_lon", task.lon, grid_cache)
+            lat_path = _save_memmap_payload(run_dir, f"{prefix}_lat", task.lat, grid_cache)
+            data_path = _save_memmap_payload(run_dir, f"{prefix}_data", task.data)
+            if lon_path is None or lat_path is None or data_path is None:
+                raise ValueError("Figure memmap task requires lon, lat, and data arrays")
+            memmap_tasks.append(
+                FigureMemmapTask(
+                    lon_path=lon_path,
+                    lat_path=lat_path,
+                    data_path=data_path,
+                    overlay_data_path=_save_memmap_payload(
+                        run_dir, f"{prefix}_overlay", task.overlay_data
+                    ),
+                    u_path=_save_memmap_payload(run_dir, f"{prefix}_u", task.u),
+                    v_path=_save_memmap_payload(run_dir, f"{prefix}_v", task.v),
+                    vmin=task.vmin,
+                    vmax=task.vmax,
+                    cmap_name=task.cmap_name,
+                    overlay_levels=task.overlay_levels,
+                    title=task.title,
+                    output_path=task.output_path,
+                    map_config=task.map_config,
+                    dpi=task.dpi,
+                    saturation=task.saturation,
+                )
+            )
+
+        if n_workers == 1:
+            paths = [_render_figure_memmap(task) for task in memmap_tasks]
+        else:
+            with ProcessPoolExecutor(max_workers=n_workers) as pool:
+                futures = {
+                    pool.submit(_render_figure_memmap, task): i
+                    for i, task in enumerate(memmap_tasks)
+                }
+                for future in as_completed(futures):
+                    try:
+                        paths.append(future.result())
+                    except Exception:
+                        idx = futures[future]
+                        logger.exception("Failed to render memmap figure task %d", idx)
+    finally:
+        if run_dir_ctx is not None:
+            run_dir_ctx.cleanup()
+        else:
+            shutil.rmtree(run_dir, ignore_errors=True)
+
+    elapsed = time.perf_counter() - t0
+    logger.info(
+        "✓ Rendered %d figures in %.1fs (%.1f img/s)",
+        len(paths),
+        elapsed,
+        len(paths) / elapsed if elapsed > 0 else 0,
+    )
     return paths
 
 

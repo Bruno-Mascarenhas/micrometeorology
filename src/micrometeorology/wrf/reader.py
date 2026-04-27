@@ -15,18 +15,18 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 import netCDF4
 import numpy as np
 import xarray as xr
+from numpy.typing import NDArray
 
 from micrometeorology.common.types import WEEKDAY_PT, GridLevel
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from numpy.typing import NDArray
-
 logger = logging.getLogger(__name__)
 
 ReaderMode = Literal["eager", "lazy"]
 ChunkSpec = dict[str, int] | str | None
+WRFArray = NDArray | xr.DataArray
 
 
 class WRFReader(Protocol):
@@ -54,7 +54,7 @@ class WRFReader(Protocol):
 
     def build_date_metadata(self, skip_first_n: int = 0) -> list[dict]: ...
 
-    def get_variable(self, name: str) -> NDArray: ...
+    def get_variable(self, name: str) -> WRFArray: ...
 
     def has_variable(self, name: str) -> bool: ...
 
@@ -315,9 +315,9 @@ class LazyWRFDataset:
     def dy(self) -> float:
         return float(self.dataset.attrs["DY"])
 
-    def get_variable(self, name: str) -> NDArray:
-        """Select a variable lazily, then materialize it as a squeezed ndarray."""
-        return np.asarray(self.dataset[name].to_numpy()).squeeze()
+    def get_variable(self, name: str) -> xr.DataArray:
+        """Select a variable lazily and return a squeezed xarray object."""
+        return self.dataset[name].squeeze()
 
     def read_grid(self) -> tuple[NDArray, NDArray]:
         if self._grid_cache is None:

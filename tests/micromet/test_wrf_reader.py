@@ -6,8 +6,10 @@ from pathlib import Path
 
 import netCDF4
 import numpy as np
+import xarray as xr
 
 from micrometeorology.wrf.reader import LazyWRFDataset, WRFDataset, open_wrf_dataset, parse_chunks
+from micrometeorology.wrf.variables import extract_scalar, materialize_2d
 
 
 def _write_tiny_wrf_file(path: Path) -> None:
@@ -68,8 +70,9 @@ def test_lazy_wrf_reader_defers_variable_loading_until_requested():
             t2 = wrf.get_variable("T2")
 
             assert wrf.has_variable("T2")
+            assert isinstance(t2, xr.DataArray)
             assert t2.shape == (2, 2, 3)
-            np.testing.assert_array_equal(t2[0], np.arange(6).reshape(2, 3))
+            np.testing.assert_array_equal(t2.isel(Time=0).to_numpy(), np.arange(6).reshape(2, 3))
     finally:
         path.unlink(missing_ok=True)
 
@@ -94,7 +97,8 @@ def test_open_wrf_dataset_lazy_matches_eager_for_synthetic_file():
         np.testing.assert_array_equal(lazy_lon, eager_lon)
         np.testing.assert_array_equal(lazy_lat, eager_lat)
         assert lazy_times == eager_times
-        np.testing.assert_array_equal(lazy_t2, eager_t2)
+        assert isinstance(lazy_t2, xr.DataArray)
+        np.testing.assert_array_equal(lazy_t2.to_numpy(), eager_t2)
     finally:
         path.unlink(missing_ok=True)
 
@@ -104,3 +108,22 @@ def test_parse_chunks_accepts_none_auto_and_explicit_pairs():
     assert parse_chunks("none") is None
     assert parse_chunks("auto") == "auto"
     assert parse_chunks("Time=1,south_north=128") == {"Time": 1, "south_north": 128}
+
+
+def test_lazy_scalar_extractor_keeps_dataarray_until_slice_materialization():
+    path = Path("scratch") / "wrfout_d01_synthetic_lazy_scalar.nc"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        _write_tiny_wrf_file(path)
+
+        with open_wrf_dataset(path, reader="lazy", chunks=parse_chunks("none")) as lazy:
+            var_data, vmin, vmax = extract_scalar(lazy, "T2")
+            first_step = materialize_2d(var_data[0:1, :, :])
+
+        assert isinstance(var_data, xr.DataArray)
+        assert vmin == 6.0
+        assert vmax == 10.9
+        np.testing.assert_array_equal(first_step, np.arange(6).reshape(2, 3))
+    finally:
+        path.unlink(missing_ok=True)

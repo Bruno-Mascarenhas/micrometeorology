@@ -36,7 +36,7 @@ def test_auto_resolves_tiny_workload_to_eager_pickle():
 
         assert plan.reader == "eager"
         assert plan.chunks is None
-        assert plan.json_worker_backend == "pickle"
+        assert plan.json_worker_backend == "serial"
         assert "small input" in plan.reason
         assert "single worker" in plan.reason
     finally:
@@ -110,12 +110,19 @@ def test_explicit_reader_and_worker_overrides_auto_heuristics():
             json_worker_request="memmap",
             workers=1,
         )
+        serial_plan = resolve_wrf_execution_plan(
+            paths=[path],
+            workflow="json",
+            json_worker_request="serial",
+            workers=8,
+        )
 
         assert eager_plan.reader == "eager"
         assert lazy_plan.reader == "lazy"
         assert lazy_plan.chunks is None
         assert pickle_plan.json_worker_backend == "pickle"
         assert memmap_plan.json_worker_backend == "memmap"
+        assert serial_plan.json_worker_backend == "serial"
     finally:
         path.unlink(missing_ok=True)
 
@@ -132,6 +139,40 @@ def test_explicit_chunks_with_eager_reader_raise_clear_error():
             )
         assert "--chunks" in str(exc_info.value)
         assert "--reader lazy" in str(exc_info.value)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_explicit_chunks_without_dask_raise_clear_error_for_lazy_reader():
+    path = _scratch_file("bad-dask-chunks")
+    try:
+        with pytest.raises(ValueError, match="dask-backed xarray chunking"):
+            resolve_wrf_execution_plan(
+                paths=[path],
+                workflow="json",
+                reader_request="lazy",
+                chunks_request="Time=1",
+                chunking_available=False,
+            )
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_auto_chunks_without_dask_falls_back_to_unchunked_lazy():
+    path = _scratch_file("auto-no-dask", size=128)
+    try:
+        plan = resolve_wrf_execution_plan(
+            paths=[path],
+            workflow="json",
+            reader_request="auto",
+            chunks_request="auto",
+            large_file_threshold_bytes=64,
+            chunking_available=False,
+        )
+
+        assert plan.reader == "lazy"
+        assert plan.chunks is None
+        assert "dask unavailable" in plan.reason
     finally:
         path.unlink(missing_ok=True)
 
@@ -204,7 +245,7 @@ def test_wrf_geojson_auto_matches_old_explicit_eager_pickle_on_tiny_file():
         assert old_result.exit_code == 0, old_result.output
         assert auto_result.exit_code == 0, auto_result.output
         assert "reader: eager" in auto_result.output
-        assert "json worker backend: pickle" in auto_result.output
+        assert "worker backend: serial" in auto_result.output
         assert _read_json(auto_json / "D01_T2_000.json") == _read_json(
             old_json / "D01_T2_000.json"
         )

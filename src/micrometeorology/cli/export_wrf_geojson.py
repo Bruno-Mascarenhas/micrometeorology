@@ -24,7 +24,10 @@ Usage::
     labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
         -o output/JSON -g output/GeoJSON --reader lazy --chunks none
 
-    # Force memmap worker references for large JSON exports
+    # Force serial writes or memmap worker references
+    labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
+        -o output/JSON -g output/GeoJSON --worker-backend serial
+
     labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
         -o output/JSON -g output/GeoJSON --worker-backend memmap --tmp-dir scratch/wrf-json
 """
@@ -160,7 +163,7 @@ def _build_json_tasks_for_domain(
                 data = vmod.extract_temperature_step(t2[i : i + 1, :, :])
                 tasks.append(
                     JsonTask(
-                        data=data,
+                        data=vmod.materialize_2d(data),
                         scale_min=vmin,
                         scale_max=vmax,
                         date_str=_format_datetime(meta["datetime_local"]),
@@ -178,7 +181,7 @@ def _build_json_tasks_for_domain(
                 data = vmod.extract_rain_step(total, i)
                 tasks.append(
                     JsonTask(
-                        data=data,
+                        data=vmod.materialize_2d(data),
                         scale_min=vmin,
                         scale_max=vmax,
                         date_str=_format_datetime(meta["datetime_local"]),
@@ -193,8 +196,8 @@ def _build_json_tasks_for_domain(
                 if meta.get("skip"):
                     continue
                 i = meta["index"]
-                u = np.squeeze(u10[i : i + 1])
-                v = np.squeeze(v10[i : i + 1])
+                u = vmod.materialize_2d(u10[i : i + 1])
+                v = vmod.materialize_2d(v10[i : i + 1])
                 speed = np.hypot(u, v)
                 tasks.append(
                     JsonTask(
@@ -216,7 +219,7 @@ def _build_json_tasks_for_domain(
                 if local_hour < 6 or local_hour > 18:
                     continue
                 i = meta["index"]
-                data = np.squeeze(var_data[i : i + 1, :, :])
+                data = vmod.materialize_2d(var_data[i : i + 1, :, :])
                 tasks.append(
                     JsonTask(
                         data=data,
@@ -248,7 +251,7 @@ def _build_json_tasks_for_domain(
                     if meta.get("skip"):
                         continue
                     i = meta["index"]
-                    data = np.squeeze(speed_3d[i : i + 1, :, :])
+                    data = vmod.materialize_2d(speed_3d[i : i + 1, :, :])
 
                     # Compute wind vectors per timestep (matches legacy behavior)
                     try:
@@ -281,8 +284,8 @@ def _build_json_tasks_for_domain(
                 if meta.get("skip"):
                     continue
                 i = meta["index"]
-                u = np.squeeze(u10[i : i + 1])
-                v = np.squeeze(v10[i : i + 1])
+                u = vmod.materialize_2d(u10[i : i + 1])
+                v = vmod.materialize_2d(v10[i : i + 1])
                 wv_json = create_wind_vectors_json(
                     u,
                     v,
@@ -314,7 +317,7 @@ def _build_json_tasks_for_domain(
                 if meta.get("skip"):
                     continue
                 i = meta["index"]
-                data = np.squeeze(var_data[i : i + 1, :, :])
+                data = vmod.materialize_2d(var_data[i : i + 1, :, :])
                 tasks.append(
                     JsonTask(
                         data=data,
@@ -363,9 +366,9 @@ def _build_json_tasks_for_domain(
     "--worker-backend",
     "worker_backend",
     default="auto",
-    type=click.Choice(["auto", "pickle", "memmap"]),
+    type=click.Choice(["auto", "serial", "pickle", "memmap"]),
     show_default=True,
-    help="JSON worker payload backend. Auto uses pickle for small/serial work and memmap for large multi-worker exports.",
+    help="JSON worker payload backend. Auto uses serial for single-worker work and memmap for large multi-worker exports.",
 )
 @click.option(
     "--tmp-dir",

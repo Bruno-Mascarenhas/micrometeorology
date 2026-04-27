@@ -54,6 +54,8 @@ def test_wrf_figures_help_exposes_lazy_reader_options(runner):
     assert result.exit_code == 0, result.output
     assert "--reader" in result.output
     assert "--chunks" in result.output
+    assert "--worker-backend" in result.output
+    assert "--tmp-dir" in result.output
     assert "[default: auto]" in result.output
 
 
@@ -64,5 +66,6 @@ def test_wrf_pipeline_help_exposes_reader_and_json_worker_backends(runner):
     assert "--reader" in result.output
     assert "--chunks" in result.output
     assert "--json-worker-backend" in result.output
+    assert "--figure-worker-backend" in result.output
     assert "--tmp-dir" in result.output
     assert "[default: auto]" in result.output

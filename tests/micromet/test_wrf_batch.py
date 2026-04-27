@@ -9,7 +9,13 @@ from pathlib import Path
 
 import numpy as np
 
-from micrometeorology.wrf.batch import JsonTask, run_json_tasks
+from micrometeorology.wrf.batch import (
+    FigureTask,
+    JsonTask,
+    MapConfig,
+    run_figure_tasks,
+    run_json_tasks,
+)
 
 
 def _read_json(path: Path) -> dict:
@@ -66,6 +72,76 @@ def test_json_memmap_backend_cleans_temporary_payload_directory():
 
         run_json_tasks([task], workers=1, backend="memmap", tmp_dir=tmp_dir)
 
+        assert out_path.exists()
+        assert tmp_dir.exists()
+        assert not list(tmp_dir.iterdir())
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_json_serial_backend_matches_pickle_backend():
+    root = Path("scratch") / f"json-serial-equivalence-{uuid.uuid4().hex}"
+    pickle_out = root / "pickle.json"
+    serial_out = root / "serial.json"
+    root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        data = np.array([[1.234, np.nan], [3.456, 4.567]], dtype=np.float32)
+        pickle_task = JsonTask(
+            data=data,
+            scale_min=0.0,
+            scale_max=5.0,
+            date_str="01/01/2024 00:00:00",
+            output_path=str(pickle_out),
+            wind_data=None,
+        )
+        serial_task = pickle_task._replace(output_path=str(serial_out))
+
+        run_json_tasks([pickle_task], workers=1, backend="pickle")
+        run_json_tasks([serial_task], workers=8, backend="serial")
+
+        assert _read_json(serial_out) == _read_json(pickle_out)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_figure_memmap_backend_cleans_payload_directory(monkeypatch):
+    root = Path("scratch") / f"figure-memmap-cleanup-{uuid.uuid4().hex}"
+    tmp_dir = root / "tmp"
+    out_path = root / "figure.png"
+    root.mkdir(parents=True, exist_ok=True)
+
+    def fake_render(task):
+        Path(task.output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(task.output_path).write_text("ok", encoding="utf-8")
+        return task.output_path
+
+    monkeypatch.setattr("micrometeorology.wrf.batch._render_figure_memmap", fake_render)
+
+    try:
+        lon = np.zeros((2, 2), dtype=np.float32)
+        lat = np.zeros((2, 2), dtype=np.float32)
+        task = FigureTask(
+            lon=lon,
+            lat=lat,
+            data=np.ones((2, 2), dtype=np.float32),
+            vmin=0.0,
+            vmax=1.0,
+            cmap_name="viridis",
+            overlay_data=None,
+            overlay_levels=None,
+            u=None,
+            v=None,
+            title="test",
+            output_path=str(out_path),
+            map_config=MapConfig("D01", 0.0, 1.0, 0.0, 1.0, 1, 1, False, None),
+            dpi=50,
+            saturation=1.0,
+        )
+
+        paths = run_figure_tasks([task], workers=1, backend="memmap", tmp_dir=tmp_dir)
+
+        assert paths == [str(out_path)]
         assert out_path.exists()
         assert tmp_dir.exists()
         assert not list(tmp_dir.iterdir())
