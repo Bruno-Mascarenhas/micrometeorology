@@ -1,5 +1,8 @@
 """Tests for PreprocessingPipeline to ensure no data leakage."""
 
+import shutil
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -73,18 +76,18 @@ class TestPreprocessingPipeline:
 
         # DataFrame missing column A, but having extra column D
         weird_df = pd.DataFrame({"B": [10.0], "D": [99.0]})
-        out = pipeline.transform(weird_df)
-
-        # Should only contain A and B (A will be NaN and dropped if strategy is drop)
-        # Wait, if strategy is drop, and A is NaN, the whole row is dropped!
-        assert len(out) == 0
+        with pytest.raises(ValueError, match="Input schema does not match"):
+            pipeline.transform(weird_df)
 
         # With mean imputation, A should be filled with train mean (3.0)
         pipeline = PreprocessingPipeline(
-            scaler_type="none", impute_strategy="mean", drop_na_threshold=0.5
+            scaler_type="none",
+            impute_strategy="mean",
+            drop_na_threshold=0.5,
+            strict_schema=False,
         )
         pipeline.fit(train_df)
-        out = pipeline.transform(weird_df)
+        out = pipeline.transform(pd.DataFrame({"A": [np.nan], "B": [10.0], "D": [99.0]}))
         assert "D" not in out.columns
         assert out["A"].iloc[0] == 3.0
         assert out["B"].iloc[0] == 10.0
@@ -123,3 +126,34 @@ class TestPreprocessingPipeline:
         out = pipeline.transform(test)
 
         assert out["A"].iloc[1] == 10.0
+
+    def test_state_roundtrip_schema_metadata_and_inverse_equivalence(self, train_df):
+        scratch = Path("scratch") / "test_preprocessing_state"
+        path = scratch / "preprocessing.joblib"
+        try:
+            scratch.mkdir(parents=True, exist_ok=True)
+            pipeline = PreprocessingPipeline(
+                scaler_type="standard",
+                impute_strategy="mean",
+                drop_na_threshold=0.5,
+                feature_columns=["A", "B"],
+                target_column="B",
+            )
+            transformed = pipeline.fit_transform(train_df)
+            pipeline.save(path)
+            pipeline.save_state_json(scratch / "preprocessing_state.json")
+
+            loaded = PreprocessingPipeline.load(path)
+            transformed_loaded = loaded.transform(train_df)
+
+            pd.testing.assert_frame_equal(transformed, transformed_loaded)
+            assert loaded.state.feature_columns == ["A", "B"]
+            assert loaded.state.target_column == "B"
+            assert loaded.state.row_counts["fit_input_rows"] == len(train_df)
+            assert "C" in loaded.state.dropped_columns
+
+            recovered = loaded.inverse_transform_column(transformed_loaded["A"].to_numpy(), "A")
+            np.testing.assert_allclose(recovered, train_df.loc[transformed_loaded.index, "A"])
+        finally:
+            if scratch.exists():
+                shutil.rmtree(scratch)

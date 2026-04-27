@@ -76,6 +76,8 @@ class TestLSTMSmoke:
             loaded_preds = loaded.predict(val_ds)
             assert loaded_preds.shape == (50,)
 
+            from solrad_correction.config import RuntimeConfig
+
             resume_config = ModelConfig(
                 model_type="lstm",
                 lstm_hidden_size=16,
@@ -83,10 +85,10 @@ class TestLSTMSmoke:
                 max_epochs=1,
                 batch_size=32,
                 patience=5,
-                pretrained_path=str(checkpoint_path),
             )
+            resume_runtime = RuntimeConfig(device="cpu", num_workers=0, resume=str(checkpoint_path))
             resumed = LSTMRegressor(input_size=5, hidden_size=16, num_layers=1, device="cpu")
-            resumed.fit(train_ds, val_ds, resume_config)
+            resumed.fit(train_ds, val_ds, resume_config, runtime=resume_runtime)
 
             resumed_path = Path("scratch") / "lstm_resumed_checkpoint.pt"
             try:
@@ -99,6 +101,58 @@ class TestLSTMSmoke:
                 resumed_path.unlink(missing_ok=True)
         finally:
             checkpoint_path.unlink(missing_ok=True)
+
+    def test_runtime_checkpoints_and_resume(self):
+        pytest.importorskip("torch")
+        from solrad_correction.config import ModelConfig, RuntimeConfig
+        from solrad_correction.datasets.sequence import SequenceDataset
+        from solrad_correction.models.lstm import LSTMRegressor
+        from solrad_correction.utils.serialization import load_torch_checkpoint
+
+        rng = np.random.default_rng(123)
+        features = rng.normal(0, 1, (80, 3, 4)).astype(np.float32)
+        targets = rng.normal(0, 1, 80).astype(np.float32)
+        train_ds = SequenceDataset(features[:60], targets[:60])
+        val_ds = SequenceDataset(features[60:], targets[60:])
+
+        checkpoint_dir = Path("scratch") / "lstm_runtime_checkpoints"
+        try:
+            model = LSTMRegressor(input_size=4, hidden_size=8, num_layers=1, device="cpu")
+            config = ModelConfig(model_type="lstm", max_epochs=1, batch_size=16, patience=3)
+            runtime = RuntimeConfig(
+                device="cpu",
+                num_workers=0,
+                amp=False,
+                checkpoint_dir=str(checkpoint_dir),
+            )
+
+            model.fit(train_ds, val_ds, config, runtime=runtime)
+
+            best_path = checkpoint_dir / "best.pt"
+            last_path = checkpoint_dir / "last.pt"
+            assert best_path.exists()
+            assert last_path.exists()
+            last_checkpoint = load_torch_checkpoint(last_path)
+            assert last_checkpoint["epoch"] == 1
+            assert last_checkpoint["metadata"]["checkpoint_kind"] == "last"
+
+            resumed = LSTMRegressor(input_size=4, hidden_size=8, num_layers=1, device="cpu")
+            resume_config = ModelConfig(model_type="lstm", max_epochs=1, batch_size=16, patience=3)
+            resume_runtime = RuntimeConfig(
+                device="cpu",
+                num_workers=0,
+                amp=False,
+                checkpoint_dir=str(checkpoint_dir),
+                resume=str(last_path),
+            )
+            resumed.fit(train_ds, val_ds, resume_config, runtime=resume_runtime)
+            resumed_checkpoint = load_torch_checkpoint(last_path)
+            assert resumed_checkpoint["epoch"] == 2
+        finally:
+            if checkpoint_dir.exists():
+                for child in checkpoint_dir.iterdir():
+                    child.unlink()
+                checkpoint_dir.rmdir()
 
 
 class TestTransformerSmoke:

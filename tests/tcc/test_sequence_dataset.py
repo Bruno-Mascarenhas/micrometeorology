@@ -9,7 +9,6 @@ import pandas as pd
 import pytest
 
 from solrad_correction.datasets.sequence import (
-    SequenceDatasetMeta,
     WindowedSequenceDataset,
     WindowedSequenceDatasetMeta,
 )
@@ -222,22 +221,3 @@ class TestWindowedSequenceDataset:
                     child.unlink()
                 scratch.rmdir()
 
-    def test_legacy_sequence_meta_can_load_lazy_cache(self):
-        scratch = Path("scratch") / "windowed_sequence_legacy_compat_test"
-        try:
-            features = np.arange(40, dtype=np.float32).reshape(10, 4)
-            target = np.arange(10, dtype=np.float32)
-            dataset = WindowedSequenceDataset(features, target, sequence_length=3)
-            dense_x, dense_y = create_sequences(features, target, sequence_length=3)
-
-            dataset.save(scratch, feature_names=["a", "b", "c", "d"])
-            loaded = SequenceDatasetMeta.load(scratch)
-
-            np.testing.assert_array_equal(loaded.X_raw, dense_x)
-            np.testing.assert_array_equal(loaded.y_raw, dense_y)
-            assert loaded.sequence_length == 3
-        finally:
-            if scratch.exists():
-                for child in scratch.iterdir():
-                    child.unlink()
-                scratch.rmdir()

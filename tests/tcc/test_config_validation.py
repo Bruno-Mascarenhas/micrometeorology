@@ -9,7 +9,13 @@ import yaml
 from click.testing import CliRunner
 
 from solrad_correction.cli import run_experiment_cli
-from solrad_correction.config import ExperimentConfig, ModelConfig, SplitConfig
+from solrad_correction.config import (
+    DataConfig,
+    ExperimentConfig,
+    ModelConfig,
+    RuntimeConfig,
+    SplitConfig,
+)
 
 
 def test_existing_default_config_validates():
@@ -43,6 +49,32 @@ def test_invalid_split_ratio_fails_clearly():
         cfg.validate()
 
 
+def test_invalid_data_source_format_fails_clearly():
+    cfg = ExperimentConfig(data=DataConfig(source_format="xlsx"))
+
+    with pytest.raises(ValueError, match=r"data\.source_format"):
+        cfg.validate()
+
+
+@pytest.mark.parametrize(
+    ("runtime_config", "message"),
+    [
+        (RuntimeConfig(device="quantum"), "runtime.device"),
+        (RuntimeConfig(num_workers=-1), "runtime.num_workers"),
+        (RuntimeConfig(prefetch_factor=0), "runtime.prefetch_factor"),
+        (RuntimeConfig(num_workers=0, prefetch_factor=2), "prefetch_factor"),
+        (RuntimeConfig(gradient_clip=-1.0), "runtime.gradient_clip"),
+        (RuntimeConfig(checkpoint_every=0), "runtime.checkpoint_every"),
+        (RuntimeConfig(limit_rows=0), "runtime.limit_rows"),
+    ],
+)
+def test_invalid_runtime_config_fails_clearly(runtime_config, message):
+    cfg = ExperimentConfig(runtime=runtime_config)
+
+    with pytest.raises(ValueError, match=message):
+        cfg.validate()
+
+
 def test_to_dict_contains_resolved_defaults():
     cfg = ExperimentConfig(name="resolved_test")
 
@@ -51,6 +83,7 @@ def test_to_dict_contains_resolved_defaults():
     assert resolved["name"] == "resolved_test"
     assert resolved["model"]["model_type"] == "svm"
     assert resolved["split"]["train_ratio"] == 0.7
+    assert resolved["runtime"]["device"] == "auto"
 
 
 def test_cli_validate_config_exits_without_training():
@@ -106,3 +139,74 @@ def test_cli_invalid_config_reports_click_error():
         assert "Invalid experiment config" in result.output
     finally:
         config_path.unlink(missing_ok=True)
+
+
+def test_cli_dry_run_does_not_require_data_load():
+    scratch = Path("scratch")
+    scratch.mkdir(exist_ok=True)
+    config_path = scratch / "dry_run_config_cli.yaml"
+    try:
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "name": "cli_dry",
+                    "data": {"hourly_data_path": "does-not-need-to-exist.csv"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = CliRunner().invoke(run_experiment_cli, ["--config", str(config_path), "--dry-run"])
+
+        assert result.exit_code == 0, result.output
+        assert "Dry run" in result.output
+    finally:
+        config_path.unlink(missing_ok=True)
+
+
+def test_cli_runtime_overrides_show_in_print_config():
+    scratch = Path("scratch")
+    scratch.mkdir(exist_ok=True)
+    config_path = scratch / "runtime_override_cli.yaml"
+    try:
+        config_path.write_text(yaml.safe_dump({"name": "cli_runtime"}), encoding="utf-8")
+
+        result = CliRunner().invoke(
+            run_experiment_cli,
+            [
+                "--config",
+                str(config_path),
+                "--print-config",
+                "--device",
+                "cpu",
+                "--num-workers",
+                "0",
+                "--no-pin-memory",
+                "--no-amp",
+                "--no-compile",
+                "--limit-rows",
+                "10",
+                "--profile",
+                "--output-dir",
+                "scratch/cli-runtime-output",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert '"device": "cpu"' in result.output
+        assert '"num_workers": 0' in result.output
+        assert '"pin_memory": false' in result.output
+        assert '"amp": false' in result.output
+        assert '"torch_compile": false' in result.output
+        assert '"limit_rows": 10' in result.output
+        assert '"profile": true' in result.output
+        assert '"output_dir": "scratch/cli-runtime-output"' in result.output
+    finally:
+        config_path.unlink(missing_ok=True)
+
+
+def test_cli_smoke_dry_run_does_not_need_config():
+    result = CliRunner().invoke(run_experiment_cli, ["--smoke-test", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Dry run" in result.output

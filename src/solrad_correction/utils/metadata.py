@@ -130,6 +130,14 @@ def _model_metadata(model: Any | None) -> dict[str, Any]:
             )
         except Exception as exc:
             info["parameter_count_error"] = str(exc)
+    info["best_metric"] = getattr(model, "best_metric", None)
+    info["best_epoch"] = getattr(model, "best_epoch", None)
+    settings = getattr(model, "dataloader_settings", None)
+    if settings is not None:
+        try:
+            info["dataloader"] = settings.to_dict()
+        except Exception as exc:
+            info["dataloader_error"] = str(exc)
     return info
 
 

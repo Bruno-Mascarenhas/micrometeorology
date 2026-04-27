@@ -79,6 +79,8 @@ def evaluate_epoch(
     dataloader: DataLoader,
     criterion: nn.Module,
     device: str,
+    *,
+    amp_enabled: bool | None = None,
 ) -> float:
     """Run one evaluation pass.
 
@@ -94,7 +96,8 @@ def evaluate_epoch(
             y_batch = y_batch.to(device, non_blocking=True).unsqueeze(-1)
 
             device_type = "cuda" if "cuda" in device else "cpu"
-            with torch.autocast(device_type=device_type, enabled="cuda" in device):
+            use_amp = "cuda" in device if amp_enabled is None else amp_enabled
+            with torch.autocast(device_type=device_type, enabled=use_amp):
                 y_pred = model(x_batch)
                 loss = criterion(y_pred, y_batch)
 

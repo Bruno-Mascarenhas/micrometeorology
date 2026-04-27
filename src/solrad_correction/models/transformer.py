@@ -154,7 +154,12 @@ class TransformerRegressor(TorchRegressorModel):
         }
 
     @classmethod
-    def from_config(cls, config: ModelConfig, input_size: int) -> TransformerRegressor:
+    def from_config(
+        cls,
+        config: ModelConfig,
+        input_size: int,
+        device: str | None = None,
+    ) -> TransformerRegressor:
         """Create from experiment config."""
         return cls(
             input_size=input_size,
@@ -163,6 +168,7 @@ class TransformerRegressor(TorchRegressorModel):
             num_encoder_layers=config.tf_num_encoder_layers,
             dim_feedforward=config.tf_dim_feedforward,
             dropout=config.tf_dropout,
+            device=device,
         )
 
     @classmethod
@@ -184,6 +190,9 @@ class TransformerRegressor(TorchRegressorModel):
         instance._optimizer_state = checkpoint.get("optimizer_state_dict")
         instance._scheduler_state = checkpoint.get("scheduler_state_dict")
         instance._scaler_state = checkpoint.get("scaler_state_dict")
+        instance._best_metric = None
+        instance._best_epoch = None
+        instance._dataloader_settings = None
         return instance
 
     def save(self, path: str | Path) -> None:

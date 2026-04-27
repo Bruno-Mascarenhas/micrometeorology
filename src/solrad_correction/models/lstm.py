@@ -77,11 +77,9 @@ class LSTMRegressor(TorchRegressorModel):
         model = LSTMRegressor(input_size=10, hidden_size=64)
         model.fit(train_dataset, val_dataset, config=config)
 
-        # Resume training with more epochs:
-        config.pretrained_path = "output/experiments/lstm_v1/model.pt"
-        config.max_epochs = 50
-        model2 = LSTMRegressor(input_size=10, hidden_size=64)
-        model2.fit(train_dataset, val_dataset, config=config)
+        # Resume training through RuntimeConfig.resume:
+        # runtime.resume = "output/experiments/lstm_v1/checkpoints/last.pt"
+        # model2.fit(train_dataset, val_dataset, config=config, runtime=runtime)
     """
 
     @property
@@ -111,13 +109,19 @@ class LSTMRegressor(TorchRegressorModel):
         }
 
     @classmethod
-    def from_config(cls, config: ModelConfig, input_size: int) -> LSTMRegressor:
+    def from_config(
+        cls,
+        config: ModelConfig,
+        input_size: int,
+        device: str | None = None,
+    ) -> LSTMRegressor:
         """Create from experiment config."""
         return cls(
             input_size=input_size,
             hidden_size=config.lstm_hidden_size,
             num_layers=config.lstm_num_layers,
             dropout=config.lstm_dropout,
+            device=device,
         )
 
     @classmethod
@@ -137,6 +141,9 @@ class LSTMRegressor(TorchRegressorModel):
         instance._optimizer_state = checkpoint.get("optimizer_state_dict")
         instance._scheduler_state = checkpoint.get("scheduler_state_dict")
         instance._scaler_state = checkpoint.get("scaler_state_dict")
+        instance._best_metric = None
+        instance._best_epoch = None
+        instance._dataloader_settings = None
         return instance
 
     def save(self, path: str | Path) -> None:

@@ -44,6 +44,8 @@ model:
   weight_decay: 0.00001
   max_epochs: 100
   patience: 10
+
+runtime:
   torch_compile: false
 
 output_dir: output/experiments

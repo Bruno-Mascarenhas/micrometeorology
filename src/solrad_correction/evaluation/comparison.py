@@ -15,7 +15,7 @@ def compare_experiments(experiment_dirs: list[str | Path]) -> pd.DataFrame:
     Parameters
     ----------
     experiment_dirs:
-        List of directories, each containing a ``metrics.json``.
+        List of experiment directories using the v2 artifact layout.
 
     Returns
     -------
@@ -25,7 +25,7 @@ def compare_experiments(experiment_dirs: list[str | Path]) -> pd.DataFrame:
     rows: list[dict] = []
     for d in experiment_dirs:
         d = Path(d)
-        metrics_path = d / "metrics.json"
+        metrics_path = d / "metrics" / "metrics.json"
         if not metrics_path.exists():
             continue
         metrics = load_json(metrics_path)

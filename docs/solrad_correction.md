@@ -26,9 +26,9 @@ src/solrad_correction/
 ├── config.py                # Experiment configuration (dataclasses + YAML)
 ├── cli.py                   # CLI: solrad-run
 ├── data/
-│   ├── loaders.py           # Wrappers for loading sensor/WRF data
+│   ├── loaders.py           # CSV/Parquet loading, projection, dtype, row limits
 │   ├── alignment.py         # Temporal alignment sensor ↔ WRF
-│   ├── preprocessing.py     # Pipeline with fit on train only (no leakage)
+│   ├── preprocessing.py     # Train-only fitted state + strict schema validation
 │   └── splits.py            # Chronological split, walk-forward, temporal K-fold
 ├── features/
 │   ├── engineering.py       # Lags, rolling means, differences
@@ -36,7 +36,7 @@ src/solrad_correction/
 │   └── sequence.py          # Sliding windows construction for LSTM/Transformer
 ├── datasets/
 │   ├── tabular.py           # TabularDataset (X, y) + reproducible save/load
-│   └── sequence.py          # SequenceDataset (torch.Dataset) + save/load
+│   └── sequence.py          # Dense and lazy windowed torch datasets + save/load
 ├── models/
 │   ├── base.py              # BaseRegressorModel (ABC): unified interface
 │   ├── sklearn_base.py      # Wrapper for scikit-learn regressors
@@ -54,7 +54,9 @@ src/solrad_correction/
 │   ├── reports.py           # ExperimentReport: saves metrics, config, history
 │   └── comparison.py        # Comparative table between experiments
 ├── experiments/
-│   └── runner.py            # Complete pipeline: config → data → train → evaluate
+│   ├── artifacts.py         # Canonical artifact layout and manifest
+│   ├── pipeline.py          # Composable pipeline stages
+│   └── runner.py            # Public compatibility wrapper
 └── utils/
     ├── seeds.py             # Seed control (numpy, torch, random)
     ├── io.py                # JSON I/O, CSV predictions
@@ -95,6 +97,10 @@ seed: 42
 
 data:
   hourly_data_path: data/hourly/sensor_data.csv
+  source_format: auto       # "auto", "csv", or "parquet"
+  datetime_column: 0        # First CSV column by default; can be a column name
+  datetime_index: true
+  dtype_map: {}             # Optional pandas dtypes for loaded columns
   target_column: SW_dif
   feature_columns:
     - SWDOWN
@@ -153,17 +159,37 @@ Each experiment generates a directory containing everything needed to reproduce 
 
 ```
 output/experiments/svm_baseline_salvador/
-├── config.yaml                      # Exact config used
-├── config_resolved.json             # Config dumped to JSON
-├── metrics.json                     # Results (RMSE, MAE, R², etc.)
-├── predictions.csv                  # y_true vs y_pred
-├── training_history.csv             # Loss per epoch (if neural network)
-├── model.joblib (or model.pt)       # Trained model
-├── preprocessing_pipeline.joblib    # Preprocessing state
-└── datasets/
-    ├── train/                       # Saved training dataset
-    └── test/                        # Saved testing dataset
+├── manifest.json                    # Artifact list, byte sizes, checksums
+├── configs/
+│   ├── config.yaml                  # Exact YAML config used
+│   └── config_resolved.json         # Resolved config dumped to JSON
+├── metrics/
+│   ├── metrics.json                 # Results (RMSE, MAE, R², etc.)
+│   └── training_history.csv         # Loss per epoch (if neural network)
+├── predictions/
+│   └── predictions.csv              # y_true vs y_pred
+├── metadata/
+│   ├── metadata.json                # Environment/device/git/model metadata
+│   └── preprocessing_state.json     # Human-readable fitted preprocessing state
+├── preprocessing/
+│   └── preprocessing_pipeline.joblib
+├── models/
+│   └── model.joblib (or model.pt)
+├── checkpoints/                     # best.pt and last.pt for neural runs
+├── datasets/
+│   ├── train/
+│   ├── val/
+│   └── test/
+├── profiles/
+│   └── profile.json                 # Written when --profile/runtime.profile is enabled
+├── logs/
+└── cache/
 ```
+
+Migration note: root-level artifacts from the previous layout are no longer
+written. Use `configs/config.yaml`, `metrics/metrics.json`,
+`predictions/predictions.csv`, `models/model.*`, and
+`preprocessing/preprocessing_pipeline.joblib`.
 
 ---
 
@@ -221,11 +247,19 @@ Training can be resumed from a previous checkpoint:
 ```yaml
 model:
   model_type: lstm
-  pretrained_path: output/experiments/lstm_v1/model.pt   # Previous weights
   max_epochs: 50       # ADDITIONAL epochs
+
+runtime:
+  resume: output/experiments/lstm_v1/checkpoints/last.pt
 ```
 
-This loads the weights from `lstm_v1` and trains for an additional 50 epochs. The checkpoint saves:
+This restores the model, optimizer, scheduler, scaler, and epoch state from
+`last.pt` and trains for an additional 50 epochs. Neural runs write:
+
+- `checkpoints/best.pt` (best validation/train monitor)
+- `checkpoints/last.pt` (latest epoch)
+
+Each checkpoint saves:
 
 - `model_state_dict` (model weights)
 - `optimizer_state_dict` (optimizer state)
@@ -234,9 +268,6 @@ This loads the weights from `lstm_v1` and trains for an additional 50 epochs. Th
 - `epoch` (epoch it stopped at)
 - `config` (architecture parameters for reconstruction)
 
-Older checkpoints that contain only model weights still load; optimizer,
-scheduler, and scaler state are restored only when present.
-
 ### PyTorch Compile
 
 `torch.compile` is opt-in because compile overhead is workload- and platform-
@@ -244,8 +275,7 @@ dependent. Keep it disabled for short CPU experiments and enable it explicitly
 for longer GPU runs after a smoke test:
 
 ```yaml
-model:
-  model_type: lstm
+runtime:
   torch_compile: true
 ```
 
@@ -254,6 +284,29 @@ model:
 ## Data Leakage Prevention
 
 The package implements multiple protection layers:
+
+### 0. Format-aware Loading
+
+Preprocessed hourly inputs can be CSV or Parquet:
+
+```yaml
+data:
+  hourly_data_path: path/to/hourly.parquet
+  source_format: parquet   # auto also works for .csv, .parquet, and .pq
+  datetime_column: timestamp
+  target_column: SW_dif
+  feature_columns: [SWDOWN, T2, Q2, PSFC]
+  dtype_map:
+    SWDOWN: float32
+    T2: float32
+
+runtime:
+  limit_rows: 10000        # applied during read where possible
+```
+
+When `data.load_columns` is empty and `feature_columns` is set, the loader
+projects `feature_columns + target_column`. `data.load_columns` can be used for
+manual projection when a custom feature stage needs additional columns.
 
 ### 1. Chronological Splitting
 
@@ -286,9 +339,16 @@ Window 2: [t₁, t₂, t₃, t₄] → target: t₅
 
 The target is always **after** the end of the window.
 
-### 4. Serialized Pipeline
+### 4. Serialized Pipeline and State
 
-The preprocessing state is saved with each experiment (`preprocessing_pipeline.joblib`), ensuring that the exact same transform can be applied to future data.
+The preprocessing state is saved twice:
+
+- `preprocessing/preprocessing_pipeline.joblib` for executable reuse.
+- `metadata/preprocessing_state.json` for audit/debugging.
+
+The state records fitted input/output columns, feature and target columns, row
+counts, imputation values, scaling values, and dropped-column reasons. Transform
+is strict by default: missing or unexpected columns raise before scaling.
 
 ---
 
@@ -317,6 +377,22 @@ model:
 `common_sequence_horizon` intentionally changes the SVM metric row set. The
 prediction CSV index follows the selected policy, so metric row counts and
 timestamps remain explicit and reproducible.
+
+---
+
+## Profiling and Synthetic Benchmarks
+
+Use `--profile` or `runtime.profile: true` to write
+`profiles/profile.json` with stable stage timings and total stage time.
+
+Synthetic benchmarks never read `data/`; they generate inputs under `scratch/`:
+
+```bash
+conda run -n labmim python benchmarks/solrad_correction/loading.py --rows 10000 --features 16
+conda run -n labmim python benchmarks/solrad_correction/preprocessing.py --rows 20000 --features 24
+conda run -n labmim python benchmarks/solrad_correction/sequence_dataloader.py --rows 50000 --features 24 --sequence-length 24
+conda run -n labmim python benchmarks/solrad_correction/artifact_checkpoint.py --hidden-size 32 --layers 2
+```
 
 ---
 
@@ -447,10 +523,10 @@ No. SVM runs exclusively on CPU. LSTM and Transformer work on CPU but are signif
 
 1. Use the exact same `seed` in the config
 2. Use the saved dataset in `experiments/<name>/datasets/`
-3. Use the saved config in `experiments/<name>/config.yaml`
+3. Use the saved config in `experiments/<name>/configs/config.yaml`
 
 ```python
-config = ExperimentConfig.from_yaml("output/experiments/lstm_v1/config.yaml")
+config = ExperimentConfig.from_yaml("output/experiments/lstm_v1/configs/config.yaml")
 report = run_experiment(config)
 ```
 
@@ -471,6 +547,8 @@ The saved pipeline allows you to undo the normalization:
 ```python
 from solrad_correction.data.preprocessing import PreprocessingPipeline
 
-pipeline = PreprocessingPipeline.load("output/experiments/svm_v1/preprocessing_pipeline.joblib")
+pipeline = PreprocessingPipeline.load(
+    "output/experiments/svm_v1/preprocessing/preprocessing_pipeline.joblib"
+)
 y_original = pipeline.inverse_transform_column(y_normalized, "SW_dif")
 ```

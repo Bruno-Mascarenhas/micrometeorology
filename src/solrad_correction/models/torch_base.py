@@ -16,8 +16,9 @@ from solrad_correction.utils.serialization import load_torch_checkpoint, save_to
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from solrad_correction.config import ModelConfig
+    from solrad_correction.config import ModelConfig, RuntimeConfig
     from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
+    from solrad_correction.training.dataloaders import DataLoaderSettings
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ class TorchRegressorModel(BaseRegressorModel):
     2. Override ``_build_module(**kwargs)`` to construct the architecture.
     3. Override ``name`` property.
 
-    Supports transfer learning via ``pretrained_path`` in config.
+    Supports full training resume via ``RuntimeConfig.resume``.
     """
 
     _module: nn.Module
@@ -43,56 +44,81 @@ class TorchRegressorModel(BaseRegressorModel):
         self._optimizer_state: dict[str, Any] | None = None
         self._scheduler_state: dict[str, Any] | None = None
         self._scaler_state: dict[str, Any] | None = None
+        self._best_metric: float | None = None
+        self._best_epoch: int | None = None
+        self._dataloader_settings: DataLoaderSettings | None = None
         logger.info("Device: %s", self._device)
 
     def _build_module(self, **kwargs: Any) -> nn.Module:
         """Construct the nn.Module. Subclasses must override this."""
         raise NotImplementedError
 
-    def _load_pretrained(self, path: str) -> None:
-        """Load pretrained weights for transfer learning / resumed training."""
+    def _load_resume_checkpoint(self, path: str) -> None:
+        """Load a full training checkpoint for resumed training."""
         checkpoint = load_torch_checkpoint(path)
         self._module.load_state_dict(checkpoint["model_state_dict"])
         self._start_epoch = checkpoint.get("epoch", 0)
         self._optimizer_state = checkpoint.get("optimizer_state_dict")
         self._scheduler_state = checkpoint.get("scheduler_state_dict")
         self._scaler_state = checkpoint.get("scaler_state_dict")
-        logger.info("Loaded pretrained weights from %s (epoch %d)", path, self._start_epoch)
+        logger.info("Loaded resume checkpoint from %s (epoch %d)", path, self._start_epoch)
 
     def fit(
         self,
         train_data: SequenceDataset | WindowedSequenceDataset,
         val_data: SequenceDataset | WindowedSequenceDataset | None = None,
         config: ModelConfig | None = None,
+        runtime: RuntimeConfig | None = None,
     ) -> TorchRegressorModel:
         """Train using the standard training loop with progress display."""
         from solrad_correction.training.trainer import Trainer
 
-        if config and config.pretrained_path:
-            self._load_pretrained(config.pretrained_path)
+        if runtime and runtime.resume:
+            self._load_resume_checkpoint(runtime.resume)
 
         trainer = Trainer(
             model=self._module,
             device=self._device,
             config=config,
+            runtime=runtime,
             start_epoch=self._start_epoch,
             optimizer_state=self._optimizer_state,
             scheduler_state=self._scheduler_state,
             scaler_state=self._scaler_state,
+            checkpoint_config=getattr(self, "_config_kwargs", None),
         )
         self._module, history = trainer.train(train_data, val_data)
         self._start_epoch = trainer.completed_epochs
         self._optimizer_state = trainer.optimizer_state
         self._scheduler_state = trainer.scheduler_state
         self._scaler_state = trainer.scaler_state
+        self._best_metric = trainer.best_metric
+        self._best_epoch = trainer.best_epoch
+        self._dataloader_settings = trainer.dataloader_settings
         self._history = history
         self._config = config
+        self._runtime = runtime
         return self
 
     @property
     def training_history(self) -> dict[str, list[float]]:
         """Training history from the latest fit call."""
         return getattr(self, "_history", {})
+
+    @property
+    def best_metric(self) -> float | None:
+        """Best monitored training metric from the latest fit call."""
+        return getattr(self, "_best_metric", None)
+
+    @property
+    def best_epoch(self) -> int | None:
+        """Best epoch from the latest fit call."""
+        return getattr(self, "_best_epoch", None)
+
+    @property
+    def dataloader_settings(self) -> DataLoaderSettings | None:
+        """Resolved DataLoader settings from the latest fit call."""
+        return getattr(self, "_dataloader_settings", None)
 
     def predict(self, data: SequenceDataset | WindowedSequenceDataset | np.ndarray) -> np.ndarray:
         """Generate predictions using a batched DataLoader to prevent OOM."""
@@ -167,5 +193,8 @@ class TorchRegressorModel(BaseRegressorModel):
         instance._optimizer_state = checkpoint.get("optimizer_state_dict")
         instance._scheduler_state = checkpoint.get("scheduler_state_dict")
         instance._scaler_state = checkpoint.get("scaler_state_dict")
+        instance._best_metric = None
+        instance._best_epoch = None
+        instance._dataloader_settings = None
         # Subclass must call _build_module and load_state_dict
         return instance

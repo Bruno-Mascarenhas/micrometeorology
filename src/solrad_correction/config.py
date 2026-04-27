@@ -17,6 +17,11 @@ class DataConfig:
     sensor_data_path: str | None = None
     hourly_data_path: str | None = None
     wrf_data_path: str | None = None
+    source_format: str = "auto"  # "auto", "csv", "parquet"
+    datetime_column: str | int | None = 0
+    datetime_index: bool = True
+    load_columns: list[str] = field(default_factory=list)
+    dtype_map: dict[str, str] = field(default_factory=dict)
 
     target_column: str = "SW_dif"
     feature_columns: list[str] = field(default_factory=list)
@@ -67,8 +72,7 @@ class ModelConfig:
 
     model_type: str = "svm"  # "svm", "lstm", "transformer"
 
-    # Checkpointing / Logging
-    pretrained_path: str | None = None
+    # Logging
     log_dir: str | None = None
 
     # SVM
@@ -99,8 +103,28 @@ class ModelConfig:
     max_epochs: int = 100
     patience: int = 10  # early stopping
     min_delta: float = 1e-4
-    torch_compile: bool = False
     evaluation_policy: str = "model_native"  # "model_native" or "common_sequence_horizon"
+
+
+@dataclass(slots=True)
+class RuntimeConfig:
+    """Operational settings for local CPU and Colab/GPU execution."""
+
+    device: str = "auto"  # "auto", "cpu", "cuda"
+    num_workers: int | None = None
+    pin_memory: bool | None = None
+    persistent_workers: bool | None = None
+    prefetch_factor: int | None = None
+    amp: bool | None = None
+    torch_compile: bool = False
+    gradient_clip: float | None = 1.0
+    checkpoint_dir: str | None = None
+    checkpoint_every: int | None = 1
+    resume: str | None = None
+    profile: bool = False
+    dry_run: bool = False
+    smoke_test: bool = False
+    limit_rows: int | None = None
 
 
 @dataclass
@@ -116,6 +140,7 @@ class ExperimentConfig:
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     features: FeatureConfig = field(default_factory=FeatureConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
     # Output
     output_dir: str = "output/experiments"
@@ -135,6 +160,9 @@ class ExperimentConfig:
         model_type = self.model.model_type.lower()
         if model_type not in {"svm", "lstm", "transformer"}:
             errors.append("model.model_type must be one of: svm, lstm, transformer")
+
+        if self.data.source_format not in {"auto", "csv", "parquet"}:
+            errors.append("data.source_format must be one of: auto, csv, parquet")
 
         if self.model.evaluation_policy not in {"model_native", "common_sequence_horizon"}:
             errors.append(
@@ -161,6 +189,21 @@ class ExperimentConfig:
         elif self.model.tf_d_model % self.model.tf_nhead != 0:
             errors.append("model.tf_d_model must be divisible by model.tf_nhead")
 
+        if self.runtime.device not in {"auto", "cpu", "cuda"}:
+            errors.append("runtime.device must be one of: auto, cpu, cuda")
+        if self.runtime.num_workers is not None and self.runtime.num_workers < 0:
+            errors.append("runtime.num_workers must be non-negative")
+        if self.runtime.prefetch_factor is not None and self.runtime.prefetch_factor <= 0:
+            errors.append("runtime.prefetch_factor must be positive when set")
+        if self.runtime.num_workers == 0 and self.runtime.prefetch_factor is not None:
+            errors.append("runtime.prefetch_factor requires runtime.num_workers > 0")
+        if self.runtime.gradient_clip is not None and self.runtime.gradient_clip < 0:
+            errors.append("runtime.gradient_clip must be non-negative when set")
+        if self.runtime.checkpoint_every is not None and self.runtime.checkpoint_every <= 0:
+            errors.append("runtime.checkpoint_every must be positive when set")
+        if self.runtime.limit_rows is not None and self.runtime.limit_rows <= 0:
+            errors.append("runtime.limit_rows must be positive when set")
+
         if errors:
             joined = "\n".join(f"- {error}" for error in errors)
             raise ValueError(f"Invalid experiment config:\n{joined}")
@@ -186,5 +229,6 @@ class ExperimentConfig:
             preprocess=PreprocessConfig(**data.get("preprocess", {})),
             features=FeatureConfig(**data.get("features", {})),
             model=ModelConfig(**data.get("model", {})),
+            runtime=RuntimeConfig(**data.get("runtime", {})),
             output_dir=data.get("output_dir", "output/experiments"),
         )

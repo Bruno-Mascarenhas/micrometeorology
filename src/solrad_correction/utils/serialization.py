@@ -34,6 +34,7 @@ def save_torch_checkpoint(
     *,
     scheduler_state: dict | None = None,
     scaler_state: dict | None = None,
+    metadata: dict | None = None,
 ) -> None:
     """Save a PyTorch checkpoint."""
     import torch
@@ -52,6 +53,8 @@ def save_torch_checkpoint(
         checkpoint["scaler_state_dict"] = scaler_state
     if config is not None:
         checkpoint["config"] = config
+    if metadata is not None:
+        checkpoint["metadata"] = metadata
     torch.save(checkpoint, p)
     logger.info("Saved checkpoint: %s (epoch %d)", p, epoch)
 

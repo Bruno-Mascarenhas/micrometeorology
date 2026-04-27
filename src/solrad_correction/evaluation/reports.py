@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import numpy as np
     import pandas as pd
 
+from solrad_correction.experiments.artifacts import ArtifactLayout
 from solrad_correction.utils.io import save_json, save_predictions
 
 logger = logging.getLogger(__name__)
@@ -29,26 +31,26 @@ class ExperimentReport:
 
     def save(self, output_dir: str | Path) -> None:
         """Save full report to the experiment directory."""
-        out = Path(output_dir)
-        out.mkdir(parents=True, exist_ok=True)
+        layout = ArtifactLayout.from_experiment_dir(output_dir)
+        layout.ensure_directories()
 
         # Metrics
-        save_json(self.metrics, out / "metrics.json")
+        save_json(self.metrics, layout.metrics)
 
         # Config
-        save_json(self.config, out / "config_resolved.json")
+        save_json(self.config, layout.config_resolved)
 
         # Training history
         if self.train_history:
             import pandas as pd
 
             history_df = pd.DataFrame(self.train_history)
-            history_df.to_csv(out / "training_history.csv", index_label="epoch")
+            history_df.to_csv(layout.training_history, index_label="epoch")
 
         if self.metadata:
-            save_json(self.metadata, out / "metadata.json")
+            save_json(self.metadata, layout.metadata)
 
-        logger.info("Report saved to %s", out)
+        logger.info("Report saved to %s", layout.root)
 
     def print_summary(self) -> None:
         """Print a terminal-friendly summary."""
@@ -70,4 +72,5 @@ def save_experiment_results(
 ) -> None:
     """Save complete experiment results: report + predictions."""
     report.save(output_dir)
-    save_predictions(y_true, y_pred, Path(output_dir) / "predictions.csv", index)
+    layout = ArtifactLayout.from_experiment_dir(output_dir)
+    save_predictions(y_true, y_pred, layout.predictions, index)
