@@ -152,15 +152,20 @@ def _plot_radiacao_difusa(
 
     col_sw = "CM3Up_Wm2_Avg"
     col_df = "CMP21_Wm2_Avg"
+    col_df2 = "PSP_Wm2_Avg"
 
     if col_sw in raw.columns:
         ax.plot(raw.index, raw[col_sw], "o", color="yellow", markersize=6, label="Media 5 min")
     if col_df in raw.columns:
         ax.plot(raw.index, raw[col_df], "o", color="silver", markersize=6, label="Media 5 min")
+    if col_df2 in raw.columns:
+        ax.plot(raw.index, raw[col_df2], "o", color="silver", markersize=6, label="Media 5 min")
     if col_sw in hourly.columns:
         ax.plot(hourly.index, hourly[col_sw], "-vr", label="SW_dw 1h")
     if col_df in hourly.columns:
         ax.plot(hourly.index, hourly[col_df], "-db", label="SW_df 1h")
+    if col_df2 in hourly.columns:
+        ax.plot(hourly.index, hourly[col_df2], "-dg", label="SW_df 1h (PSP)")
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["radiacao_difusa"], label="SW_dw-wrf 1h")
 
@@ -379,14 +384,20 @@ def _plot_pressao(
 ) -> None:
     """Graph 7 -- Atmospheric Pressure."""
     col = "Pmb_WXT"
-    if col not in raw.columns:
-        logger.warning("Column %s not found -- skipping pressao.png", col)
+    col2 = "BP1_mbar_Avg"
+    if col not in raw.columns and col2 not in raw.columns:
+        logger.warning("No pressure columns found -- skipping pressao.png")
         return
 
     fig, ax = create_figure()
-    ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
+    if col in raw.columns:
+        ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
+    if col2 in raw.columns:
+        ax.plot(raw.index, raw[col2], "o", color="silver", markersize=6, label="Media 5 min (BP1)")
     if col in hourly.columns:
         ax.plot(hourly.index, hourly[col], "s-b", label="Media 1h")
+    if col2 in hourly.columns:
+        ax.plot(hourly.index, hourly[col2], "s-c", label="Media 1h (BP1)")
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["pressao"])
 
@@ -413,14 +424,26 @@ def _plot_velocidade(
 ) -> None:
     """Graph 8 -- Wind Speed."""
     col = "WS_WXT_Avg"
-    if col not in raw.columns:
-        logger.warning("Column %s not found -- skipping velocidade.png", col)
+    col_ws1 = "WS1_ms_GMX"
+    col_ws2 = "WS_ms"
+    if col not in raw.columns and col_ws1 not in raw.columns and col_ws2 not in raw.columns:
+        logger.warning("No wind speed columns found -- skipping velocidade.png")
         return
 
     fig, ax = create_figure()
-    ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
+    if col in raw.columns:
+        ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
+    if col_ws1 in raw.columns:
+        ax.plot(raw.index, raw[col_ws1], "o", color="silver", markersize=6, label="Media 5 min (WS1)")
+    if col_ws2 in raw.columns:
+        ax.plot(raw.index, raw[col_ws2], "o", color="silver", markersize=6, label="Media 5 min (WS2)")
+    
     if col in hourly.columns:
         ax.plot(hourly.index, hourly[col], "-*k", label="WXT 1h")
+    if col_ws1 in hourly.columns:
+        ax.plot(hourly.index, hourly[col_ws1], "-*b", label="GMX 1h")
+    if col_ws2 in hourly.columns:
+        ax.plot(hourly.index, hourly[col_ws2], "-*g", label="WS 1h")
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["velocidade"])
 
@@ -447,14 +470,26 @@ def _plot_direcao(
 ) -> None:
     """Graph 9 -- Wind Direction."""
     col = "WD_WXT_Avg"
-    if col not in raw.columns:
-        logger.warning("Column %s not found -- skipping direcao.png", col)
+    col_wd1 = "WindDir1_GMX"
+    col_wd2 = "WindDir"
+    if col not in raw.columns and col_wd1 not in raw.columns and col_wd2 not in raw.columns:
+        logger.warning("No wind direction columns found -- skipping direcao.png")
         return
 
     fig, ax = create_figure()
-    ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
+    if col in raw.columns:
+        ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
+    if col_wd1 in raw.columns:
+        ax.plot(raw.index, raw[col_wd1], "o", color="silver", markersize=6, label="Media 5 min (WD1)")
+    if col_wd2 in raw.columns:
+        ax.plot(raw.index, raw[col_wd2], "o", color="silver", markersize=6, label="Media 5 min (WD2)")
+        
     if col in hourly.columns:
         ax.plot(hourly.index, hourly[col], "*k", label="WXT 1h")
+    if col_wd1 in hourly.columns:
+        ax.plot(hourly.index, hourly[col_wd1], "*b", label="GMX 1h")
+    if col_wd2 in hourly.columns:
+        ax.plot(hourly.index, hourly[col_wd2], "*g", label="WindDir 1h")
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["direcao"])
 
@@ -632,8 +667,12 @@ def main(
     # ------------------------------------------------------------------
     click.echo("Computing hourly aggregates...")
 
-    wind_dir_cols = ["WD_WXT_Avg"]
-    wind_speed_map = {"WD_WXT_Avg": "WS_WXT_Avg"}
+    wind_dir_cols = ["WD_WXT_Avg", "WindDir1_GMX", "WindDir"]
+    wind_speed_map = {
+        "WD_WXT_Avg": "WS_WXT_Avg",
+        "WindDir1_GMX": "WS1_ms_GMX",
+        "WindDir": "WS_ms"
+    }
     sum_cols = [RAIN_COLUMN]
 
     # Filter to only columns that actually exist
