@@ -5,7 +5,6 @@ from __future__ import annotations
 import shutil
 import time
 from pathlib import Path
-
 from typing import Literal
 
 import numpy as np

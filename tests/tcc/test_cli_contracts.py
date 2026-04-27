@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
@@ -12,9 +12,12 @@ from click.testing import CliRunner
 from solrad_correction.cli import run_experiment_cli
 from solrad_correction.cli_colab import load_colab_config, run_colab_cli
 
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
 
 @pytest.fixture
-def scratch_config() -> Generator[Path, None, None]:
+def scratch_config() -> Generator[Path]:
     scratch = Path("scratch")
     scratch.mkdir(exist_ok=True)
     path = scratch / "cli_contract.yaml"

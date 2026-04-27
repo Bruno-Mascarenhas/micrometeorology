@@ -6,7 +6,6 @@ import json
 import shutil
 import uuid
 from pathlib import Path
-
 from typing import Any, cast
 
 import numpy as np
@@ -22,7 +21,7 @@ from micrometeorology.wrf.batch import (
 
 def _read_json(path: Path) -> dict[str, Any]:
     with open(path, encoding="utf-8") as f:
-        return cast(dict[str, Any], json.load(f))
+        return cast("dict[str, Any]", json.load(f))
 
 
 def test_json_memmap_backend_matches_pickle_backend():

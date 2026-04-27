@@ -6,7 +6,6 @@ import json
 import shutil
 import uuid
 from pathlib import Path
-
 from typing import Any, cast
 
 import pytest
@@ -28,7 +27,7 @@ def _scratch_file(name: str, size: int = 16) -> Path:
 
 def _read_json(path: Path) -> dict[str, Any]:
     with open(path, encoding="utf-8") as f:
-        return cast(dict[str, Any], json.load(f))
+        return cast("dict[str, Any]", json.load(f))
 
 
 def test_auto_resolves_tiny_workload_to_eager_pickle():
