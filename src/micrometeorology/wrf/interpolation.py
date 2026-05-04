@@ -120,6 +120,15 @@ def _xarray_vertical_interpolate(
     heights: xr.DataArray,
     target_height: float,
 ) -> xr.DataArray:
+    """Interpolate an xarray field along the vertical dimension.
+
+    ``apply_ufunc`` with ``input_core_dims`` moves the level axis to the
+    **last** position in the underlying NumPy array, so we pass ``axis=-1``
+    to ``vertical_interpolate``.  ``vectorize=False`` keeps the call
+    vectorized over the full (time, ny, nx) block; setting it to ``True``
+    would dispatch one Python call per grid cell, which is catastrophically
+    slow for WRF grids.
+    """
     level_dim = _vertical_dim(values)
     return cast(
         "xr.DataArray",
@@ -128,13 +137,13 @@ def _xarray_vertical_interpolate(
                 value_profile,
                 height_profile,
                 target_height,
-                axis=0,
+                axis=-1,
             ),
             values,
             heights,
             input_core_dims=[[level_dim], [level_dim]],
             output_core_dims=[[]],
-            vectorize=True,
+            vectorize=False,
             dask="parallelized",
             output_dtypes=[float],
         ),

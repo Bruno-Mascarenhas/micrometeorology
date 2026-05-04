@@ -70,7 +70,21 @@ class Settings(BaseSettings):
 
     # WRF defaults
     wrf_default_variables: list[str] = Field(
-        default=["temperature", "pressure", "vapor", "wind", "rain", "HFX", "LH", "SWDOWN"],
+        default=[
+            "temperature",
+            "pressure",
+            "vapor",
+            "relative_humidity",
+            "skin_temperature",
+            "wind",
+            "rain",
+            "HFX",
+            "LH",
+            "SWDOWN",
+            "poteolico",
+            "GLW",
+            "wind_power_density_10m",
+        ],
         description="Default WRF variables to process",
     )
 

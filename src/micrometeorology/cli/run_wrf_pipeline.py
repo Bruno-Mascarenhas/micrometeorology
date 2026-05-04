@@ -174,9 +174,14 @@ def main(
             "wind",
             "rain",
             "vapor",
+            "relative_humidity",
+            "skin_temperature",
             "HFX",
             "LH",
             "SWDOWN",
+            "poteolico",
+            "GLW",
+            "wind_power_density_10m",
         ]
         var_list = list(variables) if variables else default_vars
         paths = _resolve_wrfout_paths(wrf_dir, date, domains, dataset)
@@ -262,9 +267,14 @@ def main(
             "wind",
             "rain",
             "vapor",
+            "relative_humidity",
+            "skin_temperature",
             "HFX",
             "LH",
             "SWDOWN",
+            "poteolico",
+            "GLW",
+            "wind_power_density_10m",
         ]
         var_list = list(variables) if variables else default_vars
         paths = _resolve_geo(wrf_dir, date, domains, dataset)

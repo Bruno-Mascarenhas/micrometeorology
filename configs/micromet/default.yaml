@@ -16,11 +16,16 @@ wrf_default_variables:
   - temperature
   - pressure
   - vapor
+  - relative_humidity
+  - skin_temperature
   - wind
   - rain
   - HFX
   - LH
   - SWDOWN
+  - poteolico
+  - GLW
+  - wind_power_density_10m
 
 # Sensor quality-control limits
 # Each entry: {column, lower, upper}

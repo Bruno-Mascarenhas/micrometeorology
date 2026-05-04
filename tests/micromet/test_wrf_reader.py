@@ -9,7 +9,12 @@ import numpy as np
 import xarray as xr
 
 from micrometeorology.wrf.reader import LazyWRFDataset, WRFDataset, open_wrf_dataset, parse_chunks
-from micrometeorology.wrf.variables import extract_scalar, materialize_2d
+from micrometeorology.wrf.variables import (
+    compute_air_density,
+    compute_relative_humidity,
+    extract_scalar,
+    materialize_2d,
+)
 
 
 def _write_tiny_wrf_file(path: Path) -> None:
@@ -127,3 +132,24 @@ def test_lazy_scalar_extractor_keeps_dataarray_until_slice_materialization():
         np.testing.assert_array_equal(first_step, np.arange(6).reshape(2, 3))
     finally:
         path.unlink(missing_ok=True)
+
+
+def test_relative_humidity_uses_q2_t2_psfc_units():
+    q2 = np.array([[[0.010]]], dtype=np.float64)
+    t2 = np.array([[[293.15]]], dtype=np.float64)
+    psfc = np.array([[[101325.0]]], dtype=np.float64)
+
+    rh = compute_relative_humidity(q2, t2, psfc)
+
+    assert rh.shape == q2.shape
+    assert np.isclose(float(rh[0, 0, 0]), 68.60, atol=0.05)
+
+
+def test_air_density_uses_virtual_temperature():
+    t2 = np.array([[[300.0]]], dtype=np.float64)
+    psfc = np.array([[[100000.0]]], dtype=np.float64)
+    q2 = np.array([[[0.010]]], dtype=np.float64)
+
+    rho = compute_air_density(t2, psfc, q2)
+
+    assert np.isclose(float(rho[0, 0, 0]), 1.154, atol=0.001)

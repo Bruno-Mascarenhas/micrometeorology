@@ -43,6 +43,7 @@ import numpy as np
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import geojson, reader
+from micrometeorology.wrf.reader import resolve_wrfout_paths
 from micrometeorology.wrf import variables as vmod
 from micrometeorology.wrf.batch import (
     JsonTask,
@@ -68,10 +69,14 @@ DEFAULT_VARS = [
     "wind",
     "rain",
     "vapor",
+    "skin_temperature",
+    "relative_humidity",
     "HFX",
     "LH",
     "SWDOWN",
+    "GLW",
     "poteolico",
+    "wind_power_density_10m",
     "wind_vectors",
 ]
 
@@ -101,24 +106,20 @@ def _resolve_wrfout_paths(
     domains: tuple[int, ...],
     dataset: str | None,
 ) -> list[Path]:
-    """Resolve WRF output file paths."""
+    """Resolve WRF output file paths.
+
+    Delegates to :func:`micrometeorology.wrf.reader.resolve_wrfout_paths`
+    for robust glob-based matching of any wrfout filename convention.
+    """
     if dataset:
         return [Path(dataset)]
 
     if not wrf_dir or not date:
         raise click.UsageError("Provide either --dataset or --wrf-dir + --date")
 
-    year, month, day = date[:4], date[4:6], date[6:8]
-    dom_start = min(domains) if domains else 1
-    dom_end = max(domains) if domains else 4
-
-    paths: list[Path] = []
-    for d in range(dom_start, dom_end + 1):
-        p = Path(wrf_dir) / f"wrfout_d{d:02d}_{year}-{month}-{day}_00:00:00"
-        if p.exists():
-            paths.append(p)
-        else:
-            click.echo(f"  ⚠ Not found: {p}")
+    paths = resolve_wrfout_paths(wrf_dir, date, domains or None)
+    if not paths:
+        click.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
     return paths
 
 
@@ -164,6 +165,42 @@ def _build_json_tasks_for_domain(
                 tasks.append(
                     JsonTask(
                         data=vmod.materialize_2d(data),
+                        scale_min=vmin,
+                        scale_max=vmax,
+                        date_str=_format_datetime(meta["datetime_local"]),
+                        output_path=str(Path(json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"),
+                        wind_data=None,
+                    )
+                )
+
+        elif var_name == WRFVariable.SKIN_TEMPERATURE:
+            tsk, vmin, vmax = vmod.extract_skin_temperature(ds)
+            for meta in time_meta:
+                if meta.get("skip"):
+                    continue
+                i = meta["index"]
+                data = vmod.extract_temperature_step(tsk[i : i + 1, :, :])
+                tasks.append(
+                    JsonTask(
+                        data=vmod.materialize_2d(data),
+                        scale_min=vmin,
+                        scale_max=vmax,
+                        date_str=_format_datetime(meta["datetime_local"]),
+                        output_path=str(Path(json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"),
+                        wind_data=None,
+                    )
+                )
+
+        elif var_name == WRFVariable.RELATIVE_HUMIDITY:
+            rh, vmin, vmax = vmod.extract_relative_humidity(ds)
+            for meta in time_meta:
+                if meta.get("skip"):
+                    continue
+                i = meta["index"]
+                data = vmod.materialize_2d(rh[i : i + 1, :, :])
+                tasks.append(
+                    JsonTask(
+                        data=data,
                         scale_min=vmin,
                         scale_max=vmax,
                         date_str=_format_datetime(meta["datetime_local"]),
@@ -275,6 +312,24 @@ def _build_json_tasks_for_domain(
                             wind_data=wind_vectors,
                         )
                     )
+
+        elif var_name == WRFVariable.WIND_POWER_DENSITY_10M:
+            power_density, vmin, vmax = vmod.extract_wind_power_density_10m(ds)
+            for meta in time_meta:
+                if meta.get("skip"):
+                    continue
+                i = meta["index"]
+                data = vmod.materialize_2d(power_density[i : i + 1, :, :])
+                tasks.append(
+                    JsonTask(
+                        data=data,
+                        scale_min=vmin,
+                        scale_max=vmax,
+                        date_str=_format_datetime(meta["datetime_local"]),
+                        output_path=str(Path(json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"),
+                        wind_data=None,
+                    )
+                )
 
         elif var_name == "wind_vectors":
             # Standalone wind vector overlay files (surface U10/V10)

@@ -45,6 +45,7 @@ from micrometeorology.common.types import (
     WRFVariable,
 )
 from micrometeorology.wrf import reader
+from micrometeorology.wrf.reader import resolve_wrfout_paths
 from micrometeorology.wrf import variables as vmod
 from micrometeorology.wrf.batch import (
     FigureTask,
@@ -67,9 +68,13 @@ DEFAULT_VARS = [
     "wind",
     "rain",
     "vapor",
+    "skin_temperature",
+    "relative_humidity",
     "HFX",
     "LH",
     "SWDOWN",
+    "GLW",
+    "wind_power_density_10m",
 ]
 
 # Variables that exist in the pipeline but don't have figure renderers yet.
@@ -100,24 +105,20 @@ def _resolve_wrfout_paths(
     domains: tuple[int, ...],
     dataset: str | None,
 ) -> list[Path]:
-    """Resolve WRF output file paths from arguments."""
+    """Resolve WRF output file paths.
+
+    Delegates to :func:`micrometeorology.wrf.reader.resolve_wrfout_paths`
+    for robust glob-based matching of any wrfout filename convention.
+    """
     if dataset:
         return [Path(dataset)]
 
     if not wrf_dir or not date:
         raise click.UsageError("Provide either --dataset or --wrf-dir + --date")
 
-    year, month, day = date[:4], date[4:6], date[6:8]
-    dom_start = min(domains) if domains else 1
-    dom_end = max(domains) if domains else 4
-
-    paths: list[Path] = []
-    for d in range(dom_start, dom_end + 1):
-        p = Path(wrf_dir) / f"wrfout_d{d:02d}_{year}-{month}-{day}_00:00:00"
-        if p.exists():
-            paths.append(p)
-        else:
-            click.echo(f"  ⚠ Not found: {p}")
+    paths = resolve_wrfout_paths(wrf_dir, date, domains or None)
+    if not paths:
+        click.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
     return paths
 
 
@@ -171,6 +172,64 @@ def _build_tasks_for_domain(
                         u=None,
                         v=None,
                         title=f"Temperature (°C){meta['label']}",
+                        output_path=str(
+                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
+                        ),
+                        map_config=mc,
+                        dpi=dpi,
+                        saturation=2.0,
+                    )
+                )
+
+        elif var_name == WRFVariable.SKIN_TEMPERATURE:
+            tsk, vmin, vmax = vmod.extract_skin_temperature(ds)
+            for meta in time_meta:
+                if meta.get("skip"):
+                    continue
+                i = meta["index"]
+                data = vmod.extract_temperature_step(tsk[i : i + 1, :, :])
+                tasks.append(
+                    FigureTask(
+                        lon=lon,
+                        lat=lat,
+                        data=vmod.materialize_2d(data),
+                        vmin=vmin,
+                        vmax=vmax,
+                        cmap_name=cmap,
+                        overlay_data=None,
+                        overlay_levels=None,
+                        u=None,
+                        v=None,
+                        title=f"Skin Temperature (°C){meta['label']}",
+                        output_path=str(
+                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
+                        ),
+                        map_config=mc,
+                        dpi=dpi,
+                        saturation=2.0,
+                    )
+                )
+
+        elif var_name == WRFVariable.RELATIVE_HUMIDITY:
+            rh, vmin, vmax = vmod.extract_relative_humidity(ds)
+            for meta in time_meta:
+                if meta.get("skip"):
+                    continue
+                i = meta["index"]
+                data = vmod.materialize_2d(rh[i : i + 1, :, :])
+                tasks.append(
+                    FigureTask(
+                        lon=lon,
+                        lat=lat,
+                        data=data,
+                        vmin=vmin,
+                        vmax=vmax,
+                        cmap_name=cmap,
+                        overlay_data=None,
+                        overlay_levels=None,
+                        u=None,
+                        v=None,
+                        title=f"Relative Humidity 2m (%){meta['label']}",
                         output_path=str(
                             Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
                         ),
@@ -264,6 +323,35 @@ def _build_tasks_for_domain(
                         u=None,
                         v=None,
                         title=f"SWDOWN (W/m²){meta['label']}",
+                        output_path=str(
+                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
+                        ),
+                        map_config=mc,
+                        dpi=dpi,
+                        saturation=2.0,
+                    )
+                )
+
+        elif var_name == WRFVariable.WIND_POWER_DENSITY_10M:
+            power_density, vmin, vmax = vmod.extract_wind_power_density_10m(ds)
+            for meta in time_meta:
+                if meta.get("skip"):
+                    continue
+                i = meta["index"]
+                data = vmod.materialize_2d(power_density[i : i + 1, :, :])
+                tasks.append(
+                    FigureTask(
+                        lon=lon,
+                        lat=lat,
+                        data=data,
+                        vmin=vmin,
+                        vmax=vmax,
+                        cmap_name=cmap,
+                        overlay_data=None,
+                        overlay_levels=None,
+                        u=None,
+                        v=None,
+                        title=f"Wind Power Density 10m (W/m²){meta['label']}",
                         output_path=str(
                             Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
                         ),

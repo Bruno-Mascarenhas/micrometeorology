@@ -23,13 +23,17 @@ class WRFVariable(StrEnum):
     WIND = "wind"
     RAIN = "rain"
     VAPOR = "vapor"
+    SKIN_TEMPERATURE = "skin_temperature"
+    RELATIVE_HUMIDITY = "relative_humidity"
     HFX = "HFX"
     LH = "LH"
     SWDOWN = "SWDOWN"
+    GLW = "GLW"
     WEIBULL = "weibull"
 
     # Eolic potential is height-dependent; the suffix is handled at runtime.
     WIND_POTENTIAL = "poteolico"
+    WIND_POWER_DENSITY_10M = "wind_power_density_10m"
 
 
 class GridLevel(StrEnum):
@@ -50,13 +54,17 @@ VARIABLE_COLORMAPS: dict[WRFVariable | str, str] = {
     WRFVariable.TEMPERATURE: "hot_r",
     WRFVariable.WIND: "PuBu",
     WRFVariable.VAPOR: "YlGnBu",
+    WRFVariable.SKIN_TEMPERATURE: "hot_r",
+    WRFVariable.RELATIVE_HUMIDITY: "YlGnBu",
     WRFVariable.PRESSURE: "Blues",
     WRFVariable.RAIN: "afmhot_r",
     WRFVariable.HFX: "jet",
     WRFVariable.LH: "jet",
     WRFVariable.SWDOWN: "hot_r",
+    WRFVariable.GLW: "magma",
     WRFVariable.WEIBULL: "jet",
     WRFVariable.WIND_POTENTIAL: "Blues",
+    WRFVariable.WIND_POWER_DENSITY_10M: "YlOrRd",
 }
 
 # Map from our enum to the NetCDF variable / output file suffix
@@ -66,10 +74,14 @@ VARIABLE_NETCDF_MAP: dict[WRFVariable | str, str] = {
     WRFVariable.WIND: "WIND",
     WRFVariable.RAIN: "RAIN",
     WRFVariable.VAPOR: "VAPOR",
+    WRFVariable.SKIN_TEMPERATURE: "TSK",
+    WRFVariable.RELATIVE_HUMIDITY: "RH2",
     WRFVariable.HFX: "HFX",
     WRFVariable.LH: "LH",
     WRFVariable.SWDOWN: "SWDOWN",
+    WRFVariable.GLW: "GLW",
     WRFVariable.WEIBULL: "K_WEIB",
+    WRFVariable.WIND_POWER_DENSITY_10M: "WIND_POWER_DENSITY_10M",
 }
 
 WEEKDAY_PT: dict[int, str] = {

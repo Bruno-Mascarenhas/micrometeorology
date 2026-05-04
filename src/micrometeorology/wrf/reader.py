@@ -398,3 +398,44 @@ def open_wrf_dataset(
             yield ds
     else:
         raise ValueError(f"Unknown WRF reader backend: {reader}")
+
+
+def resolve_wrfout_paths(
+    wrf_dir: str | Path,
+    date: str,
+    domains: tuple[int, ...] | None = None,
+) -> list[Path]:
+    """Resolve WRF output file paths using robust glob matching.
+
+    Handles any filename suffix convention — colons (``00:00:00``),
+    underscores (``00_00_00``), and non-standard trailing suffixes
+    (e.g. ``wrfout_d01_2013-07-01_01_00_00-003_``).
+
+    Parameters
+    ----------
+    wrf_dir:
+        Directory containing ``wrfout_*`` files.
+    date:
+        Simulation date in ``YYYYMMDD`` format.
+    domains:
+        Domain numbers to search. Defaults to ``(1, 2, 3, 4)``.
+
+    Returns
+    -------
+    list[Path]
+        Sorted list of matching paths.
+    """
+    year, month, day = date[:4], date[4:6], date[6:8]
+    dom_start = min(domains) if domains else 1
+    dom_end = max(domains) if domains else 4
+
+    paths: list[Path] = []
+    base = Path(wrf_dir)
+    for d in range(dom_start, dom_end + 1):
+        pattern = f"wrfout_d{d:02d}_{year}-{month}-{day}*"
+        matches = sorted(base.glob(pattern))
+        if matches:
+            paths.extend(matches)
+        else:
+            logger.warning("No wrfout match for pattern %s in %s", pattern, wrf_dir)
+    return paths
