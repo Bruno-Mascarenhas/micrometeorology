@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 ReaderRequest = Literal["auto", "eager", "lazy"]
-JsonWorkerRequest = Literal["auto", "serial", "pickle", "memmap"]
+JsonWorkerRequest = Literal["auto", "serial", "memmap"]
 WorkflowKind = Literal["figures", "json", "pipeline"]
 
 LARGE_FILE_THRESHOLD_BYTES = 512 * 1024 * 1024
@@ -109,10 +109,8 @@ def _resolve_json_worker_backend(
     large_json_payload_threshold_bytes: int,
     many_json_tasks_threshold: int,
 ) -> tuple[JsonWorkerBackend, list[str]]:
-    if worker_request in {"serial", "pickle", "memmap"}:
-        return cast("JsonWorkerBackend", worker_request), [
-            f"JSON worker backend explicitly set to {worker_request}"
-        ]
+    if worker_request in {"serial", "memmap"}:
+        return worker_request, [f"JSON worker backend explicitly set to {worker_request}"]
 
     if workers <= 1:
         return "serial", ["single worker uses serial JSON fast path"]
@@ -123,7 +121,7 @@ def _resolve_json_worker_backend(
         return "memmap", ["large estimated JSON payload favors memmap worker references"]
     if tasks >= many_json_tasks_threshold and payload > 0:
         return "memmap", ["many JSON tasks favor memmap worker references"]
-    return "pickle", ["small JSON workload favors direct pickle payloads"]
+    return "memmap", ["multi-worker workload uses memmap worker references"]
 
 
 def resolve_wrf_execution_plan(
@@ -146,8 +144,8 @@ def resolve_wrf_execution_plan(
     """Resolve reader, chunking, and JSON worker choices for a WRF run.
 
     Explicit concrete requests always win. ``auto`` chooses conservative eager
-    and pickle paths for small/serial workloads, and lazy/memmap paths for large
-    inputs or large multi-worker JSON payloads.
+    and serial paths for single-worker workloads, and lazy/memmap paths for
+    large inputs or any multi-worker payloads.
     """
     parsed_chunks = wrf_reader.parse_chunks(chunks_request)
     resolved_workers = workers or default_workers()
@@ -167,7 +165,7 @@ def resolve_wrf_execution_plan(
         large_total_input_threshold_bytes=large_total_input_threshold_bytes,
     )
 
-    if json_worker_request in {"serial", "pickle"} and resolved_tmp_dir is not None:
+    if json_worker_request == "serial" and resolved_tmp_dir is not None:
         raise ValueError("--tmp-dir is only valid with --worker-backend auto or memmap")
 
     json_backend, json_reasons = _resolve_json_worker_backend(

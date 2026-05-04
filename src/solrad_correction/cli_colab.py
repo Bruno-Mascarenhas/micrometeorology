@@ -1,84 +1,107 @@
-"""Click command for Google Colab / remote GPU solrad training."""
+"""Click command for Google Colab / remote GPU solrad training.
+
+Examples
+--------
+Run an experiment on Google Colab:
+    solrad-colab --config configs/tcc/experiments/lstm_hourly.yaml
+
+Save output to Google Drive:
+    solrad-colab --config configs/tcc/experiments/lstm_hourly.yaml -o /content/drive/MyDrive/outputs/
+
+Resume an interrupted run:
+    solrad-colab --config configs/tcc/experiments/lstm_hourly.yaml --resume /content/drive/MyDrive/outputs/checkpoints/last.pt
+"""
 
 from __future__ import annotations
 
 import json
+from enum import StrEnum
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated
 
-import click
+import typer
 
 from solrad_correction.experiments.overrides import (
     ExperimentOverrides,
     load_config_with_overrides,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-@click.command(name="solrad-colab")
-@click.option(
-    "--config", "-c", required=True, type=click.Path(exists=True), help="Experiment YAML config."
-)
-@click.option("--name", "-n", default=None, help="Override experiment name.")
-@click.option("--output-dir", "-o", default=None, help="Drive-backed experiment output directory.")
-@click.option("--validate-config", is_flag=True, help="Validate config and exit without training.")
-@click.option(
-    "--print-config", "print_config", is_flag=True, help="Print resolved config and exit."
-)
-@click.option("--limit-rows", type=int, default=None, help="Limit loaded rows for development.")
-@click.option("--profile", is_flag=True, help="Write profile.json with stage timings.")
-@click.option("--device", type=click.Choice(["auto", "cpu", "cuda"]), default="cuda")
-@click.option("--num-workers", type=int, default=None)
-@click.option("--pin-memory/--no-pin-memory", default=None)
-@click.option("--amp/--no-amp", default=None)
-@click.option("--compile/--no-compile", "torch_compile", default=None)
-@click.option(
-    "--resume", type=click.Path(exists=True), default=None, help="Path to checkpoints/last.pt."
-)
+
+class DeviceChoice(StrEnum):
+    auto = "auto"
+    cpu = "cpu"
+    cuda = "cuda"
+
+
+app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
+
+
+@app.command()
 def run_colab_cli(
-    config: str,
-    name: str | None,
-    output_dir: str | None,
-    validate_config: bool,
-    print_config: bool,
-    limit_rows: int | None,
-    profile: bool,
-    device: str | None,
-    num_workers: int | None,
-    pin_memory: bool | None,
-    amp: bool | None,
-    torch_compile: bool | None,
-    resume: str | None,
+    config: Annotated[
+        Path, typer.Option("-c", "--config", help="Experiment YAML config.", exists=True)
+    ],
+    name: Annotated[str | None, typer.Option("-n", help="Override experiment name.")] = None,
+    output_dir: Annotated[
+        Path | None, typer.Option("-o", "--output-dir", help="Drive-backed output directory.")
+    ] = None,
+    validate_config: Annotated[
+        bool, typer.Option("--validate-config", help="Validate config and exit.")
+    ] = False,
+    print_config: Annotated[
+        bool, typer.Option("--print-config", help="Print resolved config and exit.")
+    ] = False,
+    limit_rows: Annotated[
+        int | None, typer.Option(help="Limit loaded rows for development.")
+    ] = None,
+    profile: Annotated[
+        bool, typer.Option("--profile", help="Write profile.json with stage timings.")
+    ] = False,
+    device: Annotated[DeviceChoice, typer.Option(help="Device to use.")] = DeviceChoice.cuda,
+    num_workers: Annotated[int | None, typer.Option(help="Number of data loader workers.")] = None,
+    pin_memory: Annotated[bool | None, typer.Option("--pin-memory/--no-pin-memory")] = None,
+    amp: Annotated[bool | None, typer.Option("--amp/--no-amp")] = None,
+    torch_compile: Annotated[bool | None, typer.Option("--compile/--no-compile")] = None,
+    resume: Annotated[
+        Path | None, typer.Option(help="Path to checkpoints/last.pt.", exists=True)
+    ] = None,
 ) -> None:
     """Run a solrad neural-network experiment with Colab-friendly defaults."""
     cfg = load_colab_config(
-        config=config,
+        config=str(config),
         name=name,
-        output_dir=output_dir,
+        output_dir=str(output_dir) if output_dir else None,
         limit_rows=limit_rows,
         profile=profile,
-        device=device,
+        device=str(device),
         num_workers=num_workers,
         pin_memory=pin_memory,
         amp=amp,
         torch_compile=torch_compile,
-        resume=resume,
+        resume=str(resume) if resume else None,
     )
 
     try:
         cfg.validate()
     except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
     if print_config:
-        click.echo(json.dumps(cfg.to_dict(), indent=2, ensure_ascii=False, default=str))
+        typer.echo(json.dumps(cfg.to_dict(), indent=2, ensure_ascii=False, default=str))
         return
 
     if validate_config:
-        click.echo("Config is valid.")
+        typer.echo("Config is valid.")
         return
 
-    click.echo(f"Experiment: {cfg.name}")
-    click.echo(f"Model:      {cfg.model.model_type}")
-    click.echo(f"Device:     {cfg.runtime.device}")
-    click.echo(f"Output:     {cfg.experiment_dir}")
+    typer.echo(f"Experiment: {cfg.name}")
+    typer.echo(f"Model:      {cfg.model.model_type}")
+    typer.echo(f"Device:     {cfg.runtime.device}")
+    typer.echo(f"Output:     {cfg.experiment_dir}")
 
     from solrad_correction.experiments.runner import run_experiment
 
@@ -118,7 +141,7 @@ def load_colab_config(
 
 
 def main() -> None:
-    run_colab_cli()
+    app()
 
 
 if __name__ == "__main__":

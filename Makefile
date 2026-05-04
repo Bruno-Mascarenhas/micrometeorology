@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint lint-fix format format-check typecheck test test-verbose clean all check
+.PHONY: install install-dev fix check typecheck test test-verbose clean all
 
 # Variables
 PYTHON = python3
@@ -11,17 +11,9 @@ install-dev:
 	$(PIP) install torch --index-url https://download.pytorch.org/whl/cpu
 	$(PIP) install -e ".[dev,tcc]"
 
-lint:
-	ruff check .
-
-lint-fix:
-	ruff check --fix .
-
-format:
+fix:
 	ruff format .
-
-format-check:
-	ruff format --check .
+	ruff check --fix .
 
 typecheck:
 	mypy src tests
@@ -35,12 +27,15 @@ test-verbose:
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type d -name ".pytest_cache" -exec rm -rf {} +
+	find . -type d -name ".pytest_tmp" -exec rm -rf {} +
 	find . -type d -name ".ruff_cache" -exec rm -rf {} +
 	find . -type d -name ".mypy_cache" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
 
-# Full CI-equivalent check
-check: format-check lint typecheck test
+check:
+	ruff format --check .
+	ruff check .
+	mypy src tests
+	pytest -n auto tests/
 
-# Format + lint-fix + test
-all: format lint-fix typecheck test
+all: fix check

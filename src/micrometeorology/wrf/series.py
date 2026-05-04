@@ -13,6 +13,9 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
+from micrometeorology.wrf.reader import _decode_wrf_time_strings
+from micrometeorology.wrf.safety import assert_reasonable_array_size
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -81,14 +84,7 @@ def extract_point_series(
 
             # Parse times
             times_raw = ds["Times"].to_numpy()
-            try:
-                if isinstance(times_raw[0], np.ndarray):
-                    times_str = [b"".join(t).decode("UTF-8").replace("_", " ") for t in times_raw]
-                else:
-                    times_str = [str(t).replace("_", " ") for t in times_raw]
-            except Exception:
-                times_str = [str(t).replace("_", " ") for t in times_raw]
-
+            times_str = [ts.replace("_", " ") for ts in _decode_wrf_time_strings(times_raw)]
             time_idx = pd.to_datetime(times_str, errors="coerce")
 
             # Extract spatial slice for all times and convert to DataFrame
@@ -102,9 +98,26 @@ def extract_point_series(
             for vname in valid_vars:
                 val = ds[vname]
                 if "south_north" in val.dims and "west_east" in val.dims:
-                    extracted[vname] = val.isel(south_north=row, west_east=col).to_numpy()
+                    point = val.isel(south_north=row, west_east=col)
                 else:
-                    extracted[vname] = val.to_numpy()
+                    point = val
+
+                if point.dims != ("Time",):
+                    logger.warning(
+                        "Skipping %s in point series: expected a Time-only selection, got dims=%s",
+                        vname,
+                        point.dims,
+                    )
+                    continue
+                assert_reasonable_array_size(
+                    point.shape,
+                    point.dtype,
+                    context=f"point-series extraction for {vname}",
+                )
+                extracted[vname] = point.to_numpy()
+
+            if not extracted:
+                continue
 
             # Combine into DataFrame
             df_part = pd.DataFrame(extracted, index=time_idx)

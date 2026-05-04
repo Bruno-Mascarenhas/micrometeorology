@@ -10,19 +10,15 @@ Usage::
 
     # Multiple domains (auto-detected from directory)
     labmim-wrf-figures --wrf-dir /path/to/wrfout/ --date 20240101 \\
-        --domains 1 4 -v temperature wind rain SWDOWN -o output/figures --workers 44
+        --domains 1,4 -v temperature,wind,rain,SWDOWN -o output/figures --workers 44
 
     # All variables, generate WebM videos too
     labmim-wrf-figures --wrf-dir /path/to/ --date 20240101 \\
-        --domains 1 4 -o output/ --also-video
+        -D 1 -D 4 -o output/ --also-video
 
     # Auto mode chooses eager for tiny files and lazy for large/chunked inputs
     labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
         -o output/figures
-
-    # Force old eager behavior
-    labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
-        -o output/figures --reader eager --chunks none --worker-backend pickle
 
     # Force xarray-backed lazy reader
     labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
@@ -32,11 +28,12 @@ Usage::
 from __future__ import annotations
 
 from collections import defaultdict
+from enum import StrEnum
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, Annotated, cast
 
-import click
 import numpy as np
+import typer
 
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.types import (
@@ -45,7 +42,6 @@ from micrometeorology.common.types import (
     WRFVariable,
 )
 from micrometeorology.wrf import reader
-from micrometeorology.wrf.reader import resolve_wrfout_paths
 from micrometeorology.wrf import variables as vmod
 from micrometeorology.wrf.batch import (
     FigureTask,
@@ -60,6 +56,12 @@ from micrometeorology.wrf.execution import (
     format_wrf_execution_plan,
     resolve_wrf_execution_plan,
 )
+from micrometeorology.wrf.reader import resolve_wrfout_paths
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
 # Default variables when none specified
 DEFAULT_VARS = [
@@ -100,10 +102,10 @@ def _normalize_var_list(var_list: list[str]) -> list[str]:
 
 
 def _resolve_wrfout_paths(
-    wrf_dir: str | None,
+    wrf_dir: Path | str | None,
     date: str | None,
     domains: tuple[int, ...],
-    dataset: str | None,
+    dataset: Path | str | None,
 ) -> list[Path]:
     """Resolve WRF output file paths.
 
@@ -114,21 +116,23 @@ def _resolve_wrfout_paths(
         return [Path(dataset)]
 
     if not wrf_dir or not date:
-        raise click.UsageError("Provide either --dataset or --wrf-dir + --date")
+        raise typer.BadParameter("Provide either --dataset or --wrf-dir + --date")
 
     paths = resolve_wrfout_paths(wrf_dir, date, domains or None)
     if not paths:
-        click.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
+        typer.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
     return paths
 
 
 def _build_tasks_for_domain(
     ds: reader.WRFReader,
     var_list: list[str],
-    output_dir: str,
-    shapes_dir: str | None,
+    output_dir: Path | str,
+    shapes_dir: Path | str | None,
     skip_first: int,
     dpi: int,
+    task_sink: Callable[[list[FigureTask], str], None] | None = None,
+    task_batch_size: int = 16,
 ) -> list[FigureTask]:
     """Build all FigureTasks for a single domain file."""
     lon, lat = ds.read_grid()
@@ -139,14 +143,21 @@ def _build_tasks_for_domain(
         float(np.amax(lat)),
     )
     grid = ds.grid_level.value
-    mc = build_map_config(grid, bounds, shapes_dir)
+    mc = build_map_config(grid, bounds, str(shapes_dir) if shapes_dir else None)
     time_meta = ds.build_date_metadata(skip_first_n=skip_first)
 
     tasks: list[FigureTask] = []
 
     for var_name in var_list:
+
+        def add_task(task: FigureTask, label: str = var_name) -> None:
+            tasks.append(task)
+            if task_sink is not None and len(tasks) >= task_batch_size:
+                task_sink(tasks, label)
+                tasks.clear()
+
         if var_name in _SKIP_FOR_FIGURES:
-            click.echo(f"  ⚠ Skipping {var_name} (no figure renderer)")
+            typer.echo(f"  ⚠ Skipping {var_name} (no figure renderer)")
             continue
         cmap = VARIABLE_COLORMAPS.get(var_name, "viridis")
         nc_suffix = VARIABLE_NETCDF_MAP.get(var_name, var_name.upper())
@@ -159,7 +170,7 @@ def _build_tasks_for_domain(
                 i = meta["index"]
                 data = vmod.extract_temperature_step(t2[i : i + 1, :, :])
                 pressure = vmod.materialize_2d(psfc[i : i + 1, :, :])
-                tasks.append(
+                add_task(
                     FigureTask(
                         lon=lon,
                         lat=lat,
@@ -188,7 +199,7 @@ def _build_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.extract_temperature_step(tsk[i : i + 1, :, :])
-                tasks.append(
+                add_task(
                     FigureTask(
                         lon=lon,
                         lat=lat,
@@ -217,7 +228,7 @@ def _build_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.materialize_2d(rh[i : i + 1, :, :])
-                tasks.append(
+                add_task(
                     FigureTask(
                         lon=lon,
                         lat=lat,
@@ -248,7 +259,7 @@ def _build_tasks_for_domain(
                 u = vmod.materialize_2d(u10[i : i + 1])
                 v = vmod.materialize_2d(v10[i : i + 1])
                 speed = np.hypot(u, v)
-                tasks.append(
+                add_task(
                     FigureTask(
                         lon=lon,
                         lat=lat,
@@ -277,7 +288,7 @@ def _build_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.extract_rain_step(total, i)
-                tasks.append(
+                add_task(
                     FigureTask(
                         lon=lon,
                         lat=lat,
@@ -310,7 +321,7 @@ def _build_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.materialize_2d(var_data[i : i + 1, :, :])
-                tasks.append(
+                add_task(
                     FigureTask(
                         lon=lon,
                         lat=lat,
@@ -339,7 +350,7 @@ def _build_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.materialize_2d(power_density[i : i + 1, :, :])
-                tasks.append(
+                add_task(
                     FigureTask(
                         lon=lon,
                         lat=lat,
@@ -371,7 +382,7 @@ def _build_tasks_for_domain(
             elif ds.has_variable(nc_var):
                 var_data, vmin, vmax = vmod.extract_scalar(ds, nc_var)
             else:
-                click.echo(f"  ⚠ Variable {nc_var} not found in dataset — skipping")
+                typer.echo(f"  ⚠ Variable {nc_var} not found in dataset — skipping")
                 continue
 
             for meta in time_meta:
@@ -379,7 +390,7 @@ def _build_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.materialize_2d(var_data[i : i + 1, :, :])
-                tasks.append(
+                add_task(
                     FigureTask(
                         lon=lon,
                         lat=lat,
@@ -401,87 +412,101 @@ def _build_tasks_for_domain(
                     )
                 )
 
+        if task_sink is not None and tasks:
+            task_sink(tasks, var_name)
+            tasks.clear()
+
     return tasks
 
 
-@click.command()
-@click.option("--dataset", "-d", default=None, type=click.Path(), help="Single WRF NetCDF file.")
-@click.option("--wrf-dir", default=None, type=click.Path(), help="Directory with wrfout files.")
-@click.option("--date", default=None, help="Simulation date YYYYMMDD.")
-@click.option(
-    "--domains",
-    "-D",
-    type=int,
-    multiple=True,
-    default=None,
-    help="Domain numbers (e.g. -D 1 -D 4).",
-)
-@click.option("--output", "-o", default="output/figures", type=click.Path(), help="Output dir.")
-@click.option("--variables", "-v", multiple=True, default=None, help="Variables to plot.")
-@click.option("--shapes-dir", default=None, help="Municipality shapefiles dir.")
-@click.option("--skip-first", default=0, type=int, help="Time steps to skip.")
-@click.option(
-    "--reader",
-    "reader_backend",
-    default="auto",
-    type=click.Choice(["auto", "eager", "lazy"]),
-    show_default=True,
-    help="WRF reader backend. Auto chooses eager for small inputs and lazy for large/chunked inputs.",
-)
-@click.option(
-    "--chunks",
-    default="auto",
-    show_default=True,
-    help="Lazy-reader chunks: 'auto', 'none', or comma-separated dim=size pairs.",
-)
-@click.option(
-    "--workers",
-    "-w",
-    default=None,
-    type=int,
-    help=f"Parallel workers (default: {default_workers()}).",
-)
-@click.option(
-    "--worker-backend",
-    default="auto",
-    type=click.Choice(["auto", "serial", "pickle", "memmap"]),
-    show_default=True,
-    help="Figure worker payload backend. Auto uses serial for single-worker work and memmap for large multi-worker payloads.",
-)
-@click.option(
-    "--tmp-dir",
-    "tmp_dir",
-    default=None,
-    type=click.Path(file_okay=False),
-    help="Parent directory for temporary memmap payloads when --worker-backend memmap.",
-)
-@click.option("--dpi", default=100, type=int, help="Image DPI.")
-@click.option("--also-video", is_flag=True, help="Also generate WebM videos.")
-@click.option("--log-level", default="INFO", help="Logging level.")
-def main(
-    dataset: str | None,
-    wrf_dir: str | None,
-    date: str | None,
-    domains: tuple[int, ...],
-    output: str,
-    variables: tuple[str, ...],
-    shapes_dir: str | None,
-    skip_first: int,
-    reader_backend: str,
-    chunks: str,
-    workers: int | None,
-    worker_backend: str,
-    tmp_dir: str | None,
-    dpi: int,
-    also_video: bool,
-    log_level: str,
+def _parse_csv(raw: str | list[str] | None) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    if isinstance(raw, str):
+        raw = [raw]
+    res = []
+    for item in raw:
+        for x in item.split(","):
+            if x.strip():
+                res.append(x.strip())
+    return tuple(res)
+
+
+def _parse_int_csv(raw: str | list[str] | None) -> tuple[int, ...]:
+    if not raw:
+        return ()
+    if isinstance(raw, str):
+        raw = [raw]
+    res = []
+    for item in raw:
+        for x in item.split(","):
+            if x.strip():
+                res.append(int(x.strip()))
+    return tuple(res)
+
+
+class ReaderChoice(StrEnum):
+    auto = "auto"
+    eager = "eager"
+    lazy = "lazy"
+
+
+class WorkerChoice(StrEnum):
+    auto = "auto"
+    serial = "serial"
+    memmap = "memmap"
+
+
+@app.command()
+def run(
+    dataset: Annotated[
+        Path | None, typer.Option("-d", "--dataset", help="Single WRF file.")
+    ] = None,
+    wrf_dir: Annotated[Path | None, typer.Option(help="Directory with wrfout files.")] = None,
+    date: Annotated[str | None, typer.Option(help="Simulation date YYYYMMDD.")] = None,
+    domains: Annotated[
+        list[str],
+        typer.Option("-D", "--domains", help="Domain numbers. Can be repeated or comma-separated."),
+    ] = [],
+    output: Annotated[Path, typer.Option("-o", "--output", help="Output dir.")] = Path(
+        "output/figures"
+    ),
+    variables: Annotated[
+        list[str],
+        typer.Option(
+            "-v", "--variables", help="Variables to process. Can be repeated or comma-separated."
+        ),
+    ] = [],
+    shapes_dir: Annotated[Path | None, typer.Option(help="Municipality shapefiles dir.")] = None,
+    skip_first: Annotated[int, typer.Option(help="Time steps to skip.")] = 0,
+    reader_backend: Annotated[
+        ReaderChoice, typer.Option("--reader", help="WRF reader backend.")
+    ] = ReaderChoice.auto,
+    chunks: Annotated[
+        str, typer.Option(help="Lazy-reader chunks: 'auto', 'none', or dim=size pairs.")
+    ] = "auto",
+    workers: Annotated[
+        int | None,
+        typer.Option("-w", "--workers", help=f"Parallel workers (default: {default_workers()})."),
+    ] = None,
+    worker_backend: Annotated[
+        WorkerChoice, typer.Option("--worker-backend", help="Figure worker backend.")
+    ] = WorkerChoice.auto,
+    tmp_dir: Annotated[
+        Path | None, typer.Option(help="Temp directory for memmap payloads.")
+    ] = None,
+    dpi: Annotated[int, typer.Option(help="Image DPI.")] = 100,
+    also_video: Annotated[
+        bool, typer.Option("--also-video", help="Also generate WebM videos.")
+    ] = False,
+    log_level: Annotated[str, typer.Option(help="Logging level.")] = "INFO",
 ) -> None:
     """Generate WRF map figures with parallel rendering."""
     setup_logging(log_level)
 
-    var_list = list(variables) if variables else DEFAULT_VARS
+    var_list = list(_parse_csv(variables)) if variables else DEFAULT_VARS
     var_list = _normalize_var_list(var_list)
-    paths = _resolve_wrfout_paths(wrf_dir, date, domains, dataset)
+    paths = _resolve_wrfout_paths(wrf_dir, date, _parse_int_csv(domains), dataset)
     try:
         plan = resolve_wrf_execution_plan(
             paths=paths,
@@ -493,61 +518,75 @@ def main(
             tmp_dir=tmp_dir,
         )
     except ValueError as exc:
-        raise click.UsageError(str(exc)) from exc
+        raise typer.BadParameter(str(exc)) from exc
 
     if not paths:
-        click.echo("No WRF files found.")
+        typer.echo("No WRF files found.")
         return
 
-    click.echo(f"Files: {[p.name for p in paths]}")
-    click.echo(f"Variables: {var_list}")
-    click.echo(f"Output: {output}")
-    click.echo(format_wrf_execution_plan(plan))
+    typer.echo(f"Files: {[p.name for p in paths]}")
+    typer.echo(f"Variables: {var_list}")
+    typer.echo(f"Output: {output}")
+    typer.echo(format_wrf_execution_plan(plan))
 
-    # Phase 1: Build all tasks (serial — fast, I/O-bound NetCDF reads)
-    all_tasks: list[FigureTask] = []
+    # Build and render tasks per domain/variable to avoid retaining all frames in RAM.
+    png_paths: list[str] = []
+    printed_plans: set[str] = set()
     for wrf_path in paths:
-        click.echo(f"\nLoading {wrf_path.name}...")
+        typer.echo(f"\nLoading {wrf_path.name}...")
+
+        def render_task_batch(
+            tasks: list[FigureTask],
+            label: str,
+            current_wrf_path: Path = wrf_path,
+        ) -> None:
+            try:
+                batch_plan = resolve_wrf_execution_plan(
+                    paths=[current_wrf_path],
+                    workflow="figures",
+                    reader_request=cast("ReaderRequest", plan.reader),
+                    chunks_request=chunks,
+                    json_worker_request=cast("JsonWorkerRequest", worker_backend),
+                    workers=plan.workers,
+                    tmp_dir=tmp_dir,
+                    estimated_json_payload_bytes=estimate_figure_payload_bytes(tasks),
+                    json_task_count=len(tasks),
+                )
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+            plan_text = format_wrf_execution_plan(batch_plan)
+            if batch_plan != plan and plan_text not in printed_plans:
+                typer.echo(plan_text)
+                printed_plans.add(plan_text)
+            rendered = run_figure_tasks(
+                tasks,
+                workers=batch_plan.workers,
+                backend=batch_plan.json_worker_backend,
+                tmp_dir=batch_plan.tmp_dir,
+            )
+            png_paths.extend(rendered)
+            typer.echo(f"  -> {len(rendered)} figures generated for {label}")
+
         with reader.open_wrf_dataset(
             wrf_path,
             reader=plan.reader,
             chunks=plan.chunks,
         ) as ds:
-            tasks = _build_tasks_for_domain(ds, var_list, output, shapes_dir, skip_first, dpi)
-            all_tasks.extend(tasks)
-            click.echo(f"  → {len(tasks)} frames queued")
+            _build_tasks_for_domain(
+                ds,
+                var_list,
+                output,
+                shapes_dir,
+                skip_first,
+                dpi,
+                task_sink=render_task_batch,
+            )
 
-    click.echo(f"\nTotal frames: {len(all_tasks)}")
-    try:
-        final_plan = resolve_wrf_execution_plan(
-            paths=paths,
-            workflow="figures",
-            reader_request=cast("ReaderRequest", plan.reader),
-            chunks_request=chunks,
-            json_worker_request=cast("JsonWorkerRequest", worker_backend),
-            workers=plan.workers,
-            tmp_dir=tmp_dir,
-            estimated_json_payload_bytes=estimate_figure_payload_bytes(all_tasks),
-            json_task_count=len(all_tasks),
-        )
-    except ValueError as exc:
-        raise click.UsageError(str(exc)) from exc
-    if final_plan != plan:
-        click.echo(format_wrf_execution_plan(final_plan))
-
-    # Phase 2: Parallel rendering
-    png_paths = run_figure_tasks(
-        all_tasks,
-        workers=final_plan.workers,
-        backend=final_plan.json_worker_backend,
-        tmp_dir=final_plan.tmp_dir,
-    )
-
-    click.echo(f"\n✓ Generated {len(png_paths)} figures")
+    typer.echo(f"\n✓ Generated {len(png_paths)} figures")
 
     # Phase 3: WebM (optional)
     if also_video and png_paths:
-        click.echo("\nGenerating WebM videos...")
+        typer.echo("\nGenerating WebM videos...")
         from micrometeorology.wrf.animation import batch_create_webm
 
         # Group PNGs by variable+domain prefix (e.g. "TEMP_D03")
@@ -560,10 +599,14 @@ def main(
             else:
                 grouped[stem].append(p)
 
-        webm_paths = batch_create_webm(grouped, output, fps=2, workers=final_plan.workers)
-        click.echo(f"✓ Generated {len(webm_paths)} videos")
+        webm_paths = batch_create_webm(grouped, output, fps=2, workers=plan.workers)
+        typer.echo(f"✓ Generated {len(webm_paths)} videos")
 
-    click.echo("\n✓ Done")
+    typer.echo("\n✓ Done")
+
+
+def main() -> None:
+    app()
 
 
 if __name__ == "__main__":

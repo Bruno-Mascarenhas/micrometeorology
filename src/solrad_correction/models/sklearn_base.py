@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from solrad_correction.models.base import TabularRegressorModel, TrainingResult
+from solrad_correction.utils.memory import assert_array_size
 from solrad_correction.utils.serialization import load_sklearn_model, save_sklearn_model
 
 if TYPE_CHECKING:
@@ -50,6 +51,7 @@ class SklearnRegressorModel(TabularRegressorModel):
     def predict(self, data: TabularDataset | np.ndarray) -> np.ndarray:
         """Predict using the fitted estimator."""
         x_input = data.X if hasattr(data, "X") else np.asarray(data)
+        assert_array_size(x_input.shape, np.float32, context="sklearn prediction input array")
         return self._estimator.predict(x_input).astype(np.float32)  # type: ignore
 
     def save(self, path: str | Path) -> None:

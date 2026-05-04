@@ -8,15 +8,23 @@ Covers:
 
 from __future__ import annotations
 
+import inspect
+import json
+import shutil
+import uuid
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+from micrometeorology.wrf.batch import _write_json_payload
 from micrometeorology.wrf.geojson import (
     create_grid_geojson,
     create_values_json,
     create_wind_vectors_json,
+    save_geojson,
+    write_values_json_stream,
 )
 
 # ---------------------------------------------------------------------------
@@ -141,6 +149,33 @@ class TestCreateValuesJson:
         result = create_values_json(sample_values_2d, 0.0, 1.0, None)
         assert "wind" not in result["metadata"]
 
+    def test_streamed_values_json_matches_in_memory_payload(self, sample_values_2d):
+        root = Path("scratch") / f"stream-values-{uuid.uuid4().hex}"
+        out = root / "values.json"
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            expected = create_values_json(sample_values_2d, 0.0, 20.0, None)
+            write_values_json_stream(
+                out,
+                sample_values_2d,
+                0.0,
+                20.0,
+                "N/A",
+                chunk_size=3,
+            )
+            with open(out, encoding="utf-8") as f:
+                actual = json.load(f)
+
+            assert actual == expected
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_batch_json_writer_uses_streaming_payload(self):
+        source = inspect.getsource(_write_json_payload)
+
+        assert "write_values_json_stream" in source
+        assert ".tolist()" not in source
+
 
 # ---------------------------------------------------------------------------
 # create_wind_vectors_json
@@ -204,3 +239,18 @@ class TestCreateWindVectorsJson:
         assert len(result["downsampled_angles"]) == 3
         assert len(result["downsampled_magnitudes"]) == 3
         assert len(result["downsampled_linear_indices"]) == 3
+
+
+def test_save_geojson_stream_matches_in_memory_geojson(sample_grid):
+    root = Path("scratch") / f"stream-geojson-{uuid.uuid4().hex}"
+    root.mkdir(parents=True, exist_ok=True)
+    lon, lat = sample_grid
+    try:
+        expected = create_grid_geojson(lon, lat, 3000.0, 3000.0, "")
+        out = save_geojson(root, "D01", lon, lat, 3000.0, 3000.0)
+        with open(out, encoding="utf-8") as f:
+            actual = json.load(f)
+
+        assert actual == expected
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

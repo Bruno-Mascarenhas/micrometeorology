@@ -22,16 +22,21 @@ import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
 import numpy as np
+
+from micrometeorology.wrf.safety import (
+    assert_reasonable_array_size,
+)
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
+MAX_TASKS_PER_CHILD = int(os.environ.get("LABMIM_MAX_TASKS_PER_CHILD", "64"))
 
-WorkerBackend = Literal["serial", "pickle", "memmap"]
+WorkerBackend = Literal["auto", "serial", "memmap"]
 JsonWorkerBackend = WorkerBackend
 
 
@@ -246,34 +251,25 @@ def _write_json_payload(
     wind_data: dict | None,
 ) -> str:
     """Write a single values JSON payload from an ndarray-like object."""
-    import json
+    from micrometeorology.wrf.geojson import write_values_json_stream
 
     arr = arr.filled(np.nan) if hasattr(arr, "filled") else np.asarray(arr, dtype=float)
-
-    # Vectorized: round, flatten, convert to Python list in one call
-    flat = np.round(arr.astype(np.float64), 2).ravel()
-    values = flat.tolist()
-    # Replace NaN with None for JSON — only touch NaN positions (O(nan_count) vs O(N))
-    nan_indices = np.flatnonzero(np.isnan(flat))
-    for idx in nan_indices:
-        values[idx] = None
-
-    scale_values = [round(float(x), 2) for x in np.linspace(scale_min, scale_max, 6)]
-
-    metadata: dict[str, Any] = {
-        "scale_values": scale_values,
-        "date_time": date_str,
-    }
-    if wind_data is not None:
-        metadata["wind"] = wind_data
-
-    payload = {"metadata": metadata, "values": values}
+    assert_reasonable_array_size(
+        arr.shape,
+        arr.dtype,
+        context=f"JSON payload materialization for {output_path}",
+        multiplier=4.0,
+    )
 
     out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(payload, f, separators=(",", ":"), ensure_ascii=False)
-
+    write_values_json_stream(
+        out,
+        arr,
+        scale_min=scale_min,
+        scale_max=scale_max,
+        date_str=date_str,
+        wind_data=wind_data,
+    )
     return str(out)
 
 
@@ -366,11 +362,17 @@ def default_workers() -> int:
     return max(1, n - 4)
 
 
+def _max_tasks_per_child(n_workers: int) -> int | None:
+    if n_workers <= 1 or MAX_TASKS_PER_CHILD <= 0:
+        return None
+    return MAX_TASKS_PER_CHILD
+
+
 def run_figure_tasks(
     tasks: list[FigureTask],
     workers: int | None = None,
     *,
-    backend: WorkerBackend = "pickle",
+    backend: WorkerBackend = "auto",
     tmp_dir: str | Path | None = None,
 ) -> list[str]:
     """Execute figure rendering tasks in parallel.
@@ -391,17 +393,25 @@ def run_figure_tasks(
     n_workers = min(n_workers, len(tasks)) if tasks else 1
     total = len(tasks)
 
-    if backend not in {"serial", "pickle", "memmap"}:
+    if backend not in {"auto", "serial", "memmap"}:
         raise ValueError(f"Unknown figure worker backend: {backend}")
+    resolved_backend: Literal["serial", "memmap"] = (
+        "serial" if backend == "serial" or (backend == "auto" and n_workers == 1) else "memmap"
+    )
 
-    logger.info("Rendering %d figures with %d workers (%s backend)", total, n_workers, backend)
+    logger.info(
+        "Rendering %d figures with %d workers (%s backend)",
+        total,
+        n_workers,
+        resolved_backend,
+    )
     t0 = time.perf_counter()
 
     paths: list[str] = []
     if not tasks:
         return paths
 
-    if backend == "serial" or (backend == "pickle" and n_workers == 1):
+    if resolved_backend == "serial":
         paths = [_render_figure(task) for task in tasks]
         elapsed = time.perf_counter() - t0
         logger.info(
@@ -412,46 +422,17 @@ def run_figure_tasks(
         )
         return paths
 
-    if backend == "memmap":
+    if resolved_backend == "memmap":
         return _run_figure_tasks_memmap(tasks, n_workers, tmp_dir, t0)
 
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_render_figure, task): i for i, task in enumerate(tasks)}
-        for done, future in enumerate(as_completed(futures), 1):
-            try:
-                path = future.result()
-                paths.append(path)
-                if done % 50 == 0 or done == total:
-                    elapsed = time.perf_counter() - t0
-                    rate = done / elapsed if elapsed > 0 else 0
-                    eta = (total - done) / rate if rate > 0 else 0
-                    logger.info(
-                        "  Progress: %d/%d (%.0f%%) — %.1f img/s — ETA: %.0fs",
-                        done,
-                        total,
-                        100 * done / total,
-                        rate,
-                        eta,
-                    )
-            except Exception:
-                idx = futures[future]
-                logger.exception("Failed to render task %d", idx)
-
-    elapsed = time.perf_counter() - t0
-    logger.info(
-        "✓ Rendered %d figures in %.1fs (%.1f img/s)",
-        len(paths),
-        elapsed,
-        len(paths) / elapsed if elapsed > 0 else 0,
-    )
-    return paths
+    raise RuntimeError("unreachable figure backend resolution")
 
 
 def run_json_tasks(
     tasks: list[JsonTask],
     workers: int | None = None,
     *,
-    backend: JsonWorkerBackend = "pickle",
+    backend: JsonWorkerBackend = "auto",
     tmp_dir: str | Path | None = None,
 ) -> list[str]:
     """Execute JSON writing tasks in parallel.
@@ -464,7 +445,6 @@ def run_json_tasks(
         Number of parallel workers. Defaults to ``cpu_count - 4``.
     backend:
         ``"serial"`` writes in-process without creating worker processes.
-        ``"pickle"`` sends arrays directly to workers (legacy behavior).
         ``"memmap"`` stores arrays in temporary ``.npy`` files and sends
         lightweight file references, reducing process-pool IPC payload size.
     tmp_dir:
@@ -480,37 +460,34 @@ def run_json_tasks(
     n_workers = min(n_workers, len(tasks)) if tasks else 1
     total = len(tasks)
 
-    if backend not in {"serial", "pickle", "memmap"}:
+    if backend not in {"auto", "serial", "memmap"}:
         raise ValueError(f"Unknown JSON worker backend: {backend}")
+    resolved_backend: Literal["serial", "memmap"] = (
+        "serial" if backend == "serial" or (backend == "auto" and n_workers == 1) else "memmap"
+    )
 
-    logger.info("Writing %d JSON files with %d workers (%s backend)", total, n_workers, backend)
+    logger.info(
+        "Writing %d JSON files with %d workers (%s backend)",
+        total,
+        n_workers,
+        resolved_backend,
+    )
     t0 = time.perf_counter()
 
     paths: list[str] = []
     if not tasks:
         return paths
 
-    if backend == "serial" or (backend == "pickle" and n_workers == 1):
+    if resolved_backend == "serial":
         paths = [_write_json(task) for task in tasks]
         elapsed = time.perf_counter() - t0
         logger.info("✓ Wrote %d JSON files in %.1fs", len(paths), elapsed)
         return paths
 
-    if backend == "memmap":
+    if resolved_backend == "memmap":
         return _run_json_tasks_memmap(tasks, n_workers, tmp_dir, t0)
 
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_write_json, task): i for i, task in enumerate(tasks)}
-        for future in as_completed(futures):
-            try:
-                paths.append(future.result())
-            except Exception:
-                idx = futures[future]
-                logger.exception("Failed to write JSON task %d", idx)
-
-    elapsed = time.perf_counter() - t0
-    logger.info("✓ Wrote %d JSON files in %.1fs", len(paths), elapsed)
-    return paths
+    raise RuntimeError("unreachable JSON backend resolution")
 
 
 def _save_memmap_payload(
@@ -525,6 +502,7 @@ def _save_memmap_payload(
     if cache is not None and cache_key in cache:
         return cache[cache_key]
     data_path = run_dir / f"{name}.npy"
+    assert_reasonable_array_size(arr.shape, arr.dtype, context=f"memmap payload {name}")
     np.save(data_path, np.asarray(arr), allow_pickle=False)
     path_str = str(data_path)
     if cache is not None:
@@ -585,7 +563,10 @@ def _run_figure_tasks_memmap(
         if n_workers == 1:
             paths = [_render_figure_memmap(task) for task in memmap_tasks]
         else:
-            with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            with ProcessPoolExecutor(
+                max_workers=n_workers,
+                max_tasks_per_child=_max_tasks_per_child(n_workers),
+            ) as pool:
                 futures = {
                     pool.submit(_render_figure_memmap, task): i
                     for i, task in enumerate(memmap_tasks)
@@ -635,6 +616,11 @@ def _run_json_tasks_memmap(
         for idx, task in enumerate(tasks):
             data_path = run_dir / f"task_{idx:06d}.npy"
             data = task.data.filled(np.nan) if hasattr(task.data, "filled") else task.data
+            assert_reasonable_array_size(
+                data.shape,
+                data.dtype,
+                context=f"JSON memmap payload task {idx}",
+            )
             np.save(data_path, np.asarray(data), allow_pickle=False)
             memmap_tasks.append(
                 JsonMemmapTask(
@@ -650,7 +636,10 @@ def _run_json_tasks_memmap(
         if n_workers == 1:
             paths = [_write_json_memmap(task) for task in memmap_tasks]
         else:
-            with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            with ProcessPoolExecutor(
+                max_workers=n_workers,
+                max_tasks_per_child=_max_tasks_per_child(n_workers),
+            ) as pool:
                 futures = {
                     pool.submit(_write_json_memmap, task): i for i, task in enumerate(memmap_tasks)
                 }
@@ -669,3 +658,23 @@ def _run_json_tasks_memmap(
     elapsed = time.perf_counter() - t0
     logger.info("✓ Wrote %d JSON files in %.1fs", len(paths), elapsed)
     return paths
+
+
+def _estimate_json_payload_bytes(tasks: list[JsonTask]) -> int:
+    total = 0
+    for task in tasks:
+        total += int(getattr(task.data, "nbytes", 0) or 0)
+    return total
+
+
+def _estimate_figure_payload_bytes(tasks: list[FigureTask]) -> int:
+    total = 0
+    seen: set[int] = set()
+    for task in tasks:
+        for attr in ("lon", "lat", "data", "overlay_data", "u", "v"):
+            data = getattr(task, attr)
+            if data is None or id(data) in seen:
+                continue
+            seen.add(id(data))
+            total += int(getattr(data, "nbytes", 0) or 0)
+    return total

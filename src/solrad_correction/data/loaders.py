@@ -196,9 +196,10 @@ def _read_parquet_table(
     if datetime_index and isinstance(datetime_column, str) and columns is not None:
         parquet_columns = [datetime_column, *columns]
 
-    df = pd.read_parquet(path, columns=parquet_columns)
     if limit_rows is not None:
-        df = df.iloc[:limit_rows].copy()
+        df = _read_parquet_head(path, columns=parquet_columns, limit_rows=limit_rows)
+    else:
+        df = pd.read_parquet(path, columns=parquet_columns)
 
     if datetime_index and datetime_column is not None:
         if isinstance(datetime_column, int):
@@ -215,6 +216,24 @@ def _read_parquet_table(
             raise ValueError(f"datetime_column '{datetime_column}' not found in parquet table")
 
     return df
+
+
+def _read_parquet_head(
+    path: Path,
+    *,
+    columns: list[str] | None,
+    limit_rows: int,
+) -> pd.DataFrame:
+    """Read only the first rows of a Parquet file instead of loading all row groups."""
+    import pyarrow.parquet as pq
+
+    parquet_file = pq.ParquetFile(path)
+    batches = parquet_file.iter_batches(batch_size=limit_rows, columns=columns)
+    try:
+        batch = next(batches)
+    except StopIteration:
+        return pd.DataFrame(columns=columns)
+    return cast("pd.DataFrame", batch.to_pandas())
 
 
 def _resolve_datetime_column(columns: list[str], datetime_column: str | int | None) -> str | None:

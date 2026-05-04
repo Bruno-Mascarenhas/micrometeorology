@@ -10,6 +10,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from solrad_correction.utils.memory import assert_array_size
+
 SequenceArray = np.ndarray | np.memmap | torch.Tensor
 
 
@@ -30,6 +32,8 @@ class SequenceDataset(Dataset):
         targets:
             1-D array of shape ``(n_samples,)``.
         """
+        assert_array_size(features.shape, np.float32, context="dense sequence feature tensor")
+        assert_array_size(targets.shape, np.float32, context="dense sequence target vector")
         self.X = torch.from_numpy(np.ascontiguousarray(features, dtype=np.float32))
         self.y = torch.from_numpy(np.ascontiguousarray(targets, dtype=np.float32))
 
@@ -107,6 +111,7 @@ class WindowedSequenceDataset(Dataset):
         arr = np.asarray(features)
         if arr.ndim != 2:
             raise ValueError(f"features must be 2-D, got shape {arr.shape}")
+        assert_array_size(arr.shape, np.float32, context="windowed sequence feature matrix")
         if arr.dtype != np.float32:
             arr = arr.astype(np.float32)
         return arr
@@ -118,6 +123,7 @@ class WindowedSequenceDataset(Dataset):
             return y.to(dtype=torch.float32)
 
         arr = np.asarray(targets).reshape(-1)
+        assert_array_size(arr.shape, np.float32, context="windowed sequence target vector")
         if arr.dtype != np.float32:
             arr = arr.astype(np.float32)
         return arr

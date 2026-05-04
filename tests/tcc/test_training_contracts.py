@@ -13,6 +13,7 @@ from solrad_correction.datasets.tabular import TabularDataset
 from solrad_correction.models.registry import MODEL_REGISTRY, build_model, get_model_spec
 from solrad_correction.models.svm import SVMRegressor
 from solrad_correction.training.dataloaders import resolve_dataloader_settings, resolve_device
+from solrad_correction.utils.memory import assert_array_size
 
 
 @pytest.fixture
@@ -59,6 +60,17 @@ def test_runtime_dataloader_resolution_and_cuda_validation(monkeypatch: pytest.M
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     with pytest.raises(ValueError, match="CUDA is not available"):
         resolve_device("cuda")
+
+
+def test_solrad_memory_guard_fails_before_large_array_materialization() -> None:
+    with pytest.raises(MemoryError, match="dense test array"):
+        assert_array_size(
+            (1024, 1024),
+            np.float32,
+            context="dense test array",
+            max_gb=0.001,
+            multiplier=2.0,
+        )
 
 
 def test_svm_fit_predict_evaluate_and_save_load(synthetic_tabular: TabularDataset) -> None:

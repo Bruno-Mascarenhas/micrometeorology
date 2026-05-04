@@ -1,4 +1,10 @@
-"""Automate the processing of WRF output files."""
+"""Automate the processing of WRF output files.
+
+Examples
+--------
+Run the full WRF automation script directly using Python:
+    python scripts/wrf/run_all.py
+"""
 
 import glob
 import logging

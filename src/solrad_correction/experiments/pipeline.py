@@ -28,6 +28,7 @@ from solrad_correction.experiments.results import (
 from solrad_correction.experiments.writer import ExperimentWriter
 from solrad_correction.models.registry import build_model, get_model_spec
 from solrad_correction.training.dataloaders import resolve_device
+from solrad_correction.utils.memory import dataframe_to_float32_numpy, series_to_float32_numpy
 from solrad_correction.utils.metadata import collect_run_metadata
 from solrad_correction.utils.seeds import set_global_seed
 
@@ -221,12 +222,33 @@ def build_datasets(config: ExperimentConfig, processed: PreprocessedSplits) -> D
     from solrad_correction.datasets.sequence import WindowedSequenceDataset
 
     seq_len = config.model.sequence_length
-    train_features = processed.train[feature_cols].to_numpy()
-    val_features = processed.val[feature_cols].to_numpy()
-    test_features = processed.test[feature_cols].to_numpy()
-    train_target = processed.train[config.data.target_column].to_numpy()
-    val_target = processed.val[config.data.target_column].to_numpy()
-    test_target = processed.test[config.data.target_column].to_numpy()
+    train_features = dataframe_to_float32_numpy(
+        processed.train,
+        feature_cols,
+        context="train sequence feature matrix",
+    )
+    val_features = dataframe_to_float32_numpy(
+        processed.val,
+        feature_cols,
+        context="validation sequence feature matrix",
+    )
+    test_features = dataframe_to_float32_numpy(
+        processed.test,
+        feature_cols,
+        context="test sequence feature matrix",
+    )
+    train_target = series_to_float32_numpy(
+        processed.train[config.data.target_column],
+        context="train sequence target vector",
+    )
+    val_target = series_to_float32_numpy(
+        processed.val[config.data.target_column],
+        context="validation sequence target vector",
+    )
+    test_target = series_to_float32_numpy(
+        processed.test[config.data.target_column],
+        context="test sequence target vector",
+    )
 
     train_seq = WindowedSequenceDataset(train_features, train_target, seq_len)
     val_seq = WindowedSequenceDataset(val_features, val_target, seq_len)

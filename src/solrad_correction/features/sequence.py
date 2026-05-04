@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from solrad_correction.utils.memory import assert_array_size
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -41,6 +43,13 @@ def create_sequences(
         raise ValueError(f"sequence_length ({sequence_length}) >= data length ({len(x)})")
 
     n = len(x) - sequence_length
+    output_shape = (n, sequence_length, x.shape[1])
+    assert_array_size(
+        output_shape,
+        np.float32,
+        context="dense sliding-window sequence construction",
+        multiplier=2.0,
+    )
 
     # sliding_window_view creates a zero-copy strided view.
     x_windows = np.lib.stride_tricks.sliding_window_view(x, sequence_length, axis=0)

@@ -2,116 +2,136 @@
 
 Examples
 --------
-Run the default config:
+Run an experiment from a config file:
     solrad-run --config configs/tcc/experiments/svm_hourly.yaml
 
-Fair SVM/LSTM/Transformer comparison:
-    set model.evaluation_policy: common_sequence_horizon in the YAML.
+Run a quick test on CPU with only 100 rows:
+    solrad-run --config configs/tcc/experiments/svm_hourly.yaml --limit-rows 100 --device cpu
 
-Opt into PyTorch compilation for longer neural-network runs:
-    set runtime.torch_compile: true in the YAML.
+Run a smoke test without needing a config:
+    solrad-run --smoke-test --dry-run
 
-Resume from a checkpoint:
-    set runtime.resume: output/experiments/lstm_v1/checkpoints/last.pt.
+Resume a neural-network experiment from a checkpoint:
+    solrad-run --config configs/tcc/experiments/lstm_hourly.yaml --resume output/checkpoints/last.pt
 """
 
 from __future__ import annotations
 
 import json
+from enum import StrEnum
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated
 
-import click
+import typer
 
 from solrad_correction.experiments.overrides import (
     ExperimentOverrides,
     load_config_with_overrides,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-@click.command()
-@click.option(
-    "--config", "-c", required=False, type=click.Path(exists=True), help="Experiment config YAML."
-)
-@click.option("--name", "-n", default=None, help="Override experiment name.")
-@click.option("--output-dir", "-o", default=None, help="Override output directory.")
-@click.option("--validate-config", is_flag=True, help="Validate config and exit without training.")
-@click.option(
-    "--print-config", "print_config", is_flag=True, help="Print resolved config and exit."
-)
-@click.option(
-    "--dry-run", is_flag=True, help="Validate resolved config and exit without loading data."
-)
-@click.option("--smoke-test", is_flag=True, help="Run a small synthetic CPU-safe smoke experiment.")
-@click.option("--limit-rows", type=int, default=None, help="Limit loaded rows for development.")
-@click.option("--profile", is_flag=True, help="Write profile.json with stage timings.")
-@click.option("--device", type=click.Choice(["auto", "cpu", "cuda"]), default=None)
-@click.option("--num-workers", type=int, default=None)
-@click.option("--pin-memory/--no-pin-memory", default=None)
-@click.option("--amp/--no-amp", default=None)
-@click.option("--compile/--no-compile", "torch_compile", default=None)
-@click.option("--resume", type=click.Path(exists=True), default=None)
+
+class DeviceChoice(StrEnum):
+    auto = "auto"
+    cpu = "cpu"
+    cuda = "cuda"
+
+
+app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
+
+
+@app.command()
 def run_experiment_cli(
-    config: str | None,
-    name: str | None,
-    output_dir: str | None,
-    validate_config: bool,
-    print_config: bool,
-    dry_run: bool,
-    smoke_test: bool,
-    limit_rows: int | None,
-    profile: bool,
-    device: str | None,
-    num_workers: int | None,
-    pin_memory: bool | None,
-    amp: bool | None,
-    torch_compile: bool | None,
-    resume: str | None,
+    config: Annotated[
+        Path | None, typer.Option("-c", "--config", help="Experiment config YAML.", exists=True)
+    ] = None,
+    name: Annotated[str | None, typer.Option("-n", help="Override experiment name.")] = None,
+    output_dir: Annotated[
+        Path | None, typer.Option("-o", "--output-dir", help="Override output directory.")
+    ] = None,
+    validate_config: Annotated[
+        bool, typer.Option("--validate-config", help="Validate config and exit.")
+    ] = False,
+    print_config: Annotated[
+        bool, typer.Option("--print-config", help="Print resolved config and exit.")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Validate and exit without loading data.")
+    ] = False,
+    smoke_test: Annotated[
+        bool, typer.Option("--smoke-test", help="Run a small synthetic CPU-safe smoke experiment.")
+    ] = False,
+    limit_rows: Annotated[
+        int | None, typer.Option(help="Limit loaded rows for development.")
+    ] = None,
+    profile: Annotated[
+        bool, typer.Option("--profile", help="Write profile.json with stage timings.")
+    ] = False,
+    device: Annotated[DeviceChoice | None, typer.Option(help="Device to use.")] = None,
+    num_workers: Annotated[int | None, typer.Option(help="Number of data loader workers.")] = None,
+    pin_memory: Annotated[bool | None, typer.Option("--pin-memory/--no-pin-memory")] = None,
+    amp: Annotated[bool | None, typer.Option("--amp/--no-amp")] = None,
+    torch_compile: Annotated[bool | None, typer.Option("--compile/--no-compile")] = None,
+    resume: Annotated[
+        Path | None, typer.Option(help="Resume from checkpoint.", exists=True)
+    ] = None,
 ) -> None:
     """Run a solrad_correction experiment from a YAML config file."""
     if not smoke_test and not config:
-        raise click.ClickException("--config is required unless --smoke-test is used")
+        typer.echo("Error: --config is required unless --smoke-test is used", err=True)
+        raise typer.Exit(code=1)
 
     overrides = ExperimentOverrides(
         name=name,
-        output_dir=output_dir,
+        output_dir=str(output_dir) if output_dir else None,
         dry_run=dry_run,
         smoke_test=smoke_test,
         limit_rows=limit_rows,
         profile=profile,
-        device=device,
+        device=str(device) if device else None,
         num_workers=num_workers,
         pin_memory=pin_memory,
         amp=amp,
         torch_compile=torch_compile,
-        resume=resume,
+        resume=str(resume) if resume else None,
     )
-    cfg = load_config_with_overrides(config, smoke_test=smoke_test, overrides=overrides)
+    cfg = load_config_with_overrides(
+        str(config) if config else None, smoke_test=smoke_test, overrides=overrides
+    )
 
     try:
         cfg.validate()
     except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
     if print_config:
-        click.echo(json.dumps(cfg.to_dict(), indent=2, ensure_ascii=False, default=str))
+        typer.echo(json.dumps(cfg.to_dict(), indent=2, ensure_ascii=False, default=str))
         return
 
     if validate_config:
-        click.echo("Config is valid.")
+        typer.echo("Config is valid.")
         return
 
     if dry_run:
-        click.echo("Dry run: config is valid. No data was loaded and no training was run.")
+        typer.echo("Dry run: config is valid. No data was loaded and no training was run.")
         return
 
-    click.echo(f"Experiment: {cfg.name}")
-    click.echo(f"Model:      {cfg.model.model_type}")
-    click.echo(f"Eval policy:{cfg.model.evaluation_policy:>16}")
-    click.echo(f"Output:     {cfg.experiment_dir}")
+    typer.echo(f"Experiment: {cfg.name}")
+    typer.echo(f"Model:      {cfg.model.model_type}")
+    typer.echo(f"Eval policy:{cfg.model.evaluation_policy:>16}")
+    typer.echo(f"Output:     {cfg.experiment_dir}")
 
     from solrad_correction.experiments.runner import run_experiment
 
     run_experiment(cfg)
 
 
+def main() -> None:
+    app()
+
+
 if __name__ == "__main__":
-    run_experiment_cli()
+    main()

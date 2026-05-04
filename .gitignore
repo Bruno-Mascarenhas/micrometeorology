@@ -42,6 +42,8 @@ coverage.xml
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.pytest_tmp*/
+scratch/
 .ipynb_checkpoints/
 .jupyter/
 

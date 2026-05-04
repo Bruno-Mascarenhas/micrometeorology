@@ -3,39 +3,28 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
 import yaml
-from click.testing import CliRunner
+from typer.testing import CliRunner
 
-from solrad_correction.cli import run_experiment_cli
-from solrad_correction.cli_colab import load_colab_config, run_colab_cli
-
-if TYPE_CHECKING:
-    from collections.abc import Generator
+from solrad_correction.cli import app as solrad_app
+from solrad_correction.cli_colab import app as colab_app
+from solrad_correction.cli_colab import load_colab_config
 
 
 @pytest.fixture
-def scratch_config() -> Generator[Path]:
-    scratch = Path("scratch")
-    scratch.mkdir(exist_ok=True)
-    path = scratch / "cli_contract.yaml"
-    try:
-        yield path
-    finally:
-        path.unlink(missing_ok=True)
+def scratch_config(tmp_path: Path) -> Path:
+    return tmp_path / "cli_contract.yaml"
 
 
 def test_cli_validate_print_and_dry_run_config_modes(scratch_config: Path) -> None:
     scratch_config.write_text(yaml.safe_dump({"name": "cli_contract"}), encoding="utf-8")
     runner = CliRunner()
 
-    validate = runner.invoke(
-        run_experiment_cli, ["--config", str(scratch_config), "--validate-config"]
-    )
-    printed = runner.invoke(run_experiment_cli, ["--config", str(scratch_config), "--print-config"])
-    dry_run = runner.invoke(run_experiment_cli, ["--config", str(scratch_config), "--dry-run"])
+    validate = runner.invoke(solrad_app, ["--config", str(scratch_config), "--validate-config"])
+    printed = runner.invoke(solrad_app, ["--config", str(scratch_config), "--print-config"])
+    dry_run = runner.invoke(solrad_app, ["--config", str(scratch_config), "--dry-run"])
 
     assert validate.exit_code == 0, validate.output
     assert "Config is valid." in validate.output
@@ -45,15 +34,13 @@ def test_cli_validate_print_and_dry_run_config_modes(scratch_config: Path) -> No
     assert "Dry run" in dry_run.output
 
 
-def test_cli_invalid_config_reports_click_error(scratch_config: Path) -> None:
+def test_cli_invalid_config_reports_error(scratch_config: Path) -> None:
     scratch_config.write_text(
         yaml.safe_dump({"model": {"model_type": "bad_model"}}),
         encoding="utf-8",
     )
 
-    result = CliRunner().invoke(
-        run_experiment_cli, ["--config", str(scratch_config), "--validate-config"]
-    )
+    result = CliRunner().invoke(solrad_app, ["--config", str(scratch_config), "--validate-config"])
 
     assert result.exit_code != 0
     assert "Invalid experiment config" in result.output
@@ -63,7 +50,7 @@ def test_cli_runtime_overrides_show_in_print_config(scratch_config: Path) -> Non
     scratch_config.write_text(yaml.safe_dump({"name": "cli_runtime"}), encoding="utf-8")
 
     result = CliRunner().invoke(
-        run_experiment_cli,
+        solrad_app,
         [
             "--config",
             str(scratch_config),
@@ -92,13 +79,13 @@ def test_cli_runtime_overrides_show_in_print_config(scratch_config: Path) -> Non
         '"torch_compile": false',
         '"limit_rows": 10',
         '"profile": true',
-        '"output_dir": "scratch/cli-runtime-output"',
+        f'"output_dir": "{str(Path("scratch/cli-runtime-output")).replace(chr(92), chr(92) * 2)}"',
     ]:
         assert expected in result.output
 
 
 def test_cli_smoke_dry_run_does_not_need_config() -> None:
-    result = CliRunner().invoke(run_experiment_cli, ["--smoke-test", "--dry-run"])
+    result = CliRunner().invoke(solrad_app, ["--smoke-test", "--dry-run"])
 
     assert result.exit_code == 0, result.output
     assert "Dry run" in result.output
@@ -134,14 +121,14 @@ def test_colab_wrapper_loads_config_and_applies_runtime_overrides(scratch_config
     assert cfg.runtime.profile is True
 
 
-def test_colab_click_entrypoint_prints_resolved_config(scratch_config: Path) -> None:
+def test_colab_entrypoint_prints_resolved_config(scratch_config: Path) -> None:
     scratch_config.write_text(
         yaml.safe_dump({"name": "colab_print", "model": {"model_type": "lstm"}}),
         encoding="utf-8",
     )
 
     result = CliRunner().invoke(
-        run_colab_cli,
+        colab_app,
         ["--config", str(scratch_config), "--print-config", "--device", "cpu"],
     )
 
