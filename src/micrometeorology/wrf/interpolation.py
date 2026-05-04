@@ -12,6 +12,11 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import xarray as xr
 
+from micrometeorology.wrf.safety import (
+    assert_reasonable_array_size,
+    assert_same_dims_and_shape,
+)
+
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
@@ -42,8 +47,21 @@ def vertical_interpolate(
     NDArray
         (N-1)-D array with interpolated values.
     """
-    values = np.asarray(values, dtype=float)
-    heights = np.asarray(heights, dtype=float)
+    values_arr = np.asarray(values)
+    heights_arr = np.asarray(heights)
+    if values_arr.shape != heights_arr.shape:
+        raise ValueError("values and heights must have the same shape")
+
+    dtype = np.result_type(values_arr.dtype, heights_arr.dtype, np.float32)
+    assert_reasonable_array_size(
+        values_arr.shape,
+        dtype,
+        context="vertical interpolation block",
+        multiplier=6.0,
+    )
+
+    values = values_arr.astype(dtype, copy=False)
+    heights = heights_arr.astype(dtype, copy=False)
     if values.shape != heights.shape:
         raise ValueError("values and heights must have the same shape")
 
@@ -66,7 +84,7 @@ def vertical_interpolate(
     valid = ~np.isnan(h_sorted) & ~np.isnan(s_sorted)
     valid_count = np.sum(valid, axis=0)
 
-    result = np.full(n_cols, np.nan, dtype=float)
+    result = np.full(n_cols, np.nan, dtype=dtype)
 
     # Single valid level → use that value
     single_mask = valid_count == 1
@@ -129,6 +147,7 @@ def _xarray_vertical_interpolate(
     would dispatch one Python call per grid cell, which is catastrophically
     slow for WRF grids.
     """
+    assert_same_dims_and_shape(values, heights, context="xarray vertical interpolation")
     level_dim = _vertical_dim(values)
     return cast(
         "xr.DataArray",

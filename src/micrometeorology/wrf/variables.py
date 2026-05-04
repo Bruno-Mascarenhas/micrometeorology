@@ -7,10 +7,17 @@ duplicated across the ``drawmap()`` functions in the legacy scripts.
 from __future__ import annotations
 
 import logging
+import operator
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import xarray as xr
+
+from micrometeorology.wrf.safety import (
+    assert_reasonable_array_size,
+    destagger_dataarray,
+    safe_binary_op,
+)
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -61,6 +68,11 @@ def squeeze_array(value: WRFArray) -> WRFArray:
 def materialize_2d(value: WRFArray) -> NDArray:
     """Materialize an ndarray/DataArray at the final 2-D worker payload boundary."""
     squeezed = squeeze_array(value)
+    shape = tuple(int(size) for size in squeezed.shape)
+    if len(shape) != 2:
+        raise ValueError(f"Expected a 2-D worker payload, got shape {shape!r}")
+    dtype = squeezed.dtype if _is_xarray(squeezed) else np.asarray(squeezed).dtype
+    assert_reasonable_array_size(shape, dtype, context="materialize_2d")
     if _is_xarray(squeezed):
         return np.asarray(squeezed.to_numpy())
     return np.asarray(squeezed)
@@ -68,6 +80,9 @@ def materialize_2d(value: WRFArray) -> NDArray:
 
 def materialize_nd(value: WRFArray) -> NDArray:
     """Materialize an ndarray/DataArray without changing dimensionality."""
+    shape = tuple(int(size) for size in value.shape)
+    dtype = value.dtype if _is_xarray(value) else np.asarray(value).dtype
+    assert_reasonable_array_size(shape, dtype, context="materialize_nd")
     if _is_xarray(value):
         return np.asarray(value.to_numpy())
     return np.asarray(value)
@@ -85,7 +100,13 @@ def get_low_high(variable: WRFArray) -> tuple[float, float]:
 def get_low_high_wind(u: WRFArray, v: WRFArray) -> tuple[float, float]:
     """Return ``(min, max)`` wind speed from U/V arrays (skip first step)."""
     if _is_xarray(u) or _is_xarray(v):
-        speed = np.hypot(_tail(u), _tail(v))
+        speed = safe_binary_op(
+            _tail(u),
+            _tail(v),
+            np.hypot,
+            context="wind speed bounds",
+            result_dtype=float,
+        )
         return _as_float(speed.min(skipna=True)), _as_float(speed.max(skipna=True))
     flat_u = u[1:, :].ravel()
     flat_v = v[1:, :].ravel()
@@ -199,10 +220,24 @@ def compute_relative_humidity(q2: WRFArray, t2: WRFArray, psfc: WRFArray) -> WRF
     """
     epsilon = 0.622
     temp_c = t2 - 273.15
-    vapor_pressure = (q2 * psfc) / (epsilon + q2)
+    numerator = safe_binary_op(
+        q2,
+        psfc,
+        operator.mul,
+        context="relative humidity q2*psfc",
+        result_dtype=float,
+    )
+    vapor_pressure = numerator / (epsilon + q2)
     saturation_pressure = 611.2 * np.exp((17.67 * temp_c) / (temp_c + 243.5))
     with np.errstate(invalid="ignore", divide="ignore"):
-        rh = 100.0 * vapor_pressure / saturation_pressure
+        rh = safe_binary_op(
+            vapor_pressure,
+            saturation_pressure,
+            operator.truediv,
+            context="relative humidity vapor/saturation pressure",
+            result_dtype=float,
+        )
+        rh = 100.0 * rh
     if _is_xarray(rh):
         return rh.clip(min=0.0, max=100.0)
     return np.clip(rh, 0.0, 100.0)
@@ -230,7 +265,7 @@ def extract_rain(ds: WRFReader) -> tuple[WRFArray, float, float]:
     """Extract total precipitation (convective + non-convective, cumulative)."""
     rainc = ds.get_variable("RAINC")
     rainnc = ds.get_variable("RAINNC")
-    total = rainc + rainnc
+    total = safe_binary_op(rainc, rainnc, operator.add, context="total precipitation")
     r_min, r_max = get_low_high_rain(total)
     return total, r_min, r_max
 
@@ -271,8 +306,20 @@ def compute_air_density(t2: WRFArray, psfc: WRFArray, q2: WRFArray) -> WRFArray:
         This is a near-surface density estimate. It should not be treated as
         density at turbine hub height without a vertical thermodynamic profile.
     """
-    virtual_temperature = t2 * (1.0 + 0.61 * q2)
-    return psfc / (287.05 * virtual_temperature)
+    virtual_temperature = safe_binary_op(
+        t2,
+        1.0 + 0.61 * q2,
+        operator.mul,
+        context="air density virtual temperature",
+        result_dtype=float,
+    )
+    return safe_binary_op(
+        psfc,
+        287.05 * virtual_temperature,
+        operator.truediv,
+        context="air density pressure/virtual temperature",
+        result_dtype=float,
+    )
 
 
 def extract_wind_power_density_10m(ds: WRFReader) -> tuple[WRFArray, float, float]:
@@ -296,9 +343,16 @@ def extract_wind_power_density_10m(ds: WRFReader) -> tuple[WRFArray, float, floa
     t2 = ds.get_variable("T2")
     psfc = ds.get_variable("PSFC")
     q2 = ds.get_variable("Q2")
-    speed = np.hypot(u10, v10)
+    speed = safe_binary_op(u10, v10, np.hypot, context="10m wind speed", result_dtype=float)
     density = compute_air_density(t2, psfc, q2)
-    power_density = 0.5 * density * np.power(speed, 3)
+    power_density = safe_binary_op(
+        density,
+        np.power(speed, 3),
+        operator.mul,
+        context="10m wind power density",
+        result_dtype=float,
+    )
+    power_density = 0.5 * power_density
     p_min, p_max = get_low_high(power_density)
     return power_density, p_min, p_max
 
@@ -319,52 +373,118 @@ def compute_adjusted_heights(ds: WRFReader) -> tuple[WRFArray, WRFArray, WRFArra
     u_raw = ds.get_variable("U")
     v_raw = ds.get_variable("V")
 
-    # Interpolate staggered grid to cell centers
-    u_central = (u_raw[:, :, :, :-1] + u_raw[:, :, :, 1:]) / 2.0
-    v_central = (v_raw[:, :, :-1, :] + v_raw[:, :, 1:, :]) / 2.0
+    # Interpolate staggered grids to mass-grid cell centers positionally.
+    # This intentionally bypasses xarray label alignment while preserving
+    # lazy/dask arrays, because staggered coordinates are adjacent samples, not
+    # labels that should be intersected.
+    u_central: Any
+    if _is_xarray(u_raw):
+        u_central = destagger_dataarray(
+            cast("xr.DataArray", u_raw),
+            staggered_dim="west_east_stag",
+            target_dim="west_east",
+            context="U wind destagger",
+        )
+    else:
+        u_shape = list(u_raw.shape)
+        u_shape[3] -= 1
+        assert_reasonable_array_size(u_shape, u_raw.dtype, context="U wind destagger")
+        u_central = (u_raw[:, :, :, :-1] + u_raw[:, :, :, 1:]) / 2.0
 
-    # WRF stores U on a west_east-staggered grid and V on a south_north-staggered
-    # grid.  After averaging adjacent points the array shape matches the mass
-    # grid, but xarray preserves the original "*_stag" dimension name.  We must
-    # rename to the unstaggered names so that downstream operations (np.hypot,
-    # xr.apply_ufunc) can align dimensions without triggering an outer-product
-    # broadcast that causes a catastrophic memory allocation.
-    if _is_xarray(u_central) and "west_east_stag" in u_central.dims:
-        u_central = u_central.rename({"west_east_stag": "west_east"})
-    if _is_xarray(v_central) and "south_north_stag" in v_central.dims:
-        v_central = v_central.rename({"south_north_stag": "south_north"})
+    v_central: Any
+    if _is_xarray(v_raw):
+        v_central = destagger_dataarray(
+            cast("xr.DataArray", v_raw),
+            staggered_dim="south_north_stag",
+            target_dim="south_north",
+            context="V wind destagger",
+        )
+    else:
+        v_shape = list(v_raw.shape)
+        v_shape[2] -= 1
+        assert_reasonable_array_size(v_shape, v_raw.dtype, context="V wind destagger")
+        v_central = (v_raw[:, :, :-1, :] + v_raw[:, :, 1:, :]) / 2.0
 
     # Geopotential height
     ph = ds.get_variable("PH")
     phb = ds.get_variable("PHB")
     hgt = ds.get_variable("HGT")
 
-    geopot_total = ph + phb
+    geopot_total = safe_binary_op(ph, phb, operator.add, context="PH+PHB geopotential")
     height = geopot_total / 9.81
 
     # Midpoint heights
-    height_central = (height[:, :-1, :, :] + height[:, 1:, :, :]) / 2.0
+    height_central: Any
+    if _is_xarray(height):
+        height_central = destagger_dataarray(
+            cast("xr.DataArray", height),
+            staggered_dim="bottom_top_stag",
+            target_dim="bottom_top",
+            context="geopotential height destagger",
+        )
+    else:
+        height_shape = list(height.shape)
+        height_shape[1] -= 1
+        assert_reasonable_array_size(
+            height_shape,
+            height.dtype,
+            context="geopotential height destagger",
+        )
+        height_central = (height[:, :-1, :, :] + height[:, 1:, :, :]) / 2.0
 
-    # Adjust for terrain — vectorized broadcast (hgt is 3-D: time, ny, nx)
-    # height_central is 4-D: time, level, ny, nx
-    # Broadcasting hgt[:, np.newaxis, :, :] aligns the level axis automatically
+    # Adjust for terrain.  Build the expanded HGT array with the exact target
+    # dims instead of relying on xarray's automatic alignment/broadcasting.
     height_adjusted: Any
     if _is_xarray(height_central):
-        height_central_da = cast("xr.DataArray", height_central)
+        height_central_da = height_central
         hgt_da = cast("xr.DataArray", hgt)
+        expected_hgt_dims = (
+            height_central_da.dims[0],
+            height_central_da.dims[2],
+            height_central_da.dims[3],
+        )
+        if hgt_da.dims != expected_hgt_dims:
+            raise ValueError(
+                "HGT dimensions do not match height field: "
+                f"{hgt_da.dims!r} vs expected {expected_hgt_dims!r}"
+            )
+        if hgt_da.shape != (
+            height_central_da.shape[0],
+            height_central_da.shape[2],
+            height_central_da.shape[3],
+        ):
+            raise ValueError(
+                "HGT shape does not match height field: "
+                f"{hgt_da.shape!r} vs expected "
+                f"{(height_central_da.shape[0], height_central_da.shape[2], height_central_da.shape[3])!r}"
+            )
         level_dim = height_central_da.dims[1]
-        height_adjusted = height_central_da - hgt_da.expand_dims(
+        hgt_expanded = hgt_da.expand_dims(
             {level_dim: height_central_da.sizes[level_dim]},
             axis=1,
+        ).transpose(*height_central_da.dims)
+        height_adjusted = safe_binary_op(
+            height_central_da,
+            hgt_expanded,
+            operator.sub,
+            context="height above terrain",
+            result_dtype=float,
         )
-        # PH/PHB use bottom_top_stag; midpoint averaging removes one level
-        # but xarray keeps the stag name — rename to match the mass-grid dim.
-        if "bottom_top_stag" in height_adjusted.dims:
-            height_adjusted = height_adjusted.rename({"bottom_top_stag": "bottom_top"})
     else:
+        assert_reasonable_array_size(
+            height_central.shape,
+            height_central.dtype,
+            context="height above terrain",
+        )
         height_adjusted = height_central - hgt[:, np.newaxis, :, :]
 
     # Speed at all levels
-    speed_4d = np.hypot(u_central, v_central)
+    speed_4d = safe_binary_op(
+        u_central,
+        v_central,
+        np.hypot,
+        context="3D wind speed from destaggered U/V",
+        result_dtype=float,
+    )
 
     return u_central, v_central, height_adjusted, speed_4d

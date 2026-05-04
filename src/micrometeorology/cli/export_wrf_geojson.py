@@ -10,15 +10,11 @@ Usage::
 
     # Multiple domains
     labmim-wrf-geojson --wrf-dir /path/to/wrfout/ --date 20240101 \\
-        --domains 1 4 -o output/JSON -g output/GeoJSON --workers 44
+        --domains 1,4 -o output/JSON -g output/GeoJSON --workers 44
 
-    # Auto mode chooses eager/pickle for tiny work and lazy/memmap for large work
+    # Auto mode chooses serial for single-worker work and memmap for multi-worker work
     labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
         -o output/JSON -g output/GeoJSON
-
-    # Force old eager/pickle behavior
-    labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
-        -o output/JSON -g output/GeoJSON --reader eager --chunks none --worker-backend pickle
 
     # Force xarray-backed lazy reader
     labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
@@ -34,16 +30,16 @@ Usage::
 
 from __future__ import annotations
 
+from enum import StrEnum
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, Annotated, cast
 
-import click
 import numpy as np
+import typer
 
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import geojson, reader
-from micrometeorology.wrf.reader import resolve_wrfout_paths
 from micrometeorology.wrf import variables as vmod
 from micrometeorology.wrf.batch import (
     JsonTask,
@@ -62,6 +58,12 @@ from micrometeorology.wrf.interpolation import (
     compute_wind_vectors_at_height,
     interpolate_speed_to_height,
 )
+from micrometeorology.wrf.reader import resolve_wrfout_paths
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
 DEFAULT_VARS = [
     "temperature",
@@ -101,10 +103,10 @@ def _normalize_var_list(var_list: list[str]) -> list[str]:
 
 
 def _resolve_wrfout_paths(
-    wrf_dir: str | None,
+    wrf_dir: Path | str | None,
     date: str | None,
     domains: tuple[int, ...],
-    dataset: str | None,
+    dataset: Path | str | None,
 ) -> list[Path]:
     """Resolve WRF output file paths.
 
@@ -115,11 +117,11 @@ def _resolve_wrfout_paths(
         return [Path(dataset)]
 
     if not wrf_dir or not date:
-        raise click.UsageError("Provide either --dataset or --wrf-dir + --date")
+        raise typer.BadParameter("Provide either --dataset or --wrf-dir + --date")
 
     paths = resolve_wrfout_paths(wrf_dir, date, domains or None)
     if not paths:
-        click.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
+        typer.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
     return paths
 
 
@@ -138,9 +140,11 @@ def _format_datetime(dt) -> str:
 def _build_json_tasks_for_domain(
     ds: reader.WRFReader,
     var_list: list[str],
-    json_dir: str,
-    geojson_dir: str,
+    json_dir: Path | str,
+    geojson_dir: Path | str,
     skip_first: int,
+    task_sink: Callable[[list[JsonTask], str], None] | None = None,
+    task_batch_size: int = 16,
 ) -> list[JsonTask]:
     """Build all JSON tasks for a single domain, saving GeoJSON grids along the way."""
     lon, lat = ds.read_grid()
@@ -153,6 +157,13 @@ def _build_json_tasks_for_domain(
     tasks: list[JsonTask] = []
 
     for var_name in var_list:
+
+        def add_task(task: JsonTask, label: str = var_name) -> None:
+            tasks.append(task)
+            if task_sink is not None and len(tasks) >= task_batch_size:
+                task_sink(tasks, label)
+                tasks.clear()
+
         nc_suffix = VARIABLE_NETCDF_MAP.get(var_name, var_name.upper())
 
         if var_name == WRFVariable.TEMPERATURE:
@@ -162,7 +173,7 @@ def _build_json_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.extract_temperature_step(t2[i : i + 1, :, :])
-                tasks.append(
+                add_task(
                     JsonTask(
                         data=vmod.materialize_2d(data),
                         scale_min=vmin,
@@ -180,7 +191,7 @@ def _build_json_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.extract_temperature_step(tsk[i : i + 1, :, :])
-                tasks.append(
+                add_task(
                     JsonTask(
                         data=vmod.materialize_2d(data),
                         scale_min=vmin,
@@ -198,7 +209,7 @@ def _build_json_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.materialize_2d(rh[i : i + 1, :, :])
-                tasks.append(
+                add_task(
                     JsonTask(
                         data=data,
                         scale_min=vmin,
@@ -216,7 +227,7 @@ def _build_json_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.extract_rain_step(total, i)
-                tasks.append(
+                add_task(
                     JsonTask(
                         data=vmod.materialize_2d(data),
                         scale_min=vmin,
@@ -236,7 +247,7 @@ def _build_json_tasks_for_domain(
                 u = vmod.materialize_2d(u10[i : i + 1])
                 v = vmod.materialize_2d(v10[i : i + 1])
                 speed = np.hypot(u, v)
-                tasks.append(
+                add_task(
                     JsonTask(
                         data=speed,
                         scale_min=vmin,
@@ -257,7 +268,7 @@ def _build_json_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.materialize_2d(var_data[i : i + 1, :, :])
-                tasks.append(
+                add_task(
                     JsonTask(
                         data=data,
                         scale_min=vmin,
@@ -270,7 +281,7 @@ def _build_json_tasks_for_domain(
 
         elif var_name == WRFVariable.WIND_POTENTIAL:
             # Wind potential: interpolate wind speed to 50m, 100m, 150m
-            click.echo("  Computing adjusted heights for wind potential...")
+            typer.echo("  Computing adjusted heights for wind potential...")
             u_central, v_central, height_adjusted, speed_4d = vmod.compute_adjusted_heights(ds)
 
             for target_height, suffix in [
@@ -278,7 +289,7 @@ def _build_json_tasks_for_domain(
                 (100, "POT_EOLICO_100M"),
                 (150, "POT_EOLICO_150M"),
             ]:
-                click.echo(f"    -> Interpolating to {target_height}m ({suffix})...")
+                typer.echo(f"    -> Interpolating to {target_height}m ({suffix})...")
                 speed_3d = interpolate_speed_to_height(speed_4d, height_adjusted, target_height)
 
                 vmin = float(np.nanmin(speed_3d))
@@ -302,7 +313,7 @@ def _build_json_tasks_for_domain(
                     except Exception:
                         wind_vectors = None
 
-                    tasks.append(
+                    add_task(
                         JsonTask(
                             data=data,
                             scale_min=vmin,
@@ -320,7 +331,7 @@ def _build_json_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.materialize_2d(power_density[i : i + 1, :, :])
-                tasks.append(
+                add_task(
                     JsonTask(
                         data=data,
                         scale_min=vmin,
@@ -333,7 +344,7 @@ def _build_json_tasks_for_domain(
 
         elif var_name == "wind_vectors":
             # Standalone wind vector overlay files (surface U10/V10)
-            click.echo("  Computing standalone wind vectors (U10/V10)...")
+            typer.echo("  Computing standalone wind vectors (U10/V10)...")
             u10, v10, _vmin, _vmax = vmod.extract_wind(ds)
             for meta in time_meta:
                 if meta.get("skip"):
@@ -365,7 +376,7 @@ def _build_json_tasks_for_domain(
             elif ds.has_variable(nc_var):
                 var_data, vmin, vmax = vmod.extract_scalar(ds, nc_var)
             else:
-                click.echo(f"  ⚠ Variable {nc_var} not found — skipping")
+                typer.echo(f"  ⚠ Variable {nc_var} not found — skipping")
                 continue
 
             for meta in time_meta:
@@ -373,7 +384,7 @@ def _build_json_tasks_for_domain(
                     continue
                 i = meta["index"]
                 data = vmod.materialize_2d(var_data[i : i + 1, :, :])
-                tasks.append(
+                add_task(
                     JsonTask(
                         data=data,
                         scale_min=vmin,
@@ -384,77 +395,101 @@ def _build_json_tasks_for_domain(
                     )
                 )
 
+        if task_sink is not None and tasks:
+            task_sink(tasks, var_name)
+            tasks.clear()
+
     return tasks
 
 
-@click.command()
-@click.option("--dataset", "-d", default=None, type=click.Path(), help="Single WRF file.")
-@click.option("--wrf-dir", default=None, type=click.Path(), help="Directory with wrfout files.")
-@click.option("--date", default=None, help="Simulation date YYYYMMDD.")
-@click.option("--domains", "-D", type=int, multiple=True, default=None, help="Domain numbers.")
-@click.option("--output-dir", "-o", required=True, help="Output dir for value JSON files.")
-@click.option("--geojson-dir", "-g", required=True, help="Output dir for GeoJSON grid files.")
-@click.option("--variables", "-v", multiple=True, default=None, help="Variables to process.")
-@click.option("--skip-first", default=0, type=int, help="Time steps to skip.")
-@click.option(
-    "--reader",
-    "reader_backend",
-    default="auto",
-    type=click.Choice(["auto", "eager", "lazy"]),
-    show_default=True,
-    help="WRF reader backend. Auto chooses eager for small inputs and lazy for large/chunked inputs.",
-)
-@click.option(
-    "--chunks",
-    default="auto",
-    show_default=True,
-    help="Lazy-reader chunks: 'auto', 'none', or comma-separated dim=size pairs.",
-)
-@click.option(
-    "--workers",
-    "-w",
-    default=None,
-    type=int,
-    help=f"Parallel workers (default: {default_workers()}).",
-)
-@click.option(
-    "--worker-backend",
-    "worker_backend",
-    default="auto",
-    type=click.Choice(["auto", "serial", "pickle", "memmap"]),
-    show_default=True,
-    help="JSON worker payload backend. Auto uses serial for single-worker work and memmap for large multi-worker exports.",
-)
-@click.option(
-    "--tmp-dir",
-    "tmp_dir",
-    default=None,
-    type=click.Path(file_okay=False),
-    help="Parent directory for temporary memmap payloads when --worker-backend memmap.",
-)
-@click.option("--log-level", default="INFO", help="Logging level.")
-def main(
-    dataset: str | None,
-    wrf_dir: str | None,
-    date: str | None,
-    domains: tuple[int, ...],
-    output_dir: str,
-    geojson_dir: str,
-    variables: tuple[str, ...],
-    skip_first: int,
-    reader_backend: str,
-    chunks: str,
-    workers: int | None,
-    worker_backend: str,
-    tmp_dir: str | None,
-    log_level: str,
+def _parse_int_csv(raw: str | list[str] | None) -> tuple[int, ...]:
+    """Parse comma-separated or repeated integers."""
+    if not raw:
+        return ()
+    if isinstance(raw, str):
+        raw = [raw]
+    res = []
+    for item in raw:
+        for x in item.split(","):
+            if x.strip():
+                res.append(int(x.strip()))
+    return tuple(res)
+
+
+def _parse_csv(raw: str | list[str] | None) -> tuple[str, ...]:
+    """Parse comma-separated or repeated strings."""
+    if not raw:
+        return ()
+    if isinstance(raw, str):
+        raw = [raw]
+    res = []
+    for item in raw:
+        for x in item.split(","):
+            if x.strip():
+                res.append(x.strip())
+    return tuple(res)
+
+
+class ReaderChoice(StrEnum):
+    auto = "auto"
+    eager = "eager"
+    lazy = "lazy"
+
+
+class WorkerChoice(StrEnum):
+    auto = "auto"
+    serial = "serial"
+    memmap = "memmap"
+
+
+@app.command()
+def run(
+    dataset: Annotated[
+        Path | None, typer.Option("-d", "--dataset", help="Single WRF file.")
+    ] = None,
+    wrf_dir: Annotated[Path | None, typer.Option(help="Directory with wrfout files.")] = None,
+    date: Annotated[str | None, typer.Option(help="Simulation date YYYYMMDD.")] = None,
+    domains: Annotated[
+        list[str],
+        typer.Option("-D", "--domains", help="Domain numbers. Can be repeated or comma-separated."),
+    ] = [],
+    output_dir: Annotated[
+        Path, typer.Option("-o", "--output-dir", help="Output dir for value JSON files.")
+    ] = ...,  # type: ignore[assignment]
+    geojson_dir: Annotated[
+        Path, typer.Option("-g", "--geojson-dir", help="Output dir for GeoJSON grid files.")
+    ] = ...,  # type: ignore[assignment]
+    variables: Annotated[
+        list[str],
+        typer.Option(
+            "-v", "--variables", help="Variables to process. Can be repeated or comma-separated."
+        ),
+    ] = [],
+    skip_first: Annotated[int, typer.Option(help="Time steps to skip.")] = 0,
+    reader_backend: Annotated[
+        ReaderChoice, typer.Option("--reader", help="WRF reader backend.")
+    ] = ReaderChoice.auto,
+    chunks: Annotated[
+        str, typer.Option(help="Lazy-reader chunks: 'auto', 'none', or dim=size pairs.")
+    ] = "auto",
+    workers: Annotated[
+        int | None,
+        typer.Option("-w", "--workers", help=f"Parallel workers (default: {default_workers()})."),
+    ] = None,
+    worker_backend: Annotated[
+        WorkerChoice, typer.Option("--worker-backend", help="JSON worker backend.")
+    ] = WorkerChoice.auto,
+    tmp_dir: Annotated[
+        Path | None, typer.Option(help="Temp directory for memmap payloads.")
+    ] = None,
+    log_level: Annotated[str, typer.Option(help="Logging level.")] = "INFO",
 ) -> None:
     """Generate GeoJSON and value JSON files with parallel writing."""
     setup_logging(log_level)
 
-    var_list = list(variables) if variables else DEFAULT_VARS
+    var_list = list(_parse_csv(variables)) if variables else DEFAULT_VARS
     var_list = _normalize_var_list(var_list)
-    paths = _resolve_wrfout_paths(wrf_dir, date, domains, dataset)
+    paths = _resolve_wrfout_paths(wrf_dir, date, _parse_int_csv(domains), dataset)
     try:
         initial_plan = resolve_wrf_execution_plan(
             paths=paths,
@@ -466,56 +501,75 @@ def main(
             tmp_dir=tmp_dir,
         )
     except ValueError as exc:
-        raise click.UsageError(str(exc)) from exc
+        raise typer.BadParameter(str(exc)) from exc
 
     if not paths:
-        click.echo("No WRF files found.")
+        typer.echo("No WRF files found.")
         return
 
-    click.echo(f"Files: {[p.name for p in paths]}")
-    click.echo(f"Variables: {var_list}")
-    click.echo(format_wrf_execution_plan(initial_plan))
+    typer.echo(f"Files: {[p.name for p in paths]}")
+    typer.echo(f"Variables: {var_list}")
+    typer.echo(format_wrf_execution_plan(initial_plan))
 
-    # Build all tasks
-    all_tasks: list[JsonTask] = []
+    # Build and write tasks per domain/variable to avoid keeping all frames in RAM.
+    generated_count = 0
+    printed_plans: set[str] = set()
     for wrf_path in paths:
-        click.echo(f"\nLoading {wrf_path.name}...")
+        typer.echo(f"\nLoading {wrf_path.name}...")
+
+        def write_task_batch(
+            tasks: list[JsonTask],
+            label: str,
+            current_wrf_path: Path = wrf_path,
+        ) -> None:
+            nonlocal generated_count
+            try:
+                batch_plan = resolve_wrf_execution_plan(
+                    paths=[current_wrf_path],
+                    workflow="json",
+                    reader_request=cast("ReaderRequest", initial_plan.reader),
+                    chunks_request=chunks,
+                    json_worker_request=cast("JsonWorkerRequest", worker_backend),
+                    workers=initial_plan.workers,
+                    tmp_dir=tmp_dir,
+                    estimated_json_payload_bytes=estimate_json_payload_bytes(tasks),
+                    json_task_count=len(tasks),
+                )
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+            plan_text = format_wrf_execution_plan(batch_plan)
+            if batch_plan != initial_plan and plan_text not in printed_plans:
+                typer.echo(plan_text)
+                printed_plans.add(plan_text)
+            json_paths = run_json_tasks(
+                tasks,
+                workers=batch_plan.workers,
+                backend=batch_plan.json_worker_backend,
+                tmp_dir=batch_plan.tmp_dir,
+            )
+            generated_count += len(json_paths)
+            typer.echo(f"  -> {len(json_paths)} JSON files generated for {label}")
+
         with reader.open_wrf_dataset(
             wrf_path,
             reader=initial_plan.reader,
             chunks=initial_plan.chunks,
         ) as ds:
-            tasks = _build_json_tasks_for_domain(ds, var_list, output_dir, geojson_dir, skip_first)
-            all_tasks.extend(tasks)
-            click.echo(f"  → {len(tasks)} JSON files queued")
+            _build_json_tasks_for_domain(
+                ds,
+                var_list,
+                output_dir,
+                geojson_dir,
+                skip_first,
+                task_sink=write_task_batch,
+            )
 
-    click.echo(f"\nTotal JSON files: {len(all_tasks)}")
-    try:
-        final_plan = resolve_wrf_execution_plan(
-            paths=paths,
-            workflow="json",
-            reader_request=cast("ReaderRequest", initial_plan.reader),
-            chunks_request=chunks,
-            json_worker_request=cast("JsonWorkerRequest", worker_backend),
-            workers=initial_plan.workers,
-            tmp_dir=tmp_dir,
-            estimated_json_payload_bytes=estimate_json_payload_bytes(all_tasks),
-            json_task_count=len(all_tasks),
-        )
-    except ValueError as exc:
-        raise click.UsageError(str(exc)) from exc
-    if final_plan != initial_plan:
-        click.echo(format_wrf_execution_plan(final_plan))
+    typer.echo(f"\n✓ Generated {generated_count} JSON files")
+    typer.echo("✓ Done")
 
-    # Parallel JSON writing
-    json_paths = run_json_tasks(
-        all_tasks,
-        workers=final_plan.workers,
-        backend=final_plan.json_worker_backend,
-        tmp_dir=final_plan.tmp_dir,
-    )
-    click.echo(f"\n✓ Generated {len(json_paths)} JSON files")
-    click.echo("✓ Done")
+
+def main() -> None:
+    app()
 
 
 if __name__ == "__main__":

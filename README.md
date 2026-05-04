@@ -97,12 +97,12 @@ exports can resolve to the lazy reader and memmap payload references.
 When dask-backed xarray chunking is unavailable, auto mode keeps lazy reads
 unchunked instead of failing.
 
-To force the previous fixed behavior:
+To force a conservative single-process path:
 
 ```bash
 labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
     -o output/JSON -g output/GeoJSON \
-    --reader eager --chunks none --worker-backend pickle
+    --reader eager --chunks none --worker-backend serial --workers 1
 ```
 
 For large exports, you can still force lazy + memmap explicitly:

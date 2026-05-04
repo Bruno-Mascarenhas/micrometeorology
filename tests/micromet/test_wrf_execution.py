@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from click.testing import CliRunner
+from typer.testing import CliRunner
 
-from micrometeorology.cli.export_wrf_geojson import main as wrf_geojson_main
+from micrometeorology.cli.export_wrf_geojson import app as wrf_geojson_app
 from micrometeorology.wrf.execution import resolve_wrf_execution_plan
 from tests.micromet.test_wrf_reader import _write_tiny_wrf_file
 
@@ -30,7 +30,7 @@ def _read_json(path: Path) -> dict[str, Any]:
         return cast("dict[str, Any]", json.load(f))
 
 
-def test_auto_resolves_tiny_workload_to_eager_pickle():
+def test_auto_resolves_tiny_workload_to_eager_serial_for_single_worker():
     path = _scratch_file("tiny-auto")
     try:
         plan = resolve_wrf_execution_plan(paths=[path], workflow="json", workers=1)
@@ -97,14 +97,6 @@ def test_explicit_reader_and_worker_overrides_auto_heuristics():
             chunks_request="none",
             workers=1,
         )
-        pickle_plan = resolve_wrf_execution_plan(
-            paths=[path],
-            workflow="json",
-            json_worker_request="pickle",
-            workers=4,
-            estimated_json_payload_bytes=4096,
-            large_json_payload_threshold_bytes=1024,
-        )
         memmap_plan = resolve_wrf_execution_plan(
             paths=[path],
             workflow="json",
@@ -121,7 +113,6 @@ def test_explicit_reader_and_worker_overrides_auto_heuristics():
         assert eager_plan.reader == "eager"
         assert lazy_plan.reader == "lazy"
         assert lazy_plan.chunks is None
-        assert pickle_plan.json_worker_backend == "pickle"
         assert memmap_plan.json_worker_backend == "memmap"
         assert serial_plan.json_worker_backend == "serial"
     finally:
@@ -193,11 +184,11 @@ def test_resolved_plan_is_deterministic():
         path.unlink(missing_ok=True)
 
 
-def test_wrf_geojson_auto_matches_old_explicit_eager_pickle_on_tiny_file():
+def test_wrf_geojson_auto_matches_explicit_eager_serial_on_tiny_file():
     root = Path("scratch") / f"wrf-auto-equivalence-{uuid.uuid4().hex}"
     wrf_path = root / "wrfout_d01_synthetic_cli.nc"
-    old_json = root / "old-json"
-    old_geojson = root / "old-geojson"
+    explicit_json = root / "explicit-json"
+    explicit_geojson = root / "explicit-geojson"
     auto_json = root / "auto-json"
     auto_geojson = root / "auto-geojson"
     root.mkdir(parents=True, exist_ok=True)
@@ -206,15 +197,15 @@ def test_wrf_geojson_auto_matches_old_explicit_eager_pickle_on_tiny_file():
         _write_tiny_wrf_file(wrf_path)
         runner = CliRunner()
 
-        old_result = runner.invoke(
-            wrf_geojson_main,
+        explicit_result = runner.invoke(
+            wrf_geojson_app,
             [
                 "--dataset",
                 str(wrf_path),
                 "-o",
-                str(old_json),
+                str(explicit_json),
                 "-g",
-                str(old_geojson),
+                str(explicit_geojson),
                 "-v",
                 "T2",
                 "--reader",
@@ -222,13 +213,13 @@ def test_wrf_geojson_auto_matches_old_explicit_eager_pickle_on_tiny_file():
                 "--chunks",
                 "none",
                 "--worker-backend",
-                "pickle",
+                "serial",
                 "--workers",
                 "1",
             ],
         )
         auto_result = runner.invoke(
-            wrf_geojson_main,
+            wrf_geojson_app,
             [
                 "--dataset",
                 str(wrf_path),
@@ -243,10 +234,12 @@ def test_wrf_geojson_auto_matches_old_explicit_eager_pickle_on_tiny_file():
             ],
         )
 
-        assert old_result.exit_code == 0, old_result.output
+        assert explicit_result.exit_code == 0, explicit_result.output
         assert auto_result.exit_code == 0, auto_result.output
         assert "reader: eager" in auto_result.output
         assert "worker backend: serial" in auto_result.output
-        assert _read_json(auto_json / "D01_T2_000.json") == _read_json(old_json / "D01_T2_000.json")
+        assert _read_json(auto_json / "D01_T2_000.json") == _read_json(
+            explicit_json / "D01_T2_000.json"
+        )
     finally:
         shutil.rmtree(root, ignore_errors=True)

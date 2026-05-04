@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from solrad_correction.models.base import SequenceRegressorModel, TrainingResult
+from solrad_correction.utils.memory import assert_array_size
 from solrad_correction.utils.seeds import get_device
 from solrad_correction.utils.serialization import load_torch_checkpoint, save_torch_checkpoint
 
@@ -133,7 +134,9 @@ class TorchRegressorModel(SequenceRegressorModel):
         if self._is_torch_dataset(data):
             dataset = cast("Dataset", data)
         else:
-            x_input = torch.tensor(np.asarray(data), dtype=torch.float32)
+            arr = np.asarray(data)
+            assert_array_size(arr.shape, np.float32, context="torch prediction input array")
+            x_input = torch.as_tensor(arr, dtype=torch.float32)
             dataset = TensorDataset(x_input)
 
         # Batch size defaults to a reasonable number if not specified in config

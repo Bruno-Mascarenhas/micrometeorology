@@ -5,11 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-import numpy as np
 import pandas as pd
+
+from solrad_correction.utils.memory import dataframe_to_float32_numpy, series_to_float32_numpy
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import numpy as np
 
 
 @dataclass
@@ -48,12 +51,19 @@ class TabularDataset:
         drop_na:
             If True, drop rows with any NaN in features or target.
         """
-        subset = df[[*feature_columns, target_column]].copy()
+        subset = df.loc[:, [*feature_columns, target_column]]
         if drop_na:
             subset = subset.dropna()
 
-        features = subset[feature_columns].to_numpy().astype(np.float32)
-        targets = subset[target_column].to_numpy().astype(np.float32)
+        features = dataframe_to_float32_numpy(
+            subset,
+            feature_columns,
+            context="TabularDataset feature matrix",
+        )
+        targets = series_to_float32_numpy(
+            subset[target_column],
+            context="TabularDataset target vector",
+        )
         index = subset.index if isinstance(subset.index, pd.DatetimeIndex) else None
 
         return cls(X=features, y=targets, feature_names=list(feature_columns), index=index)

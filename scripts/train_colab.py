@@ -1,4 +1,13 @@
-"""Compatibility entry point for Colab GPU solrad training."""
+"""Compatibility entry point for Colab GPU solrad training.
+
+Examples
+--------
+Run directly using Python:
+    python scripts/train_colab.py --config configs/tcc/experiments/lstm_hourly.yaml
+
+Run and save to Google Drive:
+    python scripts/train_colab.py --config configs/tcc/experiments/lstm_hourly.yaml --output-dir /content/drive/MyDrive/outputs/
+"""
 
 from __future__ import annotations
 

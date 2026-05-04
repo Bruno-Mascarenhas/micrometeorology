@@ -1,15 +1,18 @@
 """CLI: Run model vs. observation comparison.
 
-Usage::
-
-    python scripts/run_comparison.py --obs data/obs/salvador.csv \\
-        --model data/model/wrf_series.csv --output output/comparison/
+Examples
+--------
+Compare model output against observations:
+    labmim-comparison --obs data/obs/salvador.csv --model data/model/wrf_series.csv -o output/comparison/
 """
 
 from __future__ import annotations
 
-import click
+from pathlib import Path  # noqa: TC003
+from typing import Annotated
+
 import matplotlib
+import typer
 
 matplotlib.use("Agg")
 
@@ -22,49 +25,46 @@ from micrometeorology.stats.comparison import (
     read_dataset,
 )
 
+app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
-@click.command()
-@click.option("--obs", required=True, type=click.Path(exists=True), help="Observation data file.")
-@click.option("--model", required=True, type=click.Path(exists=True), help="Model data file.")
-@click.option("--output", "-o", required=True, help="Output directory.")
-@click.option("--separator", default=",", help="Column separator for input files.")
-@click.option("--tolerance", default="30min", help="Max time offset for pairing (e.g. 30min, 1h).")
-@click.option("--plots/--no-plots", default=True, help="Generate comparison plots.")
-@click.option("--log-level", default="INFO", help="Logging level.")
-def main(
-    obs: str,
-    model: str,
-    output: str,
-    separator: str,
-    tolerance: str,
-    plots: bool,
-    log_level: str,
+
+@app.command()
+def run(
+    obs: Annotated[Path, typer.Option(help="Observation data file.", exists=True)],
+    model: Annotated[Path, typer.Option(help="Model data file.", exists=True)],
+    output: Annotated[Path, typer.Option("-o", "--output", help="Output directory.")],
+    separator: Annotated[str, typer.Option(help="Column separator for input files.")] = ",",
+    tolerance: Annotated[
+        str, typer.Option(help="Max time offset for pairing (e.g. 30min, 1h).")
+    ] = "30min",
+    plots: Annotated[
+        bool, typer.Option("--plots/--no-plots", help="Generate comparison plots.")
+    ] = True,
+    log_level: Annotated[str, typer.Option(help="Logging level.")] = "INFO",
 ) -> None:
     """Compare model predictions with observational data."""
     setup_logging(log_level)
     out_dir = ensure_dir(output)
 
-    click.echo(f"Observations: {obs}")
-    click.echo(f"Model:        {model}")
+    typer.echo(f"Observations: {obs}")
+    typer.echo(f"Model:        {model}")
 
-    df_obs = read_dataset(obs, separator=separator)
-    df_model = read_dataset(model, separator=separator)
+    df_obs = read_dataset(str(obs), separator=separator)
+    df_model = read_dataset(str(model), separator=separator)
 
     paired = pair_dataframes(df_obs, df_model, tolerance=tolerance)
     if paired.empty:
-        click.echo("⚠ No overlapping data found")
+        typer.echo("Warning: No overlapping data found")
         return
 
-    click.echo(f"Paired {len(paired)} time steps")
+    typer.echo(f"Paired {len(paired)} time steps")
 
-    # Compute metrics
     metrics_df = compare_all_variables(paired)
     metrics_path = out_dir / "metrics_summary.csv"
     metrics_df.to_csv(metrics_path)
-    click.echo(f"\n{metrics_df.to_string()}")
-    click.echo(f"\n✓ Metrics saved to {metrics_path}")
+    typer.echo(f"\n{metrics_df.to_string()}")
+    typer.echo(f"\n>> Metrics saved to {metrics_path}")
 
-    # Plots
     if plots:
         variables = sorted(
             {
@@ -75,7 +75,11 @@ def main(
         )
         for var in variables:
             plot_comparison(paired, var, output_path=out_dir / f"comparison_{var}.png")
-        click.echo(f"✓ Plots saved to {out_dir}")
+        typer.echo(f">> Plots saved to {out_dir}")
+
+
+def main() -> None:
+    app()
 
 
 if __name__ == "__main__":

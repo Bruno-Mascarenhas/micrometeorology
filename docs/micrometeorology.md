@@ -281,12 +281,12 @@ starts. Small or single-worker jobs use the eager `netCDF4` reader and serial
 JSON writer. Large files, explicit chunk dimensions, or large multi-worker JSON
 payloads can resolve to the xarray-backed lazy reader and memmap worker payloads.
 
-To force the previous fixed behavior:
+To force local single-process behavior:
 
 ```bash
 labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
     -o output/JSON -g output/GeoJSON \
-    --reader eager --chunks none --worker-backend pickle
+    --reader eager --chunks none --worker-backend serial --workers 1
 ```
 
 For large files, the xarray-backed reader can select variables before
@@ -401,6 +401,18 @@ To support different environments without code changes:
 
 Yes. All NetCDF processing works on both Windows and Linux. Dependencies (`netCDF4`, `cartopy`) are cross-platform. WRF itself typically runs on Linux, but its output files (NetCDF) can be processed on any OS.
 
+For test runs on Windows, prefer a pytest temporary directory outside OneDrive
+and outside a corrupted `AppData\Local\Temp\pytest-of-<user>` tree:
+
+```powershell
+$env:LABMIM_PYTEST_TMP = "$env:LOCALAPPDATA\labmim-pytest"
+New-Item -ItemType Directory -Force $env:LABMIM_PYTEST_TMP
+pytest -n auto -v tests --basetemp $env:LABMIM_PYTEST_TMP
+```
+
+The xdist-safe tests use per-test temporary files, so parallel workers should
+not share mutable YAML/config fixtures.
+
 ### How do I add a new sensor?
 
 1. The datalogger already generates the new column in the `.dat` file
@@ -414,4 +426,40 @@ Basemap is deprecated and no longer maintained. All map generation now uses **Ca
 
 ### What is `batch.py`?
 
-The core parallel rendering engine. Instead of rendering frames serially in a loop, it pre-extracts all data, builds lightweight `FigureTask` tuples, and dispatches them to a `ProcessPoolExecutor`. Each worker uses the `Agg` matplotlib backend (no GUI) and a single `pcolormesh` call (instead of the legacy double `contourf` + `pcolor`).
+The core parallel rendering engine. It builds `FigureTask` and `JsonTask` units and dispatches them to either serial execution or memmap-backed workers. The legacy direct-pickle worker backend was removed because it duplicated ndarray payloads across process boundaries and was the easiest path to accidental memory spikes. For server workloads, prefer `--reader lazy --chunks auto --worker-backend memmap` so large arrays are selected lazily and worker processes receive file references.
+
+### Safe WRF execution guardrails
+
+WRF operations now fail early when a planned array operation exceeds the configured memory guardrail. The default single-operation limit is `16 GiB` and can be adjusted with `LABMIM_MAX_ARRAY_GB`. Worker processes are recycled every `64` tasks by default; set `LABMIM_MAX_TASKS_PER_CHILD=0` to disable or raise it if worker startup dominates. For very large NetCDF files, raise these only with `--reader lazy --chunks auto --worker-backend memmap`; high eager limits are not a substitute for chunked execution.
+
+Staggered WRF dimensions are destaggered positionally before derived calculations. Operations such as `U/V` wind speed, `PH+PHB`, height above terrain, relative humidity, precipitation totals, and wind power density validate exact xarray dimension names and shapes before combining arrays. This prevents accidental xarray outer-product alignment between dimensions such as `west_east_stag`, `west_east`, `south_north_stag`, and `south_north`.
+
+Recommended server commands:
+
+```bash
+labmim-wrf-geojson --wrf-dir /data/wrf --date 20240101 --domains 1 4 \
+  --variables temperature wind rain wind_vectors \
+  --reader lazy --chunks auto --worker-backend memmap --workers 8 \
+  --tmp-dir /scratch/labmim-wrf-json -o output/JSON -g output/GeoJSON
+
+labmim-wrf-figures --wrf-dir /data/wrf --date 20240101 --domains 3 \
+  --variables temperature wind SWDOWN \
+  --reader lazy --chunks auto --worker-backend memmap --workers 8 \
+  --tmp-dir /scratch/labmim-wrf-figures -o output/figures
+```
+
+Architecture remains modular:
+
+- `reader.py` owns NetCDF/xarray access and path resolution.
+- `safety.py` owns shape, dtype, memory, staggered-grid, and worker-payload guardrails.
+- `variables.py` owns physical WRF diagnostics and derived variables.
+- `interpolation.py` owns vertical interpolation and keeps the xarray/dask path vectorized.
+- `geojson.py` owns grid/value serialization and writes large outputs incrementally.
+- `batch.py` owns worker execution and payload transport.
+- CLI modules compose those layers and now flush bounded task batches instead of retaining the full run in memory.
+
+Large JSON/GeoJSON outputs are streamed:
+
+- Grid GeoJSON is written feature-by-feature; `save_geojson()` no longer builds a full `FeatureCollection` feature list in the file-output path.
+- Per-timestep value JSON is written in chunks of `65,536` flattened cells; the file format remains `{"metadata":...,"values":[...]}` but the Python process no longer holds the entire values list.
+- The legacy in-memory helpers `create_grid_geojson()` and `create_values_json()` remain useful for tests and small arrays, but server workflows should use the file writers through the CLIs.

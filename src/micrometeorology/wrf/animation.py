@@ -10,6 +10,7 @@ import logging
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any, cast
 
 from micrometeorology.common.paths import ensure_dir
 
@@ -35,7 +36,7 @@ def create_gif(
     duration:
         Duration of each frame in seconds.
     """
-    import imageio.v3 as iio
+    import imageio.v2 as imageio
 
     images_dir = Path(image_dir)
     files = sorted(images_dir.glob(pattern))
@@ -46,9 +47,11 @@ def create_gif(
     out = Path(output_path)
     ensure_dir(out.parent)
 
-    frames = [iio.imread(str(f)) for f in files]
-    iio.imwrite(str(out), frames, duration=int(duration * 1000), loop=0)
-    logger.info("Created GIF: %s (%d frames)", out, len(frames))
+    with imageio.get_writer(str(out), mode="I", duration=duration, loop=0) as writer:
+        gif_writer = cast("Any", writer)
+        for file_path in files:
+            gif_writer.append_data(imageio.imread(str(file_path)))
+    logger.info("Created GIF: %s (%d frames)", out, len(files))
     return out
 
 
@@ -88,8 +91,10 @@ def create_webm_from_images(  # type: ignore
 
     str_paths = [str(p) for p in image_paths]
     clip = ImageSequenceClip(str_paths, fps=fps)
-    clip.write_videofile(str(out), audio=False, threads=1, logger=None)
-    clip.close()
+    try:
+        clip.write_videofile(str(out), audio=False, threads=1, logger=None)
+    finally:
+        clip.close()
 
     logger.info("Created WebM: %s (%d frames, %d fps)", out, len(image_paths), fps)
     return out
@@ -116,8 +121,10 @@ def gif_to_webm(
     ensure_dir(out.parent)
 
     clip = VideoFileClip(str(gif))
-    clip.write_videofile(str(out), audio=False, threads=1, logger=None)
-    clip.close()
+    try:
+        clip.write_videofile(str(out), audio=False, threads=1, logger=None)
+    finally:
+        clip.close()
     logger.info("Created WebM: %s", out)
     return out
 
@@ -165,7 +172,11 @@ def batch_create_webm(
     logger.info("Creating %d WebM videos with %d workers", len(tasks), n_workers)
 
     results: list[str] = []
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+    max_tasks_per_child = 1 if n_workers > 1 else None
+    with ProcessPoolExecutor(
+        max_workers=n_workers,
+        max_tasks_per_child=max_tasks_per_child,
+    ) as pool:
         futures = {pool.submit(_batch_single_webm, t): t[0] for t in tasks}
         for future in as_completed(futures):
             result = future.result()

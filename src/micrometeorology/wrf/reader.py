@@ -18,6 +18,7 @@ import xarray as xr
 from numpy.typing import NDArray
 
 from micrometeorology.common.types import WEEKDAY_PT, GridLevel
+from micrometeorology.wrf.safety import assert_reasonable_array_size
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -234,7 +235,11 @@ class WRFDataset:
 
     def get_variable(self, name: str) -> NDArray:
         """Read a variable from the dataset, squeezed."""
-        return np.asarray(self._ds.variables[name][:]).squeeze()
+        var = self._ds.variables[name]
+        shape = tuple(int(size) for size in var.shape)
+        dtype = np.dtype(var.dtype)
+        assert_reasonable_array_size(shape, dtype, context=f"eager read of WRF variable {name}")
+        return np.asarray(var[:]).squeeze()
 
     def has_variable(self, name: str) -> bool:
         return name in self._ds.variables

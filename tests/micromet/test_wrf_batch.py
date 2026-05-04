@@ -24,9 +24,9 @@ def _read_json(path: Path) -> dict[str, Any]:
         return cast("dict[str, Any]", json.load(f))
 
 
-def test_json_memmap_backend_matches_pickle_backend():
+def test_json_memmap_backend_matches_serial_backend():
     root = Path("scratch") / f"json-backend-equivalence-{uuid.uuid4().hex}"
-    pickle_out = root / "pickle.json"
+    serial_out = root / "serial.json"
     memmap_out = root / "memmap.json"
     tmp_dir = root / "tmp"
     root.mkdir(parents=True, exist_ok=True)
@@ -41,15 +41,15 @@ def test_json_memmap_backend_matches_pickle_backend():
             scale_min=0.0,
             scale_max=5.0,
             date_str="01/01/2024 00:00:00",
-            output_path=str(pickle_out),
+            output_path=str(serial_out),
             wind_data={"downsampled_angles": [180.0]},
         )
         memmap_task = base_task._replace(output_path=str(memmap_out))
 
-        run_json_tasks([base_task], workers=1, backend="pickle")
+        run_json_tasks([base_task], workers=1, backend="serial")
         run_json_tasks([memmap_task], workers=1, backend="memmap", tmp_dir=tmp_dir)
 
-        assert _read_json(memmap_out) == _read_json(pickle_out)
+        assert _read_json(memmap_out) == _read_json(serial_out)
         assert _read_json(memmap_out)["values"][1] is None
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -80,28 +80,28 @@ def test_json_memmap_backend_cleans_temporary_payload_directory():
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_json_serial_backend_matches_pickle_backend():
+def test_json_auto_backend_matches_serial_backend_for_single_worker():
     root = Path("scratch") / f"json-serial-equivalence-{uuid.uuid4().hex}"
-    pickle_out = root / "pickle.json"
+    auto_out = root / "auto.json"
     serial_out = root / "serial.json"
     root.mkdir(parents=True, exist_ok=True)
 
     try:
         data = np.array([[1.234, np.nan], [3.456, 4.567]], dtype=np.float32)
-        pickle_task = JsonTask(
+        auto_task = JsonTask(
             data=data,
             scale_min=0.0,
             scale_max=5.0,
             date_str="01/01/2024 00:00:00",
-            output_path=str(pickle_out),
+            output_path=str(auto_out),
             wind_data=None,
         )
-        serial_task = pickle_task._replace(output_path=str(serial_out))
+        serial_task = auto_task._replace(output_path=str(serial_out))
 
-        run_json_tasks([pickle_task], workers=1, backend="pickle")
+        run_json_tasks([auto_task], workers=1, backend="auto")
         run_json_tasks([serial_task], workers=8, backend="serial")
 
-        assert _read_json(serial_out) == _read_json(pickle_out)
+        assert _read_json(serial_out) == _read_json(auto_out)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

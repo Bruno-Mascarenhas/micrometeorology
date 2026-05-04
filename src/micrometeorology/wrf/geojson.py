@@ -14,12 +14,13 @@ from __future__ import annotations
 import json
 import logging
 from collections import OrderedDict
-from pathlib import Path  # noqa: TC003 — used at runtime in save_geojson/save_values_json
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, TextIO
 
 import numpy as np
 
 from micrometeorology.common.paths import ensure_dir
+from micrometeorology.wrf.safety import assert_reasonable_array_size
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
+JSON_VALUE_CHUNK_SIZE = 65_536
 
 
 def create_grid_geojson(
@@ -42,48 +44,13 @@ def create_grid_geojson(
     so that the JavaScript front-end can map values to cells by index.
     """
     features: list[dict] = []
-    n_rows, n_cols = lon.shape
+    n_rows, n_cols = _validate_grid(lon, lat, context="GeoJSON grid feature generation")
 
-    for i in range(n_rows):
-        for j in range(n_cols):
-            # Cell corners via averaging with neighbours
-            if i == 0:
-                lat_top = float(lat[i, j] + (lat[i, j] - lat[i + 1, j]) / 2)
-                lat_bottom = float((lat[i, j] + lat[i + 1, j]) / 2)
-            elif i == n_rows - 1:
-                lat_top = float((lat[i - 1, j] + lat[i, j]) / 2)
-                lat_bottom = float(lat[i, j] - (lat[i - 1, j] - lat[i, j]) / 2)
-            else:
-                lat_top = float((lat[i - 1, j] + lat[i, j]) / 2)
-                lat_bottom = float((lat[i, j] + lat[i + 1, j]) / 2)
-
-            if j == 0:
-                lon_left = float(lon[i, j] - (lon[i, j + 1] - lon[i, j]) / 2)
-                lon_right = float((lon[i, j] + lon[i, j + 1]) / 2)
-            elif j == n_cols - 1:
-                lon_left = float((lon[i, j - 1] + lon[i, j]) / 2)
-                lon_right = float(lon[i, j] + (lon[i, j] - lon[i, j - 1]) / 2)
-            else:
-                lon_left = float((lon[i, j - 1] + lon[i, j]) / 2)
-                lon_right = float((lon[i, j] + lon[i, j + 1]) / 2)
-
-            polygon_coords = [
-                [
-                    [round(lon_left, 10), round(lat_bottom, 10)],
-                    [round(lon_right, 10), round(lat_bottom, 10)],
-                    [round(lon_right, 10), round(lat_top, 10)],
-                    [round(lon_left, 10), round(lat_top, 10)],
-                    [round(lon_left, 10), round(lat_bottom, 10)],
-                ]
-            ]
-
-            features.append(
-                {
-                    "type": "Feature",
-                    "geometry": {"type": "Polygon", "coordinates": polygon_coords},
-                    "properties": {"linear_index": int(i * n_cols + j)},
-                }
-            )
+    features.extend(
+        _grid_cell_feature(lon, lat, i, j, n_rows, n_cols)
+        for i in range(n_rows)
+        for j in range(n_cols)
+    )
 
     metadata = {
         "resolucao_m": [float(resolution_x), float(resolution_y)],
@@ -119,6 +86,12 @@ def create_values_json(
         Optional wind-vector data (from ``compute_wind_vectors_at_height``).
     """
     arr = var.filled(np.nan) if isinstance(var, np.ma.MaskedArray) else np.asarray(var)
+    assert_reasonable_array_size(
+        arr.shape,
+        arr.dtype,
+        context="values JSON payload generation",
+        multiplier=4.0,
+    )
 
     # Vectorized: round, flatten, convert to Python list in one pass
     flat = np.round(arr.astype(np.float64), 2).ravel()
@@ -150,6 +123,45 @@ def create_values_json(
     return {"metadata": metadata, "values": values_rounded}
 
 
+def write_values_json_stream(
+    output_path: str | Path,
+    var: NDArray,
+    scale_min: float,
+    scale_max: float,
+    date_str: str,
+    wind_data: dict | None = None,
+    *,
+    chunk_size: int = JSON_VALUE_CHUNK_SIZE,
+) -> Path:
+    """Write value JSON without materializing the full flattened values list."""
+    arr = var.filled(np.nan) if isinstance(var, np.ma.MaskedArray) else np.asarray(var)
+    assert_reasonable_array_size(
+        arr.shape,
+        arr.dtype,
+        context=f"streamed values JSON generation for {output_path}",
+        multiplier=2.0,
+    )
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    metadata: dict[str, Any] = {
+        "scale_values": [round(float(x), 2) for x in np.linspace(scale_min, scale_max, 6)],
+        "date_time": date_str,
+    }
+    if wind_data is not None:
+        metadata["wind"] = wind_data
+
+    with open(out, "w", encoding="utf-8") as f:
+        f.write('{"metadata":')
+        json.dump(metadata, f, separators=(",", ":"), ensure_ascii=False)
+        f.write(',"values":[')
+        _write_flat_values_chunks(f, arr, chunk_size=chunk_size)
+        f.write("]}")
+
+    logger.info("Saved streamed JSON: %s", out)
+    return out
+
+
 def create_wind_vectors_json(
     u: NDArray,
     v: NDArray,
@@ -173,6 +185,14 @@ def create_wind_vectors_json(
     """
     u = np.asarray(u, dtype=np.float64)
     v = np.asarray(v, dtype=np.float64)
+    if u.shape != v.shape:
+        raise ValueError(f"wind vector shapes differ: {u.shape!r} vs {v.shape!r}")
+    assert_reasonable_array_size(
+        u.shape,
+        u.dtype,
+        context="wind vector JSON generation",
+        multiplier=4.0,
+    )
 
     magnitude = np.hypot(u, v)
     # Meteorological convention: angle is direction wind comes FROM
@@ -231,12 +251,45 @@ def save_geojson(
     their own configuration.
     """
     out_dir = ensure_dir(output_dir)
-    geojson_obj = create_grid_geojson(lon, lat, dx, dy, colormap)
     out_path = out_dir / f"{filename_prefix}.geojson"
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(geojson_obj, f, separators=(",", ":"), ensure_ascii=False)
+    write_grid_geojson_stream(out_path, lon, lat, dx, dy, colormap)
     logger.info("Saved GeoJSON: %s", out_path)
     return out_path
+
+
+def write_grid_geojson_stream(
+    output_path: str | Path,
+    lon: NDArray,
+    lat: NDArray,
+    resolution_x: float,
+    resolution_y: float,
+    _colormap: str = "",
+) -> Path:
+    """Write grid GeoJSON feature-by-feature without building a full feature list."""
+    n_rows, n_cols = _validate_grid(lon, lat, context=f"streamed GeoJSON grid for {output_path}")
+    metadata = {"resolucao_m": [float(resolution_x), float(resolution_y)]}
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(out, "w", encoding="utf-8") as f:
+        f.write('{"type":"FeatureCollection","metadata":')
+        json.dump(metadata, f, separators=(",", ":"), ensure_ascii=False)
+        f.write(',"features":[')
+        first = True
+        for i in range(n_rows):
+            for j in range(n_cols):
+                if not first:
+                    f.write(",")
+                first = False
+                json.dump(
+                    _grid_cell_feature(lon, lat, i, j, n_rows, n_cols),
+                    f,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+        f.write("]}")
+
+    return out
 
 
 def save_values_json(
@@ -251,3 +304,84 @@ def save_values_json(
         json.dump(json_obj, f, separators=(",", ":"), ensure_ascii=False)
     logger.info("Saved JSON: %s", out_path)
     return out_path
+
+
+def _validate_grid(lon: NDArray, lat: NDArray, *, context: str) -> tuple[int, int]:
+    if lon.shape != lat.shape:
+        raise ValueError(f"lon/lat grid shapes differ: {lon.shape!r} vs {lat.shape!r}")
+    if len(lon.shape) != 2:
+        raise ValueError(f"lon/lat grids must be 2-D, got {lon.shape!r}")
+    n_rows, n_cols = lon.shape
+    if n_rows < 2 or n_cols < 2:
+        raise ValueError("GeoJSON grid generation requires at least a 2x2 grid")
+    assert_reasonable_array_size(
+        lon.shape,
+        np.float64,
+        context=context,
+        multiplier=4.0,
+    )
+    return int(n_rows), int(n_cols)
+
+
+def _grid_cell_feature(
+    lon: NDArray,
+    lat: NDArray,
+    i: int,
+    j: int,
+    n_rows: int,
+    n_cols: int,
+) -> dict[str, Any]:
+    if i == 0:
+        lat_top = float(lat[i, j] + (lat[i, j] - lat[i + 1, j]) / 2)
+        lat_bottom = float((lat[i, j] + lat[i + 1, j]) / 2)
+    elif i == n_rows - 1:
+        lat_top = float((lat[i - 1, j] + lat[i, j]) / 2)
+        lat_bottom = float(lat[i, j] - (lat[i - 1, j] - lat[i, j]) / 2)
+    else:
+        lat_top = float((lat[i - 1, j] + lat[i, j]) / 2)
+        lat_bottom = float((lat[i, j] + lat[i + 1, j]) / 2)
+
+    if j == 0:
+        lon_left = float(lon[i, j] - (lon[i, j + 1] - lon[i, j]) / 2)
+        lon_right = float((lon[i, j] + lon[i, j + 1]) / 2)
+    elif j == n_cols - 1:
+        lon_left = float((lon[i, j - 1] + lon[i, j]) / 2)
+        lon_right = float(lon[i, j] + (lon[i, j] - lon[i, j - 1]) / 2)
+    else:
+        lon_left = float((lon[i, j - 1] + lon[i, j]) / 2)
+        lon_right = float((lon[i, j] + lon[i, j + 1]) / 2)
+
+    polygon_coords = [
+        [
+            [round(lon_left, 10), round(lat_bottom, 10)],
+            [round(lon_right, 10), round(lat_bottom, 10)],
+            [round(lon_right, 10), round(lat_top, 10)],
+            [round(lon_left, 10), round(lat_top, 10)],
+            [round(lon_left, 10), round(lat_bottom, 10)],
+        ]
+    ]
+    return {
+        "type": "Feature",
+        "geometry": {"type": "Polygon", "coordinates": polygon_coords},
+        "properties": {"linear_index": int(i * n_cols + j)},
+    }
+
+
+def _write_flat_values_chunks(f: TextIO, arr: NDArray, *, chunk_size: int) -> None:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    flat = np.ravel(arr)
+    first = True
+    for start in range(0, flat.size, chunk_size):
+        chunk = np.round(flat[start : start + chunk_size].astype(np.float64, copy=False), 2)
+        values: list[float | None] = chunk.tolist()  # type: ignore[assignment]
+        invalid = np.flatnonzero(~np.isfinite(chunk))
+        for idx in invalid:
+            values[idx] = None
+        if not values:
+            continue
+        text = json.dumps(values, separators=(",", ":"), ensure_ascii=False)
+        if not first:
+            f.write(",")
+        first = False
+        f.write(text[1:-1])

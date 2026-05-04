@@ -28,11 +28,12 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Annotated
 
-import click
 import matplotlib
 import matplotlib.pyplot as plt
 import pandas as pd
+import typer
 
 matplotlib.use("Agg")  # headless backend for server
 
@@ -47,6 +48,8 @@ from micrometeorology.sensors.plotting import (
     save_figure,
     setup_date_axis,
 )
+
+app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
 logger = logging.getLogger(__name__)
 
@@ -544,54 +547,37 @@ def _plot_precipitacao(
 # ---------------------------------------------------------------------------
 
 
-@click.command()
-@click.option(
-    "--lenta",
-    "-l",
-    required=True,
-    type=click.Path(exists=True),
-    help="Path to LBM_lenta_YYYY.dat (slow sensor data).",
-)
-@click.option(
-    "--rain",
-    "-r",
-    required=True,
-    type=click.Path(exists=True),
-    help="Path to LBM_rain_YYYY.dat (precipitation data).",
-)
-@click.option("--output-dir", "-o", required=True, help="Output directory for graph PNGs.")
-@click.option(
-    "--wrf",
-    "-w",
-    "wrf_path",
-    default=None,
-    type=click.Path(exists=True),
-    help="Optional: path to WRF series_operacional.dat for model overlay.",
-)
-@click.option(
-    "--start-date",
-    type=click.DateTime(formats=["%Y-%m-%d"]),
-    default=None,
-    help="Initial date for the plot (YYYY-MM-DD). If omitted, defaults to today minus 'days'.",
-)
-@click.option("--days", default=7, type=int, show_default=True, help="Number of days to plot.")
-@click.option(
-    "--rh-offset",
-    default=RH_WXT_OFFSET,
-    type=float,
-    show_default=True,
-    help="Additive bias correction for RH_WXT sensor.",
-)
-@click.option("--log-level", default="INFO", show_default=True, help="Logging level.")
-def main(
-    lenta: str,
-    rain: str,
-    output_dir: str,
-    wrf_path: str | None,
-    start_date: datetime | None,
-    days: int,
-    rh_offset: float,
-    log_level: str,
+@app.command()
+def run(
+    lenta: Annotated[
+        Path,
+        typer.Option(
+            "-l", "--lenta", help="Path to LBM_lenta_YYYY.dat (slow sensor data).", exists=True
+        ),
+    ],
+    rain: Annotated[
+        Path,
+        typer.Option(
+            "-r", "--rain", help="Path to LBM_rain_YYYY.dat (precipitation data).", exists=True
+        ),
+    ],
+    output_dir: Annotated[
+        Path, typer.Option("-o", "--output-dir", help="Output directory for graph PNGs.")
+    ],
+    wrf_path: Annotated[
+        Path | None,
+        typer.Option(
+            "-w", "--wrf", help="Path to WRF series_operacional.dat for model overlay.", exists=True
+        ),
+    ] = None,
+    start_date: Annotated[
+        str | None, typer.Option(help="Initial date YYYY-MM-DD. Defaults to today minus 'days'.")
+    ] = None,
+    days: Annotated[int, typer.Option(help="Number of days to plot.")] = 7,
+    rh_offset: Annotated[
+        float, typer.Option(help="Additive bias correction for RH_WXT sensor.")
+    ] = RH_WXT_OFFSET,
+    log_level: Annotated[str, typer.Option(help="Logging level.")] = "INFO",
 ) -> None:
     """Generate LabMiM station graphs from raw .dat sensor files.
 
@@ -611,7 +597,7 @@ def main(
     # ------------------------------------------------------------------
     # 1. Ingest -- read raw .dat files
     # ------------------------------------------------------------------
-    click.echo("Reading sensor data...")
+    typer.echo("Reading sensor data...")
 
     df_lenta = read_campbell_dat(
         lenta,
@@ -622,8 +608,8 @@ def main(
         drop_columns=RAIN_DROP_COLUMNS,
     )
 
-    click.echo(f"  lenta: {len(df_lenta)} rows, {len(df_lenta.columns)} columns")
-    click.echo(f"  rain:  {len(df_rain)} rows, {len(df_rain.columns)} columns")
+    typer.echo(f"  lenta: {len(df_lenta)} rows, {len(df_lenta.columns)} columns")
+    typer.echo(f"  rain:  {len(df_rain)} rows, {len(df_rain.columns)} columns")
 
     # ------------------------------------------------------------------
     # 1b. Optional WRF series
@@ -631,7 +617,7 @@ def main(
     wrf: pd.DataFrame | None = None
     if wrf_path:
         wrf = read_wrf_series(wrf_path)
-        click.echo(f"  wrf:   {len(wrf)} rows")
+        typer.echo(f"  wrf:   {len(wrf)} rows")
 
     # ------------------------------------------------------------------
     # 2. Merge rain into the main DataFrame for unified aggregation
@@ -643,7 +629,7 @@ def main(
     # 3. Filter by date range
     # ------------------------------------------------------------------
     if start_date is not None:
-        date_start = pd.Timestamp(start_date)
+        date_start = pd.Timestamp(datetime.strptime(start_date, "%Y-%m-%d"))
         date_end = date_start + pd.Timedelta(days=days)
     else:
         # Always plot from today - days to today if no start_date is given
@@ -656,24 +642,24 @@ def main(
     raw = df_lenta.loc[mask_lenta].copy()
     raw_rain = df_rain.loc[mask_rain].copy()
 
-    click.echo(
+    typer.echo(
         f"  filtered for {days} days ({date_start.date()} to {date_end.date()}): {len(raw)} rows (lenta), {len(raw_rain)} rows (rain)"
     )
 
     if raw.empty:
-        click.echo("[!] No data in the requested date range -- nothing to plot.")
+        typer.echo("[!] No data in the requested date range -- nothing to plot.")
         sys.exit(0)
 
     # Filter WRF to same date range
     if wrf is not None:
         mask_wrf = (wrf.index >= date_start) & (wrf.index <= date_end)
         wrf = wrf.loc[mask_wrf].copy()
-        click.echo(f"  wrf filtered: {len(wrf)} rows")
+        typer.echo(f"  wrf filtered: {len(wrf)} rows")
 
     # ------------------------------------------------------------------
     # 4. Aggregate to hourly means
     # ------------------------------------------------------------------
-    click.echo("Computing hourly aggregates...")
+    typer.echo("Computing hourly aggregates...")
 
     wind_dir_cols = ["WD_WXT_Avg", "WindDir1_GMX", "WindDir"]
     wind_speed_map = {"WD_WXT_Avg": "WS_WXT_Avg", "WindDir1_GMX": "WS1_ms_GMX", "WindDir": "WS_ms"}
@@ -691,7 +677,7 @@ def main(
         wind_dir_columns=wind_dir_cols,
         wind_speed_column_map=wind_speed_map,
     )
-    click.echo(f"  -> {len(hourly)} hourly rows")
+    typer.echo(f"  -> {len(hourly)} hourly rows")
 
     # Use data-end timestamp for graph labels (not wall-clock if historical)
     graph_dt = date_end.to_pydatetime()
@@ -699,39 +685,43 @@ def main(
     # ------------------------------------------------------------------
     # 5. Generate all graphs
     # ------------------------------------------------------------------
-    click.echo("Generating graphs...")
+    typer.echo("Generating graphs...")
 
     _plot_radiacao_difusa(raw, hourly, out, graph_dt, wrf=wrf)
-    click.echo("  [ok] radiacao_difusa.png")
+    typer.echo("  [ok] radiacao_difusa.png")
 
     _plot_balanco(raw, hourly, out, graph_dt)
-    click.echo("  [ok] balanco.png")
+    typer.echo("  [ok] balanco.png")
 
     _plot_radiacao_liq(raw, hourly, out, graph_dt)
-    click.echo("  [ok] radiacao_liq.png")
+    typer.echo("  [ok] radiacao_liq.png")
 
     _plot_radiacao_par(raw, hourly, out, graph_dt)
-    click.echo("  [ok] radiacao_par.png")
+    typer.echo("  [ok] radiacao_par.png")
 
     _plot_temperatura(raw, hourly, out, graph_dt, wrf=wrf)
-    click.echo("  [ok] temperatura.png")
+    typer.echo("  [ok] temperatura.png")
 
     _plot_umidade(raw, hourly, out, graph_dt, rh_offset, wrf=wrf)
-    click.echo("  [ok] umidade.png")
+    typer.echo("  [ok] umidade.png")
 
     _plot_pressao(raw, hourly, out, graph_dt, wrf=wrf)
-    click.echo("  [ok] pressao.png")
+    typer.echo("  [ok] pressao.png")
 
     _plot_velocidade(raw, hourly, out, graph_dt, wrf=wrf)
-    click.echo("  [ok] velocidade.png")
+    typer.echo("  [ok] velocidade.png")
 
     _plot_direcao(raw, hourly, out, graph_dt, wrf=wrf)
-    click.echo("  [ok] direcao.png")
+    typer.echo("  [ok] direcao.png")
 
     _plot_precipitacao(raw_rain, hourly, out, graph_dt)
-    click.echo("  [ok] precipitacao.png")
+    typer.echo("  [ok] precipitacao.png")
 
-    click.echo(f"\n[ok] All graphs saved to {out}")
+    typer.echo(f"\n[ok] All graphs saved to {out}")
+
+
+def main() -> None:
+    app()
 
 
 if __name__ == "__main__":

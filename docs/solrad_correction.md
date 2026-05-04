@@ -341,6 +341,15 @@ When `data.load_columns` is empty and `feature_columns` is set, the loader
 projects `feature_columns + target_column`. `data.load_columns` can be used for
 manual projection when a custom feature stage needs additional columns.
 
+Memory guardrails:
+
+- Dense NumPy materialization for tabular and sequence datasets is checked before allocation.
+- The default guard is `SOLRAD_MAX_ARRAY_GB=8`; raise it only when the host has enough RAM for the feature matrix, target vector, and model-specific copies.
+- LSTM/Transformer experiments use `WindowedSequenceDataset`, which stores the 2-D base feature matrix and slices windows lazily instead of materializing the full 3-D `(n_windows, sequence_length, n_features)` tensor.
+- The legacy `create_sequences()` helper still exists for small in-memory workflows, but now fails early if dense window construction would exceed the guardrail.
+- For large experiments, prefer Parquet, `data.load_columns`, `dtype_map` to `float32`, and a realistic `runtime.limit_rows` during development.
+- With Parquet inputs, `runtime.limit_rows` reads only the first batch through PyArrow instead of loading the whole file and slicing afterward.
+
 Raw LabMiM sensor directories can be loaded through the micrometeorology
 ingestion, calibration, and aggregation stack before solrad preprocessing:
 
