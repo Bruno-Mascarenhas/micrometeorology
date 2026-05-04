@@ -424,11 +424,9 @@ def _parse_csv(raw: str | list[str] | None) -> tuple[str, ...]:
         return ()
     if isinstance(raw, str):
         raw = [raw]
-    res = []
+    res: list[str] = []
     for item in raw:
-        for x in item.split(","):
-            if x.strip():
-                res.append(x.strip())
+        res.extend(x.strip() for x in item.split(",") if x.strip())
     return tuple(res)
 
 
@@ -437,11 +435,9 @@ def _parse_int_csv(raw: str | list[str] | None) -> tuple[int, ...]:
         return ()
     if isinstance(raw, str):
         raw = [raw]
-    res = []
+    res: list[int] = []
     for item in raw:
-        for x in item.split(","):
-            if x.strip():
-                res.append(int(x.strip()))
+        res.extend(int(x.strip()) for x in item.split(",") if x.strip())
     return tuple(res)
 
 
@@ -465,18 +461,18 @@ def run(
     wrf_dir: Annotated[Path | None, typer.Option(help="Directory with wrfout files.")] = None,
     date: Annotated[str | None, typer.Option(help="Simulation date YYYYMMDD.")] = None,
     domains: Annotated[
-        list[str],
+        list[str] | None,
         typer.Option("-D", "--domains", help="Domain numbers. Can be repeated or comma-separated."),
-    ] = [],
+    ] = None,
     output: Annotated[Path, typer.Option("-o", "--output", help="Output dir.")] = Path(
         "output/figures"
     ),
     variables: Annotated[
-        list[str],
+        list[str] | None,
         typer.Option(
             "-v", "--variables", help="Variables to process. Can be repeated or comma-separated."
         ),
-    ] = [],
+    ] = None,
     shapes_dir: Annotated[Path | None, typer.Option(help="Municipality shapefiles dir.")] = None,
     skip_first: Annotated[int, typer.Option(help="Time steps to skip.")] = 0,
     reader_backend: Annotated[
