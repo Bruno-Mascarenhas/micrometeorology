@@ -41,6 +41,7 @@ coverage.xml
 # ==============================================================================
 .mypy_cache/
 .ruff_cache/
+.uv-cache/
 .pytest_cache/
 .pytest_tmp*/
 scratch/

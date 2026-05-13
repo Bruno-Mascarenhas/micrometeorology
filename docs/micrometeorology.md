@@ -56,15 +56,25 @@ src/micrometeorology/
 
 ```bash
 # Micrometeorology only:
-pip install -e "."
+uv pip install -e "."
 
 # With development dependencies:
-pip install -e ".[dev]"
+uv pip install -e ".[dev]"
 
 # With video generation (moviepy):
-pip install -e ".[video]"
+uv pip install -e ".[video]"
 
 # Dask-backed xarray chunking is included in the base dependencies.
+```
+
+For local development, prefer activating the existing `labmim` Conda
+environment first and then running the `uv pip` commands inside it. Conda keeps
+native scientific binaries stable; `uv` speeds up dependency resolution and
+editable installs. On Windows, set `UV_PYTHON` to the active Conda interpreter
+first:
+
+```powershell
+$env:UV_PYTHON = (python -c "import sys; print(sys.executable)")
 ```
 
 ### Cartopy Shapefiles

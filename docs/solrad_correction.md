@@ -71,11 +71,20 @@ src/solrad_correction/
 
 ```bash
 # With CPU PyTorch:
-pip install -e ".[tcc]"
+uv pip install --torch-backend cpu -e ".[tcc]"
 
 # With CUDA PyTorch (install torch first):
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-pip install -e ".[tcc-cuda]"
+uv pip install --torch-backend cu121 torch
+uv pip install -e ".[tcc-cuda]"
+```
+
+For local development, activate the `labmim` Conda environment before running
+these commands. Conda remains the environment boundary for native scientific
+packages; `uv pip` is used as the faster package installer inside that env. On
+Windows, set `UV_PYTHON` to the active Conda interpreter first:
+
+```powershell
+$env:UV_PYTHON = (python -c "import sys; print(sys.executable)")
 ```
 
 ### Check if GPU is available
@@ -288,7 +297,9 @@ override path and experiment runner as `solrad-run`, so local and Colab artifact
 stay aligned.
 
 ```bash
-pip install -e ".[tcc-cuda]"
+python -m pip install uv
+uv pip install --torch-backend cu121 torch
+uv pip install -e ".[tcc-cuda]"
 
 solrad-colab \
   --config configs/tcc/experiments/lstm_hourly.yaml \
