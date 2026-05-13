@@ -42,29 +42,51 @@ legacy/                           # Archived Cartopy/Basemap scripts
 
 Requires **Python >= 3.14**.
 
+Recommended local workflow: keep the existing Conda environment for Python and
+native scientific libraries, then use `uv pip` inside that environment for fast
+editable installs and dependency checks.
+
+```powershell
+conda activate labmim
+python -m pip install uv
+
+# Optional: keep the uv cache inside the repository workspace.
+$env:UV_CACHE_DIR = "$PWD\.uv-cache"
+
+# Make uv target the active Conda interpreter explicitly.
+$env:UV_PYTHON = (python -c "import sys; print(sys.executable)")
+
+uv pip install --torch-backend cpu -e ".[dev,tcc,video]"
+uv pip check
+```
+
+Use `uv venv` / `uv sync` only if you intentionally want a separate `.venv`.
+For this project, the Conda + `uv pip` path is usually safer because Cartopy,
+NetCDF, PyTorch, and geospatial dependencies rely on native binaries.
+
 ### Base Scientific Suite
 
 ```bash
-pip install -e "."
+uv pip install -e "."
 ```
 
 ### Machine Learning Environment (CPU)
 
 ```bash
-pip install -e ".[tcc]"
+uv pip install --torch-backend cpu -e ".[tcc]"
 ```
 
 ### Machine Learning Environment (CUDA)
 
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-pip install -e ".[tcc-cuda]"
+uv pip install --torch-backend cu121 torch
+uv pip install -e ".[tcc-cuda]"
 ```
 
 ### Development Environment
 
 ```bash
-pip install -e ".[dev,tcc,video]"
+uv pip install --torch-backend cpu -e ".[dev,tcc,video]"
 ```
 
 Dask-backed xarray chunking is included in the base dependencies for large WRF

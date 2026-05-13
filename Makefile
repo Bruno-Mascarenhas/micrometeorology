@@ -1,15 +1,22 @@
-.PHONY: install install-dev fix check typecheck test test-verbose clean all
+.PHONY: install-uv install install-dev install-cuda fix check typecheck test test-verbose clean all
 
 # Variables
-PYTHON = python3
-PIP = pip
+PYTHON ?= python
+UV ?= uv
+UV_PIP = $(UV) pip install --python $(PYTHON)
+
+install-uv:
+	$(PYTHON) -m pip install uv
 
 install:
-	$(PIP) install -e .
+	$(UV_PIP) -e .
 
 install-dev:
-	$(PIP) install torch --index-url https://download.pytorch.org/whl/cpu
-	$(PIP) install -e ".[dev,tcc]"
+	$(UV_PIP) --torch-backend cpu -e ".[dev,tcc,video]"
+
+install-cuda:
+	$(UV_PIP) --torch-backend cu121 torch
+	$(UV_PIP) -e ".[tcc-cuda]"
 
 fix:
 	ruff format .

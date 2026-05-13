@@ -60,7 +60,7 @@ tcc = [
     "tqdm>=4.66",
     "tensorboard>=2.14",
 ]
-# TCC with CUDA support (install separately: pip install torch --index-url https://download.pytorch.org/whl/cu121)
+# TCC with CUDA support (install separately: uv pip install --torch-backend cu121 torch)
 tcc-cuda = [
     "joblib>=1.3",
     "tqdm>=4.66",
