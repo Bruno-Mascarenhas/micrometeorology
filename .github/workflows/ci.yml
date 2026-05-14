@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: ["master", "main"]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,16 +24,21 @@ jobs:
         uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
+          cache-dependency-glob: "uv.lock"
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      - name: Install dependencies (locked)
         run: |
-          uv pip install --system --torch-backend cpu -e ".[dev,tcc]"
+          uv sync --frozen --extra dev --extra tcc
+
+      - name: Audit dependencies for known vulnerabilities
+        run: |
+          uv export --format requirements-txt --no-emit-project -o requirements-audit.txt
+          uvx pip-audit --strict --disable-pip -r requirements-audit.txt
 
       - name: Cache MyPy
         uses: actions/cache@v5
@@ -42,16 +50,16 @@ jobs:
 
       - name: Format with Ruff
         run: |
-          ruff format --check .
+          uv run ruff format --check .
 
       - name: Lint with Ruff
         run: |
-          ruff check .
+          uv run ruff check .
 
       - name: Typecheck with MyPy
         run: |
-          mypy src tests
+          uv run mypy src tests
 
       - name: Test with pytest
         run: |
-          pytest -n auto --maxfail=1 -v tests/
+          uv run pytest -n auto --maxfail=1 -v tests/
