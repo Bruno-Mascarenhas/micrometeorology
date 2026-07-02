@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 JSON_VALUE_CHUNK_SIZE = 65_536
+GEOJSON_FEATURE_CHUNK_SIZE = 4_096
 
 
 def create_grid_geojson(
@@ -265,7 +266,110 @@ def write_grid_geojson_stream(
     resolution_y: float,
     _colormap: str = "",
 ) -> Path:
-    """Write grid GeoJSON feature-by-feature without building a full feature list."""
+    """Write grid GeoJSON feature-by-feature without building a full feature list.
+
+    Corner coordinates are computed vectorized (same element arithmetic and
+    operand order as :func:`_grid_cell_feature`, in the input dtype) and the
+    feature text is assembled in chunks with f-strings. The output bytes are
+    identical to serialising each :func:`_grid_cell_feature` dict with
+    ``json.dump(..., separators=(",", ":"), ensure_ascii=False)``.
+    """
+    n_rows, n_cols = _validate_grid(lon, lat, context=f"streamed GeoJSON grid for {output_path}")
+    metadata = {"resolucao_m": [float(resolution_x), float(resolution_y)]}
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    lon_left, lon_right, lat_top, lat_bottom = _grid_cell_corners(lon, lat)
+    n_cells = n_rows * n_cols
+
+    with open(out, "w", encoding="utf-8") as f:
+        f.write('{"type":"FeatureCollection","metadata":')
+        json.dump(metadata, f, separators=(",", ":"), ensure_ascii=False)
+        f.write(',"features":[')
+        for start in range(0, n_cells, GEOJSON_FEATURE_CHUNK_SIZE):
+            stop = min(start + GEOJSON_FEATURE_CHUNK_SIZE, n_cells)
+            chunk = ",".join(
+                f'{{"type":"Feature","geometry":{{"type":"Polygon","coordinates":'
+                f"[[[{lon_left[k]!r},{lat_bottom[k]!r}],"
+                f"[{lon_right[k]!r},{lat_bottom[k]!r}],"
+                f"[{lon_right[k]!r},{lat_top[k]!r}],"
+                f"[{lon_left[k]!r},{lat_top[k]!r}],"
+                f"[{lon_left[k]!r},{lat_bottom[k]!r}]]]}}"
+                f',"properties":{{"linear_index":{k}}}}}'
+                for k in range(start, stop)
+            )
+            if start:
+                f.write(",")
+            f.write(chunk)
+        f.write("]}")
+
+    return out
+
+
+def _grid_cell_corners(
+    lon: NDArray,
+    lat: NDArray,
+) -> tuple[list[float], list[float], list[float], list[float]]:
+    """Compute per-cell corner coordinates for every grid cell, vectorized.
+
+    Returns ``(lon_left, lon_right, lat_top, lat_bottom)`` as flat row-major
+    Python lists. The arithmetic mirrors :func:`_grid_cell_feature` exactly —
+    same expressions and operand order, evaluated in the input dtype (float32
+    grids stay float32) — followed by Python's builtin ``round(v, 10)`` per
+    element. ``np.round`` must NOT be used here: it disagrees with builtin
+    ``round`` at decimal ties for float64 inputs (e.g. ``-14.000000000050001``).
+    """
+    # WRF readers hand back MaskedArrays (mask all False); np.ma arithmetic
+    # promotes ``/ 2`` to float64, unlike the per-element scalar path.
+    # Normalize to the underlying ndarray so float32 grids stay float32.
+    lon = np.asarray(lon)
+    lat = np.asarray(lat)
+
+    lat_mid = (lat[:-1, :] + lat[1:, :]) / 2
+    lat_top = np.concatenate(
+        [lat[:1, :] + (lat[:1, :] - lat[1:2, :]) / 2, lat_mid],
+        axis=0,
+    )
+    lat_bottom = np.concatenate(
+        [lat_mid, lat[-1:, :] - (lat[-2:-1, :] - lat[-1:, :]) / 2],
+        axis=0,
+    )
+
+    lon_mid = (lon[:, :-1] + lon[:, 1:]) / 2
+    lon_left = np.concatenate(
+        [lon[:, :1] - (lon[:, 1:2] - lon[:, :1]) / 2, lon_mid],
+        axis=1,
+    )
+    lon_right = np.concatenate(
+        [lon_mid, lon[:, -1:] + (lon[:, -1:] - lon[:, -2:-1]) / 2],
+        axis=1,
+    )
+
+    return (
+        _rounded_coordinate_list(lon_left),
+        _rounded_coordinate_list(lon_right),
+        _rounded_coordinate_list(lat_top),
+        _rounded_coordinate_list(lat_bottom),
+    )
+
+
+def _rounded_coordinate_list(arr: NDArray) -> list[float]:
+    """Flatten row-major and apply builtin ``round(v, 10)`` per element."""
+    return [round(v, 10) for v in np.asarray(arr).ravel().tolist()]
+
+
+def _write_grid_geojson_stream_reference(
+    output_path: str | Path,
+    lon: NDArray,
+    lat: NDArray,
+    resolution_x: float,
+    resolution_y: float,
+) -> Path:
+    """Reference (pre-vectorization) stream writer.
+
+    Kept module-private as the byte-identity oracle for tests of
+    :func:`write_grid_geojson_stream` — do not use in production code paths.
+    """
     n_rows, n_cols = _validate_grid(lon, lat, context=f"streamed GeoJSON grid for {output_path}")
     metadata = {"resolucao_m": [float(resolution_x), float(resolution_y)]}
     out = Path(output_path)

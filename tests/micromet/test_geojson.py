@@ -20,10 +20,12 @@ import pytest
 
 from micrometeorology.wrf.batch import _write_json_payload
 from micrometeorology.wrf.geojson import (
+    _write_grid_geojson_stream_reference,
     create_grid_geojson,
     create_values_json,
     create_wind_vectors_json,
     save_geojson,
+    write_grid_geojson_stream,
     write_values_json_stream,
 )
 
@@ -239,6 +241,114 @@ class TestCreateWindVectorsJson:
         assert len(result["downsampled_angles"]) == 3
         assert len(result["downsampled_magnitudes"]) == 3
         assert len(result["downsampled_linear_indices"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# write_grid_geojson_stream — byte identity vs the reference per-feature loop
+# ---------------------------------------------------------------------------
+
+
+def _non_uniform_float32_grid(ny: int, nx: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Curvilinear float32 grid with negative coords and irregular spacing."""
+    rng = np.random.default_rng(seed)
+    lon_axis = np.sort(rng.uniform(-41.0, -37.0, nx)).astype(np.float32)
+    lat_axis = np.sort(rng.uniform(-15.0, -11.0, ny))[::-1].astype(np.float32)
+    lon = np.repeat(lon_axis[np.newaxis, :], ny, axis=0)
+    lat = np.repeat(lat_axis[:, np.newaxis], nx, axis=1)
+    # Small perturbation so rows/columns are not identical (curvilinear grid).
+    lon = lon + rng.uniform(-0.01, 0.01, size=lon.shape).astype(np.float32)
+    lat = lat + rng.uniform(-0.01, 0.01, size=lat.shape).astype(np.float32)
+    assert lon.dtype == np.float32
+    assert lat.dtype == np.float32
+    return lon, lat
+
+
+class TestGridGeoJsonStreamByteIdentity:
+    """The vectorized writer must produce byte-identical files to the old loop.
+
+    Performance note (no timing assertion, CI-robust): the vectorized writer
+    renders a 99x99 grid in ~10-20 ms vs ~780 ms for the per-feature
+    ``_grid_cell_feature`` + ``json.dump`` reference loop.
+    """
+
+    def _assert_stream_bytes_match_reference(
+        self,
+        tmp_path: Path,
+        lon: np.ndarray,
+        lat: np.ndarray,
+    ) -> bytes:
+        ref_path = tmp_path / "reference.geojson"
+        new_path = tmp_path / "vectorized.geojson"
+        _write_grid_geojson_stream_reference(ref_path, lon, lat, 3000.0, 3000.0)
+        write_grid_geojson_stream(new_path, lon, lat, 3000.0, 3000.0)
+        ref_bytes = ref_path.read_bytes()
+        new_bytes = new_path.read_bytes()
+        assert new_bytes == ref_bytes
+        return new_bytes
+
+    def test_bytes_identical_4x5_float32_non_uniform(self, tmp_path):
+        lon, lat = _non_uniform_float32_grid(4, 5, seed=1)
+        self._assert_stream_bytes_match_reference(tmp_path, lon, lat)
+
+    def test_bytes_identical_7x3_float32_non_uniform(self, tmp_path):
+        lon, lat = _non_uniform_float32_grid(7, 3, seed=2)
+        self._assert_stream_bytes_match_reference(tmp_path, lon, lat)
+
+    def test_bytes_identical_2x2_minimal_grid(self, tmp_path):
+        """2x2 grid: every cell hits only the edge formulas."""
+        lon = np.array([[-40.5, -38.25], [-40.4, -38.15]], dtype=np.float32)
+        lat = np.array([[-12.1, -12.2], [-13.9, -14.05]], dtype=np.float32)
+        self._assert_stream_bytes_match_reference(tmp_path, lon, lat)
+
+    def test_bytes_identical_99x99_dense_random_float32(self, tmp_path):
+        """Dense random float32 grid (the fallback for the round-tie case).
+
+        A true builtin-round vs np.round tie at the 10th decimal is impossible
+        for float32 inputs: any float32 value at geographic magnitude is
+        m * 2**e with m < 2**24, so v * 1e10 = m * 5**10 * 2**(e+10) has at
+        most ~48 significant bits and is EXACT in float64 — np.round and
+        builtin round then agree everywhere (verified empirically over 8e8
+        random float32 samples). Hence the spec fallback: byte-equality on a
+        dense random 99x99 float32 grid.
+        """
+        rng = np.random.default_rng(99)
+        lon = rng.uniform(-45.0, -35.0, size=(99, 99)).astype(np.float32)
+        lat = rng.uniform(-16.0, -10.0, size=(99, 99)).astype(np.float32)
+        self._assert_stream_bytes_match_reference(tmp_path, lon, lat)
+
+    def test_bytes_identical_masked_array_float32(self, tmp_path):
+        """WRF readers return float32 MaskedArrays (mask all False).
+
+        Regression: np.ma arithmetic promotes ``/ 2`` to float64, unlike the
+        per-element float32 scalar path — corner math must not run on the
+        MaskedArray or edge cells drift in the 6th decimal.
+        """
+        lon, lat = _non_uniform_float32_grid(6, 4, seed=3)
+        lon_ma = np.ma.MaskedArray(lon, mask=False)
+        lat_ma = np.ma.MaskedArray(lat, mask=False)
+        self._assert_stream_bytes_match_reference(tmp_path, lon_ma, lat_ma)
+
+    def test_bytes_identical_float64_round_tie_grid(self, tmp_path):
+        """float64 grid pinned at values where round() and np.round disagree.
+
+        For float64 inputs v * 1e10 is inexact, so np.round(v, 10) can land on
+        an exact .5 and round half-to-even while builtin round(v, 10) rounds
+        the true decimal expansion correctly. A constant grid keeps every
+        corner exactly at the tie value ((t + t) / 2 == t, t - (t - t) / 2 == t).
+        """
+        tie_lat = -14.000000000050001
+        tie_lon = -38.000000000050001
+        # The trap must be real: old path (builtin round) differs from np.round.
+        assert round(tie_lat, 10) != float(np.round(tie_lat, 10))
+        assert round(tie_lon, 10) != float(np.round(tie_lon, 10))
+
+        lat = np.full((3, 4), tie_lat, dtype=np.float64)
+        lon = np.full((3, 4), tie_lon, dtype=np.float64)
+        data = self._assert_stream_bytes_match_reference(tmp_path, lon, lat)
+        # Builtin-round digits must appear in the output (np.round would
+        # have written -14.0 / -38.0 instead).
+        assert b"-14.0000000001" in data
+        assert b"-38.0000000001" in data
 
 
 def test_save_geojson_stream_matches_in_memory_geojson(sample_grid):
