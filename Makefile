@@ -32,8 +32,9 @@ test-verbose:
 	pytest -n auto -v tests/
 
 # Mirrors the CI vulnerability gate so advisory failures surface before a push.
+# dev+video is the widest auditable set (torch ships from the PyTorch index).
 audit:
-	$(UV) export --frozen --format requirements-txt --no-emit-project -o requirements-audit.txt
+	$(UV) export --frozen --extra dev --extra video --format requirements-txt --no-emit-project -o requirements-audit.txt
 	uvx pip-audit --strict --disable-pip -r requirements-audit.txt
 	rm -f requirements-audit.txt
 

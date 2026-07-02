@@ -92,8 +92,8 @@ def _git_metadata() -> dict[str, Any]:
 
 def _git(args: list[str], cwd: Path) -> str | None:
     try:
-        result = subprocess.run(
-            ["git", *args],
+        result = subprocess.run(  # noqa: S603 — fixed executable, internal constant args
+            ["git", *args],  # noqa: S607 — git deliberately resolved from PATH
             cwd=cwd,
             check=False,
             capture_output=True,

@@ -137,6 +137,7 @@ select = [
     "PT",   # flake8-pytest-style
     "PD",   # pandas-vet
     "NPY",  # numpy-specific rules (legacy RNG, deprecated aliases)
+    "S",    # flake8-bandit — security anti-patterns
 ]
 ignore = [
     "E501",  # line too long (handled by formatter)
@@ -146,6 +147,11 @@ ignore = [
 # Global seeding of the legacy numpy RNG is the point here: sklearn and other
 # libraries draw from np.random's global state for reproducibility.
 "src/solrad_correction/utils/seeds.py" = ["NPY002"]
+# Tests are made of asserts; the pickle and subprocess uses are deliberate
+# contract tests (WorkUnit picklability, worker crash recovery).
+"tests/**" = ["S101", "S301", "S603"]
+# Drives this package's own CLI with fixed arguments.
+"scripts/wrf/run_all.py" = ["S603"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["micrometeorology", "solrad_correction"]

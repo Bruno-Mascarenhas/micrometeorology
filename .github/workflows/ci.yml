@@ -9,52 +9,100 @@ on:
 permissions:
   contents: read
 
+# Superseded runs on the same ref are cancelled, except on master where every
+# push keeps its own complete record.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 jobs:
+  # Lightweight vulnerability gate: needs only uv + the lockfile, so an
+  # advisory failure reports in seconds without hiding lint/test results.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      # dev+video is the widest auditable set: torch ships from the PyTorch
+      # index, not PyPI, so the tcc extras cannot be audited by pip-audit.
+      - name: Audit dependencies for known vulnerabilities
+        run: |
+          uv export --frozen --extra dev --extra video --format requirements-txt --no-emit-project -o requirements-audit.txt
+          uvx pip-audit --strict --disable-pip -r requirements-audit.txt
+
+  # Flags vulnerable or malicious dependency changes introduced by a PR.
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     strategy:
       matrix:
         python-version: ["3.14"]
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
+          version: "0.11.26"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
 
+      # --locked also fails when uv.lock has drifted from pyproject.toml.
       - name: Install dependencies (locked)
         run: |
-          uv sync --frozen --extra dev --extra tcc
-
-      - name: Audit dependencies for known vulnerabilities
-        run: |
-          uv export --format requirements-txt --no-emit-project -o requirements-audit.txt
-          uvx pip-audit --strict --disable-pip -r requirements-audit.txt
+          uv sync --locked --extra dev --extra tcc
 
       - name: Cache MyPy
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .mypy_cache
           key: mypy-${{ runner.os }}-${{ hashFiles('**/*.py') }}
           restore-keys: |
             mypy-${{ runner.os }}-
 
-      - name: Format with Ruff
-        run: |
-          uv run ruff format --check .
+      - name: Cache pre-commit environments
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
-      - name: Lint with Ruff
+      # Single source of truth with the local hooks: ruff format + lint plus
+      # the whitespace/yaml/large-file hygiene checks.
+      - name: Lint (pre-commit)
         run: |
-          uv run ruff check .
+          uv run pre-commit run --all-files --show-diff-on-failure
 
       - name: Typecheck with MyPy
         run: |
