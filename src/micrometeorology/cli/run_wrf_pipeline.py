@@ -204,6 +204,7 @@ def run(
                 json_worker_request=cast("JsonWorkerRequest", figure_worker_backend),
                 workers=workers,
                 tmp_dir=figure_tmp_dir,
+                requested_variables=var_list,
             )
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -228,6 +229,7 @@ def run(
                         json_worker_request=cast("JsonWorkerRequest", figure_worker_backend),
                         workers=figure_plan.workers,
                         tmp_dir=figure_tmp_dir,
+                        requested_variables=var_list,
                         estimated_json_payload_bytes=estimate_figure_payload_bytes(tasks),
                         json_task_count=len(tasks),
                     )
@@ -303,6 +305,7 @@ def run(
                 json_worker_request=cast("JsonWorkerRequest", json_worker_backend),
                 workers=workers,
                 tmp_dir=json_tmp_dir,
+                requested_variables=var_list,
             )
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -328,6 +331,7 @@ def run(
                         json_worker_request=cast("JsonWorkerRequest", json_worker_backend),
                         workers=json_plan.workers,
                         tmp_dir=json_tmp_dir,
+                        requested_variables=var_list,
                         estimated_json_payload_bytes=estimate_json_payload_bytes(tasks),
                         json_task_count=len(tasks),
                     )

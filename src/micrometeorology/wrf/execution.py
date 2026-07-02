@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
+
+import netCDF4
 
 from micrometeorology.wrf import reader as wrf_reader
 from micrometeorology.wrf.batch import JsonWorkerBackend, default_workers
@@ -17,10 +20,17 @@ ReaderRequest = Literal["auto", "eager", "lazy"]
 JsonWorkerRequest = Literal["auto", "serial", "memmap"]
 WorkflowKind = Literal["figures", "json", "pipeline"]
 
+# Historical size thresholds. They no longer flip the auto reader to lazy
+# (eager slicing is faster on measured real data), but are kept for importers.
 LARGE_FILE_THRESHOLD_BYTES = 512 * 1024 * 1024
 LARGE_TOTAL_INPUT_THRESHOLD_BYTES = 1024 * 1024 * 1024
 LARGE_JSON_PAYLOAD_THRESHOLD_BYTES = 64 * 1024 * 1024
 MANY_JSON_TASKS_THRESHOLD = 64
+
+EAGER_4D_BUDGET_ENV_VAR = "LABMIM_EAGER_4D_BUDGET_GB"
+DEFAULT_EAGER_4D_BUDGET_GB = 4.0
+# ~11 simultaneously-live float32 arrays in the current eager 4D (poteolico) path.
+EAGER_4D_LIVE_ARRAYS = 11
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,18 +49,62 @@ class WRFExecutionPlan:
         return "; ".join(self.reasons)
 
 
-def _file_size(path: Path) -> int:
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
-
-
 def _chunk_request_is_explicit(chunks_request: str | None) -> bool:
     if chunks_request is None:
         return False
     value = chunks_request.strip().lower()
     return value not in {"", "auto", "none"}
+
+
+def estimate_4d_working_set_bytes(path: Path) -> int:
+    """Estimate peak float32 bytes of the eager 4D (poteolico) path for one file.
+
+    Opens the file read-only with netCDF4, reads dimension sizes only, and
+    closes it immediately. Returns ``0`` when the file cannot be read or lacks
+    the required dimensions so execution planning never crashes.
+    """
+    try:
+        with netCDF4.Dataset(path, mode="r") as ds:
+            sizes = {name: dim.size for name, dim in ds.dimensions.items()}
+        return (
+            EAGER_4D_LIVE_ARRAYS
+            * sizes["Time"]
+            * sizes["bottom_top_stag"]
+            * sizes["south_north"]
+            * sizes["west_east"]
+            * 4
+        )
+    except Exception:
+        return 0
+
+
+def _eager_4d_budget_bytes() -> int:
+    raw = os.environ.get(EAGER_4D_BUDGET_ENV_VAR)
+    if raw is not None:
+        try:
+            return int(float(raw) * 1024**3)
+        except ValueError:
+            pass
+    return int(DEFAULT_EAGER_4D_BUDGET_GB * 1024**3)
+
+
+def _exceeds_eager_4d_budget(
+    paths: list[Path],
+    requested_variables: Sequence[str] | None,
+) -> bool:
+    """Return True when a requested 4D workload is too big for eager reads.
+
+    TEMPORARY (Phase 1 of REFACTOR_PLAN.md): this gate keeps large research
+    files with 4D poteolico extraction on the lazy reader. Phase 2's
+    block-streamed 4D path removes it, making auto resolve eager
+    unconditionally (barring explicit lazy/chunk requests).
+    """
+    if not requested_variables:
+        return False
+    if not any(name.startswith("poteolico") for name in requested_variables):
+        return False
+    budget_bytes = _eager_4d_budget_bytes()
+    return any(estimate_4d_working_set_bytes(path) > budget_bytes for path in paths)
 
 
 def _resolve_reader(
@@ -60,12 +114,9 @@ def _resolve_reader(
     chunks_request: str | None,
     parsed_chunks: wrf_reader.ChunkSpec,
     chunking_available: bool,
-    large_file_threshold_bytes: int,
-    large_total_input_threshold_bytes: int,
+    requested_variables: Sequence[str] | None,
 ) -> tuple[wrf_reader.ReaderMode, wrf_reader.ChunkSpec, list[str]]:
     reasons: list[str] = []
-    total_size = sum(_file_size(path) for path in paths)
-    largest_size = max((_file_size(path) for path in paths), default=0)
 
     if reader_request in {"eager", "lazy"}:
         resolved_reader = cast("wrf_reader.ReaderMode", reader_request)
@@ -73,15 +124,14 @@ def _resolve_reader(
     elif _chunk_request_is_explicit(chunks_request):
         resolved_reader = "lazy"
         reasons.append("explicit chunk dimensions require lazy reader")
-    elif (
-        largest_size >= large_file_threshold_bytes
-        or total_size >= large_total_input_threshold_bytes
-    ):
+    elif _exceeds_eager_4d_budget(paths, requested_variables):
         resolved_reader = "lazy"
-        reasons.append("large input size favors lazy variable selection")
+        reasons.append(
+            "4D working set exceeds eager budget; using lazy reader until streamed extraction lands"
+        )
     else:
         resolved_reader = "eager"
-        reasons.append("small input favors eager reader")
+        reasons.append("auto reader defaults to eager per-timestep slicing")
 
     chunks_value = (chunks_request or "auto").strip().lower()
     if resolved_reader == "eager":
@@ -102,6 +152,7 @@ def _resolve_reader(
 
 def _resolve_json_worker_backend(
     *,
+    workflow: WorkflowKind,
     worker_request: JsonWorkerRequest,
     workers: int,
     estimated_json_payload_bytes: int | None,
@@ -119,6 +170,8 @@ def _resolve_json_worker_backend(
     tasks = json_task_count or 0
     if payload >= large_json_payload_threshold_bytes:
         return "memmap", ["large estimated JSON payload favors memmap worker references"]
+    if workflow == "json":
+        return "serial", ["small JSON payload favors serial writes over worker pools"]
     if tasks >= many_json_tasks_threshold and payload > 0:
         return "memmap", ["many JSON tasks favor memmap worker references"]
     return "memmap", ["multi-worker workload uses memmap worker references"]
@@ -133,19 +186,21 @@ def resolve_wrf_execution_plan(
     json_worker_request: JsonWorkerRequest = "auto",
     workers: int | None = None,
     tmp_dir: str | Path | None = None,
+    requested_variables: Sequence[str] | None = None,
     estimated_json_payload_bytes: int | None = None,
     json_task_count: int | None = None,
-    large_file_threshold_bytes: int = LARGE_FILE_THRESHOLD_BYTES,
-    large_total_input_threshold_bytes: int = LARGE_TOTAL_INPUT_THRESHOLD_BYTES,
     large_json_payload_threshold_bytes: int = LARGE_JSON_PAYLOAD_THRESHOLD_BYTES,
     many_json_tasks_threshold: int = MANY_JSON_TASKS_THRESHOLD,
     chunking_available: bool | None = None,
 ) -> WRFExecutionPlan:
     """Resolve reader, chunking, and JSON worker choices for a WRF run.
 
-    Explicit concrete requests always win. ``auto`` chooses conservative eager
-    and serial paths for single-worker workloads, and lazy/memmap paths for
-    large inputs or any multi-worker payloads.
+    Explicit concrete requests always win. ``auto`` resolves the eager reader
+    unless explicit chunk dimensions are given or a requested 4D field's
+    estimated eager working set exceeds the ``LABMIM_EAGER_4D_BUDGET_GB``
+    budget. For the ``json`` workflow ``auto`` resolves the serial backend
+    below the large-payload threshold; figure workflows keep parallel
+    memmap-backed workers for multi-worker workloads.
     """
     parsed_chunks = wrf_reader.parse_chunks(chunks_request)
     resolved_workers = workers or default_workers()
@@ -161,14 +216,14 @@ def resolve_wrf_execution_plan(
         chunks_request=chunks_request,
         parsed_chunks=parsed_chunks,
         chunking_available=chunking_available,
-        large_file_threshold_bytes=large_file_threshold_bytes,
-        large_total_input_threshold_bytes=large_total_input_threshold_bytes,
+        requested_variables=requested_variables,
     )
 
     if json_worker_request == "serial" and resolved_tmp_dir is not None:
         raise ValueError("--tmp-dir is only valid with --worker-backend auto or memmap")
 
     json_backend, json_reasons = _resolve_json_worker_backend(
+        workflow=workflow,
         worker_request=json_worker_request,
         workers=resolved_workers,
         estimated_json_payload_bytes=estimated_json_payload_bytes,

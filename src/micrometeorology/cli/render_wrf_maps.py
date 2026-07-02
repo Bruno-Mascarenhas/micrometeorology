@@ -512,6 +512,7 @@ def run(
             json_worker_request=cast("JsonWorkerRequest", worker_backend),
             workers=workers,
             tmp_dir=tmp_dir,
+            requested_variables=var_list,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -545,6 +546,7 @@ def run(
                     json_worker_request=cast("JsonWorkerRequest", worker_backend),
                     workers=plan.workers,
                     tmp_dir=tmp_dir,
+                    requested_variables=var_list,
                     estimated_json_payload_bytes=estimate_figure_payload_bytes(tasks),
                     json_task_count=len(tasks),
                 )
