@@ -241,6 +241,30 @@ class WRFDataset:
         assert_reasonable_array_size(shape, dtype, context=f"eager read of WRF variable {name}")
         return np.asarray(var[:]).squeeze()
 
+    @property
+    def n_time_steps(self) -> int:
+        """Number of entries along the ``Time`` dimension."""
+        return len(self._ds.dimensions["Time"])
+
+    def get_variable_block(self, name: str, t_start: int, t_stop: int) -> NDArray:
+        """Read a ``[t_start:t_stop]`` time block of a variable, unsqueezed.
+
+        Blocks always span the full spatial extent so each compressed HDF5
+        chunk is decompressed exactly once per streaming pass.
+        """
+        if t_start < 0 or t_stop <= t_start:
+            raise ValueError(f"Invalid time block [{t_start}:{t_stop}] for variable {name}")
+        var = self._ds.variables[name]
+        n_times = int(var.shape[0])
+        t_stop = min(t_stop, n_times)
+        shape = (t_stop - t_start, *(int(size) for size in var.shape[1:]))
+        assert_reasonable_array_size(
+            shape,
+            np.dtype(var.dtype),
+            context=f"block read of WRF variable {name}",
+        )
+        return np.asarray(var[t_start:t_stop])
+
     def has_variable(self, name: str) -> bool:
         return name in self._ds.variables
 

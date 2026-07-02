@@ -6,6 +6,7 @@ from pathlib import Path
 
 import netCDF4
 import numpy as np
+import pytest
 import xarray as xr
 
 from micrometeorology.wrf.reader import LazyWRFDataset, WRFDataset, open_wrf_dataset, parse_chunks
@@ -153,3 +154,29 @@ def test_air_density_uses_virtual_temperature():
     rho = compute_air_density(t2, psfc, q2)
 
     assert np.isclose(float(rho[0, 0, 0]), 1.154, atol=0.001)
+
+
+def test_get_variable_block_reads_unsqueezed_time_slabs():
+    path = Path("scratch") / "wrfout_d01_synthetic_block_reader.nc"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        _write_tiny_wrf_file(path)
+
+        with WRFDataset(path) as wrf:
+            assert wrf.n_time_steps == 2
+
+            block = wrf.get_variable_block("T2", 0, 1)
+            assert block.shape == (1, 2, 3)
+            np.testing.assert_array_equal(block[0], np.arange(6).reshape(2, 3))
+
+            # t_stop past the end is clamped; values match the eager full read.
+            tail = wrf.get_variable_block("T2", 1, 99)
+            assert tail.shape == (1, 2, 3)
+            full = np.asarray(wrf.dataset.variables["T2"][:])
+            np.testing.assert_array_equal(tail, full[1:2])
+
+            with pytest.raises(ValueError, match="Invalid time block"):
+                wrf.get_variable_block("T2", 1, 1)
+    finally:
+        path.unlink(missing_ok=True)
