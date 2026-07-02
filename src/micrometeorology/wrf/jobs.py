@@ -264,6 +264,9 @@ def _run_grid_geojson_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], l
 
 def process_unit(unit: WorkUnit) -> UnitResult:
     """Execute one work unit. Runs in a worker process; never raises."""
+    if os.environ.get("LABMIM_TEST_CRASH_UNIT") == unit.variable:
+        # Test hook: simulate an OOM-killed worker (exercises pool-break recovery).
+        os._exit(137)
     t0 = time.perf_counter()
     try:
         with WRFDataset(unit.wrf_path) as ds:
@@ -346,9 +349,10 @@ def execute_units(
     """Execute all units on ONE persistent process pool, heaviest first.
 
     Ordinary unit failures are isolated (reported in the unit's result). If
-    the pool itself breaks — e.g. a worker is OOM-killed — it is respawned
-    once for the units that never completed; units still incomplete after
-    the retry get an error result so callers can exit non-zero.
+    the pool itself breaks — e.g. a worker is OOM-killed — units that never
+    completed are retried one at a time in isolated single-worker pools, so a
+    unit that keeps killing its worker fails alone instead of dooming the
+    other pending units; it gets an error result so callers can exit non-zero.
     """
     if not units:
         return []
@@ -365,38 +369,41 @@ def execute_units(
 
     results: list[UnitResult] = []
     pending: list[WorkUnit] = list(ordered)
-    for attempt in (1, 2):
-        completed: set[int] = set()
-        try:
-            with ProcessPoolExecutor(
-                max_workers=min(n_workers, len(pending)),
-                max_tasks_per_child=_max_tasks_per_child(n_workers),
-            ) as pool:
-                futures = {pool.submit(process_unit, unit): idx for idx, unit in enumerate(pending)}
-                for future in as_completed(futures):
-                    idx = futures[future]
-                    result = future.result()
-                    completed.add(idx)
-                    results.append(result)
-                    status = f"✗ {result.error}" if result.error else f"{len(result.files)} files"
-                    echo(f"  [{len(results)}/{len(ordered)}] {result.label}: {status}")
-            pending = []
-            break
-        except BrokenProcessPool:
-            pending = [u for idx, u in enumerate(pending) if idx not in completed]
-            if attempt == 1:
-                echo(
-                    f"⚠ Worker pool broke (possible OOM kill); respawning once for "
-                    f"{len(pending)} incomplete units"
-                )
-
-    results.extend(
-        UnitResult(
-            label=unit.label,
-            kind=unit.kind,
-            error="worker pool broke twice; unit not completed",
+    completed: set[int] = set()
+    try:
+        with ProcessPoolExecutor(
+            max_workers=n_workers,
+            max_tasks_per_child=_max_tasks_per_child(n_workers),
+        ) as pool:
+            futures = {pool.submit(process_unit, unit): idx for idx, unit in enumerate(pending)}
+            for future in as_completed(futures):
+                idx = futures[future]
+                result = future.result()
+                completed.add(idx)
+                results.append(result)
+                status = f"✗ {result.error}" if result.error else f"{len(result.files)} files"
+                echo(f"  [{len(results)}/{len(ordered)}] {result.label}: {status}")
+        pending = []
+    except BrokenProcessPool:
+        pending = [u for idx, u in enumerate(pending) if idx not in completed]
+        echo(
+            f"⚠ Worker pool broke (possible OOM kill); retrying "
+            f"{len(pending)} incomplete units in isolation"
         )
-        for unit in pending
-    )
+
+    for unit in pending:
+        try:
+            with ProcessPoolExecutor(max_workers=1) as retry_pool:
+                result = retry_pool.submit(process_unit, unit).result()
+        except BrokenProcessPool:
+            result = UnitResult(
+                label=unit.label,
+                kind=unit.kind,
+                error="worker crashed while processing this unit (possible OOM kill)",
+            )
+        results.append(result)
+        status = f"✗ {result.error}" if result.error else f"{len(result.files)} files"
+        echo(f"  [{len(results)}/{len(ordered)}] {result.label}: {status}")
+
     echo(f"✓ {len(results)} work units in {time.perf_counter() - t0:.1f}s")
     return results
