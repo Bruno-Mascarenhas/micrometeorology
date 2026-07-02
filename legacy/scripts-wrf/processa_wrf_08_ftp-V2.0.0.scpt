@@ -171,7 +171,7 @@ EOF
 #/public_html/interative_maps/js
 path_js=$path_maps/js
 echo "    + FTP - sending data from $path_js to /public_html/js"
-cd $path_js 
+cd $path_js
 
 lftp -u leal,9tzDoHN5SpUf leal.ufes.br << EOF
 set ssl:verify-certificate no

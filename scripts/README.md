@@ -1,6 +1,6 @@
 # LabMiM Automation Scripts
 
-This directory contains various convenience scripts and automation bash wrappers that orchestrate the core Python CLI tools. 
+This directory contains various convenience scripts and automation bash wrappers that orchestrate the core Python CLI tools.
 
 These are typically used on high-performance workstations to trigger large-scale batch processing without needing to manually type the long CLI arguments.
 

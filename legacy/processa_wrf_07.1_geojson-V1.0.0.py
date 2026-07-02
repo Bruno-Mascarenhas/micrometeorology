@@ -296,7 +296,7 @@ def vertical_interpolate_to_target(speed_levels, height_levels, target_height):
 
 def compute_wind_vectors_at_height(U_central, V_central, altura_ajustada, target_height, downsampling=4):
     """Computa vetores de vento interpolados para altura desejada com downsampling.
-    
+
     Retorna dicionário com:
     - angles: lista com ângulos do vento (graus) - 0=de Norte, 90=de Leste
     - magnitudes: lista com magnitudes (m/s)
@@ -873,4 +873,3 @@ if __name__ == '__main__':
         pass
     except Exception as err:
         print(err)
-

@@ -101,7 +101,7 @@ cd $dir_namelist
 
 
 echo "    + WPS    - apagando namelist.wps anterior"
-\rm -f namelist.wps     
+\rm -f namelist.wps
 sed "s/xnum_max_domx/$num_max_dom/g" $projeto-namelist.wps-cat > namelist.wps
 
 
@@ -214,11 +214,11 @@ if [[ $success != "Successful" ]]; then
     cp $dir_wps/geogrid.log $dir_local/d-log  #somente um log, para ver o erro da rodada
     exit
 
-fi 
+fi
 
 
 \rm -f Vtable
-\ln -sf $dir_wps/ungrib/Variable_Tables/Vtable.GFS Vtable 
+\ln -sf $dir_wps/ungrib/Variable_Tables/Vtable.GFS Vtable
 
 
 echo "    + WPS    - criando o link para ${DATAhistory}/${DATAtype}/"
@@ -248,7 +248,7 @@ if [[ $success != "Successful" ]]; then
     cp $dir_wps/metgrid.log $dir_local/d-log  #somente um log, para ver o erro da rodada
     exit
 
-fi 
+fi
 
 
 echo "    + WPS    - saindo do diretorio do WPS"

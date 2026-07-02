@@ -212,4 +212,4 @@ fi
 
 
 echo "    + WRF    - saindo do                                                  = WRF"
-cd $dir_local 
+cd $dir_local
