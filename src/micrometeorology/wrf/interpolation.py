@@ -125,6 +125,119 @@ def vertical_interpolate(
     return result.reshape(result_shape)
 
 
+class VerticalInterpolator:
+    """Reusable vertical interpolator that prepares the height stack once.
+
+    The pipeline calls :func:`vertical_interpolate` once per (target height x
+    field) against the *same* height stack, re-sorting the heights every time.
+    This class validates the heights once and, when every column is NaN-free
+    and strictly increasing along the vertical axis, interpolates via a
+    monotonic bracket search that is bitwise-identical to
+    :func:`vertical_interpolate` while skipping the per-call ``argsort``.
+    Per-target brackets are cached so interpolating several fields to the same
+    height reuses them.  Whenever the fast-path preconditions do not hold
+    (NaN heights, non-monotonic columns, NaN values, fewer than two levels),
+    the call falls back to :func:`vertical_interpolate`, so results are always
+    identical to the eager reference.
+
+    Parameters
+    ----------
+    heights:
+        N-D array of heights at each level (meters AGL), shared by every
+        field passed to :meth:`interpolate`.
+    axis:
+        The axis corresponding to the vertical levels (default 1, matching
+        WRF ``(time, levels, ny, nx)`` blocks).
+    """
+
+    def __init__(self, heights: NDArray, axis: int = 1) -> None:
+        heights_arr = np.asarray(heights)
+        self.axis = axis
+        self._heights = heights_arr
+        self._shape = heights_arr.shape
+
+        h_moved = np.moveaxis(heights_arr, axis, 0)
+        self._levels = h_moved.shape[0]
+        self._n_cols = int(np.prod(h_moved.shape[1:]))
+        self._h2d = h_moved.reshape(self._levels, self._n_cols)
+        self._cols = np.arange(self._n_cols)
+
+        self._fast_ok = (
+            self._levels >= 2
+            and not np.isnan(self._h2d).any()
+            and bool((np.diff(self._h2d, axis=0) > 0).all())
+        )
+        # target height -> (lower_idx, frac, dtype) for the bracket fast path.
+        self._bracket_cache: dict[float, tuple[NDArray, NDArray, np.dtype]] = {}
+
+    def _bracket(self, target_height: float, dtype: np.dtype) -> tuple[NDArray, NDArray]:
+        """Return cached ``(lower_idx, frac)`` for *target_height* in *dtype*."""
+        cached = self._bracket_cache.get(target_height)
+        if cached is not None and cached[2] == dtype:
+            return cached[0], cached[1]
+
+        h = self._h2d.astype(dtype, copy=False)
+        greater = h > target_height
+        any_greater = np.any(greater, axis=0)
+        first_gt = np.argmax(greater, axis=0)
+
+        lower_idx = np.where(any_greater, first_gt - 1, self._levels - 2)
+        lower_idx = np.clip(lower_idx, 0, self._levels - 2)
+
+        h1 = h[lower_idx, self._cols]
+        h2 = h[lower_idx + 1, self._cols]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            frac = (target_height - h1) / (h2 - h1)
+        frac = np.where(np.isfinite(frac), frac, 0.0)
+
+        self._bracket_cache[target_height] = (lower_idx, frac, dtype)
+        return lower_idx, frac
+
+    def interpolate(self, values: NDArray, target: float) -> NDArray:
+        """Interpolate *values* to *target* height (meters AGL).
+
+        Parameters
+        ----------
+        values:
+            N-D array of the field to interpolate, same shape as the heights
+            passed to the constructor.
+        target:
+            Desired height in meters above ground level.
+
+        Returns
+        -------
+        NDArray
+            (N-1)-D array with interpolated values, bitwise-identical to
+            ``vertical_interpolate(values, heights, target, axis=self.axis)``.
+        """
+        target = float(target)
+        values_arr = np.asarray(values)
+        if values_arr.shape != self._shape:
+            raise ValueError("values and heights must have the same shape")
+
+        if not self._fast_ok or np.isnan(values_arr).any():
+            return vertical_interpolate(values_arr, self._heights, target, axis=self.axis)
+
+        dtype = np.result_type(values_arr.dtype, self._heights.dtype, np.float32)
+        assert_reasonable_array_size(
+            values_arr.shape,
+            dtype,
+            context="vertical interpolation block",
+            multiplier=6.0,
+        )
+        lower_idx, frac = self._bracket(target, dtype)
+
+        v = values_arr.astype(dtype, copy=False)
+        s = np.moveaxis(v, self.axis, 0).reshape(self._levels, self._n_cols)
+        s1 = s[lower_idx, self._cols]
+        s2 = s[lower_idx + 1, self._cols]
+        result: NDArray = s1 + frac * (s2 - s1)
+
+        result_shape = list(values_arr.shape)
+        result_shape.pop(self.axis)
+        return result.reshape(result_shape)
+
+
 def _is_xarray(value: object) -> bool:
     return isinstance(value, xr.DataArray)
 
