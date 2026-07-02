@@ -280,49 +280,69 @@ def _build_json_tasks_for_domain(
                 )
 
         elif var_name == WRFVariable.WIND_POTENTIAL:
-            # Wind potential: interpolate wind speed to 50m, 100m, 150m
             typer.echo("  Computing adjusted heights for wind potential...")
-            u_central, v_central, height_adjusted, speed_4d = vmod.compute_adjusted_heights(ds)
-
-            for target_height, suffix in [
-                (50, "POT_EOLICO_50M"),
-                (100, "POT_EOLICO_100M"),
-                (150, "POT_EOLICO_150M"),
-            ]:
-                typer.echo(f"    -> Interpolating to {target_height}m ({suffix})...")
-                speed_3d = interpolate_speed_to_height(speed_4d, height_adjusted, target_height)
-
-                vmin = float(np.nanmin(speed_3d))
-                vmax = float(np.nanmax(speed_3d))
-
-                for meta in time_meta:
-                    if meta.get("skip"):
-                        continue
-                    i = meta["index"]
-                    data = vmod.materialize_2d(speed_3d[i : i + 1, :, :])
-
-                    # Compute wind vectors per timestep (matches legacy behavior)
-                    try:
-                        wind_vectors = compute_wind_vectors_at_height(
-                            u_central[i : i + 1],
-                            v_central[i : i + 1],
-                            height_adjusted[i : i + 1],
-                            target_height,
-                            downsampling=4,
+            if isinstance(ds, reader.WRFDataset):
+                # Block-streamed eager path: bounded memory on long files, one
+                # bracket pass per block shared across u/v/speed and heights.
+                for series in vmod.stream_wind_at_heights(ds):
+                    suffix = f"POT_EOLICO_{series.target}M"
+                    typer.echo(f"    -> Interpolating to {series.target}m ({suffix})...")
+                    for meta in time_meta:
+                        if meta.get("skip"):
+                            continue
+                        i = meta["index"]
+                        add_task(
+                            JsonTask(
+                                data=series.speed_steps[i],
+                                scale_min=series.vmin,
+                                scale_max=series.vmax,
+                                date_str=_format_datetime(meta["datetime_local"]),
+                                output_path=str(Path(json_dir) / f"{grid}_{suffix}_{i:03d}.json"),
+                                wind_data=series.wind_vectors[i],
+                            )
                         )
-                    except Exception:
-                        wind_vectors = None
+            else:
+                u_central, v_central, height_adjusted, speed_4d = vmod.compute_adjusted_heights(ds)
 
-                    add_task(
-                        JsonTask(
-                            data=data,
-                            scale_min=vmin,
-                            scale_max=vmax,
-                            date_str=_format_datetime(meta["datetime_local"]),
-                            output_path=str(Path(json_dir) / f"{grid}_{suffix}_{i:03d}.json"),
-                            wind_data=wind_vectors,
+                for target_height, suffix in [
+                    (50, "POT_EOLICO_50M"),
+                    (100, "POT_EOLICO_100M"),
+                    (150, "POT_EOLICO_150M"),
+                ]:
+                    typer.echo(f"    -> Interpolating to {target_height}m ({suffix})...")
+                    speed_3d = interpolate_speed_to_height(speed_4d, height_adjusted, target_height)
+
+                    vmin = float(np.nanmin(speed_3d))
+                    vmax = float(np.nanmax(speed_3d))
+
+                    for meta in time_meta:
+                        if meta.get("skip"):
+                            continue
+                        i = meta["index"]
+                        data = vmod.materialize_2d(speed_3d[i : i + 1, :, :])
+
+                        # Compute wind vectors per timestep (matches legacy behavior)
+                        try:
+                            wind_vectors = compute_wind_vectors_at_height(
+                                u_central[i : i + 1],
+                                v_central[i : i + 1],
+                                height_adjusted[i : i + 1],
+                                target_height,
+                                downsampling=4,
+                            )
+                        except Exception:
+                            wind_vectors = None
+
+                        add_task(
+                            JsonTask(
+                                data=data,
+                                scale_min=vmin,
+                                scale_max=vmax,
+                                date_str=_format_datetime(meta["datetime_local"]),
+                                output_path=str(Path(json_dir) / f"{grid}_{suffix}_{i:03d}.json"),
+                                wind_data=wind_vectors,
+                            )
                         )
-                    )
 
         elif var_name == WRFVariable.WIND_POWER_DENSITY_10M:
             power_density, vmin, vmax = vmod.extract_wind_power_density_10m(ds)

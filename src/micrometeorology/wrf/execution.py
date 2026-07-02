@@ -91,14 +91,17 @@ def _eager_4d_budget_bytes() -> int:
 def _exceeds_eager_4d_budget(
     paths: list[Path],
     requested_variables: Sequence[str] | None,
+    workflow: WorkflowKind,
 ) -> bool:
     """Return True when a requested 4D workload is too big for eager reads.
 
-    TEMPORARY (Phase 1 of REFACTOR_PLAN.md): this gate keeps large research
-    files with 4D poteolico extraction on the lazy reader. Phase 2's
-    block-streamed 4D path removes it, making auto resolve eager
-    unconditionally (barring explicit lazy/chunk requests).
+    Applies only to figure workflows: their poteolico branch still
+    materializes the full 4D fields eagerly. The JSON workflow block-streams
+    4D extraction (``variables.stream_wind_at_heights``), so its memory is
+    bounded regardless of file length and it is never gated to lazy.
     """
+    if workflow == "json":
+        return False
     if not requested_variables:
         return False
     if not any(name.startswith("poteolico") for name in requested_variables):
@@ -115,6 +118,7 @@ def _resolve_reader(
     parsed_chunks: wrf_reader.ChunkSpec,
     chunking_available: bool,
     requested_variables: Sequence[str] | None,
+    workflow: WorkflowKind,
 ) -> tuple[wrf_reader.ReaderMode, wrf_reader.ChunkSpec, list[str]]:
     reasons: list[str] = []
 
@@ -124,7 +128,7 @@ def _resolve_reader(
     elif _chunk_request_is_explicit(chunks_request):
         resolved_reader = "lazy"
         reasons.append("explicit chunk dimensions require lazy reader")
-    elif _exceeds_eager_4d_budget(paths, requested_variables):
+    elif _exceeds_eager_4d_budget(paths, requested_variables, workflow):
         resolved_reader = "lazy"
         reasons.append(
             "4D working set exceeds eager budget; using lazy reader until streamed extraction lands"
@@ -217,6 +221,7 @@ def resolve_wrf_execution_plan(
         parsed_chunks=parsed_chunks,
         chunking_available=chunking_available,
         requested_variables=requested_variables,
+        workflow=workflow,
     )
 
     if json_worker_request == "serial" and resolved_tmp_dir is not None:
