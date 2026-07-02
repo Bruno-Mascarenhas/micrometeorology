@@ -39,7 +39,7 @@ import typer
 
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
-from micrometeorology.wrf import geojson, reader
+from micrometeorology.wrf import geojson, jobs, reader
 from micrometeorology.wrf import variables as vmod
 from micrometeorology.wrf.batch import (
     JsonTask,
@@ -528,7 +528,36 @@ def run(
     typer.echo(f"Variables: {var_list}")
     typer.echo(format_wrf_execution_plan(initial_plan))
 
-    # Build and write tasks per domain/variable to avoid keeping all frames in RAM.
+    if initial_plan.reader == "eager":
+        # Default path: coarse (file, variable) work units on ONE persistent
+        # pool. Workers open the NetCDF themselves - no array IPC, no temp
+        # .npy payloads, no per-batch pool spawning.
+        if worker_backend == WorkerChoice.memmap or tmp_dir is not None:
+            typer.echo(
+                "  ⚠ --worker-backend memmap/--tmp-dir are deprecated for JSON export "
+                "and ignored: work units write files directly"
+            )
+        unit_workers = 1 if worker_backend == WorkerChoice.serial else initial_plan.workers
+        units = jobs.build_units(paths, var_list, output_dir, geojson_dir, skip_first)
+        results = jobs.execute_units(units, unit_workers, echo=typer.echo)
+
+        for result in results:
+            for warning in result.warnings:
+                typer.echo(f"  ⚠ {warning}")
+        generated_count = sum(
+            len(result.files) for result in results if result.kind in {"values_json", "poteolico"}
+        )
+        failed = [result for result in results if result.error]
+        typer.echo(f"\n✓ Generated {generated_count} JSON files")
+        if failed:
+            typer.echo(f"✗ {len(failed)} work units failed:")
+            for result in failed:
+                typer.echo(f"  - {result.label}: {result.error}")
+            raise typer.Exit(code=1)
+        typer.echo("✓ Done")
+        return
+
+    # Explicit --reader lazy (or explicit chunks): legacy per-domain task loop.
     generated_count = 0
     printed_plans: set[str] = set()
     for wrf_path in paths:
