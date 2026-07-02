@@ -6,9 +6,16 @@ from pathlib import Path
 
 import netCDF4
 import numpy as np
+import pytest
 import xarray as xr
 
-from micrometeorology.wrf.reader import LazyWRFDataset, WRFDataset, open_wrf_dataset, parse_chunks
+from micrometeorology.wrf.reader import (
+    LazyWRFDataset,
+    WRFDataset,
+    open_wrf_dataset,
+    parse_chunks,
+    resolve_wrfout_paths,
+)
 from micrometeorology.wrf.variables import (
     compute_air_density,
     compute_relative_humidity,
@@ -17,9 +24,9 @@ from micrometeorology.wrf.variables import (
 )
 
 
-def _write_tiny_wrf_file(path: Path) -> None:
+def _write_tiny_wrf_file(path: Path, n_times: int = 2) -> None:
     with netCDF4.Dataset(path, "w") as ds:
-        ds.createDimension("Time", 2)
+        ds.createDimension("Time", n_times)
         ds.createDimension("south_north", 2)
         ds.createDimension("west_east", 3)
         ds.createDimension("DateStrLen", 19)
@@ -32,16 +39,16 @@ def _write_tiny_wrf_file(path: Path) -> None:
         times = ds.createVariable("Times", "S1", ("Time", "DateStrLen"))
 
         lon[:] = np.array(
-            [[[-38.0, -37.5, -37.0], [-38.0, -37.5, -37.0]]] * 2,
+            [[[-38.0, -37.5, -37.0], [-38.0, -37.5, -37.0]]] * n_times,
             dtype=np.float32,
         )
         lat[:] = np.array(
-            [[[-13.0, -13.0, -13.0], [-12.5, -12.5, -12.5]]] * 2,
+            [[[-13.0, -13.0, -13.0], [-12.5, -12.5, -12.5]]] * n_times,
             dtype=np.float32,
         )
-        t2[:] = np.arange(12, dtype=np.float32).reshape(2, 2, 3)
+        t2[:] = np.arange(6 * n_times, dtype=np.float32).reshape(n_times, 2, 3)
         times[:] = np.array(
-            [list("2024-01-01_00:00:00"), list("2024-01-01_01:00:00")],
+            [list(f"2024-01-01_{h:02d}:00:00") for h in range(n_times)],
             dtype="S1",
         )
 
@@ -153,3 +160,61 @@ def test_air_density_uses_virtual_temperature():
     rho = compute_air_density(t2, psfc, q2)
 
     assert np.isclose(float(rho[0, 0, 0]), 1.154, atol=0.001)
+
+
+def test_resolve_wrfout_paths_matches_exact_domain_set(tmp_path):
+    for d in (1, 2, 3, 4):
+        (tmp_path / f"wrfout_d{d:02d}_2026-01-01_00:00:00").touch()
+
+    def names(domains):
+        return [p.name for p in resolve_wrfout_paths(tmp_path, "20260101", domains)]
+
+    assert names((1, 4)) == [
+        "wrfout_d01_2026-01-01_00:00:00",
+        "wrfout_d04_2026-01-01_00:00:00",
+    ]
+    assert names((2,)) == ["wrfout_d02_2026-01-01_00:00:00"]
+    assert names(None) == [f"wrfout_d{d:02d}_2026-01-01_00:00:00" for d in (1, 2, 3, 4)]
+
+
+def test_get_variable_keeps_time_axis_for_single_timestep_file(tmp_path):
+    path = tmp_path / "wrfout_d01_single_step.nc"
+    _write_tiny_wrf_file(path, n_times=1)
+
+    with WRFDataset(path) as eager:
+        t2 = eager.get_variable("T2")
+        assert t2.shape == (1, 2, 3)
+        np.testing.assert_array_equal(t2[0], np.arange(6).reshape(2, 3))
+
+    with LazyWRFDataset(path) as lazy:
+        t2_lazy = lazy.get_variable("T2")
+        assert isinstance(t2_lazy, xr.DataArray)
+        assert "Time" in t2_lazy.dims
+        assert t2_lazy.shape == (1, 2, 3)
+        np.testing.assert_array_equal(t2_lazy.isel(Time=0).to_numpy(), np.arange(6).reshape(2, 3))
+
+
+def test_get_variable_block_reads_unsqueezed_time_slabs():
+    path = Path("scratch") / "wrfout_d01_synthetic_block_reader.nc"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        _write_tiny_wrf_file(path)
+
+        with WRFDataset(path) as wrf:
+            assert wrf.n_time_steps == 2
+
+            block = wrf.get_variable_block("T2", 0, 1)
+            assert block.shape == (1, 2, 3)
+            np.testing.assert_array_equal(block[0], np.arange(6).reshape(2, 3))
+
+            # t_stop past the end is clamped; values match the eager full read.
+            tail = wrf.get_variable_block("T2", 1, 99)
+            assert tail.shape == (1, 2, 3)
+            full = np.asarray(wrf.dataset.variables["T2"][:])
+            np.testing.assert_array_equal(tail, full[1:2])
+
+            with pytest.raises(ValueError, match="Invalid time block"):
+                wrf.get_variable_block("T2", 1, 1)
+    finally:
+        path.unlink(missing_ok=True)

@@ -36,6 +36,8 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import nullcontext
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, cast
@@ -43,7 +45,7 @@ from typing import Annotated, cast
 import typer
 
 from micrometeorology.common.logging import setup_logging
-from micrometeorology.wrf.batch import default_workers
+from micrometeorology.wrf.batch import _max_tasks_per_child, default_workers
 from micrometeorology.wrf.execution import (
     JsonWorkerRequest,
     ReaderRequest,
@@ -172,7 +174,6 @@ def run(
             _resolve_wrfout_paths,
         )
         from micrometeorology.wrf.batch import run_figure_tasks
-        from micrometeorology.wrf.execution import estimate_figure_payload_bytes
 
         default_vars = [
             "temperature",
@@ -204,62 +205,53 @@ def run(
                 json_worker_request=cast("JsonWorkerRequest", figure_worker_backend),
                 workers=workers,
                 tmp_dir=figure_tmp_dir,
+                requested_variables=var_list,
             )
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
         typer.echo(format_wrf_execution_plan(figure_plan))
 
+        # One process pool is hoisted over the figure stage so each 16-task
+        # batch reuses warm workers instead of paying pool spawn overhead.
         png_paths: list[str] = []
-        printed_figure_plans: set[str] = set()
-        for wrf_path in paths:
-            typer.echo(f"  Loading {wrf_path.name}...")
+        figure_pool_ctx: ProcessPoolExecutor | nullcontext[None] = (
+            ProcessPoolExecutor(
+                max_workers=figure_plan.workers,
+                max_tasks_per_child=_max_tasks_per_child(figure_plan.workers),
+            )
+            if figure_plan.workers > 1 and figure_plan.json_worker_backend != "serial"
+            else nullcontext()
+        )
+        with figure_pool_ctx as figure_pool:
 
-            def render_task_batch(
-                tasks,
-                label,
-                current_wrf_path: Path = wrf_path,
-            ):  # type: ignore[no-untyped-def]
-                try:
-                    batch_plan = resolve_wrf_execution_plan(
-                        paths=[current_wrf_path],
-                        workflow="figures",
-                        reader_request=cast("ReaderRequest", figure_plan.reader),
-                        chunks_request=chunks,
-                        json_worker_request=cast("JsonWorkerRequest", figure_worker_backend),
-                        workers=figure_plan.workers,
-                        tmp_dir=figure_tmp_dir,
-                        estimated_json_payload_bytes=estimate_figure_payload_bytes(tasks),
-                        json_task_count=len(tasks),
-                    )
-                except ValueError as exc:
-                    raise typer.BadParameter(str(exc)) from exc
-                plan_text = format_wrf_execution_plan(batch_plan)
-                if batch_plan != figure_plan and plan_text not in printed_figure_plans:
-                    typer.echo(plan_text)
-                    printed_figure_plans.add(plan_text)
+            def render_task_batch(tasks, label):  # type: ignore[no-untyped-def]
                 rendered = run_figure_tasks(
                     tasks,
-                    workers=batch_plan.workers,
-                    backend=batch_plan.json_worker_backend,
-                    tmp_dir=batch_plan.tmp_dir,
+                    figure_plan.workers,
+                    backend=figure_plan.json_worker_backend,
+                    tmp_dir=figure_plan.tmp_dir,
+                    executor=figure_pool,
                 )
                 png_paths.extend(rendered)
                 typer.echo(f"    -> {len(rendered)} figures generated for {label}")
 
-            with wrf_reader.open_wrf_dataset(
-                wrf_path,
-                reader=figure_plan.reader,
-                chunks=figure_plan.chunks,
-            ) as ds:
-                _build_tasks_for_domain(
-                    ds,
-                    var_list,
-                    str(figures_dir),
-                    shapes_dir,
-                    skip_first,
-                    dpi,
-                    task_sink=render_task_batch,
-                )
+            for wrf_path in paths:
+                typer.echo(f"  Loading {wrf_path.name}...")
+
+                with wrf_reader.open_wrf_dataset(
+                    wrf_path,
+                    reader=figure_plan.reader,
+                    chunks=figure_plan.chunks,
+                ) as ds:
+                    _build_tasks_for_domain(
+                        ds,
+                        var_list,
+                        str(figures_dir),
+                        shapes_dir,
+                        skip_first,
+                        dpi,
+                        task_sink=render_task_batch,
+                    )
         video_workers = figure_plan.workers
         typer.echo(f"  ✓ {len(png_paths)} figures generated")
     else:
@@ -270,12 +262,12 @@ def run(
         typer.echo("\n── Phase 2: GeoJSON & JSON Generation ──")
         from micrometeorology.cli.export_wrf_geojson import (
             _build_json_tasks_for_domain,
+            _normalize_var_list,
         )
         from micrometeorology.cli.export_wrf_geojson import (
             _resolve_wrfout_paths as _resolve_geo,
         )
         from micrometeorology.wrf.batch import run_json_tasks
-        from micrometeorology.wrf.execution import estimate_json_payload_bytes
 
         default_vars = [
             "temperature",
@@ -292,7 +284,7 @@ def run(
             "GLW",
             "wind_power_density_10m",
         ]
-        var_list = list(_parse_csv(variables)) if variables else default_vars
+        var_list = _normalize_var_list(list(_parse_csv(variables)) if variables else default_vars)
         paths = _resolve_geo(wrf_dir, date, _parse_int_csv(domains), dataset)
         try:
             json_plan = resolve_wrf_execution_plan(
@@ -303,62 +295,52 @@ def run(
                 json_worker_request=cast("JsonWorkerRequest", json_worker_backend),
                 workers=workers,
                 tmp_dir=json_tmp_dir,
+                requested_variables=var_list,
             )
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
         typer.echo(format_wrf_execution_plan(json_plan))
 
+        # Same hoist as the figure stage: one pool for the whole JSON stage.
         generated_json_count = 0
-        printed_json_plans: set[str] = set()
-        for wrf_path in paths:
-            typer.echo(f"  Loading {wrf_path.name}...")
+        json_pool_ctx: ProcessPoolExecutor | nullcontext[None] = (
+            ProcessPoolExecutor(
+                max_workers=json_plan.workers,
+                max_tasks_per_child=_max_tasks_per_child(json_plan.workers),
+            )
+            if json_plan.workers > 1 and json_plan.json_worker_backend != "serial"
+            else nullcontext()
+        )
+        with json_pool_ctx as json_pool:
 
-            def write_task_batch(
-                tasks,
-                label,
-                current_wrf_path: Path = wrf_path,
-            ):  # type: ignore[no-untyped-def]
+            def write_task_batch(tasks, label):  # type: ignore[no-untyped-def]
                 nonlocal generated_json_count
-                try:
-                    batch_plan = resolve_wrf_execution_plan(
-                        paths=[current_wrf_path],
-                        workflow="json",
-                        reader_request=cast("ReaderRequest", json_plan.reader),
-                        chunks_request=chunks,
-                        json_worker_request=cast("JsonWorkerRequest", json_worker_backend),
-                        workers=json_plan.workers,
-                        tmp_dir=json_tmp_dir,
-                        estimated_json_payload_bytes=estimate_json_payload_bytes(tasks),
-                        json_task_count=len(tasks),
-                    )
-                except ValueError as exc:
-                    raise typer.BadParameter(str(exc)) from exc
-                plan_text = format_wrf_execution_plan(batch_plan)
-                if batch_plan != json_plan and plan_text not in printed_json_plans:
-                    typer.echo(plan_text)
-                    printed_json_plans.add(plan_text)
                 json_paths = run_json_tasks(
                     tasks,
-                    workers=batch_plan.workers,
-                    backend=batch_plan.json_worker_backend,
-                    tmp_dir=batch_plan.tmp_dir,
+                    json_plan.workers,
+                    backend=json_plan.json_worker_backend,
+                    tmp_dir=json_plan.tmp_dir,
+                    executor=json_pool,
                 )
                 generated_json_count += len(json_paths)
                 typer.echo(f"    -> {len(json_paths)} JSON files generated for {label}")
 
-            with wrf_reader.open_wrf_dataset(
-                wrf_path,
-                reader=json_plan.reader,
-                chunks=json_plan.chunks,
-            ) as ds:
-                _build_json_tasks_for_domain(
-                    ds,
-                    var_list,
-                    str(json_dir),
-                    str(geojson_dir),
-                    skip_first,
-                    task_sink=write_task_batch,
-                )
+            for wrf_path in paths:
+                typer.echo(f"  Loading {wrf_path.name}...")
+
+                with wrf_reader.open_wrf_dataset(
+                    wrf_path,
+                    reader=json_plan.reader,
+                    chunks=json_plan.chunks,
+                ) as ds:
+                    _build_json_tasks_for_domain(
+                        ds,
+                        var_list,
+                        str(json_dir),
+                        str(geojson_dir),
+                        skip_first,
+                        task_sink=write_task_batch,
+                    )
         typer.echo(f"  ✓ {generated_json_count} JSON files generated")
 
     # Phase 3: WebM Videos

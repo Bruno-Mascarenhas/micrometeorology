@@ -20,6 +20,7 @@ import tempfile
 import time
 import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, cast
@@ -31,6 +32,8 @@ from micrometeorology.wrf.safety import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
@@ -374,6 +377,7 @@ def run_figure_tasks(
     *,
     backend: WorkerBackend = "auto",
     tmp_dir: str | Path | None = None,
+    executor: ProcessPoolExecutor | None = None,
 ) -> list[str]:
     """Execute figure rendering tasks in parallel.
 
@@ -383,6 +387,12 @@ def run_figure_tasks(
         List of ``FigureTask`` to render.
     workers:
         Number of parallel workers. Defaults to ``cpu_count - 4``.
+    executor:
+        Optional caller-owned process pool. When provided and the resolved
+        backend is ``"memmap"`` with more than one worker, tasks are
+        submitted to it instead of creating a fresh pool per call; the
+        executor is used as-is (no worker clamping) and never shut down
+        here. The serial backend ignores it.
 
     Returns
     -------
@@ -390,7 +400,8 @@ def run_figure_tasks(
         Paths of generated PNG files.
     """
     n_workers = workers or default_workers()
-    n_workers = min(n_workers, len(tasks)) if tasks else 1
+    if executor is None:
+        n_workers = min(n_workers, len(tasks)) if tasks else 1
     total = len(tasks)
 
     if backend not in {"auto", "serial", "memmap"}:
@@ -423,7 +434,7 @@ def run_figure_tasks(
         return paths
 
     if resolved_backend == "memmap":
-        return _run_figure_tasks_memmap(tasks, n_workers, tmp_dir, t0)
+        return _run_figure_tasks_memmap(tasks, n_workers, tmp_dir, t0, executor=executor)
 
     raise RuntimeError("unreachable figure backend resolution")
 
@@ -434,6 +445,7 @@ def run_json_tasks(
     *,
     backend: JsonWorkerBackend = "auto",
     tmp_dir: str | Path | None = None,
+    executor: ProcessPoolExecutor | None = None,
 ) -> list[str]:
     """Execute JSON writing tasks in parallel.
 
@@ -450,6 +462,12 @@ def run_json_tasks(
     tmp_dir:
         Parent directory for temporary memmap payloads when backend is
         ``"memmap"``. A per-run subdirectory is created and removed.
+    executor:
+        Optional caller-owned process pool. When provided and the resolved
+        backend is ``"memmap"`` with more than one worker, tasks are
+        submitted to it instead of creating a fresh pool per call; the
+        executor is used as-is (no worker clamping) and never shut down
+        here. The serial backend ignores it.
 
     Returns
     -------
@@ -457,7 +475,8 @@ def run_json_tasks(
         Paths of generated JSON files.
     """
     n_workers = workers or default_workers()
-    n_workers = min(n_workers, len(tasks)) if tasks else 1
+    if executor is None:
+        n_workers = min(n_workers, len(tasks)) if tasks else 1
     total = len(tasks)
 
     if backend not in {"auto", "serial", "memmap"}:
@@ -485,7 +504,7 @@ def run_json_tasks(
         return paths
 
     if resolved_backend == "memmap":
-        return _run_json_tasks_memmap(tasks, n_workers, tmp_dir, t0)
+        return _run_json_tasks_memmap(tasks, n_workers, tmp_dir, t0, executor=executor)
 
     raise RuntimeError("unreachable JSON backend resolution")
 
@@ -510,11 +529,35 @@ def _save_memmap_payload(
     return path_str
 
 
+def _collect_pool_paths[TaskT](
+    pool: ProcessPoolExecutor,
+    worker: Callable[[TaskT], str],
+    tasks: list[TaskT],
+    task_kind: str,
+) -> list[str]:
+    """Submit memmap tasks to *pool* and collect result paths as they complete."""
+    paths: list[str] = []
+    futures = {pool.submit(worker, task): i for i, task in enumerate(tasks)}
+    for future in as_completed(futures):
+        try:
+            paths.append(future.result())
+        except BrokenProcessPool:
+            # The pool itself died (e.g. OOM-killed worker): every remaining
+            # task is doomed, so surface the failure instead of logging it away.
+            raise
+        except Exception:
+            idx = futures[future]
+            logger.exception("Failed to %s task %d", task_kind, idx)
+    return paths
+
+
 def _run_figure_tasks_memmap(
     tasks: list[FigureTask],
     n_workers: int,
     tmp_dir: str | Path | None,
     t0: float,
+    *,
+    executor: ProcessPoolExecutor | None = None,
 ) -> list[str]:
     """Materialize figure task arrays to temporary .npy files and process by reference."""
     parent: Path | None = Path(tmp_dir) if tmp_dir is not None else None
@@ -562,21 +605,18 @@ def _run_figure_tasks_memmap(
 
         if n_workers == 1:
             paths = [_render_figure_memmap(task) for task in memmap_tasks]
+        elif executor is not None:
+            paths = _collect_pool_paths(
+                executor, _render_figure_memmap, memmap_tasks, "render memmap figure"
+            )
         else:
             with ProcessPoolExecutor(
                 max_workers=n_workers,
                 max_tasks_per_child=_max_tasks_per_child(n_workers),
             ) as pool:
-                futures = {
-                    pool.submit(_render_figure_memmap, task): i
-                    for i, task in enumerate(memmap_tasks)
-                }
-                for future in as_completed(futures):
-                    try:
-                        paths.append(future.result())
-                    except Exception:
-                        idx = futures[future]
-                        logger.exception("Failed to render memmap figure task %d", idx)
+                paths = _collect_pool_paths(
+                    pool, _render_figure_memmap, memmap_tasks, "render memmap figure"
+                )
     finally:
         if run_dir_ctx is not None:
             run_dir_ctx.cleanup()
@@ -598,6 +638,8 @@ def _run_json_tasks_memmap(
     n_workers: int,
     tmp_dir: str | Path | None,
     t0: float,
+    *,
+    executor: ProcessPoolExecutor | None = None,
 ) -> list[str]:
     """Materialize JSON task arrays to temporary .npy files and process by reference."""
     parent: Path | None = Path(tmp_dir) if tmp_dir is not None else None
@@ -635,20 +677,18 @@ def _run_json_tasks_memmap(
 
         if n_workers == 1:
             paths = [_write_json_memmap(task) for task in memmap_tasks]
+        elif executor is not None:
+            paths = _collect_pool_paths(
+                executor, _write_json_memmap, memmap_tasks, "write memmap JSON"
+            )
         else:
             with ProcessPoolExecutor(
                 max_workers=n_workers,
                 max_tasks_per_child=_max_tasks_per_child(n_workers),
             ) as pool:
-                futures = {
-                    pool.submit(_write_json_memmap, task): i for i, task in enumerate(memmap_tasks)
-                }
-                for future in as_completed(futures):
-                    try:
-                        paths.append(future.result())
-                    except Exception:
-                        idx = futures[future]
-                        logger.exception("Failed to write memmap JSON task %d", idx)
+                paths = _collect_pool_paths(
+                    pool, _write_json_memmap, memmap_tasks, "write memmap JSON"
+                )
     finally:
         if run_dir_ctx is not None:
             run_dir_ctx.cleanup()
@@ -658,23 +698,3 @@ def _run_json_tasks_memmap(
     elapsed = time.perf_counter() - t0
     logger.info("✓ Wrote %d JSON files in %.1fs", len(paths), elapsed)
     return paths
-
-
-def _estimate_json_payload_bytes(tasks: list[JsonTask]) -> int:
-    total = 0
-    for task in tasks:
-        total += int(getattr(task.data, "nbytes", 0) or 0)
-    return total
-
-
-def _estimate_figure_payload_bytes(tasks: list[FigureTask]) -> int:
-    total = 0
-    seen: set[int] = set()
-    for task in tasks:
-        for attr in ("lon", "lat", "data", "overlay_data", "u", "v"):
-            data = getattr(task, attr)
-            if data is None or id(data) in seen:
-                continue
-            seen.add(id(data))
-            total += int(getattr(data, "nbytes", 0) or 0)
-    return total
