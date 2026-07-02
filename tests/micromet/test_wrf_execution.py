@@ -70,14 +70,14 @@ def test_auto_resolves_large_3d_input_to_eager_reader():
         path.unlink(missing_ok=True)
 
 
-def test_auto_resolves_lazy_when_4d_working_set_exceeds_budget(monkeypatch):
+def test_figures_auto_resolves_lazy_when_4d_working_set_exceeds_budget(monkeypatch):
     path = _scratch_file("poteolico-auto")
     monkeypatch.delenv("LABMIM_EAGER_4D_BUDGET_GB", raising=False)
     monkeypatch.setattr(execution, "estimate_4d_working_set_bytes", lambda _path: 5 * 1024**3)
     try:
         plan = resolve_wrf_execution_plan(
             paths=[path],
-            workflow="json",
+            workflow="figures",
             workers=1,
             requested_variables=["temperature", "poteolico"],
             chunking_available=True,
@@ -90,14 +90,33 @@ def test_auto_resolves_lazy_when_4d_working_set_exceeds_budget(monkeypatch):
         path.unlink(missing_ok=True)
 
 
-def test_auto_stays_eager_when_4d_working_set_within_budget(monkeypatch):
+def test_json_workflow_is_never_gated_by_4d_budget(monkeypatch):
+    """The JSON workflow block-streams 4D extraction, so it always stays eager."""
+    path = _scratch_file("poteolico-json-auto")
+    monkeypatch.delenv("LABMIM_EAGER_4D_BUDGET_GB", raising=False)
+    monkeypatch.setattr(execution, "estimate_4d_working_set_bytes", lambda _path: 512 * 1024**3)
+    try:
+        plan = resolve_wrf_execution_plan(
+            paths=[path],
+            workflow="json",
+            workers=1,
+            requested_variables=["temperature", "poteolico"],
+        )
+
+        assert plan.reader == "eager"
+        assert "defaults to eager" in plan.reason
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_figures_auto_stays_eager_when_4d_working_set_within_budget(monkeypatch):
     path = _scratch_file("poteolico-small-auto")
     monkeypatch.delenv("LABMIM_EAGER_4D_BUDGET_GB", raising=False)
     monkeypatch.setattr(execution, "estimate_4d_working_set_bytes", lambda _path: 1024**3)
     try:
         plan = resolve_wrf_execution_plan(
             paths=[path],
-            workflow="json",
+            workflow="figures",
             workers=1,
             requested_variables=["poteolico100"],
         )
@@ -114,7 +133,7 @@ def test_4d_budget_gate_ignores_non_poteolico_variables(monkeypatch):
     try:
         plan = resolve_wrf_execution_plan(
             paths=[path],
-            workflow="json",
+            workflow="figures",
             workers=1,
             requested_variables=["temperature", "wind"],
         )
@@ -131,7 +150,7 @@ def test_4d_budget_env_var_overrides_default(monkeypatch):
     try:
         plan = resolve_wrf_execution_plan(
             paths=[path],
-            workflow="json",
+            workflow="figures",
             workers=1,
             requested_variables=["poteolico"],
             chunking_available=True,
