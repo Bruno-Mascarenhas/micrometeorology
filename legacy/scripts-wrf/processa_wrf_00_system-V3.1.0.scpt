@@ -251,7 +251,7 @@ echo ' '
     VERSAO_WPS=$(                 grep VERSAO_WPS                 $namelist | awk '{print $3}' )
     VERSAO_WRF=$(                 grep VERSAO_WRF                 $namelist | awk '{print $3}' )
     VERSAO_MMIF=$(                grep VERSAO_MMIF                $namelist | awk '{print $3}' )
-    
+
 
     #sao binarios somente os *.scpt
     processa_wrf_system=$processa_wrf_system.$ext
@@ -935,7 +935,7 @@ echo ' '
             echo " "
 
         fi
-        
+
     done
 
 
@@ -960,7 +960,7 @@ echo ' '
         echo "    + SYSTEM - remocao dos arquivos anteriores a 30 dias em d-output       = S"
 
         $dir_local/$processa_wrf_deletafiles ${vetdeletafiles[@]}
-    
+
     fi
 
     cd $dir_local

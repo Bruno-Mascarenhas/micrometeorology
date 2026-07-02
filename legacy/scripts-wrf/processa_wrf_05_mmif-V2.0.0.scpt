@@ -271,7 +271,7 @@ sed -i '1,10d' lista.json
 echo "    + MMIF - inserindo a primeira linha em branco na lista.json"
 sed -i '1s/^/\n/' lista.json
 echo "    + MMIF - inserindo [{ na primeira linha da lista.json"
-sed -i '1s/^/[{/' lista.json 
+sed -i '1s/^/[{/' lista.json
 echo "    + MMIF - apagando }] na ultima linha"
 sed -i '/}]/d' lista.json
 echo "    + MMIF - preenchendo a ultima linha"

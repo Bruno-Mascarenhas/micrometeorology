@@ -3,7 +3,7 @@
 #script para extrair dados do WRF
 #
 #autor:
-#MAXSUEL M R PEREIRA 
+#MAXSUEL M R PEREIRA
 #
 #datas:
 #27/01/2020 - codigo original  - maxsuel m r pereira
@@ -126,7 +126,7 @@ cd $ReadWRFnc
 rm -f wrfout_d0${WRFgrade}_${year}-${month}*                   #apagando os links antigos caso existam
 ln -sf $WRFoutput/wrfout_d0${WRFgrade}_${year}-${month}* .     #criando o link para os anos (1,2,3,4,5,6) diferentes de zero
 
-    
+
 #extraindo as series temporais e de perfis verticais wrfout_d04_2013-04-01
 #-------------------------------------------
 #OBS:
@@ -135,7 +135,7 @@ ln -sf $WRFoutput/wrfout_d0${WRFgrade}_${year}-${month}* .     #criando o link p
 # temperatura potencial total_K    = T + 300
 # pressao total_mb                 = (P + PB)/0.01
 # caminho dos dados de input (sem a barra, /, no final)
-   
+
 #echo "variaveis lidas:"
 #echo "-----------------------------------------------"
 #echo "VENTO ZONAL                  - U      (m/s    )"
@@ -164,21 +164,21 @@ ln -sf $WRFoutput/wrfout_d0${WRFgrade}_${year}-${month}* .     #criando o link p
 
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-#PH and PHB are staggered in the Z direction, meaning that they are at the tops and bottoms of grid cells. 
-#  That is fine for the heights of vertical winds, but for horizontal winds, other prognostic variables, 
-#  and most diagnostic variables, the center of the cell should be used. You can average the top and bottom 
+#PH and PHB are staggered in the Z direction, meaning that they are at the tops and bottoms of grid cells.
+#  That is fine for the heights of vertical winds, but for horizontal winds, other prognostic variables,
+#  and most diagnostic variables, the center of the cell should be used. You can average the top and bottom
 #  to get the center. For the cell at vertical level 'k,' height above sea level is:
 
 #*(((PH(k)+PH(k+1)) / 2) + ((PHB(k)+(PHB(k+1)) / 2) / 9.81**
 
-#Call me lazy if you like (everyone else does), but WRF already makes part of that calculation and puts it 
-#  in an unstaggered variable for the geopotential height at the cell center. That variable is PHP, 
-#  so height above sea level for middle of cell(j,i) at level 'k' is PHP(k,j,i)/9.81. In the subroutine 
+#Call me lazy if you like (everyone else does), but WRF already makes part of that calculation and puts it
+#  in an unstaggered variable for the geopotential height at the cell center. That variable is PHP,
+#  so height above sea level for middle of cell(j,i) at level 'k' is PHP(k,j,i)/9.81. In the subroutine
 #  calc_php, it uses this code:
 
 #*php(i,k,j) = 0.5*(phb(i,k,j)+phb(i,k+1,j)+ph(i,k,j)+ph(i,k+1,j))*
 
-#Height in m asl (metres above mean sea level-MAMSL, or simply metres above sea level-MASL or asl) 
+#Height in m asl (metres above mean sea level-MAMSL, or simply metres above sea level-MASL or asl)
 #  is (PH+PHB)/9.81. Subtract terrain height HGT to get height in m agl (above ground level).
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -186,7 +186,7 @@ ln -sf $WRFoutput/wrfout_d0${WRFgrade}_${year}-${month}* .     #criando o link p
 #apagando os arquivos antigos caso existam
 rm -f *.csv
 rm -f *.zip
-rm -f *.out 
+rm -f *.out
 
 echo " "
 echo '    ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐'
@@ -210,7 +210,7 @@ echo " "
 echo " "
 echo '    ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐'
 echo " "
-    
+
 echo "    + READWRFNC - compactando os arquivos como TIME_SERIES_${yyyymmdd}.zip"
 #   -----------------------------------------------------------------------------------------------------
 rm -f *.zip
@@ -229,7 +229,7 @@ sed -i '1,10d' lista.json
 echo "    + READWRFNC - inserindo a primeira linha em branco na lista.json"
 sed -i '1s/^/\n/' lista.json
 echo "    + READWRFNC - inserindo [{ na primeira linha da lista.json"
-sed -i '1s/^/[{/' lista.json 
+sed -i '1s/^/[{/' lista.json
 echo "    + READWRFNC - apagando }] na ultima linha"
 sed -i '/}]/d' lista.json
 echo "    + READWRFNC - preenchendo a ultima linha"

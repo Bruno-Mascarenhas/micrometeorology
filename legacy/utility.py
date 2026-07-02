@@ -85,5 +85,3 @@ def getLatLon(dataset,lat,lon,name):
 
 #dataset = netCDF4.Dataset("C:\\Users\\BrunoM\\Documents\\working now\\allGraphs\\wrfout_d03_2018-04-27_00_00_00.nc")
 #getLatLon(dataset,-12.999095,-38.508166,"wrfout_d03_2018-04-27_00_00_00.nc")
-
-

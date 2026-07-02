@@ -437,4 +437,3 @@ if __name__ == '__main__':
     files = [(g+n[1:], path+g+n, path) for g in grade for n in names]
 
     processes.starmap(generateGifs,files)
-

@@ -59,23 +59,23 @@ int main (void){
 			fputc (c, pb );
 			c = fgetc (pa);
 				if (c=='-'){ /*Salva apenas os traços utilizados como sinais negativos*/
-				j++;	
+				j++;
 					while(j<3){
 						if (c=='-'){
-						c=a;	
+						c=a;
 						fputc (c, pb );
 						j++;
 						}
 						else{
 						fputc (c, pb );
 						}
-					c = fgetc (pa);	
+					c = fgetc (pa);
 					}
 				}
 			}
 			else{ /* Se não for um número conta-se o número de virgulas para salvar apenas as variáveis desejadas*/
-	                if (c==','){  
-					c=a;	
+	                if (c==','){
+					c=a;
 					fputc (c, pb );
 					i++;
 						while(i<0){
@@ -84,7 +84,7 @@ int main (void){
 							i++;
 							}
 						}
-						if (i==1){  
+						if (i==1){
 							while(i<2){
 							c = fgetc (pa);
 								if (c==','){
@@ -92,22 +92,22 @@ int main (void){
 								}
 							}
 						}
-						if (i==3){ 
+						if (i==3){
 							while(i<6){
 							c = fgetc (pa);
-								if (c==','){ 
+								if (c==','){
 								i++;
 								}
 							}
 						}
-						if (i==6){ 
+						if (i==6){
 						i=0;
 						j=0;
 						}
-					c = fgetc (pa);		
+					c = fgetc (pa);
 					}
 					else{ /* Substitui qualquer outro caracter por espaço */
-					c=a;	
+					c=a;
 					fputc (c, pb );
 					c = fgetc (pa);
 					}

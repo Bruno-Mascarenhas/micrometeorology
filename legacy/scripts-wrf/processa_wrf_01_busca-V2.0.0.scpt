@@ -25,7 +25,7 @@ dir_local=$( grep dir_local /home/models/WRF/wrf-op/.FUNCTIONS_WRF_environment |
 export PATH=$PATH:${dir_local}:.
 
 echo "    + BUSCA - inicio da busca de dados ateh $hour_end horas"
-    
+
 #criando o diretorio dentro do d-input onde guardo os arquivos da noaa
 #---------------------------------------------------------------------
 dir_input=${dir_local}/d-input/${yyyymmdd}/$DATAtype
@@ -62,7 +62,7 @@ while [[ $hour -le $hour_end ]]; do
         fi
 
     fi
-    
+
     (( hour  = hour + 03 ))
 
     #local onde vai buscar os arquivos no noaa ou ucar (de 3 em 3 horas)
@@ -219,7 +219,7 @@ if [[ ${DATAtype} = "fnl" || ${DATAtype} = "gdas" ]] ; then
 
         if [[ ${DATAtype} = "fnl" ]] ; then
 
-            #                            /home/models/WRF/wrf-data/fnl/2024 /fnl_2024   01      01    _00    _00.grib2 
+            #                            /home/models/WRF/wrf-data/fnl/2024 /fnl_2024   01      01    _00    _00.grib2
             echo "    + BUSCA - copiando /home/models/WRF/wrf-data/fnl/$year/fnl_${year}${month}${day}_${hour}_00.grib2"
             echo '      ─────────────────────────────────────────────────────────────'
             cp /home/models/WRF/wrf-data/fnl/$year/fnl_${year}${month}${day}_${hour}_00.grib2 .

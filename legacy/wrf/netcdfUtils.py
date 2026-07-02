@@ -14,7 +14,7 @@ __location__ = os.path.realpath(os.path.join(os.getcwd(), os.path.dirname(__file
 
 def getFileNames(dataDir):
     """
-    Function to generate 
+    Function to generate
     """
     grades = ['d01','d02','d03','d04']
     os.chdir(dataDir)

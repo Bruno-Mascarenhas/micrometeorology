@@ -150,4 +150,3 @@ print(1-quantity['factor5']/quantity['total'])
 print(1-quantity['factor6']/quantity['total'])
 
 labmim.to_csv('labmim_completo_controle.dat',sep=';',na_rep='nan',index=False)
-

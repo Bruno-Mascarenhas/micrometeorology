@@ -55,8 +55,8 @@ params = ['sfcpblz2230','sfcpblz1130','sfcpblz1730']
 for case in params:
     #absolute paths
     files = [(obs_path+x+'.dat',model_path+case+'/timeseries/'+y+'.dat',z) for x,y,z in zip(real,model,stations)]
-    
-    #names and months   
+
+    #names and months
     #months = [[1,2,3,4,5,6,7,8,9,10,11,12],[1,2,3],[6,7,8]]
     months = [[7]]
     #names = [case+'_completo_',case+'_verao_',case+'_inverno_']
@@ -68,7 +68,7 @@ for case in params:
     for name, month in zip(names,months):
         #function to generate sheets
         generate_metrics(files,out_path_sheets,name,variables,month)
-        
+
         #function to generate distributions
         generate_distributions(files,out_path_distribution,name,variables,month)
 

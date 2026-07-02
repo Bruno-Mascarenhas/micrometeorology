@@ -33,7 +33,7 @@ year=$(echo ${yyyymmdd}  | cut -b 1-4)
 month=$(echo ${yyyymmdd} | cut -b 5-6)
 day=$(echo ${yyyymmdd}   | cut -b 7-8)
 
-#-----------------------------------------------------       
+#-----------------------------------------------------
 echo "    + PYTHON - no. de variaveis recebidas                 = ${#vetpython[*]}"
 echo "    + PYTHON - local de trabalho (dir_local)              = $dir_local"
 echo "    + PYTHON - local do python (dir_python)               = $dir_python"
@@ -41,11 +41,11 @@ echo "    + PYTHON - local das figuras (dir_fig)                = $WRFoutput"
 echo "    + PYTHON - local do WRF (wrf_simulacao)               = $WRFoutput"
 echo "    + PYTHON - figuras serao geradas para o(s) dominio(s) = d0$DOMini ao d0$DOMfim"
 echo "    + PYTHON - ativa o ambiente virtual basemap"
-#-----------------------------------------------------    
+#-----------------------------------------------------
 
 
 #local do script python para figuras do wrf
-dir_scriptpy=$dir_local/d-python/wrfpy  
+dir_scriptpy=$dir_local/d-python/wrfpy
 eval "$($dir_python/conda shell.bash hook)"
 conda activate basemap
 $dir_python/conda env list
@@ -59,7 +59,7 @@ path5=$WRFoutput/wrfout_d05_${year}-${month}-${day}_00:00:00
 echo "    + PYTHON - para executar PYTHON:">>$dir_local/d-log/${yyyymmdd}-wrf-op.debug
 echo "    + PYTHON - python3 $processa_wrf_figuras $dir_scriptpy $WRFoutput $day $month $year $DOMini $DOMfim $path1 $path2 $path3 $path4 $path5 ${GRAFICOS_WRF[@]}">>$dir_local/d-log/${yyyymmdd}-wrf-op.debug
 echo "    + PYTHON - ----------------------------">>$dir_local/d-log/${yyyymmdd}-wrf-op.debug
-#excecuta o python    
+#excecuta o python
 
 python3 $dir_scriptpy/$processa_wrf_figuras $dir_scriptpy $WRFoutput $day $month $year $DOMini $DOMfim $path1 $path2 $path3 $path4 $path5 ${GRAFICOS_WRF[@]}
 
@@ -71,9 +71,9 @@ python3 $dir_scriptpy/$processa_wrf_figuras $dir_scriptpy $WRFoutput $day $month
 
 #python3 $dir_scriptpy/main.py
 echo "    + PYTHON - desativando o ambiente virtual basemap"
-#-----------------------------------------------------------       
+#-----------------------------------------------------------
 conda deactivate
 
 echo "    + PYTHON - voltando ao local de trabalho"
-#--------------------------------------------------       
+#--------------------------------------------------
 cd ${dir_local}
