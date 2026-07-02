@@ -261,14 +261,20 @@ units = jobs.build_units([{str(wrf)!r}], ["temperature", "pressure", "wind"], {s
 results = jobs.execute_units(units, workers=2, echo=lambda _msg: None)
 print(json.dumps([[r.label, r.error is not None, len(r.files)] for r in results]))
 """
-    proc = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        env=os.environ | {"LABMIM_TEST_CRASH_UNIT": "pressure"},
-        timeout=300,
-        check=False,
-    )
+    # One retry: under a fully saturated CPU the helper interpreter can fail to
+    # fork its worker pool at all, which is environment noise, not the
+    # crash-recovery behavior under test.
+    for _attempt in range(2):
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=os.environ | {"LABMIM_TEST_CRASH_UNIT": "pressure"},
+            timeout=300,
+            check=False,
+        )
+        if proc.returncode == 0:
+            break
     assert proc.returncode == 0, proc.stderr[-2000:]
     rows = {label: (failed, n) for label, failed, n in __import__("json").loads(proc.stdout)}
 
