@@ -52,7 +52,7 @@ class Trainer:
         scaler_state: dict[str, Any] | None = None,
         checkpoint_config: dict[str, Any] | None = None,
     ) -> None:
-        self.model: nn.Module = model  # type: ignore
+        self.model: nn.Module = model
         self.device = device
         self.config = config
         self.runtime = runtime

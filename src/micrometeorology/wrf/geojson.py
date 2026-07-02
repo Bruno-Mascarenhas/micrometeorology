@@ -478,7 +478,7 @@ def _write_flat_values_chunks(f: TextIO, arr: NDArray, *, chunk_size: int) -> No
     first = True
     for start in range(0, flat.size, chunk_size):
         chunk = np.round(flat[start : start + chunk_size].astype(np.float64, copy=False), 2)
-        values: list[float | None] = chunk.tolist()  # type: ignore[assignment]
+        values: list[float | None] = chunk.tolist()
         invalid = np.flatnonzero(~np.isfinite(chunk))
         for idx in invalid:
             values[idx] = None

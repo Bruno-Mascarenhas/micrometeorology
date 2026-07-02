@@ -55,7 +55,7 @@ def create_gif(
     return out
 
 
-def create_webm_from_images(  # type: ignore
+def create_webm_from_images(
     image_paths: list[str | Path],
     output_path: str | Path,
     fps: int = 2,
