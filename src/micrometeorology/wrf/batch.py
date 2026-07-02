@@ -20,6 +20,7 @@ import tempfile
 import time
 import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, cast
@@ -540,6 +541,10 @@ def _collect_pool_paths[TaskT](
     for future in as_completed(futures):
         try:
             paths.append(future.result())
+        except BrokenProcessPool:
+            # The pool itself died (e.g. OOM-killed worker): every remaining
+            # task is doomed, so surface the failure instead of logging it away.
+            raise
         except Exception:
             idx = futures[future]
             logger.exception("Failed to %s task %d", task_kind, idx)

@@ -70,9 +70,12 @@ def _eager_reference(ds: WRFDataset, targets: tuple[int, ...]) -> dict[int, dict
             )
             for i in range(speed_3d.shape[0])
         ]
+        # Scale bounds follow the site-wide convention (get_low_high):
+        # skip the spin-up first step, cap the max at the 98th percentile.
+        vmin, vmax = vmod.get_low_high(speed_3d)
         out[target] = {
-            "vmin": float(np.nanmin(speed_3d)),
-            "vmax": float(np.nanmax(speed_3d)),
+            "vmin": vmin,
+            "vmax": vmax,
             "steps": steps,
             "vectors": vectors,
         }
@@ -94,6 +97,9 @@ def test_stream_wind_at_heights_matches_eager_path_bitwise(tmp_path, block_steps
         ref = reference[s.target]
         assert s.vmin == ref["vmin"]
         assert s.vmax == ref["vmax"]
+        # Bounds pin the site-wide convention: skip step 0, 98th-pct max.
+        assert s.vmin == float(np.nanmin(s.speed_steps[1:]))
+        assert s.vmax == float(np.nanpercentile(s.speed_steps[1:].ravel(), 98))
         assert s.speed_steps.dtype == ref["steps"][0].dtype
         for i, ref_step in enumerate(ref["steps"]):
             assert np.array_equal(s.speed_steps[i], ref_step, equal_nan=True)

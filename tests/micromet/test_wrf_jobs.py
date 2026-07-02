@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -10,8 +11,12 @@ from typing import TYPE_CHECKING
 
 import netCDF4
 import numpy as np
+import pytest
 
-from micrometeorology.cli.export_wrf_geojson import _build_json_tasks_for_domain
+from micrometeorology.cli.export_wrf_geojson import (
+    _build_json_tasks_for_domain,
+    _normalize_var_list,
+)
 from micrometeorology.wrf import jobs
 from micrometeorology.wrf.batch import run_json_tasks
 from micrometeorology.wrf.reader import open_wrf_dataset
@@ -37,10 +42,10 @@ VAR_LIST = [
 ]
 
 
-def _write_full_wrf_file(path: Path, *, seed: int = 5) -> None:
+def _write_full_wrf_file(path: Path, *, seed: int = 5, nt: int = NT) -> None:
     rng = np.random.default_rng(seed)
     with netCDF4.Dataset(path, "w") as ds:
-        ds.createDimension("Time", NT)
+        ds.createDimension("Time", nt)
         ds.createDimension("DateStrLen", 19)
         ds.createDimension("bottom_top", NZ)
         ds.createDimension("bottom_top_stag", NZ + 1)
@@ -53,21 +58,21 @@ def _write_full_wrf_file(path: Path, *, seed: int = 5) -> None:
 
         def var2d(name: str, low: float, high: float) -> None:
             v = ds.createVariable(name, "f4", ("Time", "south_north", "west_east"))
-            v[:] = rng.uniform(low, high, size=(NT, NY, NX)).astype(np.float32)
+            v[:] = rng.uniform(low, high, size=(nt, NY, NX)).astype(np.float32)
 
         times = ds.createVariable("Times", "S1", ("Time", "DateStrLen"))
-        times[:] = np.array([list(f"2026-05-03_{9 + i:02d}:00:00") for i in range(NT)], dtype="S1")
+        times[:] = np.array([list(f"2026-05-03_{9 + i:02d}:00:00") for i in range(nt)], dtype="S1")
         lon = ds.createVariable("XLONG", "f4", ("Time", "south_north", "west_east"))
         lat = ds.createVariable("XLAT", "f4", ("Time", "south_north", "west_east"))
         lon[:] = (
             np.linspace(-38.5, -38.0, NX, dtype=np.float32)[None, None, :]
             .repeat(NY, axis=1)
-            .repeat(NT, axis=0)
+            .repeat(nt, axis=0)
         )
         lat[:] = (
             np.linspace(-13.5, -13.0, NY, dtype=np.float32)[None, :, None]
             .repeat(NX, axis=2)
-            .repeat(NT, axis=0)
+            .repeat(nt, axis=0)
         )
 
         var2d("T2", 290, 305)
@@ -79,9 +84,9 @@ def _write_full_wrf_file(path: Path, *, seed: int = 5) -> None:
         var2d("HFX", -30, 400)
         var2d("SWDOWN", 0, 900)
         rainc = ds.createVariable("RAINC", "f4", ("Time", "south_north", "west_east"))
-        rainc[:] = np.cumsum(rng.uniform(0, 2, size=(NT, NY, NX)).astype(np.float32), axis=0)
+        rainc[:] = np.cumsum(rng.uniform(0, 2, size=(nt, NY, NX)).astype(np.float32), axis=0)
         rainnc = ds.createVariable("RAINNC", "f4", ("Time", "south_north", "west_east"))
-        rainnc[:] = np.cumsum(rng.uniform(0, 3, size=(NT, NY, NX)).astype(np.float32), axis=0)
+        rainnc[:] = np.cumsum(rng.uniform(0, 3, size=(nt, NY, NX)).astype(np.float32), axis=0)
 
         u = ds.createVariable("U", "f4", ("Time", "bottom_top", "south_north", "west_east_stag"))
         v = ds.createVariable("V", "f4", ("Time", "bottom_top", "south_north_stag", "west_east"))
@@ -90,14 +95,14 @@ def _write_full_wrf_file(path: Path, *, seed: int = 5) -> None:
             "PHB", "f4", ("Time", "bottom_top_stag", "south_north", "west_east")
         )
         hgt = ds.createVariable("HGT", "f4", ("Time", "south_north", "west_east"))
-        u[:] = rng.uniform(-25, 25, size=(NT, NZ, NY, NX + 1)).astype(np.float32)
-        v[:] = rng.uniform(-25, 25, size=(NT, NZ, NY + 1, NX)).astype(np.float32)
+        u[:] = rng.uniform(-25, 25, size=(nt, NZ, NY, NX + 1)).astype(np.float32)
+        v[:] = rng.uniform(-25, 25, size=(nt, NZ, NY + 1, NX)).astype(np.float32)
         base = np.cumsum(
-            rng.uniform(300, 700, size=(NT, NZ + 1, NY, NX)).astype(np.float32), axis=1
+            rng.uniform(300, 700, size=(nt, NZ + 1, NY, NX)).astype(np.float32), axis=1
         )
         ph[:] = (base * 0.05).astype(np.float32)
         phb[:] = (base * 9.5).astype(np.float32)
-        hgt[:] = rng.uniform(0, 60, size=(NT, NY, NX)).astype(np.float32)
+        hgt[:] = rng.uniform(0, 60, size=(nt, NY, NX)).astype(np.float32)
 
 
 def _tree_bytes(root: Path) -> dict[str, bytes]:
@@ -299,3 +304,100 @@ def test_units_run_capped_serial_when_single_worker(tmp_path, monkeypatch):
     monkeypatch.setattr(jobs, "ProcessPoolExecutor", _boom)
     results = _run_units(wrf, tmp_path / "out", workers=1)
     assert not [r for r in results if r.error]
+
+
+def test_single_timestep_file_processes_without_errors(tmp_path):
+    """Time=1 wrfout files must not crash the squeeze/bounds logic (Fix 3)."""
+    wrf = tmp_path / "wrfout_d02_jobs_single.nc"
+    _write_full_wrf_file(wrf, seed=21, nt=1)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], ["temperature", "wind", "rain"], json_dir, geo_dir)
+    results = jobs.execute_units(units, workers=1)
+
+    assert [r.error for r in results if r.error] == []
+    value_files = sorted(
+        os.path.basename(f) for r in results if r.kind == "values_json" for f in r.files
+    )
+    assert value_files == ["D02_RAIN_000.json", "D02_TEMP_000.json", "D02_WIND_000.json"]
+
+    # The lone rain frame publishes zero increments, not the cumulative total.
+    with open(json_dir / "D02_RAIN_000.json", encoding="utf-8") as fh:
+        rain = json.load(fh)
+    assert all(v == 0.0 for v in rain["values"])
+
+
+def test_parse_poteolico_heights_maps_names_to_targets():
+    assert jobs.parse_poteolico_heights("poteolico") == (50, 100, 150)
+    assert jobs.parse_poteolico_heights("poteolico50") == (50,)
+    assert jobs.parse_poteolico_heights("poteolico100") == (100,)
+    assert jobs.parse_poteolico_heights("poteolico150") == (150,)
+    for bad in ("poteolico75", "poteolico1000", "poteolicoXY", "weibull"):
+        with pytest.raises(ValueError, match="poteolico"):
+            jobs.parse_poteolico_heights(bad)
+
+
+def test_poteolico_single_height_writes_only_that_height(tmp_path):
+    wrf = tmp_path / "wrfout_d02_jobs_pot100.nc"
+    _write_full_wrf_file(wrf, seed=17)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], ["poteolico100"], json_dir, geo_dir)
+    assert [u.kind for u in units] == ["grid_geojson", "poteolico"]
+    results = jobs.execute_units(units, workers=1)
+
+    assert [r for r in results if r.error] == []
+    written = sorted(p.name for p in json_dir.glob("*.json"))
+    assert written == [f"D02_POT_EOLICO_100M_{i:03d}.json" for i in range(NT)]
+
+
+def test_poteolico_bare_name_writes_all_three_heights(tmp_path):
+    wrf = tmp_path / "wrfout_d02_jobs_potall.nc"
+    _write_full_wrf_file(wrf, seed=19)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], ["poteolico"], json_dir, geo_dir)
+    results = jobs.execute_units(units, workers=1)
+
+    assert [r for r in results if r.error] == []
+    written = sorted(p.name for p in json_dir.glob("*.json"))
+    expected = sorted(
+        f"D02_POT_EOLICO_{h}M_{i:03d}.json" for h in (50, 100, 150) for i in range(NT)
+    )
+    assert written == expected
+
+
+def test_poteolico_duplicates_normalize_to_all_heights_once(tmp_path):
+    var_list = _normalize_var_list(["poteolico100", "poteolico", "poteolico100"])
+    assert var_list == ["poteolico"]
+
+    wrf = tmp_path / "wrfout_d02_jobs_potdup.nc"
+    _write_full_wrf_file(wrf, seed=23)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], var_list, json_dir, geo_dir)
+    assert [u.variable for u in units if u.kind == "poteolico"] == ["poteolico"]
+    results = jobs.execute_units(units, workers=1)
+
+    assert [r for r in results if r.error] == []
+    written = sorted(p.name for p in json_dir.glob("*.json"))
+    expected = sorted(
+        f"D02_POT_EOLICO_{h}M_{i:03d}.json" for h in (50, 100, 150) for i in range(NT)
+    )
+    assert written == expected
+
+
+def test_normalize_var_list_keeps_single_height_requests_distinct():
+    assert _normalize_var_list(["poteolico100"]) == ["poteolico100"]
+    assert _normalize_var_list(["poteolico50", "poteolico150", "poteolico50"]) == [
+        "poteolico50",
+        "poteolico150",
+    ]
+    assert _normalize_var_list(["temperature", "poteolico100", "poteolico"]) == [
+        "temperature",
+        "poteolico",
+    ]

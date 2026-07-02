@@ -30,6 +30,7 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, cast
@@ -63,6 +64,8 @@ from micrometeorology.wrf.reader import resolve_wrfout_paths
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+logger = logging.getLogger(__name__)
+
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
 DEFAULT_VARS = [
@@ -84,18 +87,19 @@ DEFAULT_VARS = [
 
 
 def _normalize_var_list(var_list: list[str]) -> list[str]:
-    """Normalize legacy variable names to new names.
+    """Deduplicate variable names, honoring single-height poteolico requests.
 
-    The legacy system passes ``poteolico50``, ``poteolico100``, ``poteolico150``
-    as separate variables.  The new pipeline handles all three heights from a
-    single ``poteolico`` entry, so we collapse them and deduplicate.
+    ``poteolico50`` / ``poteolico100`` / ``poteolico150`` stay distinct so a
+    single-height request only computes and writes that height. When the bare
+    ``poteolico`` (all heights) is also present it wins: the per-height
+    entries are dropped as duplicates. Repeated names are deduplicated.
     """
+    has_all_heights = "poteolico" in var_list
     normalized: list[str] = []
     seen: set[str] = set()
     for v in var_list:
-        # poteolico50 / poteolico100 / poteolico150 → poteolico
-        if v.startswith("poteolico") and v != "poteolico":
-            v = "poteolico"
+        if has_all_heights and v.startswith("poteolico") and v != "poteolico":
+            continue
         if v not in seen:
             normalized.append(v)
             seen.add(v)
@@ -279,12 +283,13 @@ def _build_json_tasks_for_domain(
                     )
                 )
 
-        elif var_name == WRFVariable.WIND_POTENTIAL:
+        elif var_name.startswith(WRFVariable.WIND_POTENTIAL):
             typer.echo("  Computing adjusted heights for wind potential...")
+            targets = jobs.parse_poteolico_heights(var_name)
             if isinstance(ds, reader.WRFDataset):
                 # Block-streamed eager path: bounded memory on long files, one
                 # bracket pass per block shared across u/v/speed and heights.
-                for series in vmod.stream_wind_at_heights(ds):
+                for series in vmod.stream_wind_at_heights(ds, targets):
                     suffix = f"POT_EOLICO_{series.target}M"
                     typer.echo(f"    -> Interpolating to {series.target}m ({suffix})...")
                     for meta in time_meta:
@@ -304,16 +309,14 @@ def _build_json_tasks_for_domain(
             else:
                 u_central, v_central, height_adjusted, speed_4d = vmod.compute_adjusted_heights(ds)
 
-                for target_height, suffix in [
-                    (50, "POT_EOLICO_50M"),
-                    (100, "POT_EOLICO_100M"),
-                    (150, "POT_EOLICO_150M"),
-                ]:
+                for target_height in targets:
+                    suffix = f"POT_EOLICO_{target_height}M"
                     typer.echo(f"    -> Interpolating to {target_height}m ({suffix})...")
                     speed_3d = interpolate_speed_to_height(speed_4d, height_adjusted, target_height)
 
-                    vmin = float(np.nanmin(speed_3d))
-                    vmax = float(np.nanmax(speed_3d))
+                    # Scale bounds follow the site-wide convention
+                    # (get_low_high): skip spin-up step 0, 98th-percentile max.
+                    vmin, vmax = vmod.get_low_high(speed_3d)
 
                     for meta in time_meta:
                         if meta.get("skip"):
@@ -331,6 +334,12 @@ def _build_json_tasks_for_domain(
                                 downsampling=4,
                             )
                         except Exception:
+                            logger.warning(
+                                "Wind vector computation failed for step %d at %dm",
+                                i,
+                                target_height,
+                                exc_info=True,
+                            )
                             wind_vectors = None
 
                         add_task(
