@@ -234,12 +234,45 @@ class WRFDataset:
     # ------------------------------------------------------------------
 
     def get_variable(self, name: str) -> NDArray:
-        """Read a variable from the dataset, squeezed."""
+        """Read a variable from the dataset, squeezed.
+
+        All singleton axes are squeezed EXCEPT axis 0 (``Time``), so a
+        single-timestep file keeps its time axis and downstream per-step
+        slicing/bounds logic keeps working.
+        """
         var = self._ds.variables[name]
         shape = tuple(int(size) for size in var.shape)
         dtype = np.dtype(var.dtype)
         assert_reasonable_array_size(shape, dtype, context=f"eager read of WRF variable {name}")
-        return np.asarray(var[:]).squeeze()
+        arr = np.asarray(var[:])
+        squeeze_axes = tuple(i for i, size in enumerate(arr.shape) if size == 1 and i != 0)
+        if not squeeze_axes:
+            return arr
+        return arr.squeeze(axis=squeeze_axes)
+
+    @property
+    def n_time_steps(self) -> int:
+        """Number of entries along the ``Time`` dimension."""
+        return len(self._ds.dimensions["Time"])
+
+    def get_variable_block(self, name: str, t_start: int, t_stop: int) -> NDArray:
+        """Read a ``[t_start:t_stop]`` time block of a variable, unsqueezed.
+
+        Blocks always span the full spatial extent so each compressed HDF5
+        chunk is decompressed exactly once per streaming pass.
+        """
+        if t_start < 0 or t_stop <= t_start:
+            raise ValueError(f"Invalid time block [{t_start}:{t_stop}] for variable {name}")
+        var = self._ds.variables[name]
+        n_times = int(var.shape[0])
+        t_stop = min(t_stop, n_times)
+        shape = (t_stop - t_start, *(int(size) for size in var.shape[1:]))
+        assert_reasonable_array_size(
+            shape,
+            np.dtype(var.dtype),
+            context=f"block read of WRF variable {name}",
+        )
+        return np.asarray(var[t_start:t_stop])
 
     def has_variable(self, name: str) -> bool:
         return name in self._ds.variables
@@ -318,8 +351,17 @@ class LazyWRFDataset:
         return float(self.dataset.attrs["DY"])
 
     def get_variable(self, name: str) -> xr.DataArray:
-        """Select a variable lazily and return a squeezed xarray object."""
-        return self.dataset[name].squeeze()
+        """Select a variable lazily and return a squeezed xarray object.
+
+        All singleton dimensions are squeezed EXCEPT ``Time``, so a
+        single-timestep file keeps its time dimension and downstream per-step
+        slicing/bounds logic keeps working.
+        """
+        da = self.dataset[name]
+        squeeze_dims = [str(dim) for dim in da.dims if da.sizes[dim] == 1 and str(dim) != "Time"]
+        if not squeeze_dims:
+            return da
+        return da.squeeze(dim=squeeze_dims)
 
     def read_grid(self) -> tuple[NDArray, NDArray]:
         if self._grid_cache is None:
@@ -423,7 +465,8 @@ def resolve_wrfout_paths(
     date:
         Simulation date in ``YYYYMMDD`` format.
     domains:
-        Domain numbers to search. Defaults to ``(1, 2, 3, 4)``.
+        Exact domain numbers to search (no range widening: ``(1, 4)``
+        matches only d01 and d04). Defaults to ``(1, 2, 3, 4)``.
 
     Returns
     -------
@@ -431,12 +474,11 @@ def resolve_wrfout_paths(
         Sorted list of matching paths.
     """
     year, month, day = date[:4], date[4:6], date[6:8]
-    dom_start = min(domains) if domains else 1
-    dom_end = max(domains) if domains else 4
+    selected = sorted(set(domains)) if domains else [1, 2, 3, 4]
 
     paths: list[Path] = []
     base = Path(wrf_dir)
-    for d in range(dom_start, dom_end + 1):
+    for d in selected:
         pattern = f"wrfout_d{d:02d}_{year}-{month}-{day}*"
         matches = sorted(base.glob(pattern))
         if matches:

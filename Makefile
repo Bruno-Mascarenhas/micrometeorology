@@ -3,7 +3,8 @@
 # Variables
 PYTHON ?= python
 UV ?= uv
-UV_PIP = $(UV) pip install --python $(PYTHON)
+#UV_PIP = $(UV) pip install --python $(PYTHON)
+UV_PIP = $(UV) pip install --system
 
 install-uv:
 	$(PYTHON) -m pip install uv

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import operator
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -46,8 +47,18 @@ def _time_dim(value: xr.DataArray) -> str:
 
 
 def _tail(value: WRFArray) -> WRFArray:
+    """Drop the spin-up first time step.
+
+    When the time axis has <= 1 entries (single-timestep files) the full
+    array is returned instead, so reductions never see an empty tail.
+    """
     if _is_xarray(value):
-        return value.isel({_time_dim(value): slice(1, None)})
+        time_dim = _time_dim(value)
+        if value.sizes[time_dim] <= 1:
+            return value
+        return value.isel({time_dim: slice(1, None)})
+    if value.shape[0] <= 1:
+        return value
     return value[1:, :]
 
 
@@ -89,16 +100,22 @@ def materialize_nd(value: WRFArray) -> NDArray:
 
 
 def get_low_high(variable: WRFArray) -> tuple[float, float]:
-    """Return ``(min, max)`` of a 3-D variable, skipping the first time step."""
+    """Return ``(min, max)`` of a 3-D variable, skipping the first time step.
+
+    Single-timestep inputs fall back to the full array (see :func:`_tail`).
+    """
     if _is_xarray(variable):
         tail = _tail(variable)
         return _as_float(tail.min(skipna=True)), _as_float(tail.quantile(0.98, skipna=True))
-    flat = variable[1:, :].ravel()
+    flat = _tail(variable).ravel()
     return float(np.nanmin(flat)), float(np.nanpercentile(flat, 98))
 
 
 def get_low_high_wind(u: WRFArray, v: WRFArray) -> tuple[float, float]:
-    """Return ``(min, max)`` wind speed from U/V arrays (skip first step)."""
+    """Return ``(min, max)`` wind speed from U/V arrays (skip first step).
+
+    Single-timestep inputs fall back to the full arrays (see :func:`_tail`).
+    """
     if _is_xarray(u) or _is_xarray(v):
         speed = safe_binary_op(
             _tail(u),
@@ -108,8 +125,8 @@ def get_low_high_wind(u: WRFArray, v: WRFArray) -> tuple[float, float]:
             result_dtype=float,
         )
         return _as_float(speed.min(skipna=True)), _as_float(speed.max(skipna=True))
-    flat_u = u[1:, :].ravel()
-    flat_v = v[1:, :].ravel()
+    flat_u = _tail(u).ravel()
+    flat_v = _tail(v).ravel()
     speed = np.hypot(flat_u, flat_v)
     return float(np.nanmin(speed)), float(np.nanmax(speed))
 
@@ -271,16 +288,21 @@ def extract_rain(ds: WRFReader) -> tuple[WRFArray, float, float]:
 
 
 def extract_rain_step(total: WRFArray, i: int) -> WRFArray:
-    """Compute incremental rain for step *i* from cumulative totals."""
+    """Compute incremental rain for step *i* from cumulative totals.
+
+    Step 0 returns zeros: the increment is unknowable at a file/restart
+    boundary, and publishing rain accumulated since simulation start would
+    massively overstate rainfall. Every later step is ``total[i] - total[i-1]``.
+    """
     if _is_xarray(total):
         time_dim = _time_dim(total)
         current = total.isel({time_dim: slice(i, i + 1)})
-        if i <= 1:
-            return squeeze_array(current)
+        if i == 0:
+            return xr.zeros_like(squeeze_array(current))
         previous = total.isel({time_dim: slice(i - 1, i)})
         return squeeze_array(current) - squeeze_array(previous)
-    if i <= 1:
-        return np.squeeze(total[i : i + 1, :, :])
+    if i == 0:
+        return np.zeros_like(np.squeeze(total[i : i + 1, :, :]))
     return np.squeeze(total[i : i + 1, :, :]) - np.squeeze(total[i - 1 : i, :, :])  # type: ignore
 
 
@@ -488,3 +510,142 @@ def compute_adjusted_heights(ds: WRFReader) -> tuple[WRFArray, WRFArray, WRFArra
     )
 
     return u_central, v_central, height_adjusted, speed_4d
+
+
+# ---------------------------------------------------------------------------
+# Block-streamed wind-at-height extraction (bounded memory for long files)
+# ---------------------------------------------------------------------------
+
+DEFAULT_STREAM_BLOCK_STEPS = 64
+
+
+@dataclass(frozen=True)
+class WindHeightSeries:
+    """Interpolated wind speed series and per-step wind vectors for one height."""
+
+    target: int
+    vmin: float
+    vmax: float
+    speed_steps: NDArray
+    wind_vectors: list[dict | None]
+
+
+def _package_wind_vectors_step(
+    u_target: NDArray,
+    v_target: NDArray,
+    ny: int,
+    nx: int,
+    downsampling: int,
+) -> dict:
+    """Package one timestep's wind vectors.
+
+    Must stay operation-for-operation identical to the numpy branch of
+    ``interpolation.compute_wind_vectors_at_height`` (equivalence is pinned
+    by tests); the output floats are embedded unrounded in the values JSON.
+    """
+    magnitude = np.hypot(u_target, v_target)
+    angle = np.arctan2(u_target, v_target) * 180.0 / np.pi
+    angle = np.where(angle < 0, angle + 360.0, angle)
+
+    i_idx, j_idx = np.mgrid[0:ny:downsampling, 0:nx:downsampling]
+    i_flat = i_idx.ravel()
+    j_flat = j_idx.ravel()
+
+    angles_flat = angle[i_flat, j_flat]
+    mags_flat = magnitude[i_flat, j_flat]
+
+    valid = ~np.isnan(angles_flat)
+    linear_indices = (i_flat * nx + j_flat)[valid]
+
+    return {
+        "downsampled_angles": angles_flat[valid].tolist(),
+        "downsampled_magnitudes": mags_flat[valid].tolist(),
+        "downsampled_linear_indices": linear_indices.tolist(),
+    }
+
+
+def stream_wind_at_heights(
+    ds: WRFReader,
+    targets: tuple[int, ...] = (50, 100, 150),
+    *,
+    block_steps: int = DEFAULT_STREAM_BLOCK_STEPS,
+    downsampling: int = 4,
+) -> list[WindHeightSeries]:
+    """Compute wind speed and wind vectors at *targets* heights, block-streamed.
+
+    Reads U/V/PH/PHB/HGT in ``block_steps``-sized time blocks so peak memory is
+    bounded by the block size instead of the file's full time dimension, and
+    interpolates u/v/speed for all target heights from ONE bracket pass per
+    block. Arithmetic matches the eager whole-array path bit-for-bit (float32
+    chain, same operand order), which the byte-diff gates pin.
+
+    Requires an eager :class:`~micrometeorology.wrf.reader.WRFDataset` (uses
+    ``get_variable_block``).
+    """
+    from micrometeorology.wrf.interpolation import VerticalInterpolator
+
+    if block_steps <= 0:
+        raise ValueError("block_steps must be positive")
+
+    n_t = ds.n_time_steps  # type: ignore[attr-defined]
+
+    speed_out: dict[int, NDArray] = {}
+    vectors_out: dict[int, list[dict | None]] = {t: [] for t in targets}
+
+    for t0 in range(0, n_t, block_steps):
+        t1 = min(t0 + block_steps, n_t)
+        u_raw = ds.get_variable_block("U", t0, t1)  # type: ignore[attr-defined]
+        u_c = (u_raw[:, :, :, :-1] + u_raw[:, :, :, 1:]) / 2.0
+        del u_raw
+        v_raw = ds.get_variable_block("V", t0, t1)  # type: ignore[attr-defined]
+        v_c = (v_raw[:, :, :-1, :] + v_raw[:, :, 1:, :]) / 2.0
+        del v_raw
+
+        ph = ds.get_variable_block("PH", t0, t1)  # type: ignore[attr-defined]
+        phb = ds.get_variable_block("PHB", t0, t1)  # type: ignore[attr-defined]
+        height = (ph + phb) / 9.81
+        del ph, phb
+        height_c = (height[:, :-1, :, :] + height[:, 1:, :, :]) / 2.0
+        del height
+        hgt = ds.get_variable_block("HGT", t0, t1)  # type: ignore[attr-defined]
+        height_adjusted = height_c - hgt[:, np.newaxis, :, :]
+        del height_c, hgt
+
+        speed_4d = np.hypot(u_c, v_c)
+        ny, nx = speed_4d.shape[2], speed_4d.shape[3]
+
+        interpolator = VerticalInterpolator(height_adjusted, axis=1)
+        for target in targets:
+            if target not in speed_out:
+                speed_out[target] = np.empty((n_t, ny, nx), dtype=speed_4d.dtype)
+            speed_out[target][t0:t1] = interpolator.interpolate(speed_4d, float(target))
+            u_3d = interpolator.interpolate(u_c, float(target))
+            v_3d = interpolator.interpolate(v_c, float(target))
+            for k in range(t1 - t0):
+                try:
+                    vectors_out[target].append(
+                        _package_wind_vectors_step(u_3d[k], v_3d[k], ny, nx, downsampling)
+                    )
+                except Exception:
+                    logger.warning(
+                        "Wind vector packaging failed for step %d at %dm", t0 + k, target
+                    )
+                    vectors_out[target].append(None)
+        del u_c, v_c, height_adjusted, speed_4d, interpolator
+
+    series: list[WindHeightSeries] = []
+    for target in targets:
+        speed = speed_out[target]
+        # Scale bounds follow the site-wide convention (get_low_high): skip the
+        # spin-up first step and cap the max at the 98th percentile.
+        vmin, vmax = get_low_high(speed)
+        series.append(
+            WindHeightSeries(
+                target=target,
+                vmin=vmin,
+                vmax=vmax,
+                speed_steps=speed,
+                wind_vectors=vectors_out[target],
+            )
+        )
+    return series

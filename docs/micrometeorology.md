@@ -280,27 +280,35 @@ Supported site-oriented variables include the legacy fields `TEMP`, `PRES`,
 `WIND_POWER_DENSITY_10M`. See [`wrf_variables_2026.md`](wrf_variables_2026.md)
 for the metadata inventory, units, formulas, and rejected candidates.
 
-The default WRF execution mode is now adaptive:
+JSON export runs coarse (file, variable) work units on ONE persistent process
+pool (`micrometeorology.wrf.jobs`). Each worker opens the NetCDF itself with
+the eager `netCDF4` reader, derives its variable, computes scale bounds, and
+writes every timestep JSON in-process — no arrays cross the process boundary
+and no temporary `.npy` payloads are staged. Wind-potential (`poteolico`)
+extraction streams U/V/PH/PHB in ~64-step blocks
+(`variables.stream_wind_at_heights`), interpolating u/v/speed to all target
+heights from one bracket pass per block, so peak worker memory is bounded by
+the block size regardless of how many timesteps the file has.
 
-```bash
---reader auto --chunks auto --worker-backend auto
-```
+Reliability: every output file is written to a temporary name and atomically
+renamed, so consumers never observe truncated JSON. A unit that fails reports
+its error without affecting sibling units; if a worker process dies (e.g.
+OOM-killed), incomplete units are retried one at a time in isolated pools and
+anything still failing makes the CLI exit non-zero with a per-unit report.
+On network filesystems where HDF5 file locking fails at open, set
+`LABMIM_HDF5_FILE_LOCKING=BEST_EFFORT` (do not disable locking for files that
+may still be written by WRF).
 
-Auto mode resolves a deterministic execution plan and prints it before work
-starts. Small or single-worker jobs use the eager `netCDF4` reader and serial
-JSON writer. Large files, explicit chunk dimensions, or large multi-worker JSON
-payloads can resolve to the xarray-backed lazy reader and memmap worker payloads.
-
-To force local single-process behavior:
+To force single-process (in-process) writing:
 
 ```bash
 labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
-    -o output/JSON -g output/GeoJSON \
-    --reader eager --chunks none --worker-backend serial --workers 1
+    -o output/JSON -g output/GeoJSON --worker-backend serial
 ```
 
-For large files, the xarray-backed reader can select variables before
-materializing arrays:
+`--reader lazy` (or explicit chunk pairs such as
+`--chunks Time=1,south_north=256,west_east=256`, accepted only with the lazy
+reader) switches to the xarray-backed legacy task loop:
 
 ```bash
 labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
@@ -308,23 +316,9 @@ labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
     --reader lazy --chunks none
 ```
 
-`--chunks auto` or explicit chunk pairs such as
-`--chunks Time=1,south_north=256,west_east=256` are accepted only with
-`--reader lazy`. Auto mode disables chunking when dask-backed xarray chunking is
-not available; explicit chunk dimensions raise a clear error in that case.
-
-Large JSON exports can avoid repeatedly pickling arrays into process workers by
-using the memmap payload backend:
-
-```bash
-labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
-    -o output/JSON -g output/GeoJSON \
-    --worker-backend memmap --tmp-dir scratch/wrf-json
-```
-
-`memmap` may be slower for tiny or single-worker jobs because arrays must first
-be materialized as temporary `.npy` files. The resolver keeps those jobs on the
-serial path unless memmap is explicitly requested.
+`--worker-backend memmap` and `--tmp-dir` are deprecated no-ops for JSON
+export (kept for backward compatibility; the figures CLIs still use memmap
+payload staging where it belongs).
 
 ### Figures (Static Maps & Video)
 

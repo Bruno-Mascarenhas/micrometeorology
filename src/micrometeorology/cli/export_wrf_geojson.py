@@ -30,6 +30,7 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, cast
@@ -39,7 +40,7 @@ import typer
 
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
-from micrometeorology.wrf import geojson, reader
+from micrometeorology.wrf import geojson, jobs, reader
 from micrometeorology.wrf import variables as vmod
 from micrometeorology.wrf.batch import (
     JsonTask,
@@ -63,6 +64,8 @@ from micrometeorology.wrf.reader import resolve_wrfout_paths
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+logger = logging.getLogger(__name__)
+
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
 DEFAULT_VARS = [
@@ -84,18 +87,19 @@ DEFAULT_VARS = [
 
 
 def _normalize_var_list(var_list: list[str]) -> list[str]:
-    """Normalize legacy variable names to new names.
+    """Deduplicate variable names, honoring single-height poteolico requests.
 
-    The legacy system passes ``poteolico50``, ``poteolico100``, ``poteolico150``
-    as separate variables.  The new pipeline handles all three heights from a
-    single ``poteolico`` entry, so we collapse them and deduplicate.
+    ``poteolico50`` / ``poteolico100`` / ``poteolico150`` stay distinct so a
+    single-height request only computes and writes that height. When the bare
+    ``poteolico`` (all heights) is also present it wins: the per-height
+    entries are dropped as duplicates. Repeated names are deduplicated.
     """
+    has_all_heights = "poteolico" in var_list
     normalized: list[str] = []
     seen: set[str] = set()
     for v in var_list:
-        # poteolico50 / poteolico100 / poteolico150 → poteolico
-        if v.startswith("poteolico") and v != "poteolico":
-            v = "poteolico"
+        if has_all_heights and v.startswith("poteolico") and v != "poteolico":
+            continue
         if v not in seen:
             normalized.append(v)
             seen.add(v)
@@ -279,50 +283,75 @@ def _build_json_tasks_for_domain(
                     )
                 )
 
-        elif var_name == WRFVariable.WIND_POTENTIAL:
-            # Wind potential: interpolate wind speed to 50m, 100m, 150m
+        elif var_name.startswith(WRFVariable.WIND_POTENTIAL):
             typer.echo("  Computing adjusted heights for wind potential...")
-            u_central, v_central, height_adjusted, speed_4d = vmod.compute_adjusted_heights(ds)
-
-            for target_height, suffix in [
-                (50, "POT_EOLICO_50M"),
-                (100, "POT_EOLICO_100M"),
-                (150, "POT_EOLICO_150M"),
-            ]:
-                typer.echo(f"    -> Interpolating to {target_height}m ({suffix})...")
-                speed_3d = interpolate_speed_to_height(speed_4d, height_adjusted, target_height)
-
-                vmin = float(np.nanmin(speed_3d))
-                vmax = float(np.nanmax(speed_3d))
-
-                for meta in time_meta:
-                    if meta.get("skip"):
-                        continue
-                    i = meta["index"]
-                    data = vmod.materialize_2d(speed_3d[i : i + 1, :, :])
-
-                    # Compute wind vectors per timestep (matches legacy behavior)
-                    try:
-                        wind_vectors = compute_wind_vectors_at_height(
-                            u_central[i : i + 1],
-                            v_central[i : i + 1],
-                            height_adjusted[i : i + 1],
-                            target_height,
-                            downsampling=4,
+            targets = jobs.parse_poteolico_heights(var_name)
+            if isinstance(ds, reader.WRFDataset):
+                # Block-streamed eager path: bounded memory on long files, one
+                # bracket pass per block shared across u/v/speed and heights.
+                for series in vmod.stream_wind_at_heights(ds, targets):
+                    suffix = f"POT_EOLICO_{series.target}M"
+                    typer.echo(f"    -> Interpolating to {series.target}m ({suffix})...")
+                    for meta in time_meta:
+                        if meta.get("skip"):
+                            continue
+                        i = meta["index"]
+                        add_task(
+                            JsonTask(
+                                data=series.speed_steps[i],
+                                scale_min=series.vmin,
+                                scale_max=series.vmax,
+                                date_str=_format_datetime(meta["datetime_local"]),
+                                output_path=str(Path(json_dir) / f"{grid}_{suffix}_{i:03d}.json"),
+                                wind_data=series.wind_vectors[i],
+                            )
                         )
-                    except Exception:
-                        wind_vectors = None
+            else:
+                u_central, v_central, height_adjusted, speed_4d = vmod.compute_adjusted_heights(ds)
 
-                    add_task(
-                        JsonTask(
-                            data=data,
-                            scale_min=vmin,
-                            scale_max=vmax,
-                            date_str=_format_datetime(meta["datetime_local"]),
-                            output_path=str(Path(json_dir) / f"{grid}_{suffix}_{i:03d}.json"),
-                            wind_data=wind_vectors,
+                for target_height in targets:
+                    suffix = f"POT_EOLICO_{target_height}M"
+                    typer.echo(f"    -> Interpolating to {target_height}m ({suffix})...")
+                    speed_3d = interpolate_speed_to_height(speed_4d, height_adjusted, target_height)
+
+                    # Scale bounds follow the site-wide convention
+                    # (get_low_high): skip spin-up step 0, 98th-percentile max.
+                    vmin, vmax = vmod.get_low_high(speed_3d)
+
+                    for meta in time_meta:
+                        if meta.get("skip"):
+                            continue
+                        i = meta["index"]
+                        data = vmod.materialize_2d(speed_3d[i : i + 1, :, :])
+
+                        # Compute wind vectors per timestep (matches legacy behavior)
+                        try:
+                            wind_vectors = compute_wind_vectors_at_height(
+                                u_central[i : i + 1],
+                                v_central[i : i + 1],
+                                height_adjusted[i : i + 1],
+                                target_height,
+                                downsampling=4,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Wind vector computation failed for step %d at %dm",
+                                i,
+                                target_height,
+                                exc_info=True,
+                            )
+                            wind_vectors = None
+
+                        add_task(
+                            JsonTask(
+                                data=data,
+                                scale_min=vmin,
+                                scale_max=vmax,
+                                date_str=_format_datetime(meta["datetime_local"]),
+                                output_path=str(Path(json_dir) / f"{grid}_{suffix}_{i:03d}.json"),
+                                wind_data=wind_vectors,
+                            )
                         )
-                    )
 
         elif var_name == WRFVariable.WIND_POWER_DENSITY_10M:
             power_density, vmin, vmax = vmod.extract_wind_power_density_10m(ds)
@@ -495,6 +524,7 @@ def run(
             json_worker_request=cast("JsonWorkerRequest", worker_backend),
             workers=workers,
             tmp_dir=tmp_dir,
+            requested_variables=var_list,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -507,7 +537,36 @@ def run(
     typer.echo(f"Variables: {var_list}")
     typer.echo(format_wrf_execution_plan(initial_plan))
 
-    # Build and write tasks per domain/variable to avoid keeping all frames in RAM.
+    if initial_plan.reader == "eager":
+        # Default path: coarse (file, variable) work units on ONE persistent
+        # pool. Workers open the NetCDF themselves - no array IPC, no temp
+        # .npy payloads, no per-batch pool spawning.
+        if worker_backend == WorkerChoice.memmap or tmp_dir is not None:
+            typer.echo(
+                "  ⚠ --worker-backend memmap/--tmp-dir are deprecated for JSON export "
+                "and ignored: work units write files directly"
+            )
+        unit_workers = 1 if worker_backend == WorkerChoice.serial else initial_plan.workers
+        units = jobs.build_units(paths, var_list, output_dir, geojson_dir, skip_first)
+        results = jobs.execute_units(units, unit_workers, echo=typer.echo)
+
+        for result in results:
+            for warning in result.warnings:
+                typer.echo(f"  ⚠ {warning}")
+        generated_count = sum(
+            len(result.files) for result in results if result.kind in {"values_json", "poteolico"}
+        )
+        failed = [result for result in results if result.error]
+        typer.echo(f"\n✓ Generated {generated_count} JSON files")
+        if failed:
+            typer.echo(f"✗ {len(failed)} work units failed:")
+            for result in failed:
+                typer.echo(f"  - {result.label}: {result.error}")
+            raise typer.Exit(code=1)
+        typer.echo("✓ Done")
+        return
+
+    # Explicit --reader lazy (or explicit chunks): legacy per-domain task loop.
     generated_count = 0
     printed_plans: set[str] = set()
     for wrf_path in paths:
@@ -528,6 +587,7 @@ def run(
                     json_worker_request=cast("JsonWorkerRequest", worker_backend),
                     workers=initial_plan.workers,
                     tmp_dir=tmp_dir,
+                    requested_variables=var_list,
                     estimated_json_payload_bytes=estimate_json_payload_bytes(tasks),
                     json_task_count=len(tasks),
                 )
