@@ -18,10 +18,10 @@ jobs:
         python-version: ["3.14"]
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -41,7 +41,7 @@ jobs:
           uvx pip-audit --strict --disable-pip -r requirements-audit.txt
 
       - name: Cache MyPy
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: .mypy_cache
           key: mypy-${{ runner.os }}-${{ hashFiles('**/*.py') }}
