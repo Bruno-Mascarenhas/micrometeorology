@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-import yaml  # type: ignore
+import yaml
 
 from micrometeorology.common.config import get_settings
 from micrometeorology.common.logging import setup_logging

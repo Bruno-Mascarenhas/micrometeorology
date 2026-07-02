@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import yaml  # type: ignore
+import yaml
 
 logger = logging.getLogger(__name__)
 

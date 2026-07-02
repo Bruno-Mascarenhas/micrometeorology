@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore
+import yaml
 
 from solrad_correction.config.data import DataConfig
 from solrad_correction.config.features import FeatureConfig

@@ -189,7 +189,7 @@ class TorchRegressorModel(SequenceRegressorModel):
         config_dict = None
         if hasattr(self, "_config") and self._config is not None:
             config_dict = (
-                dataclasses.asdict(self._config)  # type: ignore
+                dataclasses.asdict(self._config)
                 if dataclasses.is_dataclass(self._config)
                 else self._config
             )

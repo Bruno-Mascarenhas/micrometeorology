@@ -147,7 +147,7 @@ def _render_figure(task: FigureTask) -> str:
 
     matplotlib.use("Agg")
     import cartopy.crs as ccrs
-    import cartopy.feature as cfeature  # type: ignore
+    import cartopy.feature as cfeature
     import matplotlib.pyplot as plt
 
     from micrometeorology.wrf.plotting import saturated_cmap

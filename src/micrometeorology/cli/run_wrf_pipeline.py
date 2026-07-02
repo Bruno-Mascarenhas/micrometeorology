@@ -224,7 +224,7 @@ def run(
         )
         with figure_pool_ctx as figure_pool:
 
-            def render_task_batch(tasks, label):  # type: ignore[no-untyped-def]
+            def render_task_batch(tasks, label):
                 rendered = run_figure_tasks(
                     tasks,
                     figure_plan.workers,
@@ -313,7 +313,7 @@ def run(
         )
         with json_pool_ctx as json_pool:
 
-            def write_task_batch(tasks, label):  # type: ignore[no-untyped-def]
+            def write_task_batch(tasks, label):
                 nonlocal generated_json_count
                 json_paths = run_json_tasks(
                     tasks,

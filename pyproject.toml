@@ -136,10 +136,16 @@ select = [
     "ARG",  # flake8-unused-arguments
     "PT",   # flake8-pytest-style
     "PD",   # pandas-vet
+    "NPY",  # numpy-specific rules (legacy RNG, deprecated aliases)
 ]
 ignore = [
     "E501",  # line too long (handled by formatter)
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# Global seeding of the legacy numpy RNG is the point here: sklearn and other
+# libraries draw from np.random's global state for reproducibility.
+"src/solrad_correction/utils/seeds.py" = ["NPY002"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["micrometeorology", "solrad_correction"]
@@ -151,7 +157,7 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 check_untyped_defs = true
 warn_redundant_casts = true
-warn_unused_ignores = false
+warn_unused_ignores = true
 strict_equality = true
 extra_checks = true
 ignore_missing_imports = true

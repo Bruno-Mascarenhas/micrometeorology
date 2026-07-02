@@ -47,7 +47,7 @@ class PipelineProfile:
 
     stage_seconds: dict[str, float]
 
-    def time_stage(self, name: str, fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+    def time_stage(self, name: str, fn, *args, **kwargs):
         started = time.monotonic()
         try:
             return fn(*args, **kwargs)

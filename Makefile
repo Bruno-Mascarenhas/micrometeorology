@@ -1,9 +1,8 @@
-.PHONY: install-uv install install-dev install-cuda fix check typecheck test test-verbose clean all
+.PHONY: install-uv install install-dev install-cuda fix check typecheck test test-verbose audit lock-check clean all
 
 # Variables
 PYTHON ?= python
 UV ?= uv
-#UV_PIP = $(UV) pip install --python $(PYTHON)
 UV_PIP = $(UV) pip install --system
 
 install-uv:
@@ -32,6 +31,16 @@ test:
 test-verbose:
 	pytest -n auto -v tests/
 
+# Mirrors the CI vulnerability gate so advisory failures surface before a push.
+audit:
+	$(UV) export --frozen --format requirements-txt --no-emit-project -o requirements-audit.txt
+	uvx pip-audit --strict --disable-pip -r requirements-audit.txt
+	rm -f requirements-audit.txt
+
+# Fails when uv.lock is out of sync with pyproject.toml (offline, fast).
+lock-check:
+	$(UV) lock --check
+
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type d -name ".pytest_cache" -exec rm -rf {} +
@@ -40,7 +49,7 @@ clean:
 	find . -type d -name ".mypy_cache" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
 
-check:
+check: lock-check
 	ruff format --check .
 	ruff check .
 	mypy src tests

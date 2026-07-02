@@ -303,7 +303,7 @@ def extract_rain_step(total: WRFArray, i: int) -> WRFArray:
         return squeeze_array(current) - squeeze_array(previous)
     if i == 0:
         return np.zeros_like(np.squeeze(total[i : i + 1, :, :]))
-    return np.squeeze(total[i : i + 1, :, :]) - np.squeeze(total[i - 1 : i, :, :])  # type: ignore
+    return np.squeeze(total[i : i + 1, :, :]) - np.squeeze(total[i - 1 : i, :, :])
 
 
 def extract_scalar(ds: WRFReader, var_name: str) -> tuple[WRFArray, float, float]:
