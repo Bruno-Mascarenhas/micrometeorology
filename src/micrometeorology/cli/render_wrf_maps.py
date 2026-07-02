@@ -28,6 +28,8 @@ Usage::
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import nullcontext
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, cast
@@ -45,6 +47,7 @@ from micrometeorology.wrf import reader
 from micrometeorology.wrf import variables as vmod
 from micrometeorology.wrf.batch import (
     FigureTask,
+    _max_tasks_per_child,
     build_map_config,
     default_workers,
     run_figure_tasks,
@@ -52,7 +55,6 @@ from micrometeorology.wrf.batch import (
 from micrometeorology.wrf.execution import (
     JsonWorkerRequest,
     ReaderRequest,
-    estimate_figure_payload_bytes,
     format_wrf_execution_plan,
     resolve_wrf_execution_plan,
 )
@@ -527,58 +529,47 @@ def run(
     typer.echo(format_wrf_execution_plan(plan))
 
     # Build and render tasks per domain/variable to avoid retaining all frames in RAM.
+    # One process pool is hoisted over the whole run so each 16-task batch reuses
+    # warm workers instead of paying pool spawn overhead per flush.
     png_paths: list[str] = []
-    printed_plans: set[str] = set()
-    for wrf_path in paths:
-        typer.echo(f"\nLoading {wrf_path.name}...")
+    pool_ctx: ProcessPoolExecutor | nullcontext[None] = (
+        ProcessPoolExecutor(
+            max_workers=plan.workers,
+            max_tasks_per_child=_max_tasks_per_child(plan.workers),
+        )
+        if plan.workers > 1 and plan.json_worker_backend != "serial"
+        else nullcontext()
+    )
+    with pool_ctx as pool:
 
-        def render_task_batch(
-            tasks: list[FigureTask],
-            label: str,
-            current_wrf_path: Path = wrf_path,
-        ) -> None:
-            try:
-                batch_plan = resolve_wrf_execution_plan(
-                    paths=[current_wrf_path],
-                    workflow="figures",
-                    reader_request=cast("ReaderRequest", plan.reader),
-                    chunks_request=chunks,
-                    json_worker_request=cast("JsonWorkerRequest", worker_backend),
-                    workers=plan.workers,
-                    tmp_dir=tmp_dir,
-                    requested_variables=var_list,
-                    estimated_json_payload_bytes=estimate_figure_payload_bytes(tasks),
-                    json_task_count=len(tasks),
-                )
-            except ValueError as exc:
-                raise typer.BadParameter(str(exc)) from exc
-            plan_text = format_wrf_execution_plan(batch_plan)
-            if batch_plan != plan and plan_text not in printed_plans:
-                typer.echo(plan_text)
-                printed_plans.add(plan_text)
+        def render_task_batch(tasks: list[FigureTask], label: str) -> None:
             rendered = run_figure_tasks(
                 tasks,
-                workers=batch_plan.workers,
-                backend=batch_plan.json_worker_backend,
-                tmp_dir=batch_plan.tmp_dir,
+                plan.workers,
+                backend=plan.json_worker_backend,
+                tmp_dir=plan.tmp_dir,
+                executor=pool,
             )
             png_paths.extend(rendered)
             typer.echo(f"  -> {len(rendered)} figures generated for {label}")
 
-        with reader.open_wrf_dataset(
-            wrf_path,
-            reader=plan.reader,
-            chunks=plan.chunks,
-        ) as ds:
-            _build_tasks_for_domain(
-                ds,
-                var_list,
-                output,
-                shapes_dir,
-                skip_first,
-                dpi,
-                task_sink=render_task_batch,
-            )
+        for wrf_path in paths:
+            typer.echo(f"\nLoading {wrf_path.name}...")
+
+            with reader.open_wrf_dataset(
+                wrf_path,
+                reader=plan.reader,
+                chunks=plan.chunks,
+            ) as ds:
+                _build_tasks_for_domain(
+                    ds,
+                    var_list,
+                    output,
+                    shapes_dir,
+                    skip_first,
+                    dpi,
+                    task_sink=render_task_batch,
+                )
 
     typer.echo(f"\n✓ Generated {len(png_paths)} figures")
 
