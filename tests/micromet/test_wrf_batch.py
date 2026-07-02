@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import shutil
 import uuid
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+import pytest
 
 from micrometeorology.wrf.batch import (
     FigureMemmapTask,
@@ -166,6 +168,34 @@ def test_json_memmap_backend_with_provided_executor_matches_owned_pool():
             assert provided == owned
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_broken_process_pool_propagates_instead_of_being_swallowed(tmp_path):
+    """A broken pool dooms every remaining task: it must raise, not log-and-drop."""
+
+    class _BrokenPoolExecutor:
+        def submit(self, *_args, **_kwargs):
+            future: Future[str] = Future()
+            future.set_exception(BrokenProcessPool("worker died"))
+            return future
+
+    task = JsonTask(
+        data=np.ones((2, 2), dtype=np.float32),
+        scale_min=0.0,
+        scale_max=1.0,
+        date_str="01/01/2024 00:00:00",
+        output_path=str(tmp_path / "values.json"),
+        wind_data=None,
+    )
+
+    with pytest.raises(BrokenProcessPool):
+        run_json_tasks(
+            [task],
+            workers=2,
+            backend="memmap",
+            tmp_dir=tmp_path / "memmap-tmp",
+            executor=_BrokenPoolExecutor(),  # type: ignore[arg-type]
+        )
 
 
 def test_figure_memmap_backend_with_provided_executor_matches_owned_pool(monkeypatch):

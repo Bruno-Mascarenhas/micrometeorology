@@ -262,6 +262,7 @@ def run(
         typer.echo("\n── Phase 2: GeoJSON & JSON Generation ──")
         from micrometeorology.cli.export_wrf_geojson import (
             _build_json_tasks_for_domain,
+            _normalize_var_list,
         )
         from micrometeorology.cli.export_wrf_geojson import (
             _resolve_wrfout_paths as _resolve_geo,
@@ -283,7 +284,7 @@ def run(
             "GLW",
             "wind_power_density_10m",
         ]
-        var_list = list(_parse_csv(variables)) if variables else default_vars
+        var_list = _normalize_var_list(list(_parse_csv(variables)) if variables else default_vars)
         paths = _resolve_geo(wrf_dir, date, _parse_int_csv(domains), dataset)
         try:
             json_plan = resolve_wrf_execution_plan(

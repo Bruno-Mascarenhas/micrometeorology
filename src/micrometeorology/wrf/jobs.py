@@ -43,6 +43,27 @@ UnitKind = Literal["values_json", "poteolico", "wind_vectors", "grid_geojson"]
 
 HDF5_LOCKING_ENV = "LABMIM_HDF5_FILE_LOCKING"
 
+POTEOLICO_ALL_HEIGHTS: tuple[int, ...] = (50, 100, 150)
+
+
+def parse_poteolico_heights(variable: str) -> tuple[int, ...]:
+    """Parse a poteolico variable name into the target heights it requests.
+
+    ``"poteolico"`` requests all heights ``(50, 100, 150)``;
+    ``"poteolico<nn>"`` requests ``(<nn>,)`` for ``nn`` in ``{50, 100, 150}``.
+    Anything else raises ``ValueError`` with a CLI-friendly message.
+    """
+    if variable == "poteolico":
+        return POTEOLICO_ALL_HEIGHTS
+    if variable.startswith("poteolico"):
+        suffix = variable[len("poteolico") :]
+        if suffix.isdigit() and int(suffix) in POTEOLICO_ALL_HEIGHTS:
+            return (int(suffix),)
+    raise ValueError(
+        f"Unknown wind-potential variable {variable!r}: expected 'poteolico' or "
+        f"one of {', '.join(f'poteolico{h}' for h in POTEOLICO_ALL_HEIGHTS)}"
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class WorkUnit:
@@ -210,7 +231,8 @@ def _run_poteolico_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list
     files: list[str] = []
     grid = ds.grid_level.value
     time_meta = ds.build_date_metadata(skip_first_n=unit.skip_first)
-    series = vmod.stream_wind_at_heights(ds)
+    targets = parse_poteolico_heights(unit.variable)
+    series = vmod.stream_wind_at_heights(ds, targets)
 
     for s in series:
         suffix = f"POT_EOLICO_{s.target}M"
@@ -321,7 +343,7 @@ def build_units(
             )
         )
         for var_name in variables:
-            if var_name == WRFVariable.WIND_POTENTIAL:
+            if var_name.startswith(WRFVariable.WIND_POTENTIAL):
                 kind: UnitKind = "poteolico"
             elif var_name == "wind_vectors":
                 kind = "wind_vectors"

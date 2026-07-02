@@ -47,8 +47,18 @@ def _time_dim(value: xr.DataArray) -> str:
 
 
 def _tail(value: WRFArray) -> WRFArray:
+    """Drop the spin-up first time step.
+
+    When the time axis has <= 1 entries (single-timestep files) the full
+    array is returned instead, so reductions never see an empty tail.
+    """
     if _is_xarray(value):
-        return value.isel({_time_dim(value): slice(1, None)})
+        time_dim = _time_dim(value)
+        if value.sizes[time_dim] <= 1:
+            return value
+        return value.isel({time_dim: slice(1, None)})
+    if value.shape[0] <= 1:
+        return value
     return value[1:, :]
 
 
@@ -90,16 +100,22 @@ def materialize_nd(value: WRFArray) -> NDArray:
 
 
 def get_low_high(variable: WRFArray) -> tuple[float, float]:
-    """Return ``(min, max)`` of a 3-D variable, skipping the first time step."""
+    """Return ``(min, max)`` of a 3-D variable, skipping the first time step.
+
+    Single-timestep inputs fall back to the full array (see :func:`_tail`).
+    """
     if _is_xarray(variable):
         tail = _tail(variable)
         return _as_float(tail.min(skipna=True)), _as_float(tail.quantile(0.98, skipna=True))
-    flat = variable[1:, :].ravel()
+    flat = _tail(variable).ravel()
     return float(np.nanmin(flat)), float(np.nanpercentile(flat, 98))
 
 
 def get_low_high_wind(u: WRFArray, v: WRFArray) -> tuple[float, float]:
-    """Return ``(min, max)`` wind speed from U/V arrays (skip first step)."""
+    """Return ``(min, max)`` wind speed from U/V arrays (skip first step).
+
+    Single-timestep inputs fall back to the full arrays (see :func:`_tail`).
+    """
     if _is_xarray(u) or _is_xarray(v):
         speed = safe_binary_op(
             _tail(u),
@@ -109,8 +125,8 @@ def get_low_high_wind(u: WRFArray, v: WRFArray) -> tuple[float, float]:
             result_dtype=float,
         )
         return _as_float(speed.min(skipna=True)), _as_float(speed.max(skipna=True))
-    flat_u = u[1:, :].ravel()
-    flat_v = v[1:, :].ravel()
+    flat_u = _tail(u).ravel()
+    flat_v = _tail(v).ravel()
     speed = np.hypot(flat_u, flat_v)
     return float(np.nanmin(speed)), float(np.nanmax(speed))
 
@@ -272,16 +288,21 @@ def extract_rain(ds: WRFReader) -> tuple[WRFArray, float, float]:
 
 
 def extract_rain_step(total: WRFArray, i: int) -> WRFArray:
-    """Compute incremental rain for step *i* from cumulative totals."""
+    """Compute incremental rain for step *i* from cumulative totals.
+
+    Step 0 returns zeros: the increment is unknowable at a file/restart
+    boundary, and publishing rain accumulated since simulation start would
+    massively overstate rainfall. Every later step is ``total[i] - total[i-1]``.
+    """
     if _is_xarray(total):
         time_dim = _time_dim(total)
         current = total.isel({time_dim: slice(i, i + 1)})
-        if i <= 1:
-            return squeeze_array(current)
+        if i == 0:
+            return xr.zeros_like(squeeze_array(current))
         previous = total.isel({time_dim: slice(i - 1, i)})
         return squeeze_array(current) - squeeze_array(previous)
-    if i <= 1:
-        return np.squeeze(total[i : i + 1, :, :])
+    if i == 0:
+        return np.zeros_like(np.squeeze(total[i : i + 1, :, :]))
     return np.squeeze(total[i : i + 1, :, :]) - np.squeeze(total[i - 1 : i, :, :])  # type: ignore
 
 
@@ -615,11 +636,14 @@ def stream_wind_at_heights(
     series: list[WindHeightSeries] = []
     for target in targets:
         speed = speed_out[target]
+        # Scale bounds follow the site-wide convention (get_low_high): skip the
+        # spin-up first step and cap the max at the 98th percentile.
+        vmin, vmax = get_low_high(speed)
         series.append(
             WindHeightSeries(
                 target=target,
-                vmin=float(np.nanmin(speed)),
-                vmax=float(np.nanmax(speed)),
+                vmin=vmin,
+                vmax=vmax,
                 speed_steps=speed,
                 wind_vectors=vectors_out[target],
             )
