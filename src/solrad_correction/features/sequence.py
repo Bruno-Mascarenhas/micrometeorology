@@ -32,7 +32,10 @@ def create_sequences(
     -------
     tuple of (x_sequences, y_targets)
         ``x_sequences``: shape ``(n_sequences, sequence_length, n_features)``
-        ``y_targets``: shape ``(n_sequences,)``; the target at the end of each window.
+        ``y_targets``: shape ``(n_sequences,)``; window rows ``[i, i + sequence_length)``
+        are paired with ``y[i + sequence_length - 1]``, the target concurrent with the
+        last row *inside* the window (same-time correction, not one-step-ahead
+        forecasting).
     """
     x = np.asarray(features)
     y = np.asarray(target).flatten()
@@ -42,7 +45,7 @@ def create_sequences(
     if sequence_length >= len(x):
         raise ValueError(f"sequence_length ({sequence_length}) >= data length ({len(x)})")
 
-    n = len(x) - sequence_length
+    n = len(x) - sequence_length + 1
     output_shape = (n, sequence_length, x.shape[1])
     assert_array_size(
         output_shape,
@@ -55,7 +58,7 @@ def create_sequences(
     x_windows = np.lib.stride_tricks.sliding_window_view(x, sequence_length, axis=0)
     # x_windows shape: (n, n_features, sequence_length); transpose to (n, seq_len, n_features)
     x_out = np.ascontiguousarray(x_windows[:n].transpose(0, 2, 1), dtype=np.float32)
-    y_out = y[sequence_length:].astype(np.float32)
+    y_out = y[sequence_length - 1 :].astype(np.float32)
 
     return x_out, y_out
 
@@ -66,6 +69,8 @@ def create_sequences_index(
 ) -> pd.DatetimeIndex:
     """Get the DatetimeIndex corresponding to sequence targets.
 
-    Useful for mapping predictions back to timestamps.
+    Window ``i`` covers rows ``[i, i + sequence_length)`` and predicts the target
+    at the window's last row, so target timestamps start at position
+    ``sequence_length - 1``. Useful for mapping predictions back to timestamps.
     """
-    return index[sequence_length:]
+    return index[sequence_length - 1 :]

@@ -49,8 +49,15 @@ class WindowedSequenceDataset(Dataset):
 
     Unlike ``SequenceDataset``, this stores the base 2-D feature matrix and
     target vector, then slices each window on demand. This preserves the
-    existing ``create_sequences()`` alignment without materializing the full
-    3-D ``(n_windows, sequence_length, n_features)`` array.
+    ``create_sequences()`` alignment — window rows ``[i, i + sequence_length)``
+    predict ``y[i + sequence_length - 1]``, the target concurrent with the last
+    row inside the window — without materializing the full 3-D
+    ``(n_windows, sequence_length, n_features)`` array.
+
+    When a ``DatetimeIndex`` is provided, windows that span a temporal gap
+    larger than the base sampling frequency (inferred as the median timestamp
+    delta, overridable via ``max_gap``) are dropped so no window mixes
+    discontinuous history.
     """
 
     def __init__(
@@ -60,6 +67,8 @@ class WindowedSequenceDataset(Dataset):
         sequence_length: int,
         *,
         target_offset: int | None = None,
+        index: pd.DatetimeIndex | None = None,
+        max_gap: pd.Timedelta | str | None = None,
     ) -> None:
         """
         Parameters
@@ -72,23 +81,35 @@ class WindowedSequenceDataset(Dataset):
             Number of time steps per input window.
         target_offset:
             Target row offset relative to the window start. Defaults to
-            ``sequence_length``, matching ``create_sequences()``.
+            ``sequence_length - 1`` (the last row inside the window), matching
+            ``create_sequences()``.
+        index:
+            Optional ``DatetimeIndex`` aligned with the base rows. When given,
+            windows spanning a temporal gap larger than ``max_gap`` are dropped.
+        max_gap:
+            Maximum allowed timestamp delta between consecutive rows inside a
+            window. Defaults to the inferred base frequency (median delta).
         """
         if sequence_length <= 0:
             raise ValueError(f"sequence_length ({sequence_length}) must be positive")
 
         self.sequence_length = sequence_length
-        self.target_offset = sequence_length if target_offset is None else target_offset
+        self.target_offset = sequence_length - 1 if target_offset is None else target_offset
 
         if self.target_offset < 0:
             raise ValueError(f"target_offset ({self.target_offset}) must be non-negative")
 
         self.X = self._prepare_features(features)
         self.y = self._prepare_targets(targets)
+        self.index = None if index is None else pd.DatetimeIndex(index)
 
         if len(self.X) != len(self.y):
             raise ValueError(
                 f"features ({len(self.X)}) and target ({len(self.y)}) must have same length"
+            )
+        if self.index is not None and len(self.index) != len(self.X):
+            raise ValueError(
+                f"index ({len(self.index)}) and features ({len(self.X)}) must have same length"
             )
         if sequence_length >= len(self.X):
             raise ValueError(f"sequence_length ({sequence_length}) >= data length ({len(self.X)})")
@@ -97,9 +118,30 @@ class WindowedSequenceDataset(Dataset):
                 f"target_offset ({self.target_offset}) >= target length ({len(self.y)})"
             )
 
-        self._length = min(len(self.X) - sequence_length, len(self.y) - self.target_offset)
+        base_length = min(len(self.X) - sequence_length + 1, len(self.y) - self.target_offset)
+        self._starts = self._valid_window_starts(base_length, max_gap)
+        self._length = base_length if self._starts is None else len(self._starts)
         if self._length <= 0:
             raise ValueError("No sequence windows can be generated with the provided offsets")
+
+    def _valid_window_starts(
+        self,
+        base_length: int,
+        max_gap: pd.Timedelta | str | None,
+    ) -> np.ndarray | None:
+        """Return window start positions whose rows contain no temporal gap."""
+        if self.index is None:
+            return None
+        timestamps = self.index.to_numpy(dtype="datetime64[ns]").astype(np.int64)
+        deltas = np.diff(timestamps)
+        limit = float(np.median(deltas)) if max_gap is None else float(pd.Timedelta(max_gap).value)
+        gap_after = np.zeros(len(self.index), dtype=np.int64)
+        gap_after[1:] = deltas > limit
+        cumulative = np.cumsum(gap_after)
+        starts = np.arange(max(base_length, 0))
+        span = max(self.sequence_length - 1, self.target_offset)
+        valid: np.ndarray = starts[(cumulative[starts + span] - cumulative[starts]) == 0]
+        return valid
 
     @staticmethod
     def _prepare_features(features: SequenceArray) -> SequenceArray:
@@ -137,8 +179,9 @@ class WindowedSequenceDataset(Dataset):
         if idx < 0 or idx >= self._length:
             raise IndexError(idx)
 
-        window = self.X[idx : idx + self.sequence_length]
-        target = self.y[idx + self.target_offset]
+        start = idx if self._starts is None else int(self._starts[idx])
+        window = self.X[start : start + self.sequence_length]
+        target = self.y[start + self.target_offset]
 
         if isinstance(window, torch.Tensor):
             x_tensor = window
@@ -157,12 +200,25 @@ class WindowedSequenceDataset(Dataset):
         """Number of features in each time step."""
         return int(self.X.shape[1])
 
+    def _target_positions(self) -> np.ndarray:
+        """Base-row positions of each window's target."""
+        starts = np.arange(self._length) if self._starts is None else self._starts
+        return starts + self.target_offset
+
     def target_values(self) -> np.ndarray:
         """Return targets aligned with the lazy sequence windows."""
-        values = self.y[self.target_offset : self.target_offset + self._length]
-        if isinstance(values, torch.Tensor):
+        positions = self._target_positions()
+        if isinstance(self.y, torch.Tensor):
+            values = self.y[torch.as_tensor(positions, dtype=torch.long)]
             return values.detach().cpu().numpy().astype(np.float32, copy=False)
-        return np.asarray(values, dtype=np.float32)
+        selected: np.ndarray = np.asarray(self.y, dtype=np.float32)[positions]
+        return selected
+
+    def prediction_index(self) -> pd.DatetimeIndex | None:
+        """Return the timestamps of each window's target row, if an index is set."""
+        if self.index is None:
+            return None
+        return self.index[self._target_positions()]
 
     def save(
         self,
@@ -220,7 +276,7 @@ class WindowedSequenceDatasetMeta:
             feature_names=feature_names or [],
             sequence_length=dataset.sequence_length,
             target_offset=dataset.target_offset,
-            index=index,
+            index=index if index is not None else dataset.index,
         )
 
     def to_torch_dataset(self) -> WindowedSequenceDataset:
@@ -230,6 +286,7 @@ class WindowedSequenceDatasetMeta:
             self.targets,
             self.sequence_length,
             target_offset=self.target_offset,
+            index=None if self.index is None else pd.DatetimeIndex(self.index),
         )
 
     def save(self, path: str | Path) -> None:
@@ -242,7 +299,7 @@ class WindowedSequenceDatasetMeta:
             y_base=np.asarray(self.targets, dtype=np.float32).reshape(-1),
             sequence_length=np.array([self.sequence_length]),
             target_offset=np.array(
-                [self.sequence_length if self.target_offset is None else self.target_offset]
+                [self.sequence_length - 1 if self.target_offset is None else self.target_offset]
             ),
             format_version=np.array([1]),
         )
