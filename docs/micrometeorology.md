@@ -64,7 +64,6 @@ uv pip install -e ".[dev]"
 # With video generation (moviepy):
 uv pip install -e ".[video]"
 
-# Dask-backed xarray chunking is included in the base dependencies.
 ```
 
 For local development, prefer activating the existing `labmim` Conda
@@ -299,26 +298,9 @@ On network filesystems where HDF5 file locking fails at open, set
 `LABMIM_HDF5_FILE_LOCKING=BEST_EFFORT` (do not disable locking for files that
 may still be written by WRF).
 
-To force single-process (in-process) writing:
-
-```bash
-labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
-    -o output/JSON -g output/GeoJSON --worker-backend serial
-```
-
-`--reader lazy` (or explicit chunk pairs such as
-`--chunks Time=1,south_north=256,west_east=256`, accepted only with the lazy
-reader) switches to the xarray-backed legacy task loop:
-
-```bash
-labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
-    -o output/JSON -g output/GeoJSON \
-    --reader lazy --chunks none
-```
-
-`--worker-backend memmap` and `--tmp-dir` are deprecated no-ops for JSON
-export (kept for backward compatibility; the figures CLIs still use memmap
-payload staging where it belongs).
+To run single-process, pass `--workers 1`. There is deliberately no reader or
+worker-backend selection anymore: eager block-streamed reads plus one
+persistent pool of file-owning workers is the only execution model.
 
 ### Figures (Static Maps & Video)
 
@@ -332,38 +314,16 @@ labmim-wrf-figures --wrf-dir /path/to/wrfout/ --date 20240101 \
     -o output/figures/ --workers 44 --also-video
 ```
 
-Figures also support adaptive reader planning during task construction:
-
-```bash
-labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
-    -o output/figures --reader auto --chunks auto --worker-backend auto
-```
-
-For large multi-worker render jobs, force memmap-backed figure payloads to avoid
-pickling each 2-D frame array into worker processes:
-
-```bash
-labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
-    -o output/figures --reader lazy --chunks auto \
-    --worker-backend memmap --tmp-dir scratch/wrf-figures
-```
+Figure frames are spilled to temporary ``.npy`` files and rendered on one
+persistent worker pool per run; no reader or backend tuning is exposed.
 
 ### Local testing (all-in-one)
 
 ```bash
-python scripts/micromet/run_wrf_local.py \
+python -m micrometeorology.cli.run_wrf_pipeline \
     --wrf-dir /path/to/wrfout/ --date 20240101 \
     -D 1 -D 4 -v temperature -v wind -v rain \
     -o output/wrf_local/ --workers 8 --also-video
-```
-
-The all-in-one command exposes the same adaptive reader controls and JSON memmap
-backend:
-
-```bash
-python scripts/micromet/run_wrf_local.py \
-    --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
-    -o output/wrf_local --reader auto --json-worker-backend auto
 ```
 
 ### Sensor processing
@@ -430,34 +390,31 @@ Basemap is deprecated and no longer maintained. All map generation now uses **Ca
 
 ### What is `batch.py`?
 
-The core parallel rendering engine. It builds `FigureTask` and `JsonTask` units and dispatches them to either serial execution or memmap-backed workers. The legacy direct-pickle worker backend was removed because it duplicated ndarray payloads across process boundaries and was the easiest path to accidental memory spikes. For server workloads, prefer `--reader lazy --chunks auto --worker-backend memmap` so large arrays are selected lazily and worker processes receive file references.
+The parallel figure-rendering engine. It builds `FigureTask` frames, spills their arrays to temporary `.npy` files, and renders them on a persistent process pool. JSON generation lives in `jobs.py`, where each worker opens the NetCDF itself and writes its files directly — no array payloads cross process boundaries at all.
 
 ### Safe WRF execution guardrails
 
-WRF operations now fail early when a planned array operation exceeds the configured memory guardrail. The default single-operation limit is `16 GiB` and can be adjusted with `LABMIM_MAX_ARRAY_GB`. Worker processes are recycled every `64` tasks by default; set `LABMIM_MAX_TASKS_PER_CHILD=0` to disable or raise it if worker startup dominates. For very large NetCDF files, raise these only with `--reader lazy --chunks auto --worker-backend memmap`; high eager limits are not a substitute for chunked execution.
+WRF operations fail early when a planned array allocation exceeds the configured memory guardrail. The default single-operation limit is `16 GiB` and can be adjusted with `LABMIM_MAX_ARRAY_GB`. Worker processes are recycled every `64` tasks by default; set `LABMIM_MAX_TASKS_PER_CHILD=0` to disable or raise it if worker startup dominates. Wind-potential extraction streams the 4D fields in ~64-step blocks, so peak worker memory stays bounded regardless of how many timesteps a file has.
 
-Staggered WRF dimensions are destaggered positionally before derived calculations. Operations such as `U/V` wind speed, `PH+PHB`, height above terrain, relative humidity, precipitation totals, and wind power density validate exact xarray dimension names and shapes before combining arrays. This prevents accidental xarray outer-product alignment between dimensions such as `west_east_stag`, `west_east`, `south_north_stag`, and `south_north`.
+Staggered WRF dimensions are destaggered positionally before derived calculations (`U/V` wind speed, `PH+PHB` heights above terrain), so no label alignment ever occurs.
 
 Recommended server commands:
 
 ```bash
-labmim-wrf-geojson --wrf-dir /data/wrf --date 20240101 --domains 1 4 \
-  --variables temperature wind rain wind_vectors \
-  --reader lazy --chunks auto --worker-backend memmap --workers 8 \
-  --tmp-dir /scratch/labmim-wrf-json -o output/JSON -g output/GeoJSON
+labmim-wrf-geojson --wrf-dir /data/wrf --date 20240101 --domains 1,4 \
+  --variables temperature wind rain wind_vectors --workers 8 \
+  -o output/JSON -g output/GeoJSON
 
 labmim-wrf-figures --wrf-dir /data/wrf --date 20240101 --domains 3 \
-  --variables temperature wind SWDOWN \
-  --reader lazy --chunks auto --worker-backend memmap --workers 8 \
-  --tmp-dir /scratch/labmim-wrf-figures -o output/figures
+  --variables temperature wind SWDOWN --workers 8 -o output/figures
 ```
 
 Architecture remains modular:
 
-- `reader.py` owns NetCDF/xarray access and path resolution.
+- `reader.py` owns eager NetCDF access (whole variables and time blocks) and path resolution.
 - `safety.py` owns shape, dtype, memory, staggered-grid, and worker-payload guardrails.
 - `variables.py` owns physical WRF diagnostics and derived variables.
-- `interpolation.py` owns vertical interpolation and keeps the xarray/dask path vectorized.
+- `interpolation.py` owns vertical interpolation (`VerticalInterpolator` bracket fast path with an argsort fallback).
 - `geojson.py` owns grid/value serialization and writes large outputs incrementally.
 - `batch.py` owns worker execution and payload transport.
 - CLI modules compose those layers and now flush bounded task batches instead of retaining the full run in memory.
