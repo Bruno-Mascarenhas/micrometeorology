@@ -21,12 +21,24 @@ from solrad_correction.training.factories import (
 from solrad_correction.training.loops import evaluate_epoch, train_one_epoch
 from solrad_correction.training.progress import TrainingProgress
 from solrad_correction.training.state import BestModelState, TrainingPlan, TrainingState
+from solrad_correction.utils.serialization import load_torch_checkpoint
 
 if TYPE_CHECKING:
     from solrad_correction.config import ModelConfig, RuntimeConfig
     from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
 
 logger = logging.getLogger(__name__)
+
+
+def _unwrap_compiled(module: nn.Module) -> nn.Module:
+    """Return the original module underneath a ``torch.compile`` wrapper.
+
+    Compiled modules (``OptimizedModule``) expose the wrapped module as
+    ``_orig_mod`` and share its parameters. Persisting the unwrapped module
+    keeps checkpoint/state-dict keys free of the ``_orig_mod.`` prefix so
+    they load back into plain (uncompiled) modules.
+    """
+    return getattr(module, "_orig_mod", module)
 
 
 class Trainer:
@@ -51,6 +63,8 @@ class Trainer:
         scheduler_state: dict[str, Any] | None = None,
         scaler_state: dict[str, Any] | None = None,
         checkpoint_config: dict[str, Any] | None = None,
+        best_metric: float | None = None,
+        best_epoch: int | None = None,
     ) -> None:
         self.model: nn.Module = model
         self.device = device
@@ -75,8 +89,10 @@ class Trainer:
         self.optimizer_state: dict[str, Any] | None = None
         self.scheduler_state: dict[str, Any] | None = None
         self.scaler_state: dict[str, Any] | None = None
-        self.best_metric: float | None = None
-        self.best_epoch: int | None = None
+        # Seeded from a resume checkpoint so a resumed run never overwrites a
+        # better model persisted by the previous run.
+        self.best_metric: float | None = best_metric
+        self.best_epoch: int | None = best_epoch
         self.dataloader_settings: DataLoaderSettings | None = None
 
     def train(
@@ -86,9 +102,29 @@ class Trainer:
     ) -> tuple[nn.Module, dict]:
         """Run the full training loop.
 
+        ``config.max_epochs`` is the total epoch budget of the run: a resumed
+        run trains only the remaining ``max_epochs - start_epoch`` epochs.
+
         Returns ``(trained_model, history)`` where history contains
         per-epoch losses.
         """
+        if self.start_epoch >= self.max_epochs:
+            logger.warning(
+                "start_epoch (%d) >= max_epochs (%d): nothing left to train. "
+                "Increase model.max_epochs to continue this run.",
+                self.start_epoch,
+                self.max_epochs,
+            )
+            self.optimizer_state = self._resume_optimizer_state
+            self.scheduler_state = self._resume_scheduler_state
+            self.scaler_state = self._resume_scaler_state
+            self.state.best_metric = self.best_metric
+            self.state.best_epoch = self.best_epoch
+            self.state.optimizer_state = self.optimizer_state
+            self.state.scheduler_state = self.scheduler_state
+            self.state.scaler_state = self.scaler_state
+            return self.model, self.state.history
+
         settings = (
             resolve_dataloader_settings(self.runtime)
             if self.runtime is not None
@@ -115,6 +151,10 @@ class Trainer:
             except Exception as e:
                 logger.debug("torch.compile not supported or failed: %s", e)
 
+        # All persistence (checkpoints, best-state capture) uses the plain
+        # module so state_dict keys never carry the `_orig_mod.` prefix.
+        plain_model = _unwrap_compiled(self.model)
+
         train_loader = self._build_loader(train_data, settings=settings, shuffle=True)
         val_loader = (
             self._build_loader(val_data, settings=settings, shuffle=False) if val_data else None
@@ -123,6 +163,10 @@ class Trainer:
         optimizer = create_optimizer(self.model, self.plan)
         criterion = create_criterion()
         early_stop = EarlyStopping(patience=self.patience, min_delta=self.min_delta)
+        if self.best_metric is not None:
+            # Resume: early stopping must measure improvement against the
+            # previous run's best metric, not restart from scratch.
+            early_stop.best_score = self.best_metric
 
         # Automatic Mixed Precision (AMP)
         use_amp = settings.amp
@@ -165,13 +209,17 @@ class Trainer:
         history = self.state.history
 
         best = BestModelState()
+        if self.best_metric is not None:
+            # Seed with the resumed run's best metric so a worse epoch never
+            # clobbers the previously saved best.pt.
+            best.metric = self.best_metric
+            best.epoch = self.best_epoch or 0
         checkpoint_manager = CheckpointManager.from_runtime(
             self.runtime,
             checkpoint_config=self._checkpoint_config,
         )
 
-        total_epochs = self.start_epoch + self.max_epochs
-        for epoch in range(self.start_epoch, total_epochs):
+        for epoch in range(self.start_epoch, self.max_epochs):
             self.completed_epochs = epoch + 1
             progress.start_epoch(epoch)
 
@@ -213,29 +261,33 @@ class Trainer:
             scheduler.step(monitor)
 
             # Best-model tracking keeps only CPU model weights in memory.
-            if best.capture_if_better(self.model, monitor, epoch + 1):
+            if best.capture_if_better(plain_model, monitor, epoch + 1):
                 self.best_metric = best.metric
                 self.best_epoch = best.epoch
                 if checkpoint_manager.enabled:
                     checkpoint_manager.save_best(
                         epoch=epoch + 1,
-                        model=self.model,
+                        model=plain_model,
                         optimizer=optimizer,
                         scheduler=scheduler,
                         scaler=scaler,
                         metric=monitor,
                         dataloader_settings=self.dataloader_settings,
+                        best_metric=self.best_metric,
+                        best_epoch=self.best_epoch,
                     )
 
             if checkpoint_manager.should_save_last(epoch + 1):
                 checkpoint_manager.save_last(
                     epoch=epoch + 1,
-                    model=self.model,
+                    model=plain_model,
                     optimizer=optimizer,
                     scheduler=scheduler,
                     scaler=scaler,
                     metric=monitor,
                     dataloader_settings=self.dataloader_settings,
+                    best_metric=self.best_metric,
+                    best_epoch=self.best_epoch,
                 )
 
             extra = ""
@@ -251,9 +303,27 @@ class Trainer:
         if writer:
             writer.close()
 
-        # Restore best weights before returning
-        logger.info("Restoring best model weights (loss=%.6f)", best.metric)
-        best.restore(self.model)
+        # Restore best weights before returning. If this (resumed) run never
+        # beat the seeded best metric, fall back to the on-disk best.pt so the
+        # returned model is still the best across all runs.
+        if best.state_dict:
+            logger.info("Restoring best model weights (loss=%.6f)", best.metric)
+            best.restore(plain_model)
+        elif checkpoint_manager.enabled and checkpoint_manager.directory is not None:
+            best_path = checkpoint_manager.directory / "best.pt"
+            if best_path.exists():
+                checkpoint = load_torch_checkpoint(best_path)
+                plain_model.load_state_dict(checkpoint["model_state_dict"])
+                logger.info(
+                    "No epoch improved on the resumed best (loss=%.6f); "
+                    "restored best model weights from %s",
+                    best.metric,
+                    best_path,
+                )
+
+        # Hand back the plain module so downstream save()/state_dict() calls
+        # persist clean (uncompiled) keys.
+        self.model = plain_model
 
         self.optimizer_state = optimizer.state_dict()
         self.scheduler_state = scheduler.state_dict()

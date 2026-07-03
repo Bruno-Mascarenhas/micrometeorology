@@ -59,8 +59,26 @@ def save_torch_checkpoint(
     logger.info("Saved checkpoint: %s (epoch %d)", p, epoch)
 
 
+def _strip_compiled_prefix(state: dict) -> dict:
+    """Strip ``torch.compile`` key prefixes from a model state_dict.
+
+    Checkpoints written from a compiled module carry ``_orig_mod.``-prefixed
+    keys that cannot be loaded into a plain module. New checkpoints are saved
+    unwrapped; this keeps previously written ones loadable.
+    """
+    prefix = "_orig_mod."
+    if not any(key.startswith(prefix) for key in state):
+        return state
+    logger.info("Normalizing torch.compile-prefixed state_dict keys")
+    return {key.removeprefix(prefix): value for key, value in state.items()}
+
+
 def load_torch_checkpoint(path: str | Path) -> dict:
     """Load a PyTorch checkpoint securely."""
     import torch
 
-    return torch.load(path, map_location="cpu", weights_only=True)  # type: ignore
+    checkpoint: dict = torch.load(path, map_location="cpu", weights_only=True)
+    model_state = checkpoint.get("model_state_dict")
+    if isinstance(model_state, dict):
+        checkpoint["model_state_dict"] = _strip_compiled_prefix(model_state)
+    return checkpoint

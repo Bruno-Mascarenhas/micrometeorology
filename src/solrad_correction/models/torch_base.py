@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -15,8 +16,6 @@ from solrad_correction.utils.seeds import get_device
 from solrad_correction.utils.serialization import load_torch_checkpoint, save_torch_checkpoint
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from solrad_correction.config import ModelConfig
     from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
     from solrad_correction.training.dataloaders import DataLoaderSettings
@@ -62,7 +61,38 @@ class TorchRegressorModel(SequenceRegressorModel):
         self._optimizer_state = checkpoint.get("optimizer_state_dict")
         self._scheduler_state = checkpoint.get("scheduler_state_dict")
         self._scaler_state = checkpoint.get("scaler_state_dict")
+        self._best_metric, self._best_epoch = self._resolve_resume_best(checkpoint, path)
         logger.info("Loaded resume checkpoint from %s (epoch %d)", path, self._start_epoch)
+
+    @staticmethod
+    def _resolve_resume_best(
+        checkpoint: dict[str, Any], path: str
+    ) -> tuple[float | None, int | None]:
+        """Recover the previous run's best monitor metric for resume.
+
+        Preference order: the ``best_metric`` persisted in the checkpoint
+        metadata, the checkpoint's own metric when it *is* the best
+        checkpoint, then a sibling ``best.pt`` written by the checkpoint
+        manager (covers checkpoints written before ``best_metric`` existed).
+        """
+        metadata = checkpoint.get("metadata") or {}
+        best_metric = metadata.get("best_metric")
+        best_epoch = metadata.get("best_epoch")
+        if best_metric is not None:
+            return best_metric, best_epoch
+        if metadata.get("checkpoint_kind") == "best":
+            return metadata.get("monitor_metric"), checkpoint.get("epoch")
+
+        best_path = Path(path).parent / "best.pt"
+        if best_path.exists():
+            best_checkpoint = load_torch_checkpoint(best_path)
+            best_metadata = best_checkpoint.get("metadata") or {}
+            metric = best_metadata.get("best_metric")
+            if metric is None:
+                metric = best_metadata.get("monitor_metric")
+            if metric is not None:
+                return metric, best_checkpoint.get("epoch")
+        return None, None
 
     def fit(
         self,
@@ -89,6 +119,8 @@ class TorchRegressorModel(SequenceRegressorModel):
             scheduler_state=self._scheduler_state,
             scaler_state=self._scaler_state,
             checkpoint_config=getattr(self, "_config_kwargs", None),
+            best_metric=self._best_metric,
+            best_epoch=self._best_epoch,
         )
         self._module, history = trainer.train(train_data, val_data)
         self._start_epoch = trainer.completed_epochs
@@ -124,7 +156,14 @@ class TorchRegressorModel(SequenceRegressorModel):
         return getattr(self, "_dataloader_settings", None)
 
     def predict(self, data: SequenceDataset | WindowedSequenceDataset | np.ndarray) -> np.ndarray:
-        """Generate predictions using a batched DataLoader to prevent OOM."""
+        """Generate predictions using a batched DataLoader to prevent OOM.
+
+        Inference always runs in full float32 precision (no autocast) and
+        returns a float32 array: AMP is a training-time optimization, and
+        half-precision predictions (~3 significant digits) would make saved
+        predictions and metrics differ between CUDA and CPU for the same
+        checkpoint.
+        """
         from torch.utils.data import DataLoader, Dataset, TensorDataset
 
         self._module.eval()
@@ -165,14 +204,11 @@ class TorchRegressorModel(SequenceRegressorModel):
         all_preds = []
 
         with torch.inference_mode():
-            device_type = "cuda" if "cuda" in self._device else "cpu"
-            use_amp = settings.amp if settings is not None else "cuda" in self._device
             for batch in loader:
                 batch_x = batch[0] if isinstance(batch, list | tuple) else batch
                 batch_x = batch_x.to(self._device, non_blocking=True)
-                with torch.autocast(device_type=device_type, enabled=use_amp):
-                    preds = self._module(batch_x)
-                all_preds.append(preds.cpu().numpy().flatten())
+                preds = self._module(batch_x)
+                all_preds.append(preds.float().cpu().numpy().flatten())
 
         return np.concatenate(all_preds)
 
@@ -194,8 +230,11 @@ class TorchRegressorModel(SequenceRegressorModel):
                 else self._config
             )
 
+        # Persist the plain module: torch.compile wrappers prefix state_dict
+        # keys with `_orig_mod.`, which plain modules cannot load back.
+        module = getattr(self._module, "_orig_mod", self._module)
         save_torch_checkpoint(
-            model_state=self._module.state_dict(),
+            model_state=module.state_dict(),
             optimizer_state=getattr(self, "_optimizer_state", None),
             config=config_dict,
             epoch=getattr(self, "_start_epoch", 0),
