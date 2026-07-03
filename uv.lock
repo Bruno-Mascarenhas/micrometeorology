@@ -449,6 +449,7 @@ tcc = [
 ]
 tcc-cuda = [
     { name = "joblib" },
+    { name = "tensorboard" },
     { name = "tqdm" },
 ]
 video = [
@@ -483,6 +484,7 @@ requires-dist = [
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "tensorboard", marker = "extra == 'allsky'", specifier = ">=2.14" },
     { name = "tensorboard", marker = "extra == 'tcc'", specifier = ">=2.14" },
+    { name = "tensorboard", marker = "extra == 'tcc-cuda'", specifier = ">=2.14" },
     { name = "torch", marker = "sys_platform == 'darwin' and extra == 'allsky'", specifier = ">=2.6.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "sys_platform == 'darwin' and extra == 'tcc'", specifier = ">=2.6.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'allsky'", specifier = ">=2.6.0" },

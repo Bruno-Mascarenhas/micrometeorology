@@ -74,6 +74,10 @@ class BaseRegressorModel(ABC):
         """Evaluate the model on a dataset.
 
         Default implementation: predict then compute metrics.
+
+        ``target_values()`` takes precedence over ``y`` so that windowed
+        datasets compare predictions against the window-aligned targets
+        instead of the full-length base target vector.
         """
         from solrad_correction.evaluation.metrics import REGRESSION_METRICS
 
@@ -82,13 +86,20 @@ class BaseRegressorModel(ABC):
 
         y_pred = self.predict(data)
 
-        if hasattr(data, "y"):
+        target_values = getattr(data, "target_values", None)
+        if callable(target_values):
+            y_true = np.asarray(target_values()).flatten()
+        elif hasattr(data, "y"):
             y_true = np.asarray(data.y).flatten()
-        elif hasattr(data, "target_values"):
-            y_true = np.asarray(data.target_values()).flatten()
         else:
             raise TypeError(
                 f"Data of type {type(data).__name__} does not expose y or target_values()"
+            )
+
+        if y_true.shape[0] != y_pred.shape[0]:
+            raise ValueError(
+                f"Targets ({y_true.shape[0]}) and predictions ({y_pred.shape[0]}) have "
+                "different lengths; dataset targets are misaligned with model outputs"
             )
 
         return {name: fn(y_true, y_pred) for name, fn in metrics.items()}

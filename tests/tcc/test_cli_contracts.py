@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import pytest
@@ -135,3 +136,68 @@ def test_colab_entrypoint_prints_resolved_config(scratch_config: Path) -> None:
     assert result.exit_code == 0, result.output
     assert '"name": "colab_print"' in result.output
     assert '"device": "cpu"' in result.output
+
+
+def test_console_script_main_functions_parse_argv(
+    scratch_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The console scripts must target main(), which routes argv through typer.
+
+    pyproject [project.scripts] must reference ``solrad_correction.cli:main``
+    and ``solrad_correction.cli_colab:main``; wiring the bare command
+    functions ignores every flag.
+    """
+    import sys
+
+    from solrad_correction import cli, cli_colab
+
+    monkeypatch.setattr(sys, "argv", ["solrad-run", "--smoke-test", "--dry-run"])
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+    assert excinfo.value.code in (0, None)
+    assert "Dry run" in capsys.readouterr().out
+
+    scratch_config.write_text(
+        yaml.safe_dump({"name": "colab_main", "model": {"model_type": "lstm"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["solrad-colab", "--config", str(scratch_config), "--print-config", "--device", "cpu"],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        cli_colab.main()
+    assert excinfo.value.code in (0, None)
+    assert '"name": "colab_main"' in capsys.readouterr().out
+
+
+def test_colab_fails_fast_when_cuda_unavailable(
+    scratch_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """solrad-colab with device=cuda must abort before any data is loaded."""
+    torch = pytest.importorskip("torch")
+    import solrad_correction.experiments.runner as runner
+
+    scratch_config.write_text(
+        yaml.safe_dump({"name": "colab_nogpu", "model": {"model_type": "lstm"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    pipeline_calls: list[object] = []
+    monkeypatch.setattr(runner, "run_experiment", pipeline_calls.append)
+
+    # Device defaults to cuda on the Colab entry point.
+    result = CliRunner().invoke(colab_app, ["--config", str(scratch_config)])
+
+    combined = result.output
+    # On older click versions stderr is merged into output and .stderr raises.
+    with contextlib.suppress(AttributeError, ValueError):
+        combined += result.stderr
+
+    assert result.exit_code != 0
+    assert "CUDA is not available" in combined
+    assert "--device cpu" in combined
+    assert pipeline_calls == []

@@ -31,15 +31,29 @@ def save_predictions(
     path: str | Path,
     index: pd.DatetimeIndex | None = None,
 ) -> None:
-    """Save ground truth and predictions as CSV."""
+    """Save ground truth and predictions as CSV.
+
+    Raises
+    ------
+    ValueError
+        If ``index`` is provided but its length does not match the predictions;
+        silently dropping the index would produce untrackable artifacts.
+    """
     import numpy as np
     import pandas as pd
 
     df = pd.DataFrame(
         {"y_true": np.asarray(y_true).flatten(), "y_pred": np.asarray(y_pred).flatten()}
     )
-    if index is not None and len(index) == len(df):
+    if index is not None:
+        if len(index) != len(df):
+            raise ValueError(
+                f"predictions index length ({len(index)}) does not match "
+                f"number of prediction rows ({len(df)})"
+            )
         df.index = index
+        if df.index.name is None:
+            df.index.name = "timestamp"
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(p, float_format="%.4f")

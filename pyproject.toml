@@ -73,6 +73,7 @@ tcc = [
 tcc-cuda = [
     "joblib>=1.3",
     "tqdm>=4.66",
+    "tensorboard>=2.14",
 ]
 
 [project.scripts]
@@ -86,8 +87,8 @@ labmim-station-graphs = "micrometeorology.cli.generate_station_graphs:main"
 # All-sky CLI
 allsky = "allsky.cli:main"
 # TCC CLIs
-solrad-run = "solrad_correction.cli:run_experiment_cli"
-solrad-colab = "solrad_correction.cli_colab:run_colab_cli"
+solrad-run = "solrad_correction.cli:main"
+solrad-colab = "solrad_correction.cli_colab:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/micrometeorology", "src/solrad_correction", "src/allsky"]
