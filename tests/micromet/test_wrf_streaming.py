@@ -9,11 +9,12 @@ import numpy as np
 import pytest
 
 from micrometeorology.wrf import variables as vmod
-from micrometeorology.wrf.interpolation import (
+from micrometeorology.wrf.reader import WRFDataset
+from tests.micromet._reference import (
+    compute_adjusted_heights,
     compute_wind_vectors_at_height,
     interpolate_speed_to_height,
 )
-from micrometeorology.wrf.reader import WRFDataset
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -54,8 +55,8 @@ def _write_wind_wrf_file(path: Path, *, seed: int = 11) -> None:
 
 
 def _eager_reference(ds: WRFDataset, targets: tuple[int, ...]) -> dict[int, dict]:
-    """Reproduce the current CLI WIND_POTENTIAL branch exactly."""
-    u_central, v_central, height_adjusted, speed_4d = vmod.compute_adjusted_heights(ds)
+    """Reproduce the pre-deletion CLI WIND_POTENTIAL branch exactly (frozen oracles)."""
+    u_central, v_central, height_adjusted, speed_4d = compute_adjusted_heights(ds)
     out: dict[int, dict] = {}
     for target in targets:
         speed_3d = interpolate_speed_to_height(speed_4d, height_adjusted, target)

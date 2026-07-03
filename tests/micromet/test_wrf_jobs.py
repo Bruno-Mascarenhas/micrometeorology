@@ -7,19 +7,16 @@ import os
 import subprocess
 import sys
 from concurrent.futures.process import BrokenProcessPool
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import netCDF4
 import numpy as np
 import pytest
 
-from micrometeorology.cli.export_wrf_geojson import (
-    _build_json_tasks_for_domain,
-    _normalize_var_list,
-)
+from micrometeorology.cli.export_wrf_geojson import _normalize_var_list
 from micrometeorology.wrf import jobs
-from micrometeorology.wrf.batch import run_json_tasks
-from micrometeorology.wrf.reader import open_wrf_dataset
+from tests.micromet import _reference
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -111,16 +108,6 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
     }
 
 
-def _run_legacy_serial(wrf_path: Path, out_root: Path) -> None:
-    json_dir = out_root / "json"
-    geo_dir = out_root / "geo"
-    json_dir.mkdir(parents=True)
-    geo_dir.mkdir(parents=True)
-    with open_wrf_dataset(wrf_path, reader="eager") as ds:
-        tasks = _build_json_tasks_for_domain(ds, list(VAR_LIST), json_dir, geo_dir, 0)
-    run_json_tasks(tasks, workers=1, backend="serial")
-
-
 def _run_units(wrf_path: Path, out_root: Path, workers: int) -> list[jobs.UnitResult]:
     json_dir = out_root / "json"
     geo_dir = out_root / "geo"
@@ -130,23 +117,35 @@ def _run_units(wrf_path: Path, out_root: Path, workers: int) -> list[jobs.UnitRe
     return jobs.execute_units(units, workers)
 
 
-def test_units_serial_output_matches_legacy_serial_bytes(tmp_path):
-    wrf = tmp_path / "wrfout_d02_jobs_synth.nc"
-    _write_full_wrf_file(wrf)
+def test_values_json_bytes_match_reference_payload_format(tmp_path):
+    """The values-JSON byte format is pinned by the frozen reference oracle.
 
-    _run_legacy_serial(wrf, tmp_path / "legacy")
-    results = _run_units(wrf, tmp_path / "units", workers=1)
+    ``write_values_json_stream`` (used by every values unit through
+    ``jobs._atomic_values_json``) must produce exactly the bytes of
+    ``json.dumps(_reference.create_values_json(...), separators=(",", ":"))``
+    — same metadata key order, compact separators, 2-decimal rounding,
+    NaN→null, and embedded wind payload.
+    """
+    arr = np.array(
+        [[1.234, np.nan, 5.6789], [-3.21, 0.0, 2.5]],
+        dtype=np.float32,
+    )
+    wind_data = {
+        "downsampled_angles": [123.45678901234567, 350.0],
+        "downsampled_magnitudes": [4.567890123456789, 0.25],
+        "downsampled_linear_indices": [0, 3],
+    }
+    dt = datetime(2026, 5, 3, 12, 34, 56)
+    out = tmp_path / "values.json"
 
-    assert not [r for r in results if r.error]
-    legacy = _tree_bytes(tmp_path / "legacy")
-    units = _tree_bytes(tmp_path / "units")
-    assert set(units) == set(legacy)
-    mismatched = [name for name in legacy if units[name] != legacy[name]]
-    assert mismatched == []
-    # Manifest covers everything written.
-    reported = {name.rsplit("/", 1)[-1] for r in results for name in r.files}
-    on_disk = {name.rsplit("/", 1)[-1] for name in units}
-    assert reported == on_disk
+    jobs._atomic_values_json(out, arr, 0.0, 5.0, jobs._format_datetime(dt), wind_data)
+
+    expected = _reference.create_values_json(arr, 0.0, 5.0, dt, wind_data)
+    expected_bytes = json.dumps(expected, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    assert out.read_bytes() == expected_bytes
+    # The reference payload embeds the wind dict and null for the NaN cell.
+    assert expected["metadata"]["wind"] == wind_data
+    assert expected["values"][1] is None
 
 
 def test_units_parallel_output_matches_serial_bytes(tmp_path):

@@ -89,9 +89,6 @@ uv pip install -e ".[tcc-cuda]"
 uv pip install --torch-backend cpu -e ".[dev,tcc,video]"
 ```
 
-Dask-backed xarray chunking is included in the base dependencies for large WRF
-workloads.
-
 ---
 
 ## Quick Start
@@ -122,24 +119,14 @@ export completes in seconds; failed units are reported per unit and make the
 CLI exit non-zero, and files are atomically renamed into place so consumers
 never see truncated JSON.
 
-To force single-process (in-process) writing:
+To run single-process, pass `--workers 1`. On network filesystems where HDF5
+file locking fails, set `LABMIM_HDF5_FILE_LOCKING=BEST_EFFORT` before the run.
 
-```bash
-labmim-wrf-geojson --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
-    -o output/JSON -g output/GeoJSON --worker-backend serial
-```
-
-`--reader lazy` (or explicit `--chunks dim=size`) switches to the xarray-backed
-legacy task loop for exotic cases; `--worker-backend memmap` and `--tmp-dir`
-are deprecated no-ops for JSON export. On network filesystems where HDF5 file
-locking fails, set `LABMIM_HDF5_FILE_LOCKING=BEST_EFFORT` before the run.
-
-Static map rendering also supports memmap-backed figure payloads:
+Static map rendering uses the same worker pool model:
 
 ```bash
 labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
-    -o output/figures --reader lazy --chunks auto \
-    --worker-backend memmap --tmp-dir scratch/wrf-figures
+    -o output/figures --workers 8
 ```
 
 ### 2. Sensor Data Processing & Calibration
