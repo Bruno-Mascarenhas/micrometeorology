@@ -186,4 +186,5 @@ def derive_targets(
         label_cfg.min_solar_elevation_deg,
         out["target_source"].iloc[0] if len(out) else "n/a",
     )
-    return out
+    result: pd.DataFrame = out
+    return result

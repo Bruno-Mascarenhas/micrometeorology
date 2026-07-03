@@ -92,7 +92,7 @@ def solar_declination(timestamps: DatetimeLike) -> np.ndarray:
     precision tracking applications.
     """
     g = _fractional_year(_as_datetime_index(timestamps))
-    return (
+    declination: np.ndarray = np.asarray(
         0.006918
         - 0.399912 * np.cos(g)
         + 0.070257 * np.sin(g)
@@ -101,6 +101,7 @@ def solar_declination(timestamps: DatetimeLike) -> np.ndarray:
         - 0.002697 * np.cos(3 * g)
         + 0.00148 * np.sin(3 * g)
     )
+    return declination
 
 
 def equation_of_time(timestamps: DatetimeLike) -> np.ndarray:
@@ -112,13 +113,14 @@ def equation_of_time(timestamps: DatetimeLike) -> np.ndarray:
     - 0.014615 cos(2g) - 0.040849 sin(2g))``
     """
     g = _fractional_year(_as_datetime_index(timestamps))
-    return 229.18 * (
+    minutes: np.ndarray = 229.18 * np.asarray(
         0.000075
         + 0.001868 * np.cos(g)
         - 0.032077 * np.sin(g)
         - 0.014615 * np.cos(2 * g)
         - 0.040849 * np.sin(2 * g)
     )
+    return minutes
 
 
 def eccentricity_correction(timestamps: DatetimeLike) -> np.ndarray:
@@ -130,13 +132,14 @@ def eccentricity_correction(timestamps: DatetimeLike) -> np.ndarray:
     + 0.000719 cos(2g) + 0.000077 sin(2g)``
     """
     g = _fractional_year(_as_datetime_index(timestamps))
-    return (
+    eccentricity: np.ndarray = np.asarray(
         1.000110
         + 0.034221 * np.cos(g)
         + 0.001280 * np.sin(g)
         + 0.000719 * np.cos(2 * g)
         + 0.000077 * np.sin(2 * g)
     )
+    return eccentricity
 
 
 def _resolve_utc_offset(longitude: float, utc_offset_hours: float | None) -> float:
@@ -211,7 +214,8 @@ def solar_elevation(
     -------
     ``elevation = 90 - zenith = arcsin(cos(theta_z))``
     """
-    return np.rad2deg(np.arcsin(cos_zenith(timestamps, site, utc_offset_hours)))
+    elevation: np.ndarray = np.rad2deg(np.arcsin(cos_zenith(timestamps, site, utc_offset_hours)))
+    return elevation
 
 
 def extraterrestrial_ghi(
