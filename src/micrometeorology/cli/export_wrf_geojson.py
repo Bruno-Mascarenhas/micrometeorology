@@ -69,8 +69,14 @@ def _resolve_paths(
 ) -> list[Path]:
     if dataset:
         return [Path(dataset)]
-    if not wrf_dir or not date:
-        raise typer.BadParameter("Provide either --dataset or --wrf-dir + --date")
+    if not wrf_dir:
+        raise typer.BadParameter("Provide either --dataset or --wrf-dir (optionally with --date)")
+    if not date:
+        # No date: batch mode — every wrfout file in the directory.
+        paths = sorted(Path(wrf_dir).glob("wrfout*"))
+        if not paths:
+            typer.echo(f"  ⚠ No wrfout files found in {wrf_dir}")
+        return paths
     paths = resolve_wrfout_paths(wrf_dir, date, domains or None)
     if not paths:
         typer.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
@@ -107,7 +113,10 @@ def run(
         Path | None, typer.Option("-d", "--dataset", help="Single WRF file.")
     ] = None,
     wrf_dir: Annotated[Path | None, typer.Option(help="Directory with wrfout files.")] = None,
-    date: Annotated[str | None, typer.Option(help="Simulation date YYYYMMDD.")] = None,
+    date: Annotated[
+        str | None,
+        typer.Option(help="Simulation date YYYYMMDD. Omit to process every wrfout in --wrf-dir."),
+    ] = None,
     domains: Annotated[
         list[str] | None,
         typer.Option("-D", "--domains", help="Domain numbers. Can be repeated or comma-separated."),

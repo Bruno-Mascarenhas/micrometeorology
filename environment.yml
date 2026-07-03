@@ -1,0 +1,18 @@
+# Conda environment bootstrap: interpreter + uv only.
+#
+# Everything else installs through uv against pyproject.toml/uv.lock, so the
+# conda layer stays minimal and the single source of dependency truth stays
+# in the lockfile:
+#
+#   conda env create -f environment.yml
+#   conda activate micrometeorology
+#   make install-dev          # uv pip install --system ".[dev,tcc,video]"
+#   # GPU workstation: make install-cuda
+#   # all-sky training:  uv pip install --system -e ".[allsky]"
+name: micrometeorology
+channels:
+  - conda-forge
+dependencies:
+  - python=3.14
+  - pip
+  - uv>=0.11

@@ -159,8 +159,6 @@ ignore = [
 # Tests are made of asserts; the pickle and subprocess uses are deliberate
 # contract tests (WorkUnit picklability, worker crash recovery).
 "tests/**" = ["S101", "S301", "S603"]
-# Drives this package's own CLI with fixed arguments.
-"scripts/wrf/run_all.py" = ["S603"]
 # Colab notebook drives this package's own CLI over the user's Drive files.
 "notebooks/*.ipynb" = ["S603", "S607"]
 

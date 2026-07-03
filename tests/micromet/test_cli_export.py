@@ -98,3 +98,28 @@ def test_cli_unknown_poteolico_height_fails_nonzero(tmp_path):
     assert result.exit_code == 1
     assert "work units failed" in result.output
     assert "poteolico75" in result.output
+
+
+def test_cli_wrf_dir_without_date_processes_every_wrfout(tmp_path):
+    for name in ("wrfout_d01_x", "wrfout_d02_y"):
+        _write_full_wrf_file(tmp_path / name, seed=31)
+    result = runner.invoke(
+        app,
+        [
+            "--wrf-dir",
+            str(tmp_path),
+            "-o",
+            str(tmp_path / "json"),
+            "-g",
+            str(tmp_path / "geo"),
+            "-v",
+            "temperature",
+            "--workers",
+            "1",
+            "--log-level",
+            "WARNING",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert len(list((tmp_path / "json").glob("D01_TEMP_*.json"))) == NT
+    assert len(list((tmp_path / "json").glob("D02_TEMP_*.json"))) == NT
