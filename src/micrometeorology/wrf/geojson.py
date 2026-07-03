@@ -13,13 +13,11 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import OrderedDict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
 import numpy as np
 
-from micrometeorology.common.paths import ensure_dir
 from micrometeorology.wrf.safety import assert_reasonable_array_size
 
 if TYPE_CHECKING:
@@ -30,98 +28,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 JSON_VALUE_CHUNK_SIZE = 65_536
 GEOJSON_FEATURE_CHUNK_SIZE = 4_096
-
-
-def create_grid_geojson(
-    lon: NDArray,
-    lat: NDArray,
-    resolution_x: float,
-    resolution_y: float,
-    _colormap: str,
-) -> dict:
-    """Build a GeoJSON FeatureCollection representing the WRF grid cells.
-
-    Each feature is a rectangular polygon with a ``linear_index`` property
-    so that the JavaScript front-end can map values to cells by index.
-    """
-    features: list[dict] = []
-    n_rows, n_cols = _validate_grid(lon, lat, context="GeoJSON grid feature generation")
-
-    features.extend(
-        _grid_cell_feature(lon, lat, i, j, n_rows, n_cols)
-        for i in range(n_rows)
-        for j in range(n_cols)
-    )
-
-    metadata = {
-        "resolucao_m": [float(resolution_x), float(resolution_y)],
-    }
-
-    return OrderedDict(
-        [
-            ("type", "FeatureCollection"),
-            ("metadata", metadata),
-            ("features", features),
-        ]
-    )
-
-
-def create_values_json(
-    var: NDArray,
-    scale_min: float,
-    scale_max: float,
-    date_time: datetime | None,
-    wind_data: dict | None = None,
-) -> dict[str, Any]:
-    """Build the per-timestep JSON payload.
-
-    Parameters
-    ----------
-    var:
-        2-D array of values for a single time step.
-    scale_min, scale_max:
-        Colour-scale boundaries.
-    date_time:
-        Forecast datetime (local).
-    wind_data:
-        Optional wind-vector data (from ``compute_wind_vectors_at_height``).
-    """
-    arr = var.filled(np.nan) if isinstance(var, np.ma.MaskedArray) else np.asarray(var)
-    assert_reasonable_array_size(
-        arr.shape,
-        arr.dtype,
-        context="values JSON payload generation",
-        multiplier=4.0,
-    )
-
-    # Vectorized: round, flatten, convert to Python list in one pass
-    flat = np.round(arr.astype(np.float64), 2).ravel()
-    values_rounded: list[float | None] = flat.tolist()  # type: ignore
-    # Replace NaN with None — only touch NaN positions (O(nan_count) vs O(N))
-    nan_indices = np.flatnonzero(np.isnan(flat))
-    for idx in nan_indices:
-        values_rounded[idx] = None
-
-    # Date formatting
-    if date_time is None:
-        date_str = "N/A"
-    else:
-        try:
-            dt = date_time.replace(minute=0, second=0, microsecond=0, tzinfo=None)
-            date_str = dt.strftime("%d/%m/%Y %H:%M:%S")
-        except Exception:
-            date_str = str(date_time)
-
-    scale_values = [float(round(x, 2)) for x in np.linspace(scale_min, scale_max, 6)]
-
-    metadata: dict[str, Any] = {
-        "scale_values": scale_values,
-        "date_time": date_str,
-    }
-    if wind_data is not None:
-        metadata["wind"] = wind_data
-
-    return {"metadata": metadata, "values": values_rounded}
 
 
 def write_values_json_stream(
@@ -236,28 +142,6 @@ def create_wind_vectors_json(
 # ---------------------------------------------------------------------------
 
 
-def save_geojson(
-    output_dir: str | Path,
-    filename_prefix: str,
-    lon: NDArray,
-    lat: NDArray,
-    dx: float,
-    dy: float,
-    colormap: str = "",
-) -> Path:
-    """Create and save a grid GeoJSON file.
-
-    The ``colormap`` parameter is accepted for backward-compatibility but
-    is **no longer stored** in the output — external clients should read it from
-    their own configuration.
-    """
-    out_dir = ensure_dir(output_dir)
-    out_path = out_dir / f"{filename_prefix}.geojson"
-    write_grid_geojson_stream(out_path, lon, lat, dx, dy, colormap)
-    logger.info("Saved GeoJSON: %s", out_path)
-    return out_path
-
-
 def write_grid_geojson_stream(
     output_path: str | Path,
     lon: NDArray,
@@ -269,7 +153,7 @@ def write_grid_geojson_stream(
     """Write grid GeoJSON feature-by-feature without building a full feature list.
 
     Corner coordinates are computed vectorized (same element arithmetic and
-    operand order as :func:`_grid_cell_feature`, in the input dtype) and the
+    operand order as the historical per-cell writer, in the input dtype) and the
     feature text is assembled in chunks with f-strings. The output bytes are
     identical to serialising each :func:`_grid_cell_feature` dict with
     ``json.dump(..., separators=(",", ":"), ensure_ascii=False)``.
@@ -313,7 +197,7 @@ def _grid_cell_corners(
     """Compute per-cell corner coordinates for every grid cell, vectorized.
 
     Returns ``(lon_left, lon_right, lat_top, lat_bottom)`` as flat row-major
-    Python lists. The arithmetic mirrors :func:`_grid_cell_feature` exactly —
+    Python lists. The arithmetic preserves the historical per-cell writer exactly —
     same expressions and operand order, evaluated in the input dtype (float32
     grids stay float32) — followed by Python's builtin ``round(v, 10)`` per
     element. ``np.round`` must NOT be used here: it disagrees with builtin
@@ -358,58 +242,6 @@ def _rounded_coordinate_list(arr: NDArray) -> list[float]:
     return [round(v, 10) for v in np.asarray(arr).ravel().tolist()]
 
 
-def _write_grid_geojson_stream_reference(
-    output_path: str | Path,
-    lon: NDArray,
-    lat: NDArray,
-    resolution_x: float,
-    resolution_y: float,
-) -> Path:
-    """Reference (pre-vectorization) stream writer.
-
-    Kept module-private as the byte-identity oracle for tests of
-    :func:`write_grid_geojson_stream` — do not use in production code paths.
-    """
-    n_rows, n_cols = _validate_grid(lon, lat, context=f"streamed GeoJSON grid for {output_path}")
-    metadata = {"resolucao_m": [float(resolution_x), float(resolution_y)]}
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(out, "w", encoding="utf-8") as f:
-        f.write('{"type":"FeatureCollection","metadata":')
-        json.dump(metadata, f, separators=(",", ":"), ensure_ascii=False)
-        f.write(',"features":[')
-        first = True
-        for i in range(n_rows):
-            for j in range(n_cols):
-                if not first:
-                    f.write(",")
-                first = False
-                json.dump(
-                    _grid_cell_feature(lon, lat, i, j, n_rows, n_cols),
-                    f,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                )
-        f.write("]}")
-
-    return out
-
-
-def save_values_json(
-    output_dir: str | Path,
-    name: str,
-    json_obj: dict,
-) -> Path:
-    """Save a per-timestep values JSON file (compact format)."""
-    out_dir = ensure_dir(output_dir)
-    out_path = out_dir / f"{name}.json"
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(json_obj, f, separators=(",", ":"), ensure_ascii=False)
-    logger.info("Saved JSON: %s", out_path)
-    return out_path
-
-
 def _validate_grid(lon: NDArray, lat: NDArray, *, context: str) -> tuple[int, int]:
     if lon.shape != lat.shape:
         raise ValueError(f"lon/lat grid shapes differ: {lon.shape!r} vs {lat.shape!r}")
@@ -425,50 +257,6 @@ def _validate_grid(lon: NDArray, lat: NDArray, *, context: str) -> tuple[int, in
         multiplier=4.0,
     )
     return int(n_rows), int(n_cols)
-
-
-def _grid_cell_feature(
-    lon: NDArray,
-    lat: NDArray,
-    i: int,
-    j: int,
-    n_rows: int,
-    n_cols: int,
-) -> dict[str, Any]:
-    if i == 0:
-        lat_top = float(lat[i, j] + (lat[i, j] - lat[i + 1, j]) / 2)
-        lat_bottom = float((lat[i, j] + lat[i + 1, j]) / 2)
-    elif i == n_rows - 1:
-        lat_top = float((lat[i - 1, j] + lat[i, j]) / 2)
-        lat_bottom = float(lat[i, j] - (lat[i - 1, j] - lat[i, j]) / 2)
-    else:
-        lat_top = float((lat[i - 1, j] + lat[i, j]) / 2)
-        lat_bottom = float((lat[i, j] + lat[i + 1, j]) / 2)
-
-    if j == 0:
-        lon_left = float(lon[i, j] - (lon[i, j + 1] - lon[i, j]) / 2)
-        lon_right = float((lon[i, j] + lon[i, j + 1]) / 2)
-    elif j == n_cols - 1:
-        lon_left = float((lon[i, j - 1] + lon[i, j]) / 2)
-        lon_right = float(lon[i, j] + (lon[i, j] - lon[i, j - 1]) / 2)
-    else:
-        lon_left = float((lon[i, j - 1] + lon[i, j]) / 2)
-        lon_right = float((lon[i, j] + lon[i, j + 1]) / 2)
-
-    polygon_coords = [
-        [
-            [round(lon_left, 10), round(lat_bottom, 10)],
-            [round(lon_right, 10), round(lat_bottom, 10)],
-            [round(lon_right, 10), round(lat_top, 10)],
-            [round(lon_left, 10), round(lat_top, 10)],
-            [round(lon_left, 10), round(lat_bottom, 10)],
-        ]
-    ]
-    return {
-        "type": "Feature",
-        "geometry": {"type": "Polygon", "coordinates": polygon_coords},
-        "properties": {"linear_index": int(i * n_cols + j)},
-    }
 
 
 def _write_flat_values_chunks(f: TextIO, arr: NDArray, *, chunk_size: int) -> None:
