@@ -129,19 +129,38 @@ labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
     -o output/figures --workers 8
 ```
 
-### 2. Sensor Data Processing & Calibration
+### 2. All-Sky Cloud Conditions & Diffuse Radiation (DNN)
+
+The `allsky` package pairs all-sky camera timelapses (`data/all-sky/allsky-YYYYMMDD.mp4`,
+one frame per minute) with the radiation sensors and trains a multi-task DNN
+(`SkyFusionNet`) that classifies cloud condition (clear / partial / overcast, weak
+labels from the clearness index) and predicts diffuse radiation. Diffuse targets
+come from the PSP pyranometer (`PSP_Wm2_Avg`); rows are paired within a 5-minute
+tolerance and the train/validation split is by calendar day (no same-day leakage).
+
+```bash
+allsky extract-frames data/all-sky/allsky-20260625.mp4 -o output/allsky/frames
+allsky build-index --manifest output/allsky/frames/manifest.parquet --out output/allsky/index.parquet
+allsky train --index output/allsky/index.parquet   # device auto: CUDA -> MPS -> CPU, AMP on GPU
+```
+
+For Google Colab GPU training use [`notebooks/allsky_colab.ipynb`](notebooks/allsky_colab.ipynb)
+(install cell, Drive mount, TensorBoard, resumable checkpoints). Install extras with
+`pip install -e ".[allsky]"`.
+
+### 3. Sensor Data Processing & Calibration
 
 ```bash
 labmim-sensor-process --input data/raw/ --output data/hourly/
 ```
 
-### 3. Statistical Comparison (WRF vs Observations)
+### 4. Statistical Comparison (WRF vs Observations)
 
 ```bash
 labmim-metrics -a salvador.dat -b rio.dat -o metrics.csv
 ```
 
-### 4. Machine Learning Bias Correction
+### 5. Machine Learning Bias Correction
 
 ```bash
 solrad-run --config configs/tcc/experiments/svm_hourly.yaml
@@ -159,7 +178,7 @@ solrad-colab --config configs/tcc/experiments/lstm_hourly.yaml \
     --device cuda --amp --num-workers 2
 ```
 
-### 5. Static Cartopy Map Generation
+### 6. Static Cartopy Map Generation
 
 If you need static `.png` maps or `.webm` animations for publications, you can use the parallel batch renderer:
 
