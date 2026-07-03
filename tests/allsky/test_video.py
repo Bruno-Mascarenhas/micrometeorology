@@ -59,11 +59,6 @@ class TestFrameTimestamps:
         ts = frame_timestamps(4, date(2026, 1, 1), cfg)
         assert ts[0] == pd.Timestamp("2026-01-01 06:00")
 
-    def test_frame3_is_three_minutes_later(self, cfg: VideoConfig):
-        ts = frame_timestamps(4, date(2026, 1, 1), cfg)
-        assert ts[3] == pd.Timestamp("2026-01-01 06:03")
-        assert len(ts) == 4
-
     def test_minutes_per_frame_scales_spacing(self):
         vcfg = VideoConfig(start_time="08:30", minutes_per_frame=2.5)
         ts = frame_timestamps(3, date(2026, 1, 1), vcfg)

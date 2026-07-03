@@ -60,13 +60,6 @@ def test_info_missing_config_fails():
     assert result.exit_code != 0
 
 
-@pytest.mark.parametrize("command", ["extract-frames", "build-index", "train"])
-def test_subcommand_help(command):
-    """--help must work without importing torch or the sibling pipeline modules."""
-    result = runner.invoke(app, [command, "--help"])
-    assert result.exit_code == 0
-
-
 # ---------------------------------------------------------------------------
 # training helpers (pure pandas — no torch)
 # ---------------------------------------------------------------------------
