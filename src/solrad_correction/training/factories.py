@@ -7,9 +7,10 @@ from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
-from torch.utils.tensorboard import SummaryWriter
 
 if TYPE_CHECKING:
+    from torch.utils.tensorboard import SummaryWriter
+
     from solrad_correction.training.state import TrainingPlan
 
 
@@ -41,7 +42,13 @@ def create_criterion() -> nn.Module:
 
 
 def create_summary_writer(log_dir: str | None) -> SummaryWriter | None:
-    """Create an optional TensorBoard writer."""
+    """Create an optional TensorBoard writer.
+
+    The import is deferred so tensorboard stays an optional dependency: it is
+    only required when ``log_dir`` is actually configured.
+    """
     if not log_dir:
         return None
+    from torch.utils.tensorboard import SummaryWriter
+
     return SummaryWriter(log_dir=str(Path(log_dir)))

@@ -98,6 +98,21 @@ def run_colab_cli(
         typer.echo("Config is valid.")
         return
 
+    # Fail fast BEFORE any data is loaded: on Colab the default runtime has
+    # no GPU, and discovering that only at model-build time wastes the whole
+    # load/feature/split/preprocess pipeline.
+    from solrad_correction.training.dataloaders import resolve_device
+
+    try:
+        resolve_device(cfg.runtime.device)
+    except ValueError as exc:
+        typer.echo(
+            f"Error: {exc}. Enable a GPU runtime (Runtime > Change runtime type) "
+            "or pass --device cpu to train without a GPU.",
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+
     typer.echo(f"Experiment: {cfg.name}")
     typer.echo(f"Model:      {cfg.model.model_type}")
     typer.echo(f"Device:     {cfg.runtime.device}")

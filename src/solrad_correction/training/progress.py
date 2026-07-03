@@ -9,6 +9,11 @@ import time
 class TrainingProgress:
     """Display training progress with batch %, epoch %, and ETA.
 
+    ``total_epochs`` is the absolute epoch budget of the run
+    (``config.max_epochs``); on resume, ``start_epoch`` marks where the run
+    continues, so only the remaining ``total_epochs - start_epoch`` epochs
+    are counted toward the overall percentage.
+
     Usage::
 
         progress = TrainingProgress(total_epochs=100)
@@ -43,7 +48,7 @@ class TrainingProgress:
         overall_pct = epochs_done / total_to_do * 100 if total_to_do > 0 else 0
 
         sys.stdout.write(
-            f"\r  Epoch {self.current_epoch + 1}/{self._initial_epoch + self.total_epochs} "
+            f"\r  Epoch {self.current_epoch + 1}/{self.total_epochs} "
             f"[{pct:5.1f}%] "
             f"ETA epoch: {self._fmt_time(eta_epoch)} | "
             f"Overall: {overall_pct:5.1f}%"
@@ -70,7 +75,7 @@ class TrainingProgress:
 
         val_str = f"  val_loss={val_loss:.6f}" if val_loss is not None else ""
         sys.stdout.write(
-            f"\r  Epoch {self.current_epoch + 1}/{self._initial_epoch + self.total_epochs} "
+            f"\r  Epoch {self.current_epoch + 1}/{self.total_epochs} "
             f"- train_loss={train_loss:.6f}{val_str} "
             f"({self._fmt_time(elapsed)}/epoch, ETA: {self._fmt_time(eta_total)})"
             f"{extra}\n"

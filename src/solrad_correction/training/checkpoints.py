@@ -61,6 +61,8 @@ class CheckpointManager:
         scaler: torch.amp.GradScaler | None,
         metric: float,
         dataloader_settings: DataLoaderSettings | None,
+        best_metric: float | None = None,
+        best_epoch: int | None = None,
     ) -> None:
         self.save(
             "best.pt",
@@ -72,6 +74,8 @@ class CheckpointManager:
             metric=metric,
             kind="best",
             dataloader_settings=dataloader_settings,
+            best_metric=best_metric if best_metric is not None else metric,
+            best_epoch=best_epoch if best_epoch is not None else epoch,
         )
 
     def save_last(
@@ -84,6 +88,8 @@ class CheckpointManager:
         scaler: torch.amp.GradScaler | None,
         metric: float,
         dataloader_settings: DataLoaderSettings | None,
+        best_metric: float | None = None,
+        best_epoch: int | None = None,
     ) -> None:
         self.save(
             "last.pt",
@@ -95,6 +101,8 @@ class CheckpointManager:
             metric=metric,
             kind="last",
             dataloader_settings=dataloader_settings,
+            best_metric=best_metric,
+            best_epoch=best_epoch,
         )
 
     def save(
@@ -109,6 +117,8 @@ class CheckpointManager:
         metric: float,
         kind: str,
         dataloader_settings: DataLoaderSettings | None,
+        best_metric: float | None = None,
+        best_epoch: int | None = None,
     ) -> None:
         if self.directory is None:
             return
@@ -123,6 +133,10 @@ class CheckpointManager:
             metadata={
                 "checkpoint_kind": kind,
                 "monitor_metric": metric,
+                # Best metric across the whole run so far; resume reads this
+                # to seed best-model tracking and early stopping.
+                "best_metric": best_metric,
+                "best_epoch": best_epoch,
                 "dataloader": dataloader_settings.to_dict()
                 if dataloader_settings is not None
                 else {},
