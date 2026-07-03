@@ -513,13 +513,15 @@ writing an untimestamped file.
 Use `--profile` or `runtime.profile: true` to write
 `profiles/profile.json` with stable stage timings and total stage time.
 
-Synthetic benchmarks never read `data/`; they generate inputs under `scratch/`:
+Synthetic benchmarks never read `data/`; they generate inputs under `scratch/`.
+Run them all with `make bench`, or individually (a smoke test in
+`tests/tcc/test_benchmarks_smoke.py` keeps them working against the current APIs):
 
 ```bash
-conda run -n labmim python benchmarks/solrad_correction/loading.py --rows 10000 --features 16
-conda run -n labmim python benchmarks/solrad_correction/preprocessing.py --rows 20000 --features 24
-conda run -n labmim python benchmarks/solrad_correction/sequence_dataloader.py --rows 50000 --features 24 --sequence-length 24
-conda run -n labmim python benchmarks/solrad_correction/artifact_checkpoint.py --hidden-size 32 --layers 2
+python benchmarks/solrad_correction/loading.py --rows 10000 --features 16
+python benchmarks/solrad_correction/preprocessing.py --rows 20000 --features 24
+python benchmarks/solrad_correction/sequence_dataloader.py --rows 50000 --features 24 --sequence-length 24
+python benchmarks/solrad_correction/artifact_checkpoint.py --hidden-size 32 --layers 2
 ```
 
 ---

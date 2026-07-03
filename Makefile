@@ -1,4 +1,4 @@
-.PHONY: install-uv install install-dev install-cuda fix check typecheck test test-verbose audit lock-check clean all
+.PHONY: install-uv install install-dev install-cuda fix check typecheck test test-verbose audit lock-check bench clean all
 
 # Variables
 PYTHON ?= python
@@ -41,6 +41,13 @@ audit:
 # Fails when uv.lock is out of sync with pyproject.toml (offline, fast).
 lock-check:
 	$(UV) lock --check
+
+# Synthetic perf harnesses for the solrad hot paths (no data/ needed).
+bench:
+	$(PYTHON) benchmarks/solrad_correction/loading.py --rows 10000 --features 16
+	$(PYTHON) benchmarks/solrad_correction/preprocessing.py --rows 20000 --features 24
+	$(PYTHON) benchmarks/solrad_correction/sequence_dataloader.py --rows 50000 --features 24 --sequence-length 24
+	$(PYTHON) benchmarks/solrad_correction/artifact_checkpoint.py --hidden-size 32 --layers 2
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
