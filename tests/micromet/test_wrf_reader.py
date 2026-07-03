@@ -2,26 +2,22 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import netCDF4
 import numpy as np
 import pytest
-import xarray as xr
 
-from micrometeorology.wrf.reader import (
-    LazyWRFDataset,
-    WRFDataset,
-    open_wrf_dataset,
-    parse_chunks,
-    resolve_wrfout_paths,
-)
+from micrometeorology.wrf.reader import WRFDataset, resolve_wrfout_paths
 from micrometeorology.wrf.variables import (
     compute_air_density,
     compute_relative_humidity,
     extract_scalar,
     materialize_2d,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _write_tiny_wrf_file(path: Path, n_times: int = 2) -> None:
@@ -53,92 +49,32 @@ def _write_tiny_wrf_file(path: Path, n_times: int = 2) -> None:
         )
 
 
-def test_wrf_reader_handles_tiny_synthetic_netcdf():
-    path = Path("scratch") / "wrfout_d01_synthetic_reader.nc"
-    path.parent.mkdir(parents=True, exist_ok=True)
+def test_wrf_reader_handles_tiny_synthetic_netcdf(tmp_path):
+    path = tmp_path / "wrfout_d01_synthetic_reader.nc"
+    _write_tiny_wrf_file(path)
 
-    try:
-        _write_tiny_wrf_file(path)
+    with WRFDataset(path) as wrf:
+        lon_grid, lat_grid = wrf.read_grid()
 
-        with WRFDataset(path) as wrf:
-            lon_grid, lat_grid = wrf.read_grid()
-
-            assert lon_grid.shape == (2, 3)
-            assert lat_grid.shape == (2, 3)
-            assert wrf.grid_bounds() == (-38.0, -37.0, -13.0, -12.5)
-            assert [dt.hour for dt in wrf.parse_times()] == [0, 1]
-    finally:
-        path.unlink(missing_ok=True)
+        assert lon_grid.shape == (2, 3)
+        assert lat_grid.shape == (2, 3)
+        assert wrf.grid_bounds() == (-38.0, -37.0, -13.0, -12.5)
+        assert [dt.hour for dt in wrf.parse_times()] == [0, 1]
 
 
-def test_lazy_wrf_reader_defers_variable_loading_until_requested():
-    path = Path("scratch") / "wrfout_d01_synthetic_lazy_reader.nc"
-    path.parent.mkdir(parents=True, exist_ok=True)
+def test_scalar_extractor_bounds_and_first_step_materialization(tmp_path):
+    path = tmp_path / "wrfout_d01_synthetic_scalar.nc"
+    _write_tiny_wrf_file(path)
 
-    try:
-        _write_tiny_wrf_file(path)
+    with WRFDataset(path) as wrf:
+        var_data, vmin, vmax = extract_scalar(wrf, "T2")
+        first_step = materialize_2d(var_data[0:1, :, :])
 
-        with LazyWRFDataset(path) as wrf:
-            t2 = wrf.get_variable("T2")
-
-            assert wrf.has_variable("T2")
-            assert isinstance(t2, xr.DataArray)
-            assert t2.shape == (2, 2, 3)
-            np.testing.assert_array_equal(t2.isel(Time=0).to_numpy(), np.arange(6).reshape(2, 3))
-    finally:
-        path.unlink(missing_ok=True)
-
-
-def test_open_wrf_dataset_lazy_matches_eager_for_synthetic_file():
-    path = Path("scratch") / "wrfout_d01_synthetic_lazy_equivalence.nc"
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        _write_tiny_wrf_file(path)
-
-        with open_wrf_dataset(path, reader="eager") as eager:
-            eager_lon, eager_lat = eager.read_grid()
-            eager_times = eager.parse_times()
-            eager_t2 = eager.get_variable("T2")
-
-        with open_wrf_dataset(path, reader="lazy", chunks=parse_chunks("none")) as lazy:
-            lazy_lon, lazy_lat = lazy.read_grid()
-            lazy_times = lazy.parse_times()
-            lazy_t2 = lazy.get_variable("T2")
-
-        np.testing.assert_array_equal(lazy_lon, eager_lon)
-        np.testing.assert_array_equal(lazy_lat, eager_lat)
-        assert lazy_times == eager_times
-        assert isinstance(lazy_t2, xr.DataArray)
-        np.testing.assert_array_equal(lazy_t2.to_numpy(), eager_t2)
-    finally:
-        path.unlink(missing_ok=True)
-
-
-def test_parse_chunks_accepts_none_auto_and_explicit_pairs():
-    assert parse_chunks(None) is None
-    assert parse_chunks("none") is None
-    assert parse_chunks("auto") == "auto"
-    assert parse_chunks("Time=1,south_north=128") == {"Time": 1, "south_north": 128}
-
-
-def test_lazy_scalar_extractor_keeps_dataarray_until_slice_materialization():
-    path = Path("scratch") / "wrfout_d01_synthetic_lazy_scalar.nc"
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        _write_tiny_wrf_file(path)
-
-        with open_wrf_dataset(path, reader="lazy", chunks=parse_chunks("none")) as lazy:
-            var_data, vmin, vmax = extract_scalar(lazy, "T2")
-            first_step = materialize_2d(var_data[0:1, :, :])
-
-        assert isinstance(var_data, xr.DataArray)
-        assert vmin == 6.0
-        assert vmax == 10.9
-        np.testing.assert_array_equal(first_step, np.arange(6).reshape(2, 3))
-    finally:
-        path.unlink(missing_ok=True)
+    assert isinstance(var_data, np.ndarray)
+    assert vmin == 6.0
+    # float32 data: the 98th percentile lands a ULP below the decimal literal.
+    assert vmax == pytest.approx(10.9, abs=1e-5)
+    np.testing.assert_array_equal(first_step, np.arange(6).reshape(2, 3))
 
 
 def test_relative_humidity_uses_q2_t2_psfc_units():
@@ -186,35 +122,23 @@ def test_get_variable_keeps_time_axis_for_single_timestep_file(tmp_path):
         assert t2.shape == (1, 2, 3)
         np.testing.assert_array_equal(t2[0], np.arange(6).reshape(2, 3))
 
-    with LazyWRFDataset(path) as lazy:
-        t2_lazy = lazy.get_variable("T2")
-        assert isinstance(t2_lazy, xr.DataArray)
-        assert "Time" in t2_lazy.dims
-        assert t2_lazy.shape == (1, 2, 3)
-        np.testing.assert_array_equal(t2_lazy.isel(Time=0).to_numpy(), np.arange(6).reshape(2, 3))
 
+def test_get_variable_block_reads_unsqueezed_time_slabs(tmp_path):
+    path = tmp_path / "wrfout_d01_synthetic_block_reader.nc"
+    _write_tiny_wrf_file(path)
 
-def test_get_variable_block_reads_unsqueezed_time_slabs():
-    path = Path("scratch") / "wrfout_d01_synthetic_block_reader.nc"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    with WRFDataset(path) as wrf:
+        assert wrf.n_time_steps == 2
 
-    try:
-        _write_tiny_wrf_file(path)
+        block = wrf.get_variable_block("T2", 0, 1)
+        assert block.shape == (1, 2, 3)
+        np.testing.assert_array_equal(block[0], np.arange(6).reshape(2, 3))
 
-        with WRFDataset(path) as wrf:
-            assert wrf.n_time_steps == 2
+        # t_stop past the end is clamped; values match the eager full read.
+        tail = wrf.get_variable_block("T2", 1, 99)
+        assert tail.shape == (1, 2, 3)
+        full = np.asarray(wrf.dataset.variables["T2"][:])
+        np.testing.assert_array_equal(tail, full[1:2])
 
-            block = wrf.get_variable_block("T2", 0, 1)
-            assert block.shape == (1, 2, 3)
-            np.testing.assert_array_equal(block[0], np.arange(6).reshape(2, 3))
-
-            # t_stop past the end is clamped; values match the eager full read.
-            tail = wrf.get_variable_block("T2", 1, 99)
-            assert tail.shape == (1, 2, 3)
-            full = np.asarray(wrf.dataset.variables["T2"][:])
-            np.testing.assert_array_equal(tail, full[1:2])
-
-            with pytest.raises(ValueError, match="Invalid time block"):
-                wrf.get_variable_block("T2", 1, 1)
-    finally:
-        path.unlink(missing_ok=True)
+        with pytest.raises(ValueError, match="Invalid time block"):
+            wrf.get_variable_block("T2", 1, 1)

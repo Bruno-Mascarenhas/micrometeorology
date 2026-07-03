@@ -1,8 +1,9 @@
 """Tests for the GeoJSON / JSON generation pipeline.
 
 Covers:
-- ``create_grid_geojson`` → correct FeatureCollection structure and linear_index
-- ``create_values_json`` → vectorized NaN→None handling and rounding
+- ``write_grid_geojson_stream`` → byte/structure identity vs the frozen
+  reference oracles in ``tests.micromet._reference``
+- ``write_values_json_stream`` → matches the reference in-memory payload
 - ``create_wind_vectors_json`` → standalone wind vector file schema
 """
 
@@ -10,24 +11,26 @@ from __future__ import annotations
 
 import inspect
 import json
-import shutil
-import uuid
 from datetime import datetime
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
 
-from micrometeorology.wrf.batch import _write_json_payload
+from micrometeorology.wrf import jobs
 from micrometeorology.wrf.geojson import (
-    _write_grid_geojson_stream_reference,
-    create_grid_geojson,
-    create_values_json,
     create_wind_vectors_json,
-    save_geojson,
     write_grid_geojson_stream,
     write_values_json_stream,
 )
+from tests.micromet._reference import (
+    create_grid_geojson,
+    create_values_json,
+    reference_write_grid_geojson_stream,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -62,7 +65,7 @@ def sample_wind_2d() -> tuple[np.ndarray, np.ndarray]:
 
 
 # ---------------------------------------------------------------------------
-# create_grid_geojson
+# _reference.create_grid_geojson (frozen oracle sanity)
 # ---------------------------------------------------------------------------
 
 
@@ -102,7 +105,7 @@ class TestCreateGridGeoJson:
 
 
 # ---------------------------------------------------------------------------
-# create_values_json
+# values JSON vs the _reference.create_values_json oracle
 # ---------------------------------------------------------------------------
 
 
@@ -151,29 +154,24 @@ class TestCreateValuesJson:
         result = create_values_json(sample_values_2d, 0.0, 1.0, None)
         assert "wind" not in result["metadata"]
 
-    def test_streamed_values_json_matches_in_memory_payload(self, sample_values_2d):
-        root = Path("scratch") / f"stream-values-{uuid.uuid4().hex}"
-        out = root / "values.json"
-        root.mkdir(parents=True, exist_ok=True)
-        try:
-            expected = create_values_json(sample_values_2d, 0.0, 20.0, None)
-            write_values_json_stream(
-                out,
-                sample_values_2d,
-                0.0,
-                20.0,
-                "N/A",
-                chunk_size=3,
-            )
-            with open(out, encoding="utf-8") as f:
-                actual = json.load(f)
+    def test_streamed_values_json_matches_in_memory_payload(self, tmp_path, sample_values_2d):
+        out = tmp_path / "values.json"
+        expected = create_values_json(sample_values_2d, 0.0, 20.0, None)
+        write_values_json_stream(
+            out,
+            sample_values_2d,
+            0.0,
+            20.0,
+            "N/A",
+            chunk_size=3,
+        )
+        with open(out, encoding="utf-8") as f:
+            actual = json.load(f)
 
-            assert actual == expected
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
+        assert actual == expected
 
-    def test_batch_json_writer_uses_streaming_payload(self):
-        source = inspect.getsource(_write_json_payload)
+    def test_jobs_values_writer_uses_streaming_payload(self):
+        source = inspect.getsource(jobs._atomic_values_json)
 
         assert "write_values_json_stream" in source
         assert ".tolist()" not in source
@@ -279,7 +277,7 @@ class TestGridGeoJsonStreamByteIdentity:
     ) -> bytes:
         ref_path = tmp_path / "reference.geojson"
         new_path = tmp_path / "vectorized.geojson"
-        _write_grid_geojson_stream_reference(ref_path, lon, lat, 3000.0, 3000.0)
+        reference_write_grid_geojson_stream(ref_path, lon, lat, 3000.0, 3000.0)
         write_grid_geojson_stream(new_path, lon, lat, 3000.0, 3000.0)
         ref_bytes = ref_path.read_bytes()
         new_bytes = new_path.read_bytes()
@@ -351,16 +349,12 @@ class TestGridGeoJsonStreamByteIdentity:
         assert b"-38.0000000001" in data
 
 
-def test_save_geojson_stream_matches_in_memory_geojson(sample_grid):
-    root = Path("scratch") / f"stream-geojson-{uuid.uuid4().hex}"
-    root.mkdir(parents=True, exist_ok=True)
+def test_grid_geojson_stream_matches_reference_dict(tmp_path, sample_grid):
     lon, lat = sample_grid
-    try:
-        expected = create_grid_geojson(lon, lat, 3000.0, 3000.0, "")
-        out = save_geojson(root, "D01", lon, lat, 3000.0, 3000.0)
-        with open(out, encoding="utf-8") as f:
-            actual = json.load(f)
+    expected = create_grid_geojson(lon, lat, 3000.0, 3000.0, "")
+    out = tmp_path / "D01.geojson"
+    write_grid_geojson_stream(out, lon, lat, 3000.0, 3000.0)
+    with open(out, encoding="utf-8") as f:
+        actual = json.load(f)
 
-        assert actual == expected
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+    assert actual == expected
