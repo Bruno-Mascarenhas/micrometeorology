@@ -4,12 +4,13 @@
 [![Ruff](https://img.shields.io/badge/linter-ruff-261230.svg)](https://docs.astral.sh/ruff/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-An advanced scientific computing suite for atmospheric science research, maintained by the Micrometeorology Laboratory (LabMiM) at UFBA. This repository unifies data processing, geospatial visualization, and machine learning pipelines into two core packages:
+An advanced scientific computing suite for atmospheric science research, maintained by the Micrometeorology Laboratory (LabMiM) at UFBA. This repository unifies data processing, geospatial visualization, and machine learning pipelines into three core packages:
 
 | Package | Purpose |
 |---|---|
 | **`micrometeorology`** | High-performance WRF output analysis, data export, sensor data ingestion, and statistical climatology |
 | **`solrad_correction`** | Machine learning pipeline for bias correction of WRF diffuse solar radiation (SVM, LSTM, Transformer architectures) |
+| **`allsky`** | All-sky camera + radiation-sensor fusion: SkyFusionNet DNN for cloud-condition classification and diffuse-radiation prediction |
 
 > 📘 Detailed technical documentation for each package is located in the [`docs/`](docs/) directory.
 
@@ -19,20 +20,26 @@ An advanced scientific computing suite for atmospheric science research, maintai
 
 ```
 src/
-├── micrometeorology/      # Core data pipelines, WRF spatial processing, and APIs
+├── micrometeorology/             # Core data pipelines, WRF spatial processing, and APIs
 │   ├── common/                   # Cross-platform config, logging, types
 │   ├── sensors/                  # Datalogger ingestion and calibration algorithms
 │   ├── stats/                    # Statistical comparison and climatological metrics
-│   └── wrf/                      # High-speed NetCDF parsing, GeoJSON export, interpolation
-└── solrad_correction/            # Deep learning bias correction pipeline
-    ├── models/                   # Neural architectures (SVM, LSTM, Transformer)
-    ├── training/                 # PyTorch training loops and early stopping
-    └── evaluation/               # Experiment reporting and validation metrics
+│   └── wrf/                      # Eager NetCDF reading, work-unit JSON/GeoJSON export, figures
+├── solrad_correction/            # Deep learning bias correction pipeline
+│   ├── models/                   # Neural architectures (SVM, LSTM, Transformer)
+│   ├── training/                 # PyTorch training loops and early stopping
+│   └── evaluation/               # Experiment reporting and validation metrics
+└── allsky/                       # All-sky camera + radiation fusion (SkyFusionNet)
+    ├── video.py / dataset.py     # Minute-resolution frame extraction, sensor pairing
+    ├── solar.py / erbs.py        # Solar geometry, clearness index, Erbs decomposition
+    └── models.py / training.py   # Multi-task DNN and Colab-ready training loop
 
 configs/                          # YAML environments for pipelines and ML experiments
+notebooks/                        # Colab GPU training notebooks + guide (notebooks/README.md)
 tests/                            # Comprehensive Pytest suite
+benchmarks/                       # Offline benchmark harnesses (solrad)
 docs/                             # In-depth package documentation
-legacy/                           # Archived Cartopy/Basemap scripts
+legacy/                           # Archived pre-package scripts (reference only)
 ```
 
 ---
@@ -75,6 +82,12 @@ uv pip install --torch-backend cu121 torch
 uv pip install -e ".[tcc-cuda]"
 ```
 
+### All-Sky DNN (`allsky`)
+
+```bash
+uv pip install --torch-backend cpu -e ".[allsky]"
+```
+
 ### Development Environment
 
 ```bash
@@ -93,6 +106,8 @@ This command extracts spatial data from WRF NetCDF outputs into highly optimized
 labmim-wrf-geojson --wrf-dir /path/to/wrfout/ --date 20240101 \
     -D 1 -D 4 -o output/JSON -g output/GeoJSON --workers 44
 ```
+
+Omit `--date` to batch-process every `wrfout*` file in the directory.
 
 The JSON exporter supports the static-site variables (see the extractor
 docstrings in `src/micrometeorology/wrf/variables.py`), including derived
@@ -159,10 +174,12 @@ solrad-run --config configs/tcc/experiments/svm_hourly.yaml
 ```
 
 Set `model.evaluation_policy: common_sequence_horizon` when comparing SVM
-against LSTM/Transformer metrics on the same sequence target horizon. The
-default `model_native` policy preserves previous metric semantics.
+against LSTM/Transformer metrics on the same sequence target horizon. Under
+either policy, `predictions.csv` carries timestamps and sequence windows
+predict the target concurrent with their last row.
 
-For Colab GPU runs, use the same config with the Click-based remote entry point:
+For Colab GPU runs, use the same config with the Typer-based remote entry point
+(fails fast if no GPU runtime is enabled; resume with `--resume .../last.pt`):
 
 ```bash
 solrad-colab --config configs/tcc/experiments/lstm_hourly.yaml \
@@ -185,10 +202,12 @@ labmim-wrf-figures --wrf-dir /path/to/wrfout/ --date 20240101 \
 ## Testing
 
 ```bash
-pytest tests/ -v          # all the tests
+make check                # lockfile sync + lint + typecheck + full suite
+pytest -n auto tests/     # all the tests, in parallel
 pytest tests/micromet/    # micrometeorology only
-pytest tests/tcc/         # ML correction only
-ruff check src/ tests/    # lint
+pytest tests/tcc/         # solrad_correction only
+pytest tests/allsky/      # allsky only
+make audit                # dependency vulnerability gate (mirrors CI)
 ```
 
 ---
