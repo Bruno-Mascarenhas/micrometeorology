@@ -1,21 +1,18 @@
 """Vertical interpolation utilities for WRF data.
 
-Replaces ``wrf-python``'s ``interplevel`` with a fully vectorized
-implementation that has no external dependency beyond NumPy.
+``vertical_interpolate`` is the fully vectorized reference implementation
+(argsort-based, NaN-robust); ``VerticalInterpolator`` prepares a height stack
+once and serves the monotonic bracket fast path with automatic fallback.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
-import xarray as xr
 
-from micrometeorology.wrf.safety import (
-    assert_reasonable_array_size,
-    assert_same_dims_and_shape,
-)
+from micrometeorology.wrf.safety import assert_reasonable_array_size
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -236,177 +233,3 @@ class VerticalInterpolator:
         result_shape = list(values_arr.shape)
         result_shape.pop(self.axis)
         return result.reshape(result_shape)
-
-
-def _is_xarray(value: object) -> bool:
-    return isinstance(value, xr.DataArray)
-
-
-def _vertical_dim(value: xr.DataArray) -> str:
-    return str(value.dims[1])
-
-
-def _xarray_vertical_interpolate(
-    values: xr.DataArray,
-    heights: xr.DataArray,
-    target_height: float,
-) -> xr.DataArray:
-    """Interpolate an xarray field along the vertical dimension.
-
-    ``apply_ufunc`` with ``input_core_dims`` moves the level axis to the
-    **last** position in the underlying NumPy array, so we pass ``axis=-1``
-    to ``vertical_interpolate``.  ``vectorize=False`` keeps the call
-    vectorized over the full (time, ny, nx) block; setting it to ``True``
-    would dispatch one Python call per grid cell, which is catastrophically
-    slow for WRF grids.
-    """
-    assert_same_dims_and_shape(values, heights, context="xarray vertical interpolation")
-    level_dim = _vertical_dim(values)
-    return cast(
-        "xr.DataArray",
-        xr.apply_ufunc(
-            lambda value_profile, height_profile: vertical_interpolate(
-                value_profile,
-                height_profile,
-                target_height,
-                axis=-1,
-            ),
-            values,
-            heights,
-            input_core_dims=[[level_dim], [level_dim]],
-            output_core_dims=[[]],
-            vectorize=False,
-            dask="parallelized",
-            output_dtypes=[float],
-        ),
-    )
-
-
-def interpolate_speed_to_height(
-    speed_4d: Any,
-    heights: Any,
-    target_height: float,
-) -> Any:
-    """Interpolate wind speed to a target height for all time steps.
-
-    Parameters
-    ----------
-    speed_4d:
-        4-D array ``(time, levels, ny, nx)`` of wind speed.
-    heights:
-        4-D array ``(time, levels, ny, nx)`` of adjusted heights.
-    target_height:
-        Target height in meters AGL.
-
-    Returns
-    -------
-    speed_3d:
-        3-D array ``(time, ny, nx)`` with interpolated speeds.
-    """
-    if _is_xarray(speed_4d) or _is_xarray(heights):
-        return _xarray_vertical_interpolate(speed_4d, heights, target_height)
-    return vertical_interpolate(speed_4d, heights, target_height, axis=1)
-
-
-def compute_weibull_k(speed_3d: NDArray) -> NDArray:
-    """Compute the Weibull shape factor *k* from a time series of wind speed fields.
-
-    Parameters
-    ----------
-    speed_3d:
-        3-D array ``(time, ny, nx)``.  The first time step is excluded.
-
-    Returns
-    -------
-    fator_k:
-        2-D array ``(ny, nx)`` of Weibull k values.
-    """
-    with np.errstate(invalid="ignore", divide="ignore"):
-        std = np.nanstd(speed_3d[1:, ...], axis=0)
-        mean = np.nanmean(speed_3d[1:, ...], axis=0)
-        ratio = np.where(mean > 0, std / mean, np.nan)
-        fator_k = np.power(ratio, -1.086)
-    return fator_k
-
-
-def compute_wind_vectors_at_height(
-    u_central: Any,
-    v_central: Any,
-    height_adjusted: Any,
-    target_height: float,
-    downsampling: int = 4,
-) -> dict:
-    """Compute wind vectors interpolated to *target_height* with down-sampling.
-
-    Returns a dict with keys:
-    - ``downsampled_angles``: wind direction angles (degrees, meteorological convention)
-    - ``downsampled_magnitudes``: wind speed (m/s)
-    - ``downsampled_linear_indices``: row-major linear indices for the sampled points
-    """
-    ny, nx = u_central.shape[2], u_central.shape[3]
-
-    if _is_xarray(u_central) or _is_xarray(v_central) or _is_xarray(height_adjusted):
-        u_all = interpolate_speed_to_height(u_central, height_adjusted, target_height)
-        v_all = interpolate_speed_to_height(v_central, height_adjusted, target_height)
-        time_dim = "Time" if "Time" in u_all.dims else str(u_all.dims[0])
-        u_target = u_all.mean(dim=time_dim, skipna=True)
-        v_target = v_all.mean(dim=time_dim, skipna=True)
-        magnitude = np.hypot(u_target, v_target)
-        angle = np.arctan2(u_target, v_target) * 180.0 / np.pi
-        angle = angle.where(angle >= 0, angle + 360.0)
-
-        angle_values = angle.isel(
-            {
-                angle.dims[-2]: slice(0, None, downsampling),
-                angle.dims[-1]: slice(0, None, downsampling),
-            }
-        ).to_numpy()
-        magnitude_values = magnitude.isel(
-            {
-                magnitude.dims[-2]: slice(0, None, downsampling),
-                magnitude.dims[-1]: slice(0, None, downsampling),
-            }
-        ).to_numpy()
-        i_idx, j_idx = np.mgrid[0:ny:downsampling, 0:nx:downsampling]
-        angles_flat = angle_values.ravel()
-        mags_flat = magnitude_values.ravel()
-        i_flat = i_idx.ravel()
-        j_flat = j_idx.ravel()
-        valid = ~np.isnan(angles_flat)
-        linear_indices = (i_flat * nx + j_flat)[valid]
-        return {
-            "downsampled_angles": angles_flat[valid].tolist(),
-            "downsampled_magnitudes": mags_flat[valid].tolist(),
-            "downsampled_linear_indices": linear_indices.tolist(),
-        }
-
-    # Vectorized interpolation for all time steps at once
-    u_all = vertical_interpolate(u_central, height_adjusted, target_height, axis=1)
-    v_all = vertical_interpolate(v_central, height_adjusted, target_height, axis=1)
-
-    # Average over time ignoring NaNs
-    with np.errstate(invalid="ignore"):
-        u_target = np.nanmean(u_all, axis=0)
-        v_target = np.nanmean(v_all, axis=0)
-
-    magnitude = np.hypot(u_target, v_target)
-    angle = np.arctan2(u_target, v_target) * 180.0 / np.pi
-    angle = np.where(angle < 0, angle + 360.0, angle)
-
-    # Fast downsampling with advanced slicing
-    i_idx, j_idx = np.mgrid[0:ny:downsampling, 0:nx:downsampling]
-    i_flat = i_idx.ravel()
-    j_flat = j_idx.ravel()
-
-    angles_flat = angle[i_flat, j_flat]
-    mags_flat = magnitude[i_flat, j_flat]
-
-    valid = ~np.isnan(angles_flat)
-
-    linear_indices = (i_flat * nx + j_flat)[valid]
-
-    return {
-        "downsampled_angles": angles_flat[valid].tolist(),
-        "downsampled_magnitudes": mags_flat[valid].tolist(),
-        "downsampled_linear_indices": linear_indices.tolist(),
-    }
