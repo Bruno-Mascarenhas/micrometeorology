@@ -1,0 +1,52 @@
+# All-sky pipeline defaults (LabMiM/UFBA, Salvador-BA).
+video:
+  pattern: "data/all-sky/allsky-*.mp4"
+  filename_date_format: "allsky-%Y%m%d"
+  start_time: "06:00"        # local time of frame 0 — adjust to the camera schedule
+  minutes_per_frame: 1.0
+
+sensor:
+  paths:
+    - "data/LBM_lenta_2025.dat"
+  ghi_column: "CM3Up_Wm2_Avg"
+  # CMP21 is the primary diffuse pyranometer, but its W/m2 logger channel is
+  # currently zero-filled (only CMP21_Avg mV is live). PSP is the working
+  # diffuse measurement today; switch back to CMP21_Wm2_Avg once the CR5000
+  # program conversion is fixed.
+  diffuse_column: "PSP_Wm2_Avg"
+  feature_columns:
+    - "CM3Up_Wm2_Avg"
+    - "CG3Up_Wm2_Avg"
+    - "CM3Dn_Wm2_Avg"
+    - "Net_Wm2_Avg"
+    - "CUV5_Wm2_Avg"
+    - "PAR_Wm2_Avg"
+  tolerance_minutes: 5.0
+
+site:
+  latitude: -13.00
+  longitude: -38.51
+
+labels:
+  kt_clear: 0.65
+  kt_overcast: 0.35
+  min_solar_elevation_deg: 10.0
+
+model:
+  image_size: 224
+  backbone: "small"
+  embed_dim: 128
+  hidden_dim: 256
+  n_classes: 3
+
+train:
+  epochs: 20
+  batch_size: 32
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  num_workers: 2
+  device: "auto"
+  out_dir: "output/allsky"
+  seed: 42
+  cls_loss_weight: 1.0
+  reg_loss_weight: 1.0
