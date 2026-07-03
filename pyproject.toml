@@ -55,6 +55,13 @@ dev = [
 video = [
     "moviepy>=2.2",
 ]
+# All-sky camera + radiation fusion (CPU-only torch by default; see install-cuda)
+allsky = [
+    "torch>=2.6.0",
+    "imageio-ffmpeg>=0.6",
+    "tqdm>=4.66",
+    "tensorboard>=2.14",
+]
 # TCC: ML-based solar radiation correction (CPU-only PyTorch)
 tcc = [
     "torch>=2.6.0",
@@ -76,12 +83,14 @@ labmim-sensor-process = "micrometeorology.cli.ingest_sensor_data:main"
 labmim-comparison = "micrometeorology.cli.compare_wrf_observations:main"
 labmim-metrics = "micrometeorology.cli.compute_metrics:main"
 labmim-station-graphs = "micrometeorology.cli.generate_station_graphs:main"
+# All-sky CLI
+allsky = "allsky.cli:main"
 # TCC CLIs
 solrad-run = "solrad_correction.cli:run_experiment_cli"
 solrad-colab = "solrad_correction.cli_colab:run_colab_cli"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/micrometeorology", "src/solrad_correction"]
+packages = ["src/micrometeorology", "src/solrad_correction", "src/allsky"]
 
 # Lock torch against the CPU wheel index on Linux/macOS so the resolver does not
 # pull the multi-GB CUDA dependency stack into uv.lock. Windows wheels on PyPI
@@ -151,9 +160,11 @@ ignore = [
 "tests/**" = ["S101", "S301", "S603"]
 # Drives this package's own CLI with fixed arguments.
 "scripts/wrf/run_all.py" = ["S603"]
+# Colab notebook drives this package's own CLI over the user's Drive files.
+"notebooks/*.ipynb" = ["S603", "S607"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["micrometeorology", "solrad_correction"]
+known-first-party = ["allsky", "micrometeorology", "solrad_correction"]
 
 [tool.mypy]
 python_version = "3.14"
