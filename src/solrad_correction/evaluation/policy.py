@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from solrad_correction.models.registry import get_model_spec
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -14,14 +16,21 @@ def prediction_index(
     model_type: str,
     sequence_length: int,
     evaluation_policy: str,
-) -> pd.DatetimeIndex | None:
-    """Return the explicit prediction index for the selected evaluation policy."""
-    _ = model_type
+) -> pd.DatetimeIndex:
+    """Return the prediction timestamps aligned with the model's evaluated rows.
+
+    Sequence windows cover rows ``[i, i + sequence_length)`` and predict the
+    target at the window's last row, so window targets start at position
+    ``sequence_length - 1``. Under ``model_native`` tabular models keep the
+    full processed index; predictions therefore always carry timestamps.
+    """
     if evaluation_policy == "model_native":
-        return None
+        if get_model_spec(model_type).kind == "sequence":
+            return index[sequence_length - 1 :]
+        return index
     if evaluation_policy != "common_sequence_horizon":
         raise ValueError(f"Unknown evaluation_policy: {evaluation_policy}")
-    return index[sequence_length:]
+    return index[sequence_length - 1 :]
 
 
 def align_test_frame(
@@ -31,11 +40,16 @@ def align_test_frame(
     sequence_length: int,
     evaluation_policy: str,
 ) -> pd.DataFrame:
-    """Apply the selected evaluation row policy to the processed test frame."""
+    """Apply the selected evaluation row policy to the processed test frame.
+
+    Under ``common_sequence_horizon`` tabular rows are trimmed to the sequence
+    target rows, which start at position ``sequence_length - 1`` (the last row
+    inside the first window).
+    """
     if evaluation_policy == "model_native":
         return test_df
     if evaluation_policy != "common_sequence_horizon":
         raise ValueError(f"Unknown evaluation_policy: {evaluation_policy}")
-    if model_type == "svm":
-        return test_df.iloc[sequence_length:]
+    if get_model_spec(model_type).kind == "tabular":
+        return test_df.iloc[sequence_length - 1 :]
     return test_df

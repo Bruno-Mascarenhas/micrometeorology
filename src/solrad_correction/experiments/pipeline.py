@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from solrad_correction.data.preprocessing import PreprocessingPipeline
 from solrad_correction.data.splits import temporal_train_val_test_split
 from solrad_correction.datasets.tabular import TabularDataset
 from solrad_correction.evaluation.metrics import compute_regression_metrics
-from solrad_correction.evaluation.policy import align_test_frame, prediction_index
+from solrad_correction.evaluation.policy import align_test_frame
 from solrad_correction.evaluation.reports import ExperimentReport
 from solrad_correction.experiments.artifacts import ArtifactLayout
 from solrad_correction.experiments.results import (
@@ -100,8 +100,16 @@ def load_data(config: ExperimentConfig) -> LoadedData:
 
 
 def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame:
-    """Apply feature engineering according to config."""
+    """Apply feature engineering according to config.
+
+    When ``data.feature_columns`` is set, the model inputs are the requested
+    base columns plus every column added by the enabled feature stages
+    (temporal/cyclic/lag/rolling/diff) — engineered columns are included
+    explicitly because they were requested via the feature config, never by
+    name-prefix accident.
+    """
     df = loaded.frame
+    source_columns = set(df.columns)
     if config.features.add_temporal:
         from solrad_correction.features.temporal import (
             add_all_cyclic_encodings,
@@ -134,11 +142,9 @@ def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame
 
     feature_cols = [c for c in df.columns if c != config.data.target_column]
     if config.data.feature_columns:
-        base = set(config.data.feature_columns)
-        feature_cols = [
-            c for c in df.columns if c in base or any(c.startswith(f"{b}_") for b in base)
-        ]
-        feature_cols = [c for c in feature_cols if c != config.data.target_column]
+        engineered = [c for c in df.columns if c not in source_columns]
+        requested = set(config.data.feature_columns) | set(engineered)
+        feature_cols = [c for c in df.columns if c in requested and c != config.data.target_column]
     return FeatureFrame(frame=df, feature_cols=feature_cols)
 
 
@@ -184,7 +190,12 @@ def preprocess_splits(
 
 
 def build_datasets(config: ExperimentConfig, processed: PreprocessedSplits) -> DatasetBundle:
-    """Build train/validation/test datasets and preserve artifact schemas."""
+    """Build train/validation/test datasets and preserve artifact schemas.
+
+    The prediction index is taken from the built test dataset itself so it is
+    always row-aligned with the model's predictions (including rows dropped
+    for NaNs or temporal gaps) under every evaluation policy.
+    """
     model_type = config.model.model_type.lower()
     eval_policy = config.model.evaluation_policy
     spec = get_model_spec(model_type)
@@ -204,19 +215,13 @@ def build_datasets(config: ExperimentConfig, processed: PreprocessedSplits) -> D
             evaluation_policy=eval_policy,
         )
         test_ds = TabularDataset.from_dataframe(test_eval, feature_cols, config.data.target_column)
-        pred_index = prediction_index(
-            cast("pd.DatetimeIndex", processed.test.index),
-            model_type=model_type,
-            sequence_length=config.model.sequence_length,
-            evaluation_policy=eval_policy,
-        )
         return DatasetBundle(
             train=train_ds,
             val=val_ds,
             test=test_ds,
             input_size=None,
             y_true=test_ds.y,
-            prediction_index=pred_index,
+            prediction_index=test_ds.index,
         )
 
     from solrad_correction.datasets.sequence import WindowedSequenceDataset
@@ -250,14 +255,14 @@ def build_datasets(config: ExperimentConfig, processed: PreprocessedSplits) -> D
         context="test sequence target vector",
     )
 
-    train_seq = WindowedSequenceDataset(train_features, train_target, seq_len)
-    val_seq = WindowedSequenceDataset(val_features, val_target, seq_len)
-    test_seq = WindowedSequenceDataset(test_features, test_target, seq_len)
-    pred_index = prediction_index(
-        cast("pd.DatetimeIndex", processed.test.index),
-        model_type=model_type,
-        sequence_length=seq_len,
-        evaluation_policy=eval_policy,
+    train_seq = WindowedSequenceDataset(
+        train_features, train_target, seq_len, index=_datetime_index_or_none(processed.train)
+    )
+    val_seq = WindowedSequenceDataset(
+        val_features, val_target, seq_len, index=_datetime_index_or_none(processed.val)
+    )
+    test_seq = WindowedSequenceDataset(
+        test_features, test_target, seq_len, index=_datetime_index_or_none(processed.test)
     )
     return DatasetBundle(
         train=train_seq,
@@ -265,8 +270,15 @@ def build_datasets(config: ExperimentConfig, processed: PreprocessedSplits) -> D
         test=test_seq,
         input_size=train_features.shape[1],
         y_true=test_seq.target_values(),
-        prediction_index=pred_index,
+        prediction_index=test_seq.prediction_index(),
     )
+
+
+def _datetime_index_or_none(frame: pd.DataFrame) -> pd.DatetimeIndex | None:
+    """Return the frame's DatetimeIndex, or None when the index is not temporal."""
+    import pandas as pd
+
+    return frame.index if isinstance(frame.index, pd.DatetimeIndex) else None
 
 
 def build_configured_model(config: ExperimentConfig, bundle: DatasetBundle) -> BaseRegressorModel:
@@ -336,10 +348,16 @@ def run_pipeline(config: ExperimentConfig) -> ExperimentReport:
         features,
         splits,
     )
+    # Persist the fitted preprocessing state before any downstream stage can
+    # fail, so a crash after training never discards reusable state.
+    profile.time_stage("persist_preprocessing", writer.write_preprocessing, processed.pipeline)
     bundle = profile.time_stage("build_datasets", build_datasets, config, processed)
     model = profile.time_stage("build_model", build_configured_model, config, bundle)
     training = profile.time_stage("train_model", train_model, config, model, bundle)
     model = training.result.model
+    # Persist the trained model immediately after fit: a crash during
+    # prediction or evaluation must leave the model recoverable on disk.
+    profile.time_stage("persist_model", writer.write_model, config, model)
     predictions = profile.time_stage("predict_model", predict_model, model, bundle)
     evaluation = profile.time_stage(
         "evaluate_predictions",

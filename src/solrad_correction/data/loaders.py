@@ -181,7 +181,17 @@ def _read_csv_table(
         "index_col": index_col,
         "nrows": limit_rows,
     }
-    return cast("pd.DataFrame", pd.read_csv(path, **kwargs))
+    df = cast("pd.DataFrame", pd.read_csv(path, **kwargs))
+    # pandas does not parse unnamed ("Unnamed: N") datetime columns passed via
+    # parse_dates; coerce string-like indexes so the datetime index survives.
+    if index_col is not None and not isinstance(df.index, pd.DatetimeIndex):
+        if not _is_datetime_convertible(df.index):
+            raise ValueError(
+                f"datetime_column '{index_col}' in CSV file '{path}' is not datetime-like; "
+                "set data.datetime_column to a datetime column or data.datetime_index to false"
+            )
+        df.index = pd.to_datetime(df.index)
+    return df
 
 
 def _read_parquet_table(
@@ -203,12 +213,7 @@ def _read_parquet_table(
 
     if datetime_index and datetime_column is not None:
         if isinstance(datetime_column, int):
-            if df.index.name is not None or isinstance(df.index, pd.DatetimeIndex):
-                df.index = pd.to_datetime(df.index)
-            else:
-                name = df.columns[datetime_column]
-                df[name] = pd.to_datetime(df[name])
-                df = df.set_index(name)
+            df = _recover_datetime_index(df, path, datetime_column)
         elif datetime_column in df.columns:
             df[datetime_column] = pd.to_datetime(df[datetime_column])
             df = df.set_index(datetime_column)
@@ -218,22 +223,76 @@ def _read_parquet_table(
     return df
 
 
+def _recover_datetime_index(df: pd.DataFrame, path: Path, position: int) -> pd.DataFrame:
+    """Recover a datetime index for a positional ``datetime_column`` spec.
+
+    Prefers the stored pandas index; falls back to the column at ``position``
+    only when it is datetime-like. Numeric columns are never reinterpreted as
+    epoch timestamps — a clear error is raised instead.
+    """
+    if isinstance(df.index, pd.DatetimeIndex):
+        return df
+    if df.index.name is not None and _is_datetime_convertible(df.index):
+        df.index = pd.to_datetime(df.index)
+        return df
+    name = df.columns[position] if position < len(df.columns) else None
+    if name is not None and _is_datetime_convertible(df[name]):
+        df[name] = pd.to_datetime(df[name])
+        return df.set_index(name)
+    raise ValueError(
+        f"Could not recover a datetime index from parquet file '{path}': the stored index is "
+        f"not datetime-like and positional datetime_column {position} resolves to "
+        f"non-datetime column '{name}'. Set data.datetime_column to the name of a datetime "
+        "column, write the datetime index into the parquet file, or set "
+        "data.datetime_index to false."
+    )
+
+
+def _is_datetime_convertible(values: Any) -> bool:
+    """Return True for datetime64 or string-like data that can be parsed as datetimes."""
+    dtype = values.dtype
+    if pd.api.types.is_datetime64_any_dtype(dtype):
+        return True
+    return pd.api.types.is_object_dtype(dtype) or pd.api.types.is_string_dtype(dtype)
+
+
 def _read_parquet_head(
     path: Path,
     *,
     columns: list[str] | None,
     limit_rows: int,
 ) -> pd.DataFrame:
-    """Read only the first rows of a Parquet file instead of loading all row groups."""
+    """Read only the first rows of a Parquet file instead of loading all row groups.
+
+    The stored pandas index columns are always read alongside a column
+    projection so the original (e.g. datetime) index survives the head read.
+    """
     import pyarrow.parquet as pq
 
     parquet_file = pq.ParquetFile(path)
-    batches = parquet_file.iter_batches(batch_size=limit_rows, columns=columns)
+    read_columns = columns
+    if columns is not None:
+        index_columns = _stored_pandas_index_columns(parquet_file)
+        read_columns = list(dict.fromkeys([*columns, *index_columns]))
+    batches = parquet_file.iter_batches(batch_size=limit_rows, columns=read_columns)
     try:
         batch = next(batches)
     except StopIteration:
         return pd.DataFrame(columns=columns)
     return cast("pd.DataFrame", batch.to_pandas())
+
+
+def _stored_pandas_index_columns(parquet_file: Any) -> list[str]:
+    """Return stored pandas index columns that exist as physical parquet fields."""
+    import json
+
+    metadata = parquet_file.schema_arrow.metadata or {}
+    pandas_meta = metadata.get(b"pandas")
+    if pandas_meta is None:
+        return []
+    index_columns = json.loads(pandas_meta).get("index_columns", [])
+    # RangeIndex entries are dicts (no physical column); named/level indexes are strings.
+    return [column for column in index_columns if isinstance(column, str)]
 
 
 def _resolve_datetime_column(columns: list[str], datetime_column: str | int | None) -> str | None:

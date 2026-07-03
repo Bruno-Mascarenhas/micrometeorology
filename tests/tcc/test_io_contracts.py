@@ -19,6 +19,7 @@ from solrad_correction.config import (
     SplitConfig,
 )
 from solrad_correction.data.loaders import load_sensor_hourly, load_sensor_raw, load_table
+from solrad_correction.utils.io import save_predictions
 
 
 def _synthetic_frame() -> pd.DataFrame:
@@ -95,6 +96,80 @@ def test_table_loading_projection_limit_index_and_dtype(
         assert isinstance(df.index, pd.DatetimeIndex)
         assert len(df) == 3
         assert str(df["f1"].dtype) == "float32"
+    finally:
+        if scratch.exists():
+            shutil.rmtree(scratch)
+
+
+def test_parquet_head_read_preserves_stored_datetime_index_under_projection() -> None:
+    """Regression for finding 2: limit_rows + column projection must keep the index."""
+    scratch = Path("scratch") / "test_parquet_head_index_contract"
+    path = scratch / "hourly.parquet"
+    index = pd.date_range("2024-01-01", periods=6, freq="1h")
+    try:
+        scratch.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "SWDOWN": np.arange(6, dtype=np.float32),
+                "T2": np.arange(10, 16, dtype=np.float32),
+                "SW_dif": np.arange(20, 26, dtype=np.float32),
+            },
+            index=index,
+        ).to_parquet(path)
+
+        df = load_sensor_hourly(
+            path,
+            source_format="parquet",
+            columns=["SWDOWN", "SW_dif"],
+            limit_rows=3,
+        )
+
+        assert isinstance(df.index, pd.DatetimeIndex)
+        assert df.index.equals(index[:3])
+        assert list(df.columns) == ["SWDOWN", "SW_dif"]
+        np.testing.assert_allclose(df["SWDOWN"], [0.0, 1.0, 2.0])
+    finally:
+        if scratch.exists():
+            shutil.rmtree(scratch)
+
+
+def test_parquet_without_recoverable_datetime_index_raises_instead_of_epoch_fallback() -> None:
+    """Regression for finding 2: numeric columns must never become 1970-epoch indexes."""
+    scratch = Path("scratch") / "test_parquet_no_index_contract"
+    path = scratch / "hourly.parquet"
+    try:
+        scratch.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "SWDOWN": np.arange(6, dtype=np.float32),
+                "SW_dif": np.arange(20, 26, dtype=np.float32),
+            }
+        ).to_parquet(path, index=False)
+
+        for limit_rows in [None, 3]:
+            with pytest.raises(ValueError, match="datetime index"):
+                load_sensor_hourly(path, source_format="parquet", limit_rows=limit_rows)
+    finally:
+        if scratch.exists():
+            shutil.rmtree(scratch)
+
+
+def test_save_predictions_writes_timestamps_and_rejects_misaligned_index() -> None:
+    """Regression for finding 15: never silently drop the prediction index."""
+    scratch = Path("scratch") / "test_save_predictions_contract"
+    path = scratch / "predictions.csv"
+    index = pd.date_range("2024-01-01", periods=4, freq="1h")
+    y = np.arange(4, dtype=np.float64)
+    try:
+        scratch.mkdir(parents=True, exist_ok=True)
+        save_predictions(y, y, path, index=index)
+        written = pd.read_csv(path, index_col=0, parse_dates=True)
+
+        assert isinstance(written.index, pd.DatetimeIndex)
+        assert written.index.name == "timestamp"
+        assert written.index.equals(index)
+        with pytest.raises(ValueError, match="does not match"):
+            save_predictions(y, y, path, index=index[:3])
     finally:
         if scratch.exists():
             shutil.rmtree(scratch)

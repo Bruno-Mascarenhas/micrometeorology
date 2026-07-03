@@ -132,9 +132,12 @@ class Preprocessor:
         fill_values = _series_to_float_dict(df_clean.mean(numeric_only=True))
         last_values = _series_to_float_dict(df_clean.ffill().iloc[-1]) if not df_clean.empty else {}
         scaling = self._fit_scaling(df_clean)
-        fit_output_rows = (
-            len(df_clean.dropna()) if self.impute_strategy == "drop" else len(df_clean)
-        )
+        if self.impute_strategy == "drop":
+            fit_output_rows = len(df_clean.dropna())
+        elif self.impute_strategy == "interpolate":
+            fit_output_rows = len(self._interpolate(df_clean).dropna())
+        else:
+            fit_output_rows = len(df_clean)
 
         self._state = PreprocessingState(
             scaler_type=self.scaler_type,
@@ -245,7 +248,23 @@ class Preprocessor:
             return df.ffill().fillna(self._state.last_values).fillna(self._state.fill_values)
         if self.impute_strategy == "mean":
             return df.fillna(self._state.fill_values)
-        return df.ffill().fillna(self._state.last_values).fillna(self._state.fill_values)
+        if self.impute_strategy == "interpolate":
+            return self._interpolate(df).dropna()
+        raise ValueError(f"Unknown impute_strategy: {self.impute_strategy}")
+
+    @staticmethod
+    def _interpolate(df: pd.DataFrame) -> pd.DataFrame:
+        """Linearly interpolate internal gaps only.
+
+        Uses time-based interpolation on a ``DatetimeIndex`` (positional
+        otherwise). ``limit_area='inside'`` restricts filling to gaps between
+        known points, so leading/trailing NaNs are never extrapolated or
+        forward-filled — those rows stay NaN and are dropped by ``_impute``,
+        keeping the trailing edge causal-safe (no implied ffill).
+        """
+        if isinstance(df.index, pd.DatetimeIndex):
+            return df.interpolate(method="time", limit_area="inside")
+        return df.interpolate(method="linear", limit_area="inside")
 
     def _scale(self, df: pd.DataFrame) -> pd.DataFrame:
         if self.scaler_type == "standard":

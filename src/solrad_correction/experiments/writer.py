@@ -11,9 +11,11 @@ from solrad_correction.utils.io import save_json, save_predictions
 
 if TYPE_CHECKING:
     from solrad_correction.config import ExperimentConfig
+    from solrad_correction.data.preprocessing import PreprocessingPipeline
     from solrad_correction.evaluation.reports import ExperimentReport
     from solrad_correction.experiments.pipeline import PipelineProfile
     from solrad_correction.experiments.results import ExperimentResult
+    from solrad_correction.models.base import BaseRegressorModel
 
 
 @dataclass(slots=True)
@@ -39,9 +41,9 @@ class ExperimentWriter:
         """Write the full v2 artifact set and final manifest."""
         self.prepare()
         self.write_config(config)
-        self.write_preprocessing(result)
+        self.write_preprocessing(result.processed.pipeline)
         self.write_datasets(result)
-        self.write_model(config, result)
+        self.write_model(config, result.model)
         self.write_report(result.report)
         self.write_predictions(result)
         self.write_profile(config, profile)
@@ -50,9 +52,11 @@ class ExperimentWriter:
     def write_config(self, config: ExperimentConfig) -> None:
         config.save(self.layout.config_yaml)
 
-    def write_preprocessing(self, result: ExperimentResult) -> None:
-        result.processed.pipeline.save(self.layout.preprocessing_joblib)
-        result.processed.pipeline.save_state_json(self.layout.preprocessing_state)
+    def write_preprocessing(self, pipeline: PreprocessingPipeline) -> None:
+        """Persist the fitted preprocessing state; safe to call before predictions."""
+        self.prepare()
+        pipeline.save(self.layout.preprocessing_joblib)
+        pipeline.save_state_json(self.layout.preprocessing_state)
 
     def write_datasets(self, result: ExperimentResult) -> None:
         from solrad_correction.datasets.serialization import save_dataset
@@ -69,12 +73,14 @@ class ExperimentWriter:
             result.datasets.test, self.layout.datasets_dir / "test", feature_names=feature_names
         )
 
-    def write_model(self, config: ExperimentConfig, result: ExperimentResult) -> None:
+    def write_model(self, config: ExperimentConfig, model: BaseRegressorModel) -> None:
+        """Persist the trained model; safe to call immediately after fit."""
+        self.prepare()
         spec = get_model_spec(config.model.model_type)
         if spec.kind == "sequence":
-            result.model.save(self.layout.model_pt)
+            model.save(self.layout.model_pt)
         else:
-            result.model.save(self.layout.model_joblib)
+            model.save(self.layout.model_joblib)
 
     def write_report(self, report: ExperimentReport) -> None:
         save_json(report.metrics, self.layout.metrics)
