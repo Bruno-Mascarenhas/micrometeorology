@@ -26,7 +26,8 @@ Current public support is intentionally scoped to SVM, LSTM, and Transformer.
 src/solrad_correction/
 ├── __init__.py              # Version and docstring
 ├── config/                  # Modular config package + public facade
-├── cli.py                   # CLI: solrad-run
+├── cli.py                   # CLI: solrad-run (Typer app)
+├── cli_colab.py             # CLI: solrad-colab (Typer app, Colab defaults)
 ├── data/
 │   ├── loaders.py           # CSV/Parquet loading, projection, dtype, row limits
 │   ├── preprocessing.py     # Train-only fitted state + strict schema validation
@@ -149,6 +150,9 @@ output_dir: output/experiments
 
 ### 2. Run the Experiment
 
+`solrad-run` and `solrad-colab` are installed console scripts (Typer apps), so
+they can be invoked directly after `uv pip install -e ".[tcc]"`:
+
 ```bash
 solrad-run --config configs/tcc/experiments/my_experiment.yaml
 ```
@@ -201,6 +205,10 @@ Migration note: root-level artifacts from the previous layout are no longer
 written. Use `configs/config.yaml`, `metrics/metrics.json`,
 `predictions/predictions.csv`, `models/model.*`, and
 `preprocessing/preprocessing_pipeline.joblib`.
+
+Crash safety: the fitted preprocessing pipeline is written right after fitting
+and the trained model right after `fit()` returns — before prediction and
+evaluation run — so a crash in a later stage never loses hours of training.
 
 ---
 
@@ -258,14 +266,23 @@ Training can be resumed from a previous checkpoint:
 ```yaml
 model:
   model_type: lstm
-  max_epochs: 50       # ADDITIONAL epochs
+  max_epochs: 100      # TOTAL epoch budget for the run (not additional)
 
 runtime:
   resume: output/experiments/lstm_v1/checkpoints/last.pt
 ```
 
-This restores the model, optimizer, scheduler, scaler, and epoch state from
-`last.pt` and trains for an additional 50 epochs. Neural runs write:
+`model.max_epochs` is the **total** epoch budget: a run resumed at epoch 30
+with `max_epochs: 100` trains only the remaining 70 epochs. Resuming also
+restores the previous run's best monitor metric, so a resumed epoch that is
+worse than the earlier best never overwrites `checkpoints/best.pt`, and early
+stopping measures improvement against that best rather than restarting from
+scratch. If the checkpoint is already at or past `max_epochs`, the run logs a
+warning and exits cleanly without training; to extend a finished run, raise
+`model.max_epochs`.
+
+Resume restores the model, optimizer, scheduler, scaler, epoch, and
+best-metric state from `last.pt`. Neural runs write:
 
 - `checkpoints/best.pt` (best validation/train monitor)
 - `checkpoints/last.pt` (latest epoch)
@@ -278,6 +295,7 @@ Each checkpoint saves:
 - `scaler_state_dict` (if AMP scaling is active)
 - `epoch` (epoch it stopped at)
 - `config` (architecture parameters for reconstruction)
+- `metadata` (checkpoint kind, monitor metric, run-wide `best_metric`/`best_epoch`)
 
 ### PyTorch Compile
 
@@ -290,11 +308,22 @@ runtime:
   torch_compile: true
 ```
 
+Compiled runs persist checkpoints with plain `state_dict` keys, so they load
+back into uncompiled modules. Legacy checkpoints written with `_orig_mod.*`
+prefixed keys remain loadable — the prefix is normalized at load time.
+
+### Inference Precision
+
+`predict()` never runs under autocast, even when AMP was enabled for training:
+inference is always full float32 and returns a float32 array. The same
+checkpoint therefore produces identical predictions and metrics on CUDA and
+CPU. AMP (`runtime.amp` / `--amp`) is a training-time optimization only.
+
 ### Google Colab GPU Training
 
-Use the Click-based Colab entry point for remote GPU runs. It uses the same
-override path and experiment runner as `solrad-run`, so local and Colab artifacts
-stay aligned.
+Use the Typer-based `solrad-colab` entry point for remote GPU runs. It uses the
+same override path and experiment runner as `solrad-run`, so local and Colab
+artifacts stay aligned.
 
 ```bash
 python -m pip install uv
@@ -312,7 +341,7 @@ solrad-colab \
 The compatibility script remains available:
 
 ```bash
-python scripts/train_colab.py --config configs/tcc/experiments/lstm_hourly.yaml --device cuda --amp
+solrad-colab --config configs/tcc/experiments/lstm_hourly.yaml --device cuda --amp
 ```
 
 Useful Colab management flags:
@@ -320,8 +349,13 @@ Useful Colab management flags:
 - `--validate-config` checks YAML and overrides without training.
 - `--print-config` prints the resolved config for notebook inspection.
 - `--resume /path/to/checkpoints/last.pt` resumes optimizer, scheduler, scaler,
-  epoch, and model state.
+  epoch, model, and best-metric state.
 - `--limit-rows N` runs a small GPU smoke pass before a full training campaign.
+
+`solrad-colab` defaults to `--device cuda` and fails fast — before any data is
+loaded — when CUDA is unavailable (the Colab default runtime has no GPU).
+Enable a GPU runtime (Runtime > Change runtime type) or pass `--device cpu` to
+train without a GPU.
 
 ---
 
@@ -359,7 +393,7 @@ Memory guardrails:
 - LSTM/Transformer experiments use `WindowedSequenceDataset`, which stores the 2-D base feature matrix and slices windows lazily instead of materializing the full 3-D `(n_windows, sequence_length, n_features)` tensor.
 - The legacy `create_sequences()` helper still exists for small in-memory workflows, but now fails early if dense window construction would exceed the guardrail.
 - For large experiments, prefer Parquet, `data.load_columns`, `dtype_map` to `float32`, and a realistic `runtime.limit_rows` during development.
-- With Parquet inputs, `runtime.limit_rows` reads only the first batch through PyArrow instead of loading the whole file and slicing afterward.
+- With Parquet inputs (including the Parquet cache written for CSV sources), `runtime.limit_rows` reads only the first batch through PyArrow instead of loading the whole file and slicing afterward. Head reads always include the stored pandas index columns, so the original `DatetimeIndex` survives row limits and column projection; numeric columns are never reinterpreted as epoch timestamps.
 
 Raw LabMiM sensor directories can be loaded through the micrometeorology
 ingestion, calibration, and aggregation stack before solrad preprocessing:
@@ -395,16 +429,35 @@ test_pp  = pipeline.transform(test_df)        # ← Apply train parameters
 
 The mean and standard deviation used to normalize are calculated **only** on the training set. Validation and testing use these identical values.
 
+Missing values are handled by `preprocess.impute_strategy` (`drop` is the
+default). `interpolate` performs real interpolation of **interior** gaps only —
+time-based when the frame has a `DatetimeIndex`, positional otherwise. Leading
+and trailing NaNs are never extrapolated or forward-filled: those rows stay NaN
+and are dropped, keeping the trailing edge causal-safe.
+
 ### 3. Sliding Windows (Sequence)
 
-For LSTM/Transformer, each window only looks into the **past**:
+For LSTM/Transformer, window rows `[i, i + sequence_length)` are paired with
+the target at the window's **last row**, `y[i + sequence_length - 1]`:
 
 ```
-Window 1: [t₀, t₁, t₂, t₃] → target: t₄
-Window 2: [t₁, t₂, t₃, t₄] → target: t₅
+Window 1: [t₀, t₁, t₂, t₃] → target: t₃
+Window 2: [t₁, t₂, t₃, t₄] → target: t₄
 ```
 
-The target is always **after** the end of the window.
+This is **concurrent bias correction** (features at time *t* correct the
+biased estimate at time *t*), not one-step-ahead forecasting — the same task
+the tabular SVM solves, so models are directly comparable. No row after the
+target's timestamp ever enters a window.
+
+Windows also never span temporal gaps: when the data carries a
+`DatetimeIndex`, the base sampling frequency is inferred as the median
+timestamp delta and any window containing a larger jump between consecutive
+rows is dropped.
+
+> **Breaking change:** earlier releases paired each window with the target one
+> step *past* the window and allowed windows to cross gaps. Sequence metrics
+> from those runs are not comparable with current runs.
 
 ### 4. Serialized Pipeline and State
 
@@ -429,8 +482,9 @@ model:
 ```
 
 This means SVM evaluates the full processed test set, while LSTM and Transformer
-evaluate sequence targets starting at `sequence_length`. Use this default when
-you want backward-compatible metrics or model-specific production behavior.
+evaluate sequence targets starting at position `sequence_length - 1` (the last
+row of the first window), minus any windows dropped for temporal gaps. Use this
+default when you want model-specific production behavior.
 
 For fair side-by-side SVM/LSTM/Transformer comparison, align SVM metrics to the
 same target horizon used by sequence models:
@@ -444,6 +498,13 @@ model:
 `common_sequence_horizon` intentionally changes the SVM metric row set. The
 prediction CSV index follows the selected policy, so metric row counts and
 timestamps remain explicit and reproducible.
+
+`predictions/predictions.csv` always carries timestamps, under both policies
+(`model_native` included): the index is taken from the built test dataset
+itself, so it stays row-aligned with the model's predictions even when rows are
+dropped for NaNs or temporal gaps. `save_predictions` raises a `ValueError` on
+an index whose length does not match the predictions instead of silently
+writing an untimestamped file.
 
 ---
 
@@ -492,6 +553,11 @@ features:
   cyclic_encoding: true   # Converts to sin/cos (avoids 23→0 discontinuity)
 ```
 
+Engineered columns always reach the models, even when `data.feature_columns`
+is set: `feature_columns` selects the base data columns, and every column
+added by an enabled feature stage (temporal, cyclic, lag, rolling, diff) is
+appended to the model inputs on top of them.
+
 **Why cyclic encoding?** Hour 23 and hour 0 are adjacent in time, but numerically far apart. The sin/cos encoding preserves this proximity:
 
 ```
@@ -525,6 +591,13 @@ During neural network training, progress is displayed in real-time:
 
 ✓ Training complete in 50.6s
 ```
+
+### TensorBoard
+
+Set `model.log_dir` to log per-epoch train/validation loss and learning rate
+to TensorBoard. The `tensorboard` package is an optional dependency imported
+lazily — it is only required when `log_dir` is actually set. Both the `tcc`
+and `tcc-cuda` extras ship it.
 
 ---
 

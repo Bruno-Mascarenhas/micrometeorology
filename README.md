@@ -30,7 +30,6 @@ src/
     └── evaluation/               # Experiment reporting and validation metrics
 
 configs/                          # YAML environments for pipelines and ML experiments
-scripts/                          # CLI automation tools and Bash workflows
 tests/                            # Comprehensive Pytest suite
 docs/                             # In-depth package documentation
 legacy/                           # Archived Cartopy/Basemap scripts
@@ -42,27 +41,20 @@ legacy/                           # Archived Cartopy/Basemap scripts
 
 Requires **Python >= 3.14**.
 
-Recommended local workflow: keep the existing Conda environment for Python and
-native scientific libraries, then use `uv pip` inside that environment for fast
-editable installs and dependency checks.
+Recommended workflow: Conda provides the interpreter + `uv`
+([`environment.yml`](environment.yml)); uv installs everything else from
+`pyproject.toml`/`uv.lock` into that environment:
 
-```powershell
-conda activate labmim
-python -m pip install uv
-
-# Optional: keep the uv cache inside the repository workspace.
-$env:UV_CACHE_DIR = "$PWD\.uv-cache"
-
-# Make uv target the active Conda interpreter explicitly.
-$env:UV_PYTHON = (python -c "import sys; print(sys.executable)")
-
-uv pip install --torch-backend cpu -e ".[dev,tcc,video]"
-uv pip check
+```bash
+conda env create -f environment.yml
+conda activate micrometeorology
+make install-dev            # uv pip install --system ".[dev,tcc,video]"
 ```
 
-Use `uv venv` / `uv sync` only if you intentionally want a separate `.venv`.
-For this project, the Conda + `uv pip` path is usually safer because Cartopy,
-NetCDF, PyTorch, and geospatial dependencies rely on native binaries.
+`--system` targets the active Conda interpreter, so the lockfile-driven uv
+resolution and the Conda env stay one and the same. Use `uv venv` / `uv sync`
+only if you intentionally want a separate `.venv` — CI does exactly that with
+`uv sync --locked`.
 
 ### Base Scientific Suite
 
@@ -102,8 +94,8 @@ labmim-wrf-geojson --wrf-dir /path/to/wrfout/ --date 20240101 \
     -D 1 -D 4 -o output/JSON -g output/GeoJSON --workers 44
 ```
 
-The JSON exporter supports the static-site variables documented in
-[`docs/wrf_variables_2026.md`](docs/wrf_variables_2026.md), including derived
+The JSON exporter supports the static-site variables (see the extractor
+docstrings in `src/micrometeorology/wrf/variables.py`), including derived
 2-m relative humidity (`RH2`), surface skin temperature (`TSK`), downward
 longwave radiation (`GLW`), and 10-m wind power density
 (`WIND_POWER_DENSITY_10M`). The existing site wind-potential files
@@ -146,7 +138,7 @@ allsky train --index output/allsky/index.parquet   # device auto: CUDA -> MPS ->
 
 For Google Colab GPU training use [`notebooks/allsky_colab.ipynb`](notebooks/allsky_colab.ipynb)
 (install cell, Drive mount, TensorBoard, resumable checkpoints). Install extras with
-`pip install -e ".[allsky]"`.
+`pip install -e ".[allsky]"`. Full documentation: [`docs/allsky.md`](docs/allsky.md).
 
 ### 3. Sensor Data Processing & Calibration
 
@@ -207,6 +199,7 @@ ruff check src/ tests/    # lint
 |---|---|
 | [`docs/micrometeorology.md`](docs/micrometeorology.md) | Sensor ingestion, calibration, aggregation, WRF parallel pipeline, batch rendering, statistics, CLI reference, FAQ |
 | [`docs/solrad_correction.md`](docs/solrad_correction.md) | Model types (SVM/LSTM/Transformer), experiment configs, transfer learning, data leakage prevention, feature engineering, FAQ |
+| [`docs/allsky.md`](docs/allsky.md) | All-sky camera + radiation fusion: frame extraction, sensor pairing, SkyFusionNet, Colab GPU training, FAQ |
 
 ---
 
