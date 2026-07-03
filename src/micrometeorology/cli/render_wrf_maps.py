@@ -15,14 +15,6 @@ Usage::
     # All variables, generate WebM videos too
     labmim-wrf-figures --wrf-dir /path/to/ --date 20240101 \\
         -D 1 -D 4 -o output/ --also-video
-
-    # Auto mode chooses eager for tiny files and lazy for large/chunked inputs
-    labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
-        -o output/figures
-
-    # Force xarray-backed lazy reader
-    labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \\
-        -o output/figures --reader lazy --chunks auto --worker-backend memmap
 """
 
 from __future__ import annotations
@@ -30,9 +22,8 @@ from __future__ import annotations
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
-from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, cast
+from typing import TYPE_CHECKING, Annotated
 
 import numpy as np
 import typer
@@ -51,12 +42,6 @@ from micrometeorology.wrf.batch import (
     build_map_config,
     default_workers,
     run_figure_tasks,
-)
-from micrometeorology.wrf.execution import (
-    JsonWorkerRequest,
-    ReaderRequest,
-    format_wrf_execution_plan,
-    resolve_wrf_execution_plan,
 )
 from micrometeorology.wrf.reader import resolve_wrfout_paths
 
@@ -127,7 +112,7 @@ def _resolve_wrfout_paths(
 
 
 def _build_tasks_for_domain(
-    ds: reader.WRFReader,
+    ds: reader.WRFDataset,
     var_list: list[str],
     output_dir: Path | str,
     shapes_dir: Path | str | None,
@@ -443,18 +428,6 @@ def _parse_int_csv(raw: str | list[str] | None) -> tuple[int, ...]:
     return tuple(res)
 
 
-class ReaderChoice(StrEnum):
-    auto = "auto"
-    eager = "eager"
-    lazy = "lazy"
-
-
-class WorkerChoice(StrEnum):
-    auto = "auto"
-    serial = "serial"
-    memmap = "memmap"
-
-
 @app.command()
 def run(
     dataset: Annotated[
@@ -477,21 +450,9 @@ def run(
     ] = None,
     shapes_dir: Annotated[Path | None, typer.Option(help="Municipality shapefiles dir.")] = None,
     skip_first: Annotated[int, typer.Option(help="Time steps to skip.")] = 0,
-    reader_backend: Annotated[
-        ReaderChoice, typer.Option("--reader", help="WRF reader backend.")
-    ] = ReaderChoice.auto,
-    chunks: Annotated[
-        str, typer.Option(help="Lazy-reader chunks: 'auto', 'none', or dim=size pairs.")
-    ] = "auto",
     workers: Annotated[
         int | None,
         typer.Option("-w", "--workers", help=f"Parallel workers (default: {default_workers()})."),
-    ] = None,
-    worker_backend: Annotated[
-        WorkerChoice, typer.Option("--worker-backend", help="Figure worker backend.")
-    ] = WorkerChoice.auto,
-    tmp_dir: Annotated[
-        Path | None, typer.Option(help="Temp directory for memmap payloads.")
     ] = None,
     dpi: Annotated[int, typer.Option(help="Image DPI.")] = 100,
     also_video: Annotated[
@@ -505,28 +466,18 @@ def run(
     var_list = list(_parse_csv(variables)) if variables else DEFAULT_VARS
     var_list = _normalize_var_list(var_list)
     paths = _resolve_wrfout_paths(wrf_dir, date, _parse_int_csv(domains), dataset)
-    try:
-        plan = resolve_wrf_execution_plan(
-            paths=paths,
-            workflow="figures",
-            reader_request=cast("ReaderRequest", reader_backend),
-            chunks_request=chunks,
-            json_worker_request=cast("JsonWorkerRequest", worker_backend),
-            workers=workers,
-            tmp_dir=tmp_dir,
-            requested_variables=var_list,
-        )
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
     if not paths:
         typer.echo("No WRF files found.")
         return
 
+    resolved_workers = workers or default_workers()
+    if resolved_workers < 1:
+        raise typer.BadParameter("--workers must be >= 1")
+
     typer.echo(f"Files: {[p.name for p in paths]}")
     typer.echo(f"Variables: {var_list}")
     typer.echo(f"Output: {output}")
-    typer.echo(format_wrf_execution_plan(plan))
+    typer.echo(f"Workers: {resolved_workers}")
 
     # Build and render tasks per domain/variable to avoid retaining all frames in RAM.
     # One process pool is hoisted over the whole run so each 16-task batch reuses
@@ -534,10 +485,10 @@ def run(
     png_paths: list[str] = []
     pool_ctx: ProcessPoolExecutor | nullcontext[None] = (
         ProcessPoolExecutor(
-            max_workers=plan.workers,
-            max_tasks_per_child=_max_tasks_per_child(plan.workers),
+            max_workers=resolved_workers,
+            max_tasks_per_child=_max_tasks_per_child(resolved_workers),
         )
-        if plan.workers > 1 and plan.json_worker_backend != "serial"
+        if resolved_workers > 1
         else nullcontext()
     )
     with pool_ctx as pool:
@@ -545,9 +496,8 @@ def run(
         def render_task_batch(tasks: list[FigureTask], label: str) -> None:
             rendered = run_figure_tasks(
                 tasks,
-                plan.workers,
-                backend=plan.json_worker_backend,
-                tmp_dir=plan.tmp_dir,
+                resolved_workers,
+                backend="auto",
                 executor=pool,
             )
             png_paths.extend(rendered)
@@ -556,11 +506,7 @@ def run(
         for wrf_path in paths:
             typer.echo(f"\nLoading {wrf_path.name}...")
 
-            with reader.open_wrf_dataset(
-                wrf_path,
-                reader=plan.reader,
-                chunks=plan.chunks,
-            ) as ds:
+            with reader.WRFDataset(wrf_path) as ds:
                 _build_tasks_for_domain(
                     ds,
                     var_list,
@@ -588,7 +534,7 @@ def run(
             else:
                 grouped[stem].append(p)
 
-        webm_paths = batch_create_webm(grouped, output, fps=2, workers=plan.workers)
+        webm_paths = batch_create_webm(grouped, output, fps=2, workers=resolved_workers)
         typer.echo(f"✓ Generated {len(webm_paths)} videos")
 
     typer.echo("\n✓ Done")
