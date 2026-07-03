@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
@@ -284,6 +285,35 @@ def _run_grid_geojson_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], l
     return [str(out)], []
 
 
+_TEMP_FILE_PATTERN = re.compile(r"\.tmp-(\d+)$")
+
+
+def _sweep_stale_temp_files(dirs: Sequence[str]) -> int:
+    """Remove orphaned ``.tmp-<pid>`` files whose owning process is dead.
+
+    A worker killed mid-write (OOM kill, broken pool teardown) can leave its
+    private temp file behind; the final outputs are never affected because of
+    the atomic rename, but the debris should not accumulate. Only files whose
+    embedded PID no longer exists are removed, so concurrent runs writing into
+    the same directories are never disturbed.
+    """
+    removed = 0
+    for directory in dict.fromkeys(dirs):
+        for path in Path(directory).glob(".*.tmp-*"):
+            match = _TEMP_FILE_PATTERN.search(path.name)
+            if match is None:
+                continue
+            pid = int(match.group(1))
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                path.unlink(missing_ok=True)
+                removed += 1
+            except PermissionError:  # pragma: no cover - pid exists, other user
+                continue
+    return removed
+
+
 def process_unit(unit: WorkUnit) -> UnitResult:
     """Execute one work unit. Runs in a worker process; never raises."""
     if os.environ.get("LABMIM_TEST_CRASH_UNIT") == unit.variable:
@@ -413,6 +443,12 @@ def execute_units(
             f"{len(pending)} incomplete units in isolation"
         )
 
+    if pending:
+        swept = _sweep_stale_temp_files(
+            [d for unit in ordered for d in (unit.json_dir, unit.geojson_dir)]
+        )
+        if swept:
+            echo(f"  swept {swept} stale temp file(s) left by killed workers")
     for unit in pending:
         try:
             with ProcessPoolExecutor(max_workers=1) as retry_pool:
@@ -426,6 +462,8 @@ def execute_units(
         results.append(result)
         status = f"✗ {result.error}" if result.error else f"{len(result.files)} files"
         echo(f"  [{len(results)}/{len(ordered)}] {result.label}: {status}")
+    if pending:
+        _sweep_stale_temp_files([d for unit in ordered for d in (unit.json_dir, unit.geojson_dir)])
 
     echo(f"✓ {len(results)} work units in {time.perf_counter() - t0:.1f}s")
     return results
