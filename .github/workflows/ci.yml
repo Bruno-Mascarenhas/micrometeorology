@@ -80,9 +80,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       # --locked also fails when uv.lock has drifted from pyproject.toml.
+      # allsky brings imageio-ffmpeg for the video tests; torch overlaps tcc.
       - name: Install dependencies (locked)
         run: |
-          uv sync --locked --extra dev --extra tcc
+          uv sync --locked --extra dev --extra tcc --extra allsky
 
       - name: Cache MyPy
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
