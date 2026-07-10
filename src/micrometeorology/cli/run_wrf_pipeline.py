@@ -203,6 +203,9 @@ def run(
         for result in results:
             for warning in result.warnings:
                 typer.echo(f"  ⚠ {warning}")
+        manifest_path = jobs.write_run_manifest(json_dir, results)
+        if manifest_path:
+            typer.echo(f"  ✓ Manifest: {manifest_path}")
         generated_json_count = sum(
             len(result.files) for result in results if result.kind in {"values_json", "poteolico"}
         )

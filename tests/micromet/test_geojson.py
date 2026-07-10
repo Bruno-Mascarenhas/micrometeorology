@@ -20,6 +20,7 @@ import pytest
 from micrometeorology.wrf import jobs
 from micrometeorology.wrf.geojson import (
     create_wind_vectors_json,
+    write_grid_compact_json_stream,
     write_grid_geojson_stream,
     write_values_json_stream,
 )
@@ -104,6 +105,114 @@ class TestCreateValuesJson:
 
         assert "write_values_json_stream" in source
         assert ".tolist()" not in source
+
+    def test_whole_floats_serialized_as_integers(self, tmp_path):
+        """0.0 -> 0 (and -0.0 -> -0) in the serialized text; parsed values
+        are unchanged, including across chunk boundaries."""
+        arr = np.array([[0.0, -0.0, 2.0, 1.25, np.nan]], dtype=np.float64)
+        out = tmp_path / "vals.json"
+        write_values_json_stream(out, arr, 0.0, 5.0, "N/A", chunk_size=2)
+
+        text = out.read_text(encoding="utf-8")
+        assert '"values":[0,-0,2,1.25,null]' in text
+        with open(out, encoding="utf-8") as f:
+            parsed = json.load(f)
+        assert parsed["values"] == [0, 0, 2, 1.25, None]
+
+    def test_int_formatting_does_not_touch_fractional_values(self, tmp_path):
+        arr = np.array([[10.05, 100.0, -0.25]], dtype=np.float64)
+        out = tmp_path / "vals.json"
+        write_values_json_stream(out, arr, 0.0, 5.0, "N/A")
+        assert '"values":[10.05,100,-0.25]' in out.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# write_grid_compact_json_stream — compact companion for the site front-end
+# ---------------------------------------------------------------------------
+
+
+class TestWriteGridCompactJsonStream:
+    # 7-decimal vs 10-decimal rounding of the SAME corner value can differ by
+    # at most 0.5e-7 + 0.5e-10.
+    ROUNDING_TOL = 5.05e-8
+
+    def _corner_sets(self, feature):
+        ring = feature["geometry"]["coordinates"][0]
+        return sorted({p[0] for p in ring}), sorted({p[1] for p in ring})
+
+    def test_separable_grid_uses_edges_format_and_matches_geojson(self, tmp_path, sample_grid):
+        lon, lat = sample_grid
+        geo = tmp_path / "grid.geojson"
+        compact = tmp_path / "grid.grid.json"
+        write_grid_geojson_stream(geo, lon, lat, 1000.0, 2000.0)
+        write_grid_compact_json_stream(compact, lon, lat, 1000.0, 2000.0)
+
+        with open(compact, encoding="utf-8") as f:
+            payload = json.load(f)
+        assert payload["format"] == "grid-edges-v1"
+        assert payload["shape"] == [4, 5]
+        assert payload["metadata"] == {"resolucao_m": [1000.0, 2000.0]}
+        assert len(payload["lon_edges"]) == 5 + 1
+        assert len(payload["lat_edges"]) == 4 + 1
+
+        with open(geo, encoding="utf-8") as f:
+            features = json.load(f)["features"]
+        n_cols = payload["shape"][1]
+        for k, feature in enumerate(features):
+            assert feature["properties"]["linear_index"] == k
+            i, j = divmod(k, n_cols)
+            lons, lats = self._corner_sets(feature)
+            edge_lons = sorted([payload["lon_edges"][j], payload["lon_edges"][j + 1]])
+            edge_lats = sorted([payload["lat_edges"][i], payload["lat_edges"][i + 1]])
+            for got, want in zip(edge_lons, lons, strict=True):
+                assert abs(got - want) <= self.ROUNDING_TOL
+            for got, want in zip(edge_lats, lats, strict=True):
+                assert abs(got - want) <= self.ROUNDING_TOL
+
+    def test_non_separable_grid_falls_back_to_bounds_format(self, tmp_path):
+        ny, nx = 3, 4
+        lon = np.linspace(-40, -38, nx)[np.newaxis, :].repeat(ny, axis=0)
+        lat = np.linspace(-14, -12, ny)[:, np.newaxis].repeat(nx, axis=1)
+        lon = lon + np.linspace(0, 0.01, ny)[:, np.newaxis]  # skew: rows differ
+
+        geo = tmp_path / "g.geojson"
+        compact = tmp_path / "g.grid.json"
+        write_grid_geojson_stream(geo, lon, lat, 500.0, 500.0)
+        write_grid_compact_json_stream(compact, lon, lat, 500.0, 500.0)
+
+        with open(compact, encoding="utf-8") as f:
+            payload = json.load(f)
+        assert payload["format"] == "grid-bounds-v1"
+        assert payload["shape"] == [ny, nx]
+        assert len(payload["bounds"]) == ny * nx
+
+        with open(geo, encoding="utf-8") as f:
+            features = json.load(f)["features"]
+        for k, feature in enumerate(features):
+            lon_left, lat_bottom, lon_right, lat_top = payload["bounds"][k]
+            lons, lats = self._corner_sets(feature)
+            for got, want in zip(sorted([lon_left, lon_right]), lons, strict=True):
+                assert abs(got - want) <= self.ROUNDING_TOL
+            for got, want in zip(sorted([lat_bottom, lat_top]), lats, strict=True):
+                assert abs(got - want) <= self.ROUNDING_TOL
+
+    def test_float32_masked_grid_matches_production_reader_path(self, tmp_path):
+        """MaskedArray float32 input (what WRFDataset.read_grid returns) takes
+        the same corner-arithmetic path as the legacy writer."""
+        ny, nx = 4, 3
+        lon = np.ma.MaskedArray(
+            np.linspace(-49.6, -49.0, nx, dtype=np.float32)[np.newaxis, :].repeat(ny, axis=0)
+        )
+        lat = np.ma.MaskedArray(
+            np.linspace(-20.2, -19.6, ny, dtype=np.float32)[:, np.newaxis].repeat(nx, axis=1)
+        )
+        compact = tmp_path / "m.grid.json"
+        write_grid_compact_json_stream(compact, lon, lat, 27000.0, 27000.0)
+        with open(compact, encoding="utf-8") as f:
+            payload = json.load(f)
+        assert payload["format"] == "grid-edges-v1"
+        assert len(payload["lon_edges"]) == nx + 1
+        assert len(payload["lat_edges"]) == ny + 1
 
 
 # ---------------------------------------------------------------------------

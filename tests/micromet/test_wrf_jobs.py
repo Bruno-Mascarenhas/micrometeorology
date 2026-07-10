@@ -117,14 +117,15 @@ def _run_units(wrf_path: Path, out_root: Path, workers: int) -> list[jobs.UnitRe
     return jobs.execute_units(units, workers)
 
 
-def test_values_json_bytes_match_reference_payload_format(tmp_path):
-    """The values-JSON byte format is pinned by the frozen reference oracle.
+def test_values_json_matches_reference_payload_with_int_formatting(tmp_path):
+    """The values-JSON content is pinned by the frozen reference oracle.
 
     ``write_values_json_stream`` (used by every values unit through
-    ``jobs._atomic_values_json``) must produce exactly the bytes of
-    ``json.dumps(_reference.create_values_json(...), separators=(",", ":"))``
+    ``jobs._atomic_values_json``) must parse to exactly the reference payload
     — same metadata key order, compact separators, 2-decimal rounding,
-    NaN→null, and embedded wind payload.
+    NaN→null, embedded wind payload. The one deliberate byte-level deviation
+    from the reference is that whole floats in the *values* array serialize
+    as integers (``0.0`` → ``0``), which parses to the same numbers.
     """
     arr = np.array(
         [[1.234, np.nan, 5.6789], [-3.21, 0.0, 2.5]],
@@ -141,8 +142,13 @@ def test_values_json_bytes_match_reference_payload_format(tmp_path):
     jobs._atomic_values_json(out, arr, 0.0, 5.0, jobs._format_datetime(dt), wind_data)
 
     expected = _reference.create_values_json(arr, 0.0, 5.0, dt, wind_data)
-    expected_bytes = json.dumps(expected, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    assert out.read_bytes() == expected_bytes
+    text = out.read_text(encoding="utf-8")
+    assert json.loads(text) == expected
+    # metadata (including the embedded wind dict) keeps the exact reference
+    # serialization; only the values array formatting deviates.
+    expected_metadata = json.dumps(expected["metadata"], separators=(",", ":"), ensure_ascii=False)
+    assert text.startswith('{"metadata":' + expected_metadata)
+    assert text.endswith(',"values":[1.23,null,5.68,-3.21,0,2.5]}')
     # The reference payload embeds the wind dict and null for the NaN cell.
     assert expected["metadata"]["wind"] == wind_data
     assert expected["values"][1] is None

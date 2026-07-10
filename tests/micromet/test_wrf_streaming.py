@@ -104,9 +104,18 @@ def test_stream_wind_at_heights_matches_eager_path_bitwise(tmp_path, block_steps
         assert s.speed_steps.dtype == ref["steps"][0].dtype
         for i, ref_step in enumerate(ref["steps"]):
             assert np.array_equal(s.speed_steps[i], ref_step, equal_nan=True)
-        # Wind vector payloads embed unrounded floats in the values JSON —
-        # exact equality, not approx.
-        assert s.wind_vectors == ref["vectors"]
+        # Wind vector payloads embed floats rounded to the standalone-overlay
+        # convention (angles 1dp, magnitudes 2dp) — exact equality against the
+        # rounded reference, not approx.
+        for i, ref_vec in enumerate(ref["vectors"]):
+            got = s.wind_vectors[i]
+            assert got is not None, f"wind vector packaging failed for step {i}"
+            assert got["downsampled_linear_indices"] == ref_vec["downsampled_linear_indices"]
+            assert got["downsampled_angles"] == np.round(ref_vec["downsampled_angles"], 1).tolist()
+            assert (
+                got["downsampled_magnitudes"]
+                == np.round(ref_vec["downsampled_magnitudes"], 2).tolist()
+            )
 
 
 def test_stream_wind_block_boundary_independence(tmp_path):

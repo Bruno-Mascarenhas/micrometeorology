@@ -282,7 +282,48 @@ def _run_grid_geojson_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], l
     geojson.write_grid_geojson_stream(tmp, lon, lat, ds.dx, ds.dy)
     os.replace(tmp, out)
     logger.info("Saved GeoJSON: %s", out)
-    return [str(out)], []
+
+    # Compact companion preferred by the site front-end (which falls back to
+    # the legacy .geojson above); a fraction of the size on the wire.
+    compact = Path(unit.geojson_dir) / f"{grid}.grid.json"
+    compact_tmp = compact.with_name(f".{compact.name}.tmp-{os.getpid()}")
+    geojson.write_grid_compact_json_stream(compact_tmp, lon, lat, ds.dx, ds.dy)
+    os.replace(compact_tmp, compact)
+    return [str(out), str(compact)], []
+
+
+def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> Path | None:
+    """Write ``manifest.json`` into *json_dir* after a generation run.
+
+    The site front-end fetches this tiny file with ``Cache-Control: no-cache``
+    and appends ``?v=<version>`` to every data URL, which lets the fixed-name
+    data files be cached long-term while staying fresh across runs. Absence of
+    the manifest simply keeps the front-end on unversioned URLs.
+
+    The version is bumped whenever the run executed ANY unit — including
+    fully failed runs: a unit that crashed mid-way may already have atomically
+    replaced some files under unchanged filenames (its ``files`` manifest is
+    empty on error, so the file count cannot be trusted), and keeping the
+    previous version alive would let long-cached clients pin outdated data
+    under the old ``?v=`` URLs. An extra bump is only ever a cache miss.
+    """
+    if not results:
+        return None
+    written = sum(len(result.files) for result in results)
+    domains = sorted(
+        {
+            match.group(1).upper()
+            for result in results
+            if (match := re.search(r"_(d\d+)_", result.label)) is not None
+        }
+    )
+    payload = {
+        "version": time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
+        "generated_utc": time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime()),
+        "domains": domains,
+        "files": written,
+    }
+    return Path(_atomic_json_dump(Path(json_dir) / "manifest.json", payload))
 
 
 _TEMP_FILE_PATTERN = re.compile(r"\.tmp-(\d+)$")
