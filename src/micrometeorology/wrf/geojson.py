@@ -7,12 +7,19 @@ Optimisations applied:
   - JSON output uses compact separators (no indent / whitespace).
   - Custom float encoder avoids Python's excessive float precision
     (e.g. ``20.450000762939453`` → ``20.45``).
+  - Whole floats in values arrays are serialized as integers (``0.0`` → ``0``);
+    the parsed numeric values are unchanged.
+  - A compact ``.grid.json`` companion is written next to each ``.geojson``
+    (see :func:`write_grid_compact_json_stream`): same cell rectangles at a
+    fraction of the size, preferred by the site front-end with the legacy
+    GeoJSON as fallback.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
@@ -190,18 +197,100 @@ def write_grid_geojson_stream(
     return out
 
 
-def _grid_cell_corners(
+GRID_COMPACT_DECIMALS = 7
+
+
+def write_grid_compact_json_stream(
+    output_path: str | Path,
     lon: NDArray,
     lat: NDArray,
-) -> tuple[list[float], list[float], list[float], list[float]]:
-    """Compute per-cell corner coordinates for every grid cell, vectorized.
+    resolution_x: float,
+    resolution_y: float,
+) -> Path:
+    """Write the compact grid companion (``D0X.grid.json``).
 
-    Returns ``(lon_left, lon_right, lat_top, lat_bottom)`` as flat row-major
-    Python lists. The arithmetic preserves the historical per-cell writer exactly —
-    same expressions and operand order, evaluated in the input dtype (float32
-    grids stay float32) — followed by Python's builtin ``round(v, 10)`` per
-    element. ``np.round`` must NOT be used here: it disagrees with builtin
-    ``round`` at decimal ties for float64 inputs (e.g. ``-14.000000000050001``).
+    Cell ``k`` (row-major; ``k`` equals the legacy GeoJSON ``linear_index``)
+    is the axis-aligned rectangle with longitude edges
+    ``(lon_left[k], lon_right[k])`` and latitude edges
+    ``(lat_top[k], lat_bottom[k])`` — the SAME corner arithmetic as the
+    legacy GeoJSON features, rounded to 7 decimals (~1.1 cm). Seven decimals
+    is the smallest count that still uniquely identifies the float32 source
+    coordinates at these magnitudes, so nothing beyond float32 noise is lost
+    (verified against the production D01-D04 grids; 6 decimals is NOT enough).
+
+    Two layouts, discriminated by the ``format`` key:
+
+    - ``grid-edges-v1`` — when the grid is separable (every row shares the
+      same longitude edges and every column the same latitude edges, as in
+      regular lat/lon WRF projections), only the 1-D edge vectors are stored:
+      ``lon_edges`` (``n_cols + 1``) and ``lat_edges`` (``n_rows + 1``).
+      Cell ``(i, j)`` spans lon ``lon_edges[j]..lon_edges[j+1]`` and lat
+      ``lat_edges[i]..lat_edges[i+1]`` (edge vectors keep the writer's
+      top/bottom orientation; consumers must not assume a sign direction).
+      ~3 KB instead of 1.2-2.6 MB for the production domains.
+
+    - ``grid-bounds-v1`` — fallback for non-separable (curvilinear) grids:
+      per-cell ``[lon_left, lat_bottom, lon_right, lat_top]``.
+    """
+    n_rows, n_cols = _validate_grid(lon, lat, context=f"compact grid JSON for {output_path}")
+    lon_left, lon_right, lat_top, lat_bottom = _grid_cell_corner_arrays(lon, lat)
+
+    payload: dict[str, Any] = {}
+    if _grid_is_separable(lon_left, lon_right, lat_top, lat_bottom):
+        # Structural sharing (lon_right[:, j] IS lon_left[:, j+1], both
+        # views of lon_mid; same for lat) means row 0 / column 0 carry the
+        # full edge information.
+        lon_edges = np.concatenate([lon_left[0, :], lon_right[0, -1:]])
+        lat_edges = np.concatenate([lat_top[:, 0], lat_bottom[-1:, 0]])
+        payload["format"] = "grid-edges-v1"
+        payload["metadata"] = {"resolucao_m": [float(resolution_x), float(resolution_y)]}
+        payload["shape"] = [n_rows, n_cols]
+        payload["lon_edges"] = [round(v, GRID_COMPACT_DECIMALS) for v in lon_edges.tolist()]
+        payload["lat_edges"] = [round(v, GRID_COMPACT_DECIMALS) for v in lat_edges.tolist()]
+    else:
+        west = [round(v, GRID_COMPACT_DECIMALS) for v in lon_left.ravel().tolist()]
+        east = [round(v, GRID_COMPACT_DECIMALS) for v in lon_right.ravel().tolist()]
+        top = [round(v, GRID_COMPACT_DECIMALS) for v in lat_top.ravel().tolist()]
+        bottom = [round(v, GRID_COMPACT_DECIMALS) for v in lat_bottom.ravel().tolist()]
+        payload["format"] = "grid-bounds-v1"
+        payload["metadata"] = {"resolucao_m": [float(resolution_x), float(resolution_y)]}
+        payload["shape"] = [n_rows, n_cols]
+        payload["bounds"] = [[west[k], bottom[k], east[k], top[k]] for k in range(n_rows * n_cols)]
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(payload, f, separators=(",", ":"), ensure_ascii=False)
+    logger.info("Saved compact grid JSON: %s (%s)", out, payload["format"])
+    return out
+
+
+def _grid_is_separable(
+    lon_left: NDArray,
+    lon_right: NDArray,
+    lat_top: NDArray,
+    lat_bottom: NDArray,
+) -> bool:
+    """True when longitude edges repeat identically across rows and latitude
+    edges across columns (exact equality on the unrounded values)."""
+    return bool(
+        (lon_left == lon_left[0:1, :]).all()
+        and (lon_right == lon_right[0:1, :]).all()
+        and (lat_top == lat_top[:, 0:1]).all()
+        and (lat_bottom == lat_bottom[:, 0:1]).all()
+    )
+
+
+def _grid_cell_corner_arrays(
+    lon: NDArray,
+    lat: NDArray,
+) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    """Compute unrounded 2-D corner arrays ``(lon_left, lon_right, lat_top, lat_bottom)``.
+
+    The arithmetic preserves the historical per-cell writer exactly — same
+    expressions and operand order, evaluated in the input dtype (float32
+    grids stay float32). Shared by the legacy GeoJSON writer and the compact
+    grid writer so both serialize the SAME corner values.
     """
     # WRF readers hand back MaskedArrays (mask all False); np.ma arithmetic
     # promotes ``/ 2`` to float64, unlike the per-element scalar path.
@@ -229,6 +318,21 @@ def _grid_cell_corners(
         axis=1,
     )
 
+    return lon_left, lon_right, lat_top, lat_bottom
+
+
+def _grid_cell_corners(
+    lon: NDArray,
+    lat: NDArray,
+) -> tuple[list[float], list[float], list[float], list[float]]:
+    """Compute per-cell corner coordinates for every grid cell, vectorized.
+
+    Returns ``(lon_left, lon_right, lat_top, lat_bottom)`` as flat row-major
+    Python lists rounded with builtin ``round(v, 10)`` per element.
+    ``np.round`` must NOT be used here: it disagrees with builtin ``round``
+    at decimal ties for float64 inputs (e.g. ``-14.000000000050001``).
+    """
+    lon_left, lon_right, lat_top, lat_bottom = _grid_cell_corner_arrays(lon, lat)
     return (
         _rounded_coordinate_list(lon_left),
         _rounded_coordinate_list(lon_right),
@@ -259,6 +363,15 @@ def _validate_grid(lon: NDArray, lat: NDArray, *, context: str) -> tuple[int, in
     return int(n_rows), int(n_cols)
 
 
+# json.dumps writes whole floats with a redundant ".0" ("0.0" instead of "0").
+# Stripping it changes no parsed value (JSON "0" and "0.0" are the same number,
+# and "-0.0" -> "-0" preserves the negative-zero sign) but saves ~2.4% across
+# the values corpus — over 40% on rain files full of dry-hour zeros. The
+# values text is only numbers/null separated by commas, so a ".0" directly
+# before a separator (or chunk end) can only be a whole float's suffix.
+_WHOLE_FLOAT_RE = re.compile(r"(-?\d+)\.0(?=,|$)")
+
+
 def _write_flat_values_chunks(f: TextIO, arr: NDArray, *, chunk_size: int) -> None:
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
@@ -272,8 +385,8 @@ def _write_flat_values_chunks(f: TextIO, arr: NDArray, *, chunk_size: int) -> No
             values[idx] = None
         if not values:
             continue
-        text = json.dumps(values, separators=(",", ":"), ensure_ascii=False)
+        text = _WHOLE_FLOAT_RE.sub(r"\1", json.dumps(values, separators=(",", ":"))[1:-1])
         if not first:
             f.write(",")
         first = False
-        f.write(text[1:-1])
+        f.write(text)

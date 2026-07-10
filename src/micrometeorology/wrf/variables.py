@@ -300,8 +300,11 @@ def _package_wind_vectors_step(
 ) -> dict:
     """Package one timestep's wind vectors.
 
-    The output floats are embedded unrounded in the values JSON, so the
-    operation order here is part of the byte contract pinned by tests.
+    Angles are rounded to 1 decimal and magnitudes to 2 — the same convention
+    as the standalone overlay files (``geojson.create_wind_vectors_json``).
+    The front-end only draws arrows from these numbers; anything beyond
+    0.1°/0.01 m/s is float64 interpolation noise, and serializing it used to
+    inflate every POT_EOLICO values file by ~21%.
     """
     magnitude = np.hypot(u_target, v_target)
     angle = np.arctan2(u_target, v_target) * 180.0 / np.pi
@@ -317,9 +320,12 @@ def _package_wind_vectors_step(
     valid = ~np.isnan(angles_flat)
     linear_indices = (i_flat * nx + j_flat)[valid]
 
+    # float64 before rounding: rounding a float32 array snaps to the nearest
+    # float32 (320.6 -> 320.6000061...), which would defeat the compact
+    # serialization; the standalone overlay path casts the same way.
     return {
-        "downsampled_angles": angles_flat[valid].tolist(),
-        "downsampled_magnitudes": mags_flat[valid].tolist(),
+        "downsampled_angles": np.round(angles_flat[valid].astype(np.float64), 1).tolist(),
+        "downsampled_magnitudes": np.round(mags_flat[valid].astype(np.float64), 2).tolist(),
         "downsampled_linear_indices": linear_indices.tolist(),
     }
 

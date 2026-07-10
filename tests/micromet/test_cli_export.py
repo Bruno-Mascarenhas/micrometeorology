@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from typer.testing import CliRunner
 
 from micrometeorology.cli.export_wrf_geojson import app
@@ -41,6 +43,19 @@ def test_cli_exports_values_and_grid_geojson(tmp_path):
     ]
     assert len(list(json_dir.glob("D02_WIND_*.json"))) == NT
     assert (geo_dir / "D02.geojson").exists()
+
+    # Compact grid companion for the site front-end.
+    with open(geo_dir / "D02.grid.json", encoding="utf-8") as f:
+        compact = json.load(f)
+    assert compact["format"] in {"grid-edges-v1", "grid-bounds-v1"}
+    assert len(compact["shape"]) == 2
+
+    # Run manifest for front-end cache versioning.
+    with open(json_dir / "manifest.json", encoding="utf-8") as f:
+        manifest = json.load(f)
+    assert manifest["version"]
+    assert manifest["domains"] == ["D02"]
+    assert manifest["files"] > 0
 
 
 def test_cli_single_height_poteolico_writes_only_that_height(tmp_path):
