@@ -109,6 +109,7 @@ def test_stream_wind_at_heights_matches_eager_path_bitwise(tmp_path, block_steps
         # rounded reference, not approx.
         for i, ref_vec in enumerate(ref["vectors"]):
             got = s.wind_vectors[i]
+            assert got is not None, f"wind vector packaging failed for step {i}"
             assert got["downsampled_linear_indices"] == ref_vec["downsampled_linear_indices"]
             assert got["downsampled_angles"] == np.round(ref_vec["downsampled_angles"], 1).tolist()
             assert (
