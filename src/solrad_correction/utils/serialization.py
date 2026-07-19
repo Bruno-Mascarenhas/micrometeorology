@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class ModelIntegrityError(RuntimeError):
+    """Raised when a pickled artifact fails its manifest checksum verification."""
 
 
 def save_sklearn_model(model: object, path: str | Path) -> None:
@@ -18,10 +25,86 @@ def save_sklearn_model(model: object, path: str | Path) -> None:
     logger.info("Saved sklearn model: %s", p)
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _find_manifest(path: Path) -> tuple[Path, dict[str, Any]] | None:
+    """Return the nearest ancestor ``manifest.json`` and its parsed contents.
+
+    Walks upward from ``path``; the experiment manifest written by
+    ``experiments.artifacts.write_manifest`` lives at the experiment root and
+    covers every file beneath it. Returns ``None`` when no readable manifest is
+    found.
+    """
+    for parent in path.resolve().parents:
+        candidate = parent / "manifest.json"
+        if candidate.is_file():
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+            except OSError, json.JSONDecodeError:
+                return None
+            if isinstance(data, dict):
+                return candidate, data
+            return None
+    return None
+
+
+def verify_pickle_integrity(path: str | Path) -> None:
+    """Verify a pickled artifact against a reachable experiment manifest.
+
+    When an ancestor ``manifest.json`` (see
+    :func:`solrad_correction.experiments.artifacts.write_manifest`) records a
+    sha256 for the artifact, the file is hashed and compared before it is
+    unpickled; a mismatch raises :class:`ModelIntegrityError`. When no manifest
+    covers the file, a warning is logged that an unverified pickle is being
+    loaded — pickles execute arbitrary code on load, so the absence of a
+    checksum is surfaced rather than hidden.
+    """
+    p = Path(path)
+    found = _find_manifest(p)
+    if found is None:
+        logger.warning("Loading unverified pickle (no manifest.json found): %s", p)
+        return
+
+    manifest_path, data = found
+    artifacts = data.get("artifacts", {})
+    try:
+        relative = p.resolve().relative_to(manifest_path.parent).as_posix()
+    except ValueError:
+        relative = None
+    entry = artifacts.get(relative) if relative is not None else None
+    expected = entry.get("sha256") if isinstance(entry, dict) else None
+    if expected is None:
+        logger.warning(
+            "Loading unverified pickle (not covered by manifest %s): %s", manifest_path, p
+        )
+        return
+
+    actual = _sha256_file(p)
+    if actual != expected:
+        raise ModelIntegrityError(
+            f"Integrity check failed for {p}: manifest {manifest_path} records sha256 "
+            f"{expected} but the file hashes to {actual}"
+        )
+    logger.debug("Verified pickle integrity via manifest %s: %s", manifest_path, p)
+
+
 def load_sklearn_model(path: str | Path) -> object:
-    """Load a scikit-learn model via joblib."""
+    """Load a scikit-learn model via joblib after verifying its integrity.
+
+    The artifact is checked against a reachable experiment ``manifest.json``
+    (raising :class:`ModelIntegrityError` on a checksum mismatch); when no
+    manifest covers the file an unverified load is logged. See
+    :func:`verify_pickle_integrity`.
+    """
     import joblib
 
+    verify_pickle_integrity(path)
     return joblib.load(path)
 
 
