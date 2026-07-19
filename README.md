@@ -176,7 +176,14 @@ Full documentation: [`docs/allsky.md`](docs/allsky.md); the internal design is i
 
 ```bash
 labmim-sensor-process --input data/raw/ --output data/hourly/
+
+# Nine fixed-name monitoring-page PNGs from the hourly CSV (site-labmim consumer)
+labmim-site-graphs site -i data/hourly/sensor_data.csv -o ../site-labmim/site/assets/graphs
 ```
+
+`labmim-site-graphs` produces the station graphs the public monitoring page
+embeds by exact name; see the
+[monitoring-page contract](docs/micrometeorology.md#monitoring-page-site-labmim).
 
 ### 4. Statistical Comparison (WRF vs Observations)
 

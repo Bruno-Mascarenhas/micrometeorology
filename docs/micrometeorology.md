@@ -36,7 +36,9 @@ src/micrometeorology/
 │   └── export.py            # Formatted CSV export
 ├── stats/
 │   ├── metrics.py           # Model vs. observation metrics (RMSE, MAE, etc.)
-│   └── comparison.py        # Full comparison pipeline: alignment + metrics + plots
+│   ├── comparison.py        # Full comparison pipeline: alignment + metrics + plots
+│   ├── climatology.py       # Diurnal / monthly / seasonal groupings of station series
+│   └── radiation.py         # Station-Series clearness index (Kt) and diffuse fraction (Kd)
 └── wrf/
     ├── reader.py            # NetCDF dataset wrapper (WRFDataset context manager)
     ├── variables.py         # Variable extraction and unit conversion
@@ -429,6 +431,24 @@ python -m micrometeorology.cli.run_wrf_pipeline \
 labmim-sensor-process --input data/raw/ --output data/hourly/
 ```
 
+### Monitoring-page graphs (site)
+
+```bash
+# Nine fixed-name PNGs for the site's monitoring page, straight into a checkout
+labmim-site-graphs site -i data/hourly/sensor_data.csv \
+    -o ../site-labmim/site/assets/graphs --last-days 7
+
+# Retarget a renamed logger column without editing code
+labmim-site-graphs site -i data/hourly/sensor_data.csv -o out/ \
+    --col temperatura=AirT2_C_Avg
+
+# Ad-hoc per-variable graphs (generic secondary command, legacy filenames)
+labmim-site-graphs columns -i data/hourly/sensor_data.csv -o out/ -v AirT1_C_Avg -v RH1
+```
+
+See [Monitoring page (site-labmim)](#monitoring-page-site-labmim) for the full
+nine-image contract and the operational command sequence.
+
 ### Comparison & metrics
 
 ```bash
@@ -534,6 +554,63 @@ and the v2 `manifest.json` — the complete set the WebGIS consumes. A single
 `wrfout` file is fine too: `-d /path/to/wrfout_d03_2026-05-03_00_00_00`
 (the domain is read from the filename). Omit `--date` to batch every `wrfout*`
 in `--wrf-dir`.
+
+### Monitoring page (site-labmim)
+
+The WebGIS above is not the only consumer. The site's **monitoring page**
+(`site/monitoring.html`, `https://labmim.if.ufba.br/monitoring.html`) embeds
+nine station graphs by **fixed image name** under `site/assets/graphs/`.
+`labmim-site-graphs site` is the producer for those PNGs, reading the hourly CSV
+that `labmim-sensor-process` exports and writing exactly the names the page
+requests, overwriting them in place each run.
+
+> **This consumer is external.** Nothing in this repository imports
+> `plot_station_graphs`, and the site repo is a separate, read-only checkout;
+> the coupling is a **cron/manual copy** of PNG files, so it is invisible to any
+> reverse-import ("who calls this?") dead-code analysis. Treat the nine
+> filenames as a byte-name contract exactly like the WebGIS JSON names above.
+
+The nine-image contract (`site` command; column names are the defaults and are
+overridable via `--config` / `--col`):
+
+| Site image (`assets/graphs/`) | Default CSV column | Plot type | Y-axis label |
+|---|---|---|---|
+| `temperatura.png`      | `AirT1_C_Avg`  | line                     | Temperatura do Ar (°C) |
+| `umidade.png`          | `RH1`          | line                     | Umidade Relativa do Ar (%) |
+| `pressao.png`          | `BP1_mbar_Avg` | line                     | Pressão Atmosférica (hPa) |
+| `precipitacao.png`     | `PL01_mm_Tot`  | bar                      | Precipitação (mm) |
+| `velocidade.png`       | `WS_ms`        | line                     | Velocidade do Vento (m/s) |
+| `direcao.png`          | `WindDir`      | scatter (0–360, wraps)   | Direção do Vento (°) |
+| `balanco.png`          | `Net_Wm2_Avg`  | line + optional CM3/CG3 components | Balanço de Radiação (W/m²) |
+| `radiacao_difusa.png`  | `PSP_Wm2_Avg`  | line                     | Radiação Difusa (W/m²) |
+| `radiacao_par.png`     | `PAR_Wm2_Avg`  | line                     | Radiação PAR (W/m²) |
+
+A missing source column logs a warning and skips only that image (exit code
+stays `0`); pass `--strict` to fail the run instead. Wind direction is scattered
+(not lined) because the series wraps at 360°; when the direct column is absent
+but U/V components are present it is reconstructed with
+`micrometeorology.sensors.wind`. The optional balance components
+(`CM3Up_Wm2_Avg`, `CM3Dn_Wm2_Avg`, `CG3Up_Wm2_Avg`, `CG3Dn_Wm2_Avg`) are drawn
+only when present, with the upward channels negated per the legacy convention.
+
+Operational command sequence (ingest → hourly CSV → graphs → copy):
+
+```bash
+# 1. Raw .dat -> processed hourly CSV
+labmim-sensor-process --input data/raw/ --output data/hourly/sensor_data.csv
+
+# 2. Hourly CSV -> the nine fixed-name PNGs (straight into the site checkout)
+labmim-site-graphs site \
+    -i data/hourly/sensor_data.csv \
+    -o ../site-labmim/site/assets/graphs \
+    --last-days 7
+
+# 3. (If step 2 wrote to a staging dir instead) copy into the page's asset dir
+#    cp output/site_graphs/*.png ../site-labmim/site/assets/graphs/
+```
+
+`-o` may point anywhere; the operational target is the site checkout's
+`site/assets/graphs/` (the default staging dir is `output/site_graphs`).
 
 ---
 

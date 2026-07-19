@@ -85,6 +85,7 @@ labmim-sensor-process = "micrometeorology.cli.ingest_sensor_data:main"
 labmim-comparison = "micrometeorology.cli.compare_wrf_observations:main"
 labmim-metrics = "micrometeorology.cli.compute_metrics:main"
 labmim-station-graphs = "micrometeorology.cli.generate_station_graphs:main"
+labmim-site-graphs = "micrometeorology.cli.plot_station_graphs:main"
 # All-sky CLI
 allsky = "allsky.cli:main"
 # TCC CLIs
