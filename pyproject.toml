@@ -37,9 +37,10 @@ dependencies = [
     "pyyaml>=6.0",
     "imageio>=2.34",
     "pyarrow>=15.0",
-    # Transitive of matplotlib/imageio. Floor set for CVE-2026-25990 / 40192 /
-    # 42308-42311. Bump when matplotlib/imageio require something newer.
-    "pillow>=12.2.0",
+    # Transitive of matplotlib/imageio. Floor covers CVE-2026-25990 / 40192 /
+    # 42308-42311 plus PYSEC-2026-2253..2257 / 3451..3453 (fixed in 12.3.0).
+    # Bump when new pillow advisories land or matplotlib/imageio require newer.
+    "pillow>=12.3.0",
 ]
 
 [project.optional-dependencies]
@@ -111,11 +112,14 @@ torch = [
 ]
 
 [tool.uv]
-# moviepy 2.2.x caps pillow<12.0, but pillow 11.x has 6 known CVEs (CVE-2026-25990,
-# 40192, 42308-42311). Override the cap so the lock can include pillow>=12.2.0.
-# Revisit when moviepy releases a version that allows pillow 12.
+# moviepy 2.2.x caps pillow<12.0, but pillow 11.x/12.2 have known CVEs and
+# PYSECs (see the pillow floor comment above). Override the cap so the lock can
+# include pillow>=12.3.0. Revisit when moviepy allows pillow 12.
+# setuptools is transitive (torch/tensorboard build chain); 81.x carries
+# PYSEC-2026-3447, fixed in 83.0.0.
 override-dependencies = [
-    "pillow>=12.2.0",
+    "pillow>=12.3.0",
+    "setuptools>=83.0.0",
 ]
 
 [tool.ruff]
