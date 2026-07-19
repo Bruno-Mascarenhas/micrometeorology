@@ -26,17 +26,14 @@ Iqbal, M. (1983). *An Introduction to Solar Radiation*. Academic Press.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
+from allsky.config import SiteConfig
 
-    from allsky.config import SiteConfig
-
-    DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
+type DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
 
 __all__ = [
     "SOLAR_CONSTANT_WM2",

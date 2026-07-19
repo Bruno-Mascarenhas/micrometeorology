@@ -18,19 +18,9 @@ helpers remain usable in a torch-free environment.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from allsky.training.legacy import logger, resolve_device, split_days, train
-
-if TYPE_CHECKING:
-    from allsky.training.checkpointing import (
-        capture_rng_state,
-        load_checkpoint,
-        restore_rng_state,
-        save_checkpoint,
-    )
-    from allsky.training.engine import run_experiment
-    from allsky.training.losses import MultitaskLoss
 
 __all__ = [
     "MultitaskLoss",

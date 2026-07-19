@@ -36,11 +36,13 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from allsky.data.contracts import resolve
+from allsky.embeddings.backbone import VisualBackbone
 from allsky.embeddings.storage import (
     META_FILENAME,
     read_index,
@@ -50,11 +52,6 @@ from allsky.embeddings.storage import (
     write_index,
     write_meta,
 )
-
-if TYPE_CHECKING:
-    import pandas as pd
-
-    from allsky.embeddings.backbone import VisualBackbone
 
 logger = logging.getLogger(__name__)
 
@@ -333,8 +330,6 @@ def _check_resume_compatible(
 
 def _index_frame(index_rows: list[dict[str, Any]]) -> pd.DataFrame:
     """Build the canonical-dtype index DataFrame from accumulated rows."""
-    import pandas as pd
-
     frame = pd.DataFrame(index_rows, columns=["sample_id", "shard", "row"])
     return frame.astype({"sample_id": "string", "shard": "int64", "row": "int64"})
 
@@ -377,8 +372,6 @@ def _read_index_and_parts(out: Path) -> pd.DataFrame | None:
     that has a written shard, so those ids are skipped and only the truly missing
     ones re-extract.
     """
-    import pandas as pd
-
     frames: list[pd.DataFrame] = []
     consolidated = read_index(out)
     if consolidated is not None:

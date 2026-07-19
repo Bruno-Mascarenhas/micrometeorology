@@ -19,14 +19,12 @@ stay portable.
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 from solrad_correction.evaluation.metrics import compute_regression_metrics
-
-if TYPE_CHECKING:
-    from numpy.typing import ArrayLike, NDArray
 
 __all__ = [
     "CLASSIFICATION_METRIC_KEYS",

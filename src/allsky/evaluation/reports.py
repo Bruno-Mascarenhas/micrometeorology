@@ -22,15 +22,13 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pandas as pd
 
-if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
-
-    from allsky.evaluation.evaluator import EvaluationResult
+from allsky.evaluation.evaluator import EvaluationResult
 
 __all__ = ["compare_experiments", "write_evaluation_report"]
 

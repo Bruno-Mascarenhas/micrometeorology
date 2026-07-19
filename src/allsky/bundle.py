@@ -31,16 +31,14 @@ import json
 import logging
 import os
 import tarfile
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pandas as pd
 import yaml
 
-if TYPE_CHECKING:
-    from collections.abc import Iterable
-
-    from allsky.config import PrepareConfig
+from allsky.config import PrepareConfig
 
 logger = logging.getLogger(__name__)
 

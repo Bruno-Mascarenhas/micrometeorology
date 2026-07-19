@@ -22,16 +22,12 @@ doi:10.1016/0038-092X(82)90302-4
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
 
 import numpy as np
+import pandas as pd
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    import pandas as pd
-
-    ArrayLike = pd.Series | np.ndarray | Sequence[float] | float
+type ArrayLike = pd.Series | np.ndarray | Sequence[float] | float
 
 __all__ = ["erbs_diffuse_fraction", "pseudo_diffuse"]
 

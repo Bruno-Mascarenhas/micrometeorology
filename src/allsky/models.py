@@ -19,13 +19,10 @@ Batch contract (as produced by ``allsky.dataset.AllSkyDataset``):
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import torch
 from torch import nn
 
-if TYPE_CHECKING:
-    from allsky.config import ModelConfig
+from allsky.config import ModelConfig
 
 #: Scale (W/m2) applied to diffuse targets/predictions inside the regression
 #: loss. SmoothL1's quadratic-to-linear transition (beta=1) then corresponds to

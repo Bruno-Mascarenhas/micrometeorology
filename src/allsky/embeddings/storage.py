@@ -26,16 +26,13 @@ import json
 import logging
 import os
 from collections import Counter, OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    import pandas as pd
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +125,6 @@ def write_index(embeddings_dir: str | Path, index: pd.DataFrame) -> Path:
 
 def read_index(embeddings_dir: str | Path) -> pd.DataFrame | None:
     """Read the parquet index, or ``None`` when it does not exist yet."""
-    import pandas as pd
-
     path = Path(embeddings_dir) / INDEX_FILENAME
     if not path.exists():
         return None

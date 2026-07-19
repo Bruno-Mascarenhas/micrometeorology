@@ -25,20 +25,15 @@ clear sky models: implementation and analysis. SAND2012-2389.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
 
 import numpy as np
+import pandas as pd
 
+from allsky.config import SiteConfig
 from allsky.solar import cos_zenith, solar_elevation
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    import pandas as pd
-
-    from allsky.config import SiteConfig
-
-    DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
+type DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
 
 __all__ = [
     "HAURWITZ_A_WM2",

@@ -30,16 +30,18 @@ import json
 import logging
 import os
 import subprocess
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta, timezone
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from allsky.clearsky import clear_sky_index
-from allsky.data.alignment import CenterFrame
+from allsky.config import PrepareConfig, SiteConfig
+from allsky.data.alignment import AlignmentStrategy, CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
     GEOMETRY_COLUMNS,
@@ -48,16 +50,10 @@ from allsky.data.contracts import (
     manifest_column_dtypes,
     to_relative,
 )
+from allsky.data.splits import DaySplit
 from allsky.erbs import pseudo_diffuse
 from allsky.features import build_feature_frame, resolve_feature_set, validate_features
 from allsky.solar import clearness_index, solar_azimuth, solar_elevation
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
-
-    from allsky.config import PrepareConfig, SiteConfig
-    from allsky.data.alignment import AlignmentStrategy
-    from allsky.data.splits import DaySplit
 
 logger = logging.getLogger(__name__)
 

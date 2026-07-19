@@ -16,7 +16,7 @@ from typing import Annotated
 import typer
 
 from allsky.cli.legacy import (
-    DeviceChoice,  # noqa: TC001 - typer resolves this annotation at runtime
+    DeviceChoice,  # typer resolves this annotation at runtime
 )
 
 logger = logging.getLogger(__name__)

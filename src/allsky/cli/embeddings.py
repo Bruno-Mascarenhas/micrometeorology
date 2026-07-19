@@ -20,12 +20,11 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 import typer
 
-if TYPE_CHECKING:
-    from allsky.config import PrepareConfig
+from allsky.config import PrepareConfig
 
 logger = logging.getLogger("allsky.embeddings")
 

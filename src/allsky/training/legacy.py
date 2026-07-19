@@ -21,22 +21,23 @@ import logging
 import math
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 
+from allsky.config import AllSkyConfig
 from solrad_correction.utils.metadata import collect_run_metadata
 from solrad_correction.utils.seeds import set_global_seed
 
-if TYPE_CHECKING:
-    from torch import nn
-    from torch.optim import Optimizer
-    from torch.utils.data import DataLoader, Dataset
-
-    from allsky.config import AllSkyConfig
-
 logger = logging.getLogger(__name__)
+
+#: torch types at runtime. Kept as aliases so importing this module — and thus
+#: ``allsky.training`` — stays torch-free (torch is imported lazily in the funcs).
+type TorchModule = Any
+type TorchOptimizer = Any
+type TorchDataLoader = Any
+type TorchDataset = Any
 
 
 def split_days(
@@ -94,7 +95,7 @@ def _build_loaders(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
     device: str,
-) -> tuple[DataLoader[Any], DataLoader[Any]]:
+) -> tuple[TorchDataLoader, TorchDataLoader]:
     """Build train/val DataLoaders from index slices.
 
     Narrow protocol with :mod:`allsky.dataset` (imported lazily, so this
@@ -125,19 +126,19 @@ def _build_loaders(
         "persistent_workers": cfg.train.num_workers > 0,
     }
     return (
-        DataLoader(cast("Dataset[Any]", train_ds), shuffle=True, **common),
-        DataLoader(cast("Dataset[Any]", val_ds), shuffle=False, **common),
+        DataLoader(cast("TorchDataset", train_ds), shuffle=True, **common),
+        DataLoader(cast("TorchDataset", val_ds), shuffle=False, **common),
     )
 
 
 def _run_epoch(
-    model: nn.Module,
-    loader: DataLoader[Any],
+    model: TorchModule,
+    loader: TorchDataLoader,
     device: str,
     *,
     w_cls: float,
     w_reg: float,
-    optimizer: Optimizer | None = None,
+    optimizer: TorchOptimizer | None = None,
     desc: str = "train",
     amp: bool = False,
     scaler: Any | None = None,

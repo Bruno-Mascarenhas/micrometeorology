@@ -33,17 +33,17 @@ from __future__ import annotations
 import os
 import random
 import subprocess
+from collections.abc import Mapping, Sequence
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-
-    from torch import nn
-    from torch.optim import Optimizer
+#: ``torch.nn.Module`` / ``torch.optim.Optimizer`` at runtime. Kept as aliases so
+#: importing this module stays torch-free (torch is imported lazily in the funcs).
+type TorchModule = Any
+type TorchOptimizer = Any
 
 __all__ = [
     "BEST_CHECKPOINT",
@@ -105,8 +105,8 @@ def restore_rng_state(state: Mapping[str, Any]) -> None:
 def save_checkpoint(
     path: str | Path,
     *,
-    model: nn.Module,
-    optimizer: Optimizer,
+    model: TorchModule,
+    optimizer: TorchOptimizer,
     scheduler: Any | None,
     scaler: Any | None,
     epoch: int,

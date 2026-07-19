@@ -17,15 +17,12 @@ JSON round-tripping into run manifests and checkpoints.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    import pandas as pd
+import pandas as pd
 
 __all__ = ["FeatureNormalizer", "TargetNormalizer", "fit_target_normalizers"]
 

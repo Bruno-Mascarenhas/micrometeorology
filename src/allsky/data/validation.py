@@ -24,8 +24,10 @@ Pure numpy/pandas; importing this module never pulls torch.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -38,10 +40,6 @@ from allsky.data.contracts import (
     resolve,
 )
 from allsky.features.policy import FORBIDDEN_FEATURES
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
-    from pathlib import Path
 
 __all__ = ["ManifestValidationError", "ValidationReport", "validate_manifest"]
 

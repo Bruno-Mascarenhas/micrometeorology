@@ -21,10 +21,8 @@ from a column (see :mod:`allsky.features.engineering`).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Literal
 
 __all__ = [
     "EXTENDED_FEATURES",

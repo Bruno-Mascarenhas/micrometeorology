@@ -17,24 +17,19 @@ contract (``forward(batch) -> ModelOutputs``).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from collections.abc import Mapping, Sequence
+from typing import cast
 
 import numpy as np
 import torch
-from torch import nn
+from numpy.typing import ArrayLike
+from torch import Tensor, nn
 
+from allsky.config import TargetsConfig
+from allsky.features.normalization import TargetNormalizer
+from allsky.modeling.contracts import ModelOutputs
 from allsky.modeling.heads import Heads, Trunk
 from allsky.modeling.sensor_encoder import SensorEncoder
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-
-    from numpy.typing import ArrayLike
-    from torch import Tensor
-
-    from allsky.config import TargetsConfig
-    from allsky.features.normalization import TargetNormalizer
-    from allsky.modeling.contracts import ModelOutputs
 
 __all__ = [
     "ClimatologyModel",

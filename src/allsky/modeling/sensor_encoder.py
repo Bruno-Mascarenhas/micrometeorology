@@ -13,14 +13,9 @@ submodules lazily.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
 
-from torch import nn
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    from torch import Tensor
+from torch import Tensor, nn
 
 __all__ = ["SensorEncoder"]
 

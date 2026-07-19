@@ -27,23 +27,20 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 
+from allsky.config import ExperimentConfig
 from allsky.data.contracts import SKY_CLASS_NAMES, sky_class_name
+from allsky.data.datasets import EmbeddingReader, WindowMode
 from allsky.evaluation.metrics import classification_metrics, regression_metrics
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-
-    from allsky.config import ExperimentConfig
-    from allsky.data.datasets import EmbeddingReader, WindowMode
-    from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
+from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
 
 logger = logging.getLogger(__name__)
 

@@ -23,13 +23,10 @@ magic constants):
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
 
 import torch
-from torch import nn
-
-if TYPE_CHECKING:
-    from torch import Tensor
+from torch import Tensor, nn
 
 logger = logging.getLogger(__name__)
 

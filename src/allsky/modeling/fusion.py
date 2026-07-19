@@ -21,17 +21,12 @@ builds per-group tokens from it).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Mapping, Sequence
 
 import torch
-from torch import nn
+from torch import Tensor, nn
 
 from allsky.modeling.contracts import group_slices
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-
-    from torch import Tensor
 
 __all__ = [
     "ConcatFusion",

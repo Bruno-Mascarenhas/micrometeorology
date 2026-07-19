@@ -17,17 +17,14 @@ training targets:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
+from allsky.config import LabelConfig, SensorConfig, SiteConfig
 from allsky.erbs import pseudo_diffuse
 from allsky.solar import clearness_index, solar_elevation
 from micrometeorology.sensors.ingestion import read_campbell_dat
-
-if TYPE_CHECKING:
-    from allsky.config import LabelConfig, SensorConfig, SiteConfig
 
 __all__ = [
     "CLASS_CLEAR",

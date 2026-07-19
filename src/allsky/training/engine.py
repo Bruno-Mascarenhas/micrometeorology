@@ -36,13 +36,18 @@ import json
 import logging
 import os
 import time
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import pandas as pd
 import torch
+from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
+from allsky.config import ExperimentConfig, SchedulerConfig
+from allsky.data.datasets import EmbeddingReader, WindowMode
+from allsky.features.normalization import TargetNormalizer
 from allsky.features.policy import active_feature_groups, resolve_feature_set
 from allsky.training.checkpointing import (
     BEST_CHECKPOINT,
@@ -54,15 +59,6 @@ from allsky.training.checkpointing import (
     save_checkpoint,
 )
 from solrad_correction.utils.seeds import set_global_seed
-
-if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
-
-    from torch import Tensor, nn
-
-    from allsky.config import ExperimentConfig, SchedulerConfig
-    from allsky.data.datasets import EmbeddingReader, WindowMode
-    from allsky.features.normalization import TargetNormalizer
 
 logger = logging.getLogger(__name__)
 

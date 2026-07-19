@@ -10,23 +10,18 @@ other fusions are not.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, cast
+from collections.abc import Sequence
+from typing import Any, Literal, cast
 
-from torch import nn
+from torch import Tensor, nn
 
+from allsky.config import TargetsConfig
 from allsky.features.policy import active_feature_groups
+from allsky.modeling.contracts import ModelOutputs
 from allsky.modeling.fusion import build_fusion
 from allsky.modeling.heads import Heads, Trunk
 from allsky.modeling.sensor_encoder import SensorEncoder
 from allsky.modeling.visual_encoder import build_visual_encoder
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    from torch import Tensor
-
-    from allsky.config import TargetsConfig
-    from allsky.modeling.contracts import ModelOutputs
 
 __all__ = ["MultimodalNet"]
 

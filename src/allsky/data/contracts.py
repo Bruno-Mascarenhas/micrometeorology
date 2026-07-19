@@ -19,12 +19,9 @@ Three things are fixed here:
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from enum import IntFlag
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
 
 __all__ = [
     "DATASET_VERSION",

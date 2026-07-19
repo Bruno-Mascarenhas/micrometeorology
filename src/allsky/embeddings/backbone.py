@@ -24,12 +24,10 @@ run in tests or CI — use :class:`FakeBackbone` there.
 from __future__ import annotations
 
 import hashlib
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from collections.abc import Sequence
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
 
 # ---------------------------------------------------------------------------
 # DINOv2 identity (pinned) + ImageNet normalization constants.

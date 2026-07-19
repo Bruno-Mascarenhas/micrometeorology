@@ -39,30 +39,7 @@ Public surface:
 from __future__ import annotations
 
 import importlib
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from allsky.modeling.baselines import (
-        ClimatologyModel,
-        ImageOnlyModel,
-        SensorOnlyModel,
-    )
-    from allsky.modeling.contracts import ModelOutputs, MultimodalModel, group_slices
-    from allsky.modeling.fusion import (
-        ConcatFusion,
-        CrossAttentionFusion,
-        FiLMFusion,
-        build_fusion,
-    )
-    from allsky.modeling.heads import Heads, Trunk
-    from allsky.modeling.multimodal import MultimodalNet
-    from allsky.modeling.registry import MODEL_BUILDERS, build_model
-    from allsky.modeling.sensor_encoder import SensorEncoder
-    from allsky.modeling.visual_encoder import (
-        ImageEncoder,
-        PrecomputedEmbedding,
-        build_visual_encoder,
-    )
+from typing import Any
 
 __all__ = [
     "MODEL_BUILDERS",

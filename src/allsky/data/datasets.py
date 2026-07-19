@@ -25,25 +25,25 @@ to mask.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
+import pandas as pd
 
 from allsky.data.contracts import resolve
 from allsky.features.normalization import FeatureNormalizer
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-    from pathlib import Path
-
-    import pandas as pd
-    import torch
 
 __all__ = [
     "EmbeddingReader",
     "MultimodalEmbeddingDataset",
     "MultimodalImageDataset",
 ]
+
+#: One dataset item: a ``str -> torch.Tensor`` mapping. ``torch`` is imported
+#: lazily inside ``__getitem__``, so importing this module never pulls it.
+type SampleTensors = dict[str, Any]
 
 #: Regression target columns (raw physical units; NaN = missing).
 _REGRESSION_TARGETS = ("target_dhi", "target_kindex", "cloud_fraction")
@@ -120,7 +120,7 @@ class _BaseMultimodalDataset:
     def __len__(self) -> int:
         return len(self.manifest)
 
-    def _target_item(self, idx: int) -> dict[str, torch.Tensor]:
+    def _target_item(self, idx: int) -> SampleTensors:
         """Build the shared target tensors for row *idx* (torch imported lazily)."""
         import torch
 
@@ -198,7 +198,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         scaled = image.astype(np.float32) / 255.0
         return np.ascontiguousarray(scaled.transpose(2, 0, 1))
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> SampleTensors:
         import torch
 
         item = self._target_item(idx)
@@ -283,8 +283,6 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         time, in time order.  The row's own position is always included (distance
         zero), so a window is never empty.
         """
-        import pandas as pd
-
         index = pd.DatetimeIndex(self.manifest["timestamp_utc"]).tz_convert("UTC").tz_localize(None)
         times_ns = index.as_unit("ns").to_numpy().astype("int64")
         days = self.manifest["day_id"].astype(str).to_numpy()
@@ -333,7 +331,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
             if (vector := self._read_optional(self._sample_ids[member])) is not None
         ]
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> SampleTensors:
         import torch
 
         item = self._target_item(idx)

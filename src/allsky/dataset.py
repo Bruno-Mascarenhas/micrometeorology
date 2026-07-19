@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import imageio.v3 as iio
 import numpy as np
@@ -27,10 +27,11 @@ import pandas as pd
 
 from allsky.config import AllSkyConfig, ModelConfig, SensorConfig
 
-if TYPE_CHECKING:
-    import torch
-
 logger = logging.getLogger(__name__)
+
+#: One dataset item: a ``str -> torch.Tensor`` mapping. ``torch`` is imported
+#: lazily inside ``__getitem__``, so importing this module never pulls it.
+type SampleTensors = dict[str, Any]
 
 #: Pairing-index columns that are never model features.
 NON_FEATURE_COLUMNS = frozenset(
@@ -289,7 +290,7 @@ class AllSkyDataset:
         scaled = image.astype(np.float32) / 255.0
         return np.ascontiguousarray(scaled.transpose(2, 0, 1))
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> SampleTensors:
         import torch
 
         return {

@@ -22,17 +22,15 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
 
+from torch import nn
+
+from allsky.config import ExperimentConfig
 from allsky.features.policy import resolve_feature_set
 from allsky.modeling.baselines import ClimatologyModel, ImageOnlyModel, SensorOnlyModel
 from allsky.modeling.multimodal import MultimodalNet
 from allsky.modeling.visual_encoder import build_visual_encoder
-
-if TYPE_CHECKING:
-    from torch import nn
-
-    from allsky.config import ExperimentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +40,13 @@ __all__ = ["MODEL_BUILDERS", "build_model", "temporal_pooling_for_strategy"]
 #: ``(cfg, n_features, embedding_dim, image_backbone, temporal_pooling) -> nn.Module``.
 ModelBuilder = Callable[
     [
-        "ExperimentConfig",
+        ExperimentConfig,
         int,
-        "int | None",
-        "nn.Module | None",
-        'Literal["mean", "attention"] | None',
+        int | None,
+        nn.Module | None,
+        Literal["mean", "attention"] | None,
     ],
-    "nn.Module",
+    nn.Module,
 ]
 
 # Per-builder recognised ``model`` hyper-parameter keys (``name`` excluded). A

@@ -17,22 +17,17 @@ downstream normalization/checkpoint feature ordering is reproducible.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
 
-from allsky.features.policy import resolve_feature_set, source_column
+from allsky.config import SiteConfig
+from allsky.features.policy import FeatureSet, resolve_feature_set, source_column
 from allsky.solar import solar_azimuth, solar_elevation
 from micrometeorology.sensors.wind import wind_components
 
-if TYPE_CHECKING:
-    from collections.abc import Iterable
-
-    from allsky.config import SiteConfig
-    from allsky.features.policy import FeatureSet
-
-    DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
+type DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
 
 __all__ = ["DAYS_PER_YEAR", "build_feature_frame"]
 

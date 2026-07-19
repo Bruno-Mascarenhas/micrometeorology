@@ -20,12 +20,12 @@ Python and drives the cross-attention sensor tokens.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, TypedDict, runtime_checkable
+from collections.abc import Mapping, Sequence
+from typing import Any, Protocol, TypedDict, runtime_checkable
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-
-    from torch import Tensor
+#: A ``torch.Tensor`` at runtime. Kept as an alias so importing this contracts
+#: module stays torch-free (its tensor types are typing-only).
+type TorchTensor = Any
 
 __all__ = [
     "ModelOutputs",
@@ -52,11 +52,11 @@ class ModelOutputs(TypedDict, total=False):
         normalized — it is already a bounded fraction).
     """
 
-    dhi: Tensor
-    dhi_log_var: Tensor
-    kindex: Tensor
-    sky_logits: Tensor
-    cloud_fraction: Tensor
+    dhi: TorchTensor
+    dhi_log_var: TorchTensor
+    kindex: TorchTensor
+    sky_logits: TorchTensor
+    cloud_fraction: TorchTensor
 
 
 @runtime_checkable
@@ -69,7 +69,7 @@ class MultimodalModel(Protocol):
     this through their ``forward`` (and ``__call__``).
     """
 
-    def forward(self, batch: dict[str, Tensor]) -> ModelOutputs:
+    def forward(self, batch: dict[str, TorchTensor]) -> ModelOutputs:
         """Map a batch dict to the enabled model outputs."""
         ...
 

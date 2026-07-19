@@ -31,20 +31,15 @@ training engine / CLIs, keeping ``import allsky`` torch-free.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
 
 import torch
-from torch import nn
+from torch import Tensor, nn
 from torch.nn import functional as F  # noqa: N812 - conventional alias
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from torch import Tensor
-
-    from allsky.config import TargetsConfig
-    from allsky.features.normalization import TargetNormalizer
-    from allsky.modeling.contracts import ModelOutputs
+from allsky.config import TargetsConfig
+from allsky.features.normalization import TargetNormalizer
+from allsky.modeling.contracts import ModelOutputs
 
 __all__ = ["MultitaskLoss"]
 
@@ -170,12 +165,12 @@ class MultitaskLoss(nn.Module):
 
     def _dhi_loss(self, outputs: ModelOutputs, target: Tensor) -> Tensor:
         """DHI component: heteroscedastic Gaussian NLL or a plain regression loss."""
-        pred = outputs["dhi"]
+        pred: Tensor = outputs["dhi"]
         if self._dhi_kind != "heteroscedastic":
             return self._regression_loss(
                 pred, target, self._dhi_kind, self._dhi_mean, self._dhi_std
             )
-        log_var = outputs["dhi_log_var"]
+        log_var: Tensor = outputs["dhi_log_var"]
         mask = torch.isfinite(target)
         if not bool(mask.any()):
             return (pred * 0.0).sum() + (log_var * 0.0).sum()

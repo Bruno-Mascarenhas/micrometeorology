@@ -18,17 +18,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 
 from allsky.data.contracts import DATASET_VERSION
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
 
 __all__ = [
     "SPLIT_NAMES",

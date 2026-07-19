@@ -20,15 +20,12 @@ trunk output:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
-from torch import nn
+from torch import Tensor, nn
 
-if TYPE_CHECKING:
-    from torch import Tensor
-
-    from allsky.config import TargetsConfig
-    from allsky.modeling.contracts import ModelOutputs
+from allsky.config import TargetsConfig
+from allsky.modeling.contracts import ModelOutputs
 
 __all__ = [
     "CloudFractionHead",

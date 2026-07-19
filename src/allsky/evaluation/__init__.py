@@ -19,12 +19,7 @@ torch — the heavy work happens only when a name is actually used.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from allsky.evaluation.evaluator import EvaluationResult, evaluate_checkpoint
-    from allsky.evaluation.metrics import classification_metrics, regression_metrics
-    from allsky.evaluation.reports import compare_experiments, write_evaluation_report
+from typing import Any
 
 __all__ = [
     "EvaluationResult",

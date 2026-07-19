@@ -13,21 +13,18 @@ loaded into memory at once.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import imageio.v3 as iio
 import numpy as np
 import pandas as pd
 
 from allsky.config import AllSkyConfig, VideoConfig
-
-if TYPE_CHECKING:
-    import datetime as dt
-    from collections.abc import Iterator
 
 logger = logging.getLogger(__name__)
 
