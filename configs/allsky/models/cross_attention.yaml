@@ -1,0 +1,12 @@
+# Model fragment — V7 one-layer cross-attention fusion.
+# The visual embedding is the query; one token per sensor feature-group
+# (solar / temperature / humidity / pressure / wind) is the key/value set.
+# token_dim defaults to the visual width and must be divisible by num_heads
+# (e.g. 384/4 for DINOv2 CLS, 32/4 in the unit tests).
+model:
+  name: cross_attention
+  sensor_hidden: [64, 128]
+  trunk_hidden: 256
+  dropout: 0.1
+  num_heads: 4
+  token_dim: null            # default: visual embedding width

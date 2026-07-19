@@ -1,25 +1,25 @@
 # `allsky` — Documentation
 
-A package that pairs one-day all-sky camera timelapses with LabMiM radiation-sensor records and trains **SkyFusionNet**, a multi-task DNN that classifies cloud condition (clear / partial / overcast) and predicts diffuse horizontal irradiance from the sky image plus sensor features.
+A package that pairs one-day all-sky camera timelapses with LabMiM radiation-sensor records into a portable **v2 multimodal dataset** (manifest + frames + precomputed visual embeddings), then trains a ladder of multimodal models (V0–V7) that predict **diffuse horizontal irradiance** — and optionally a clear-sky index and a clear / partially-cloudy / overcast **sky class** — from the sky image plus engineered sensor features.
+
+The legacy v0 SkyFusionNet pipeline (`allsky info` / `build-index` / `allsky train --index`) has been **retired**. This document describes the current multimodal stack only. The full internal design — module map, artifact contracts, anti-leakage policy, alignment strategies, and the V0–V7 ladder — is in [`allsky-architecture.md`](allsky-architecture.md); this file is the CLI + config quickstart.
 
 ---
 
 ## Overview
 
-The pipeline has three stages, each with its own CLI command:
+The pipeline has four stages, each with its own CLI command:
 
 | Stage | Command | Input | Output |
 |---|---|---|---|
-| **1. Frame extraction** | `allsky extract-frames` | `allsky-YYYYMMDD.mp4` timelapse | Timestamped JPEGs + `manifest.parquet` |
-| **2. Frame–sensor pairing** | `allsky build-index` | Frame manifest + Campbell `.dat` files | `index.parquet` (one row per matched frame) |
-| **3. Training** | `allsky train` | Pairing index | Checkpoints, metrics, TensorBoard logs |
+| **1. Prepare** | `allsky prepare-local` | `allsky-YYYYMMDD.mp4` timelapses + Campbell `.dat` files | Frames, `manifest.parquet` (+ `.meta.json`), `splits.json` |
+| **2. Validate** | `allsky validate-dataset` | Prepared manifest + splits | Pass/fail report (leakage, schema, QC) |
+| **3. Embeddings** | `allsky precompute-embeddings` | Prepared manifest + frames | DINOv2 fp16 safetensors shards + index/meta |
+| **4. Train / Evaluate** | `allsky train` / `allsky evaluate` | Manifest + splits + embeddings | Checkpoints, metrics, stratified reports |
 
-The model learns two targets jointly:
+The models learn diffuse irradiance and, per the experiment's `targets` block, optionally a clear-sky index (k\*) and a weak sky-condition class. Diffuse targets are a measured pyranometer column by default (`PSP_Wm2_Avg`), or an Erbs-decomposition **pseudo-target** derived from GHI when no measured column is configured. Every manifest row carries a `target_source` column (`"measured"` or `"erbs_pseudo"`) so pseudo rows can be identified and replaced later.
 
-1. **Cloud condition class** — *weak* labels derived from clearness-index (kt) bins, not human annotation.
-2. **Diffuse irradiance (W/m²)** — a measured pyranometer column by default (`PSP_Wm2_Avg`), or an Erbs-decomposition **pseudo-target** derived from GHI when no measured column is configured. Every dataset row carries a `target_source` column (`"measured"` or `"erbs_pseudo"`) so pseudo rows can be identified and replaced later.
-
-All timestamps in the pipeline are **naive local standard time** (the Campbell datalogger clock — no timezone conversion in v0). The UTC offset for solar geometry is inferred from the site longitude as `round(longitude / 15)`; for Salvador-BA (longitude −38.51) this yields UTC−3, correct year-round since Brazil abolished DST in 2019.
+All timestamps in the pipeline are **naive local standard time** (the Campbell datalogger clock — no timezone conversion). The UTC offset for solar geometry is inferred from the site longitude as `round(longitude / 15)`; for Salvador-BA (longitude −38.51) this yields UTC−3, correct year-round since Brazil abolished DST in 2019.
 
 ---
 
@@ -27,19 +27,25 @@ All timestamps in the pipeline are **naive local standard time** (the Campbell d
 
 ```
 src/allsky/
-├── __init__.py       # Package version and docstring
-├── config.py         # Pydantic config models (video/sensor/site/labels/model/train) + YAML loader
-├── cli.py            # CLI: allsky info / extract-frames / build-index / train
-├── solar.py          # NOAA/Spencer solar position, extraterrestrial GHI, clearness index kt
-├── erbs.py           # Erbs (1982) diffuse-fraction decomposition -> pseudo diffuse targets
-├── sensors.py        # TOA5 ingestion (via micrometeorology), target derivation, weak labels, QC
-├── video.py          # Streamed frame decoding, frame -> wall-clock mapping, JPEG extraction
-├── dataset.py        # build_index (merge_asof pairing), FeatureStats, AllSkyDataset
-├── models.py         # SkyFusionNet (image CNN + sensor MLP fusion) + multitask loss
-└── training.py       # Day-based split, training loop, AMP, TensorBoard, checkpoints
+├── __init__.py        # Package version and docstring
+├── config.py          # VideoConfig/SiteConfig + Experiment/Prepare config trees + YAML loaders
+├── video.py           # Streamed frame decoding, frame -> wall-clock mapping, JPEG extraction
+├── preprocessing.py   # Static mask / crop / resize + per-frame visual QC
+├── solar.py           # NOAA/Spencer solar position, extraterrestrial GHI, clearness index kt
+├── clearsky.py        # Haurwitz clear-sky GHI + clear-sky index k*
+├── erbs.py            # Erbs (1982) diffuse-fraction decomposition -> pseudo diffuse targets
+├── atomic.py          # Atomic file / JSON writes         provenance.py # code + content hashes
+├── bundle.py          # Colab bundle export
+├── cli/               # frames, prepare, embeddings, train, evaluate command groups
+├── data/              # manifest, contracts, alignment, splits, datasets, loading, validation
+├── features/          # engineering, normalization, anti-leakage policy
+├── embeddings/        # DINOv2 backbone, extraction loop, safetensors storage
+├── modeling/          # sensor/visual encoders, fusions, heads, model registry (V0–V7)
+├── training/          # experiment engine, losses, checkpointing, device resolution
+└── evaluation/        # evaluator, metrics, stratified reports
 ```
 
-Configuration defaults live in `configs/allsky/default.yaml`; tests are under `tests/allsky/`.
+Configs live under `configs/allsky/`; tests are under `tests/allsky/`.
 
 ---
 
@@ -61,110 +67,37 @@ pip install -e ".[allsky]"
 
 For local development, activate the `labmim` Conda environment before running these commands, as with the other packages in this repository.
 
-**torch is optional for most of the package.** `torch`, `tqdm`, `tensorboard`, and `imageio-ffmpeg` are imported lazily: `allsky info`, frame extraction, sensor ingestion, `build_index`, and `split_days` all work in a torch-free environment. Only `AllSkyDataset.__getitem__` and the training loop itself require torch.
+**torch is optional for most of the package.** `torch`, `tqdm`, `tensorboard`, and `imageio-ffmpeg` are imported lazily: `allsky --help`, frame extraction (`extract-frames`), dataset preparation, manifest building, day splits, and validation all work in a torch-free environment. Only embedding extraction, training, and evaluation require torch — install the `allsky` extra for those.
 
 ---
 
-## Quick Start
-
-### 1. Inspect the configuration and video mapping
+## Quick Start (local)
 
 ```bash
-allsky info --config configs/allsky/default.yaml
+allsky prepare-local          --config configs/allsky/data/local_prepare.yaml
+allsky validate-dataset       --config configs/allsky/data/local_prepare.yaml
+allsky precompute-embeddings  --config configs/allsky/data/local_prepare.yaml
+
+allsky train    --config configs/allsky/experiments/v4_film.yaml \
+                --data-root output/allsky-mm/dataset \
+                --out-dir   output/allsky-mm/experiments/v4_film/run --device cuda --amp
+allsky evaluate --checkpoint output/allsky-mm/experiments/v4_film/run/best.ckpt \
+                --split test --data-root output/allsky-mm/dataset
+
+allsky export-colab-bundle -o bundle.tar.gz --config configs/allsky/data/local_prepare.yaml
 ```
 
-Prints the frame-to-time mapping, the videos matched by `video.pattern`, whether the diffuse target is measured or an Erbs pseudo-target, and the fully resolved config.
+Swap `--device cuda --amp` for `--device cpu --no-amp` for a CPU smoke run (the `fp16` AMP in the shipped configs requires CUDA).
 
-### 2. Extract frames
+### Single-video frame extraction
+
+`prepare-local` runs frame extraction as its first step, but the low-level, single-video entry point is still available:
 
 ```bash
-allsky extract-frames data/all-sky/allsky-20260625.mp4 -o output/allsky/frames
+allsky extract-frames data/all-sky/allsky-20260625.mp4 -o output/allsky/frames --step 60
 ```
 
-Writes JPEGs named `allsky-YYYYMMDD-HHMM.jpg` (quality 92) plus a `manifest.parquet` with columns `frame_path`, `timestamp`, `video`, `index`. Use `--step 60` to keep one frame per hour and `--resize 224` to downscale at extraction time. The manifest is overwritten on every call — use one directory per video or per extraction run.
-
-### 3. Build the pairing index
-
-```bash
-allsky build-index --manifest output/allsky/frames/manifest.parquet \
-    --out output/allsky/index.parquet
-```
-
-Loads the Campbell files from `sensor.paths`, derives targets, and pairs each frame with the nearest sensor record within `sensor.tolerance_minutes`. The command reports how many rows survived and the `target_source` breakdown.
-
-### 4. Train
-
-```bash
-allsky train --index output/allsky/index.parquet
-# Resume an interrupted run:
-allsky train --index output/allsky/index.parquet --resume output/allsky/last.pt
-```
-
-Device resolves automatically (CUDA → MPS → CPU); useful overrides: `--epochs`, `--batch-size`, `--device`, `--out-dir`, `--val-fraction` (fraction of **days** held out, default 0.2).
-
-### Configuration file
-
-All keys and their defaults (see `configs/allsky/default.yaml`):
-
-```yaml
-video:
-  pattern: "data/all-sky/allsky-*.mp4"
-  filename_date_format: "allsky-%Y%m%d"
-  start_time: "06:00"          # local time of frame 0 — match the camera schedule
-  minutes_per_frame: 1.0
-
-sensor:
-  paths: ["data/LBM_lenta_2025.dat"]
-  ghi_column: "CM3Up_Wm2_Avg"
-  diffuse_column: "PSP_Wm2_Avg"   # null -> Erbs pseudo-targets (see below)
-  feature_columns: ["CM3Up_Wm2_Avg", "CG3Up_Wm2_Avg", "CM3Dn_Wm2_Avg",
-                    "Net_Wm2_Avg", "CUV5_Wm2_Avg", "PAR_Wm2_Avg"]
-  tolerance_minutes: 5.0
-
-site:
-  latitude: -13.00              # LabMiM/UFBA, Salvador-BA
-  longitude: -38.51
-
-labels:
-  kt_clear: 0.65
-  kt_overcast: 0.35
-  min_solar_elevation_deg: 10.0
-  max_kt: 1.2                   # QC guard: higher kt = sensor artifact, row dropped
-
-model:
-  image_size: 224
-  backbone: "small"             # "small" (built-in conv net) or "resnet18"
-  embed_dim: 128
-  hidden_dim: 256
-  n_classes: 3
-
-train:
-  epochs: 20
-  batch_size: 32
-  learning_rate: 0.0003
-  weight_decay: 0.0001
-  num_workers: 2
-  device: "auto"                # auto -> cuda | mps | cpu
-  amp: true                     # mixed precision on CUDA
-  out_dir: "output/allsky"
-  seed: 42
-  cls_loss_weight: 1.0
-  reg_loss_weight: 1.0
-```
-
-### Output artifacts
-
-Training writes into `train.out_dir`:
-
-```
-output/allsky/
-├── index.parquet     # default pairing-index location used by `allsky train`
-├── last.pt           # checkpoint every epoch (model + optimizer + epoch + config) — resumable
-├── best.pt           # checkpoint at the lowest validation loss
-├── config.json       # fully resolved config used for the run
-├── metadata.json     # git commit, package versions, device, timing
-└── runs/             # TensorBoard event files (tensorboard --logdir output/allsky/runs)
-```
+It writes JPEGs named `allsky-YYYYMMDD-HHMM.jpg` (quality 92) plus a `manifest.parquet` with columns `frame_path`, `timestamp`, `video`, `index`, using the `video` section of the PrepareConfig (`--config`, or built-in defaults) for the frame→time mapping. Use `--resize 224` to downscale at extraction time. The manifest is overwritten on every call — use one directory per video or per extraction run.
 
 ---
 
@@ -185,109 +118,101 @@ Limitations to keep in mind:
 
 ---
 
-## Sensor Pairing and Targets
+## Sensor Ingestion and Targets
 
 ### Ingestion
 
-Campbell TOA5 `.dat` files listed in `sensor.paths` are read through `micrometeorology.sensors.ingestion.read_campbell_dat` (sentinel values ≤ −900 become NaN), concatenated, sorted by timestamp, deduplicated (first occurrence wins), and reduced to the GHI, diffuse, and feature columns. A missing configured column raises `KeyError` immediately.
+Campbell TOA5 `.dat` files listed in `sensor.paths` are read through `micrometeorology.sensors.ingestion.read_campbell_dat` (sentinel values ≤ −900 become NaN), concatenated, sorted by timestamp, and deduplicated (first occurrence wins). Raw logger columns are kept as-is; the manifest builder selects and validates the policy columns it needs, and `sensor.column_map` optionally renames logger columns to the policy source names before building.
 
-### Target derivation (`allsky.sensors.derive_targets`)
+### The manifest and its targets
 
-Adds four columns and applies QC:
+`allsky prepare-local` aligns each frame to the nearest sensor record (see the alignment strategy in the config), derives targets, and writes the v2 manifest plus a `.meta.json` sidecar carrying a content `manifest_sha256`, dataset version, and provenance. Target columns include:
 
 - `kt` — clearness index `GHI / E0h` (extraterrestrial horizontal irradiance from the NOAA/Spencer solar-position chain in `allsky.solar`).
-- `diffuse` — the training target (see below).
-- `cloud_class` — weak label from kt bins.
+- `dhi` — the diffuse target (see below).
+- `kindex` — the clear-sky index k\* (GHI over Haurwitz clear-sky GHI) or the clearness index k\_t, per `targets.kindex_kind`.
+- `sky_class` — weak sky-condition label from k-index bins (`-1` marks missing/unlabelable).
 - `target_source` — `"measured"` or `"erbs_pseudo"`.
 
-Rows are **dropped** when: solar elevation is below `labels.min_solar_elevation_deg` (default 10° — night and near-horizon rows where kt is noise-dominated), kt or the diffuse target is NaN (missing GHI), or `kt > labels.max_kt` (default 1.2 — GHI spiking far beyond the physically plausible clear-sky envelope is a sensor artifact, not weather).
+Rows are flagged in a `qc_flags` bitmask (low sun, sensor gap, far alignment, k-index artifact) and night frames below the configured solar-elevation floor are dropped.
 
-### The diffuse target — read this before changing `diffuse_column`
+### The diffuse target — read this before changing `targets.diffuse_column`
 
-> **Important: the station's primary diffuse pyranometer (CMP21) currently produces no usable data.** The CMP21 W/m² logger channel is zero-filled — only the raw `CMP21_Avg` millivolt channel is live, because the CR5000 program's unit conversion is broken. Until that is fixed, **`PSP_Wm2_Avg` is the working diffuse measurement and the default target**. Switch `sensor.diffuse_column` back to `CMP21_Wm2_Avg` only after the logger program conversion is repaired.
+> **Important: the station's primary diffuse pyranometer (CMP21) currently produces no usable data.** The CMP21 W/m² logger channel is zero-filled — only the raw `CMP21_Avg` millivolt channel is live, because the CR5000 program's unit conversion is broken. Until that is fixed, **`PSP_Wm2_Avg` is the working diffuse measurement and the default target**. Switch `targets.diffuse_column` back to `CMP21_Wm2_Avg` only after the logger program conversion is repaired.
 
-A **dead-channel guard** enforces this: if the configured measured diffuse column is effectively all zeros in the selected daytime rows (more than 99% of finite values exactly zero), `derive_targets` raises `ValueError` instead of silently teaching the model to predict zero.
+Setting `targets.diffuse_column: null` switches to **Erbs pseudo-targets**: the Erbs et al. (1982) three-piece `kd(kt)` correlation converts GHI into a pseudo diffuse value (`DHI = kd(kt) × GHI`, bounded by `0 ≤ DHI ≤ GHI`). Such rows carry `target_source: "erbs_pseudo"` — regression metrics on them measure agreement with the Erbs decomposition, not with a real measurement.
 
-Setting `diffuse_column: null` switches to **Erbs pseudo-targets**: the Erbs et al. (1982) three-piece `kd(kt)` correlation converts GHI into a pseudo diffuse value (`DHI = kd(kt) × GHI`, bounded by `0 ≤ DHI ≤ GHI`). Such rows carry `target_source: "erbs_pseudo"` — regression metrics on them measure agreement with the Erbs decomposition, not with a real measurement.
+### Weak sky-condition labels
 
-### Weak cloud-condition labels
-
-| Condition | kt bin (defaults) | Class |
+| Condition | k-index bin (defaults) | Class |
 |---|---|---|
-| Clear | `kt >= labels.kt_clear` (0.65) | 0 |
-| Partial | `labels.kt_overcast <= kt < kt_clear` | 1 |
-| Overcast | `kt < labels.kt_overcast` (0.35) | 2 |
+| Clear | `kindex >= targets.class_clear` (0.65) | 0 |
+| Partially cloudy | `targets.class_overcast <= kindex < class_clear` | 1 |
+| Overcast | `kindex < targets.class_overcast` (0.35) | 2 |
 
-NaN kt yields −1 (unlabelable) and the row is dropped. These are *weak* labels: kt conflates cloudiness with turbidity and calibration drift, and thin cirrus can still reach "clear" kt values.
-
-### Pairing (`allsky.dataset.build_index`)
-
-Frames and sensor rows are joined with `pandas.merge_asof(direction="nearest")` within `sensor.tolerance_minutes` (default 5 minutes). Frames with no sensor record inside the tolerance are dropped — this also removes night frames, because `derive_targets` already removed low-sun sensor rows. Rows with any missing target or feature value are dropped too. The result (optionally written to parquet) has one row per matched frame: manifest columns, `sensor_timestamp`, sensor features, and targets.
+These are *weak* labels: the k-index conflates cloudiness with turbidity and calibration drift, and thin cirrus can still reach "clear" values. The sky-class head is off by default and enabled per experiment via `targets.sky.enabled`.
 
 ---
 
-## The Model: SkyFusionNet
+## Anti-leakage feature policy
 
-Two branches fused into a shared trunk with two heads (`allsky.models.SkyFusionNet`):
-
-- **Image branch** — `backbone: "small"` (default): a built-in 4-block conv net (Conv3×3 stride 2 → BatchNorm → ReLU, channels 32→64→128→256) with global average pooling; or `backbone: "resnet18"`: torchvision resnet18 with random weights (requires `torchvision`). Either is projected to `embed_dim`.
-- **Sensor branch** — MLP `F → 64 → embed_dim` over the standardized feature vector.
-- **Fusion trunk** — concatenation → MLP (`hidden_dim`).
-- **Heads** — `cls_head` (`n_classes` logits) and `reg_head` (1 output through a final ReLU, so predicted irradiance is **non-negative by construction**).
-
-The multi-task loss is:
-
-```
-loss = cls_loss_weight * CrossEntropy(logits, cloud_class)
-     + reg_loss_weight * SmoothL1(diffuse_pred / 100, diffuse_true / 100)
-```
-
-The division by 100 W/m² scale-normalizes the regression term so it is commensurate with cross-entropy (SmoothL1's quadratic region then covers errors up to ~100 W/m²). Predictions and the reported MAE/RMSE metrics stay in raw W/m² — only the loss is scaled.
-
----
-
-## Training
-
-`allsky train` (or `allsky.training.train`) reads the index parquet and:
-
-1. **Splits by calendar day, never by row.** Consecutive frames of the same day are near-duplicates, so a row-level split would leak validation information into training. `split_days` assigns whole days to one side (validation gets `round(n_days * val_fraction)` days, at least 1 and at most `n_days - 1`) and re-checks that no day appears on both sides. If the index spans a **single day**, training falls back to reusing that day for validation and logs a loud warning — metrics are then not leakage-free (smoke/debug runs only).
-2. **Standardizes features from the training split only.** `FeatureStats` (per-feature mean/std) are computed on the train split and handed to the validation dataset; a validation dataset refuses to compute its own stats.
-3. **Resolves the device**: `train.device: auto` picks CUDA → MPS → CPU. On CUDA, automatic mixed precision is enabled when `train.amp: true` (roughly 2× throughput on Colab T4/L4 GPUs) and cuDNN benchmarking is turned on.
-4. **Keeps DataLoader workers persistent** across epochs (`num_workers > 0`) — worker re-forking otherwise dominates epoch startup for image-heavy datasets.
-5. **Logs and checkpoints**: TensorBoard scalars (loss, accuracy, MAE/RMSE in W/m²) under `out_dir/runs`; `last.pt` every epoch and `best.pt` at the lowest validation loss, both containing model, optimizer, epoch, validation metrics, and the config; `config.json` and `metadata.json` (git commit, versions, timing) for reproducibility.
-
-Pass `--resume <out-dir>/last.pt` to restore the model, optimizer, and epoch counter and continue an interrupted run.
-
-### Google Colab
-
-[`notebooks/allsky_colab.ipynb`](../notebooks/allsky_colab.ipynb) is the GPU quickstart: it installs the `allsky` extra from GitHub, mounts Google Drive for videos and `.dat` files, writes a run config, runs the three CLI stages, and shows live metrics via `%tensorboard`. Training is resumable across Colab disconnects through `--resume`; copy the run directory back to Drive to persist artifacts.
-
----
-
-## Known Data Gap
-
-The sensor archive currently ends on **2026-04-24**, while the first all-sky video is from **2026-06-25** — there is no temporal overlap yet. `build-index` runs fine on this data but matches zero frames. Pairing yields real training rows once logger files covering the camera dates are added to `sensor.paths`.
+The default `safe` feature set is **solar geometry + standard meteorology only — no radiometry**. GHI, the diffuse pyranometer, and every derived target are *forbidden* as features and raise `ForbiddenFeatureError` if requested. This is the central anti-leakage guarantee of the v2 stack: a model must learn diffuse irradiance from the *sky image* and non-radiometric context, not from a radiometric shortcut. The `extended` set adds ablation-only radiometric auxiliaries and is never selected silently. `validate-dataset` fails if a forbidden feature reaches the manifest.
 
 ---
 
 ## CLI Reference
 
 ```bash
-allsky info [--config FILE]
+allsky extract-frames         VIDEO --out DIR [--step N] [--resize N] [--config FILE]
 
-allsky extract-frames VIDEO --out DIR [--step N] [--resize N] [--config FILE]
+allsky prepare-local          [--config FILE] [--steps a,b,c] [--dry-run] [--force]
+allsky validate-dataset       [--config FILE] [--manifest FILE] [--strict]
+allsky precompute-embeddings  --config FILE [--manifest FILE] [--out DIR]
+                              [--device auto|cpu|cuda|mps] [--resume/--no-resume] [--dry-run]
+allsky export-colab-bundle    --out BUNDLE.tar.gz [--config FILE]
+                              [--include-embeddings/--no-include-embeddings]
 
-allsky build-index --manifest MANIFEST.parquet [--out INDEX.parquet] [--config FILE]
-
-allsky train [--config FILE] [--index INDEX.parquet] [--resume CHECKPOINT.pt]
-             [--epochs N] [--batch-size N] [--device auto|cpu|cuda|mps]
-             [--out-dir DIR] [--val-fraction F]
+allsky train    --config EXPERIMENT.yaml [--data-root DIR] [--out-dir DIR]
+                [--epochs N] [--batch-size N] [--device auto|cpu|cuda|mps]
+                [--amp/--no-amp] [--resume auto|CHECKPOINT.ckpt]
+allsky evaluate --checkpoint CHECKPOINT.ckpt [--split val|test|train]
+                [--config FILE] [--data-root DIR] [--report-dir DIR]
+                [--device ...] [--batch-size N] [--predictions/--no-predictions] [--strict]
 ```
 
-- `--config` / `-c` accepts a pipeline YAML; without it, built-in defaults are used.
-- `extract-frames`: `--out` / `-o` is required; `--step N` keeps every Nth frame; `--resize N` writes N×N JPEGs.
-- `build-index`: `--out` defaults to `output/allsky/index.parquet`.
-- `train`: `--index` defaults to `<out-dir>/index.parquet`; `--epochs`, `--batch-size`, `--device`, and `--out-dir` override the corresponding `train.*` config keys.
+- `prepare-local` runs `extract-frames → build-manifest → splits`; steps are resumable and skip up-to-date outputs unless `--force`. `--dry-run` logs the full plan and writes nothing.
+- `precompute-embeddings` reads the `embeddings` section of the PrepareConfig (backbone / pooling / batch / shard-size / dtype); backbone `"fake"` is the offline dev/test hook, `"dinov2_vits14"` downloads via `torch.hub` on first use. `--resume` (default) skips `sample_id`s already in `index.parquet`, but refuses to resume into an embeddings dir built with a different backbone/pooling/dim/config — rerun with `--no-resume` (or a fresh `--out` dir) to overwrite.
+- `train` **requires** an experiment config (a YAML declaring `experiment: true`); any other config (or none) is rejected with a pointer to `configs/allsky/experiments/`. `--resume auto` finds `last.ckpt` in the run dir; `--epochs` is the **total** budget (resuming trains only the remainder and never clobbers a better `best.ckpt`).
+- `evaluate` rebuilds the model from the checkpoint, restores the train-split normalizers (no refit — leakage-safe), denormalizes to physical units, verifies `manifest_sha256`/`split_id` (warn, or error under `--strict`), and writes `metrics.json`, `stratified.csv`, `report.md` and (optionally) `predictions.parquet`.
+
+---
+
+## Config tree (`configs/allsky/`)
+
+```
+configs/allsky/
+├── data/local_prepare.yaml      # PrepareConfig: prepare/validate/embeddings/bundle
+├── models/                      # model-section fragments (name + arch params)
+│   ├── sensor_only.yaml  image_only.yaml  concat.yaml  film.yaml  cross_attention.yaml
+└── experiments/
+    ├── _base.yaml               # shared data / targets / train blocks
+    └── v0_climatology.yaml … v7_cross_attention.yaml
+```
+
+Experiment files stay tiny by composing with `extends:` (a path or list, resolved relative to the including file, deep-merged, later wins; cycles raise). A typical experiment `extends: [_base.yaml, ../models/film.yaml]` then overrides only `name`, `output_dir`, and any target/data/train key it changes. All experiment / prepare configs are strict (`extra="forbid"`) so a typo fails loudly. The V0–V7 ladder is summarised in [`allsky-architecture.md`](allsky-architecture.md).
+
+---
+
+## Training
+
+`allsky train` routes an `experiment: true` config to the multimodal engine, which:
+
+1. **Uses persisted day splits.** The split artifact (`splits.json`) assigns whole calendar days to train/val/test, so near-duplicate frames of the same day never cross splits, and carries a `split_id` (no silent regeneration). Consecutive frames one minute apart are near-duplicates — a row-level split would leak validation information into training.
+2. **Standardizes features and targets from the training split only.** The `FeatureNormalizer` / `TargetNormalizer` are fit on the train split and stored in the checkpoint; validation/test reuse them verbatim (computing one locally is refused).
+3. **Resolves the device**: `device: auto` picks CUDA → MPS → CPU; on CUDA, automatic mixed precision is available (`--amp`, `fp16`/`bf16`).
+4. **Runs the engine**: optimizer/param groups (optional separate backbone LR), scheduler (`none`/`cosine`/`plateau`), gradient accumulation and clipping, early stopping, and full resume. It writes `last.ckpt` every epoch, `best.ckpt` at the best monitored metric, `metrics.json`, and a run manifest.
+
+`--resume auto` restores from `last.ckpt` in the run dir and continues; `--epochs` is the total budget, so resuming trains only the remainder.
 
 ---
 
@@ -295,24 +220,33 @@ allsky train [--config FILE] [--index INDEX.parquet] [--resume CHECKPOINT.pt]
 
 ### Why is the diffuse target PSP and not CMP21?
 
-CMP21 is the station's primary diffuse pyranometer, but its W/m² logger channel currently writes zeros — only the raw `CMP21_Avg` mV channel is live because the CR5000 program's unit conversion is broken. Training on it would teach the model to predict zero, which is why the dead-channel guard raises on effectively all-zero measured columns. `PSP_Wm2_Avg` is the working diffuse measurement today; switch `sensor.diffuse_column` to `CMP21_Wm2_Avg` once the logger program is fixed.
+CMP21 is the station's primary diffuse pyranometer, but its W/m² logger channel currently writes zeros — only the raw `CMP21_Avg` mV channel is live because the CR5000 program's unit conversion is broken. Training on it would teach the model to predict zero. `PSP_Wm2_Avg` is the working diffuse measurement today; switch `targets.diffuse_column` to `CMP21_Wm2_Avg` once the logger program is fixed.
 
 ### What does `target_source` mean?
 
-Every index row records where its diffuse target came from: `"measured"` (a real pyranometer column) or `"erbs_pseudo"` (derived from GHI via the Erbs decomposition when `diffuse_column: null`). Pseudo rows bootstrap the pipeline when no measured diffuse exists — treat regression metrics on them as consistency checks against Erbs, not accuracy, and replace them once real measurements are available.
+Every manifest row records where its diffuse target came from: `"measured"` (a real pyranometer column) or `"erbs_pseudo"` (derived from GHI via the Erbs decomposition when `diffuse_column: null`). Pseudo rows bootstrap the pipeline when no measured diffuse exists — treat regression metrics on them as consistency checks against Erbs, not accuracy, and replace them once real measurements are available.
 
 ### Why split train/validation by day instead of by row?
 
-Sky frames one minute apart are near-duplicates. A shuffled row-level split would place near-identical images on both sides and inflate validation metrics. `split_days` assigns whole calendar days to one split, so frames of the same day never cross splits; `train()` re-checks the invariant at runtime.
+Sky frames one minute apart are near-duplicates. A shuffled row-level split would place near-identical images on both sides and inflate validation metrics. The persisted split artifact assigns whole calendar days to one split, so frames of the same day never cross splits.
 
-### How do I add a real shaded-pyranometer column later?
+### Why can't features include GHI or the pyranometers?
 
-Point `sensor.diffuse_column` at the new column name (and add it to the logger file read by `sensor.paths`), then rebuild the index with `allsky build-index`. New rows will carry `target_source: "measured"`; the dead-channel guard verifies the column actually contains data. No code changes are needed.
+That would be leakage: the diffuse target is derived from radiometry, so a model given GHI as a feature learns a radiometric shortcut instead of reading the sky. The `safe` feature policy forbids all radiometry; `validate-dataset` enforces it.
 
 ### Can I use the package without PyTorch installed?
 
-Yes, for everything except training and dataset tensor access. Config loading, `allsky info`, frame extraction, sensor ingestion, target derivation, `build_index`, and `split_days` import torch lazily (or not at all). Only `AllSkyDataset.__getitem__` and `allsky train` require torch — install the `allsky` extra for those.
+Yes, for everything except embedding extraction, training, and evaluation. Config loading, `allsky --help`, frame extraction, dataset preparation, manifest building, day splits, and validation import torch lazily (or not at all). Install the `allsky` extra for the torch-backed stages.
 
-### Why do some daytime rows disappear from the index?
+---
 
-Three QC filters remove them: solar elevation below `labels.min_solar_elevation_deg` (kt is noise-dominated near the horizon), `kt > labels.max_kt` (GHI spikes beyond the clear-sky envelope are sensor artifacts), and missing GHI/feature values. Unmatched frames (no sensor record within `sensor.tolerance_minutes`) are dropped at pairing time.
+## Known Data Gap
+
+The sensor archive currently ends on **2026-04-24**, while the first all-sky video is from **2026-06-25** — there is no temporal overlap yet. `prepare-local` runs fine on this data but matches zero frames to sensor records. Preparation yields real training rows once logger files covering the camera dates are added to `sensor.paths`.
+
+---
+
+## Quickstart (Colab)
+
+[`notebooks/allsky_multimodal_colab.ipynb`](../notebooks/allsky_multimodal_colab.ipynb) is the thin GPU notebook: it provisions a CPython 3.14 venv with `uv` (the package requires Python ≥ 3.14, which the Colab base runtime is not assumed to provide), unpacks the exported bundle, then runs `validate-dataset → train (--resume auto, AMP) → evaluate → copy to Drive`. All knobs live in one CONFIG cell; the default experiment is `configs/allsky/experiments/v4_film.yaml`. It has not been executed on a real Colab runtime from the dev environment (documented in the notebook).
+```

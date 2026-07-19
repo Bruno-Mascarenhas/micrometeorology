@@ -8,16 +8,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import NDArray
 
+from micrometeorology.wrf.reader import WRFDataset
 from micrometeorology.wrf.safety import assert_reasonable_array_size
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
-
-    from micrometeorology.wrf.reader import WRFDataset
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _tail(value: NDArray) -> NDArray:
+def _drop_spinup_step(value: NDArray) -> NDArray:
     """Drop the spin-up first time step.
 
     When the time axis has <= 1 entries (single-timestep files) the full
@@ -52,21 +48,27 @@ def materialize_2d(value: NDArray) -> NDArray:
     return np.asarray(squeezed)
 
 
-def get_low_high(variable: NDArray) -> tuple[float, float]:
-    """Return ``(min, max)`` of a 3-D variable, skipping the first time step.
+def percentile_scale_bounds(variable: NDArray) -> tuple[float, float]:
+    """Return color-scale bounds ``(low, high)`` for a 3-D variable, skipping the first step.
 
-    Single-timestep inputs fall back to the full array (see :func:`_tail`).
+    The lower bound is the true minimum, but the **upper bound is the
+    98th-percentile saturation cap, not the maximum**: capping there keeps a
+    handful of extreme cells from blowing out the map color scale so the bulk of
+    the field stays legible. Callers use the pair as ``(vmin, vmax)`` for
+    rendering, not as the data's actual range.
+
+    Single-timestep inputs fall back to the full array (see :func:`_drop_spinup_step`).
     """
-    flat = _tail(variable).ravel()
+    flat = _drop_spinup_step(variable).ravel()
     return float(np.nanmin(flat)), float(np.nanpercentile(flat, 98))
 
 
 def get_low_high_wind(u: NDArray, v: NDArray) -> tuple[float, float]:
     """Return ``(min, max)`` wind speed from U/V arrays (skip first step).
 
-    Single-timestep inputs fall back to the full arrays (see :func:`_tail`).
+    Single-timestep inputs fall back to the full arrays (see :func:`_drop_spinup_step`).
     """
-    speed = np.hypot(_tail(u).ravel(), _tail(v).ravel())
+    speed = np.hypot(_drop_spinup_step(u).ravel(), _drop_spinup_step(v).ravel())
     return float(np.nanmin(speed)), float(np.nanmax(speed))
 
 
@@ -102,7 +104,7 @@ def extract_temperature(ds: WRFDataset) -> tuple[NDArray, float, float]:
     """
     t2 = ds.get_variable("T2")  # Kelvin
 
-    t_min, t_max = get_low_high(t2)
+    t_min, t_max = percentile_scale_bounds(t2)
     t_min -= 273.15
     t_max -= 273.15
 
@@ -128,14 +130,14 @@ def extract_skin_temperature(ds: WRFDataset) -> tuple[NDArray, float, float]:
         an observed land-surface temperature product.
     """
     tsk = ds.get_variable("TSK")
-    t_min, t_max = get_low_high(tsk)
+    t_min, t_max = percentile_scale_bounds(tsk)
     return tsk, t_min - 273.15, t_max - 273.15
 
 
 def extract_pressure(ds: WRFDataset) -> tuple[NDArray, float, float]:
     """Extract surface pressure (hPa)."""
     psfc = ds.get_variable("PSFC")
-    p_min, p_max = get_low_high(psfc)
+    p_min, p_max = percentile_scale_bounds(psfc)
     return psfc / 100.0, p_min / 100.0, p_max / 100.0
 
 
@@ -147,7 +149,7 @@ def extract_vapor(ds: WRFDataset) -> tuple[NDArray, float, float]:
     converted to g/kg.
     """
     q2 = ds.get_variable("Q2")
-    q_min, q_max = get_low_high(q2)
+    q_min, q_max = percentile_scale_bounds(q2)
     return q2 * 1000.0, q_min * 1000.0, q_max * 1000.0
 
 
@@ -186,7 +188,7 @@ def extract_relative_humidity(ds: WRFDataset) -> tuple[NDArray, float, float]:
     t2 = ds.get_variable("T2")
     psfc = ds.get_variable("PSFC")
     rh = compute_relative_humidity(q2, t2, psfc)
-    rh_min, rh_max = get_low_high(rh)
+    rh_min, rh_max = percentile_scale_bounds(rh)
     return rh, rh_min, rh_max
 
 
@@ -224,7 +226,7 @@ def extract_rain_step(total: NDArray, i: int) -> NDArray:
 def extract_scalar(ds: WRFDataset, var_name: str) -> tuple[NDArray, float, float]:
     """Generic extractor for scalar fields (HFX, LH, SWDOWN)."""
     var = ds.get_variable(var_name)
-    v_min, v_max = get_low_high(var)
+    v_min, v_max = percentile_scale_bounds(var)
     return var, v_min, v_max
 
 
@@ -271,7 +273,7 @@ def extract_wind_power_density_10m(ds: WRFDataset) -> tuple[NDArray, float, floa
     speed = np.hypot(u10, v10)
     density = compute_air_density(t2, psfc, q2)
     power_density = 0.5 * (density * np.power(speed, 3))
-    p_min, p_max = get_low_high(power_density)
+    p_min, p_max = percentile_scale_bounds(power_density)
     return power_density, p_min, p_max
 
 
@@ -404,9 +406,9 @@ def stream_wind_at_heights(
     series: list[WindHeightSeries] = []
     for target in targets:
         speed = speed_out[target]
-        # Scale bounds follow the site-wide convention (get_low_high): skip the
-        # spin-up first step and cap the max at the 98th percentile.
-        vmin, vmax = get_low_high(speed)
+        # Scale bounds follow the site-wide convention (percentile_scale_bounds):
+        # skip the spin-up first step and cap the max at the 98th percentile.
+        vmin, vmax = percentile_scale_bounds(speed)
         series.append(
             WindHeightSeries(
                 target=target,

@@ -329,6 +329,81 @@ def test_resumed_best_state_prevents_best_clobber_and_seeds_early_stopping(
     assert len(history["train_loss"]) == 1
 
 
+def test_early_stopping_counter_restored_on_resume() -> None:
+    """Regression: the no-improvement counter must survive a resume.
+
+    With an unbeatable seeded best metric every epoch counts as
+    "no improvement", so the number of epochs trained before early stopping is
+    exactly ``patience - epochs_no_improve``.
+    """
+    pytest.importorskip("torch")
+    from solrad_correction.models.lstm import LSTMNet
+    from solrad_correction.training.trainer import Trainer
+
+    def run(epochs_no_improve: int) -> tuple[int, int]:
+        train_ds, val_ds = _synthetic_sequence_split(seed=42)
+        trainer = Trainer(
+            model=LSTMNet(input_size=4, hidden_size=8, num_layers=1),
+            device="cpu",
+            config=ModelConfig(model_type="lstm", max_epochs=10, batch_size=16, patience=3),
+            start_epoch=2,
+            best_metric=-1e9,  # unbeatable → every epoch is "no improvement"
+            best_epoch=1,
+            epochs_no_improve=epochs_no_improve,
+        )
+        _, history = trainer.train(train_ds, val_ds)
+        return len(history["train_loss"]), trainer.epochs_no_improve
+
+    # Restored counter=2 with patience=3 stops after exactly 1 more epoch.
+    trained, counter = run(2)
+    assert trained == 1
+    assert counter == 3
+    # A lost counter (reset to 0) would instead need the full patience.
+    assert run(0)[0] == 3
+
+
+def test_resume_persists_and_restores_early_stopping_counter(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    from solrad_correction.models.lstm import LSTMRegressor
+    from solrad_correction.utils.serialization import save_torch_checkpoint
+
+    checkpoint_dir = tmp_path / "checkpoints"
+    train_ds, val_ds = _synthetic_sequence_split(seed=21)
+    model = LSTMRegressor(input_size=4, hidden_size=8, num_layers=1, device="cpu")
+    model.fit(
+        train_ds,
+        val_ds,
+        ModelConfig(model_type="lstm", max_epochs=3, batch_size=16, patience=5),
+        runtime=RuntimeConfig(
+            device="cpu", num_workers=0, amp=False, checkpoint_dir=str(checkpoint_dir)
+        ),
+    )
+
+    from solrad_correction.utils.serialization import load_torch_checkpoint
+
+    last_meta = load_torch_checkpoint(checkpoint_dir / "last.pt")["metadata"]
+    assert "epochs_no_improve" in last_meta
+
+    resumed = LSTMRegressor(input_size=4, hidden_size=8, num_layers=1, device="cpu")
+    resumed._load_resume_checkpoint(str(checkpoint_dir / "last.pt"))
+    assert resumed._epochs_no_improve == last_meta["epochs_no_improve"]
+
+    # Legacy checkpoint predating the field: derive the counter from the gap
+    # between the completed epoch and the best epoch.
+    legacy_path = checkpoint_dir / "legacy_last.pt"
+    save_torch_checkpoint(
+        model_state=model._module.state_dict(),
+        optimizer_state=None,
+        config=None,
+        epoch=5,
+        path=legacy_path,
+        metadata={"best_metric": 0.5, "best_epoch": 2, "monitor_metric": 0.9},
+    )
+    legacy = LSTMRegressor(input_size=4, hidden_size=8, num_layers=1, device="cpu")
+    legacy._load_resume_checkpoint(str(legacy_path))
+    assert legacy._epochs_no_improve == 3  # 5 completed - best at epoch 2
+
+
 def test_evaluate_windowed_dataset_uses_aligned_targets() -> None:
     pytest.importorskip("torch")
     from solrad_correction.datasets.sequence import WindowedSequenceDataset

@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import torch
-    from torch import nn
+import torch
+from torch import nn
 
-    from solrad_correction.config import ModelConfig
+from solrad_correction.config import ModelConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +23,7 @@ class TrainingPlan:
 
     @classmethod
     def from_config(cls, config: ModelConfig | None) -> TrainingPlan:
+        """Extract training hyperparameters from a model config (defaults if ``None``)."""
         if config is None:
             return cls()
         return cls(
@@ -47,6 +46,7 @@ class TrainingState:
     )
     best_metric: float | None = None
     best_epoch: int | None = None
+    epochs_no_improve: int = 0
     optimizer_state: dict | None = None
     scheduler_state: dict | None = None
     scaler_state: dict | None = None
@@ -66,6 +66,12 @@ class BestModelState:
     state_dict: dict[str, torch.Tensor] = field(default_factory=dict)
 
     def capture_if_better(self, model: nn.Module, metric: float, epoch: int) -> bool:
+        """Snapshot ``model``'s weights when ``metric`` strictly improves on the best.
+
+        On improvement the tensors are detached, cloned and moved to CPU, and the
+        method returns ``True``; otherwise nothing is stored and it returns
+        ``False``. Lower ``metric`` is treated as better.
+        """
         if metric >= self.metric:
             return False
         self.metric = metric
@@ -76,5 +82,6 @@ class BestModelState:
         return True
 
     def restore(self, model: nn.Module) -> None:
+        """Load the captured best weights into ``model`` (no-op if none captured)."""
         if self.state_dict:
             model.load_state_dict(self.state_dict)

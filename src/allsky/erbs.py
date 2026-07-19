@@ -9,8 +9,8 @@ GHI series into a **pseudo** diffuse-irradiance target.
    These are *pseudo-targets*: LabMiM has no shaded pyranometer yet, so
    the training pipeline bootstraps on Erbs-derived diffuse values
    (``target_source="erbs_pseudo"``).  Replace them with real
-   measurements (``SensorConfig.diffuse_column``) as soon as a diffuse
-   sensor exists.
+   measurements (``PrepareTargetsConfig.diffuse_column``) as soon as a
+   diffuse sensor exists.
 
 References
 ----------
@@ -22,21 +22,17 @@ doi:10.1016/0038-092X(82)90302-4
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
 
 import numpy as np
+import pandas as pd
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    import pandas as pd
-
-    ArrayLike = pd.Series | np.ndarray | Sequence[float] | float
+type ErbsInput = pd.Series | np.ndarray | Sequence[float] | float
 
 __all__ = ["erbs_diffuse_fraction", "pseudo_diffuse"]
 
 
-def erbs_diffuse_fraction(kt: ArrayLike) -> np.ndarray:
+def erbs_diffuse_fraction(kt: ErbsInput) -> np.ndarray:
     """Diffuse fraction ``kd`` from the clearness index ``kt`` (Erbs 1982).
 
     Formula
@@ -69,7 +65,7 @@ def erbs_diffuse_fraction(kt: ArrayLike) -> np.ndarray:
     return np.clip(kd, 0.0, 1.0)
 
 
-def pseudo_diffuse(ghi: ArrayLike, kt: ArrayLike) -> np.ndarray:
+def pseudo_diffuse(ghi: ErbsInput, kt: ErbsInput) -> np.ndarray:
     """Pseudo diffuse irradiance ``DHI = kd(kt) * GHI`` in W m-2.
 
     Formula

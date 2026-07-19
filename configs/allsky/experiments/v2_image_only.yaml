@@ -1,0 +1,5 @@
+# V2 — image-only (precomputed DINOv2 embedding, no sensor branch). Isolates the
+# visual signal; the gap to V3+ shows what sensor context adds.
+extends: [_base.yaml, ../models/image_only.yaml]
+name: v2_image_only
+output_dir: output/allsky-mm/experiments/v2_image_only

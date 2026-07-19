@@ -8,7 +8,7 @@ import subprocess
 import sys
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import netCDF4
 import numpy as np
@@ -17,9 +17,6 @@ import pytest
 from micrometeorology.cli.export_wrf_geojson import _normalize_var_list
 from micrometeorology.wrf import jobs
 from tests.micromet import _reference
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 NT, NZ, NY, NX = 5, 4, 4, 5
 
@@ -496,6 +493,7 @@ def test_manifest_v2_timeline_availability_and_features(tmp_path, monkeypatch):
     assert [r for r in results if r.error] == []
 
     manifest_path = jobs.write_run_manifest(json_dir, results)
+    assert manifest_path is not None
     with open(manifest_path, encoding="utf-8") as fh:
         manifest = json.load(fh)
 
@@ -531,6 +529,7 @@ def test_no_site_artifacts_flag_writes_legacy_outputs_only(tmp_path):
     assert names == [f"D02_TEMP_{i:03d}.json" for i in range(NT)]
 
     manifest_path = jobs.write_run_manifest(json_dir, results)
+    assert manifest_path is not None
     with open(manifest_path, encoding="utf-8") as fh:
         manifest = json.load(fh)
     assert "features" not in manifest
@@ -589,6 +588,7 @@ def test_manifest_omits_features_when_any_unit_failed(tmp_path):
     assert any(r.error for r in results)
 
     manifest_path = jobs.write_run_manifest(json_dir, results)
+    assert manifest_path is not None
     with open(manifest_path, encoding="utf-8") as fh:
         manifest = json.load(fh)
     assert "features" not in manifest

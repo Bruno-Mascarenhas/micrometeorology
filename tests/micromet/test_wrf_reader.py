@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import netCDF4
 import numpy as np
@@ -15,9 +15,6 @@ from micrometeorology.wrf.variables import (
     extract_scalar,
     materialize_2d,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _write_tiny_wrf_file(path: Path, n_times: int = 2) -> None:

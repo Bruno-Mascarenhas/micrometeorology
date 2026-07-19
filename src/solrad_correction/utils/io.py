@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import numpy as np
-    import pandas as pd
+import numpy as np
+import pandas as pd
 
 
 def save_json(data: dict, path: str | Path) -> None:
@@ -39,9 +37,6 @@ def save_predictions(
         If ``index`` is provided but its length does not match the predictions;
         silently dropping the index would produce untrackable artifacts.
     """
-    import numpy as np
-    import pandas as pd
-
     df = pd.DataFrame(
         {"y_true": np.asarray(y_true).flatten(), "y_pred": np.asarray(y_pred).flatten()}
     )

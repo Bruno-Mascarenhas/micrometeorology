@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from sklearn.svm import SVR
 
+from solrad_correction.config import ModelConfig
 from solrad_correction.models.sklearn_base import SklearnRegressorModel
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from solrad_correction.config import ModelConfig
 
 logger = logging.getLogger(__name__)
 

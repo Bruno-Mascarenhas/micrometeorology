@@ -8,17 +8,15 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from solrad_correction.config import ModelConfig
-    from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
-    from solrad_correction.datasets.tabular import TabularDataset
-    from solrad_correction.evaluation.metrics import MetricFn
+from solrad_correction.config import ModelConfig
+from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
+from solrad_correction.datasets.tabular import TabularDataset
+from solrad_correction.evaluation.metrics import REGRESSION_METRICS, MetricFn
 
 
 @dataclass
@@ -79,8 +77,6 @@ class BaseRegressorModel(ABC):
         datasets compare predictions against the window-aligned targets
         instead of the full-length base target vector.
         """
-        from solrad_correction.evaluation.metrics import REGRESSION_METRICS
-
         if metrics is None:
             metrics = REGRESSION_METRICS
 

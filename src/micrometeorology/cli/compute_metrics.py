@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sys
 from enum import StrEnum
-from pathlib import Path  # noqa: TC003
+from pathlib import Path
 from typing import Annotated
 
 import pandas as pd
@@ -25,6 +25,13 @@ from micrometeorology.stats.metrics import compute_all
 
 
 class JoinMethod(StrEnum):
+    """How the two datasets are aligned before metrics are computed.
+
+    ``index`` inner-joins on matching index labels; ``nearest`` uses
+    ``merge_asof`` to pair each row with the closest index value in the other
+    dataset within the configured tolerance.
+    """
+
     by_index = "index"
     nearest = "nearest"
 
@@ -144,6 +151,7 @@ def run(
 
 
 def main() -> None:
+    """Console-script entry point (pyproject: ``labmim-metrics``)."""
     app()
 
 

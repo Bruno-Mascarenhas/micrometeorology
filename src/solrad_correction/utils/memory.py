@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
-
-if TYPE_CHECKING:
-    import pandas as pd
+import pandas as pd
 
 SOLRAD_MAX_ARRAY_GB = float(os.environ.get("SOLRAD_MAX_ARRAY_GB", "8"))
 

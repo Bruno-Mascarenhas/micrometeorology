@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import platform
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import torch
 
-if TYPE_CHECKING:
-    from solrad_correction.config import RuntimeConfig
+from solrad_correction.config import RuntimeConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +24,7 @@ class DataLoaderSettings:
     gradient_clip: float | None
 
     def to_dict(self) -> dict[str, int | float | str | bool | None]:
+        """Return the settings as a JSON-serializable dict (stored in checkpoint metadata)."""
         return {
             "device": self.device,
             "num_workers": self.num_workers,

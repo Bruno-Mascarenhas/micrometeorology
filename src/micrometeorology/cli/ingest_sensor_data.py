@@ -93,6 +93,7 @@ def run(
 
 
 def main() -> None:
+    """Console-script entry point (pyproject: ``labmim-sensor-process``)."""
     app()
 
 

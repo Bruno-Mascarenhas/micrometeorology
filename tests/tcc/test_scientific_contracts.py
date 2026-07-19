@@ -51,11 +51,13 @@ def test_preprocessing_uses_train_only_state_and_strict_schema() -> None:
     train = pd.DataFrame(
         {
             "A": [1.0, 2.0, 3.0, 4.0, 5.0],
-            "B": [10.0, 20.0, np.nan, 40.0, 50.0],
+            "B": [10.0, 20.0, 30.0, 40.0, 50.0],  # target: authoritative, complete
             "C": [np.nan, np.nan, np.nan, 4.0, 5.0],
         }
     )
-    test = pd.DataFrame({"A": [100.0, 200.0], "B": [np.nan, np.nan], "C": [1.0, 2.0]})
+    # One test row has a feature (A) gap with a valid target; the other has a
+    # MISSING target and must be excluded rather than fabricated.
+    test = pd.DataFrame({"A": [np.nan, 200.0], "B": [45.0, np.nan], "C": [1.0, 2.0]})
     try:
         scratch.mkdir(parents=True, exist_ok=True)
         pipeline = PreprocessingPipeline(
@@ -69,9 +71,14 @@ def test_preprocessing_uses_train_only_state_and_strict_schema() -> None:
         transformed_test = pipeline.transform(test)
 
         assert "C" not in transformed_train.columns
-        assert transformed_test["B"].iloc[0] == pytest.approx(0.0)
-        expected_a = (test["A"] - train["A"].mean()) / train["A"].std()
-        np.testing.assert_allclose(transformed_test["A"], expected_a)
+        # The missing-target row is dropped; only the valid-target row survives.
+        assert len(transformed_test) == 1
+        # Its feature gap is imputed with the TRAIN mean, then standardized.
+        expected_a = (train["A"].mean() - train["A"].mean()) / train["A"].std()
+        assert transformed_test["A"].iloc[0] == pytest.approx(expected_a)
+        # The observed target is passed through (standardized), never fabricated.
+        expected_b = (45.0 - train["B"].mean()) / train["B"].std()
+        assert transformed_test["B"].iloc[0] == pytest.approx(expected_b)
         with pytest.raises(ValueError, match="Input schema does not match"):
             pipeline.transform(pd.DataFrame({"A": [1.0], "B": [2.0], "extra": [3.0]}))
 
@@ -83,6 +90,66 @@ def test_preprocessing_uses_train_only_state_and_strict_schema() -> None:
     finally:
         if scratch.exists():
             shutil.rmtree(scratch)
+
+
+@pytest.mark.parametrize("strategy", ["ffill", "mean", "interpolate"])
+def test_target_column_is_authoritative_and_never_imputed(strategy: str) -> None:
+    """Regression: the target is ground truth — imputation must not fabricate it.
+
+    Under any non-``drop`` strategy the feature columns are filled but rows with
+    a missing observed target are dropped, so metrics/val-loss are never scored
+    against invented targets.
+    """
+    index = pd.date_range("2024-01-01", periods=6, freq="1h")
+    train = pd.DataFrame(
+        {"A": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "B": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]},
+        index=index,
+    )
+    pipeline = PreprocessingPipeline(
+        scaler_type="none",
+        impute_strategy=strategy,
+        feature_columns=["A"],
+        target_column="B",
+    )
+    pipeline.fit(train)
+
+    # Row 2 has a missing TARGET; row 4 has an internal FEATURE gap.
+    test = pd.DataFrame(
+        {"A": [10.0, 20.0, 30.0, 40.0, np.nan, 60.0], "B": [1.0, 2.0, np.nan, 4.0, 5.0, 6.0]},
+        index=index,
+    )
+    out = pipeline.transform(test)
+
+    # The missing-target row is EXCLUDED, and no target value is fabricated.
+    assert index[2] not in out.index
+    assert out["B"].notna().all()
+    np.testing.assert_array_equal(out["B"].to_numpy(), [1.0, 2.0, 4.0, 5.0, 6.0])
+    # Feature gaps are still imputed: the surviving feature-gap row has a value.
+    assert index[4] in out.index
+    assert not pd.isna(out.loc[index[4], "A"])
+
+
+def test_fit_transform_drops_missing_target_rows_like_transform() -> None:
+    """Train split obeys the same rule: missing-target rows are dropped, not filled."""
+    index = pd.date_range("2024-01-01", periods=4, freq="1h")
+    train = pd.DataFrame(
+        {"A": [1.0, np.nan, 3.0, 4.0], "B": [10.0, 20.0, np.nan, 40.0]}, index=index
+    )
+    pipeline = PreprocessingPipeline(
+        scaler_type="none",
+        impute_strategy="mean",
+        feature_columns=["A"],
+        target_column="B",
+    )
+    out = pipeline.fit_transform(train)
+
+    # Row 2 (missing target) dropped; row 1 (missing feature) kept and imputed.
+    assert index[2] not in out.index
+    assert index[1] in out.index
+    assert out["B"].notna().all()
+    assert not pd.isna(out.loc[index[1], "A"])
+    # fit-time row-count metadata reflects the target-aware drop.
+    assert pipeline.state.row_counts["fit_output_rows"] == len(out)
 
 
 def test_preprocessing_non_strict_schema_projects_to_fitted_columns() -> None:

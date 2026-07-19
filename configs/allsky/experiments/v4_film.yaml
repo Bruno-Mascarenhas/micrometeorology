@@ -1,0 +1,6 @@
+# V4 — FiLM fusion: sensor context modulates the visual embedding (starts
+# identical to concat, learns away from it). Same targets as V0-V3.
+# Default Colab experiment.
+extends: [_base.yaml, ../models/film.yaml]
+name: v4_film
+output_dir: output/allsky-mm/experiments/v4_film

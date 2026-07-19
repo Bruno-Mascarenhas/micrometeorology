@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import netCDF4
 import numpy as np
@@ -15,9 +15,6 @@ from tests.micromet._reference import (
     compute_wind_vectors_at_height,
     interpolate_speed_to_height,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 NT, NZ, NY, NX = 7, 5, 4, 5
 
@@ -71,9 +68,9 @@ def _eager_reference(ds: WRFDataset, targets: tuple[int, ...]) -> dict[int, dict
             )
             for i in range(speed_3d.shape[0])
         ]
-        # Scale bounds follow the site-wide convention (get_low_high):
+        # Scale bounds follow the site-wide convention (percentile_scale_bounds):
         # skip the spin-up first step, cap the max at the 98th percentile.
-        vmin, vmax = vmod.get_low_high(speed_3d)
+        vmin, vmax = vmod.percentile_scale_bounds(speed_3d)
         out[target] = {
             "vmin": vmin,
             "vmax": vmax,

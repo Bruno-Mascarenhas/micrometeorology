@@ -1,0 +1,7 @@
+# Model fragment — V3 concat fusion (visual and sensor embeddings concatenated).
+model:
+  name: concat
+  sensor_hidden: [64, 128]
+  visual_out_dim: null       # passthrough visual embedding
+  trunk_hidden: 256
+  dropout: 0.1

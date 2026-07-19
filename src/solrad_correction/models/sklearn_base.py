@@ -3,21 +3,17 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import numpy as np
+from sklearn.base import RegressorMixin
 
+from solrad_correction.config import ModelConfig
+from solrad_correction.datasets.tabular import TabularDataset
 from solrad_correction.models.base import TabularRegressorModel, TrainingResult
 from solrad_correction.utils.memory import assert_array_size
 from solrad_correction.utils.serialization import load_sklearn_model, save_sklearn_model
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from sklearn.base import RegressorMixin
-
-    from solrad_correction.config import ModelConfig
-    from solrad_correction.datasets.tabular import TabularDataset
 
 logger = logging.getLogger(__name__)
 

@@ -1,0 +1,10 @@
+# Model fragment — FiLM fusion (sensor context modulates the visual embedding).
+# The modulation generator is zero-init, so the block starts EXACTLY equal to
+# concat and learns away from it. Shared by V4 (embedding), V5 (multitask) and
+# V6 (image finetune).
+model:
+  name: film
+  sensor_hidden: [64, 128]
+  visual_out_dim: null
+  trunk_hidden: 256
+  dropout: 0.1

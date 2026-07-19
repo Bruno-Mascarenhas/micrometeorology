@@ -96,8 +96,12 @@ def merge_dat_files(
 ) -> pd.DataFrame:
     """Read and merge multiple ``.dat`` files into a single DataFrame.
 
-    Files may have different column sets (sensors added/removed). The merge
-    uses an ordered merge so that overlapping timestamps are handled correctly.
+    Files may have different column sets (sensors added/removed). Overlapping
+    timestamps are resolved **per column**: the first non-null value in
+    chronological file order wins. A column that only exists in a later file is
+    therefore preserved even when an earlier file shares the same timestamp
+    (that earlier row simply contributes ``NaN`` for the absent column), while
+    a column present in both keeps the earlier file's value on a conflict.
 
     Parameters
     ----------
@@ -111,12 +115,21 @@ def merge_dat_files(
 
     dfs = [read_campbell_dat(p, **kwargs) for p in paths]
 
-    # Fast concatenation, avoiding O(N^2) iterative merges
+    # Fast concatenation, avoiding O(N^2) iterative merges. Files are stacked in
+    # chronological order, so within any duplicated-timestamp group the earlier
+    # file's row precedes the later file's row.
     merged = pd.concat(dfs)
 
-    # Resolve overlapping timestamps by keeping the first non-null value per column
     if not merged.empty:
-        merged = merged.loc[~merged.index.duplicated(keep="first")]
+        duplicated = merged.index.duplicated(keep=False)
+        if duplicated.any():
+            # Collapse only the duplicated timestamps per column (first non-null
+            # wins). Restricting groupby to the overlap keeps the common
+            # no-overlap path cheap instead of grouping the whole frame.
+            unique_part = merged.loc[~duplicated]
+            collapsed = merged.loc[duplicated].groupby(level=0, sort=False).first()
+            merged = pd.concat([unique_part, collapsed])
+        merged = merged.sort_index()
 
     logger.info(
         "Merged %d files -> %d rows, %d columns", len(paths), len(merged), len(merged.columns)

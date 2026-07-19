@@ -25,6 +25,11 @@ def save_dataset(
 
 
 def save_tabular_dataset(dataset: TabularDataset, path: str | Path) -> None:
+    """Write a tabular dataset under ``path`` as ``data.npz`` plus CSV sidecars.
+
+    Emits ``data.npz`` (X/y arrays), ``feature_names.csv``, and — when present —
+    ``index.csv``. Loaded back by :func:`load_tabular_dataset`.
+    """
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     np.savez(p / "data.npz", X=dataset.X, y=dataset.y)
@@ -37,6 +42,7 @@ def save_tabular_dataset(dataset: TabularDataset, path: str | Path) -> None:
 
 
 def load_tabular_dataset(path: str | Path) -> TabularDataset:
+    """Reconstruct a :class:`TabularDataset` from a :func:`save_tabular_dataset` directory."""
     p = Path(path)
     data = np.load(p / "data.npz")
     meta = pd.read_csv(p / "feature_names.csv")
@@ -56,6 +62,11 @@ def save_windowed_sequence_dataset(
     feature_names: list[str] | None = None,
     index: pd.DatetimeIndex | None = None,
 ) -> None:
+    """Persist a windowed-sequence dataset via its metadata sidecar.
+
+    Delegates to :meth:`WindowedSequenceDatasetMeta.save` so the windowing
+    parameters and feature order are stored alongside the tensors.
+    """
     WindowedSequenceDatasetMeta.from_dataset(
         dataset,
         feature_names=feature_names or [],
@@ -64,6 +75,7 @@ def save_windowed_sequence_dataset(
 
 
 def load_windowed_sequence_dataset(path: str | Path) -> WindowedSequenceDataset:
+    """Reconstruct a windowed-sequence dataset saved by :func:`save_windowed_sequence_dataset`."""
     return WindowedSequenceDatasetMeta.load(path).to_torch_dataset()
 
 

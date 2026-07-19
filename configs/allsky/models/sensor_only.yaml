@@ -1,0 +1,8 @@
+# Model fragment — V1 sensor-only baseline (no visual branch).
+# Merged into an experiment via `extends`. Keys under `model` ride the permissive
+# ExperimentModelConfig (extra=allow) and are read by name by the registry builder.
+model:
+  name: sensor_only
+  sensor_hidden: [64, 128]   # MLP block widths (the last is the sensor embedding width)
+  trunk_hidden: 256
+  dropout: 0.1

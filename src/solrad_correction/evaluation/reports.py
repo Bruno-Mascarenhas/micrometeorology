@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    import numpy as np
-    import pandas as pd
+import numpy as np
+import pandas as pd
 
 from solrad_correction.experiments.artifacts import ArtifactLayout
 from solrad_correction.utils.io import save_json, save_predictions
@@ -42,8 +40,6 @@ class ExperimentReport:
 
         # Training history
         if self.train_history:
-            import pandas as pd
-
             history_df = pd.DataFrame(self.train_history)
             history_df.to_csv(layout.training_history, index_label="epoch")
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import inspect
 import json
 from datetime import datetime
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -29,9 +29,6 @@ from tests.micromet._reference import (
     create_values_json,
     reference_write_grid_geojson_stream,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Fixtures

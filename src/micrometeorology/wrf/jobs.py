@@ -18,25 +18,22 @@ import logging
 import os
 import re
 import time
+from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import numpy as np
+from numpy.typing import NDArray
 
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
-from micrometeorology.wrf import geojson
-from micrometeorology.wrf import variables as vmod
+from micrometeorology.wrf import geojson, variables
 from micrometeorology.wrf.batch import _max_tasks_per_child
 from micrometeorology.wrf.geojson import create_wind_vectors_json, write_values_json_stream
 from micrometeorology.wrf.reader import WRFDataset, product_timezone
-
-if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
-
-    from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +77,7 @@ class WorkUnit:
 
     @property
     def label(self) -> str:
+        """Short ``filename:variable`` tag used in logs and the run manifest."""
         name = Path(self.wrf_path).name
         return f"{name}:{self.variable or self.kind}"
 
@@ -112,16 +110,19 @@ def apply_hdf5_locking_policy() -> None:
         os.environ["HDF5_USE_FILE_LOCKING"] = policy
 
 
-def _format_datetime(dt) -> str:
-    """Format a datetime for JSON output (identical to the legacy CLI helper)."""
-    if dt is None:
+def _format_datetime(timestamp: datetime | None) -> str:
+    """Format a datetime for JSON output (identical to the legacy CLI helper).
+
+    ``None`` yields ``"N/A"``, matching the legacy helper's defensive contract.
+    """
+    if timestamp is None:
         return "N/A"
     try:
-        formatted: str = dt.replace(minute=0, second=0, microsecond=0, tzinfo=None).strftime(
+        formatted: str = timestamp.replace(minute=0, second=0, microsecond=0, tzinfo=None).strftime(
             "%d/%m/%Y %H:%M:%S"
         )
     except Exception:
-        return str(dt)
+        return str(timestamp)
     return formatted
 
 
@@ -151,6 +152,10 @@ def _atomic_json_dump(output_path: Path, payload: dict) -> str:
     return str(output_path)
 
 
+# Fixed-point int32 encoding for the cell-series matrix: a rounded value is
+# stored as ``rint(value * SERIES_SCALE)``, so SERIES_SCALE=100 keeps two
+# decimals. SERIES_MISSING (int32 min) is the reserved no-value sentinel and
+# _SERIES_INT_MAX is the clamp ceiling that keeps encoded values in range.
 SERIES_MISSING = -(2**31)
 SERIES_SCALE = 100
 _SERIES_INT_MAX = 2**31 - 1
@@ -185,6 +190,13 @@ class _SiteArtifactAccumulator:
         self.maxs: list[float] = []
 
     def add(self, index: int, values: NDArray, date_str: str) -> None:
+        """Quantize one time step's frame into column ``index`` of the matrix.
+
+        Values are rounded to two decimals and stored as scaled int32; cells
+        that are non-finite (masked/NaN) become :data:`SERIES_MISSING`. Steps
+        with at least one finite cell also contribute a mean/min/max row to the
+        domain summary.
+        """
         arr = values.filled(np.nan) if isinstance(values, np.ma.MaskedArray) else values
         flat = np.round(np.ravel(np.asarray(arr)).astype(np.float64, copy=False), 2)
         if self._matrix is None:
@@ -204,6 +216,11 @@ class _SiteArtifactAccumulator:
             self.maxs.append(round(float(valid.max()), 2))
 
     def write(self, json_dir: str, stem: str, domain: str, variable: str) -> list[str]:
+        """Atomically flush the ``.series.bin`` and ``.summary.json`` artifacts.
+
+        Returns the paths written, or an empty list when no finite step was ever
+        accumulated (nothing to persist).
+        """
         if self._matrix is None or not self.indices:
             return []
         series_path = Path(json_dir) / f"{stem}.series.bin"
@@ -236,48 +253,52 @@ def _values_unit_frames(
     Returns ``None`` when the variable is absent from the file.
     """
     if variable == WRFVariable.TEMPERATURE:
-        t2, vmin, vmax = vmod.extract_temperature(ds)
+        t2, vmin, vmax = variables.extract_temperature(ds)
         return (
-            lambda i: vmod.materialize_2d(vmod.extract_temperature_step(t2[i : i + 1, :, :])),
+            lambda i: variables.materialize_2d(
+                variables.extract_temperature_step(t2[i : i + 1, :, :])
+            ),
             vmin,
             vmax,
         )
     if variable == WRFVariable.SKIN_TEMPERATURE:
-        tsk, vmin, vmax = vmod.extract_skin_temperature(ds)
+        tsk, vmin, vmax = variables.extract_skin_temperature(ds)
         return (
-            lambda i: vmod.materialize_2d(vmod.extract_temperature_step(tsk[i : i + 1, :, :])),
+            lambda i: variables.materialize_2d(
+                variables.extract_temperature_step(tsk[i : i + 1, :, :])
+            ),
             vmin,
             vmax,
         )
     if variable == WRFVariable.RELATIVE_HUMIDITY:
-        rh, vmin, vmax = vmod.extract_relative_humidity(ds)
-        return lambda i: vmod.materialize_2d(rh[i : i + 1, :, :]), vmin, vmax
+        rh, vmin, vmax = variables.extract_relative_humidity(ds)
+        return lambda i: variables.materialize_2d(rh[i : i + 1, :, :]), vmin, vmax
     if variable == WRFVariable.RAIN:
-        total, vmin, vmax = vmod.extract_rain(ds)
-        return lambda i: vmod.materialize_2d(vmod.extract_rain_step(total, i)), vmin, vmax
+        total, vmin, vmax = variables.extract_rain(ds)
+        return lambda i: variables.materialize_2d(variables.extract_rain_step(total, i)), vmin, vmax
     if variable == WRFVariable.WIND:
-        u10, v10, vmin, vmax = vmod.extract_wind(ds)
+        u10, v10, vmin, vmax = variables.extract_wind(ds)
 
         def wind_frame(i: int) -> NDArray:
-            u = vmod.materialize_2d(u10[i : i + 1])
-            v = vmod.materialize_2d(v10[i : i + 1])
+            u = variables.materialize_2d(u10[i : i + 1])
+            v = variables.materialize_2d(v10[i : i + 1])
             speed: NDArray = np.hypot(u, v)
             return speed
 
         return wind_frame, vmin, vmax
     if variable == WRFVariable.WIND_POWER_DENSITY_10M:
-        power_density, vmin, vmax = vmod.extract_wind_power_density_10m(ds)
-        return lambda i: vmod.materialize_2d(power_density[i : i + 1, :, :]), vmin, vmax
+        power_density, vmin, vmax = variables.extract_wind_power_density_10m(ds)
+        return lambda i: variables.materialize_2d(power_density[i : i + 1, :, :]), vmin, vmax
     if variable == WRFVariable.PRESSURE:
-        var_data, vmin, vmax = vmod.extract_pressure(ds)
+        var_data, vmin, vmax = variables.extract_pressure(ds)
     elif variable == WRFVariable.VAPOR:
-        var_data, vmin, vmax = vmod.extract_vapor(ds)
+        var_data, vmin, vmax = variables.extract_vapor(ds)
     else:
         nc_var = variable.upper()
         if not ds.has_variable(nc_var):
             return None
-        var_data, vmin, vmax = vmod.extract_scalar(ds, nc_var)
-    return lambda i: vmod.materialize_2d(var_data[i : i + 1, :, :]), vmin, vmax
+        var_data, vmin, vmax = variables.extract_scalar(ds, nc_var)
+    return lambda i: variables.materialize_2d(var_data[i : i + 1, :, :]), vmin, vmax
 
 
 def _run_values_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list[str]]:
@@ -318,10 +339,10 @@ def _run_poteolico_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list
     grid = ds.grid_level.value
     time_meta = ds.build_date_metadata(skip_first_n=unit.skip_first)
     targets = parse_poteolico_heights(unit.variable)
-    series = vmod.stream_wind_at_heights(ds, targets)
+    series = variables.stream_wind_at_heights(ds, targets)
 
-    for s in series:
-        suffix = f"POT_EOLICO_{s.target}M"
+    for height_series in series:
+        suffix = f"POT_EOLICO_{height_series.target}M"
         acc = _SiteArtifactAccumulator(ds.n_time_steps) if unit.site_artifacts else None
         for meta in time_meta:
             if meta.get("skip"):
@@ -332,15 +353,15 @@ def _run_poteolico_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list
             files.append(
                 _atomic_values_json(
                     out,
-                    s.speed_steps[i],
-                    s.vmin,
-                    s.vmax,
+                    height_series.speed_steps[i],
+                    height_series.vmin,
+                    height_series.vmax,
                     date_str,
-                    s.wind_vectors[i],
+                    height_series.wind_vectors[i],
                 )
             )
             if acc is not None:
-                acc.add(i, s.speed_steps[i], date_str)
+                acc.add(i, height_series.speed_steps[i], date_str)
         if acc is not None:
             files.extend(acc.write(unit.json_dir, f"{grid}_{suffix}", grid, suffix))
     return files, []
@@ -350,14 +371,14 @@ def _run_wind_vectors_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], l
     files: list[str] = []
     grid = ds.grid_level.value
     time_meta = ds.build_date_metadata(skip_first_n=unit.skip_first)
-    u10, v10, _vmin, _vmax = vmod.extract_wind(ds)
+    u10, v10, _vmin, _vmax = variables.extract_wind(ds)
 
     for meta in time_meta:
         if meta.get("skip"):
             continue
         i = meta["index"]
-        u = vmod.materialize_2d(u10[i : i + 1])
-        v = vmod.materialize_2d(v10[i : i + 1])
+        u = variables.materialize_2d(u10[i : i + 1])
+        v = variables.materialize_2d(v10[i : i + 1])
         payload = create_wind_vectors_json(u, v, date_time=meta["datetime_local"], downsampling=4)
         out = Path(unit.json_dir) / f"{grid}_WIND_VECTORS_{i:03d}.json"
         files.append(_atomic_json_dump(out, payload))
@@ -531,7 +552,9 @@ def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> P
 _TEMP_FILE_PATTERN = re.compile(r"\.tmp-(\d+)$")
 
 
-def _sweep_stale_temp_files(dirs: Sequence[str], *, sweep_pids: frozenset[int] = frozenset()) -> int:
+def _sweep_stale_temp_files(
+    dirs: Sequence[str], *, sweep_pids: frozenset[int] = frozenset()
+) -> int:
     """Remove orphaned ``.tmp-<pid>`` files whose owning process is dead.
 
     A worker killed mid-write (OOM kill, broken pool teardown) can leave its

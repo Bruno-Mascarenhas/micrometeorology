@@ -4,21 +4,19 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import numpy as np
 import torch
 from torch import nn
 
+from solrad_correction.config import ModelConfig
+from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
 from solrad_correction.models.base import SequenceRegressorModel, TrainingResult
+from solrad_correction.training.dataloaders import DataLoaderSettings
 from solrad_correction.utils.memory import assert_array_size
 from solrad_correction.utils.seeds import get_device
 from solrad_correction.utils.serialization import load_torch_checkpoint, save_torch_checkpoint
-
-if TYPE_CHECKING:
-    from solrad_correction.config import ModelConfig
-    from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
-    from solrad_correction.training.dataloaders import DataLoaderSettings
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +44,7 @@ class TorchRegressorModel(SequenceRegressorModel):
         self._scaler_state: dict[str, Any] | None = None
         self._best_metric: float | None = None
         self._best_epoch: int | None = None
+        self._epochs_no_improve: int = 0
         self._dataloader_settings: DataLoaderSettings | None = None
         logger.info("Device: %s", self._device)
 
@@ -62,6 +61,9 @@ class TorchRegressorModel(SequenceRegressorModel):
         self._scheduler_state = checkpoint.get("scheduler_state_dict")
         self._scaler_state = checkpoint.get("scaler_state_dict")
         self._best_metric, self._best_epoch = self._resolve_resume_best(checkpoint, path)
+        self._epochs_no_improve = self._resolve_resume_epochs_no_improve(
+            checkpoint, self._best_epoch, self._start_epoch
+        )
         logger.info("Loaded resume checkpoint from %s (epoch %d)", path, self._start_epoch)
 
     @staticmethod
@@ -94,6 +96,25 @@ class TorchRegressorModel(SequenceRegressorModel):
                 return metric, best_checkpoint.get("epoch")
         return None, None
 
+    @staticmethod
+    def _resolve_resume_epochs_no_improve(
+        checkpoint: dict[str, Any], best_epoch: int | None, start_epoch: int
+    ) -> int:
+        """Recover the early-stopping no-improvement counter for resume.
+
+        Prefers the ``epochs_no_improve`` value persisted in the checkpoint
+        metadata. Older checkpoints predate that field: derive it from the gap
+        between the completed epoch and the best epoch (epochs elapsed since the
+        last improvement), falling back to ``0`` when neither is available.
+        """
+        metadata = checkpoint.get("metadata") or {}
+        persisted = metadata.get("epochs_no_improve")
+        if persisted is not None:
+            return int(persisted)
+        if best_epoch is not None:
+            return max(0, int(start_epoch) - int(best_epoch))
+        return 0
+
     def fit(
         self,
         train_data: SequenceDataset | WindowedSequenceDataset,
@@ -121,6 +142,7 @@ class TorchRegressorModel(SequenceRegressorModel):
             checkpoint_config=getattr(self, "_config_kwargs", None),
             best_metric=self._best_metric,
             best_epoch=self._best_epoch,
+            epochs_no_improve=self._epochs_no_improve,
         )
         self._module, history = trainer.train(train_data, val_data)
         self._start_epoch = trainer.completed_epochs
@@ -129,6 +151,7 @@ class TorchRegressorModel(SequenceRegressorModel):
         self._scaler_state = trainer.scaler_state
         self._best_metric = trainer.best_metric
         self._best_epoch = trainer.best_epoch
+        self._epochs_no_improve = trainer.epochs_no_improve
         self._dataloader_settings = trainer.dataloader_settings
         self._history = history
         self._config = config
@@ -179,14 +202,14 @@ class TorchRegressorModel(SequenceRegressorModel):
             dataset = TensorDataset(x_input)
 
         # Batch size defaults to a reasonable number if not specified in config
-        batch_size = getattr(self, "_config", None)
-        bs = batch_size.batch_size if hasattr(batch_size, "batch_size") else 256  # type: ignore
+        config = getattr(self, "_config", None)
+        batch_size = config.batch_size if hasattr(config, "batch_size") else 256  # type: ignore
 
         settings = self._dataloader_settings
         if settings is not None and settings.num_workers > 0:
             loader = DataLoader(
                 dataset,
-                batch_size=bs,
+                batch_size=batch_size,
                 shuffle=False,
                 num_workers=settings.num_workers,
                 pin_memory=settings.pin_memory,
@@ -196,7 +219,7 @@ class TorchRegressorModel(SequenceRegressorModel):
         else:
             loader = DataLoader(
                 dataset,
-                batch_size=bs,
+                batch_size=batch_size,
                 shuffle=False,
                 num_workers=0,
                 pin_memory=False,

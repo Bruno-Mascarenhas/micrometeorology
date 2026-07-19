@@ -7,15 +7,12 @@ observational datasets, producing statistical summaries and plots.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
 
 from micrometeorology.stats.metrics import compute_all
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 

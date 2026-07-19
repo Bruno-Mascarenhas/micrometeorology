@@ -16,22 +16,19 @@ import shutil
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NamedTuple, cast
+from typing import Literal, NamedTuple, cast
 
 import numpy as np
+from numpy.typing import NDArray
 
 from micrometeorology.wrf.safety import (
     assert_reasonable_array_size,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
 MAX_TASKS_PER_CHILD = int(os.environ.get("LABMIM_MAX_TASKS_PER_CHILD", "64"))
@@ -126,17 +123,20 @@ def _render_figure(task: FigureTask) -> str:
 
     from micrometeorology.wrf.plotting import saturated_cmap
 
-    mc = task.map_config
+    map_config = task.map_config
 
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(1, 1, 1, projection=ccrs.Mercator())
-    ax.set_extent([mc.lon_min, mc.lon_max, mc.lat_min, mc.lat_max], crs=ccrs.PlateCarree())
+    ax.set_extent(
+        [map_config.lon_min, map_config.lon_max, map_config.lat_min, map_config.lat_max],
+        crs=ccrs.PlateCarree(),
+    )
 
     # Map features
-    ax.coastlines(resolution="10m", linewidth=mc.coast_width)
+    ax.coastlines(resolution="10m", linewidth=map_config.coast_width)
     ax.add_feature(
         cfeature.NaturalEarthFeature("cultural", "admin_1_states_provinces_lines", "10m"),
-        linewidth=mc.state_width,
+        linewidth=map_config.state_width,
         edgecolor="black",
         facecolor="none",
     )
@@ -168,7 +168,7 @@ def _render_figure(task: FigureTask) -> str:
 
         # Quiver (sub-sampled)
         stride_map = {"D01": 6, "D02": 3, "D03": 4, "D04": 4, "D05": 4}
-        stride = stride_map.get(mc.grid_level, 4)
+        stride = stride_map.get(map_config.grid_level, 4)
         ax.quiver(
             task.lon[::stride, ::stride],
             task.lat[::stride, ::stride],

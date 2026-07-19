@@ -33,6 +33,7 @@ class PreprocessingState:
     fitted: bool = False
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the state to a JSON-safe dict (inverse of :meth:`from_dict`)."""
         return {
             "version": self.version,
             "scaler_type": self.scaler_type,
@@ -52,6 +53,13 @@ class PreprocessingState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PreprocessingState:
+        """Rebuild a state from :meth:`to_dict` output; rejects other schema versions.
+
+        Raises
+        ------
+        ValueError
+            If ``data['version']`` is not 3 (only the current schema is supported).
+        """
         if int(data.get("version", 0)) != 3:
             raise ValueError("Only preprocessing state version 3 is supported")
         return cls(
@@ -105,21 +113,31 @@ class Preprocessor:
 
     @property
     def is_fitted(self) -> bool:
+        """Whether :meth:`fit` has been run on this instance."""
         return self._state.fitted
 
     @property
     def state(self) -> PreprocessingState:
+        """The learned :class:`PreprocessingState` (statistics and column layout)."""
         return self._state
 
     @property
     def columns(self) -> list[str]:
+        """Output columns kept after fitting (input columns minus the dropped ones)."""
         return list(self._state.output_columns)
 
     @property
     def dropped_columns(self) -> dict[str, str]:
+        """Columns dropped at fit time mapped to the NaN-ratio reason they were dropped."""
         return dict(self._state.dropped_columns)
 
     def fit(self, df: pd.DataFrame) -> Preprocessor:
+        """Learn drop list, imputation fills and scaling from ``df`` (train split only).
+
+        All statistics are computed here and frozen into :attr:`state`; call this
+        on the training split alone so no validation/test information leaks into
+        the fitted parameters. Returns ``self`` for chaining.
+        """
         input_columns = list(df.columns)
         na_ratio = df.isna().mean()
         dropped = {
@@ -132,12 +150,7 @@ class Preprocessor:
         fill_values = _series_to_float_dict(df_clean.mean(numeric_only=True))
         last_values = _series_to_float_dict(df_clean.ffill().iloc[-1]) if not df_clean.empty else {}
         scaling = self._fit_scaling(df_clean)
-        if self.impute_strategy == "drop":
-            fit_output_rows = len(df_clean.dropna())
-        elif self.impute_strategy == "interpolate":
-            fit_output_rows = len(self._interpolate(df_clean).dropna())
-        else:
-            fit_output_rows = len(df_clean)
+        fit_output_rows = self._count_retained_rows(df_clean)
 
         self._state = PreprocessingState(
             scaler_type=self.scaler_type,
@@ -168,6 +181,23 @@ class Preprocessor:
         return self
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply the fitted drop/impute/scale steps to ``df``.
+
+        With ``strict_schema`` (the default) the input columns must match those
+        seen at fit time exactly.
+
+        The **target column is never imputed**: it is authoritative ground
+        truth. Under any non-``drop`` strategy the feature columns are filled
+        but rows whose observed target is missing are dropped, so metrics and
+        the validation loss are never computed against fabricated targets.
+
+        Raises
+        ------
+        RuntimeError
+            If called before :meth:`fit`.
+        ValueError
+            If the input schema does not match the fitted columns.
+        """
         if not self._state.fitted:
             raise RuntimeError("Preprocessor not fitted. Call fit() first.")
         self._validate_transform_schema(df)
@@ -177,9 +207,20 @@ class Preprocessor:
         return self._scale(out)
 
     def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Convenience for :meth:`fit` followed by :meth:`transform` on the same frame."""
         return self.fit(df).transform(df)
 
     def inverse_transform_column(self, values: np.ndarray, column: str) -> np.ndarray:
+        """Map scaled ``values`` for one column back to their original units.
+
+        Undoes only the scaling step (standard or min-max); a no-op when
+        ``scaler_type='none'``.
+
+        Raises
+        ------
+        ValueError
+            If ``column`` was not part of the fitted output columns.
+        """
         if column not in self._state.output_columns:
             raise ValueError(f"Column '{column}' is not part of fitted preprocessing output")
         values = np.asarray(values, dtype=np.float64)
@@ -193,10 +234,12 @@ class Preprocessor:
         return values
 
     def to_state(self) -> PreprocessingState:
+        """Return the fitted :class:`PreprocessingState` for serialization."""
         return self._state
 
     @classmethod
     def from_state(cls, state: PreprocessingState) -> Preprocessor:
+        """Rebuild a ready-to-transform preprocessor from a saved state (no refit)."""
         pipeline = cls(
             scaler_type=state.scaler_type,
             impute_strategy=state.impute_strategy,
@@ -208,20 +251,31 @@ class Preprocessor:
         return pipeline
 
     def save(self, path: str | Path) -> None:
+        """Persist the fitted state to ``path`` as a joblib artifact (see :meth:`load`)."""
         import joblib
 
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(self._state.to_dict(), path)
 
     def save_state_json(self, path: str | Path) -> None:
+        """Persist the fitted state to ``path`` as human-readable JSON."""
         from solrad_correction.utils.io import save_json
 
         save_json(self._state.to_dict(), path)
 
     @classmethod
     def load(cls, path: str | Path) -> Preprocessor:
+        """Reconstruct a fitted preprocessor from a :meth:`save` joblib artifact.
+
+        The artifact's integrity is checked against a reachable experiment
+        ``manifest.json`` before unpickling (raising on a checksum mismatch);
+        an unverified load is logged when no manifest covers the file.
+        """
         import joblib
 
+        from solrad_correction.utils.serialization import verify_pickle_integrity
+
+        verify_pickle_integrity(path)
         return cls.from_state(PreprocessingState.from_dict(joblib.load(path)))
 
     def _fit_scaling(self, df: pd.DataFrame) -> dict[str, dict[str, float]]:
@@ -242,15 +296,63 @@ class Preprocessor:
         return {}
 
     def _impute(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Impute feature columns only; keep the target authoritative.
+
+        ``drop`` removes any row containing a NaN (feature *or* target). Every
+        other strategy fills feature gaps but never the target column, then
+        drops any row whose observed target is missing — so ground truth is
+        never fabricated for metrics or the validation loss.
+        """
         if self.impute_strategy == "drop":
             return df.dropna()
+
+        target = self.target_column
+        has_target = target is not None and target in df.columns
+        features = df.drop(columns=[target]) if has_target else df
+        features = self._impute_features(features)
+        if not has_target:
+            return features
+
+        result = features
+        result[target] = df.loc[result.index, target]
+        result = result[list(df.columns)]
+        return result[result[target].notna()]
+
+    def _impute_features(self, features: pd.DataFrame) -> pd.DataFrame:
+        """Apply the configured non-``drop`` strategy to feature columns only.
+
+        Fill dictionaries carry the target's statistics too, but pandas'
+        ``fillna(dict)`` only touches columns present in ``features`` — the
+        target has already been split off — so the target is never filled here.
+        """
         if self.impute_strategy == "ffill":
-            return df.ffill().fillna(self._state.last_values).fillna(self._state.fill_values)
+            return features.ffill().fillna(self._state.last_values).fillna(self._state.fill_values)
         if self.impute_strategy == "mean":
-            return df.fillna(self._state.fill_values)
+            return features.fillna(self._state.fill_values)
         if self.impute_strategy == "interpolate":
-            return self._interpolate(df).dropna()
+            return self._interpolate(features).dropna()
         raise ValueError(f"Unknown impute_strategy: {self.impute_strategy}")
+
+    def _count_retained_rows(self, df: pd.DataFrame) -> int:
+        """Rows that survive imputation (used only for ``fit`` row-count stats).
+
+        Mirrors :meth:`_impute`'s drop decisions without needing fitted fill
+        values: feature imputation only removes leading/trailing rows under
+        ``interpolate``, and every non-``drop`` strategy additionally drops
+        rows with a missing target.
+        """
+        if self.impute_strategy == "drop":
+            return len(df.dropna())
+
+        target = self.target_column
+        has_target = target is not None and target in df.columns
+        features = df.drop(columns=[target]) if has_target else df
+        if self.impute_strategy == "interpolate":
+            features = self._interpolate(features).dropna()
+        kept = features.index
+        if has_target:
+            kept = kept[df.loc[kept, target].notna().to_numpy()]
+        return len(kept)
 
     @staticmethod
     def _interpolate(df: pd.DataFrame) -> pd.DataFrame:

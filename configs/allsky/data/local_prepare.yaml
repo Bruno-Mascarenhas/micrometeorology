@@ -1,0 +1,67 @@
+# PrepareConfig — LOCAL dataset preparation for the multimodal (v2) pipeline.
+# Drives: allsky prepare-local / validate-dataset / precompute-embeddings /
+# export-colab-bundle. Loads via allsky.config.load_prepare_config (extra=forbid,
+# so a typo fails loudly). All timestamps are naive local America/Bahia
+# (fixed UTC-3, no DST since 2019).
+
+video:
+  pattern: "data/all-sky/allsky-*.mp4"
+  filename_date_format: "allsky-%Y%m%d"
+  start_time: "06:00"            # local time of frame 0 — match the camera schedule
+  minutes_per_frame: 1.0
+
+site:
+  latitude: -13.00               # LabMiM/UFBA, Salvador-BA
+  longitude: -38.51              # UTC-3 fixed
+
+features:
+  set: safe                      # geometry + standard met only; NO radiometry (anti-leakage)
+
+mask:
+  path: null                     # static horizon/obstruction mask; null -> auto
+  threshold: null
+
+crop:
+  enabled: false                 # no pixel crop before resize by default
+
+resize: null                     # keep native resolution; DINOv2 transform resizes at embed time
+
+night_filter:
+  min_solar_elevation_deg: 10.0  # drop near-horizon / night frames (k-index noise-dominated)
+
+sensor:
+  paths:
+    - "data/LBM_lenta_2025.dat"
+  ghi_column: "CM3Up_Wm2_Avg"    # drives k-index + Erbs pseudo-target; FORBIDDEN as a feature
+  column_map: {}                 # optional {logger_column: policy_source_name} renames
+  tolerance_minutes: 5.0         # image<->sensor max pairing distance (alignment "far" threshold)
+
+targets:
+  diffuse_column: "PSP_Wm2_Avg"  # live diffuse sensor; null -> Erbs pseudo (target_source flags it)
+  kindex_kind: "kstar"           # k* = GHI / Haurwitz clear-sky GHI
+  # sky_class from the k-index: clear (0) when k >= class_clear; overcast (2) when
+  # k < class_overcast; partially_cloudy (1) in between.
+  class_clear: 0.65
+  class_overcast: 0.35
+
+alignment:
+  strategy: "center_frame"       # nearest frame to the window centre (build-time pairing)
+  window_minutes: 5.0
+
+output:
+  dataset_dir: "output/allsky-mm/dataset"
+  dataset_version: "2"
+
+embeddings:
+  backbone: "dinov2_vits14"      # ViT-S/14; use "fake" for offline dev/tests
+  revision: "main"               # actual torch.hub commit pin lives in a module constant
+  pooling: "cls"                 # 384-d CLS token
+  batch_size: 64
+  device: "auto"
+  shard_size: 2048               # sample_ids per safetensors shard
+  dtype: "fp16"
+
+splits:
+  val_fraction: 0.15
+  test_fraction: 0.15
+  seed: 42

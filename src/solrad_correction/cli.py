@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 import typer
 
@@ -29,11 +29,14 @@ from solrad_correction.experiments.overrides import (
     load_config_with_overrides,
 )
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 
 class DeviceChoice(StrEnum):
+    """Compute-device options for the ``--device`` flag.
+
+    ``auto`` selects CUDA when available and falls back to CPU; ``cuda`` errors
+    out if no GPU is present (see :func:`resolve_device`).
+    """
+
     auto = "auto"
     cpu = "cpu"
     cuda = "cuda"
@@ -130,6 +133,7 @@ def run_experiment_cli(
 
 
 def main() -> None:
+    """Console-script entry point (pyproject: ``solrad-run``)."""
     app()
 
 

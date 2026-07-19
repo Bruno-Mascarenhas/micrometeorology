@@ -20,10 +20,11 @@ Usage::
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 import numpy as np
 import typer
@@ -44,9 +45,6 @@ from micrometeorology.wrf.batch import (
     run_figure_tasks,
 )
 from micrometeorology.wrf.reader import resolve_wrfout_paths
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -130,7 +128,7 @@ def _build_tasks_for_domain(
         float(np.amax(lat)),
     )
     grid = ds.grid_level.value
-    mc = build_map_config(grid, bounds, str(shapes_dir) if shapes_dir else None)
+    map_config = build_map_config(grid, bounds, str(shapes_dir) if shapes_dir else None)
     time_meta = ds.build_date_metadata(skip_first_n=skip_first)
 
     tasks: list[FigureTask] = []
@@ -174,7 +172,7 @@ def _build_tasks_for_domain(
                         output_path=str(
                             Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
                         ),
-                        map_config=mc,
+                        map_config=map_config,
                         dpi=dpi,
                         saturation=2.0,
                     )
@@ -203,7 +201,7 @@ def _build_tasks_for_domain(
                         output_path=str(
                             Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
                         ),
-                        map_config=mc,
+                        map_config=map_config,
                         dpi=dpi,
                         saturation=2.0,
                     )
@@ -232,7 +230,7 @@ def _build_tasks_for_domain(
                         output_path=str(
                             Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
                         ),
-                        map_config=mc,
+                        map_config=map_config,
                         dpi=dpi,
                         saturation=2.0,
                     )
@@ -263,7 +261,7 @@ def _build_tasks_for_domain(
                         output_path=str(
                             Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
                         ),
-                        map_config=mc,
+                        map_config=map_config,
                         dpi=dpi,
                         saturation=2.0,
                     )
@@ -292,7 +290,7 @@ def _build_tasks_for_domain(
                         output_path=str(
                             Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
                         ),
-                        map_config=mc,
+                        map_config=map_config,
                         dpi=dpi,
                         saturation=2.0,
                     )
@@ -325,7 +323,7 @@ def _build_tasks_for_domain(
                         output_path=str(
                             Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
                         ),
-                        map_config=mc,
+                        map_config=map_config,
                         dpi=dpi,
                         saturation=2.0,
                     )
@@ -354,7 +352,7 @@ def _build_tasks_for_domain(
                         output_path=str(
                             Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
                         ),
-                        map_config=mc,
+                        map_config=map_config,
                         dpi=dpi,
                         saturation=2.0,
                     )
@@ -394,7 +392,7 @@ def _build_tasks_for_domain(
                         output_path=str(
                             Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
                         ),
-                        map_config=mc,
+                        map_config=map_config,
                         dpi=dpi,
                         saturation=2.0,
                     )
@@ -542,6 +540,7 @@ def run(
 
 
 def main() -> None:
+    """Console-script entry point (pyproject: ``labmim-wrf-figures``)."""
     app()
 
 

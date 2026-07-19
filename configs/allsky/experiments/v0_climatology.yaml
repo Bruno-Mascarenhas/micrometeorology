@@ -1,0 +1,8 @@
+# V0 — climatology baseline: constant per-target train-split means (+ class
+# frequencies for sky). The floor every learned model must beat. No encoders;
+# there is nothing to finetune, and input_mode is irrelevant to it.
+extends: [_base.yaml]
+name: v0_climatology
+output_dir: output/allsky-mm/experiments/v0_climatology
+model:
+  name: climatology

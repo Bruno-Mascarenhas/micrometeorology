@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
-if TYPE_CHECKING:
-    from solrad_correction.config import ModelConfig
-    from solrad_correction.models.base import BaseRegressorModel
+from solrad_correction.config import ModelConfig
+from solrad_correction.models.base import BaseRegressorModel
 
 ModelKind = Literal["tabular", "sequence"]
 

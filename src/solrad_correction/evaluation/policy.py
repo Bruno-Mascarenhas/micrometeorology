@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import pandas as pd
 
 from solrad_correction.models.registry import get_model_spec
-
-if TYPE_CHECKING:
-    import pandas as pd
 
 
 def prediction_index(

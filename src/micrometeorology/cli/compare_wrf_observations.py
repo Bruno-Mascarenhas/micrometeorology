@@ -8,7 +8,7 @@ Compare model output against observations:
 
 from __future__ import annotations
 
-from pathlib import Path  # noqa: TC003
+from pathlib import Path
 from typing import Annotated
 
 import matplotlib
@@ -79,6 +79,7 @@ def run(
 
 
 def main() -> None:
+    """Console-script entry point (pyproject: ``labmim-comparison``)."""
     app()
 
 

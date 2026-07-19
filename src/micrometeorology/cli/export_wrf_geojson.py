@@ -204,6 +204,7 @@ def run(
 
 
 def main() -> None:
+    """Console-script entry point (pyproject: ``labmim-wrf-geojson``)."""
     app()
 
 

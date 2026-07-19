@@ -242,6 +242,7 @@ def run(
 
 
 def main() -> None:
+    """Module entry point (``python -m micrometeorology.cli.run_wrf_pipeline``)."""
     app()
 
 

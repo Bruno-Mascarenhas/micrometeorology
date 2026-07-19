@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from solrad_correction.utils.memory import dataframe_to_float32_numpy, series_to_float32_numpy
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    import numpy as np
 
 
 @dataclass

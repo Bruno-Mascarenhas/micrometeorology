@@ -78,6 +78,9 @@ requirements-audit.txt
 *.hdf
 *.hdf5
 /data/**/*.dat
+# All-sky camera videos (also under /data, but stray copies land elsewhere too,
+# e.g. Colab /content) — one-day timelapses are large binaries.
+*.mp4
 
 # ==============================================================================
 # ML / Experiment Artifacts
@@ -88,6 +91,10 @@ requirements-audit.txt
 *.ckpt
 *.joblib
 *.pkl
+# Precomputed visual-embedding shards (allsky multimodal pipeline). These live
+# under /output today but are ignored globally so scratch/exported shards never
+# get committed.
+*.safetensors
 
 
 # ==============================================================================
