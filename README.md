@@ -181,9 +181,16 @@ labmim-sensor-process --input data/raw/ --output data/hourly/
 labmim-site-graphs site -i data/hourly/sensor_data.csv -o ../site-labmim/site/assets/graphs
 ```
 
-`labmim-site-graphs` produces the station graphs the public monitoring page
-embeds by exact name; see the
+`labmim-site-graphs` (module `micrometeorology/cli/plot_station_graphs.py`)
+produces the station graphs the public monitoring page embeds by exact name;
+see the
 [monitoring-page contract](docs/micrometeorology.md#monitoring-page-site-labmim).
+
+> **Maintenance:** the command maps each image to a default logger column
+> (e.g. `temperatura.png` ← `AirT1_C_Avg`). Whenever a station sensor is
+> replaced and its column is renamed in the datalogger program, update the
+> mapping — via `--col image=NewColumn` or a `--config` YAML — or that graph
+> silently stops updating on the site.
 
 ### 4. Statistical Comparison (WRF vs Observations)
 

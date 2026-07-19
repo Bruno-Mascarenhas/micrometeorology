@@ -570,6 +570,15 @@ requests, overwriting them in place each run.
 > reverse-import ("who calls this?") dead-code analysis. Treat the nine
 > filenames as a byte-name contract exactly like the WebGIS JSON names above.
 
+**Maintenance rule — sensor swaps rename columns.** The column names below are
+defaults matching the current CR5000 program. When a sensor is replaced (or the
+logger program renames a channel — e.g. a new anemometer reporting
+`WS1_ms_GMX` instead of `WS_ms`), the operator MUST update the mapping via
+`--col image=NewColumn` or the `--config` YAML, otherwise the affected graph is
+skipped with a warning and the site keeps serving the last generated PNG
+indefinitely. Run with `--strict` in cron so a broken mapping fails loudly
+instead.
+
 The nine-image contract (`site` command; column names are the defaults and are
 overridable via `--config` / `--col`):
 
