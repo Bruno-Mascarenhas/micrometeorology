@@ -107,6 +107,43 @@ class TestClearnessIndex:
             solar.clearness_index([500.0], times, site)
 
 
+class TestSolarAzimuth:
+    def test_range_within_0_360(self, site: SiteConfig):
+        day = pd.date_range("2025-03-21 00:00", "2025-03-21 23:55", freq="5min")
+        az = solar.solar_azimuth(day, site)
+        assert (az >= 0.0).all()
+        assert (az < 360.0).all()
+
+    def test_morning_east_afternoon_west(self, site: SiteConfig):
+        # Equinox: sunrise ~due east, sunset ~due west (declination ~0).
+        times = pd.DatetimeIndex(["2025-03-21 08:00:00", "2025-03-21 16:00:00"])
+        az = solar.solar_azimuth(times, site)
+        # Both timestamps are well above the horizon at Salvador.
+        assert (solar.solar_elevation(times, site) > 0).all()
+        assert 45.0 < az[0] < 135.0  # morning: eastern sky (~90)
+        assert 225.0 < az[1] < 315.0  # afternoon: western sky (~270)
+
+    def test_southern_summer_noon_points_south(self, site: SiteConfig):
+        # December (southern summer): the sun transits to the south of zenith,
+        # so solar-noon azimuth is ~180 deg.
+        day = pd.date_range("2025-12-21 05:00", "2025-12-21 19:00", freq="1min")
+        peak = day[int(np.argmax(solar.solar_elevation(day, site)))]
+        az = solar.solar_azimuth(pd.DatetimeIndex([peak]), site)[0]
+        assert 170.0 < az < 190.0
+
+    def test_southern_winter_noon_points_north(self, site: SiteConfig):
+        # June (southern winter): the sun transits to the north, azimuth ~0/360.
+        day = pd.date_range("2025-06-25 05:00", "2025-06-25 19:00", freq="1min")
+        peak = day[int(np.argmax(solar.solar_elevation(day, site)))]
+        az = solar.solar_azimuth(pd.DatetimeIndex([peak]), site)[0]
+        assert min(az, 360.0 - az) < 15.0
+
+    def test_tz_aware_timestamps_rejected(self, site: SiteConfig):
+        times = pd.date_range("2025-06-25", periods=3, freq="1h", tz="UTC")
+        with pytest.raises(ValueError, match="naive"):
+            solar.solar_azimuth(times, site)
+
+
 # ---------------------------------------------------------------------------
 # erbs.py
 # ---------------------------------------------------------------------------

@@ -46,6 +46,7 @@ __all__ = [
     "equation_of_time",
     "extraterrestrial_ghi",
     "hour_angle",
+    "solar_azimuth",
     "solar_declination",
     "solar_elevation",
 ]
@@ -216,6 +217,67 @@ def solar_elevation(
     """
     elevation: np.ndarray = np.rad2deg(np.arcsin(cos_zenith(timestamps, site, utc_offset_hours)))
     return elevation
+
+
+def solar_azimuth(
+    timestamps: DatetimeLike,
+    site: SiteConfig,
+    utc_offset_hours: float | None = None,
+) -> np.ndarray:
+    """Solar azimuth in **degrees clockwise from North**, wrapped to ``[0, 360)``.
+
+    Formula
+    -------
+    NOAA "deg cw from N" convention.  With zenith ``theta_z``, declination
+    ``decl``, latitude ``phi`` and hour angle ``ha``::
+
+        c = (sin(phi) cos(theta_z) - sin(decl)) / (cos(phi) sin(theta_z))
+        A = arccos(clip(c, -1, 1))
+        azimuth = (A + 180) mod 360   if ha > 0   (afternoon)
+        azimuth = (540 - A) mod 360   otherwise   (morning / solar noon)
+
+    In the Southern Hemisphere (this site, ``lat = -13``) the sun crosses
+    the northern sky, so azimuth is ~0 deg (North) at winter solar noon and
+    ~180 deg (South) at summer solar noon; it rises near 90 deg (East) and
+    sets near 270 deg (West).
+
+    Parameters
+    ----------
+    timestamps:
+        Naive local clock times (v0 contract; tz-aware input is rejected).
+    site:
+        Observation site (latitude/longitude in degrees).
+    utc_offset_hours:
+        UTC offset of the local clock; inferred from ``site.longitude`` when
+        None (see :func:`hour_angle`).
+
+    Limitation
+    ----------
+    Undefined exactly at the zenith (``sin(theta_z) = 0``, which occurs at
+    this latitude near the two annual zenith-crossing noons); the ratio is
+    guarded so the result stays finite there.  Azimuth is returned for every
+    row, including night — filter with :func:`solar_elevation` when a horizon
+    cut is required.
+    """
+    times = _as_datetime_index(timestamps)
+    lat = np.deg2rad(site.latitude)
+    decl = solar_declination(times)
+    cosz = cos_zenith(times, site, utc_offset_hours)
+    sinz = np.sin(np.arccos(cosz))
+    ha = hour_angle(times, site.longitude, utc_offset_hours)
+
+    denom = np.cos(lat) * sinz
+    safe = np.abs(denom) > 1e-12
+    ratio = np.divide(
+        np.sin(lat) * cosz - np.sin(decl),
+        denom,
+        out=np.zeros_like(cosz),
+        where=safe,
+    )
+    acos_deg = np.rad2deg(np.arccos(np.clip(ratio, -1.0, 1.0)))
+    azimuth = np.where(ha > 0.0, acos_deg + 180.0, 540.0 - acos_deg)
+    wrapped: np.ndarray = np.mod(azimuth, 360.0)
+    return wrapped
 
 
 def extraterrestrial_ghi(
