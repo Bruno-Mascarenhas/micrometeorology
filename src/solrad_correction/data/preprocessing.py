@@ -150,12 +150,7 @@ class Preprocessor:
         fill_values = _series_to_float_dict(df_clean.mean(numeric_only=True))
         last_values = _series_to_float_dict(df_clean.ffill().iloc[-1]) if not df_clean.empty else {}
         scaling = self._fit_scaling(df_clean)
-        if self.impute_strategy == "drop":
-            fit_output_rows = len(df_clean.dropna())
-        elif self.impute_strategy == "interpolate":
-            fit_output_rows = len(self._interpolate(df_clean).dropna())
-        else:
-            fit_output_rows = len(df_clean)
+        fit_output_rows = self._count_retained_rows(df_clean)
 
         self._state = PreprocessingState(
             scaler_type=self.scaler_type,
@@ -190,6 +185,11 @@ class Preprocessor:
 
         With ``strict_schema`` (the default) the input columns must match those
         seen at fit time exactly.
+
+        The **target column is never imputed**: it is authoritative ground
+        truth. Under any non-``drop`` strategy the feature columns are filled
+        but rows whose observed target is missing are dropped, so metrics and
+        the validation loss are never computed against fabricated targets.
 
         Raises
         ------
@@ -265,9 +265,17 @@ class Preprocessor:
 
     @classmethod
     def load(cls, path: str | Path) -> Preprocessor:
-        """Reconstruct a fitted preprocessor from a :meth:`save` joblib artifact."""
+        """Reconstruct a fitted preprocessor from a :meth:`save` joblib artifact.
+
+        The artifact's integrity is checked against a reachable experiment
+        ``manifest.json`` before unpickling (raising on a checksum mismatch);
+        an unverified load is logged when no manifest covers the file.
+        """
         import joblib
 
+        from solrad_correction.utils.serialization import verify_pickle_integrity
+
+        verify_pickle_integrity(path)
         return cls.from_state(PreprocessingState.from_dict(joblib.load(path)))
 
     def _fit_scaling(self, df: pd.DataFrame) -> dict[str, dict[str, float]]:
@@ -288,15 +296,63 @@ class Preprocessor:
         return {}
 
     def _impute(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Impute feature columns only; keep the target authoritative.
+
+        ``drop`` removes any row containing a NaN (feature *or* target). Every
+        other strategy fills feature gaps but never the target column, then
+        drops any row whose observed target is missing — so ground truth is
+        never fabricated for metrics or the validation loss.
+        """
         if self.impute_strategy == "drop":
             return df.dropna()
+
+        target = self.target_column
+        has_target = target is not None and target in df.columns
+        features = df.drop(columns=[target]) if has_target else df
+        features = self._impute_features(features)
+        if not has_target:
+            return features
+
+        result = features
+        result[target] = df.loc[result.index, target]
+        result = result[list(df.columns)]
+        return result[result[target].notna()]
+
+    def _impute_features(self, features: pd.DataFrame) -> pd.DataFrame:
+        """Apply the configured non-``drop`` strategy to feature columns only.
+
+        Fill dictionaries carry the target's statistics too, but pandas'
+        ``fillna(dict)`` only touches columns present in ``features`` — the
+        target has already been split off — so the target is never filled here.
+        """
         if self.impute_strategy == "ffill":
-            return df.ffill().fillna(self._state.last_values).fillna(self._state.fill_values)
+            return features.ffill().fillna(self._state.last_values).fillna(self._state.fill_values)
         if self.impute_strategy == "mean":
-            return df.fillna(self._state.fill_values)
+            return features.fillna(self._state.fill_values)
         if self.impute_strategy == "interpolate":
-            return self._interpolate(df).dropna()
+            return self._interpolate(features).dropna()
         raise ValueError(f"Unknown impute_strategy: {self.impute_strategy}")
+
+    def _count_retained_rows(self, df: pd.DataFrame) -> int:
+        """Rows that survive imputation (used only for ``fit`` row-count stats).
+
+        Mirrors :meth:`_impute`'s drop decisions without needing fitted fill
+        values: feature imputation only removes leading/trailing rows under
+        ``interpolate``, and every non-``drop`` strategy additionally drops
+        rows with a missing target.
+        """
+        if self.impute_strategy == "drop":
+            return len(df.dropna())
+
+        target = self.target_column
+        has_target = target is not None and target in df.columns
+        features = df.drop(columns=[target]) if has_target else df
+        if self.impute_strategy == "interpolate":
+            features = self._interpolate(features).dropna()
+        kept = features.index
+        if has_target:
+            kept = kept[df.loc[kept, target].notna().to_numpy()]
+        return len(kept)
 
     @staticmethod
     def _interpolate(df: pd.DataFrame) -> pd.DataFrame:
