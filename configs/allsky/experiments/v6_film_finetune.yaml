@@ -1,0 +1,14 @@
+# V6 — FiLM in END-TO-END IMAGE mode with a partially-unfrozen DINOv2 backbone.
+# GPU strongly recommended: this decodes JPEGs and backprops through the last two
+# ViT blocks. The embedding path (V4) cannot finetune the backbone at all — that
+# is the whole reason this variant exists.
+extends: [_base.yaml, ../models/film.yaml]
+name: v6_film_finetune
+output_dir: output/allsky-mm/experiments/v6_film_finetune
+data:
+  input_mode: image              # decode frames; requires an image backbone at build time
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 2             # finetune the last 2 ViT blocks
+train:
+  backbone_lr: 0.00001           # 1e-5: small LR for the pretrained backbone param group

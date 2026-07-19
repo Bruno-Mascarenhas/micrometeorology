@@ -1,0 +1,18 @@
+# V5 — FiLM + full multitask. The DHI head becomes HETEROSCEDASTIC (predicts its
+# own log-variance for a Gaussian NLL), on top of k-index and sky.
+#
+# cloud_fraction is wired but DISABLED on purpose: there is no cloud-fraction
+# ground truth yet (the manifest `cloud_fraction` column is all-NaN), so enabling
+# it would train a head against missing labels. Flip enabled -> true once a
+# cloud-fraction label source exists.
+extends: [_base.yaml, ../models/film.yaml]
+name: v5_multitask
+output_dir: output/allsky-mm/experiments/v5_multitask
+targets:
+  dhi:
+    enabled: true
+    loss: heteroscedastic        # mean + clamped log-variance (Gaussian NLL)
+    weight: 1.0
+  cloud_fraction:
+    enabled: false               # documented: no ground truth (column all-NaN)
+    weight: 1.0

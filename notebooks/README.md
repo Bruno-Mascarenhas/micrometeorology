@@ -13,9 +13,17 @@ https://colab.research.google.com/github/Bruno-Mascarenhas/micrometeorology/blob
 
 | Notebook | Purpose |
 |---|---|
-| [`allsky_colab.ipynb`](allsky_colab.ipynb) | Train **SkyFusionNet** (cloud condition + diffuse radiation) on all-sky frames + sensors |
+| [`allsky_multimodal_colab.ipynb`](allsky_multimodal_colab.ipynb) | Train the **multimodal** all-sky pipeline (V0–V7 DHI / k-index / sky models) from a prepared Colab bundle |
+| [`allsky_colab.ipynb`](allsky_colab.ipynb) | Train **SkyFusionNet** (cloud condition + diffuse radiation) on all-sky frames + sensors (legacy v0 pipeline) |
 | [`tcc/02_colab_training.ipynb`](tcc/02_colab_training.ipynb) | Train the **solrad_correction** models (SVM / LSTM / Transformer) via `solrad-colab` |
 | `exploratory/*.ipynb` | Local data exploration (sensor merging, WRF time series) — no GPU needed |
+
+The multimodal notebook is **thin**: it provisions a CPython 3.14 venv with `uv`
+(the package requires Python ≥ 3.14, which the Colab base runtime is not assumed
+to provide), unpacks an `allsky export-colab-bundle` archive, and drives the
+`allsky train` / `allsky evaluate` CLIs. Its default experiment is
+`configs/allsky/experiments/v4_film.yaml`. It has **not** been executed on a real
+Colab runtime from the dev environment — versions/timings are best-effort.
 
 Before running anything: **Runtime → Change runtime type → GPU** (a T4 is
 enough; both training CLIs enable AMP mixed precision on CUDA automatically /
@@ -32,10 +40,18 @@ folder for everything:
 MyDrive/labmim/
 ├── data/            # sensor .dat files (LBM_lenta_*.dat), parquet caches
 ├── all-sky/         # allsky-YYYYMMDD.mp4 camera videos
+├── allsky-mm/       # prepared multimodal bundle (bundle.tar.gz from export-colab-bundle)
 └── runs/
-    ├── allsky/      # allsky training runs (best.pt, last.pt, runs/ tensorboard)
+    ├── allsky/      # legacy SkyFusionNet runs (best.pt, last.pt, runs/ tensorboard)
+    ├── allsky-mm/   # multimodal runs (best.ckpt, last.ckpt, metrics.*, runs/, eval-*/)
     └── solrad/      # solrad_correction experiments
 ```
+
+The multimodal notebook keeps `OUTPUT_DIR` on the local `/content` disk for fast
+checkpoint I/O and copies it to `runs/allsky-mm/` on Drive (final cell). Build the
+bundle locally with
+`allsky export-colab-bundle -o bundle.tar.gz --config configs/allsky/data/local_prepare.yaml`
+and drop it under `allsky-mm/`.
 
 ## Saving the best models to your Drive
 
@@ -60,7 +76,13 @@ the run.
 Colab sessions die; the checkpoints don't (they are on Drive):
 
 ```bash
-# allsky
+# allsky multimodal — --resume auto finds last.ckpt in the run dir and continues,
+# never overwriting a better best.ckpt (epochs is the TOTAL budget)
+allsky train --config configs/allsky/experiments/v4_film.yaml \
+    --data-root .../allsky-mm/data --out-dir .../runs/allsky-mm/out \
+    --device cuda --amp --resume auto
+
+# allsky legacy (SkyFusionNet)
 allsky train --config config.yaml --index .../index.parquet --resume .../runs/allsky/last.pt
 
 # solrad_correction — max_epochs is the TOTAL budget: resuming trains only the

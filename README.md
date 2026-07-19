@@ -155,6 +155,24 @@ For Google Colab GPU training use [`notebooks/allsky_colab.ipynb`](notebooks/all
 (install cell, Drive mount, TensorBoard, resumable checkpoints). Install extras with
 `pip install -e ".[allsky]"`. Full documentation: [`docs/allsky.md`](docs/allsky.md).
 
+A **multimodal v2 pipeline** builds on top of this: a portable v2 manifest with an
+anti-leakage feature policy (geometry + met only, no radiometry), precomputed
+DINOv2 embeddings, a V0–V7 model ladder (climatology → sensor/image → concat →
+FiLM → cross-attention), and an experiment engine with stratified evaluation:
+
+```bash
+allsky prepare-local          --config configs/allsky/data/local_prepare.yaml   # frames → v2 manifest → splits
+allsky precompute-embeddings  --config configs/allsky/data/local_prepare.yaml   # DINOv2 fp16 shards
+allsky train    --config configs/allsky/experiments/v4_film.yaml \
+                --data-root output/allsky-mm/dataset --device cuda --amp        # V1..V7 by config
+allsky evaluate --checkpoint output/allsky-mm/experiments/v4_film/run/best.ckpt \
+                --split test --data-root output/allsky-mm/dataset               # report.md + metrics
+allsky export-colab-bundle -o bundle.tar.gz --config configs/allsky/data/local_prepare.yaml
+```
+
+The multimodal Colab notebook is [`notebooks/allsky_multimodal_colab.ipynb`](notebooks/allsky_multimodal_colab.ipynb);
+the full design is in [`docs/allsky-architecture.md`](docs/allsky-architecture.md).
+
 ### 3. Sensor Data Processing & Calibration
 
 ```bash
@@ -218,7 +236,8 @@ make audit                # dependency vulnerability gate (mirrors CI)
 |---|---|
 | [`docs/micrometeorology.md`](docs/micrometeorology.md) | Sensor ingestion, calibration, aggregation, WRF parallel pipeline, batch rendering, statistics, CLI reference, FAQ |
 | [`docs/solrad_correction.md`](docs/solrad_correction.md) | Model types (SVM/LSTM/Transformer), experiment configs, transfer learning, data leakage prevention, feature engineering, FAQ |
-| [`docs/allsky.md`](docs/allsky.md) | All-sky camera + radiation fusion: frame extraction, sensor pairing, SkyFusionNet, Colab GPU training, FAQ |
+| [`docs/allsky.md`](docs/allsky.md) | All-sky camera + radiation fusion: frame extraction, sensor pairing, SkyFusionNet, the multimodal v2 CLI/config quickstart, Colab GPU training, FAQ |
+| [`docs/allsky-architecture.md`](docs/allsky-architecture.md) | Multimodal v2 architecture: local→bundle→Colab flow, module map, artifact contracts, anti-leakage policy, V0–V7 model ladder, reproduction commands, limitations |
 
 ---
 

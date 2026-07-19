@@ -1,0 +1,6 @@
+# V3 — concat fusion: the first true multimodal model (image embedding + sensor
+# vector concatenated). The straightforward fusion the FiLM / cross-attention
+# variants are compared against.
+extends: [_base.yaml, ../models/concat.yaml]
+name: v3_concat
+output_dir: output/allsky-mm/experiments/v3_concat

@@ -1,0 +1,8 @@
+# Model fragment — V2 image/embedding-only baseline (no sensor branch).
+model:
+  name: image_only
+  visual_out_dim: null       # passthrough (embedding dim, or backbone dim in image mode)
+  trunk_hidden: 256
+  dropout: 0.1
+  backbone_frozen: true      # image mode only; the embedding path cannot finetune
+  unfreeze_last_n: 0

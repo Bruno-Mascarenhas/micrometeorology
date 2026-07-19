@@ -1,0 +1,5 @@
+# V1 — sensor-only MLP (no image). Measures how far solar geometry + standard
+# meteorology alone predict diffuse; the image models must improve on this.
+extends: [_base.yaml, ../models/sensor_only.yaml]
+name: v1_sensor_only
+output_dir: output/allsky-mm/experiments/v1_sensor_only

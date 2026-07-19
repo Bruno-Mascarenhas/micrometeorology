@@ -316,3 +316,115 @@ Yes, for everything except training and dataset tensor access. Config loading, `
 ### Why do some daytime rows disappear from the index?
 
 Three QC filters remove them: solar elevation below `labels.min_solar_elevation_deg` (kt is noise-dominated near the horizon), `kt > labels.max_kt` (GHI spikes beyond the clear-sky envelope are sensor artifacts), and missing GHI/feature values. Unmatched frames (no sensor record within `sensor.tolerance_minutes`) are dropped at pairing time.
+
+---
+
+## Multimodal pipeline (v2)
+
+Everything above describes the **legacy v0 pipeline** (SkyFusionNet, `build-index`,
+`allsky train --index`). It stays byte-compatible. The **v2 multimodal pipeline**
+is a separate, additive stack that produces a portable v2 manifest, precomputes
+visual embeddings, and trains a ladder of models (V0–V7) with an experiment
+engine (AMP, schedulers, early stop, full resume) and stratified evaluation.
+
+For the full design — module map, artifact contracts, anti-leakage policy,
+alignment strategies, the V0–V7 ladder, and how to extend features/fusions — see
+[`allsky-architecture.md`](allsky-architecture.md). This section is the CLI +
+config quickstart.
+
+### What is different from v0
+
+- **Anti-leakage feature policy.** The default `safe` feature set is solar
+  geometry + standard meteorology only — **no radiometry**. GHI, the diffuse
+  pyranometer, and every derived target are *forbidden* as features and raise
+  `ForbiddenFeatureError` if requested (v0's default `feature_columns` were
+  radiometry — do not carry them over).
+- **Portable manifest.** `image_path` is a relative POSIX path; a `.meta.json`
+  sidecar carries a content `manifest_sha256`, dataset version, and provenance.
+- **Persisted day splits** with a `split_id` (no silent regeneration).
+- **Precomputed embeddings** (DINOv2, fp16 safetensors shards) so training is
+  CPU-friendly and Colab-portable.
+- **Experiment configs compose** via `extends:` (no Hydra).
+
+### New CLI reference
+
+```bash
+allsky prepare-local          [--config FILE] [--steps a,b,c] [--dry-run] [--force]
+allsky validate-dataset       [--config FILE] [--manifest FILE] [--strict]
+allsky precompute-embeddings  --config FILE [--manifest FILE] [--out DIR]
+                              [--device auto|cpu|cuda|mps] [--resume/--no-resume] [--dry-run]
+allsky export-colab-bundle    --out BUNDLE.tar.gz [--config FILE]
+                              [--include-embeddings/--no-include-embeddings]
+
+allsky train    --config EXPERIMENT.yaml [--data-root DIR] [--out-dir DIR]
+                [--epochs N] [--batch-size N] [--device auto|cpu|cuda|mps]
+                [--amp/--no-amp] [--resume auto|CHECKPOINT.ckpt]
+allsky evaluate --checkpoint CHECKPOINT.ckpt [--split val|test|train]
+                [--config FILE] [--data-root DIR] [--report-dir DIR]
+                [--device ...] [--batch-size N] [--predictions/--no-predictions] [--strict]
+```
+
+- `prepare-local` runs `extract-frames → build-manifest → splits`; steps are
+  resumable and skip up-to-date outputs unless `--force`.
+- `precompute-embeddings` reads the `embeddings` section of the PrepareConfig
+  (backbone / pooling / batch / shard-size / dtype); backbone `"fake"` is the
+  offline dev/test hook, `"dinov2_vits14"` downloads via `torch.hub` on first use.
+- `train` routes to the multimodal engine when the config declares
+  `experiment: true` (otherwise it is byte-identical legacy behaviour).
+  `--resume auto` finds `last.ckpt` in the run dir; `--epochs` is the **total**
+  budget (resuming trains only the remainder and never clobbers a better
+  `best.ckpt`).
+- `evaluate` rebuilds the model from the checkpoint, restores the train-split
+  normalizers (no refit — leakage-safe), denormalizes to physical units, verifies
+  `manifest_sha256`/`split_id` (warn, or error under `--strict`), and writes
+  `metrics.json`, `stratified.csv`, `report.md` and (optionally)
+  `predictions.parquet`.
+
+### Config tree (`configs/allsky/`)
+
+```
+configs/allsky/
+├── default.yaml                 # legacy AllSkyConfig (v0)
+├── data/local_prepare.yaml      # PrepareConfig: prepare/validate/embeddings/bundle
+├── models/                      # model-section fragments (name + arch params)
+│   ├── sensor_only.yaml  image_only.yaml  concat.yaml  film.yaml  cross_attention.yaml
+└── experiments/
+    ├── _base.yaml               # shared data / targets / train blocks
+    └── v0_climatology.yaml … v7_cross_attention.yaml
+```
+
+Experiment files stay tiny by composing with `extends:` (a path or list, resolved
+relative to the including file, deep-merged, later wins; cycles raise). A typical
+experiment `extends: [_base.yaml, ../models/film.yaml]` then overrides only
+`name`, `output_dir`, and any target/data/train key it changes. All experiment/
+prepare configs are strict (`extra="forbid"`) so a typo fails loudly. The V0–V7
+ladder is summarised in [`allsky-architecture.md`](allsky-architecture.md).
+
+### Quickstart (local)
+
+```bash
+allsky prepare-local          --config configs/allsky/data/local_prepare.yaml
+allsky validate-dataset       --config configs/allsky/data/local_prepare.yaml
+allsky precompute-embeddings  --config configs/allsky/data/local_prepare.yaml
+
+allsky train    --config configs/allsky/experiments/v4_film.yaml \
+                --data-root output/allsky-mm/dataset \
+                --out-dir   output/allsky-mm/experiments/v4_film/run --device cuda --amp
+allsky evaluate --checkpoint output/allsky-mm/experiments/v4_film/run/best.ckpt \
+                --split test --data-root output/allsky-mm/dataset
+
+allsky export-colab-bundle -o bundle.tar.gz --config configs/allsky/data/local_prepare.yaml
+```
+
+Swap `--device cuda --amp` for `--device cpu --no-amp` for a CPU smoke run (the
+`fp16` AMP in the shipped configs requires CUDA).
+
+### Quickstart (Colab)
+
+[`notebooks/allsky_multimodal_colab.ipynb`](../notebooks/allsky_multimodal_colab.ipynb)
+is the thin GPU notebook: it provisions a CPython 3.14 venv with `uv` (the package
+requires Python ≥ 3.14, which the Colab base runtime is not assumed to provide),
+unpacks the exported bundle, then runs `validate-dataset → train (--resume auto,
+AMP) → evaluate → copy to Drive`. All knobs live in one CONFIG cell; the default
+experiment is `configs/allsky/experiments/v4_film.yaml`. It has not been executed
+on a real Colab runtime from the dev environment (documented in the notebook).

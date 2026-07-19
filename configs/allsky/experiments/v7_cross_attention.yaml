@@ -1,0 +1,6 @@
+# V7 — one-layer cross-attention: the visual embedding queries per-group sensor
+# tokens (solar / temperature / humidity / pressure / wind), letting the image
+# attend to the sensor context that matters for the current sky.
+extends: [_base.yaml, ../models/cross_attention.yaml]
+name: v7_cross_attention
+output_dir: output/allsky-mm/experiments/v7_cross_attention

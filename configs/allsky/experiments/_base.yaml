@@ -1,0 +1,56 @@
+# Shared base for the V0-V7 multimodal experiments. Each experiment `extends`
+# this plus a models/ fragment, then overrides only name / output_dir (and, where
+# noted, targets / data.input_mode / train.backbone_lr). Loads standalone via
+# allsky.config.load_experiment_config (extra=forbid). No Hydra.
+
+experiment: true                 # routes `allsky train` to the multimodal engine
+seed: 42
+
+features:
+  set: safe                      # geometry + standard met; NO radiometry (anti-leakage)
+
+data:
+  # manifest / embeddings_dir / split_artifact are BARE names resolved against
+  # data_root by the engine/evaluator (root / name) — never repeat data_root here
+  # or it would be doubled on resolution.
+  manifest: manifest.parquet
+  data_root: output/allsky-mm/dataset
+  embeddings_dir: embeddings
+  split_artifact: splits.json
+  input_mode: embedding          # train on precomputed DINOv2 embeddings (V6 overrides -> image)
+  alignment:
+    strategy: center_frame
+
+targets:                         # V0-V4 / V6 / V7 share this set; V5 overrides
+  dhi:
+    enabled: true
+    loss: mse                    # W/m2 diffuse horizontal irradiance
+    weight: 1.0
+  kindex:
+    enabled: true
+    kind: kstar                  # k* = GHI / clear-sky GHI
+    loss: mse
+    weight: 1.0
+  sky:
+    enabled: true                # 3-class cross-entropy (clear / partial / overcast)
+    weight: 1.0
+
+train:
+  epochs: 30
+  batch_size: 64
+  lr: 0.0003
+  weight_decay: 0.0001
+  optimizer: adamw
+  scheduler:
+    name: cosine
+  amp:
+    enabled: true
+    dtype: fp16                  # GPU only; CPU / e2e runs pass --no-amp (or amp.enabled false)
+  grad_accum_steps: 1
+  grad_clip_norm: 1.0
+  early_stopping:
+    patience: 8
+    min_delta: 0.0
+    monitor: val/loss
+  num_workers: 2
+  device: auto
