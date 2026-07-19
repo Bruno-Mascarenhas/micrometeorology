@@ -22,28 +22,6 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def add_cyclic_encoding(
-    df: pd.DataFrame,
-    column: str,
-    period: float,
-) -> pd.DataFrame:
-    """Encode a column as sin/cos pair for cyclical representation.
-
-    Parameters
-    ----------
-    column:
-        Column to encode (e.g. ``"hour"``).
-    period:
-        The natural period (e.g. 24 for hours, 365 for day_of_year).
-    """
-    values = 2 * np.pi * df[column] / period
-    new_cols = {
-        f"{column}_sin": np.sin(values),
-        f"{column}_cos": np.cos(values),
-    }
-    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
-
-
 def add_all_cyclic_encodings(df: pd.DataFrame) -> pd.DataFrame:
     """Add cyclic encodings for standard temporal features.
 
