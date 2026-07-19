@@ -30,6 +30,31 @@ def load_calibrations(config_path: str | Path) -> list[dict[str, Any]]:
     return data.get("calibrations", [])  # type: ignore
 
 
+def _resolve_inclusive_end(value: Any, fallback: pd.Timestamp) -> pd.Timestamp:
+    """Resolve an ``end_date`` config value to an *inclusive* upper bound.
+
+    A **date-only** boundary such as ``"2018-12-31"`` parses to midnight
+    (``2018-12-31 00:00:00``). Compared with ``df.index <= end`` that would
+    exclude every sample of the boundary day after ``00:00`` — the whole day
+    is silently dropped from the calibration (and, for ``factor: null``
+    records, left un-NaN'd). Because ``end_date`` is documented as the *last
+    day* the record applies (inclusive), a midnight-resolution timestamp is
+    extended to the final nanosecond of that day (``+ 1 day - 1 ns``) so the
+    entire day is covered.
+
+    A value that carries an explicit non-midnight time keeps exact
+    ``<= end`` semantics. A falsy value (``None``/empty) returns ``fallback``
+    unchanged (meaning "until the end of the dataset").
+    """
+    if not value:
+        return fallback
+    end = pd.Timestamp(value)
+    if end == end.normalize():
+        # Date-only boundary → inclusive of the whole day.
+        return end + pd.Timedelta(days=1) - pd.Timedelta(1, "ns")
+    return end
+
+
 def apply_calibrations(
     df: pd.DataFrame,
     calibrations: list[dict[str, Any]],
@@ -44,6 +69,14 @@ def apply_calibrations(
         List of calibration records, each with keys:
         ``column``, ``start_date``, ``end_date``, ``factor``, ``description``.
 
+    Notes
+    -----
+    Both ``start_date`` and ``end_date`` are **inclusive at day granularity**.
+    A date-only ``end_date`` (e.g. ``"2018-12-31"``) resolves to midnight but
+    is treated as the last nanosecond of that day, so every sub-daily sample of
+    the boundary day is calibrated (and, for ``factor: null`` records, NaN'd).
+    An ``end_date`` carrying an explicit time keeps exact ``<= end`` semantics.
+
     Returns
     -------
     pd.DataFrame
@@ -56,7 +89,7 @@ def apply_calibrations(
             continue
 
         start = pd.Timestamp(cal["start_date"]) if cal.get("start_date") else df.index.min()
-        end = pd.Timestamp(cal["end_date"]) if cal.get("end_date") else df.index.max()
+        end = _resolve_inclusive_end(cal.get("end_date"), df.index.max())
         factor = cal.get("factor")
         desc = cal.get("description", "")
 
@@ -97,6 +130,14 @@ def unify_sensor_columns(
 
     For each switch, creates a new column with the ``unified_name`` that
     concatenates data from different raw columns based on date ranges.
+
+    Notes
+    -----
+    Mapping date ranges are **inclusive at day granularity**. A date-only
+    ``end_date`` covers the whole boundary day (extended to its last
+    nanosecond), so consecutive mappings that abut on a day boundary leave no
+    unfilled hole for that day; an explicit time keeps exact ``<= end``
+    semantics.
     """
     for switch in switches:
         unified_name = switch["unified_name"]
@@ -111,7 +152,7 @@ def unify_sensor_columns(
             start = (
                 pd.Timestamp(mapping["start_date"]) if mapping.get("start_date") else df.index.min()
             )
-            end = pd.Timestamp(mapping["end_date"]) if mapping.get("end_date") else df.index.max()
+            end = _resolve_inclusive_end(mapping.get("end_date"), df.index.max())
 
             mask = (df.index >= start) & (df.index <= end)
             part = df.loc[mask, col].rename(unified_name)
