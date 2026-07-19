@@ -23,7 +23,7 @@ magic constants):
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 from torch import nn
@@ -40,6 +40,7 @@ __all__ = [
     "ImageEncoder",
     "PrecomputedEmbedding",
     "build_visual_encoder",
+    "coerce_image_backbone",
 ]
 
 
@@ -269,6 +270,72 @@ class ImageEncoder(nn.Module):
         if other_params:
             groups.append({"params": other_params})
         return groups
+
+
+class _HubVisualBackbone(nn.Module):
+    """Trainable ``nn.Module`` adapter over a :class:`VisualBackbone`.
+
+    :func:`allsky.embeddings.backbone.build_backbone` returns an *extraction*
+    wrapper (``DinoV2Backbone``) whose :meth:`encode` runs under
+    ``inference_mode`` on CPU and detaches — unusable as a trainable image
+    backbone.  This adapter loads the wrapper's underlying hub module (via
+    ``load_torch_module``) and runs ``forward_features`` + token pooling **with
+    gradients**, exposing the ``(B, 3, H, W) -> (B, dim)`` contract
+    :class:`ImageEncoder` expects (plus ``.dim`` and a ``blocks`` view so the
+    last-*n* ViT blocks can be unfrozen).
+
+    Only the DINOv2 production path reaches this class; every test injects an
+    ``nn.Module`` stub, which :func:`coerce_image_backbone` passes through
+    untouched.
+    """
+
+    def __init__(self, backbone: Any, *, pooling: str = "cls") -> None:
+        super().__init__()
+        self.dim = int(backbone.dim)
+        self.pooling = str(getattr(backbone, "pooling", pooling))
+        loader = getattr(backbone, "load_torch_module", None)
+        if not callable(loader):
+            raise TypeError(
+                f"image backbone {type(backbone).__name__} is neither an nn.Module nor a "
+                "VisualBackbone exposing load_torch_module(); cannot use it for image-mode "
+                "training"
+            )
+        # Typed Any (not nn.Module): nn.Module.__getattr__ returns Tensor | Module,
+        # which makes forward_features(...) un-analyzable. Runtime registration as a
+        # submodule still happens because the assigned value *is* an nn.Module.
+        self.model: Any = loader()
+
+    @property
+    def blocks(self) -> Any:
+        """The backbone's transformer ``blocks`` sequence (for unfreezing), if any."""
+        return getattr(self.model, "blocks", None)
+
+    def forward(self, image: Tensor) -> Tensor:
+        """Encode ``(B, 3, H, W)`` frames to a ``(B, dim)`` embedding with gradients."""
+        out = self.model.forward_features(image)
+        cls = out["x_norm_clstoken"]
+        if self.pooling == "cls":
+            pooled = cls
+        elif self.pooling == "mean":
+            pooled = out["x_norm_patchtokens"].mean(dim=1)
+        else:
+            pooled = torch.cat([cls, out["x_norm_patchtokens"].mean(dim=1)], dim=-1)
+        return cast("Tensor", pooled)
+
+
+def coerce_image_backbone(backbone: Any, *, pooling: str = "cls") -> nn.Module:
+    """Return an ``nn.Module`` image backbone from *backbone*.
+
+    An ``nn.Module`` (the test stubs, or any already-module backbone) is returned
+    unchanged; a :class:`VisualBackbone` extraction wrapper (e.g. ``DinoV2Backbone``
+    from :func:`allsky.embeddings.backbone.build_backbone`) is wrapped in
+    :class:`_HubVisualBackbone` so it becomes a trainable, gradient-carrying image
+    encoder.  ``pooling`` is only used to seed the wrapper when the source does
+    not carry its own.
+    """
+    if isinstance(backbone, nn.Module):
+        return backbone
+    return _HubVisualBackbone(backbone, pooling=pooling)
 
 
 def build_visual_encoder(

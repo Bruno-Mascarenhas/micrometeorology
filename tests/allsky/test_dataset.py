@@ -193,6 +193,25 @@ class TestSplitByDay:
             split_days(_multi_day_index(n_days=2), val_fraction=1.0)
 
 
+class TestTrainValFractionPropagates:
+    def test_bad_val_fraction_raises_not_single_day_fallback(self, tmp_path: Path):
+        # Finding F9: train() narrowed its bare `except ValueError` so that only
+        # the "fewer than 2 distinct days" case falls back to train==val. A bad
+        # val_fraction (here 1.5) must now propagate rather than be silently
+        # swallowed into a single-day run. device='cpu' keeps this torch-free:
+        # split_days rejects the fraction before any loader/model is built.
+        from allsky.config import AllSkyConfig
+        from allsky.training import train
+
+        index_path = tmp_path / "index.parquet"
+        _multi_day_index(n_days=3).to_parquet(index_path)
+        cfg = AllSkyConfig()
+        cfg.train.device = "cpu"
+        cfg.train.out_dir = str(tmp_path / "run")
+        with pytest.raises(ValueError, match="val_fraction"):
+            train(cfg, index_path=index_path, val_fraction=1.5)
+
+
 def test_infer_feature_columns_excludes_reserved():
     index_df = make_manifest(["2026-01-01 10:02"])
     index_df["ghi"] = 100.0

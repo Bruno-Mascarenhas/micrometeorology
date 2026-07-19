@@ -372,6 +372,7 @@ def _run_inference(
     from torch.utils.data import DataLoader
 
     from allsky.modeling.registry import build_model, temporal_pooling_for_strategy
+    from allsky.training.engine import _default_image_backbone_builder
 
     dataset, embedding_dim = _build_split_dataset(
         cfg,
@@ -383,8 +384,12 @@ def _run_inference(
     )
 
     image_backbone = None
-    if cfg.data.input_mode == "image" and image_backbone_builder is not None:
-        image_backbone = image_backbone_builder()
+    if cfg.data.input_mode == "image":
+        # Same gap as training (finding F6): with no injected builder the rebuilt
+        # model still needs the backbone architecture to load_state_dict, so
+        # default to the config-named backbone. The injection hook still wins.
+        builder = image_backbone_builder or _default_image_backbone_builder(cfg, device)
+        image_backbone = builder()
     # Rebuild with the same temporal pooler the checkpoint was trained with, or
     # load_state_dict would reject an attention-pooled model's extra weights.
     temporal_pooling = temporal_pooling_for_strategy(cfg.data.alignment.strategy)
@@ -467,12 +472,17 @@ def _build_split_dataset(
 
 
 def _default_reader(cfg: ExperimentConfig, root: Path) -> EmbeddingReader:
-    """Build the safetensors embedding reader from ``cfg.data.embeddings_dir``."""
+    """Build the safetensors embedding reader from ``cfg.data.embeddings_dir``.
+
+    Preloads all shards by default (finding F7), matching the training engine.
+    """
     from allsky.embeddings.storage import SafetensorsEmbeddingReader
 
     if cfg.data.embeddings_dir is None:
         raise ValueError("input_mode='embedding' requires cfg.data.embeddings_dir")
-    reader: EmbeddingReader = SafetensorsEmbeddingReader(_resolve(cfg.data.embeddings_dir, root))
+    reader: EmbeddingReader = SafetensorsEmbeddingReader(
+        _resolve(cfg.data.embeddings_dir, root), preload=cfg.data.embeddings_preload
+    )
     return reader
 
 

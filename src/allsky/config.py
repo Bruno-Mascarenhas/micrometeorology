@@ -147,6 +147,11 @@ class DataSourceConfig(BaseModel):
     additionally uses ``embeddings_dir``. Paths are resolved by the data layer;
     image paths inside the manifest are relative POSIX paths against
     ``data_root``.
+
+    ``embeddings_preload`` (default ``True``) loads every embedding shard once
+    into one resident ``(N, dim)`` array for training/eval, instead of the small
+    LRU of open shards that thrashes under shuffled access; set it ``False`` to
+    keep the lazy LRU path (e.g. when the store does not fit in memory).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -154,6 +159,7 @@ class DataSourceConfig(BaseModel):
     manifest: str = "manifest.parquet"
     data_root: str = "."
     embeddings_dir: str | None = None
+    embeddings_preload: bool = True
     split_artifact: str = "splits.json"
     input_mode: Literal["image", "embedding"] = "image"
     alignment: AlignmentConfig = Field(default_factory=AlignmentConfig)

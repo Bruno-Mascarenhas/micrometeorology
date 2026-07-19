@@ -183,8 +183,12 @@ def run_experiment(
     from allsky.modeling.registry import build_model, temporal_pooling_for_strategy
 
     image_backbone = None
-    if cfg.data.input_mode == "image" and image_backbone_builder is not None:
-        image_backbone = image_backbone_builder()
+    if cfg.data.input_mode == "image":
+        # Production path (finding F6): with no injected builder, construct the
+        # backbone the config names (default DINOv2) so a shipped image-mode
+        # experiment (v6) actually runs. The injection hook still wins for tests.
+        builder = image_backbone_builder or _default_image_backbone_builder(cfg, resolved_device)
+        image_backbone = builder()
     # The windowed-alignment strategy selects the visual temporal pooler so the
     # model matches what the dataset emits (attention_pooling -> learned attention
     # over embedding_seq; center_frame / mean_embedding -> mask-aware mean).
@@ -249,6 +253,11 @@ def run_experiment(
             global_step,
             epochs_no_improve,
         )
+    else:
+        # Fresh start into a possibly-reused run dir: stale metrics.csv/json from
+        # an earlier run would otherwise be appended to (finding F10). Rotate them
+        # aside so this run's metrics files contain exactly this run's epochs.
+        _reset_stale_metrics(run_dir)
 
     # --- epoch loop ---------------------------------------------------------
     from torch.utils.tensorboard import SummaryWriter
@@ -504,12 +513,19 @@ def _build_datasets(
 
 
 def _default_reader(cfg: ExperimentConfig, root: Path) -> EmbeddingReader:
-    """Build the safetensors embedding reader from ``cfg.data.embeddings_dir``."""
+    """Build the safetensors embedding reader from ``cfg.data.embeddings_dir``.
+
+    Preloads every shard into one resident array by default (finding F7): shuffled
+    training makes the LRU thrash, so the whole store is loaded once unless
+    ``cfg.data.embeddings_preload`` is False.
+    """
     from allsky.embeddings.storage import SafetensorsEmbeddingReader
 
     if cfg.data.embeddings_dir is None:
         raise ValueError("input_mode='embedding' requires cfg.data.embeddings_dir")
-    reader: EmbeddingReader = SafetensorsEmbeddingReader(_resolve(cfg.data.embeddings_dir, root))
+    reader: EmbeddingReader = SafetensorsEmbeddingReader(
+        _resolve(cfg.data.embeddings_dir, root), preload=cfg.data.embeddings_preload
+    )
     return reader
 
 
@@ -589,6 +605,42 @@ def _make_loader(
 def _model_param(cfg: ExperimentConfig, key: str, default: Any) -> Any:
     """Read an architecture hyper-parameter off the permissive model config."""
     return dict(cfg.model.model_dump()).get(key, default)
+
+
+def _default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Callable[[], nn.Module]:
+    """Build the default image backbone factory for ``input_mode='image'`` (finding F6).
+
+    When no ``image_backbone_builder`` is injected, image-mode training must still
+    build a real visual backbone or the shipped v6 config cannot run.  The factory
+    constructs the backbone named by the model config (``model.backbone``, default
+    ``dinov2_vits14``; ``model.backbone_pooling``, default ``cls``) on the run
+    device via :func:`allsky.embeddings.backbone.build_backbone`, then coerces it
+    into a trainable ``nn.Module`` (:func:`allsky.modeling.visual_encoder.coerce_image_backbone`
+    wraps the DINOv2 extraction wrapper; an ``nn.Module`` — e.g. a test stub, or a
+    monkeypatched ``build_backbone`` — passes straight through).  Construction is
+    deferred to call time and any failure is re-raised with a message naming the
+    config knobs to fix.
+    """
+
+    def build() -> nn.Module:
+        from allsky.embeddings.backbone import build_backbone
+        from allsky.modeling.visual_encoder import coerce_image_backbone
+
+        params = dict(cfg.model.model_dump())
+        name = str(params.get("backbone", "dinov2_vits14"))
+        pooling = str(params.get("backbone_pooling", "cls"))
+        try:
+            backbone = build_backbone(name, pooling=pooling, device=device)  # type: ignore[arg-type]
+            return coerce_image_backbone(backbone, pooling=pooling)
+        except Exception as exc:
+            raise RuntimeError(
+                "failed to construct the default image backbone for input_mode='image' "
+                f"(model.backbone={name!r}, model.backbone_pooling={pooling!r}, "
+                f"train.device={device!r}); fix those config knobs or inject an "
+                f"image_backbone_builder. Cause: {exc}"
+            ) from exc
+
+    return build
 
 
 def _fit_climatology(
@@ -1058,6 +1110,27 @@ def _truncate_metrics(run_dir: Path, fields: list[str], resumed_epoch: int) -> l
     _rewrite_csv(metrics_csv, fields, history)
     _atomic_write_json(metrics_json, history)
     return history
+
+
+def _reset_stale_metrics(run_dir: Path) -> None:
+    """Rotate any pre-existing ``metrics.csv`` / ``metrics.json`` aside on a fresh run.
+
+    A fresh (non-resume) run into a reused run directory must not append to the
+    previous run's metrics (finding F10).  Each stale file is renamed to
+    ``<name>.stale`` (replacing an older backup) rather than deleted, so the prior
+    run's numbers are still recoverable; the fresh run then re-creates the files
+    from scratch.
+    """
+    for name in ("metrics.csv", "metrics.json"):
+        path = run_dir / name
+        if path.exists():
+            backup = path.with_name(f"{name}.stale")
+            os.replace(path, backup)
+            logger.warning(
+                "fresh run: rotated stale %s aside to %s (a previous run wrote it)",
+                path,
+                backup.name,
+            )
 
 
 def _atomic_write_json(path: Path, obj: Any) -> None:

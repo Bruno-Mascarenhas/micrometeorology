@@ -224,7 +224,13 @@ def train(
 
     try:
         train_df, val_df = split_days(index_df, val_fraction=val_fraction, seed=cfg.train.seed)
-    except ValueError:
+    except ValueError as exc:
+        # Only the "fewer than 2 distinct days" case falls back to train==val
+        # (finding F9). Any other ValueError from split_days — notably a bad
+        # val_fraction outside (0, 1) — is a real configuration error and must
+        # propagate rather than be silently swallowed into a single-day run.
+        if "distinct day" not in str(exc):
+            raise
         logger.warning(
             "Index spans a single calendar day: validation REUSES the training day. "
             "Metrics are not leakage-free — smoke/debug runs only."

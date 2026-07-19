@@ -197,6 +197,19 @@ class DinoV2Backbone:
         model.to(self._device)
         self._model = model
 
+    def load_torch_module(self) -> Any:
+        """Load (once) and return the underlying hub ``nn.Module``.
+
+        The extraction path uses :meth:`encode` (``inference_mode``, detached,
+        CPU) — unusable for end-to-end image training.  Image-mode training
+        instead wants the raw model so it can run it *with* gradients and
+        register / freeze its parameters; this returns exactly that module (its
+        ``blocks`` sequence supports the usual last-*n* ViT unfreezing).  Loading
+        happens once per process and is cached on the instance.
+        """
+        self._ensure_model()
+        return self._model
+
     def transform(self, images: Sequence[np.ndarray]) -> Any:
         """Resize + ImageNet-normalize frames to a ``(B, 3, H, W)`` CPU tensor."""
         import torch

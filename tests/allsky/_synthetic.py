@@ -58,9 +58,20 @@ def _sensor(site: SiteConfig, first: pd.Timestamp, last: pd.Timestamp) -> pd.Dat
 
 
 def make_dataset(
-    tmp_path: Path, *, n_days: int = 3, per_day: int = 20
+    tmp_path: Path,
+    *,
+    n_days: int = 3,
+    per_day: int = 20,
+    write_images: bool = False,
+    image_px: int = 8,
 ) -> tuple[Path, pd.DataFrame, object]:
-    """Build a tiny manifest + split under ``tmp_path/data``; return (root, manifest, split)."""
+    """Build a tiny manifest + split under ``tmp_path/data``; return (root, manifest, split).
+
+    When *write_images* is True, a tiny ``image_px``x``image_px`` RGB JPEG is
+    written at every manifest ``image_path`` so ``input_mode='image'`` experiments
+    can actually decode frames (embedding-mode tests leave *write_images* False and
+    need no image files).
+    """
     site = SiteConfig()
     root = tmp_path / "data"
     root.mkdir(parents=True, exist_ok=True)
@@ -87,7 +98,59 @@ def make_dataset(
         manifest["day_id"].tolist(), val_fraction=0.34, test_fraction=0.0, seed=0
     )
     save_split_artifact(split, root / "splits.json")
+    if write_images:
+        write_frame_images(root, manifest, image_px=image_px)
     return root, manifest, split
+
+
+def write_frame_images(root: Path, manifest: pd.DataFrame, *, image_px: int = 8) -> None:
+    """Write a tiny deterministic JPEG at every manifest ``image_path`` under *root*."""
+    import imageio.v3 as iio
+
+    rng = np.random.default_rng(1)
+    for rel in manifest["image_path"].astype(str):
+        full = root / rel
+        full.parent.mkdir(parents=True, exist_ok=True)
+        iio.imwrite(full, rng.integers(0, 256, (image_px, image_px, 3), dtype=np.uint8), quality=90)
+
+
+def make_embeddings_store(
+    root: Path, manifest: pd.DataFrame, *, dim: int = 8, shard_size: int = 16, subdir: str = "emb"
+) -> Path:
+    """Write a real safetensors embedding store (shards + index + meta) under ``root/subdir``.
+
+    Deterministic per ``sample_id``; returns the store directory.  Lets tests
+    exercise the engine's default (non-injected) :class:`SafetensorsEmbeddingReader`
+    — including the preload path — over real on-disk shards.
+    """
+    from allsky.embeddings.storage import save_shard, shard_path, write_index, write_meta
+
+    out = root / subdir
+    out.mkdir(parents=True, exist_ok=True)
+    ids = [str(s) for s in manifest["sample_id"]]
+    rng = np.random.default_rng(0)
+    embeddings = rng.standard_normal((len(ids), dim)).astype(np.float32)
+    rows = []
+    for shard_index, start in enumerate(range(0, len(ids), shard_size)):
+        block = embeddings[start : start + shard_size]
+        save_shard(shard_path(out, shard_index), block)
+        for row, sid in enumerate(ids[start : start + shard_size]):
+            rows.append({"sample_id": sid, "shard": shard_index, "row": row})
+    write_index(out, pd.DataFrame(rows, columns=["sample_id", "shard", "row"]))
+    write_meta(
+        out,
+        {
+            "backbone": "fake",
+            "revision": "fake-v1",
+            "pooling": "fake",
+            "dim": dim,
+            "transform": "identity",
+            "config_sha256": None,
+            "count": len(ids),
+            "dtype": "fp16",
+        },
+    )
+    return out
 
 
 def make_config(
