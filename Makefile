@@ -32,12 +32,12 @@ test-verbose:
 	pytest -n auto -v tests/
 
 # Mirrors the CI vulnerability gate so advisory failures surface before a push.
-# dev+video+allsky is the widest auditable set. torch and torchvision ship from
-# the PyTorch index (as +cpu local versions), not PyPI, so pip-audit cannot
-# resolve them — both are excluded via --no-emit-package while the rest of the
-# allsky extra (safetensors, tensorboard, tqdm, imageio-ffmpeg) gets audited.
+# dev+video+allsky is the widest auditable set. torch ships from the PyTorch
+# index (as a +cpu local version), not PyPI, so pip-audit cannot resolve it — it
+# is excluded via --no-emit-package while the rest of the allsky extra
+# (safetensors, tensorboard, tqdm, imageio-ffmpeg) gets audited.
 audit:
-	$(UV) export --frozen --extra dev --extra video --extra allsky --no-emit-package torch --no-emit-package torchvision --format requirements-txt --no-emit-project -o requirements-audit.txt
+	$(UV) export --frozen --extra dev --extra video --extra allsky --no-emit-package torch --format requirements-txt --no-emit-project -o requirements-audit.txt
 	uvx pip-audit --strict --disable-pip -r requirements-audit.txt
 	rm -f requirements-audit.txt
 
