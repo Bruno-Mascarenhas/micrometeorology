@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -15,9 +15,6 @@ from allsky.data.splits import (
     load_split_artifact,
     save_split_artifact,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 DAYS = [f"2025-03-{d:02d}" for d in range(1, 21)]  # 20 distinct days
 

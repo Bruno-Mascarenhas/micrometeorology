@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import imageio.v3 as iio
 import numpy as np
@@ -12,9 +12,6 @@ import pytest
 from typer.testing import CliRunner
 
 from allsky.cli import app
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 runner = CliRunner()
 

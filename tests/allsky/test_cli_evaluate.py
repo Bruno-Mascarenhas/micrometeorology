@@ -8,7 +8,7 @@ exit 0), a missing checkpoint (non-zero exit) and cross-model comparison.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -28,9 +28,6 @@ from allsky.embeddings.storage import (  # noqa: E402
 from allsky.evaluation.reports import compare_experiments  # noqa: E402
 from allsky.training.engine import run_experiment  # noqa: E402
 from tests.allsky import _synthetic as synthetic  # noqa: E402
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 runner = CliRunner()
 

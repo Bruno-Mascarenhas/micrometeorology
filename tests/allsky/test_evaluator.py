@@ -9,7 +9,7 @@ paths (warn by default, error under strict).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -18,9 +18,6 @@ torch = pytest.importorskip("torch")
 from allsky.evaluation.evaluator import evaluate_checkpoint  # noqa: E402
 from allsky.training.engine import run_experiment  # noqa: E402
 from tests.allsky import _synthetic as synthetic  # noqa: E402
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _train(tmp_path: Path, *, epochs: int = 2, targets: dict | None = None):

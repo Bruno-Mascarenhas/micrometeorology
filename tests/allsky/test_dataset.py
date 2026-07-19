@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import imageio.v3 as iio
 import numpy as np
@@ -25,9 +26,6 @@ from allsky.dataset import (
     infer_feature_columns,
 )
 from allsky.training import split_days
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 FEATURE_COLUMNS = ["ghi", "par"]
 

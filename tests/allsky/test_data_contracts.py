@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -22,9 +22,6 @@ from allsky.data.contracts import (
     to_relative,
 )
 from allsky.features import resolve_feature_set
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 class TestManifestColumnDtypes:

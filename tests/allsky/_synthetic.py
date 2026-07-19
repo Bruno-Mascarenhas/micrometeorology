@@ -9,7 +9,7 @@ embedding reader.  Everything is offline, CPU-only and needs no image files.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -18,9 +18,6 @@ from allsky import solar
 from allsky.config import ExperimentConfig, SiteConfig
 from allsky.data.manifest import build_manifest, write_manifest_parquet
 from allsky.data.splits import create_day_splits, save_split_artifact
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 _MET = {
     "AirT1_C_Avg": (20.0, 30.0),

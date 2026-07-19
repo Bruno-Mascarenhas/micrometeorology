@@ -9,8 +9,8 @@ the shards. No torch, no network.
 from __future__ import annotations
 
 import tarfile
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
 
 import pandas as pd
 import pytest
@@ -20,9 +20,6 @@ from allsky.bundle import _safe_arcname, export_colab_bundle, validate_bundle
 from allsky.config import PrepareConfig, SiteConfig
 from allsky.data.manifest import build_manifest, write_manifest_parquet
 from allsky.data.splits import create_day_splits, save_split_artifact
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable
 
 
 def _sensor_frame(site: SiteConfig, index: pd.DatetimeIndex) -> pd.DataFrame:

@@ -9,7 +9,7 @@ as tests/allsky/test_dataset.py.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -32,9 +32,6 @@ from allsky.data.manifest import (
     write_manifest_parquet,
 )
 from allsky.features import resolve_feature_set
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 @pytest.fixture

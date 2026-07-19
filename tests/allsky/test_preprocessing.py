@@ -5,7 +5,7 @@ Pure numpy/PIL: no torch, no network, synthetic arrays only.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -21,9 +21,6 @@ from allsky.preprocessing import (
     resize_image,
     visual_qc,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _rgb(height: int = 32, width: int = 48, fill: int = 128) -> np.ndarray:

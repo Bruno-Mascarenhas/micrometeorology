@@ -6,7 +6,7 @@ on torch; no DINOv2 / network is ever exercised.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import imageio.v3 as iio
 import numpy as np
@@ -16,9 +16,6 @@ import pytest
 from allsky.embeddings.backbone import FakeBackbone
 from allsky.embeddings.extract import _load_uint8, extract_embeddings
 from allsky.embeddings.storage import SafetensorsEmbeddingReader, read_index, read_meta, shard_path
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 pytest.importorskip("torch")  # FakeBackbone.encode builds a torch tensor
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -11,9 +11,6 @@ import pytest
 from allsky import sensors, solar
 from allsky.config import LabelConfig, SensorConfig, SiteConfig
 from allsky.erbs import pseudo_diffuse
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 # Mirrors the real data/LBM_lenta_2025.dat TOA5 header structure
 # (station line / column names / units / aggregation), reduced to the

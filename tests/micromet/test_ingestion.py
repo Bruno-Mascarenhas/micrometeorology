@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from micrometeorology.sensors.ingestion import merge_dat_files
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _write_toa5(path: Path, columns: list[str], rows: list[tuple[str, list[float]]]) -> str:

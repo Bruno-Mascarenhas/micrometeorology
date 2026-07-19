@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import json
 import math
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -25,9 +26,6 @@ from allsky.data.manifest import build_manifest, write_manifest_parquet  # noqa:
 from allsky.data.splits import create_day_splits, save_split_artifact  # noqa: E402
 from allsky.evaluation.evaluator import evaluate_checkpoint  # noqa: E402
 from allsky.training.engine import run_experiment  # noqa: E402
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 _MET = {
     "AirT1_C_Avg": (20.0, 30.0),

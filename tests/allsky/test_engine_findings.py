@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -23,9 +24,6 @@ from torch import nn  # noqa: E402
 from allsky.config import ExperimentConfig  # noqa: E402
 from allsky.training.engine import run_experiment  # noqa: E402
 from tests.allsky import _synthetic as synthetic  # noqa: E402
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 class TinyConvBackbone(nn.Module):

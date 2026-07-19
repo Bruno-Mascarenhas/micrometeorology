@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from typing import TYPE_CHECKING, Any, cast
+from pathlib import Path
+from typing import Any, cast
 
 import imageio.v3 as iio
 import numpy as np
@@ -17,10 +18,7 @@ from allsky.data.datasets import MultimodalEmbeddingDataset, MultimodalImageData
 from allsky.data.manifest import build_manifest
 from allsky.features import resolve_feature_set
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from torch.utils.data import Dataset
+type TorchDataset = Any  # runtime type: torch.utils.data.Dataset[dict[str, Any]]
 
 _MET = {
     "AirT1_C_Avg": (20.0, 30.0),
@@ -181,7 +179,7 @@ class TestImageDatasetContract:
             manifest, resolve_feature_set("safe"), data_root=root, image_size=16, train=True
         )
         loader: DataLoader[dict[str, Any]] = DataLoader(
-            cast("Dataset[dict[str, Any]]", dataset), batch_size=3, shuffle=False
+            cast("TorchDataset", dataset), batch_size=3, shuffle=False
         )
         batch = next(iter(loader))
         assert batch["image"].shape == (3, 3, 16, 16)

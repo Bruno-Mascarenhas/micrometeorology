@@ -28,21 +28,16 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
+from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 from micrometeorology.wrf.interpolation import vertical_interpolate
+from micrometeorology.wrf.reader import WRFDataset
 from micrometeorology.wrf.safety import assert_reasonable_array_size
-
-if TYPE_CHECKING:
-    from datetime import datetime
-
-    from numpy.typing import NDArray
-
-    from micrometeorology.wrf.reader import WRFDataset
-
 
 # ---------------------------------------------------------------------------
 # geojson.py oracles

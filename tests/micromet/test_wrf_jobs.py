@@ -8,7 +8,7 @@ import subprocess
 import sys
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import netCDF4
 import numpy as np
@@ -17,9 +17,6 @@ import pytest
 from micrometeorology.cli.export_wrf_geojson import _normalize_var_list
 from micrometeorology.wrf import jobs
 from tests.micromet import _reference
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 NT, NZ, NY, NX = 5, 4, 4, 5
 

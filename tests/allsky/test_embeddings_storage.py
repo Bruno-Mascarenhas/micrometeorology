@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -23,9 +24,6 @@ from allsky.embeddings.storage import (
     write_index,
     write_meta,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _write_store(

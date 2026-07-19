@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import netCDF4
 import numpy as np
@@ -15,9 +15,6 @@ from tests.micromet._reference import (
     compute_wind_vectors_at_height,
     interpolate_speed_to_height,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 NT, NZ, NY, NX = 7, 5, 4, 5
 

@@ -8,7 +8,7 @@ and bad-resume-path rejection on both routes.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -23,9 +23,6 @@ from allsky.config import SiteConfig  # noqa: E402
 from allsky.data.manifest import build_manifest, write_manifest_parquet  # noqa: E402
 from allsky.data.splits import create_day_splits, save_split_artifact  # noqa: E402
 from allsky.embeddings.storage import save_shard, shard_path, write_index, write_meta  # noqa: E402
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 runner = CliRunner()
 
