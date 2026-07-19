@@ -191,3 +191,66 @@ class TestUnifySensorColumns:
         assert "unified" in df.columns
         assert df.loc["2018-06-01", "unified"] == 10
         assert df.loc["2019-03-01", "unified"] == 20
+
+
+class TestOverlapGuard:
+    """Inclusive end dates make same-day-abutting records a config error."""
+
+    def test_same_day_abutment_raises_clear_error(self, sample_data):
+        cals = [
+            {
+                "column": "CM3Up_Wm2_Avg",
+                "start_date": "2018-06-01",
+                "end_date": "2018-12-31",
+                "factor": 0.5,
+                "description": "first",
+            },
+            {
+                "column": "CM3Up_Wm2_Avg",
+                "start_date": "2018-12-31",
+                "end_date": "2019-06-01",
+                "factor": 0.9,
+                "description": "second",
+            },
+        ]
+        with pytest.raises(ValueError, match=r"Overlapping calibrations.*2018-12-31"):
+            apply_calibrations(sample_data, cals)
+
+    def test_next_day_abutment_is_clean(self, sample_data):
+        cals = [
+            {
+                "column": "CM3Up_Wm2_Avg",
+                "start_date": "2018-06-01",
+                "end_date": "2018-12-31",
+                "factor": 0.5,
+                "description": "first",
+            },
+            {
+                "column": "CM3Up_Wm2_Avg",
+                "start_date": "2019-01-01",
+                "end_date": "2019-06-01",
+                "factor": 0.9,
+                "description": "second",
+            },
+        ]
+        original = sample_data["CM3Up_Wm2_Avg"].copy()
+        apply_calibrations(sample_data, cals)
+        # Whole boundary day gets the FIRST factor; next day starts the second.
+        end_day = sample_data.loc["2018-12-31", "CM3Up_Wm2_Avg"]
+        np.testing.assert_allclose(end_day, original.loc["2018-12-31"] * 0.5)
+        next_day = sample_data.loc["2019-01-01", "CM3Up_Wm2_Avg"]
+        np.testing.assert_allclose(next_day, original.loc["2019-01-01"] * 0.9)
+
+    def test_unify_same_day_abutment_raises(self, sample_data):
+        df = sample_data.rename(columns={"CM3Up_Wm2_Avg": "sensor_A", "PSP1_Wm2_Avg": "sensor_B"})
+        switches = [
+            {
+                "unified_name": "unified",
+                "mappings": [
+                    {"column": "sensor_A", "start_date": "2018-06-01", "end_date": "2018-12-31"},
+                    {"column": "sensor_B", "start_date": "2018-12-31", "end_date": "2019-06-01"},
+                ],
+            }
+        ]
+        with pytest.raises(ValueError, match="Overlapping sensor-switch mappings"):
+            unify_sensor_columns(df, switches)
