@@ -1,22 +1,13 @@
-"""``allsky`` command-line interface.
+"""Legacy ``allsky`` CLI commands (info, extract-frames, build-index, train).
 
-Examples
---------
-Show the resolved configuration and the video -> wall-clock mapping:
-    allsky info --config configs/allsky/default.yaml
+These four commands are the pre-refactor pipeline, moved here verbatim from the
+old ``allsky/cli.py`` module during the Wave C1b package split. They are
+attached to the package app by :func:`register`, so command names and
+``--help`` output are byte-identical to the old single-module CLI.
 
-Extract every 60th frame from a one-day timelapse:
-    allsky extract-frames data/all-sky/allsky-20260625.mp4 --out scratch/frames --step 60
-
-Pair frames with sensor records into a training index:
-    allsky build-index --manifest scratch/frames/manifest.parquet --out output/allsky/index.parquet
-
-Train (or resume) SkyFusionNet:
-    allsky train --index output/allsky/index.parquet --epochs 2 --device cpu
-
-Heavy dependencies (torch, imageio-ffmpeg) and the sibling pipeline modules
-are imported lazily inside each command so ``allsky info``/``--help`` work in
-a minimal environment.
+Heavy dependencies (torch, imageio-ffmpeg) and the sibling pipeline modules are
+imported lazily inside each command so ``allsky info`` / ``--help`` work in a
+minimal environment.
 """
 
 from __future__ import annotations
@@ -30,13 +21,7 @@ from typing import Annotated
 
 import typer
 
-from allsky.config import load_config
-
-app = typer.Typer(
-    name="allsky",
-    no_args_is_help=True,
-    help="All-sky camera + radiation-sensor fusion pipeline (LabMiM/UFBA).",
-)
+from allsky.config import is_experiment_config, load_config, load_experiment_config
 
 ConfigOption = Annotated[
     Path | None,
@@ -57,7 +42,6 @@ class DeviceChoice(StrEnum):
     mps = "mps"
 
 
-@app.command()
 def info(config: ConfigOption = None) -> None:
     """Print the video -> time mapping and the fully resolved configuration."""
     cfg = load_config(config)
@@ -83,7 +67,6 @@ def info(config: ConfigOption = None) -> None:
     typer.echo(json.dumps(cfg.model_dump(), indent=2, default=str))
 
 
-@app.command("extract-frames")
 def extract_frames_cmd(
     video: Annotated[
         Path,
@@ -108,7 +91,6 @@ def extract_frames_cmd(
     typer.echo(f"Extracted {len(manifest)} frames from {video} into {out_dir}")
 
 
-@app.command("build-index")
 def build_index_cmd(
     manifest: Annotated[
         Path,
@@ -141,7 +123,6 @@ def build_index_cmd(
         typer.echo(f"Target sources: {counts}")
 
 
-@app.command()
 def train(
     config: ConfigOption = None,
     index: Annotated[
@@ -153,9 +134,12 @@ def train(
         ),
     ] = None,
     resume: Annotated[
-        Path | None,
+        str | None,
         typer.Option(
-            help="Checkpoint to resume from (e.g. <out-dir>/last.pt).", exists=True, dir_okay=False
+            help=(
+                "Checkpoint to resume from. Legacy configs: path to <out-dir>/last.pt. "
+                "Experiment configs: 'auto' (find last.ckpt in the run dir) or a path."
+            ),
         ),
     ] = None,
     epochs: Annotated[int | None, typer.Option(min=1, help="Override train.epochs.")] = None,
@@ -163,15 +147,33 @@ def train(
         int | None, typer.Option(min=1, help="Override train.batch_size.")
     ] = None,
     device: Annotated[DeviceChoice | None, typer.Option(help="Override train.device.")] = None,
-    out_dir: Annotated[Path | None, typer.Option(help="Override train.out_dir.")] = None,
+    out_dir: Annotated[Path | None, typer.Option(help="Override the output/run directory.")] = None,
+    data_root: Annotated[
+        Path | None,
+        typer.Option(help="Experiment configs: data root for the manifest/split/embeddings."),
+    ] = None,
+    amp: Annotated[
+        bool | None,
+        typer.Option("--amp/--no-amp", help="Experiment configs: override mixed precision."),
+    ] = None,
     val_fraction: Annotated[
         float, typer.Option(min=0.01, max=0.99, help="Fraction of DAYS held out for validation.")
     ] = 0.2,
 ) -> None:
-    """Train SkyFusionNet on a built index (day-based train/val split)."""
+    """Train on a built index (legacy) or run a multimodal experiment.
+
+    A config declaring ``experiment: true`` routes to the new multimodal engine
+    (``--data-root`` / ``--amp`` apply, ``--resume`` accepts ``auto`` or a path);
+    any other config keeps the byte-identical legacy SkyFusionNet behaviour.
+    """
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
     )
+
+    if config is not None and is_experiment_config(config):
+        _train_experiment(config, epochs, batch_size, device, out_dir, data_root, amp, resume)
+        return
+
     cfg = load_config(config)
     if epochs is not None:
         cfg.train.epochs = epochs
@@ -182,16 +184,72 @@ def train(
     if out_dir is not None:
         cfg.train.out_dir = str(out_dir)
 
+    # Preserve the legacy --resume semantics (a path that must exist) now that the
+    # option type is a plain string shared with the experiment dispatch.
+    resume_path: Path | None = None
+    if resume is not None:
+        resume_path = Path(resume)
+        if not resume_path.is_file():
+            raise typer.BadParameter(
+                f"resume checkpoint does not exist: {resume}", param_hint="--resume"
+            )
+
     from allsky.training import train as run_training  # lazy: pulls torch at run time
 
-    metrics = run_training(cfg, index_path=index, resume=resume, val_fraction=val_fraction)
+    metrics = run_training(cfg, index_path=index, resume=resume_path, val_fraction=val_fraction)
     typer.echo(json.dumps(metrics, indent=2, default=str))
 
 
-def main() -> None:
-    """Console-script entry point."""
-    app()
+def _train_experiment(
+    config: Path,
+    epochs: int | None,
+    batch_size: int | None,
+    device: DeviceChoice | None,
+    out_dir: Path | None,
+    data_root: Path | None,
+    amp: bool | None,
+    resume: str | None,
+) -> None:
+    """Dispatch an ``experiment: true`` config to the multimodal training engine."""
+    exp_cfg = load_experiment_config(config)
+    if epochs is not None:
+        exp_cfg.train.epochs = epochs
+    if batch_size is not None:
+        exp_cfg.train.batch_size = batch_size
+    if device is not None:
+        exp_cfg.train.device = str(device)
+
+    resume_arg: str | None = None
+    if resume is not None:
+        if resume != "auto" and not Path(resume).exists():
+            raise typer.BadParameter(
+                f"resume checkpoint does not exist: {resume}", param_hint="--resume"
+            )
+        resume_arg = resume
+
+    from allsky.training import run_experiment  # lazy: pulls torch at run time
+
+    summary = run_experiment(
+        exp_cfg,
+        data_root=data_root,
+        output_dir=out_dir,
+        device=str(device) if device is not None else None,
+        amp=amp,
+        resume=resume_arg,
+    )
+    typer.echo(json.dumps(summary, indent=2, default=str))
 
 
-if __name__ == "__main__":
-    main()
+def register(app: typer.Typer) -> None:
+    """Attach the four legacy commands onto *app*.
+
+    Command names are pinned explicitly so ``extract-frames`` / ``build-index``
+    keep their hyphenated names (Typer would otherwise derive
+    ``extract-frames-cmd`` from the function name); ``info`` and ``train`` use
+    their function names unchanged. The result is identical to the historical
+    ``@app.command()`` decorators on the old single-module CLI.
+    """
+    app.command()(info)
+    app.command("extract-frames")(extract_frames_cmd)
+    app.command("build-index")(build_index_cmd)
+    app.command()(train)
