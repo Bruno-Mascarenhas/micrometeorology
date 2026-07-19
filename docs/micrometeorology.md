@@ -36,9 +36,7 @@ src/micrometeorology/
 │   └── export.py            # Formatted CSV export
 ├── stats/
 │   ├── metrics.py           # Model vs. observation metrics (RMSE, MAE, etc.)
-│   ├── comparison.py        # Full comparison pipeline: alignment + metrics + plots
-│   ├── climatology.py       # Diurnal, monthly, and seasonal groupings
-│   └── radiation.py         # Clearness index (Kt) and diffuse fraction (Kd)
+│   └── comparison.py        # Full comparison pipeline: alignment + metrics + plots
 └── wrf/
     ├── reader.py            # NetCDF dataset wrapper (WRFDataset context manager)
     ├── variables.py         # Variable extraction and unit conversion
@@ -480,8 +478,6 @@ side the same ids are the `id`/`id_100m`/`id_150m` fields of `VARIABLES_CONFIG`
 in `site/assets/js/variables-config.js` — the front-end's registry and the
 single source of truth for which ids the map can request. The default exporter
 variable set (`DEFAULT_VARS`) matches this registry exactly.
-`data/variables-config.js` in this repo is a **reference copy only** — nothing
-in the pipeline reads it, and it can lag behind the site's live registry.
 
 ### Guarantees the site relies on
 

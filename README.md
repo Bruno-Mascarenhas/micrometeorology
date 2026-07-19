@@ -8,9 +8,9 @@ An advanced scientific computing suite for atmospheric science research, maintai
 
 | Package | Purpose |
 |---|---|
-| **`micrometeorology`** | High-performance WRF output analysis, data export, sensor data ingestion, and statistical climatology |
+| **`micrometeorology`** | High-performance WRF output analysis, data export, and sensor data ingestion |
 | **`solrad_correction`** | Machine learning pipeline for bias correction of WRF diffuse solar radiation (SVM, LSTM, Transformer architectures) |
-| **`allsky`** | All-sky camera + radiation-sensor fusion: SkyFusionNet DNN for cloud-condition classification and diffuse-radiation prediction |
+| **`allsky`** | All-sky camera + radiation-sensor fusion: multimodal DNN (V0–V7) for diffuse-radiation and sky-condition prediction |
 
 > 📘 Detailed technical documentation for each package is located in the [`docs/`](docs/) directory.
 
@@ -29,10 +29,11 @@ src/
 │   ├── models/                   # Neural architectures (SVM, LSTM, Transformer)
 │   ├── training/                 # PyTorch training loops and early stopping
 │   └── evaluation/               # Experiment reporting and validation metrics
-└── allsky/                       # All-sky camera + radiation fusion (SkyFusionNet)
-    ├── video.py / dataset.py     # Minute-resolution frame extraction, sensor pairing
+└── allsky/                       # All-sky camera + radiation fusion (multimodal V0–V7)
+    ├── video.py / data/          # Frame extraction, v2 manifest, splits, datasets
     ├── solar.py / erbs.py        # Solar geometry, clearness index, Erbs decomposition
-    └── models.py / training.py   # Multi-task DNN and Colab-ready training loop
+    ├── embeddings/ / modeling/   # DINOv2 embeddings, sensor/visual fusion model zoo
+    └── training/ / evaluation/   # Experiment engine and stratified evaluation
 
 configs/                          # YAML environments for pipelines and ML experiments
 notebooks/                        # Colab GPU training notebooks + guide (notebooks/README.md)
@@ -145,42 +146,31 @@ labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
     -o output/figures --workers 8
 ```
 
-### 2. All-Sky Cloud Conditions & Diffuse Radiation (DNN)
+### 2. All-Sky Diffuse Radiation (multimodal DNN)
 
 The `allsky` package pairs all-sky camera timelapses (`data/all-sky/allsky-YYYYMMDD.mp4`,
-one frame per minute) with the radiation sensors and trains a multi-task DNN
-(`SkyFusionNet`) that classifies cloud condition (clear / partial / overcast, weak
-labels from the clearness index) and predicts diffuse radiation. Diffuse targets
-come from the PSP pyranometer (`PSP_Wm2_Avg`); rows are paired within a 5-minute
-tolerance and the train/validation split is by calendar day (no same-day leakage).
-
-```bash
-allsky extract-frames data/all-sky/allsky-20260625.mp4 -o output/allsky/frames
-allsky build-index --manifest output/allsky/frames/manifest.parquet --out output/allsky/index.parquet
-allsky train --index output/allsky/index.parquet   # device auto: CUDA -> MPS -> CPU, AMP on GPU
-```
-
-For Google Colab GPU training use [`notebooks/allsky_colab.ipynb`](notebooks/allsky_colab.ipynb)
-(install cell, Drive mount, TensorBoard, resumable checkpoints). Install extras with
-`pip install -e ".[allsky]"`. Full documentation: [`docs/allsky.md`](docs/allsky.md).
-
-A **multimodal v2 pipeline** builds on top of this: a portable v2 manifest with an
-anti-leakage feature policy (geometry + met only, no radiometry), precomputed
-DINOv2 embeddings, a V0–V7 model ladder (climatology → sensor/image → concat →
-FiLM → cross-attention), and an experiment engine with stratified evaluation:
+one frame per minute) with the radiation sensors into a portable **v2 dataset** and
+trains a ladder of multimodal models (V0–V7) that predict diffuse horizontal
+irradiance — and optionally a clear-sky index and a clear / partially-cloudy /
+overcast sky class — from the sky image plus non-radiometric sensor context. The
+default `safe` feature policy is geometry + meteorology only (no radiometry, no
+leakage); diffuse targets come from the PSP pyranometer (`PSP_Wm2_Avg`) or an Erbs
+pseudo-target; splits are by calendar day (no same-day leakage).
 
 ```bash
 allsky prepare-local          --config configs/allsky/data/local_prepare.yaml   # frames → v2 manifest → splits
 allsky precompute-embeddings  --config configs/allsky/data/local_prepare.yaml   # DINOv2 fp16 shards
 allsky train    --config configs/allsky/experiments/v4_film.yaml \
-                --data-root output/allsky-mm/dataset --device cuda --amp        # V1..V7 by config
+                --data-root output/allsky-mm/dataset --device cuda --amp        # V0..V7 by config
 allsky evaluate --checkpoint output/allsky-mm/experiments/v4_film/run/best.ckpt \
                 --split test --data-root output/allsky-mm/dataset               # report.md + metrics
 allsky export-colab-bundle -o bundle.tar.gz --config configs/allsky/data/local_prepare.yaml
 ```
 
-The multimodal Colab notebook is [`notebooks/allsky_multimodal_colab.ipynb`](notebooks/allsky_multimodal_colab.ipynb);
-the full design is in [`docs/allsky-architecture.md`](docs/allsky-architecture.md).
+Install extras with `pip install -e ".[allsky]"`. For Google Colab GPU training use
+[`notebooks/allsky_multimodal_colab.ipynb`](notebooks/allsky_multimodal_colab.ipynb).
+Full documentation: [`docs/allsky.md`](docs/allsky.md); the internal design is in
+[`docs/allsky-architecture.md`](docs/allsky-architecture.md).
 
 ### 3. Sensor Data Processing & Calibration
 
@@ -245,7 +235,7 @@ make audit                # dependency vulnerability gate (mirrors CI)
 |---|---|
 | [`docs/micrometeorology.md`](docs/micrometeorology.md) | Sensor ingestion, calibration, aggregation, WRF parallel pipeline, batch rendering, statistics, CLI reference, [site-labmim integration contract](docs/micrometeorology.md#front-end-integration-site-labmim), FAQ |
 | [`docs/solrad_correction.md`](docs/solrad_correction.md) | Model types (SVM/LSTM/Transformer), experiment configs, transfer learning, data leakage prevention, feature engineering, FAQ |
-| [`docs/allsky.md`](docs/allsky.md) | All-sky camera + radiation fusion: frame extraction, sensor pairing, SkyFusionNet, the multimodal v2 CLI/config quickstart, Colab GPU training, FAQ |
+| [`docs/allsky.md`](docs/allsky.md) | All-sky camera + radiation fusion: frame extraction, v2 dataset prep, the multimodal CLI/config quickstart, Colab GPU training, FAQ |
 | [`docs/allsky-architecture.md`](docs/allsky-architecture.md) | Multimodal v2 architecture: local→bundle→Colab flow, module map, artifact contracts, anti-leakage policy, V0–V7 model ladder, reproduction commands, limitations |
 
 ---

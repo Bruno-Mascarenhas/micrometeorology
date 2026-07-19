@@ -6,9 +6,7 @@ modules depend on stable, well-documented interfaces rather than raw strings.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
 
 # ---------------------------------------------------------------------------
 # WRF variable definitions
@@ -93,55 +91,3 @@ WEEKDAY_PT: dict[int, str] = {
     6: "Sábado",
     7: "Domingo",
 }
-
-
-# ---------------------------------------------------------------------------
-# Sensor definitions
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class SensorLimit:
-    """Physical limits for quality-control filtering of a sensor column."""
-
-    column: str
-    lower: float
-    upper: float
-
-
-@dataclass(frozen=True, slots=True)
-class CalibrationRecord:
-    """Immutable record of a sensor calibration for a specific date range.
-
-    These are historical facts — they represent the actual calibration state
-    of a physical instrument during a specific period and must not be altered.
-    New calibration periods should be *appended* to the configuration.
-    """
-
-    column: str
-    start_date: str | None  # ISO format YYYY-MM-DD; None = beginning of time
-    end_date: str | None  # ISO format YYYY-MM-DD; None = end of time
-    factor: float  # multiplicative correction factor
-    description: str = ""
-
-
-@dataclass
-class SensorConfig:
-    """Configuration for a sensor dataset ingestion.
-
-    Headers may vary between files because sensors are added/removed from
-    the datalogger.  The parser handles this dynamically.
-    """
-
-    name: str
-    separator: str = ","
-    skip_rows: list[int] = field(default_factory=lambda: [0, 2, 3])
-    timestamp_column: str = "TIMESTAMP"
-    drop_columns: list[str] = field(default_factory=list)
-    sentinel_value: float = -900.0
-    limits: list[SensorLimit] = field(default_factory=list)
-    # Columns that should NOT be averaged (e.g. precipitation=sum, wind_dir=vector)
-    sum_columns: list[str] = field(default_factory=list)
-    wind_dir_columns: list[str] = field(default_factory=list)
-    min_samples_per_hour: int = 6
-    extra: dict[str, Any] = field(default_factory=dict)
