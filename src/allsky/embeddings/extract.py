@@ -8,11 +8,21 @@ sidecar (see :mod:`allsky.embeddings.storage`).
 Guarantees
 ----------
 - **Resumable** — the index is the source of truth: on resume every
-  ``sample_id`` already present in ``index.parquet`` is skipped, so a rerun does
-  no duplicate work.  A shard is written *and* indexed together atomically, so a
-  crash mid-run leaves a consistent (possibly shorter) index and no orphan rows.
-- **Atomic** — shards, the index and the meta sidecar are each written to a
-  temp file and ``os.replace``-d into place; a partial shard is never visible.
+  ``sample_id`` already present in the index (the consolidated ``index.parquet``
+  **plus** any per-shard ``index.part-NNNNN.parquet`` files left by an
+  interrupted run) is skipped, so a rerun does no duplicate work and re-extracts
+  only the missing ids.
+- **Incremental index** — each shard flush writes a small per-shard *part* file
+  holding only that shard's rows (``O(shard_size)``), instead of rewriting the
+  whole index every flush (which was ``O(N^2 / shard_size)`` over a run); the
+  parts are consolidated into a single ``index.parquet`` atomically at
+  completion and then removed.  The final consolidated index equals the union of
+  all parts (plus any prior consolidated rows).
+- **Atomic + crash-consistent** — shards, index parts, the consolidated index
+  and the meta sidecar are each written to a temp file and ``os.replace``-d into
+  place.  A part is written only *after* its shard lands, so a crash never leaves
+  a part referencing a missing shard; a crash before consolidation is recovered
+  on the next resume by reading consolidated + parts.
 - **Single-process** — the backbone (and any model download) is created once by
   the caller; this loop never forks workers, so a hub model is fetched at most
   once.
@@ -24,6 +34,7 @@ this module never pulls it.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -48,6 +59,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = ["extract_embeddings"]
+
+#: Per-shard index part filename pattern (glob) and formatter.
+_INDEX_PART_GLOB = "index.part-*.parquet"
+
+
+def _index_part_path(out: Path, shard_index: int) -> Path:
+    """Path to the per-shard index part for *shard_index* inside *out*."""
+    return out / f"index.part-{shard_index:05d}.parquet"
 
 
 def _load_uint8(path: Path) -> np.ndarray:
@@ -136,15 +155,28 @@ def extract_embeddings(
     if resume:
         _check_resume_compatible(out, backbone, pooling, config_sha256)
 
-    # Resume bookkeeping: the index is the source of truth for done work.
-    existing_index = read_index(out) if resume else None
+    # Resume bookkeeping: the index (consolidated + any un-consolidated parts from
+    # an interrupted run) is the source of truth for done work.
+    if resume:
+        existing_index = _read_index_and_parts(out)
+    else:
+        # A non-resume run overwrites: drop any stale parts up front so a crash
+        # cannot leave a mix of this run's and the old run's parts.
+        _remove_index_parts(out)
+        existing_index = None
     done_ids: set[str] = set()
     next_shard = 0
     prior_rows = 0
+    # Rows carried forward for the final consolidation (seeded from existing work).
+    index_rows: list[dict[str, Any]] = []
     if existing_index is not None and len(existing_index) > 0:
         done_ids = {str(s) for s in existing_index["sample_id"]}
         next_shard = int(existing_index["shard"].max()) + 1
         prior_rows = len(existing_index)
+        index_rows = [
+            {"sample_id": str(rec["sample_id"]), "shard": int(rec["shard"]), "row": int(rec["row"])}
+            for rec in existing_index.to_dict("records")
+        ]
 
     samples = [
         (str(sid), str(path))
@@ -184,18 +216,14 @@ def extract_embeddings(
 
     if not samples:
         logger.info("extract_embeddings: all %d sample(s) already embedded; nothing to do", total)
-        # Refresh the meta so provenance reflects this (possibly new) backbone/config.
         if existing_index is not None:
+            # Consolidate any parts left by an interrupted prior run into
+            # index.parquet, and refresh provenance for this backbone/config.
+            _consolidate_index(out, index_rows)
             _write_meta(out, backbone, pooling, dtype, config_sha256, prior_rows)
         return summary
 
     out.mkdir(parents=True, exist_ok=True)
-    index_rows: list[dict[str, Any]] = []
-    if existing_index is not None:
-        index_rows = [
-            {"sample_id": str(rec["sample_id"]), "shard": int(rec["shard"]), "row": int(rec["row"])}
-            for rec in existing_index.to_dict("records")
-        ]
 
     buffer: np.ndarray | None = None
     buffer_ids: list[str] = []
@@ -211,10 +239,14 @@ def extract_embeddings(
             shard_ids = buffer_ids[:take]
             path = shard_path(out, next_shard)
             save_shard(path, shard_emb)
-            for row, sid in enumerate(shard_ids):
-                index_rows.append({"sample_id": sid, "shard": next_shard, "row": row})
-            # Index only becomes truth after both the shard and index land.
-            _write_index_atomic(out, index_rows)
+            part_rows = [
+                {"sample_id": sid, "shard": next_shard, "row": row}
+                for row, sid in enumerate(shard_ids)
+            ]
+            index_rows.extend(part_rows)
+            # Write only this shard's index part (O(shard_size)), atomically and
+            # AFTER the shard lands, so the part never references a missing shard.
+            _write_index_part(out, next_shard, part_rows)
             logger.info("extract_embeddings: wrote shard %s (%d embeddings)", path.name, take)
             shards_written += 1
             next_shard += 1
@@ -237,6 +269,9 @@ def extract_embeddings(
         flush(final=False)
 
     flush(final=True)
+    # Consolidate all parts (+ prior rows) into a single index.parquet atomically,
+    # then remove the parts. index.parquet is the source of truth for the reader.
+    _consolidate_index(out, index_rows)
     _write_meta(out, backbone, pooling, dtype, config_sha256, prior_rows + encoded)
 
     summary["encoded"] = encoded
@@ -296,13 +331,76 @@ def _check_resume_compatible(
         )
 
 
-def _write_index_atomic(out: Path, index_rows: list[dict[str, Any]]) -> None:
-    """Write the full index parquet atomically from accumulated rows."""
+def _index_frame(index_rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Build the canonical-dtype index DataFrame from accumulated rows."""
     import pandas as pd
 
     frame = pd.DataFrame(index_rows, columns=["sample_id", "shard", "row"])
-    frame = frame.astype({"sample_id": "string", "shard": "int64", "row": "int64"})
-    write_index(out, frame)
+    return frame.astype({"sample_id": "string", "shard": "int64", "row": "int64"})
+
+
+def _write_index_part(out: Path, shard_index: int, part_rows: list[dict[str, Any]]) -> None:
+    """Atomically write a per-shard index part (only *shard_index*'s rows)."""
+    frame = _index_frame(part_rows)
+    tmp = _index_part_path(out, shard_index).with_name(
+        f".index.part-{shard_index:05d}.parquet.tmp-{os.getpid()}"
+    )
+    ok = False
+    try:
+        frame.to_parquet(tmp, index=False)
+        os.replace(tmp, _index_part_path(out, shard_index))
+        ok = True
+    finally:
+        if not ok:
+            tmp.unlink(missing_ok=True)
+
+
+def _index_parts(out: Path) -> list[Path]:
+    """Sorted list of existing per-shard index part files in *out*."""
+    return sorted(out.glob(_INDEX_PART_GLOB))
+
+
+def _remove_index_parts(out: Path) -> None:
+    """Delete every per-shard index part file in *out* (if the dir exists)."""
+    if not out.exists():
+        return
+    for part in _index_parts(out):
+        part.unlink(missing_ok=True)
+
+
+def _read_index_and_parts(out: Path) -> pd.DataFrame | None:
+    """Union the consolidated ``index.parquet`` with any un-consolidated parts.
+
+    Returns the deduplicated (by ``sample_id``, consolidated rows winning) index,
+    or ``None`` when neither a consolidated index nor any part exists.  This is the
+    resume source of truth: a crash before consolidation still surfaces every id
+    that has a written shard, so those ids are skipped and only the truly missing
+    ones re-extract.
+    """
+    import pandas as pd
+
+    frames: list[pd.DataFrame] = []
+    consolidated = read_index(out)
+    if consolidated is not None:
+        frames.append(consolidated)
+    frames.extend(pd.read_parquet(part) for part in _index_parts(out))
+    if not frames:
+        return None
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.drop_duplicates(subset="sample_id", keep="first").reset_index(drop=True)
+    return merged
+
+
+def _consolidate_index(out: Path, index_rows: list[dict[str, Any]]) -> None:
+    """Write the single consolidated ``index.parquet`` atomically, then drop parts.
+
+    The consolidated index equals the union of all per-shard parts plus any prior
+    consolidated rows (carried in *index_rows*).  Parts are removed only after the
+    consolidated file lands, so an interrupted consolidation leaves the parts in
+    place for the next resume.
+    """
+    write_index(out, _index_frame(index_rows))
+    _remove_index_parts(out)
 
 
 def _write_meta(

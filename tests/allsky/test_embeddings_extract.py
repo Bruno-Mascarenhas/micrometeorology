@@ -233,6 +233,89 @@ class TestResumeCompatibility:
         assert summary["encoded"] == 4
 
 
+class TestIncrementalIndex:
+    """Finding F8: per-shard index parts, consolidated atomically at completion."""
+
+    def test_completion_consolidates_and_removes_parts(self, tmp_path: Path):
+        manifest = _make_dataset(tmp_path, n=5)
+        out = tmp_path / "emb"
+        extract_embeddings(
+            manifest, FakeBackbone(dim=8), out, data_root=tmp_path, batch_size=2, shard_size=2
+        )
+        # A completed run leaves a single consolidated index and no leftover parts.
+        assert sorted(out.glob("index.part-*.parquet")) == []
+        assert (out / "index.parquet").exists()
+        index = read_index(out)
+        assert index is not None
+        assert len(index) == 5
+        assert set(index["sample_id"].astype(str)) == set(manifest["sample_id"].astype(str))
+
+    def test_resume_after_crash_reextracts_only_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import allsky.embeddings.extract as ex
+
+        manifest = _make_dataset(tmp_path, n=5)
+        out = tmp_path / "emb"
+
+        # Crash mid-run: fail writing the SECOND shard's index part, so shard 0's
+        # part survives (2 ids done) while the rest never get indexed.
+        original = ex._write_index_part
+        calls = {"n": 0}
+
+        def flaky(out_dir: Path, shard_index: int, part_rows: list) -> None:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("crash mid-run")
+            original(out_dir, shard_index, part_rows)
+
+        monkeypatch.setattr(ex, "_write_index_part", flaky)
+        with pytest.raises(RuntimeError, match="crash mid-run"):
+            extract_embeddings(
+                manifest, FakeBackbone(dim=8), out, data_root=tmp_path, batch_size=2, shard_size=2
+            )
+
+        # Parts survive the crash; the consolidated index was never written.
+        parts = sorted(out.glob("index.part-*.parquet"))
+        assert parts, "at least the first shard's index part must survive the crash"
+        assert not (out / "index.parquet").exists()
+        part_ids = set(pd.concat([pd.read_parquet(p) for p in parts])["sample_id"].astype(str))
+        assert 0 < len(part_ids) < 5  # a genuine partial state
+
+        # Resume with the real writer: only the un-indexed ids re-extract.
+        monkeypatch.setattr(ex, "_write_index_part", original)
+        summary = extract_embeddings(
+            manifest, FakeBackbone(dim=8), out, data_root=tmp_path, batch_size=2, shard_size=2
+        )
+        assert summary["skipped"] == len(part_ids)
+        assert summary["encoded"] == 5 - len(part_ids)
+
+        # Final consolidated index equals the full sample set (== per-part union),
+        # with no leftover parts.
+        index = read_index(out)
+        assert index is not None
+        assert len(index) == 5
+        assert len(set(index["sample_id"].astype(str))) == 5
+        assert set(index["sample_id"].astype(str)) == set(manifest["sample_id"].astype(str))
+        assert sorted(out.glob("index.part-*.parquet")) == []
+
+    def test_reader_serves_all_ids_after_resume(self, tmp_path: Path):
+        """The consolidated store round-trips through the reader (values intact)."""
+        manifest = _make_dataset(tmp_path, n=6)
+        out = tmp_path / "emb"
+        extract_embeddings(
+            manifest, FakeBackbone(dim=8), out, data_root=tmp_path, batch_size=3, shard_size=2
+        )
+        reader = SafetensorsEmbeddingReader(out)
+        backbone = FakeBackbone(dim=8)
+        for _, row in manifest.iterrows():
+            loaded = _load_uint8(tmp_path / row["image_path"])
+            expected = backbone._embed_one(loaded)
+            np.testing.assert_allclose(
+                reader(row["sample_id"]), expected.astype(np.float16), rtol=0
+            )
+
+
 class TestDryRun:
     def test_dry_run_writes_nothing(self, tmp_path: Path):
         manifest = _make_dataset(tmp_path, n=4)

@@ -23,6 +23,7 @@ its numpy API, so importing it (and the reader) never pulls a heavy framework.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
@@ -35,6 +36,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "EMBEDDINGS_TENSOR_KEY",
@@ -220,12 +223,22 @@ def validate_embeddings(
 
 
 class SafetensorsEmbeddingReader:
-    """Lazy ``sample_id -> (dim,) float32`` reader over safetensors shards.
+    """``sample_id -> (dim,) float32`` reader over safetensors shards.
 
     Implements the :class:`allsky.data.datasets.EmbeddingReader` protocol
-    (callable + ``dim``).  Shards are memory-loaded on demand and kept in a small
-    LRU (default 4), so a sequential pass over samples grouped by shard reads
-    each shard file exactly once.
+    (callable + ``dim``).  Two access modes:
+
+    - **LRU** (default) — shards are memory-loaded on demand and kept in a small
+      LRU (default 4), so a *sequential* pass over samples grouped by shard reads
+      each shard file exactly once.  Under **shuffled** training the working set
+      spans every shard, so an LRU of 4 thrashes (a year of 2048-row shards is
+      hundreds of shards, giving a ~1% hit rate).
+    - **Preload** (``preload=True``) — every shard is loaded once at construction
+      into a single contiguous ``(N, dim)`` fp32 array with a ``sample_id -> row``
+      map (the resident size is logged).  ``__call__`` is then a pure array index
+      with no per-sample file I/O; this is what the training/eval engine uses by
+      default (see ``data.embeddings_preload``).  Keep the LRU path for ad-hoc
+      access to stores that do not fit in memory.
 
     Parameters
     ----------
@@ -233,7 +246,10 @@ class SafetensorsEmbeddingReader:
         Directory holding the shards, ``index.parquet`` and
         ``embeddings.meta.json``.
     cache_size:
-        Maximum number of shard arrays held open in the LRU (>= 1).
+        Maximum number of shard arrays held open in the LRU (>= 1); ignored when
+        ``preload`` is True.
+    preload:
+        Load all shards into one resident array up front (see above).
 
     Raises
     ------
@@ -241,7 +257,9 @@ class SafetensorsEmbeddingReader:
         If the index parquet is absent.
     """
 
-    def __init__(self, embeddings_dir: str | Path, *, cache_size: int = 4) -> None:
+    def __init__(
+        self, embeddings_dir: str | Path, *, cache_size: int = 4, preload: bool = False
+    ) -> None:
         if cache_size < 1:
             raise ValueError(f"cache_size must be >= 1, got {cache_size}")
         self._dir = Path(embeddings_dir)
@@ -258,6 +276,12 @@ class SafetensorsEmbeddingReader:
         self._dim = int(self.meta["dim"])
         self._cache_size = cache_size
         self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
+        #: True when all shards are resident in ``self._matrix`` (preload mode).
+        self.preloaded = False
+        self._matrix: np.ndarray | None = None
+        self._row_of: dict[str, int] = {}
+        if preload:
+            self._preload_all()
 
     @property
     def dim(self) -> int:
@@ -267,6 +291,33 @@ class SafetensorsEmbeddingReader:
     def sample_ids(self) -> list[str]:
         """All ``sample_id`` values the reader can serve (index order)."""
         return list(self._locations)
+
+    def _preload_all(self) -> None:
+        """Load every shard once into one contiguous ``(N, dim)`` fp32 array."""
+        n = len(self._locations)
+        matrix = np.empty((n, self._dim), dtype=np.float32)
+        row_of: dict[str, int] = {}
+        by_shard: dict[int, list[tuple[str, int]]] = {}
+        for sid, (shard, row) in self._locations.items():
+            by_shard.setdefault(shard, []).append((sid, row))
+        cursor = 0
+        for shard in sorted(by_shard):
+            arr = load_shard(shard_path(self._dir, shard))
+            for sid, row in by_shard[shard]:
+                matrix[cursor] = arr[row]
+                row_of[sid] = cursor
+                cursor += 1
+        self._matrix = matrix
+        self._row_of = row_of
+        self.preloaded = True
+        logger.info(
+            "preloaded %d embedding(s) into a resident %d x %d fp32 array (%.1f MiB) from %s",
+            n,
+            n,
+            self._dim,
+            matrix.nbytes / (1024 * 1024),
+            self._dir,
+        )
 
     def _shard(self, shard_index: int) -> np.ndarray:
         cached = self._cache.get(shard_index)
@@ -289,6 +340,14 @@ class SafetensorsEmbeddingReader:
             If *sample_id* has no embedding in the index (message names it).
         """
         key = str(sample_id)
+        if self._matrix is not None:
+            row = self._row_of.get(key)
+            if row is None:
+                raise KeyError(
+                    f"sample_id {sample_id!r} not found in embedding index at {self._dir}"
+                )
+            resident: np.ndarray = self._matrix[row]
+            return resident
         location = self._locations.get(key)
         if location is None:
             raise KeyError(f"sample_id {sample_id!r} not found in embedding index at {self._dir}")

@@ -119,6 +119,32 @@ class TestReader:
         assert len(reader._cache) <= 2  # asserting the LRU bound
 
 
+class TestPreload:
+    def test_preloaded_matches_lru_vectors(self, tmp_path: Path):
+        # Finding F7: preload loads every shard once into one resident array; it
+        # must serve byte-identical vectors to the lazy LRU path.
+        ids = [f"allsky-20250321-09{m:02d}" for m in range(0, 60, 10)]
+        source = _write_store(tmp_path, ids, dim=4, shard_size=2)
+        lru = SafetensorsEmbeddingReader(tmp_path)
+        preloaded = SafetensorsEmbeddingReader(tmp_path, preload=True)
+        assert preloaded.preloaded is True
+        assert lru.preloaded is False
+        assert preloaded.dim == lru.dim == 4
+        assert len(preloaded) == len(ids)
+        for i, sid in enumerate(ids):
+            got = preloaded(sid)
+            assert got.shape == (4,)
+            assert got.dtype == np.float32
+            np.testing.assert_array_equal(got, lru(sid))
+            np.testing.assert_allclose(got, source[i].astype(np.float16), rtol=0)
+
+    def test_preloaded_missing_id_raises_naming_it(self, tmp_path: Path):
+        _write_store(tmp_path, ["allsky-20250321-0900"], dim=4)
+        reader = SafetensorsEmbeddingReader(tmp_path, preload=True)
+        with pytest.raises(KeyError, match="allsky-20250321-9999"):
+            reader("allsky-20250321-9999")
+
+
 class TestReaderVsDataset:
     def test_embedding_dataset_uses_reader(self, tmp_path: Path):
         pytest.importorskip("torch")
