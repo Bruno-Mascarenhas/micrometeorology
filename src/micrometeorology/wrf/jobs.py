@@ -18,13 +18,15 @@ import logging
 import os
 import re
 import time
+from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import numpy as np
+from numpy.typing import NDArray
 
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import geojson
@@ -32,11 +34,6 @@ from micrometeorology.wrf import variables as vmod
 from micrometeorology.wrf.batch import _max_tasks_per_child
 from micrometeorology.wrf.geojson import create_wind_vectors_json, write_values_json_stream
 from micrometeorology.wrf.reader import WRFDataset, product_timezone
-
-if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
-
-    from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
 
@@ -337,8 +334,8 @@ def _run_poteolico_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list
     targets = parse_poteolico_heights(unit.variable)
     series = vmod.stream_wind_at_heights(ds, targets)
 
-    for s in series:
-        suffix = f"POT_EOLICO_{s.target}M"
+    for height_series in series:
+        suffix = f"POT_EOLICO_{height_series.target}M"
         acc = _SiteArtifactAccumulator(ds.n_time_steps) if unit.site_artifacts else None
         for meta in time_meta:
             if meta.get("skip"):
@@ -349,15 +346,15 @@ def _run_poteolico_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list
             files.append(
                 _atomic_values_json(
                     out,
-                    s.speed_steps[i],
-                    s.vmin,
-                    s.vmax,
+                    height_series.speed_steps[i],
+                    height_series.vmin,
+                    height_series.vmax,
                     date_str,
-                    s.wind_vectors[i],
+                    height_series.wind_vectors[i],
                 )
             )
             if acc is not None:
-                acc.add(i, s.speed_steps[i], date_str)
+                acc.add(i, height_series.speed_steps[i], date_str)
         if acc is not None:
             files.extend(acc.write(unit.json_dir, f"{grid}_{suffix}", grid, suffix))
     return files, []

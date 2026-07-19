@@ -8,16 +8,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import NDArray
 
+from micrometeorology.wrf.reader import WRFDataset
 from micrometeorology.wrf.safety import assert_reasonable_array_size
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
-
-    from micrometeorology.wrf.reader import WRFDataset
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _tail(value: NDArray) -> NDArray:
+def _drop_spinup_step(value: NDArray) -> NDArray:
     """Drop the spin-up first time step.
 
     When the time axis has <= 1 entries (single-timestep files) the full
@@ -55,18 +51,18 @@ def materialize_2d(value: NDArray) -> NDArray:
 def get_low_high(variable: NDArray) -> tuple[float, float]:
     """Return ``(min, max)`` of a 3-D variable, skipping the first time step.
 
-    Single-timestep inputs fall back to the full array (see :func:`_tail`).
+    Single-timestep inputs fall back to the full array (see :func:`_drop_spinup_step`).
     """
-    flat = _tail(variable).ravel()
+    flat = _drop_spinup_step(variable).ravel()
     return float(np.nanmin(flat)), float(np.nanpercentile(flat, 98))
 
 
 def get_low_high_wind(u: NDArray, v: NDArray) -> tuple[float, float]:
     """Return ``(min, max)`` wind speed from U/V arrays (skip first step).
 
-    Single-timestep inputs fall back to the full arrays (see :func:`_tail`).
+    Single-timestep inputs fall back to the full arrays (see :func:`_drop_spinup_step`).
     """
-    speed = np.hypot(_tail(u).ravel(), _tail(v).ravel())
+    speed = np.hypot(_drop_spinup_step(u).ravel(), _drop_spinup_step(v).ravel())
     return float(np.nanmin(speed)), float(np.nanmax(speed))
 
 

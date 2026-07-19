@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import pandas as pd  # noqa: TC002 — used at runtime
+import pandas as pd
 
 
 def diurnal_cycle(

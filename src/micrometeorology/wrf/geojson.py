@@ -20,17 +20,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TextIO
+from typing import Any, TextIO
 
 import numpy as np
+from numpy.typing import NDArray
 
 from micrometeorology.wrf.safety import assert_reasonable_array_size
-
-if TYPE_CHECKING:
-    from datetime import datetime
-
-    from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
 JSON_VALUE_CHUNK_SIZE = 65_536

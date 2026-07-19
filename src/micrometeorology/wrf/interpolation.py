@@ -8,14 +8,11 @@ once and serves the monotonic bracket fast path with automatic fallback.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import NDArray
 
 from micrometeorology.wrf.safety import assert_reasonable_array_size
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd  # noqa: TC002 — used at runtime
+import pandas as pd
 
 
 def clearness_index(

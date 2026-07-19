@@ -10,12 +10,8 @@ legacy scripts (controle_old.py, graficos1_UFBA_v5.py, graficos3_UFBA_v1.py).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import numpy as np
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
+from numpy.typing import NDArray
 
 
 def wind_components(

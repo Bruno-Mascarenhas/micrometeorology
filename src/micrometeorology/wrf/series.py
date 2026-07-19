@@ -7,19 +7,15 @@ at specific lat/lon coordinates (e.g. for comparison with observations).
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import xarray as xr
+from numpy.typing import NDArray
 
 from micrometeorology.wrf.reader import _decode_wrf_time_strings
 from micrometeorology.wrf.safety import assert_reasonable_array_size
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +66,6 @@ def extract_point_series(
     for fpath in files:
         logger.info("Extracting from %s", fpath.name)
         with xr.open_dataset(str(fpath)) as ds:
-            # Grid coordinates (first time step)
             lat_grid = ds["XLAT"].isel(Time=0).to_numpy()
             lon_grid = ds["XLONG"].isel(Time=0).to_numpy()
             row, col = find_nearest_indices(lat_grid, lon_grid, target_lat, target_lon)
@@ -82,13 +77,10 @@ def extract_point_series(
                 float(lon_grid[row, col]),
             )
 
-            # Parse times
             times_raw = ds["Times"].to_numpy()
             times_str = [ts.replace("_", " ") for ts in _decode_wrf_time_strings(times_raw)]
             time_idx = pd.to_datetime(times_str, errors="coerce")
 
-            # Extract spatial slice for all times and convert to DataFrame
-            # Filter variables that exist in the dataset
             valid_vars = [v for v in variables if v in ds]
             if not valid_vars:
                 continue
@@ -119,7 +111,6 @@ def extract_point_series(
             if not extracted:
                 continue
 
-            # Combine into DataFrame
             df_part = pd.DataFrame(extracted, index=time_idx)
             all_records.append(df_part)  # type: ignore
 
