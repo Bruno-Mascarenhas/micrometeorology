@@ -48,6 +48,7 @@ class TrainingState:
     )
     best_metric: float | None = None
     best_epoch: int | None = None
+    epochs_no_improve: int = 0
     optimizer_state: dict | None = None
     scheduler_state: dict | None = None
     scaler_state: dict | None = None

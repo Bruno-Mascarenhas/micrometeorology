@@ -65,6 +65,7 @@ class Trainer:
         checkpoint_config: dict[str, Any] | None = None,
         best_metric: float | None = None,
         best_epoch: int | None = None,
+        epochs_no_improve: int = 0,
     ) -> None:
         self.model: nn.Module = model
         self.device = device
@@ -93,6 +94,9 @@ class Trainer:
         # better model persisted by the previous run.
         self.best_metric: float | None = best_metric
         self.best_epoch: int | None = best_epoch
+        # Early-stopping no-improvement counter carried across a resume so
+        # patience is not silently reset to zero when training continues.
+        self.epochs_no_improve = epochs_no_improve
         self.dataloader_settings: DataLoaderSettings | None = None
 
     def train(
@@ -120,6 +124,7 @@ class Trainer:
             self.scaler_state = self._resume_scaler_state
             self.state.best_metric = self.best_metric
             self.state.best_epoch = self.best_epoch
+            self.state.epochs_no_improve = self.epochs_no_improve
             self.state.optimizer_state = self.optimizer_state
             self.state.scheduler_state = self.scheduler_state
             self.state.scaler_state = self.scaler_state
@@ -167,6 +172,9 @@ class Trainer:
             # Resume: early stopping must measure improvement against the
             # previous run's best metric, not restart from scratch.
             early_stop.best_score = self.best_metric
+        # Resume: restore the no-improvement counter so patience continues from
+        # where the interrupted run left off instead of resetting to zero.
+        early_stop.counter = self.epochs_no_improve
 
         # Automatic Mixed Precision (AMP)
         use_amp = settings.amp
@@ -260,6 +268,11 @@ class Trainer:
             # LR Scheduler step
             scheduler.step(monitor)
 
+            # Update early stopping BEFORE persisting so any checkpoint written
+            # this epoch records the current no-improvement counter; a later
+            # resume restores it instead of resetting patience to zero.
+            stop = early_stop(monitor)
+
             # Best-model tracking keeps only CPU model weights in memory.
             if best.capture_if_better(plain_model, monitor, epoch + 1):
                 self.best_metric = best.metric
@@ -275,6 +288,7 @@ class Trainer:
                         dataloader_settings=self.dataloader_settings,
                         best_metric=self.best_metric,
                         best_epoch=self.best_epoch,
+                        epochs_no_improve=early_stop.counter,
                     )
 
             if checkpoint_manager.should_save_last(epoch + 1):
@@ -288,11 +302,12 @@ class Trainer:
                     dataloader_settings=self.dataloader_settings,
                     best_metric=self.best_metric,
                     best_epoch=self.best_epoch,
+                    epochs_no_improve=early_stop.counter,
                 )
 
             extra = ""
             # Early stopping
-            if early_stop(monitor):
+            if stop:
                 extra = " [EARLY STOP]"
                 progress.end_epoch(train_loss, val_loss, extra)
                 break
@@ -325,12 +340,14 @@ class Trainer:
         # persist clean (uncompiled) keys.
         self.model = plain_model
 
+        self.epochs_no_improve = early_stop.counter
         self.optimizer_state = optimizer.state_dict()
         self.scheduler_state = scheduler.state_dict()
         self.scaler_state = scaler.state_dict() if scaler is not None else None
         self.state.completed_epochs = self.completed_epochs
         self.state.best_metric = self.best_metric
         self.state.best_epoch = self.best_epoch
+        self.state.epochs_no_improve = self.epochs_no_improve
         self.state.optimizer_state = self.optimizer_state
         self.state.scheduler_state = self.scheduler_state
         self.state.scaler_state = self.scaler_state

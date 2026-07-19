@@ -66,6 +66,7 @@ class CheckpointManager:
         dataloader_settings: DataLoaderSettings | None,
         best_metric: float | None = None,
         best_epoch: int | None = None,
+        epochs_no_improve: int = 0,
     ) -> None:
         """Write ``best.pt``; ``best_metric``/``best_epoch`` default to this call's values."""
         self.save(
@@ -80,6 +81,7 @@ class CheckpointManager:
             dataloader_settings=dataloader_settings,
             best_metric=best_metric if best_metric is not None else metric,
             best_epoch=best_epoch if best_epoch is not None else epoch,
+            epochs_no_improve=epochs_no_improve,
         )
 
     def save_last(
@@ -94,6 +96,7 @@ class CheckpointManager:
         dataloader_settings: DataLoaderSettings | None,
         best_metric: float | None = None,
         best_epoch: int | None = None,
+        epochs_no_improve: int = 0,
     ) -> None:
         """Write ``last.pt`` for resume, carrying the best metric/epoch seen so far."""
         self.save(
@@ -108,6 +111,7 @@ class CheckpointManager:
             dataloader_settings=dataloader_settings,
             best_metric=best_metric,
             best_epoch=best_epoch,
+            epochs_no_improve=epochs_no_improve,
         )
 
     def save(
@@ -124,12 +128,14 @@ class CheckpointManager:
         dataloader_settings: DataLoaderSettings | None,
         best_metric: float | None = None,
         best_epoch: int | None = None,
+        epochs_no_improve: int = 0,
     ) -> None:
         """Serialize model/optimizer/scheduler/scaler state to ``filename``.
 
         A no-op when no checkpoint directory is configured. Resume-critical
-        metadata (kind, monitored metric, best metric/epoch, DataLoader settings)
-        is embedded alongside the tensors.
+        metadata (kind, monitored metric, best metric/epoch, early-stopping
+        no-improvement counter, DataLoader settings) is embedded alongside the
+        tensors.
         """
         if self.directory is None:
             return
@@ -148,6 +154,9 @@ class CheckpointManager:
                 # to seed best-model tracking and early stopping.
                 "best_metric": best_metric,
                 "best_epoch": best_epoch,
+                # Early-stopping no-improvement counter at this epoch; resume
+                # restores it so patience is not silently reset to zero.
+                "epochs_no_improve": epochs_no_improve,
                 "dataloader": dataloader_settings.to_dict()
                 if dataloader_settings is not None
                 else {},
