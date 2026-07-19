@@ -134,6 +134,18 @@ def run(
         ),
     ] = None,
     skip_first: Annotated[int, typer.Option(help="Time steps to skip.")] = 0,
+    site_artifacts: Annotated[
+        bool,
+        typer.Option(
+            "--site-artifacts/--no-site-artifacts",
+            help=(
+                "Also write the consolidated site artifacts per domain/variable: "
+                "{D}_{VAR}.series.bin (cell time-series via HTTP Range) and "
+                "{D}_{VAR}.summary.json (per-step domain stats), plus the v2 "
+                "manifest fields describing them."
+            ),
+        ),
+    ] = True,
     workers: Annotated[
         int | None,
         typer.Option("-w", "--workers", help=f"Parallel workers (default: {default_workers()})."),
@@ -158,7 +170,9 @@ def run(
     typer.echo(f"Variables: {var_list}")
     typer.echo(f"Workers: {resolved_workers}")
 
-    units = jobs.build_units(paths, var_list, output_dir, geojson_dir, skip_first)
+    units = jobs.build_units(
+        paths, var_list, output_dir, geojson_dir, skip_first, site_artifacts=site_artifacts
+    )
     results = jobs.execute_units(units, resolved_workers, echo=typer.echo)
 
     for result in results:
@@ -167,11 +181,20 @@ def run(
     manifest_path = jobs.write_run_manifest(output_dir, results)
     if manifest_path:
         typer.echo(f"✓ Manifest: {manifest_path}")
-    generated_count = sum(
-        len(result.files) for result in results if result.kind in {"values_json", "poteolico"}
-    )
+    step_count = 0
+    artifact_count = 0
+    for result in results:
+        if result.kind not in {"values_json", "poteolico"}:
+            continue
+        for file_path in result.files:
+            if file_path.endswith((".series.bin", ".summary.json")):
+                artifact_count += 1
+            else:
+                step_count += 1
     failed = [result for result in results if result.error]
-    typer.echo(f"\n✓ Generated {generated_count} JSON files")
+    typer.echo(f"\n✓ Generated {step_count} JSON files")
+    if artifact_count:
+        typer.echo(f"✓ Generated {artifact_count} consolidated site artifacts (series/summary)")
     if failed:
         typer.echo(f"✗ {len(failed)} work units failed:")
         for result in failed:

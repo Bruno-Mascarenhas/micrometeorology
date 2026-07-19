@@ -58,6 +58,17 @@ def write_values_json_stream(
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    # A fully masked/NaN field yields NaN scale bounds (nanmin/nanpercentile),
+    # and json.dump would happily serialize them as bare NaN tokens — invalid
+    # JSON that only fails later, in every visitor's browser. Fail the work
+    # unit here instead; allow_nan=False below backstops the same class of bug
+    # in wind_data.
+    if not (np.isfinite(scale_min) and np.isfinite(scale_max)):
+        raise ValueError(
+            f"Non-finite scale bounds ({scale_min!r}, {scale_max!r}) for {out.name}: "
+            "the source field has no finite values"
+        )
+
     metadata: dict[str, Any] = {
         "scale_values": [round(float(x), 2) for x in np.linspace(scale_min, scale_max, 6)],
         "date_time": date_str,
@@ -67,7 +78,7 @@ def write_values_json_stream(
 
     with open(out, "w", encoding="utf-8") as f:
         f.write('{"metadata":')
-        json.dump(metadata, f, separators=(",", ":"), ensure_ascii=False)
+        json.dump(metadata, f, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
         f.write(',"values":[')
         _write_flat_values_chunks(f, arr, chunk_size=chunk_size)
         f.write("]}")

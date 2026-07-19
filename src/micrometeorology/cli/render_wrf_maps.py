@@ -150,7 +150,8 @@ def _build_tasks_for_domain(
         nc_suffix = VARIABLE_NETCDF_MAP.get(var_name, var_name.upper())
 
         if var_name == WRFVariable.TEMPERATURE:
-            t2, psfc, vmin, vmax = vmod.extract_temperature(ds)
+            t2, vmin, vmax = vmod.extract_temperature(ds)
+            psfc = ds.get_variable("PSFC") / 100.0
             for meta in time_meta:
                 if meta.get("skip"):
                     continue
