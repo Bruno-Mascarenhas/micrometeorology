@@ -531,7 +531,9 @@ def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> P
 _TEMP_FILE_PATTERN = re.compile(r"\.tmp-(\d+)$")
 
 
-def _sweep_stale_temp_files(dirs: Sequence[str], *, sweep_pids: frozenset[int] = frozenset()) -> int:
+def _sweep_stale_temp_files(
+    dirs: Sequence[str], *, sweep_pids: frozenset[int] = frozenset()
+) -> int:
     """Remove orphaned ``.tmp-<pid>`` files whose owning process is dead.
 
     A worker killed mid-write (OOM kill, broken pool teardown) can leave its
