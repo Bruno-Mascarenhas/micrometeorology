@@ -76,11 +76,11 @@ def resolve_run_device(requested: str) -> str:
     """Resolve *requested* to a concrete device, erroring on unavailable cuda.
 
     Delegates ``"auto"`` resolution to
-    :func:`allsky.training.legacy.resolve_device`, then raises a clear
+    :func:`allsky.training.device.resolve_device`, then raises a clear
     :class:`RuntimeError` when ``"cuda"`` is asked for but no CUDA device is
     available (rather than failing opaquely deep inside the first ``.to("cuda")``).
     """
-    from allsky.training.legacy import resolve_device
+    from allsky.training.device import resolve_device
 
     device = resolve_device(requested)
     if device == "cuda" and not torch.cuda.is_available():

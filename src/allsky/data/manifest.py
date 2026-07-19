@@ -17,10 +17,10 @@ portable v2 manifest pinned in :mod:`allsky.data.contracts`:
 - ``qc_flags``: a :class:`~allsky.data.contracts.QCFlag` bitmask (low sun,
   sensor gap, far alignment, k-index artifact).
 
-Diffuse/kt/Erbs derivation reuses the same physics helpers as
-:mod:`allsky.sensors` / :mod:`allsky.erbs` without importing or mutating those
-legacy modules.  :func:`write_manifest_parquet` writes the parquet and its
-``<name>.meta.json`` sidecar atomically and records a content ``manifest_sha256``.
+Diffuse/kt/Erbs derivation reuses the physics helpers in :mod:`allsky.erbs`,
+:mod:`allsky.solar` and :mod:`allsky.clearsky`.  :func:`write_manifest_parquet`
+writes the parquet and its ``<name>.meta.json`` sidecar atomically and records a
+content ``manifest_sha256``.
 """
 
 from __future__ import annotations

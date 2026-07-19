@@ -112,7 +112,7 @@ def _resize_uint8(image: np.ndarray, size: int) -> np.ndarray:
     """Resize a ``uint8`` HWC frame to ``size x size`` with PIL bilinear.
 
     Grayscale frames are promoted to 3-channel RGB first (safety net matching
-    :meth:`allsky.dataset.AllSkyDataset._load_image`).
+    the image-loading recipe used by :mod:`allsky.data.datasets`).
     """
     arr = np.asarray(image)
     if arr.ndim == 2:  # pragma: no cover - grayscale safety net

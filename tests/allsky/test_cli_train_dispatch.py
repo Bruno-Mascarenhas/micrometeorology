@@ -1,9 +1,9 @@
-"""Tests for the ``allsky train`` experiment/legacy dispatch (Wave C4a).
+"""Tests for the ``allsky train`` experiment engine dispatch.
 
-An ``experiment: true`` config routes to the new multimodal engine (exercised
-end to end with on-disk safetensors embeddings); any other config keeps the
-byte-identical legacy behaviour.  Also checks the ``--resume auto`` acceptance
-and bad-resume-path rejection on both routes.
+An ``experiment: true`` config routes to the multimodal engine (exercised end to
+end with on-disk safetensors embeddings). Also checks ``--resume auto``
+acceptance and bad-resume-path rejection. Non-experiment configs are rejected by
+the command; that torch-free behaviour is covered in ``test_cli.py``.
 """
 
 from __future__ import annotations
@@ -191,25 +191,14 @@ class TestExperimentDispatch:
         assert result.exit_code != 0
 
 
-class TestLegacyDispatch:
-    def test_legacy_config_routes_to_legacy(self, tmp_path: Path):
-        # No 'experiment' key -> legacy path; without an index it fails exactly as
-        # the pre-C4a CLI did (reading <out-dir>/index.parquet).
+class TestNonExperimentRejected:
+    def test_non_experiment_config_is_rejected_before_the_engine(self, tmp_path: Path):
+        # A config without 'experiment: true' is rejected with a clear pointer to
+        # the experiment configs — it never reaches the training engine.
         config_path = tmp_path / "legacy.yaml"
         config_path.write_text("train:\n  epochs: 1\n", encoding="utf-8")
         result = runner.invoke(
             app, ["train", "--config", str(config_path), "--out-dir", str(tmp_path / "out")]
         )
         assert result.exit_code != 0
-        # It failed in the legacy loader (missing index), not in the experiment engine.
-        assert result.exception is not None
-        assert not isinstance(result.exception, SystemExit) or result.exception.code != 0
-
-    def test_legacy_bad_resume_path_errors(self, tmp_path: Path):
-        config_path = tmp_path / "legacy.yaml"
-        config_path.write_text("train:\n  epochs: 1\n", encoding="utf-8")
-        result = runner.invoke(
-            app,
-            ["train", "--config", str(config_path), "--resume", str(tmp_path / "missing.pt")],
-        )
-        assert result.exit_code != 0
+        assert "experiment" in result.output

@@ -9,8 +9,8 @@ GHI series into a **pseudo** diffuse-irradiance target.
    These are *pseudo-targets*: LabMiM has no shaded pyranometer yet, so
    the training pipeline bootstraps on Erbs-derived diffuse values
    (``target_source="erbs_pseudo"``).  Replace them with real
-   measurements (``SensorConfig.diffuse_column``) as soon as a diffuse
-   sensor exists.
+   measurements (``PrepareTargetsConfig.diffuse_column``) as soon as a
+   diffuse sensor exists.
 
 References
 ----------

@@ -1,9 +1,9 @@
-"""Tests for the Wave C1b ``allsky.cli`` package split.
+"""Tests for the ``allsky.cli`` package structure.
 
-Proves the module -> package conversion is behaviour-preserving: the same app
-object and ``main`` entry point resolve, the four legacy commands still appear
-in ``--help``, and the C2/C4 stub modules expose callable no-op ``register``
-functions. Torch-free (lazy command imports); CliRunner only.
+Proves the package wiring: the same app object and ``main`` entry point resolve,
+the multimodal v2 command groups register their commands, and the retired v0
+commands (``info`` / ``build-index``) are gone. Torch-free (lazy command
+imports); CliRunner only.
 """
 
 from __future__ import annotations
@@ -14,9 +14,20 @@ from pathlib import Path
 import typer
 from typer.testing import CliRunner
 
-from allsky.cli import app, embeddings, evaluate, legacy, main, prepare
+from allsky.cli import app, embeddings, evaluate, frames, main, prepare, train
 
 runner = CliRunner()
+
+#: Commands the assembled app must expose.
+EXPECTED_COMMANDS = (
+    "extract-frames",
+    "validate-dataset",
+    "prepare-local",
+    "export-colab-bundle",
+    "precompute-embeddings",
+    "train",
+    "evaluate",
+)
 
 
 def test_app_and_main_importable():
@@ -25,37 +36,39 @@ def test_app_and_main_importable():
     assert callable(main)
 
 
-def test_help_lists_legacy_commands():
+def test_help_lists_the_surviving_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("info", "extract-frames", "build-index", "train"):
+    for command in EXPECTED_COMMANDS:
         assert command in result.output
 
 
-def test_legacy_register_adds_exactly_four_commands():
+def test_frames_registers_extract_frames():
     fresh = typer.Typer()
-    legacy.register(fresh)
-    assert len(fresh.registered_commands) == 4
-    # Resolve each command's effective name (explicit name, else the callback's
-    # function name with underscores -> hyphens, as Typer derives it).
-    names = set()
-    for command in fresh.registered_commands:
-        assert command.callback is not None
-        names.add(command.name or command.callback.__name__.replace("_", "-"))
-    assert names == {"info", "extract-frames", "build-index", "train"}
-    # Registering onto a fresh app yields identical --help command listing.
-    result = runner.invoke(fresh, ["--help"])
-    assert result.exit_code == 0
-    for name in ("info", "extract-frames", "build-index", "train"):
-        assert name in result.output
+    frames.register(fresh)
+    names = {
+        command.name or command.callback.__name__.replace("_", "-")
+        for command in fresh.registered_commands
+        if command.callback is not None
+    }
+    assert names == {"extract-frames"}
+
+
+def test_train_registers_train():
+    fresh = typer.Typer()
+    train.register(fresh)
+    names = {
+        command.name or command.callback.__name__.replace("_", "-")
+        for command in fresh.registered_commands
+        if command.callback is not None
+    }
+    assert names == {"train"}
 
 
 def test_command_group_register_functions_are_callable():
     # Each command-group module exposes a callable register() that attaches its
-    # commands (or is a no-op stub) onto a fresh app without raising. Filled and
-    # still-stub modules both satisfy this — the counts are asserted per module
-    # by their own wave's tests.
-    for module in (prepare, embeddings, evaluate):
+    # commands onto a fresh app without raising.
+    for module in (frames, prepare, embeddings, train, evaluate):
         assert callable(module.register)
         fresh = typer.Typer()
         module.register(fresh)  # must not raise
@@ -63,7 +76,6 @@ def test_command_group_register_functions_are_callable():
 
 
 def test_prepare_registers_its_three_commands():
-    # Wave C2b fills prepare.register with the three prepare-family commands.
     fresh = typer.Typer()
     prepare.register(fresh)
     names = {

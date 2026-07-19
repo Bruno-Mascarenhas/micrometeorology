@@ -15,7 +15,7 @@ from typing import Annotated
 
 import typer
 
-from allsky.cli.legacy import (
+from allsky.cli.train import (
     DeviceChoice,  # typer resolves this annotation at runtime
 )
 

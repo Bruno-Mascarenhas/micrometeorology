@@ -61,9 +61,6 @@ INDEX_FILENAME = "index.parquet"
 #: Provenance sidecar filename inside an embeddings directory.
 META_FILENAME = "embeddings.meta.json"
 
-#: Ordered columns of the parquet index.
-INDEX_COLUMNS = ("sample_id", "shard", "row")
-
 
 def shard_filename(shard_index: int) -> str:
     """Filename for shard *shard_index* (``embeddings-{i:05d}.safetensors``)."""

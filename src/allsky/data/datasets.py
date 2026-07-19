@@ -3,18 +3,16 @@
 Two datasets share one batch contract (see :meth:`MultimodalImageDataset.__getitem__`):
 
 - :class:`MultimodalImageDataset` loads sky JPEGs (paths relative to
-  ``data_root``) end-to-end, reusing the legacy
-  :class:`allsky.dataset.AllSkyDataset` image-loading recipe (imageio read ->
-  PIL bilinear resize -> CHW float32 in ``[0, 1]``) without importing or
-  mutating that class.
+  ``data_root``) end-to-end with an imageio read -> PIL bilinear resize -> CHW
+  float32 in ``[0, 1]`` recipe.
 - :class:`MultimodalEmbeddingDataset` reads a precomputed visual embedding per
   sample through an :class:`EmbeddingReader` (the real safetensors reader lands
   in wave C2; here it is a minimal ``sample_id -> np.ndarray`` protocol).
 
 Both standardize the engineered feature vector with a **train-only**
 :class:`allsky.features.FeatureNormalizer` (validation/test must be handed the
-training-split normalizer — computing one locally is refused, mirroring the
-legacy leakage guard).  Targets are emitted in **raw physical units**;
+training-split normalizer — computing one locally is refused as a leakage
+guard).  Targets are emitted in **raw physical units**;
 ``sky_class == -1`` and NaN regression targets mark missing labels for the loss
 to mask.
 
@@ -178,9 +176,8 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
     def _load_image(self, relative_path: str) -> np.ndarray:
         """Load a JPEG as float32 CHW in [0, 1], resized to ``image_size``.
 
-        Mirrors :meth:`allsky.dataset.AllSkyDataset._load_image` (imageio read,
-        grayscale->RGB safety net, PIL bilinear resize), resolving the manifest's
-        relative POSIX path against ``data_root``.
+        imageio read, grayscale->RGB safety net, PIL bilinear resize; resolves
+        the manifest's relative POSIX path against ``data_root``.
         """
         import imageio.v3 as iio
 

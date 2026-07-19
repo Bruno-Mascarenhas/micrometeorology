@@ -14,7 +14,6 @@ https://colab.research.google.com/github/Bruno-Mascarenhas/micrometeorology/blob
 | Notebook | Purpose |
 |---|---|
 | [`allsky_multimodal_colab.ipynb`](allsky_multimodal_colab.ipynb) | Train the **multimodal** all-sky pipeline (V0–V7 DHI / k-index / sky models) from a prepared Colab bundle |
-| [`allsky_colab.ipynb`](allsky_colab.ipynb) | Train **SkyFusionNet** (cloud condition + diffuse radiation) on all-sky frames + sensors (legacy v0 pipeline) |
 | [`tcc/02_colab_training.ipynb`](tcc/02_colab_training.ipynb) | Train the **solrad_correction** models (SVM / LSTM / Transformer) via `solrad-colab` |
 | `exploratory/*.ipynb` | Local data exploration (sensor merging, WRF time series) — no GPU needed |
 
@@ -42,7 +41,6 @@ MyDrive/labmim/
 ├── all-sky/         # allsky-YYYYMMDD.mp4 camera videos
 ├── allsky-mm/       # prepared multimodal bundle (bundle.tar.gz from export-colab-bundle)
 └── runs/
-    ├── allsky/      # legacy SkyFusionNet runs (best.pt, last.pt, runs/ tensorboard)
     ├── allsky-mm/   # multimodal runs (best.ckpt, last.ckpt, metrics.*, runs/, eval-*/)
     └── solrad/      # solrad_correction experiments
 ```
@@ -59,17 +57,17 @@ Both pipelines write checkpoints wherever the output directory points, so the
 only thing needed to persist models across Colab sessions is an output path on
 Drive — the notebooks are already wired this way:
 
-- **allsky**: set `train.out_dir` to a Drive path in the config cell
-  (`out_dir: /content/drive/MyDrive/labmim/runs/allsky`). `best.pt`, `last.pt`,
-  `config.json`, `metadata.json` and the TensorBoard events land there directly.
+- **allsky**: point `--out-dir` at a Drive path (or the notebook's `OUTPUT_DIR`
+  cell). `best.ckpt`, `last.ckpt`, `metrics.json`, the run manifest and the
+  TensorBoard events land there directly.
 - **solrad_correction**: pass `--output-dir /content/drive/MyDrive/labmim/runs/solrad`
   to `solrad-colab`. Checkpoints, `metrics.json`, and `predictions.csv`
   (always timestamped) persist per experiment name.
 
-Tip: keep *frame extraction* output (`allsky extract-frames`) on the local
-`/content` disk — thousands of small JPEG writes are slow on Drive — and put
-only the training `out_dir` on Drive. The pairing index is tiny and lives with
-the run.
+Tip: keep *frame extraction* output on the local `/content` disk — thousands of
+small JPEG writes are slow on Drive — and put only the training `--out-dir` on
+Drive. The prepared bundle is unpacked to `/content` too and only the run
+artifacts need to persist.
 
 ## Resuming after a disconnect
 
@@ -82,9 +80,6 @@ Colab sessions die; the checkpoints don't (they are on Drive):
 allsky train --config configs/allsky/experiments/v4_film.yaml \
     --data-root .../allsky-mm/data/allsky_bundle --out-dir .../runs/allsky-mm/out \
     --device cuda --amp --resume auto
-
-# allsky legacy (SkyFusionNet)
-allsky train --config config.yaml --index .../index.parquet --resume .../runs/allsky/last.pt
 
 # solrad_correction — max_epochs is the TOTAL budget: resuming trains only the
 # remaining epochs and never overwrites a better best.pt from the earlier run

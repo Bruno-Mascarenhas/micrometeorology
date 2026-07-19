@@ -11,12 +11,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from allsky.config import AllSkyConfig, VideoConfig
+from allsky.config import VideoConfig
 from allsky.video import (
     MANIFEST_COLUMNS,
     MANIFEST_FILENAME,
     extract_frames,
-    frame_timestamps,
     iter_frames,
     video_date,
 )
@@ -46,28 +45,9 @@ class TestVideoDate:
     def test_parses_date_from_filename(self, cfg: VideoConfig):
         assert video_date(Path("data/all-sky/allsky-20260625.mp4"), cfg) == date(2026, 6, 25)
 
-    def test_accepts_root_config(self):
-        assert video_date("allsky-20260101.mp4", AllSkyConfig()) == date(2026, 1, 1)
-
     def test_rejects_non_matching_name(self, cfg: VideoConfig):
         with pytest.raises(ValueError, match="does not match"):
             video_date("sky_video.mp4", cfg)
-
-
-class TestFrameTimestamps:
-    def test_frame0_is_start_time(self, cfg: VideoConfig):
-        ts = frame_timestamps(4, date(2026, 1, 1), cfg)
-        assert ts[0] == pd.Timestamp("2026-01-01 06:00")
-
-    def test_minutes_per_frame_scales_spacing(self):
-        vcfg = VideoConfig(start_time="08:30", minutes_per_frame=2.5)
-        ts = frame_timestamps(3, date(2026, 1, 1), vcfg)
-        assert ts[0] == pd.Timestamp("2026-01-01 08:30")
-        assert ts[2] == pd.Timestamp("2026-01-01 08:35")
-
-    def test_timestamps_are_naive(self, cfg: VideoConfig):
-        ts = frame_timestamps(2, date(2026, 1, 1), cfg)
-        assert ts.tz is None
 
 
 class TestIterFrames:
@@ -92,11 +72,6 @@ class TestIterFrames:
     def test_step_must_be_positive(self, synthetic_video: Path, cfg: VideoConfig):
         with pytest.raises(ValueError, match="step"):
             next(iter_frames(synthetic_video, cfg, step=0))
-
-    def test_accepts_root_config(self, synthetic_video: Path):
-        record = next(iter_frames(synthetic_video, AllSkyConfig(), step=1))
-        assert record.index == 0
-        assert record.timestamp == pd.Timestamp("2026-01-01 06:00")
 
 
 class TestExtractFrames:

@@ -2,9 +2,7 @@
 
 Both normalizers are fit on the **training split only** and reused verbatim for
 validation/test (and stored in the checkpoint), so no distributional
-information leaks across splits — the same discipline enforced by
-:class:`allsky.dataset.FeatureStats`, which this module adapts without
-importing (that class binds to the legacy pairing-index schema).
+information leaks across splits.
 
 - :class:`FeatureNormalizer` — per-column mean/std over an engineered feature
   frame, with near-constant columns clamped to unit std.

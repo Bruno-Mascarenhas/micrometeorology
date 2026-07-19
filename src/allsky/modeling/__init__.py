@@ -1,11 +1,5 @@
 """Multimodal model zoo for the all-sky DHI stack.
 
-.. rubric:: Naming
-
-The legacy :mod:`allsky.models` module (``SkyFusionNet``) still exists and is
-frozen; a package cannot coexist with a same-named module inside ``allsky``, so
-this multimodal zoo lives in :mod:`allsky.modeling` rather than ``models/``.
-
 .. rubric:: Torch-free import contract
 
 Every submodule here (except :mod:`~allsky.modeling.contracts`) defines

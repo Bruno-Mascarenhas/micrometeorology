@@ -16,7 +16,7 @@ Three concerns, three modules:
   batched, atomically-written extraction loop.
 
 All ``torch``/``torch.hub`` imports are lazy: importing this package never pulls
-torch, mirroring the ``allsky.dataset`` / ``allsky.video`` contract.
+torch, mirroring the ``allsky.video`` / ``allsky.data`` torch-free contract.
 """
 
 from __future__ import annotations

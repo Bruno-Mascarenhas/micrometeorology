@@ -1,11 +1,11 @@
 # `allsky` multimodal architecture (v2 pipeline)
 
-Reference for the **multimodal DHI-estimation stack** that lives alongside the
-legacy SkyFusionNet pipeline (see [`allsky.md`](allsky.md) for the legacy v0
-path and shared physics). The v2 stack estimates **diffuse horizontal irradiance
-(DHI)**, a **clear-sky / clearness index**, and a **sky-condition class** from an
-all-sky image (as a precomputed DINOv2 embedding *or* end-to-end) plus
-non-radiometric sensor context.
+Reference for the **multimodal DHI-estimation stack** — the only all-sky
+pipeline (see [`allsky.md`](allsky.md) for the CLI/config quickstart and shared
+physics). The stack estimates **diffuse horizontal irradiance (DHI)**, a
+**clear-sky / clearness index**, and a **sky-condition class** from an all-sky
+image (as a precomputed DINOv2 embedding *or* end-to-end) plus non-radiometric
+sensor context.
 
 All timestamps are naive local **America/Bahia** (fixed UTC-3, no DST). The
 manifest stores tz-aware `timestamp_utc`; `day_id` is the local calendar day; a
@@ -54,9 +54,9 @@ paths**, so training on Colab is byte-identical to training locally.
 
 ## Module map
 
-New code lives in packages under `src/allsky/`; the legacy modules
-(`models.py`, `dataset.py`, `training.py` re-export, `video.py`, `sensors.py`,
-`erbs.py`, `solar.py`) are untouched and stay import-torch-free where they were.
+Code lives in packages under `src/allsky/`. The shared physics helpers
+(`video.py`, `erbs.py`, `solar.py`, `clearsky.py`, `preprocessing.py`) stay
+import-torch-free.
 
 | Package | Responsibility |
 |---|---|
@@ -64,9 +64,9 @@ New code lives in packages under `src/allsky/`; the legacy modules
 | `data/` | `contracts` (v2 column registry, `QCFlag`, sky classes, relative-path helpers), `manifest` builder + atomic parquet + `.meta.json` sidecar, `validation` (every failure mode), `splits` (day-level artifact with `split_id`), `alignment` strategies, lazy-torch `datasets` (the batch contract). |
 | `embeddings/` | `backbone` (`VisualBackbone` protocol, pinned DINOv2 via `torch.hub`, `FakeBackbone` for tests), `storage` (safetensors shards + parquet index + `embeddings.meta.json`, `SafetensorsEmbeddingReader`), `extract` (resumable, batched, atomic). |
 | `modeling/` | `contracts` (`ModelOutputs`, `group_slices`), `sensor_encoder`, `visual_encoder` (embedding passthrough / image backbone), `fusion` (concat / FiLM / cross-attention), `heads` (trunk + DHI / heteroscedastic / k-index / sky / cloud-fraction), `baselines` (climatology / sensor-only / image-only), `multimodal` assembly, `registry`. |
-| `training/` | `losses` (`MultitaskLoss`, maskable per-head), `engine` (`run_experiment`: AMP, grad accum/clip, scheduler, early stop, TensorBoard + `metrics.csv`/`metrics.json`, full resume), `checkpointing` (atomic, full payload, RNG). Legacy `train` re-exported. |
+| `training/` | `losses` (`MultitaskLoss`, maskable per-head), `engine` (`run_experiment`: AMP, grad accum/clip, scheduler, early stop, TensorBoard + `metrics.csv`/`metrics.json`, full resume), `checkpointing` (atomic, full payload, RNG), `device` (torch-free `resolve_device`). |
 | `evaluation/` | `metrics` (regression + classification), `evaluator` (rebuild from checkpoint, denormalize, stratify), `reports` (`report.md` / `metrics.json` / `stratified.csv` / `predictions.parquet`, `compare_experiments`). |
-| `cli/` | `legacy` (`info`/`extract-frames`/`build-index`/`train` with experiment dispatch), `prepare` (`validate-dataset`/`prepare-local`/`export-colab-bundle`), `embeddings` (`precompute-embeddings`), `evaluate`. Every command imports torch lazily so `allsky --help` stays light. |
+| `cli/` | `frames` (`extract-frames`), `prepare` (`validate-dataset`/`prepare-local`/`export-colab-bundle`), `embeddings` (`precompute-embeddings`), `train` (experiment engine), `evaluate`. Every command imports torch lazily so `allsky --help` stays light. |
 
 ---
 

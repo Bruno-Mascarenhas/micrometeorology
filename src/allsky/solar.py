@@ -317,7 +317,7 @@ def clearness_index(
     ----------
     kt is not clipped: near sunrise/sunset (small E0h) sensor noise can
     produce kt > 1.  Downstream consumers should filter by solar
-    elevation (see ``LabelConfig.min_solar_elevation_deg``).
+    elevation (see ``NightFilterConfig.min_solar_elevation_deg``).
     """
     times = _as_datetime_index(timestamps)
     ghi_arr = np.asarray(ghi, dtype=np.float64)

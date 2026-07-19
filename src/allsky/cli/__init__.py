@@ -2,32 +2,36 @@
 
 Examples
 --------
-Show the resolved configuration and the video -> wall-clock mapping:
-    allsky info --config configs/allsky/default.yaml
-
 Extract every 60th frame from a one-day timelapse:
     allsky extract-frames data/all-sky/allsky-20260625.mp4 --out scratch/frames --step 60
 
-Pair frames with sensor records into a training index:
-    allsky build-index --manifest scratch/frames/manifest.parquet --out output/allsky/index.parquet
+Prepare a local dataset (frames -> v2 manifest -> day splits):
+    allsky prepare-local --config configs/allsky/data/local_prepare.yaml
 
-Train (or resume) SkyFusionNet:
-    allsky train --index output/allsky/index.parquet --epochs 2 --device cpu
+Precompute DINOv2 embeddings for the prepared dataset:
+    allsky precompute-embeddings --config configs/allsky/data/local_prepare.yaml
 
-The CLI is a package: legacy commands live in :mod:`allsky.cli.legacy`, and the
-new command groups added by later waves live in :mod:`allsky.cli.prepare`,
-:mod:`allsky.cli.embeddings` and :mod:`allsky.cli.evaluate`. Each exposes a
+Train a multimodal experiment:
+    allsky train --config configs/allsky/experiments/v4_film.yaml \\
+        --data-root output/allsky-mm/dataset
+
+Evaluate a trained checkpoint:
+    allsky evaluate --checkpoint output/allsky-mm/experiments/v4_film/run/best.ckpt \\
+        --split test --data-root output/allsky-mm/dataset
+
+The CLI is a package: each command group lives in its own module
+(:mod:`allsky.cli.frames`, :mod:`allsky.cli.train`, :mod:`allsky.cli.prepare`,
+:mod:`allsky.cli.embeddings`, :mod:`allsky.cli.evaluate`) and exposes a
 ``register(app)`` function called once here, so ``__init__`` never needs editing
-again as those modules are filled in. Heavy dependencies (torch,
-imageio-ffmpeg) are imported lazily inside each command so ``allsky info`` /
-``--help`` work in a minimal environment.
+to add a command. Heavy dependencies (torch, imageio-ffmpeg) are imported
+lazily inside each command so ``allsky --help`` works in a minimal environment.
 """
 
 from __future__ import annotations
 
 import typer
 
-from allsky.cli import embeddings, evaluate, legacy, prepare
+from allsky.cli import embeddings, evaluate, frames, prepare, train
 
 app = typer.Typer(
     name="allsky",
@@ -35,13 +39,12 @@ app = typer.Typer(
     help="All-sky camera + radiation-sensor fusion pipeline (LabMiM/UFBA).",
 )
 
-# Register command groups. The legacy pipeline ships today; the stub modules are
-# populated by later waves (C2: prepare/embeddings, C4: evaluate). Importing and
-# calling each register() here means later waves add commands inside their own
-# module and never touch this file.
-legacy.register(app)
+# Register command groups. Each register() attaches its commands inside its own
+# module, so adding a command never touches this file.
+frames.register(app)
 prepare.register(app)
 embeddings.register(app)
+train.register(app)
 evaluate.register(app)
 
 
