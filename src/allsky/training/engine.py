@@ -45,8 +45,15 @@ import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
+from allsky.atomic import atomic_write, atomic_write_json
 from allsky.config import ExperimentConfig, SchedulerConfig
 from allsky.data.datasets import EmbeddingReader, WindowMode
+from allsky.data.loading import (
+    default_embedding_reader,
+    load_manifest,
+    load_split,
+    resolve_against_root,
+)
 from allsky.features.normalization import TargetNormalizer
 from allsky.features.policy import active_feature_groups, resolve_feature_set
 from allsky.training.checkpointing import (
@@ -142,9 +149,9 @@ def run_experiment(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # --- data ---------------------------------------------------------------
-    manifest_path = _resolve(cfg.data.manifest, root)
-    manifest, meta = _load_manifest(manifest_path)
-    split = _load_split(_resolve(cfg.data.split_artifact, root))
+    manifest_path = resolve_against_root(cfg.data.manifest, root)
+    manifest, meta = load_manifest(manifest_path)
+    split = load_split(resolve_against_root(cfg.data.split_artifact, root))
     train_df, val_df = _select_splits(manifest, split)
     logger.info("split %s: %d train / %d val rows", split.split_id[:12], len(train_df), len(val_df))
 
@@ -318,7 +325,7 @@ def run_experiment(
             row = _epoch_row(fields, epoch + 1, current_lr, train_metrics, val_metrics)
             _append_csv(run_dir / "metrics.csv", fields, row)
             history.append(row)
-            _atomic_write_json(run_dir / "metrics.json", history)
+            atomic_write_json(run_dir / "metrics.json", history)
 
             best_metric = {"name": monitor_key, "value": best_value, "epoch": best_epoch}
             common = _checkpoint_common(
@@ -395,35 +402,6 @@ def run_experiment(
 # ---------------------------------------------------------------------------
 
 
-def _resolve(path: str | Path, root: Path) -> Path:
-    """Resolve *path* against *root* unless it is already absolute."""
-    candidate = Path(path)
-    return candidate if candidate.is_absolute() else root / candidate
-
-
-def _load_manifest(manifest_path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Read the manifest parquet and its ``<name>.meta.json`` sidecar (if any)."""
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"manifest parquet not found: {manifest_path}")
-    manifest = pd.read_parquet(manifest_path)
-    meta_path = manifest_path.with_name(manifest_path.name + ".meta.json")
-    meta: dict[str, Any] = {}
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    else:
-        logger.warning("no manifest meta sidecar at %s; provenance fields will be null", meta_path)
-    return manifest, meta
-
-
-def _load_split(path: Path) -> Any:
-    """Load the day-split artifact from *path*."""
-    from allsky.data.splits import load_split_artifact
-
-    if not path.exists():
-        raise FileNotFoundError(f"split artifact not found: {path}")
-    return load_split_artifact(path)
-
-
 def _select_splits(manifest: pd.DataFrame, split: Any) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Slice train/val manifest rows by ``day_id`` (validation split required)."""
     day_ids = manifest["day_id"].astype(str)
@@ -465,7 +443,11 @@ def _build_datasets(
     from allsky.data.datasets import MultimodalEmbeddingDataset, MultimodalImageDataset
 
     if cfg.data.input_mode == "embedding":
-        reader = embedding_reader if embedding_reader is not None else _default_reader(cfg, root)
+        reader = (
+            embedding_reader
+            if embedding_reader is not None
+            else default_embedding_reader(cfg, root)
+        )
         _validate_embedding_coverage(reader, train_df, val_df)
         # Wire the alignment strategy end to end: center_frame (default) keeps the
         # single-frame embedding; mean_embedding / attention_pooling resolve each
@@ -506,23 +488,6 @@ def _build_datasets(
         stats=image_train.stats,
     )
     return image_train, image_val, None
-
-
-def _default_reader(cfg: ExperimentConfig, root: Path) -> EmbeddingReader:
-    """Build the safetensors embedding reader from ``cfg.data.embeddings_dir``.
-
-    Preloads every shard into one resident array by default (finding F7): shuffled
-    training makes the LRU thrash, so the whole store is loaded once unless
-    ``cfg.data.embeddings_preload`` is False.
-    """
-    from allsky.embeddings.storage import SafetensorsEmbeddingReader
-
-    if cfg.data.embeddings_dir is None:
-        raise ValueError("input_mode='embedding' requires cfg.data.embeddings_dir")
-    reader: EmbeddingReader = SafetensorsEmbeddingReader(
-        _resolve(cfg.data.embeddings_dir, root), preload=cfg.data.embeddings_preload
-    )
-    return reader
 
 
 def _validate_embedding_coverage(
@@ -1070,12 +1035,14 @@ def _append_csv(path: Path, fields: list[str], row: Mapping[str, Any]) -> None:
 
 def _rewrite_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> None:
     """Atomically rewrite the metrics CSV as *fields* header + *rows*."""
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    with open(tmp, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
-    os.replace(tmp, path)
+
+    def _write(tmp: Path) -> None:
+        with open(tmp, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+
+    atomic_write(path, _write)
 
 
 def _truncate_metrics(run_dir: Path, fields: list[str], resumed_epoch: int) -> list[dict[str, Any]]:
@@ -1104,7 +1071,7 @@ def _truncate_metrics(run_dir: Path, fields: list[str], resumed_epoch: int) -> l
     if dropped:
         logger.info("resume: dropped %d stale metrics row(s) past epoch %d", dropped, resumed_epoch)
     _rewrite_csv(metrics_csv, fields, history)
-    _atomic_write_json(metrics_json, history)
+    atomic_write_json(metrics_json, history)
     return history
 
 
@@ -1127,11 +1094,3 @@ def _reset_stale_metrics(run_dir: Path) -> None:
                 path,
                 backup.name,
             )
-
-
-def _atomic_write_json(path: Path, obj: Any) -> None:
-    """Atomically (temp + ``os.replace``) rewrite *path* as JSON."""
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(obj, handle, indent=2, default=str)
-    os.replace(tmp, path)

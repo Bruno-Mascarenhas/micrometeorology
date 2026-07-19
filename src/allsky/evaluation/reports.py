@@ -21,13 +21,13 @@ torch-free (pandas + stdlib only).
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from allsky.atomic import atomic_write
 from allsky.evaluation.evaluator import EvaluationResult
 
 __all__ = ["compare_experiments", "write_evaluation_report"]
@@ -248,18 +248,8 @@ def _fmt(value: Any) -> str:
 
 
 def _atomic(path: Path, write: Callable[[Path], Any]) -> Path:
-    """Write via a same-directory temp file, then ``os.replace`` onto *path*."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    ok = False
-    try:
-        write(tmp)
-        os.replace(tmp, path)
-        ok = True
-    finally:
-        if not ok:
-            tmp.unlink(missing_ok=True)
-    return path
+    """Delegate to the shared :func:`allsky.atomic.atomic_write` helper."""
+    return atomic_write(path, write)
 
 
 def _atomic_text(path: Path, text: str) -> Path:

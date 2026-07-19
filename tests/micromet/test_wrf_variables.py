@@ -11,9 +11,9 @@ import numpy as np
 
 from micrometeorology.wrf.variables import (
     extract_rain_step,
-    get_low_high,
     get_low_high_rain,
     get_low_high_wind,
+    percentile_scale_bounds,
 )
 
 # Cumulative totals with a deliberately NONZERO first frame, as after a
@@ -54,16 +54,16 @@ def test_extract_rain_step_later_steps_are_increments():
 # ---------------------------------------------------------------------------
 
 
-def test_get_low_high_single_timestep_uses_full_array():
+def test_percentile_scale_bounds_single_timestep_uses_full_array():
     single = np.array([[[1.0, 2.0], [3.0, 4.0]]], dtype=np.float32)
 
-    low, high = get_low_high(single)
+    low, high = percentile_scale_bounds(single)
 
     assert low == 1.0
     assert high == float(np.nanpercentile(single.ravel(), 98))
 
 
-def test_get_low_high_multi_step_still_skips_first_step():
+def test_percentile_scale_bounds_multi_step_still_skips_first_step():
     arr = np.array(
         [
             [[100.0, 100.0], [100.0, 100.0]],
@@ -73,7 +73,7 @@ def test_get_low_high_multi_step_still_skips_first_step():
         dtype=np.float32,
     )
 
-    low, high = get_low_high(arr)
+    low, high = percentile_scale_bounds(arr)
 
     assert low == 1.0
     assert high == float(np.nanpercentile(arr[1:].ravel(), 98))

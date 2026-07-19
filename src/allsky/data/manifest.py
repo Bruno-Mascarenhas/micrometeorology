@@ -25,20 +25,17 @@ legacy modules.  :func:`write_manifest_parquet` writes the parquet and its
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import os
-import subprocess
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta, timezone
-from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from allsky.atomic import atomic_write, atomic_write_json
 from allsky.clearsky import clear_sky_index
 from allsky.config import PrepareConfig, SiteConfig
 from allsky.data.alignment import AlignmentStrategy, CenterFrame
@@ -53,6 +50,7 @@ from allsky.data.contracts import (
 from allsky.data.splits import DaySplit
 from allsky.erbs import pseudo_diffuse
 from allsky.features import build_feature_frame, resolve_feature_set, validate_features
+from allsky.provenance import code_version, content_sha256
 from allsky.solar import clearness_index, solar_azimuth, solar_elevation
 
 logger = logging.getLogger(__name__)
@@ -428,20 +426,12 @@ def write_manifest_parquet(
     ``row_count`` populated).
     """
     out = Path(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
 
     sha = _content_sha256(manifest)
     written_meta = {**meta, "manifest_sha256": sha, "row_count": len(manifest)}
 
-    tmp_parquet = out.with_name(f".{out.name}.tmp-{os.getpid()}")
-    manifest.to_parquet(tmp_parquet, index=False)
-    os.replace(tmp_parquet, out)
-
-    meta_path = out.with_name(f"{out.name}.meta.json")
-    tmp_meta = meta_path.with_name(f".{meta_path.name}.tmp-{os.getpid()}")
-    with open(tmp_meta, "w", encoding="utf-8") as handle:
-        json.dump(written_meta, handle, indent=2, ensure_ascii=False, default=str)
-    os.replace(tmp_meta, meta_path)
+    atomic_write(out, lambda tmp: manifest.to_parquet(tmp, index=False))
+    atomic_write_json(out.with_name(f"{out.name}.meta.json"), written_meta)
 
     logger.info(
         "write_manifest_parquet: wrote %s (%d rows, sha256=%s)", out, len(manifest), sha[:12]
@@ -603,35 +593,10 @@ def _build_meta(
 
 
 def _content_sha256(manifest: pd.DataFrame) -> str:
-    """Container-independent content hash of the manifest (order-sensitive)."""
-    digest = hashlib.sha256()
-    digest.update(",".join(manifest.columns).encode("utf-8"))
-    csv_bytes = manifest.to_csv(index=False).encode("utf-8")
-    digest.update(csv_bytes)
-    return digest.hexdigest()
+    """Manifest content hash — delegates to :func:`allsky.provenance.content_sha256`."""
+    return content_sha256(manifest)
 
 
 def _code_version() -> dict[str, str | None]:
-    """Package version plus a best-effort git commit for reproducibility."""
-    try:
-        version: str | None = importlib_metadata.version("labmim-micrometeorology")
-    except importlib_metadata.PackageNotFoundError:
-        version = None
-    return {"package_version": version, "git_commit": _git_commit()}
-
-
-def _git_commit() -> str | None:
-    """Current git commit hash, or None when unavailable (best-effort)."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],  # noqa: S607 — git resolved from PATH
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except OSError, subprocess.SubprocessError:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip() or None
+    """Reproducibility stamp — delegates to :func:`allsky.provenance.code_version`."""
+    return code_version()

@@ -25,11 +25,9 @@ Pure stdlib + pandas/pyarrow + PyYAML: importing this module never pulls torch.
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import logging
-import os
 import tarfile
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
@@ -38,7 +36,9 @@ from typing import Any
 import pandas as pd
 import yaml
 
+from allsky.atomic import atomic_write
 from allsky.config import PrepareConfig
+from allsky.provenance import content_sha256
 
 logger = logging.getLogger(__name__)
 
@@ -57,16 +57,14 @@ _EMBEDDINGS_DIRNAME = "embeddings"
 
 
 def _content_sha256(manifest: pd.DataFrame) -> str:
-    """Container-independent content hash of a manifest (order-sensitive).
+    """Manifest content hash — delegates to :func:`allsky.provenance.content_sha256`.
 
-    Mirrors :func:`allsky.data.manifest._content_sha256` exactly (column names
-    joined with commas, then the index-free CSV) so a bundle's manifest can be
-    checked against the ``manifest_sha256`` its sidecar recorded at write time.
+    The shared implementation is what
+    :func:`allsky.data.manifest.write_manifest_parquet` records as
+    ``manifest_sha256``, so a bundle's manifest can be re-hashed and checked
+    against the value its sidecar meta stored at write time.
     """
-    digest = hashlib.sha256()
-    digest.update(",".join(manifest.columns).encode("utf-8"))
-    digest.update(manifest.to_csv(index=False).encode("utf-8"))
-    return digest.hexdigest()
+    return content_sha256(manifest)
 
 
 def _safe_arcname(name: str) -> str:
@@ -301,10 +299,8 @@ def _write_tar_atomic(
     order: list[str],
 ) -> None:
     """Write the gzip tar to a temp file then :func:`os.replace` it into place."""
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(f".{out.name}.tmp-{os.getpid()}")
-    try:
+
+    def _write(tmp: Path) -> None:
         with tarfile.open(tmp, "w:gz") as tar:
             for arc in order:
                 if arc in file_members:
@@ -315,10 +311,8 @@ def _write_tar_atomic(
                     info.size = len(data)
                     info.mtime = 0
                     tar.addfile(info, io.BytesIO(data))
-        os.replace(tmp, out)
-    finally:
-        if tmp.exists():
-            tmp.unlink()
+
+    atomic_write(Path(out_path), _write)
 
 
 def _find_member(names: list[str], suffix: str) -> str | None:

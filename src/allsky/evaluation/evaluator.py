@@ -25,7 +25,6 @@ never pulls torch.
 from __future__ import annotations
 
 import itertools
-import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -39,6 +38,12 @@ import pandas as pd
 from allsky.config import ExperimentConfig
 from allsky.data.contracts import SKY_CLASS_NAMES, sky_class_name
 from allsky.data.datasets import EmbeddingReader, WindowMode
+from allsky.data.loading import (
+    default_embedding_reader,
+    load_manifest,
+    load_split,
+    resolve_against_root,
+)
 from allsky.evaluation.metrics import classification_metrics, regression_metrics
 from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
 
@@ -162,8 +167,6 @@ def evaluate_checkpoint(
     EvaluationResult
         Global + stratified metrics, the predictions frame and provenance.
     """
-    from allsky.config import ExperimentConfig
-    from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
     from allsky.training.checkpointing import load_checkpoint
     from allsky.training.engine import resolve_run_device
 
@@ -174,9 +177,9 @@ def evaluate_checkpoint(
     cfg = ExperimentConfig.model_validate(checkpoint["config"])
     root = Path(data_root) if data_root is not None else Path(cfg.data.data_root)
 
-    manifest, meta = _load_manifest(_resolve(cfg.data.manifest, root))
+    manifest, meta = load_manifest(resolve_against_root(cfg.data.manifest, root))
     manifest_hash_ok = _check_manifest_hash(checkpoint.get("manifest_sha256"), meta, strict=strict)
-    split_obj = _load_split(_resolve(cfg.data.split_artifact, root))
+    split_obj = load_split(resolve_against_root(cfg.data.split_artifact, root))
     split_id_ok = _check_split_id(checkpoint.get("split_id"), split_obj.split_id, strict=strict)
     split_df = _select_split_rows(manifest, split_obj, split)
 
@@ -250,35 +253,6 @@ def evaluate_checkpoint(
 # ---------------------------------------------------------------------------
 # loading / provenance
 # ---------------------------------------------------------------------------
-
-
-def _resolve(path: str | Path, root: Path) -> Path:
-    """Resolve *path* against *root* unless it is already absolute."""
-    candidate = Path(path)
-    return candidate if candidate.is_absolute() else root / candidate
-
-
-def _load_manifest(manifest_path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Read the manifest parquet and its ``<name>.meta.json`` sidecar (if any)."""
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"manifest parquet not found: {manifest_path}")
-    manifest = pd.read_parquet(manifest_path)
-    meta_path = manifest_path.with_name(manifest_path.name + ".meta.json")
-    meta: dict[str, Any] = {}
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    else:
-        logger.warning("no manifest meta sidecar at %s; hash check skipped", meta_path)
-    return manifest, meta
-
-
-def _load_split(path: Path) -> Any:
-    """Load the day-split artifact from *path*."""
-    from allsky.data.splits import load_split_artifact
-
-    if not path.exists():
-        raise FileNotFoundError(f"split artifact not found: {path}")
-    return load_split_artifact(path)
 
 
 def _check_manifest_hash(stored: str | None, meta: Mapping[str, Any], *, strict: bool) -> bool:
@@ -439,7 +413,11 @@ def _build_split_dataset(
     from allsky.data.datasets import MultimodalEmbeddingDataset, MultimodalImageDataset
 
     if cfg.data.input_mode == "embedding":
-        reader = embedding_reader if embedding_reader is not None else _default_reader(cfg, root)
+        reader = (
+            embedding_reader
+            if embedding_reader is not None
+            else default_embedding_reader(cfg, root)
+        )
         # Mirror training's alignment strategy so the eval batches match what the
         # model was trained on (plain embedding for center_frame/mean_embedding,
         # padded embedding_seq + frame_mask for attention_pooling).
@@ -466,21 +444,6 @@ def _build_split_dataset(
         stats=feature_normalizer,
     )
     return dataset, None
-
-
-def _default_reader(cfg: ExperimentConfig, root: Path) -> EmbeddingReader:
-    """Build the safetensors embedding reader from ``cfg.data.embeddings_dir``.
-
-    Preloads all shards by default (finding F7), matching the training engine.
-    """
-    from allsky.embeddings.storage import SafetensorsEmbeddingReader
-
-    if cfg.data.embeddings_dir is None:
-        raise ValueError("input_mode='embedding' requires cfg.data.embeddings_dir")
-    reader: EmbeddingReader = SafetensorsEmbeddingReader(
-        _resolve(cfg.data.embeddings_dir, root), preload=cfg.data.embeddings_preload
-    )
-    return reader
 
 
 def _extract_prediction(name: str, outputs: Mapping[str, Any]) -> np.ndarray:

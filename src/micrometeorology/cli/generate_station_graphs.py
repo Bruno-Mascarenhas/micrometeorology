@@ -154,21 +154,23 @@ def _plot_radiacao_difusa(
     fig, ax = create_figure()
 
     col_sw = "CM3Up_Wm2_Avg"
-    col_df = "CMP21_Wm2_Avg"
-    col_df2 = "PSP_Wm2_Avg"
+    col_diffuse = "CMP21_Wm2_Avg"
+    col_diffuse_psp = "PSP_Wm2_Avg"
 
     if col_sw in raw.columns:
         ax.plot(raw.index, raw[col_sw], "o", color="yellow", markersize=6, label="Media 5 min")
-    if col_df in raw.columns:
-        ax.plot(raw.index, raw[col_df], "o", color="silver", markersize=6, label="Media 5 min")
-    if col_df2 in raw.columns:
-        ax.plot(raw.index, raw[col_df2], "o", color="silver", markersize=6, label="Media 5 min")
+    if col_diffuse in raw.columns:
+        ax.plot(raw.index, raw[col_diffuse], "o", color="silver", markersize=6, label="Media 5 min")
+    if col_diffuse_psp in raw.columns:
+        ax.plot(
+            raw.index, raw[col_diffuse_psp], "o", color="silver", markersize=6, label="Media 5 min"
+        )
     if col_sw in hourly.columns:
         ax.plot(hourly.index, hourly[col_sw], "-vr", label="SW_dw 1h")
-    if col_df in hourly.columns:
-        ax.plot(hourly.index, hourly[col_df], "-db", label="SW_df 1h")
-    if col_df2 in hourly.columns:
-        ax.plot(hourly.index, hourly[col_df2], "-dg", label="SW_df 1h (PSP)")
+    if col_diffuse in hourly.columns:
+        ax.plot(hourly.index, hourly[col_diffuse], "-db", label="SW_df 1h")
+    if col_diffuse_psp in hourly.columns:
+        ax.plot(hourly.index, hourly[col_diffuse_psp], "-dg", label="SW_df 1h (PSP)")
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["radiacao_difusa"], label="SW_dw-wrf 1h")
 

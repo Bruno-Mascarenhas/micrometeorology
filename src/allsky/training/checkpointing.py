@@ -30,15 +30,15 @@ compiled-then-checkpointed model loads back into a plain module.
 
 from __future__ import annotations
 
-import os
 import random
-import subprocess
 from collections.abc import Mapping, Sequence
-from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from allsky.atomic import atomic_write
+from allsky.provenance import code_version
 
 #: ``torch.nn.Module`` / ``torch.optim.Optimizer`` at runtime. Kept as aliases so
 #: importing this module stays torch-free (torch is imported lazily in the funcs).
@@ -174,15 +174,6 @@ def load_checkpoint(path: str | Path, *, map_location: str = "cpu") -> dict[str,
     return checkpoint
 
 
-def code_version() -> dict[str, str | None]:
-    """Package version plus a best-effort git commit (reproducibility stamp)."""
-    try:
-        version: str | None = importlib_metadata.version("labmim-micrometeorology")
-    except importlib_metadata.PackageNotFoundError:
-        version = None
-    return {"package_version": version, "git_commit": _git_commit()}
-
-
 # ---------------------------------------------------------------------------
 # internals
 # ---------------------------------------------------------------------------
@@ -192,16 +183,7 @@ def _atomic_torch_save(payload: dict[str, Any], out: Path) -> None:
     """``torch.save`` to a same-directory temp file, then ``os.replace`` onto *out*."""
     import torch
 
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(f".{out.name}.tmp-{os.getpid()}")
-    ok = False
-    try:
-        torch.save(payload, tmp)
-        os.replace(tmp, out)
-        ok = True
-    finally:
-        if not ok:
-            tmp.unlink(missing_ok=True)
+    atomic_write(out, lambda tmp: torch.save(payload, tmp))
 
 
 def _strip_compiled_prefix(state: dict[str, Any]) -> dict[str, Any]:
@@ -218,20 +200,3 @@ def _as_uint8_tensor(value: Any) -> Any:
     if isinstance(value, torch.Tensor):
         return value.to(dtype=torch.uint8, device="cpu")
     return torch.as_tensor(value, dtype=torch.uint8)
-
-
-def _git_commit() -> str | None:
-    """Current git commit hash, or None when unavailable (best-effort)."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],  # noqa: S607 - git resolved from PATH
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except OSError, subprocess.SubprocessError:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip() or None

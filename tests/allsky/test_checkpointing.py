@@ -120,12 +120,12 @@ class TestAtomicWrite:
         model, optimizer, scheduler = _tiny_state()
         target = tmp_path / "last.ckpt"
 
-        import allsky.training.checkpointing as checkpointing
+        import allsky.atomic as atomic
 
         def boom(*_args: Any, **_kwargs: Any) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr(checkpointing.os, "replace", boom)
+        monkeypatch.setattr(atomic.os, "replace", boom)
         with pytest.raises(OSError, match="disk full"):
             _save(target, model, optimizer, scheduler)
 

@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 #: pandas.DataFrame at runtime. pandas is imported lazily inside each command (see
 #: the module docstring) so ``allsky --help`` stays light, so it cannot be named
 #: directly in these annotations.
-type DataFrame = Any
+type PandasDataFrame = Any
 
 #: Preparation steps ``prepare-local`` can run, in execution order.
 VALID_STEPS = ("extract-frames", "build-manifest", "splits")
@@ -295,7 +295,7 @@ def _run_extract_step(
     frames_root: Path,
     run_extract: bool,
     force: bool,
-) -> list[DataFrame]:
+) -> list[PandasDataFrame]:
     """Extract (or resume) per-video frames; return the per-video frame manifests.
 
     When *run_extract* is False the existing per-video manifests are loaded so a
@@ -303,7 +303,7 @@ def _run_extract_step(
     """
     import pandas as pd
 
-    per_video: list[DataFrame] = []
+    per_video: list[PandasDataFrame] = []
     for video in videos:
         stem = Path(video).stem
         vdir = frames_root / stem
@@ -323,7 +323,7 @@ def _run_extract_step(
     return per_video
 
 
-def _extract_and_qc(video: str, vdir: Path, cfg: PrepareConfig) -> DataFrame:
+def _extract_and_qc(video: str, vdir: Path, cfg: PrepareConfig) -> PandasDataFrame:
     """Extract native frames then read them back for visual QC + preprocessing.
 
     ``extract_frames`` writes native-resolution JPEGs; each is then decoded once
@@ -362,7 +362,7 @@ def _extract_and_qc(video: str, vdir: Path, cfg: PrepareConfig) -> DataFrame:
 def _run_build_manifest_step(
     *,
     cfg: PrepareConfig,
-    per_video: list[DataFrame],
+    per_video: list[PandasDataFrame],
     dataset_dir: Path,
     manifest_path: Path,
     meta_path: Path,
@@ -387,7 +387,7 @@ def _run_build_manifest_step(
 
     from allsky.data.manifest import build_manifest_from_prepare_config, write_manifest_parquet
 
-    frames_manifest: DataFrame = pd.concat(per_video, ignore_index=True)
+    frames_manifest: PandasDataFrame = pd.concat(per_video, ignore_index=True)
     sensor_df = _load_sensor_df(cfg)
     manifest, meta = build_manifest_from_prepare_config(
         frames_manifest, sensor_df, cfg, data_root=dataset_dir, config_sha256=config_sha
@@ -440,7 +440,7 @@ def _run_splits_step(
     typer.echo(f"splits: attached 'split' column to {manifest_path} (manifest_sha256 changed)")
 
 
-def _load_sensor_df(cfg: PrepareConfig) -> DataFrame:
+def _load_sensor_df(cfg: PrepareConfig) -> PandasDataFrame:
     """Read all configured TOA5 files into one deduplicated time-indexed frame.
 
     Raw logger columns are kept as-is (the manifest builder selects and validates
@@ -459,7 +459,7 @@ def _load_sensor_df(cfg: PrepareConfig) -> DataFrame:
     return sensor_df
 
 
-def _apply_frame_qc(manifest: DataFrame, frames_manifest: DataFrame) -> DataFrame:
+def _apply_frame_qc(manifest: PandasDataFrame, frames_manifest: PandasDataFrame) -> PandasDataFrame:
     """OR the per-frame visual QC bits into the manifest ``qc_flags`` by sample_id."""
     import pandas as pd
 

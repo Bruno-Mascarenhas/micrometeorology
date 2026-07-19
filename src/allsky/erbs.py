@@ -27,12 +27,12 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
-type ArrayLike = pd.Series | np.ndarray | Sequence[float] | float
+type ErbsInput = pd.Series | np.ndarray | Sequence[float] | float
 
 __all__ = ["erbs_diffuse_fraction", "pseudo_diffuse"]
 
 
-def erbs_diffuse_fraction(kt: ArrayLike) -> np.ndarray:
+def erbs_diffuse_fraction(kt: ErbsInput) -> np.ndarray:
     """Diffuse fraction ``kd`` from the clearness index ``kt`` (Erbs 1982).
 
     Formula
@@ -65,7 +65,7 @@ def erbs_diffuse_fraction(kt: ArrayLike) -> np.ndarray:
     return np.clip(kd, 0.0, 1.0)
 
 
-def pseudo_diffuse(ghi: ArrayLike, kt: ArrayLike) -> np.ndarray:
+def pseudo_diffuse(ghi: ErbsInput, kt: ErbsInput) -> np.ndarray:
     """Pseudo diffuse irradiance ``DHI = kd(kt) * GHI`` in W m-2.
 
     Formula
