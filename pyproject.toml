@@ -51,6 +51,11 @@ dev = [
     "pandas-stubs",
     "pytest-xdist>=3.5",
     "types-PyYAML",
+    # torchvision (index-pinned to the CPU wheel index below, exactly like torch)
+    # covers the legacy resnet18 image backbone (allsky.models); without it the
+    # importorskip-gated test is silently skipped. CI's sync includes dev, so this
+    # turns that coverage on there too.
+    "torchvision>=0.21",
 ]
 video = [
     "moviepy>=2.2",
@@ -105,6 +110,12 @@ explicit = true
 
 [tool.uv.sources]
 torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
+]
+# torchvision follows torch to the CPU wheel index so the resolver does not pull
+# the CUDA stack (and so its version matches the locked torch build).
+torchvision = [
     { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]

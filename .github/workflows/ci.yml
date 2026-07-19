@@ -33,11 +33,14 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      # dev+video is the widest auditable set: torch ships from the PyTorch
-      # index, not PyPI, so the tcc extras cannot be audited by pip-audit.
+      # dev+video+allsky is the widest auditable set. torch and torchvision ship
+      # from the PyTorch index (as +cpu local versions), not PyPI, so pip-audit
+      # cannot resolve them and both are excluded via --no-emit-package; the rest
+      # of the allsky extra (safetensors, tensorboard, tqdm, imageio-ffmpeg) is
+      # audited. The tcc torch stack remains uncovered for the same index reason.
       - name: Audit dependencies for known vulnerabilities
         run: |
-          uv export --frozen --extra dev --extra video --format requirements-txt --no-emit-project -o requirements-audit.txt
+          uv export --frozen --extra dev --extra video --extra allsky --no-emit-package torch --no-emit-package torchvision --format requirements-txt --no-emit-project -o requirements-audit.txt
           uvx pip-audit --strict --disable-pip -r requirements-audit.txt
 
   # Flags vulnerable or malicious dependency changes introduced by a PR.
