@@ -198,7 +198,6 @@ class TestTrainValFractionPropagates:
         # val_fraction (here 1.5) must now propagate rather than be silently
         # swallowed into a single-day run. device='cpu' keeps this torch-free:
         # split_days rejects the fraction before any loader/model is built.
-        from allsky.config import AllSkyConfig
         from allsky.training import train
 
         index_path = tmp_path / "index.parquet"

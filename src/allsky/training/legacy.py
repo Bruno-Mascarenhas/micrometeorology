@@ -223,20 +223,20 @@ def train(
     index_df = pd.read_parquet(index_file)
     logger.info("Index: %d rows from %s", len(index_df), index_file)
 
-    try:
-        train_df, val_df = split_days(index_df, val_fraction=val_fraction, seed=cfg.train.seed)
-    except ValueError as exc:
-        # Only the "fewer than 2 distinct days" case falls back to train==val
-        # (finding F9). Any other ValueError from split_days — notably a bad
-        # val_fraction outside (0, 1) — is a real configuration error and must
-        # propagate rather than be silently swallowed into a single-day run.
-        if "distinct day" not in str(exc):
-            raise
+    # Pre-check the day count instead of catching split_days' ValueError: only a
+    # genuinely single-day index falls back to train==val (finding F9); every
+    # other error — notably a bad val_fraction outside (0, 1) — propagates.
+    if not 0.0 < val_fraction < 1.0:
+        raise ValueError(f"val_fraction must be in (0, 1), got {val_fraction}")
+    n_days = pd.to_datetime(index_df["timestamp"]).dt.normalize().nunique()
+    if n_days < 2:
         logger.warning(
             "Index spans a single calendar day: validation REUSES the training day. "
             "Metrics are not leakage-free — smoke/debug runs only."
         )
         train_df = val_df = index_df
+    else:
+        train_df, val_df = split_days(index_df, val_fraction=val_fraction, seed=cfg.train.seed)
     logger.info("Split: %d train rows / %d val rows (by day)", len(train_df), len(val_df))
     train_loader, val_loader = _build_loaders(cfg, train_df, val_df, device)
 

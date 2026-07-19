@@ -238,3 +238,19 @@ class TestAtomicity:
         save_shard(tmp_path / shard_filename(0), np.zeros((1, 4), dtype=np.float32))
         loaded = st.load_file(str(tmp_path / shard_filename(0)))
         assert list(loaded) == [EMBEDDINGS_TENSOR_KEY]
+
+
+class TestPreloadReadOnly:
+    def test_preloaded_vectors_are_immutable_views(self, tmp_path: Path):
+        # The resident matrix is shared across every caller (and COW-shared
+        # across fork workers); a mutable row view would let one consumer
+        # silently corrupt the store for all others.
+        ids = [f"allsky-20250321-09{m:02d}" for m in range(0, 30, 10)]
+        _write_store(tmp_path, ids, dim=4, shard_size=2)
+        reader = SafetensorsEmbeddingReader(tmp_path, preload=True)
+        vector = reader(ids[0])
+        with pytest.raises(ValueError, match="read-only"):
+            vector[0] = 123.0
+        # Parity with the lazy path is unaffected by the write protection.
+        lazy = SafetensorsEmbeddingReader(tmp_path)
+        np.testing.assert_array_equal(np.asarray(vector), lazy(ids[0]))

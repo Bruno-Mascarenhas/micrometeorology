@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections import Counter, OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -33,6 +32,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from allsky.atomic import atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -74,24 +75,6 @@ def shard_path(embeddings_dir: str | Path, shard_index: int) -> Path:
     return Path(embeddings_dir) / shard_filename(shard_index)
 
 
-def _atomic_replace(path: Path, write: Any) -> None:
-    """Write via a same-directory temp file, then ``os.replace`` onto *path*.
-
-    *write* is a callable taking the temp :class:`~pathlib.Path`.  The temp file
-    is removed if *write* raises, so a failed write never leaves debris.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    ok = False
-    try:
-        write(tmp)
-        os.replace(tmp, path)
-        ok = True
-    finally:
-        if not ok:
-            tmp.unlink(missing_ok=True)
-
-
 def save_shard(path: str | Path, embeddings: np.ndarray) -> Path:
     """Atomically write *embeddings* as an fp16 safetensors shard.
 
@@ -105,7 +88,7 @@ def save_shard(path: str | Path, embeddings: np.ndarray) -> Path:
     if arr.ndim != 2:
         raise ValueError(f"embeddings must be 2-D (N, dim), got shape {arr.shape}")
     out = Path(path)
-    _atomic_replace(out, lambda tmp: save_file({EMBEDDINGS_TENSOR_KEY: arr}, str(tmp)))
+    atomic_write(out, lambda tmp: save_file({EMBEDDINGS_TENSOR_KEY: arr}, str(tmp)))
     return out
 
 
@@ -119,7 +102,7 @@ def load_shard(path: str | Path) -> np.ndarray:
 def write_index(embeddings_dir: str | Path, index: pd.DataFrame) -> Path:
     """Atomically write the parquet index into *embeddings_dir*."""
     out = Path(embeddings_dir) / INDEX_FILENAME
-    _atomic_replace(out, lambda tmp: index.to_parquet(tmp, index=False))
+    atomic_write(out, lambda tmp: index.to_parquet(tmp, index=False))
     return out
 
 
@@ -139,7 +122,7 @@ def write_meta(embeddings_dir: str | Path, meta: dict[str, Any]) -> Path:
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(meta, handle, indent=2, ensure_ascii=False, default=str)
 
-    _atomic_replace(out, _write)
+    atomic_write(out, _write)
     return out
 
 
@@ -232,7 +215,9 @@ class SafetensorsEmbeddingReader:
       into a single contiguous ``(N, dim)`` fp32 array with a ``sample_id -> row``
       map (the resident size is logged).  ``__call__`` is then a pure array index
       with no per-sample file I/O; this is what the training/eval engine uses by
-      default (see ``data.embeddings_preload``).  Keep the LRU path for ad-hoc
+      default (see ``data.embeddings_preload``).  The resident array is marked
+      **read-only**, so a returned vector is a zero-copy but immutable view and
+      cannot be used to mutate the shared store.  Keep the LRU path for ad-hoc
       access to stores that do not fit in memory.
 
     Parameters
@@ -288,7 +273,13 @@ class SafetensorsEmbeddingReader:
         return list(self._locations)
 
     def _preload_all(self) -> None:
-        """Load every shard once into one contiguous ``(N, dim)`` fp32 array."""
+        """Load every shard once into one contiguous, read-only ``(N, dim)`` fp32 array.
+
+        The resident matrix is marked read-only (``setflags(write=False)``) once
+        populated: ``__call__`` returns zero-copy row *views* into it, so making
+        the base immutable stops a caller mutating the shared store through a
+        returned vector (the views inherit the read-only flag).
+        """
         n = len(self._locations)
         matrix = np.empty((n, self._dim), dtype=np.float32)
         row_of: dict[str, int] = {}
@@ -302,6 +293,7 @@ class SafetensorsEmbeddingReader:
                 matrix[cursor] = arr[row]
                 row_of[sid] = cursor
                 cursor += 1
+        matrix.setflags(write=False)
         self._matrix = matrix
         self._row_of = row_of
         self.preloaded = True
@@ -341,6 +333,8 @@ class SafetensorsEmbeddingReader:
                 raise KeyError(
                     f"sample_id {sample_id!r} not found in embedding index at {self._dir}"
                 )
+            # Zero-copy view into the resident store; the store is read-only
+            # (see _preload_all) so this view is immutable and cannot corrupt it.
             resident: np.ndarray = self._matrix[row]
             return resident
         location = self._locations.get(key)
