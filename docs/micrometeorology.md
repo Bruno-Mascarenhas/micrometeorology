@@ -264,13 +264,51 @@ labmim-wrf-geojson --wrf-dir /path/to/wrfout/ --date 20240101 \
     -v temperature -v wind --workers 44
 ```
 
-The static-site JSON contract is:
+The static-site artifact contract (all paths relative to `--geojson-dir` `-g`
+and `--output-dir` `-o`) is:
 
 ```text
-GeoJSON/{domain}.geojson
-JSON/{domain}_{variableId}_{hour}.json
-JSON/{domain}_WIND_VECTORS_{hour}.json
+GeoJSON/{domain}.geojson              # legacy full FeatureCollection (fallback)
+GeoJSON/{domain}.grid.json            # compact grid companion (edges/bounds)
+JSON/{domain}_{variableId}_{NNN}.json # per-time-step value payload
+JSON/{domain}_WIND_VECTORS_{NNN}.json # wind-arrow overlay for any variable
+JSON/{domain}_{variableId}.series.bin # per-cell time-series (int32 matrix)
+JSON/{domain}_{variableId}.summary.json  # per-step domain mean/min/max
+JSON/manifest.json                    # run manifest (v2)
 ```
+
+`{domain}` is `D01`–`D05`, `{NNN}` is the zero-padded three-digit time-step
+index (the front-end reads it as the forecast hour), and `{variableId}` is the
+output file suffix from `VARIABLE_NETCDF_MAP` (`micrometeorology.common.types`).
+
+The last four artifacts are the **consolidated site artifacts** written by
+default; pass `--no-site-artifacts` to emit only the per-step value JSONs, the
+grid files, and a v1 manifest. `--skip-first N` drops the first `N` spin-up
+time steps (their indices become gaps in the timeline).
+
+- **`{domain}.grid.json`** — compact cell geometry the front-end prefers over
+  the multi-MB `.geojson`. `grid-edges-v1` stores only the shared 1-D
+  `lon_edges`/`lat_edges` for separable (regular lat/lon) grids;
+  `grid-bounds-v1` stores per-cell `[west, south, east, north]` for
+  curvilinear grids. Cell `k` (row-major) equals the legacy GeoJSON
+  `linear_index`, so both grid encodings and the value/series payloads share
+  one cell order.
+- **`{domain}_{variableId}_{NNN}.json`** — `{"metadata":{...},"values":[...]}`.
+  `values` is the row-major flattened grid (one entry per cell, `null` where
+  masked); `metadata.scale_values` holds six linspace legend stops and
+  `metadata.date_time` the local timestamp. Poteolico/wind payloads carry an
+  extra `metadata.wind` block.
+- **`{domain}_{variableId}.series.bin`** — `cell-series-int32-le-v1`: a
+  row-major `cells × steps` little-endian int32 matrix of
+  `round(value, 2) × 100`, with sentinel `-2147483648` for never-written /
+  masked / NaN steps. Columns span `0..n_steps-1` regardless of skip-first or
+  night gaps, so one HTTP Range request returns a single cell's whole series.
+- **`{domain}_{variableId}.summary.json`** — `domain-summary-v1`: per-step
+  `indices`, `date_times`, `mean`, `min`, `max` over the same rounded values,
+  for the lightweight domain-preview panel.
+- **`manifest.json`** — see "Run manifest (v2)" below. Only `values_json` and
+  `poteolico` work units accumulate `.series.bin`/`.summary.json`;
+  `WIND_VECTORS` and the grid GeoJSON do not.
 
 Supported site-oriented variables include the legacy fields `TEMP`, `PRES`,
 `VAPOR`, `RAIN`, `WIND`, `SWDOWN`, `HFX`, `LH`, and the wind-potential files
@@ -297,6 +335,67 @@ anything still failing makes the CLI exit non-zero with a per-unit report.
 On network filesystems where HDF5 file locking fails at open, set
 `LABMIM_HDF5_FILE_LOCKING=BEST_EFFORT` (do not disable locking for files that
 may still be written by WRF).
+
+Non-finite rejection: every JSON writer serializes with `allow_nan=False`, and
+a field whose scale bounds are non-finite (a fully masked/NaN variable) fails
+its work unit rather than emitting bare `NaN` tokens — invalid JSON that would
+only break later, in every visitor's browser.
+
+Timezone: all exported `date_time` strings and the manifest anchor are
+expressed in a single pinned product timezone, `America/Bahia`
+(UTC−03:00, no DST), so the daily job produces identical labels regardless of
+the host's clock. Override with `LABMIM_TIMEZONE`; prefer fixed-offset zones,
+because the front-end labels the timeline with flat one-hour-per-index
+arithmetic and a DST transition inside a run would desync those labels from the
+per-file `date_time` strings. Timestamps are formatted `DD/MM/YYYY HH:MM:SS`
+and truncated to the hour.
+
+#### Run manifest (v2)
+
+Every run writes `JSON/manifest.json`. The front-end fetches it with
+`cache: "no-cache"` at startup and re-checks it periodically; its `version`
+(a UTC timestamp) is appended as `?v=` to every data URL so the fixed-name
+files can be cached aggressively yet cache-bust the moment a new run publishes.
+
+```jsonc
+{
+  "version": "20260719T013159Z",          // run id → ?v= cache-buster
+  "generated_utc": "2026-07-19 01:31:59Z",
+  "domains": ["D01", "D02", "D03", "D04"],
+  "files": 4844,                            // total files written this run
+  "format": "labmim-data-manifest-v2",      // absent → v1 (front-end defaults)
+  "timezone": "America/Bahia",
+  "index_min": 0,                           // intersection of per-domain ranges
+  "index_max": 75,
+  "start_local": "02/05/2026 21:00:00",     // local time of file index 0
+  "availability": {                         // only variables NOT full-range
+    "SWDOWN": [[9, 21], [33, 45], [57, 69]] // inclusive [start, end] step runs
+  },
+  "features": {                             // consolidated-artifact descriptors
+    "domain_summary": {
+      "format": "domain-summary-v1",
+      "template": "JSON/{domain}_{variable}.summary.json"
+    },
+    "cell_series": {
+      "format": "cell-series-int32-le-v1",
+      "template": "JSON/{domain}_{variable}.series.bin",
+      "dtype": "int32", "byte_order": "little",
+      "scale": 0.01, "missing": -2147483648,
+      "index_min": 0, "index_max": 75       // series columns span 0..n_steps-1
+    }
+  }
+}
+```
+
+The v2 fields are additive and are derived only from files **actually written
+this run** (never re-derived arithmetic that could drift): `availability` lists
+only variables missing from the full step range (e.g. `SWDOWN` daylight
+windows); the `features` descriptors are advertised only when every unit
+succeeded and agreed on the step count, because the consolidated artifacts are
+a byte-offset contract and a failed unit could leave a previous run's file in
+place. A consumer that sees no `features` block falls back to the per-step
+value JSONs. `start_local` always pairs with file index `0`, even when
+`--skip-first` makes `index_min > 0`.
 
 To run single-process, pass `--workers 1`. There is deliberately no reader or
 worker-backend selection anymore: eager block-streamed reads plus one
@@ -341,6 +440,104 @@ labmim-comparison --obs observed.csv --model modeled.csv --output comparison/
 # Metrics between any two datasets
 labmim-metrics -a salvador.dat -b rio.dat -o metrics.csv
 ```
+
+---
+
+## Front-end integration (site-labmim)
+
+`labmim-wrf-geojson` is the **producer** for the LabMiM public WebGIS
+(`site-labmim`). The two repositories share a byte-level file contract: the
+exporter writes fixed-name artifacts, the static site fetches them by those
+exact names, and the daily job overwrites them in place. This section is the
+authoritative description of that contract.
+
+### Producer → consumer map
+
+| Producer writes (this repo)            | Site reads (`site-labmim`)                 | Consumed by | Status |
+|---|---|---|---|
+| `JSON/manifest.json`                   | `JSON/manifest.json` (`cache: "no-cache"`) | `map-init.js` → `applyManifest` | live |
+| `GeoJSON/{domain}.grid.json`           | `GeoJSON/{domain}.grid.json`               | `map-manager.loadGridLayer` (primary) | live |
+| `GeoJSON/{domain}.geojson`             | `GeoJSON/{domain}.geojson`                 | grid loader fallback + `charts` cell lookup | live (fallback) |
+| `JSON/{domain}_{variableId}_{NNN}.json`| same                                        | `map-manager.loadValueData` (the map raster) | live |
+| `JSON/{domain}_WIND_VECTORS_{NNN}.json`| same                                        | `map-manager.renderWindVectors` (arrow overlay) | live |
+| `JSON/{domain}_{variableId}.summary.json` | via `features.domain_summary.template`   | `charts-manager._loadSummaryArtifactSeries` (domain preview) | live |
+| `JSON/{domain}_{variableId}.series.bin`   | via `features.cell_series.template`      | `charts-manager._loadCellSeriesFromBinary` (cell modal, HTTP Range) | live |
+
+The site expects the value payloads under `site/JSON/` and the grid files under
+`site/GeoJSON/`; deploying a run is copying the exporter's `-o`/`-g` outputs
+into those two directories. Every artifact the exporter emits is consumed by
+the current front-end. (`site/assets/json/` is an unrelated empty placeholder,
+not the manifest location.)
+
+### Variable-id source of truth
+
+The `{variableId}` tokens are the string values of `VARIABLE_NETCDF_MAP` in
+`src/micrometeorology/common/types.py` (`TEMP`, `PRES`, `WIND`, `RAIN`,
+`VAPOR`, `TSK`, `RH2`, `HFX`, `LH`, `SWDOWN`, `GLW`,
+`WIND_POWER_DENSITY_10M`), plus the poteolico expansion
+(`POT_EOLICO_50M/100M/150M`) and the standalone `WIND_VECTORS`. On the consumer
+side the same ids are the `id`/`id_100m`/`id_150m` fields of `VARIABLES_CONFIG`
+in `site/assets/js/variables-config.js` — the front-end's registry and the
+single source of truth for which ids the map can request. The default exporter
+variable set (`DEFAULT_VARS`) matches this registry exactly.
+`data/variables-config.js` in this repo is a **reference copy only** — nothing
+in the pipeline reads it, and it can lag behind the site's live registry.
+
+### Guarantees the site relies on
+
+- **Shape** — `values` is the row-major flattened grid; cell order is defined by
+  the grid file's `linear_index` (`k = row·n_cols + col`) and is shared by the
+  value JSON, the `.series.bin` rows, and both grid encodings.
+- **Units** — one physical unit per variable, matching the exporter docstrings
+  in `wrf/variables.py` and the `unit` field of the site registry.
+- **Non-finite** — never emitted; masked cells are `null` in value JSON and the
+  `-2147483648` sentinel in `.series.bin`, and an all-NaN field fails its unit
+  instead of shipping invalid JSON (see "Non-finite rejection" above).
+- **Rounding** — values are rounded to two decimals everywhere; `.series.bin`
+  encodes `value × 100` as int32 (`scale: 0.01`), so the binary and per-step
+  views always agree.
+- **Timezone** — `America/Bahia` (UTC−03:00, no DST); `manifest.start_local`
+  anchors file index `0`. The front-end currently hardcodes the UTC−03:00 label
+  and does not read `manifest.timezone`, so changing `LABMIM_TIMEZONE` away from
+  a −03:00 zone would desync its time labels.
+
+### Cache semantics (why the JSON is a byte contract)
+
+The pipeline reuses the **same filenames every run** and overwrites them in
+place. The site never renames on deploy, so cache invalidation rides entirely
+on the manifest:
+
+- `manifest.json` is fetched `no-cache` (always revalidated) and re-checked
+  every ~15 min and on tab refocus.
+- `manifest.version` is appended as `?v=` to every data URL, letting the browser
+  cache the fixed-name files long-term while a new run (new `version`)
+  cache-busts them all at once.
+- When a session detects a changed `version` it drops every cached payload,
+  chart series, and grid layer keyed on the old bytes and re-anchors the
+  timeline — so a page left open across the daily regeneration never mixes two
+  runs. This is why the output must be a stable byte contract: identical names,
+  identical shapes, one version stamp per round.
+
+### Refreshing the site's data from a wrfout file
+
+From this repo, export straight into a checkout of the site (read-only sibling
+`../site-labmim` shown here; adjust the path):
+
+```bash
+labmim-wrf-geojson \
+    --wrf-dir /path/to/wrfout/ --date 20260503 \
+    -D 1 -D 2 -D 3 -D 4 \
+    -o ../site-labmim/site/JSON \
+    -g ../site-labmim/site/GeoJSON \
+    --workers 44
+```
+
+This writes the per-step value JSONs, `WIND_VECTORS`, the `.geojson` +
+`.grid.json` grids, the `.series.bin`/`.summary.json` consolidated artifacts,
+and the v2 `manifest.json` — the complete set the WebGIS consumes. A single
+`wrfout` file is fine too: `-d /path/to/wrfout_d03_2026-05-03_00_00_00`
+(the domain is read from the filename). Omit `--date` to batch every `wrfout*`
+in `--wrf-dir`.
 
 ---
 

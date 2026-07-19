@@ -34,12 +34,25 @@ class ExperimentConfig:
 
     @property
     def experiment_dir(self) -> Path:
+        """Directory this run's artifacts are written to (``output_dir/name``)."""
         return Path(self.output_dir) / self.name
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the config as a nested plain-dict (via ``dataclasses.asdict``)."""
         return dataclasses.asdict(self)
 
     def validate(self) -> None:
+        """Check cross-field invariants, raising on the first invalid run.
+
+        Every violation is collected and reported together, so a single
+        ``ValueError`` lists all problems (unknown model type, split ratios that
+        do not sum to 1, non-divisible transformer head count, and so on).
+
+        Raises
+        ------
+        ValueError
+            If any invariant fails; the message enumerates every error.
+        """
         errors: list[str] = []
 
         from solrad_correction.models.registry import supported_model_names
@@ -98,12 +111,14 @@ class ExperimentConfig:
             raise ValueError(f"Invalid experiment config:\n{joined}")
 
     def save(self, path: str | Path) -> None:
+        """Write the config to ``path`` as YAML, creating parent directories."""
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             yaml.dump(self.to_dict(), handle, default_flow_style=False, sort_keys=False)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ExperimentConfig:
+        """Build a config from a YAML file, filling unspecified fields with defaults."""
         with open(path, encoding="utf-8") as handle:
             data = yaml.safe_load(handle) or {}
 

@@ -80,10 +80,12 @@ class WRFDataset:
 
     @property
     def dataset(self) -> netCDF4.Dataset:
+        """The underlying open ``netCDF4.Dataset`` (auto-masking disabled)."""
         return self._ds
 
     @property
     def grid_level(self) -> GridLevel:
+        """Domain grid level inferred from the file name (D01/D02/...)."""
         return self._grid_level
 
     @property
@@ -219,6 +221,7 @@ class WRFDataset:
         return np.asarray(var[t_start:t_stop])
 
     def has_variable(self, name: str) -> bool:
+        """Whether ``name`` is present among the file's NetCDF variables."""
         return name in self._ds.variables
 
     # ------------------------------------------------------------------
@@ -235,6 +238,7 @@ class WRFDataset:
         return GridLevel.D01
 
     def close(self) -> None:
+        """Close the underlying NetCDF file handle."""
         self._ds.close()
 
     def __enter__(self) -> WRFDataset:

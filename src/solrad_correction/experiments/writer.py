@@ -26,9 +26,11 @@ class ExperimentWriter:
 
     @classmethod
     def from_config(cls, config: ExperimentConfig) -> ExperimentWriter:
+        """Build a writer targeting ``config.experiment_dir``."""
         return cls(ArtifactLayout.from_experiment_dir(config.experiment_dir))
 
     def prepare(self) -> None:
+        """Create the experiment directory tree (idempotent)."""
         self.layout.ensure_directories()
 
     def write_result(
@@ -50,6 +52,7 @@ class ExperimentWriter:
         self.write_manifest(config)
 
     def write_config(self, config: ExperimentConfig) -> None:
+        """Write the run's ``config.yaml``."""
         config.save(self.layout.config_yaml)
 
     def write_preprocessing(self, pipeline: PreprocessingPipeline) -> None:
@@ -59,6 +62,7 @@ class ExperimentWriter:
         pipeline.save_state_json(self.layout.preprocessing_state)
 
     def write_datasets(self, result: ExperimentResult) -> None:
+        """Serialize the train/val/test datasets under ``datasets/`` (val optional)."""
         from solrad_correction.datasets.serialization import save_dataset
 
         feature_names = result.processed.feature_cols
@@ -83,6 +87,7 @@ class ExperimentWriter:
             model.save(self.layout.model_joblib)
 
     def write_report(self, report: ExperimentReport) -> None:
+        """Write metrics, resolved config, and (when present) training history and metadata."""
         save_json(report.metrics, self.layout.metrics)
         save_json(report.config, self.layout.config_resolved)
         if report.train_history:
@@ -96,6 +101,7 @@ class ExperimentWriter:
             save_json(report.metadata, self.layout.metadata)
 
     def write_predictions(self, result: ExperimentResult) -> None:
+        """Write the aligned ``y_true``/``y_pred`` table to ``predictions.csv``."""
         save_predictions(
             result.evaluation.y_true,
             result.evaluation.y_pred,
@@ -104,6 +110,7 @@ class ExperimentWriter:
         )
 
     def write_profile(self, config: ExperimentConfig, profile: PipelineProfile) -> None:
+        """Write per-stage timing to ``profile.json`` — only when profiling is enabled."""
         if config.runtime.profile:
             save_json(
                 {
@@ -115,10 +122,12 @@ class ExperimentWriter:
             )
 
     def write_manifest(self, config: ExperimentConfig) -> None:
+        """Write ``manifest.json`` — the checksummed inventory of all artifacts."""
         write_manifest(self.layout, extra=self.manifest_extra(config))
 
     @staticmethod
     def manifest_extra(config: ExperimentConfig) -> dict[str, Any]:
+        """Extra provenance fields (experiment name, model type) embedded in the manifest."""
         return {
             "experiment_name": config.name,
             "model_type": config.model.model_type.lower(),

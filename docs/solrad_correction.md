@@ -157,6 +157,14 @@ they can be invoked directly after `uv pip install -e ".[tcc]"`:
 solrad-run --config configs/tcc/experiments/my_experiment.yaml
 ```
 
+Fast pre-flight checks that never train: `--validate-config` (validate the YAML
+and exit), `--print-config` (print the resolved config as JSON), `--dry-run`
+(validate without loading data), and `--smoke-test` (a small synthetic
+CPU-safe experiment that needs no `--config`). Override flags — `--device`,
+`--amp/--no-amp`, `--compile/--no-compile`, `--num-workers`,
+`--pin-memory/--no-pin-memory`, `--limit-rows`, `--profile`, `--resume`,
+`-o/--output-dir`, `-n/--name` — take precedence over the config file.
+
 Or via Python:
 
 ```python

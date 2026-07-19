@@ -88,7 +88,9 @@ One row per paired sample. Columns (see `data/contracts.py`):
   `target_kindex`, `kindex_kind` (`kstar`/`kt`), `sky_class`
   (`0/1/2`, `-1` = missing), `cloud_fraction` (nullable, all-NaN today),
   `qc_flags` (`int64` `QCFlag` bitmask: `LOW_SUN`, `SENSOR_GAP`,
-  `ALIGNMENT_FAR`, `KT_ARTIFACT`, `FRAME_DARK`, `FRAME_SATURATED`).
+  `ALIGNMENT_FAR`, `KT_ARTIFACT`, `FRAME_DARK`, `FRAME_SATURATED` — the manifest
+  builder sets only the first four; `FRAME_DARK`/`FRAME_SATURATED` are reserved
+  for the image-preprocessing wave and stay unset here).
 - **Provenance (constant per row)**: `dataset_version`, `alignment_id` (mirror
   the sidecar meta so a manifest is self-describing), and `split` — a **nullable**
   label, empty at build and filled in place by
@@ -104,8 +106,9 @@ build with two frames in the same minute raises rather than silently colliding.
 
 ### Meta sidecar (`manifest.parquet.meta.json`)
 
-`dataset_version`, `alignment_id`, `feature_set`, `kindex_kind`, `config_sha256`,
-`code_version`/git commit, `created_at`, `row_count`, thresholds (incl.
+`dataset_version`, `alignment_id`, `feature_set`, the ordered `feature_columns`,
+`kindex_kind`, `target_source`, `config_sha256`, `code_version`/git commit,
+`created_at`, `row_count`, the `timezone` and `site`, thresholds (incl.
 `night_min_elevation_deg` and the resolved `max_kindex`), an optional `split_id`
 (recorded by `attach_split_column`), and a content **`manifest_sha256`**
 (order-sensitive, parquet-container-independent) that ties a trained checkpoint to
@@ -117,7 +120,8 @@ bytes a checkpoint trains on). Both files are written atomically
 ### Split artifact (`splits.json`)
 
 `{split_id (sha256 of the day→split map + params), seed, fractions, assignment
-day_id→split, created_at}`. Splits are **day-level** (never row-level) so
+day_id→split, created_at, dataset_version, per-split day counts}`. Splits are
+**day-level** (never row-level) so
 near-duplicate consecutive frames cannot cross splits. Overwriting an existing
 artifact with different content requires `force=True`, else `SplitExistsError`.
 
@@ -126,10 +130,16 @@ artifact with different content requires `force=True`, else `SplitExistsError`.
 - `embeddings-{i:05d}.safetensors` — one fp16 tensor per shard.
 - `index.parquet` — `sample_id → (shard, row)`.
 - `embeddings.meta.json` — backbone, revision, pooling, dim, transform,
-  `config_sha256`, count.
+  `config_sha256`, count, storage `dtype` (`fp16`).
 
-`SafetensorsEmbeddingReader` resolves a `sample_id` to its vector lazily;
-extraction skips complete shards for resume.
+`SafetensorsEmbeddingReader` resolves a `sample_id` to its vector lazily.
+Extraction is resumable — the index is the source of truth, so every `sample_id`
+already recorded in `index.parquet` is skipped (a shard and its index rows land
+together atomically, so a crash leaves a consistent, possibly shorter index). It
+**refuses to resume** into a store whose `embeddings.meta.json` records a
+different backbone / revision / pooling / dim / config, rather than silently
+mixing two encoders' vectors — rerun with `--no-resume` (or a fresh out dir) to
+overwrite.
 
 ### Checkpoint payload (`last.ckpt` / `best.ckpt`)
 

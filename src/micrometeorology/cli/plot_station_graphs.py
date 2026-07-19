@@ -65,6 +65,7 @@ def run(
 
 
 def main() -> None:
+    """Module entry point (``python -m micrometeorology.cli.plot_station_graphs``)."""
     app()
 
 

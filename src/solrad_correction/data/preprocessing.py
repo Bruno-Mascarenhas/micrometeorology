@@ -33,6 +33,7 @@ class PreprocessingState:
     fitted: bool = False
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the state to a JSON-safe dict (inverse of :meth:`from_dict`)."""
         return {
             "version": self.version,
             "scaler_type": self.scaler_type,
@@ -52,6 +53,13 @@ class PreprocessingState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PreprocessingState:
+        """Rebuild a state from :meth:`to_dict` output; rejects other schema versions.
+
+        Raises
+        ------
+        ValueError
+            If ``data['version']`` is not 3 (only the current schema is supported).
+        """
         if int(data.get("version", 0)) != 3:
             raise ValueError("Only preprocessing state version 3 is supported")
         return cls(
@@ -105,21 +113,31 @@ class Preprocessor:
 
     @property
     def is_fitted(self) -> bool:
+        """Whether :meth:`fit` has been run on this instance."""
         return self._state.fitted
 
     @property
     def state(self) -> PreprocessingState:
+        """The learned :class:`PreprocessingState` (statistics and column layout)."""
         return self._state
 
     @property
     def columns(self) -> list[str]:
+        """Output columns kept after fitting (input columns minus the dropped ones)."""
         return list(self._state.output_columns)
 
     @property
     def dropped_columns(self) -> dict[str, str]:
+        """Columns dropped at fit time mapped to the NaN-ratio reason they were dropped."""
         return dict(self._state.dropped_columns)
 
     def fit(self, df: pd.DataFrame) -> Preprocessor:
+        """Learn drop list, imputation fills and scaling from ``df`` (train split only).
+
+        All statistics are computed here and frozen into :attr:`state`; call this
+        on the training split alone so no validation/test information leaks into
+        the fitted parameters. Returns ``self`` for chaining.
+        """
         input_columns = list(df.columns)
         na_ratio = df.isna().mean()
         dropped = {
@@ -168,6 +186,18 @@ class Preprocessor:
         return self
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply the fitted drop/impute/scale steps to ``df``.
+
+        With ``strict_schema`` (the default) the input columns must match those
+        seen at fit time exactly.
+
+        Raises
+        ------
+        RuntimeError
+            If called before :meth:`fit`.
+        ValueError
+            If the input schema does not match the fitted columns.
+        """
         if not self._state.fitted:
             raise RuntimeError("Preprocessor not fitted. Call fit() first.")
         self._validate_transform_schema(df)
@@ -177,9 +207,20 @@ class Preprocessor:
         return self._scale(out)
 
     def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Convenience for :meth:`fit` followed by :meth:`transform` on the same frame."""
         return self.fit(df).transform(df)
 
     def inverse_transform_column(self, values: np.ndarray, column: str) -> np.ndarray:
+        """Map scaled ``values`` for one column back to their original units.
+
+        Undoes only the scaling step (standard or min-max); a no-op when
+        ``scaler_type='none'``.
+
+        Raises
+        ------
+        ValueError
+            If ``column`` was not part of the fitted output columns.
+        """
         if column not in self._state.output_columns:
             raise ValueError(f"Column '{column}' is not part of fitted preprocessing output")
         values = np.asarray(values, dtype=np.float64)
@@ -193,10 +234,12 @@ class Preprocessor:
         return values
 
     def to_state(self) -> PreprocessingState:
+        """Return the fitted :class:`PreprocessingState` for serialization."""
         return self._state
 
     @classmethod
     def from_state(cls, state: PreprocessingState) -> Preprocessor:
+        """Rebuild a ready-to-transform preprocessor from a saved state (no refit)."""
         pipeline = cls(
             scaler_type=state.scaler_type,
             impute_strategy=state.impute_strategy,
@@ -208,18 +251,21 @@ class Preprocessor:
         return pipeline
 
     def save(self, path: str | Path) -> None:
+        """Persist the fitted state to ``path`` as a joblib artifact (see :meth:`load`)."""
         import joblib
 
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(self._state.to_dict(), path)
 
     def save_state_json(self, path: str | Path) -> None:
+        """Persist the fitted state to ``path`` as human-readable JSON."""
         from solrad_correction.utils.io import save_json
 
         save_json(self._state.to_dict(), path)
 
     @classmethod
     def load(cls, path: str | Path) -> Preprocessor:
+        """Reconstruct a fitted preprocessor from a :meth:`save` joblib artifact."""
         import joblib
 
         return cls.from_state(PreprocessingState.from_dict(joblib.load(path)))

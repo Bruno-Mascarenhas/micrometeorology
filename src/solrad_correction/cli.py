@@ -34,6 +34,12 @@ if TYPE_CHECKING:
 
 
 class DeviceChoice(StrEnum):
+    """Compute-device options for the ``--device`` flag.
+
+    ``auto`` selects CUDA when available and falls back to CPU; ``cuda`` errors
+    out if no GPU is present (see :func:`resolve_device`).
+    """
+
     auto = "auto"
     cpu = "cpu"
     cuda = "cuda"
@@ -130,6 +136,7 @@ def run_experiment_cli(
 
 
 def main() -> None:
+    """Console-script entry point (pyproject: ``solrad-run``)."""
     app()
 
 

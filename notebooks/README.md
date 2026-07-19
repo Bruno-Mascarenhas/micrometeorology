@@ -77,9 +77,10 @@ Colab sessions die; the checkpoints don't (they are on Drive):
 
 ```bash
 # allsky multimodal — --resume auto finds last.ckpt in the run dir and continues,
-# never overwriting a better best.ckpt (epochs is the TOTAL budget)
+# never overwriting a better best.ckpt (epochs is the TOTAL budget). export-colab-bundle
+# nests everything under allsky_bundle/, so --data-root points at that unpacked subdir.
 allsky train --config configs/allsky/experiments/v4_film.yaml \
-    --data-root .../allsky-mm/data --out-dir .../runs/allsky-mm/out \
+    --data-root .../allsky-mm/data/allsky_bundle --out-dir .../runs/allsky-mm/out \
     --device cuda --amp --resume auto
 
 # allsky legacy (SkyFusionNet)

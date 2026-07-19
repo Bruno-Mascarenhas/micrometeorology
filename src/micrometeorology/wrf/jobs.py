@@ -80,6 +80,7 @@ class WorkUnit:
 
     @property
     def label(self) -> str:
+        """Short ``filename:variable`` tag used in logs and the run manifest."""
         name = Path(self.wrf_path).name
         return f"{name}:{self.variable or self.kind}"
 
@@ -151,6 +152,10 @@ def _atomic_json_dump(output_path: Path, payload: dict) -> str:
     return str(output_path)
 
 
+# Fixed-point int32 encoding for the cell-series matrix: a rounded value is
+# stored as ``rint(value * SERIES_SCALE)``, so SERIES_SCALE=100 keeps two
+# decimals. SERIES_MISSING (int32 min) is the reserved no-value sentinel and
+# _SERIES_INT_MAX is the clamp ceiling that keeps encoded values in range.
 SERIES_MISSING = -(2**31)
 SERIES_SCALE = 100
 _SERIES_INT_MAX = 2**31 - 1
@@ -185,6 +190,13 @@ class _SiteArtifactAccumulator:
         self.maxs: list[float] = []
 
     def add(self, index: int, values: NDArray, date_str: str) -> None:
+        """Quantize one time step's frame into column ``index`` of the matrix.
+
+        Values are rounded to two decimals and stored as scaled int32; cells
+        that are non-finite (masked/NaN) become :data:`SERIES_MISSING`. Steps
+        with at least one finite cell also contribute a mean/min/max row to the
+        domain summary.
+        """
         arr = values.filled(np.nan) if isinstance(values, np.ma.MaskedArray) else values
         flat = np.round(np.ravel(np.asarray(arr)).astype(np.float64, copy=False), 2)
         if self._matrix is None:
@@ -204,6 +216,11 @@ class _SiteArtifactAccumulator:
             self.maxs.append(round(float(valid.max()), 2))
 
     def write(self, json_dir: str, stem: str, domain: str, variable: str) -> list[str]:
+        """Atomically flush the ``.series.bin`` and ``.summary.json`` artifacts.
+
+        Returns the paths written, or an empty list when no finite step was ever
+        accumulated (nothing to persist).
+        """
         if self._matrix is None or not self.indices:
             return []
         series_path = Path(json_dir) / f"{stem}.series.bin"

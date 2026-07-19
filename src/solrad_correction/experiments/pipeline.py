@@ -48,6 +48,11 @@ class PipelineProfile:
     stage_seconds: dict[str, float]
 
     def time_stage(self, name: str, fn, *args, **kwargs):
+        """Call ``fn`` and record its wall-clock duration under ``name``.
+
+        The elapsed time is stored even if ``fn`` raises, and the return value
+        (or exception) is propagated unchanged.
+        """
         started = time.monotonic()
         try:
             return fn(*args, **kwargs)

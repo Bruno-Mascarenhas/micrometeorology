@@ -369,6 +369,9 @@ allsky evaluate --checkpoint CHECKPOINT.ckpt [--split val|test|train]
 - `precompute-embeddings` reads the `embeddings` section of the PrepareConfig
   (backbone / pooling / batch / shard-size / dtype); backbone `"fake"` is the
   offline dev/test hook, `"dinov2_vits14"` downloads via `torch.hub` on first use.
+  `--resume` (default) skips `sample_id`s already in `index.parquet`, but refuses
+  to resume into an embeddings dir built with a different backbone/pooling/dim/
+  config — rerun with `--no-resume` (or a fresh `--out` dir) to overwrite.
 - `train` routes to the multimodal engine when the config declares
   `experiment: true` (otherwise it is byte-identical legacy behaviour).
   `--resume auto` finds `last.ckpt` in the run dir; `--epochs` is the **total**

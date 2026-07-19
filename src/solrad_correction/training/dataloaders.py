@@ -26,6 +26,7 @@ class DataLoaderSettings:
     gradient_clip: float | None
 
     def to_dict(self) -> dict[str, int | float | str | bool | None]:
+        """Return the settings as a JSON-serializable dict (stored in checkpoint metadata)."""
         return {
             "device": self.device,
             "num_workers": self.num_workers,

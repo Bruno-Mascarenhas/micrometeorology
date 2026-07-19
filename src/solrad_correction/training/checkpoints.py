@@ -34,6 +34,7 @@ class CheckpointManager:
         *,
         checkpoint_config: dict[str, Any] | None = None,
     ) -> CheckpointManager:
+        """Build a manager from a runtime config; disabled when it has no checkpoint dir."""
         directory = (
             Path(runtime.checkpoint_dir) if runtime is not None and runtime.checkpoint_dir else None
         )
@@ -46,9 +47,11 @@ class CheckpointManager:
 
     @property
     def enabled(self) -> bool:
+        """Whether a checkpoint directory is configured (writes are no-ops otherwise)."""
         return self.directory is not None
 
     def should_save_last(self, epoch: int) -> bool:
+        """Whether ``last.pt`` is due this epoch (enabled and on the ``every`` cadence)."""
         return self.enabled and epoch % self.every == 0
 
     def save_best(
@@ -64,6 +67,7 @@ class CheckpointManager:
         best_metric: float | None = None,
         best_epoch: int | None = None,
     ) -> None:
+        """Write ``best.pt``; ``best_metric``/``best_epoch`` default to this call's values."""
         self.save(
             "best.pt",
             epoch=epoch,
@@ -91,6 +95,7 @@ class CheckpointManager:
         best_metric: float | None = None,
         best_epoch: int | None = None,
     ) -> None:
+        """Write ``last.pt`` for resume, carrying the best metric/epoch seen so far."""
         self.save(
             "last.pt",
             epoch=epoch,
@@ -120,6 +125,12 @@ class CheckpointManager:
         best_metric: float | None = None,
         best_epoch: int | None = None,
     ) -> None:
+        """Serialize model/optimizer/scheduler/scaler state to ``filename``.
+
+        A no-op when no checkpoint directory is configured. Resume-critical
+        metadata (kind, monitored metric, best metric/epoch, DataLoader settings)
+        is embedded alongside the tensors.
+        """
         if self.directory is None:
             return
         save_torch_checkpoint(
