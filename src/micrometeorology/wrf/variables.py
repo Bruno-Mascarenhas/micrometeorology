@@ -91,20 +91,22 @@ def get_low_high_rain(variable: NDArray) -> tuple[float, float]:
 # ---------------------------------------------------------------------------
 
 
-def extract_temperature(ds: WRFDataset) -> tuple[NDArray, NDArray, float, float]:
-    """Extract 2-m temperature (°C) and surface pressure (hPa).
+def extract_temperature(ds: WRFDataset) -> tuple[NDArray, float, float]:
+    """Extract 2-m temperature (°C).
 
-    Returns ``(temperature_3d, pressure_3d, temp_min, temp_max)`` where
-    temperature values are in °C and pressure in hPa.
+    Returns ``(temperature_3d, temp_min, temp_max)`` with the raw Kelvin array
+    (converted per step by :func:`extract_temperature_step`) and °C bounds.
+    Callers that also need surface pressure read PSFC themselves — bundling it
+    here forced every temperature export to eagerly load a variable it never
+    used.
     """
     t2 = ds.get_variable("T2")  # Kelvin
-    psfc = ds.get_variable("PSFC")  # Pa
 
     t_min, t_max = get_low_high(t2)
     t_min -= 273.15
     t_max -= 273.15
 
-    return t2, psfc / 100.0, t_min, t_max
+    return t2, t_min, t_max
 
 
 def extract_temperature_step(t2_step: NDArray) -> NDArray:

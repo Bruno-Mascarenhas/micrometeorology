@@ -31,7 +31,7 @@ from micrometeorology.wrf import geojson
 from micrometeorology.wrf import variables as vmod
 from micrometeorology.wrf.batch import _max_tasks_per_child
 from micrometeorology.wrf.geojson import create_wind_vectors_json, write_values_json_stream
-from micrometeorology.wrf.reader import WRFDataset
+from micrometeorology.wrf.reader import WRFDataset, product_timezone
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -68,7 +68,7 @@ def parse_poteolico_heights(variable: str) -> tuple[int, ...]:
 
 @dataclass(frozen=True, slots=True)
 class WorkUnit:
-    """Picklable description of one unit of work. Strings and ints only."""
+    """Picklable description of one unit of work. Strings, ints and bools only."""
 
     kind: UnitKind
     wrf_path: str
@@ -76,6 +76,7 @@ class WorkUnit:
     json_dir: str
     geojson_dir: str
     skip_first: int = 0
+    site_artifacts: bool = True
 
     @property
     def label(self) -> str:
@@ -93,6 +94,10 @@ class UnitResult:
     seconds: float = 0.0
     warnings: tuple[str, ...] = field(default=())
     error: str | None = None
+    # Run metadata for the manifest: the run's first local datetime (formatted
+    # like every JSON date_time) and the file's time-step count.
+    start_local: str | None = None
+    n_steps: int | None = None
 
 
 def apply_hdf5_locking_policy() -> None:
@@ -138,9 +143,86 @@ def _atomic_json_dump(output_path: Path, payload: dict) -> str:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = output_path.with_name(f".{output_path.name}.tmp-{os.getpid()}")
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, separators=(",", ":"), ensure_ascii=False)
+        # allow_nan=False: a NaN that slips into a payload must fail the work
+        # unit here, not ship as an invalid-JSON token that only breaks in
+        # every visitor's browser.
+        json.dump(payload, f, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     os.replace(tmp, output_path)
     return str(output_path)
+
+
+SERIES_MISSING = -(2**31)
+SERIES_SCALE = 100
+_SERIES_INT_MAX = 2**31 - 1
+
+
+class _SiteArtifactAccumulator:
+    """Collects the per-step frames of one (domain, variable) into the two
+    consolidated artifacts the site front-end ingests.
+
+    - ``{stem}.series.bin`` — row-major (cells x steps) little-endian int32
+      matrix: ``rint(round(value, 2) * 100)``, :data:`SERIES_MISSING` where a
+      step has no value (never written, masked, or NaN). Fixed-size records
+      let the front-end fetch ONE cell's full series with a single HTTP Range
+      request instead of downloading every per-step JSON of the domain.
+    - ``{stem}.summary.json`` — per-step domain mean/min/max over the same
+      rounded values, for the lightweight domain-preview panel (one request
+      instead of one per step).
+
+    Values match the per-step JSONs (same round-to-2-decimals), so both views
+    of the data always agree.
+    """
+
+    def __init__(self, n_steps: int) -> None:
+        if n_steps <= 0:
+            raise ValueError("n_steps must be positive")
+        self.n_steps = n_steps
+        self._matrix: NDArray | None = None
+        self.indices: list[int] = []
+        self.date_times: list[str] = []
+        self.means: list[float] = []
+        self.mins: list[float] = []
+        self.maxs: list[float] = []
+
+    def add(self, index: int, values: NDArray, date_str: str) -> None:
+        arr = values.filled(np.nan) if isinstance(values, np.ma.MaskedArray) else values
+        flat = np.round(np.ravel(np.asarray(arr)).astype(np.float64, copy=False), 2)
+        if self._matrix is None:
+            self._matrix = np.full((flat.size, self.n_steps), SERIES_MISSING, dtype="<i4")
+        finite = np.isfinite(flat)
+        column = np.full(flat.size, SERIES_MISSING, dtype="<i4")
+        column[finite] = np.clip(
+            np.rint(flat[finite] * SERIES_SCALE), SERIES_MISSING + 1, _SERIES_INT_MAX
+        ).astype("<i4")
+        self._matrix[:, index] = column
+        if finite.any():
+            valid = flat[finite]
+            self.indices.append(index)
+            self.date_times.append(date_str)
+            self.means.append(round(float(valid.mean()), 2))
+            self.mins.append(round(float(valid.min()), 2))
+            self.maxs.append(round(float(valid.max()), 2))
+
+    def write(self, json_dir: str, stem: str, domain: str, variable: str) -> list[str]:
+        if self._matrix is None or not self.indices:
+            return []
+        series_path = Path(json_dir) / f"{stem}.series.bin"
+        tmp = series_path.with_name(f".{series_path.name}.tmp-{os.getpid()}")
+        tmp.write_bytes(self._matrix.tobytes())
+        os.replace(tmp, series_path)
+
+        summary = {
+            "format": "domain-summary-v1",
+            "domain": domain,
+            "variable": variable,
+            "indices": self.indices,
+            "date_times": self.date_times,
+            "mean": self.means,
+            "min": self.mins,
+            "max": self.maxs,
+        }
+        summary_path = _atomic_json_dump(Path(json_dir) / f"{stem}.summary.json", summary)
+        return [str(series_path), summary_path]
 
 
 def _values_unit_frames(
@@ -154,7 +236,7 @@ def _values_unit_frames(
     Returns ``None`` when the variable is absent from the file.
     """
     if variable == WRFVariable.TEMPERATURE:
-        t2, _psfc, vmin, vmax = vmod.extract_temperature(ds)
+        t2, vmin, vmax = vmod.extract_temperature(ds)
         return (
             lambda i: vmod.materialize_2d(vmod.extract_temperature_step(t2[i : i + 1, :, :])),
             vmin,
@@ -211,6 +293,7 @@ def _run_values_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list[st
         return files, warnings
     frame, vmin, vmax = frames
 
+    acc = _SiteArtifactAccumulator(ds.n_time_steps) if unit.site_artifacts else None
     for meta in time_meta:
         if meta.get("skip"):
             continue
@@ -219,12 +302,14 @@ def _run_values_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list[st
             if local_hour < 6 or local_hour > 18:
                 continue
         i = meta["index"]
+        data = frame(i)
+        date_str = _format_datetime(meta["datetime_local"])
         out = Path(unit.json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"
-        files.append(
-            _atomic_values_json(
-                out, frame(i), vmin, vmax, _format_datetime(meta["datetime_local"]), None
-            )
-        )
+        files.append(_atomic_values_json(out, data, vmin, vmax, date_str, None))
+        if acc is not None:
+            acc.add(i, data, date_str)
+    if acc is not None:
+        files.extend(acc.write(unit.json_dir, f"{grid}_{nc_suffix}", grid, nc_suffix))
     return files, warnings
 
 
@@ -237,10 +322,12 @@ def _run_poteolico_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list
 
     for s in series:
         suffix = f"POT_EOLICO_{s.target}M"
+        acc = _SiteArtifactAccumulator(ds.n_time_steps) if unit.site_artifacts else None
         for meta in time_meta:
             if meta.get("skip"):
                 continue
             i = meta["index"]
+            date_str = _format_datetime(meta["datetime_local"])
             out = Path(unit.json_dir) / f"{grid}_{suffix}_{i:03d}.json"
             files.append(
                 _atomic_values_json(
@@ -248,10 +335,14 @@ def _run_poteolico_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list
                     s.speed_steps[i],
                     s.vmin,
                     s.vmax,
-                    _format_datetime(meta["datetime_local"]),
+                    date_str,
                     s.wind_vectors[i],
                 )
             )
+            if acc is not None:
+                acc.add(i, s.speed_steps[i], date_str)
+        if acc is not None:
+            files.extend(acc.write(unit.json_dir, f"{grid}_{suffix}", grid, suffix))
     return files, []
 
 
@@ -292,6 +383,31 @@ def _run_grid_geojson_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], l
     return [str(out), str(compact)], []
 
 
+def _run_time_metadata(ds: WRFDataset) -> tuple[str | None, int | None]:
+    """The run's first local datetime (JSON date_time format) and step count."""
+    try:
+        times = ds.parse_times()
+        if not times:
+            return None, None
+        return _format_datetime(times[0].astimezone(product_timezone())), len(times)
+    except Exception:  # metadata is best-effort; units must not fail over it
+        return None, None
+
+
+_TIMESTEP_FILE_RE = re.compile(r"^(D\d{2})_([A-Z0-9_]+)_(\d{3})\.json$")
+
+
+def _compress_index_ranges(indices: set[int]) -> list[list[int]]:
+    """Compress a set of indices into sorted inclusive ``[start, end]`` runs."""
+    runs: list[list[int]] = []
+    for i in sorted(indices):
+        if runs and i == runs[-1][1] + 1:
+            runs[-1][1] = i
+        else:
+            runs.append([i, i])
+    return runs
+
+
 def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> Path | None:
     """Write ``manifest.json`` into *json_dir* after a generation run.
 
@@ -317,26 +433,115 @@ def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> P
             if (match := re.search(r"_(d\d+)_", result.label)) is not None
         }
     )
-    payload = {
+    payload: dict = {
         "version": time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
         "generated_utc": time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime()),
         "domains": domains,
         "files": written,
     }
+
+    # v2 fields (additive; the site falls back to hardcoded defaults without
+    # them): timeline range and per-variable availability derived from the
+    # files ACTUALLY written this run — never re-derived arithmetic that could
+    # drift from the writers — plus feature descriptors for the consolidated
+    # summary/series artifacts.
+    var_indices: dict[str, set[int]] = {}
+    domain_indices: dict[str, set[int]] = {}
+    have_summary = False
+    have_series = False
+    for result in results:
+        for file_path in result.files:
+            name = Path(file_path).name
+            match = _TIMESTEP_FILE_RE.match(name)
+            if match:
+                index = int(match.group(3))
+                var_indices.setdefault(match.group(2), set()).add(index)
+                domain_indices.setdefault(match.group(1), set()).add(index)
+            elif name.endswith(".summary.json"):
+                have_summary = True
+            elif name.endswith(".series.bin"):
+                have_series = True
+
+    # The site renders ONE timeline across all domains, so advertise the
+    # intersection of the per-domain ranges: never an index some domain
+    # lacks entirely (a mixed-length run would otherwise label missing
+    # frames as available).
+    if domain_indices:
+        index_min = max(min(indices) for indices in domain_indices.values())
+        index_max = min(max(indices) for indices in domain_indices.values())
+    else:
+        index_min, index_max = 0, -1
+    if index_min <= index_max:
+        payload["format"] = "labmim-data-manifest-v2"
+        payload["timezone"] = str(product_timezone())
+        payload["index_min"] = index_min
+        payload["index_max"] = index_max
+        # The anchor pairs with index 0 (the file's first time step) — the
+        # client must anchor initialIndex=0 regardless of index_min. Results
+        # arrive in completion order, so only advertise the anchor when every
+        # unit that reported one agrees.
+        start_locals = {r.start_local for r in results if r.start_local}
+        if len(start_locals) == 1:
+            payload["start_local"] = start_locals.pop()
+
+        full_range = set(range(index_min, index_max + 1))
+        availability = {
+            var: _compress_index_ranges(indices & full_range)
+            for var, indices in sorted(var_indices.items())
+            if not full_range <= indices
+        }
+        if availability:
+            payload["availability"] = availability
+
+        # Consolidated-artifact descriptors are a byte-offset contract: a
+        # failed unit leaves LAST run's {D}_{VAR}.series.bin/.summary.json in
+        # place under this run's version, so only vouch for the artifacts
+        # when every unit succeeded (the site falls back to the per-step
+        # JSONs otherwise).
+        run_clean = not any(r.error for r in results)
+        features: dict = {}
+        if have_summary and run_clean:
+            features["domain_summary"] = {
+                "format": "domain-summary-v1",
+                "template": "JSON/{domain}_{variable}.summary.json",
+            }
+        # The series matrices span columns 0..n_steps-1 regardless of which
+        # steps were written (skip-first / night gaps are MISSING columns), so
+        # the byte-offset contract needs the step count — advertised only when
+        # every file agrees on it (a mixed-length run would corrupt offsets).
+        step_counts = {r.n_steps for r in results if r.n_steps}
+        if have_series and run_clean and len(step_counts) == 1:
+            n_steps = step_counts.pop()
+            features["cell_series"] = {
+                "format": "cell-series-int32-le-v1",
+                "template": "JSON/{domain}_{variable}.series.bin",
+                "dtype": "int32",
+                "byte_order": "little",
+                "scale": 0.01,
+                "missing": SERIES_MISSING,
+                "index_min": 0,
+                "index_max": n_steps - 1,
+            }
+        if features:
+            payload["features"] = features
+
     return Path(_atomic_json_dump(Path(json_dir) / "manifest.json", payload))
 
 
 _TEMP_FILE_PATTERN = re.compile(r"\.tmp-(\d+)$")
 
 
-def _sweep_stale_temp_files(dirs: Sequence[str]) -> int:
+def _sweep_stale_temp_files(dirs: Sequence[str], *, sweep_pids: frozenset[int] = frozenset()) -> int:
     """Remove orphaned ``.tmp-<pid>`` files whose owning process is dead.
 
     A worker killed mid-write (OOM kill, broken pool teardown) can leave its
     private temp file behind; the final outputs are never affected because of
     the atomic rename, but the debris should not accumulate. Only files whose
     embedded PID no longer exists are removed, so concurrent runs writing into
-    the same directories are never disturbed.
+    the same directories are never disturbed. ``sweep_pids`` marks pids whose
+    debris is known-orphaned even though the process is alive — the serial
+    path writes with the parent's own pid, so its failed-unit leftovers would
+    otherwise survive every end-of-run sweep.
     """
     removed = 0
     for directory in dict.fromkeys(dirs):
@@ -345,6 +550,10 @@ def _sweep_stale_temp_files(dirs: Sequence[str]) -> int:
             if match is None:
                 continue
             pid = int(match.group(1))
+            if pid in sweep_pids:
+                path.unlink(missing_ok=True)
+                removed += 1
+                continue
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
@@ -373,12 +582,15 @@ def process_unit(unit: WorkUnit) -> UnitResult:
                 files, warnings = _run_grid_geojson_unit(unit, ds)
             else:
                 raise ValueError(f"Unknown work unit kind: {unit.kind}")
+            start_local, n_steps = _run_time_metadata(ds)
         return UnitResult(
             label=unit.label,
             kind=unit.kind,
             files=tuple(files),
             seconds=time.perf_counter() - t0,
             warnings=tuple(warnings),
+            start_local=start_local,
+            n_steps=n_steps,
         )
     except Exception as exc:
         logger.exception("Work unit failed: %s", unit.label)
@@ -399,6 +611,7 @@ def build_units(
     json_dir: str | Path,
     geojson_dir: str | Path,
     skip_first: int = 0,
+    site_artifacts: bool = True,
 ) -> list[WorkUnit]:
     """Expand (files x variables) into work units, one grid GeoJSON per file."""
     units: list[WorkUnit] = []
@@ -411,6 +624,7 @@ def build_units(
                 json_dir=str(json_dir),
                 geojson_dir=str(geojson_dir),
                 skip_first=skip_first,
+                site_artifacts=site_artifacts,
             )
         )
         for var_name in variables:
@@ -428,6 +642,7 @@ def build_units(
                     json_dir=str(json_dir),
                     geojson_dir=str(geojson_dir),
                     skip_first=skip_first,
+                    site_artifacts=site_artifacts,
                 )
             )
     return units
@@ -455,8 +670,12 @@ def execute_units(
     n_workers = max(1, min(workers, len(ordered)))
     t0 = time.perf_counter()
 
+    output_dirs = [d for unit in ordered for d in (unit.json_dir, unit.geojson_dir)]
+
     if n_workers == 1:
         serial_results = [process_unit(u) for u in ordered]
+        # All units are done: our own pid's leftovers are orphans too.
+        _sweep_stale_temp_files(output_dirs, sweep_pids=frozenset({os.getpid()}))
         echo(f"✓ {len(serial_results)} work units in {time.perf_counter() - t0:.1f}s (serial)")
         return serial_results
 
@@ -485,9 +704,7 @@ def execute_units(
         )
 
     if pending:
-        swept = _sweep_stale_temp_files(
-            [d for unit in ordered for d in (unit.json_dir, unit.geojson_dir)]
-        )
+        swept = _sweep_stale_temp_files(output_dirs)
         if swept:
             echo(f"  swept {swept} stale temp file(s) left by killed workers")
     for unit in pending:
@@ -503,8 +720,14 @@ def execute_units(
         results.append(result)
         status = f"✗ {result.error}" if result.error else f"{len(result.files)} files"
         echo(f"  [{len(results)}/{len(ordered)}] {result.label}: {status}")
-    if pending:
-        _sweep_stale_temp_files([d for unit in ordered for d in (unit.json_dir, unit.geojson_dir)])
+
+    # Always sweep at the end: a unit that failed mid-write WITHOUT breaking
+    # the pool (the common case — process_unit catches everything) leaves its
+    # dead-pid temp file behind, and debris must not wait for a future run
+    # that happens to crash before being cleaned up.
+    swept = _sweep_stale_temp_files(output_dirs, sweep_pids=frozenset({os.getpid()}))
+    if swept:
+        echo(f"  swept {swept} stale temp file(s)")
 
     echo(f"✓ {len(results)} work units in {time.perf_counter() - t0:.1f}s")
     return results

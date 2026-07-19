@@ -39,7 +39,9 @@ VAR_LIST = [
 ]
 
 
-def _write_full_wrf_file(path: Path, *, seed: int = 5, nt: int = NT) -> None:
+def _write_full_wrf_file(
+    path: Path, *, seed: int = 5, nt: int = NT, start_hour_utc: int = 9
+) -> None:
     rng = np.random.default_rng(seed)
     with netCDF4.Dataset(path, "w") as ds:
         ds.createDimension("Time", nt)
@@ -58,7 +60,9 @@ def _write_full_wrf_file(path: Path, *, seed: int = 5, nt: int = NT) -> None:
             v[:] = rng.uniform(low, high, size=(nt, NY, NX)).astype(np.float32)
 
         times = ds.createVariable("Times", "S1", ("Time", "DateStrLen"))
-        times[:] = np.array([list(f"2026-05-03_{9 + i:02d}:00:00") for i in range(nt)], dtype="S1")
+        times[:] = np.array(
+            [list(f"2026-05-03_{start_hour_utc + i:02d}:00:00") for i in range(nt)], dtype="S1"
+        )
         lon = ds.createVariable("XLONG", "f4", ("Time", "south_north", "west_east"))
         lat = ds.createVariable("XLAT", "f4", ("Time", "south_north", "west_east"))
         lon[:] = (
@@ -202,7 +206,8 @@ def test_missing_variable_warns_and_missing_file_isolates_error(tmp_path):
     assert missing.error is not None
     ok = by_label[f"{wrf.name}:temperature"]
     assert ok.error is None
-    assert len(ok.files) == NT
+    # NT per-step JSONs plus the consolidated .series.bin and .summary.json.
+    assert len(ok.files) == NT + 2
 
 
 class _FakeFuture:
@@ -289,10 +294,11 @@ print(json.dumps([[r.label, r.error is not None, len(r.files)] for r in results]
             break
     assert proc.returncode == 0, proc.stderr[-2000:]
 
-    # The crashed unit is reported failed; the survivors completed fully.
+    # The crashed unit is reported failed; the survivors completed fully
+    # (NT per-step JSONs + .series.bin + .summary.json each).
     assert rows[f"{wrf.name}:pressure"][0] is True
-    assert rows[f"{wrf.name}:temperature"] == (False, NT)
-    assert rows[f"{wrf.name}:wind"] == (False, NT)
+    assert rows[f"{wrf.name}:temperature"] == (False, NT + 2)
+    assert rows[f"{wrf.name}:wind"] == (False, NT + 2)
     # No truncated/temp files are visible.
     leftovers = [p for p in out.rglob("*") if ".tmp-" in p.name]
     assert leftovers == []
@@ -337,7 +343,11 @@ def test_single_timestep_file_processes_without_errors(tmp_path):
     value_files = sorted(
         os.path.basename(f) for r in results if r.kind == "values_json" for f in r.files
     )
-    assert value_files == ["D02_RAIN_000.json", "D02_TEMP_000.json", "D02_WIND_000.json"]
+    assert value_files == sorted(
+        [f"D02_{v}_000.json" for v in ("RAIN", "TEMP", "WIND")]
+        + [f"D02_{v}.series.bin" for v in ("RAIN", "TEMP", "WIND")]
+        + [f"D02_{v}.summary.json" for v in ("RAIN", "TEMP", "WIND")]
+    )
 
     # The lone rain frame publishes zero increments, not the cumulative total.
     with open(json_dir / "D02_RAIN_000.json", encoding="utf-8") as fh:
@@ -367,7 +377,10 @@ def test_poteolico_single_height_writes_only_that_height(tmp_path):
 
     assert [r for r in results if r.error] == []
     written = sorted(p.name for p in json_dir.glob("*.json"))
-    assert written == [f"D02_POT_EOLICO_100M_{i:03d}.json" for i in range(NT)]
+    assert written == sorted(
+        [f"D02_POT_EOLICO_100M_{i:03d}.json" for i in range(NT)]
+        + ["D02_POT_EOLICO_100M.summary.json"]
+    )
 
 
 def test_poteolico_bare_name_writes_all_three_heights(tmp_path):
@@ -382,7 +395,8 @@ def test_poteolico_bare_name_writes_all_three_heights(tmp_path):
     assert [r for r in results if r.error] == []
     written = sorted(p.name for p in json_dir.glob("*.json"))
     expected = sorted(
-        f"D02_POT_EOLICO_{h}M_{i:03d}.json" for h in (50, 100, 150) for i in range(NT)
+        [f"D02_POT_EOLICO_{h}M_{i:03d}.json" for h in (50, 100, 150) for i in range(NT)]
+        + [f"D02_POT_EOLICO_{h}M.summary.json" for h in (50, 100, 150)]
     )
     assert written == expected
 
@@ -403,7 +417,8 @@ def test_poteolico_duplicates_normalize_to_all_heights_once(tmp_path):
     assert [r for r in results if r.error] == []
     written = sorted(p.name for p in json_dir.glob("*.json"))
     expected = sorted(
-        f"D02_POT_EOLICO_{h}M_{i:03d}.json" for h in (50, 100, 150) for i in range(NT)
+        [f"D02_POT_EOLICO_{h}M_{i:03d}.json" for h in (50, 100, 150) for i in range(NT)]
+        + [f"D02_POT_EOLICO_{h}M.summary.json" for h in (50, 100, 150)]
     )
     assert written == expected
 
@@ -418,3 +433,187 @@ def test_normalize_var_list_keeps_single_height_requests_distinct():
         "temperature",
         "poteolico",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Consolidated site artifacts (series.bin / summary.json) and manifest v2
+# ---------------------------------------------------------------------------
+
+
+def _series_matrix(path: Path, n_steps: int) -> np.ndarray:
+    raw = np.frombuffer(path.read_bytes(), dtype="<i4")
+    assert raw.size % n_steps == 0
+    return raw.reshape(raw.size // n_steps, n_steps)
+
+
+def test_series_bin_and_summary_agree_with_per_step_jsons(tmp_path):
+    wrf = tmp_path / "wrfout_d02_jobs_series.nc"
+    _write_full_wrf_file(wrf, seed=29)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], ["temperature"], json_dir, geo_dir)
+    results = jobs.execute_units(units, workers=1)
+    assert [r for r in results if r.error] == []
+
+    matrix = _series_matrix(json_dir / "D02_TEMP.series.bin", NT)
+    assert matrix.shape == (NY * NX, NT)
+
+    with open(json_dir / "D02_TEMP.summary.json", encoding="utf-8") as fh:
+        summary = json.load(fh)
+    assert summary["format"] == "domain-summary-v1"
+    assert summary["indices"] == list(range(NT))
+    assert len(summary["mean"]) == len(summary["date_times"]) == NT
+
+    for i in range(NT):
+        with open(json_dir / f"D02_TEMP_{i:03d}.json", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        values = payload["values"]
+        column = matrix[:, i]
+        for cell, value in enumerate(values):
+            if value is None:
+                assert column[cell] == jobs.SERIES_MISSING
+            else:
+                assert column[cell] == round(value * jobs.SERIES_SCALE)
+        finite = [v for v in values if v is not None]
+        assert summary["mean"][i] == pytest.approx(np.mean(finite), abs=0.011)
+        assert summary["min"][i] == min(finite)
+        assert summary["max"][i] == max(finite)
+        assert summary["date_times"][i] == payload["metadata"]["date_time"]
+
+
+def test_manifest_v2_timeline_availability_and_features(tmp_path, monkeypatch):
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_jobs_manifest.nc"
+    # 19..23 UTC = 16..20 local (America/Bahia): SWDOWN's 6-18h daylight gate
+    # keeps only the first three steps, exercising the availability ranges.
+    _write_full_wrf_file(wrf, seed=31, start_hour_utc=19)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], ["temperature", "SWDOWN"], json_dir, geo_dir)
+    results = jobs.execute_units(units, workers=1)
+    assert [r for r in results if r.error] == []
+
+    manifest_path = jobs.write_run_manifest(json_dir, results)
+    with open(manifest_path, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+
+    assert manifest["format"] == "labmim-data-manifest-v2"
+    assert manifest["timezone"] == "America/Bahia"
+    assert manifest["index_min"] == 0
+    assert manifest["index_max"] == NT - 1
+    assert manifest["start_local"] == "03/05/2026 16:00:00"
+    assert manifest["availability"] == {"SWDOWN": [[0, 2]]}
+    assert manifest["features"]["domain_summary"]["format"] == "domain-summary-v1"
+    series_feature = manifest["features"]["cell_series"]
+    assert series_feature["format"] == "cell-series-int32-le-v1"
+    assert series_feature["missing"] == jobs.SERIES_MISSING
+    assert (series_feature["index_min"], series_feature["index_max"]) == (0, NT - 1)
+
+    # The gated SWDOWN night steps are MISSING columns in a full-width matrix.
+    matrix = _series_matrix(json_dir / "D02_SWDOWN.series.bin", NT)
+    assert (matrix[:, 3:] == jobs.SERIES_MISSING).all()
+    assert (matrix[:, 0] != jobs.SERIES_MISSING).any()
+
+
+def test_no_site_artifacts_flag_writes_legacy_outputs_only(tmp_path):
+    wrf = tmp_path / "wrfout_d02_jobs_legacy.nc"
+    _write_full_wrf_file(wrf, seed=37)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], ["temperature"], json_dir, geo_dir, site_artifacts=False)
+    results = jobs.execute_units(units, workers=1)
+    assert [r for r in results if r.error] == []
+
+    names = sorted(p.name for p in json_dir.iterdir())
+    assert names == [f"D02_TEMP_{i:03d}.json" for i in range(NT)]
+
+    manifest_path = jobs.write_run_manifest(json_dir, results)
+    with open(manifest_path, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    assert "features" not in manifest
+    assert manifest["index_max"] == NT - 1  # timeline fields are still written
+
+
+def test_values_json_rejects_non_finite_scale_bounds(tmp_path):
+    from micrometeorology.wrf.geojson import write_values_json_stream
+
+    arr = np.full((2, 2), np.nan, dtype=np.float32)
+    with pytest.raises(ValueError, match=r"[Nn]on-finite scale bounds"):
+        write_values_json_stream(tmp_path / "bad.json", arr, float("nan"), float("nan"), "N/A")
+    assert not (tmp_path / "bad.json").exists() or (tmp_path / "bad.json").stat().st_size == 0
+
+
+def test_sweep_removes_dead_pid_debris_on_healthy_run(tmp_path):
+    wrf = tmp_path / "wrfout_d02_jobs_sweep.nc"
+    _write_full_wrf_file(wrf, seed=41)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+    json_dir.mkdir()
+    geo_dir.mkdir()
+    # Debris from a previous run whose worker pid no longer exists: a healthy
+    # run (no broken pool) must still sweep it.
+    debris = json_dir / ".D02_TEMP_000.json.tmp-999999999"
+    debris.write_text("truncated")
+
+    units = jobs.build_units([wrf], ["temperature"], json_dir, geo_dir)
+    results = jobs.execute_units(units, workers=2)
+
+    assert [r for r in results if r.error] == []
+    assert not debris.exists()
+
+
+def test_manifest_omits_features_when_any_unit_failed(tmp_path):
+    """A failed unit can leave LAST run's consolidated artifacts in place;
+    the manifest must not vouch for them (the site falls back to per-step
+    JSONs), while the timeline fields — derived from actually written files —
+    stay available."""
+    wrf = tmp_path / "wrfout_d02_jobs_dirty.nc"
+    _write_full_wrf_file(wrf, seed=43)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], ["temperature"], json_dir, geo_dir)
+    units.append(
+        jobs.WorkUnit(
+            kind="values_json",
+            wrf_path=str(tmp_path / "missing_wrfout"),
+            variable="pressure",
+            json_dir=str(json_dir),
+            geojson_dir=str(geo_dir),
+        )
+    )
+    results = jobs.execute_units(units, workers=1)
+    assert any(r.error for r in results)
+
+    manifest_path = jobs.write_run_manifest(json_dir, results)
+    with open(manifest_path, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    assert "features" not in manifest
+    assert manifest["index_min"] == 0
+    assert manifest["index_max"] == NT - 1
+
+
+def test_serial_run_sweeps_its_own_failed_unit_debris(tmp_path):
+    """workers=1 runs write temp files under the parent's own (live) pid; the
+    end-of-run sweep must still remove them."""
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+    json_dir.mkdir()
+    geo_dir.mkdir()
+    debris = json_dir / f".D02_TEMP_000.json.tmp-{os.getpid()}"
+    debris.write_text("truncated")
+
+    unit = jobs.WorkUnit(
+        kind="values_json",
+        wrf_path=str(tmp_path / "missing_wrfout"),
+        variable="temperature",
+        json_dir=str(json_dir),
+        geojson_dir=str(geo_dir),
+    )
+    results = jobs.execute_units([unit], workers=1)
+
+    assert results[0].error is not None
+    assert not debris.exists()
