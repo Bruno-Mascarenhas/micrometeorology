@@ -3,19 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from solrad_correction.config import ExperimentConfig
+from solrad_correction.data.preprocessing import PreprocessingPipeline
+from solrad_correction.evaluation.reports import ExperimentReport
 from solrad_correction.experiments.artifacts import ArtifactLayout, write_manifest
+from solrad_correction.experiments.results import ExperimentResult, PipelineProfile
+from solrad_correction.models.base import BaseRegressorModel
 from solrad_correction.models.registry import get_model_spec
 from solrad_correction.utils.io import save_json, save_predictions
-
-if TYPE_CHECKING:
-    from solrad_correction.config import ExperimentConfig
-    from solrad_correction.data.preprocessing import PreprocessingPipeline
-    from solrad_correction.evaluation.reports import ExperimentReport
-    from solrad_correction.experiments.pipeline import PipelineProfile
-    from solrad_correction.experiments.results import ExperimentResult
-    from solrad_correction.models.base import BaseRegressorModel
 
 
 @dataclass(slots=True)

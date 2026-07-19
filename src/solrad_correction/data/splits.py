@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from collections.abc import Generator
 
 import numpy as np
-
-if TYPE_CHECKING:
-    from collections.abc import Generator
-
-    import pandas as pd
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 

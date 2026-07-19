@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+from solrad_correction.config import ModelConfig, RuntimeConfig
+from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
 from solrad_correction.training.callbacks import EarlyStopping
 from solrad_correction.training.checkpoints import CheckpointManager
 from solrad_correction.training.dataloaders import DataLoaderSettings, resolve_dataloader_settings
@@ -22,10 +24,6 @@ from solrad_correction.training.loops import evaluate_epoch, train_one_epoch
 from solrad_correction.training.progress import TrainingProgress
 from solrad_correction.training.state import BestModelState, TrainingPlan, TrainingState
 from solrad_correction.utils.serialization import load_torch_checkpoint
-
-if TYPE_CHECKING:
-    from solrad_correction.config import ModelConfig, RuntimeConfig
-    from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
 
 logger = logging.getLogger(__name__)
 

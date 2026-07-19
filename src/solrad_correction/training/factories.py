@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
 import torch
 from torch import nn
 
-if TYPE_CHECKING:
-    from torch.utils.tensorboard import SummaryWriter
+from solrad_correction.training.state import TrainingPlan
 
-    from solrad_correction.training.state import TrainingPlan
+# Runtime type is torch.utils.tensorboard.SummaryWriter; kept as an alias so the
+# annotation resolves without importing tensorboard at module load (the real
+# import stays deferred inside create_summary_writer).
+type SummaryWriter = Any
 
 
 def create_optimizer(model: nn.Module, plan: TrainingPlan) -> torch.optim.Optimizer:

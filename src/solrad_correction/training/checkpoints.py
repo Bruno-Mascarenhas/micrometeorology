@@ -4,15 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+import torch
+from torch import nn
+
+from solrad_correction.training.dataloaders import DataLoaderSettings
 from solrad_correction.utils.serialization import save_torch_checkpoint
-
-if TYPE_CHECKING:
-    import torch
-    from torch import nn
-
-    from solrad_correction.training.dataloaders import DataLoaderSettings
 
 
 @dataclass(slots=True)

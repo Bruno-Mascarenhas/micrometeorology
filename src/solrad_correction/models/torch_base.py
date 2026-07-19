@@ -4,21 +4,19 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import numpy as np
 import torch
 from torch import nn
 
+from solrad_correction.config import ModelConfig
+from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
 from solrad_correction.models.base import SequenceRegressorModel, TrainingResult
+from solrad_correction.training.dataloaders import DataLoaderSettings
 from solrad_correction.utils.memory import assert_array_size
 from solrad_correction.utils.seeds import get_device
 from solrad_correction.utils.serialization import load_torch_checkpoint, save_torch_checkpoint
-
-if TYPE_CHECKING:
-    from solrad_correction.config import ModelConfig
-    from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
-    from solrad_correction.training.dataloaders import DataLoaderSettings
 
 logger = logging.getLogger(__name__)
 
@@ -204,14 +202,14 @@ class TorchRegressorModel(SequenceRegressorModel):
             dataset = TensorDataset(x_input)
 
         # Batch size defaults to a reasonable number if not specified in config
-        batch_size = getattr(self, "_config", None)
-        bs = batch_size.batch_size if hasattr(batch_size, "batch_size") else 256  # type: ignore
+        config = getattr(self, "_config", None)
+        batch_size = config.batch_size if hasattr(config, "batch_size") else 256  # type: ignore
 
         settings = self._dataloader_settings
         if settings is not None and settings.num_workers > 0:
             loader = DataLoader(
                 dataset,
-                batch_size=bs,
+                batch_size=batch_size,
                 shuffle=False,
                 num_workers=settings.num_workers,
                 pin_memory=settings.pin_memory,
@@ -221,7 +219,7 @@ class TorchRegressorModel(SequenceRegressorModel):
         else:
             loader = DataLoader(
                 dataset,
-                batch_size=bs,
+                batch_size=batch_size,
                 shuffle=False,
                 num_workers=0,
                 pin_memory=False,

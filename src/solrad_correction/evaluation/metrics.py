@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import NDArray
 
 from micrometeorology.stats.metrics import (
     correlation,
@@ -16,11 +16,8 @@ from micrometeorology.stats.metrics import (
     rmse,
 )
 
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
-
 #: Callable signature for a metric function: ``(observed, predicted) -> float``.
-MetricFn = Callable[["NDArray", "NDArray"], float]
+MetricFn = Callable[[NDArray, NDArray], float]
 
 
 def mape(observed: NDArray, predicted: NDArray) -> float:

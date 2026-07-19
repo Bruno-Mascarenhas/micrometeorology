@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import torch
-    from torch import nn
+import torch
+from torch import nn
 
-    from solrad_correction.config import ModelConfig
+from solrad_correction.config import ModelConfig
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
+import pandas as pd
+
+from solrad_correction.config import ExperimentConfig
 from solrad_correction.data.preprocessing import PreprocessingPipeline
 from solrad_correction.data.splits import temporal_train_val_test_split
 from solrad_correction.datasets.tabular import TabularDataset
@@ -20,44 +21,21 @@ from solrad_correction.experiments.results import (
     ExperimentResult,
     FeatureFrame,
     LoadedData,
+    PipelineProfile,
     PredictionOutput,
     PreprocessedSplits,
     SplitFrames,
     TrainingOutput,
 )
 from solrad_correction.experiments.writer import ExperimentWriter
+from solrad_correction.models.base import BaseRegressorModel
 from solrad_correction.models.registry import build_model, get_model_spec
 from solrad_correction.training.dataloaders import resolve_device
 from solrad_correction.utils.memory import dataframe_to_float32_numpy, series_to_float32_numpy
 from solrad_correction.utils.metadata import collect_run_metadata
 from solrad_correction.utils.seeds import set_global_seed
 
-if TYPE_CHECKING:
-    import pandas as pd
-
-    from solrad_correction.config import ExperimentConfig
-    from solrad_correction.models.base import BaseRegressorModel
-
 logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class PipelineProfile:
-    """Stage timing accumulator."""
-
-    stage_seconds: dict[str, float]
-
-    def time_stage(self, name: str, fn, *args, **kwargs):
-        """Call ``fn`` and record its wall-clock duration under ``name``.
-
-        The elapsed time is stored even if ``fn`` raises, and the return value
-        (or exception) is propagated unchanged.
-        """
-        started = time.monotonic()
-        try:
-            return fn(*args, **kwargs)
-        finally:
-            self.stage_seconds[name] = time.monotonic() - started
 
 
 def prepare_runtime(config: ExperimentConfig) -> None:
@@ -281,8 +259,6 @@ def build_datasets(config: ExperimentConfig, processed: PreprocessedSplits) -> D
 
 def _datetime_index_or_none(frame: pd.DataFrame) -> pd.DatetimeIndex | None:
     """Return the frame's DatetimeIndex, or None when the index is not temporal."""
-    import pandas as pd
-
     return frame.index if isinstance(frame.index, pd.DatetimeIndex) else None
 
 

@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import torch
 from torch import nn
 
+from solrad_correction.config import ModelConfig
 from solrad_correction.models.torch_base import TorchRegressorModel
 from solrad_correction.utils.serialization import load_torch_checkpoint
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from solrad_correction.config import ModelConfig
 
 logger = logging.getLogger(__name__)
 

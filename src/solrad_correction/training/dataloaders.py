@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import platform
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import torch
 
-if TYPE_CHECKING:
-    from solrad_correction.config import RuntimeConfig
+from solrad_correction.config import RuntimeConfig
 
 
 @dataclass(frozen=True, slots=True)

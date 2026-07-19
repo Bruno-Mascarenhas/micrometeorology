@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from collections.abc import Callable
 
 import torch
 from torch import nn
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader
 
 logger = logging.getLogger(__name__)
 
