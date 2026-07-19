@@ -15,6 +15,18 @@ import sys
 
 def pytest_configure(config):  # noqa: ARG001
     """Register extra DLL search paths and pre-load torch on Windows."""
+    # Force plain, wide CLI help rendering so substring assertions on typer/rich
+    # output are deterministic. typer computes FORCE_TERMINAL at import time
+    # from GITHUB_ACTIONS/FORCE_COLOR and then emits bold/dim ANSI styles that
+    # split option names like "--out" mid-token (NO_COLOR only disables colors,
+    # not styles); narrow widths additionally truncate long option rows. This
+    # hook runs before test collection imports typer, so popping the variables
+    # here makes CI render exactly like a local non-tty run.
+    os.environ.pop("GITHUB_ACTIONS", None)
+    os.environ.pop("FORCE_COLOR", None)
+    os.environ.setdefault("NO_COLOR", "1")
+    os.environ.setdefault("COLUMNS", "200")
+
     if sys.platform == "win32":
         # Prevent OMP: Error #15 (dual OpenMP runtime init)
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
