@@ -142,3 +142,34 @@ def test_get_variable_block_reads_unsqueezed_time_slabs(tmp_path):
 
         with pytest.raises(ValueError, match="Invalid time block"):
             wrf.get_variable_block("T2", 1, 1)
+
+
+def test_build_date_metadata_uses_pinned_product_timezone(tmp_path, monkeypatch):
+    """Local datetimes must come from the pinned product timezone, never the
+    host OS setting — a UTC-configured job host must not shift the forecast."""
+    from datetime import timedelta
+
+    path = tmp_path / "wrfout_d01_synthetic_tz.nc"
+    _write_tiny_wrf_file(path)
+
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    with WRFDataset(path) as wrf:
+        entries = wrf.build_date_metadata()
+    assert entries[0]["datetime_local"].utcoffset() == timedelta(hours=-3)
+    # 2024-01-01 00:00 UTC is 2023-12-31 21:00 in America/Bahia.
+    assert entries[0]["datetime_local"].strftime("%d/%m/%Y %H") == "31/12/2023 21"
+
+    monkeypatch.setenv("LABMIM_TIMEZONE", "UTC")
+    with WRFDataset(path) as wrf:
+        entries = wrf.build_date_metadata()
+    assert entries[0]["datetime_local"].utcoffset() == timedelta(0)
+
+
+def test_build_date_metadata_flags_skipped_steps(tmp_path):
+    path = tmp_path / "wrfout_d01_synthetic_skip.nc"
+    _write_tiny_wrf_file(path)
+
+    with WRFDataset(path) as wrf:
+        entries = wrf.build_date_metadata(skip_first_n=1)
+    assert [e["skip"] for e in entries] == [True, False]
+    assert [e["index"] for e in entries] == [0, 1]

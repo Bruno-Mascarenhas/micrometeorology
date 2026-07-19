@@ -7,9 +7,12 @@ grid coordinate extraction, time parsing, and metadata access.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+import os
+from datetime import UTC, datetime, tzinfo
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import netCDF4
 import numpy as np
@@ -21,6 +24,28 @@ from micrometeorology.common.types import WEEKDAY_PT, GridLevel
 from micrometeorology.wrf.safety import assert_reasonable_array_size
 
 logger = logging.getLogger(__name__)
+
+# The forecast's "local" times (file names never change, but every date_time
+# string in the exported JSONs does) must not depend on the TZ configuration
+# of whatever host happens to run the daily job — a UTC-configured container
+# would silently shift the whole forecast by 3 hours while the site keeps
+# labelling values as UTC-03:00. Pin the product timezone, overridable for
+# other deployments via LABMIM_TIMEZONE. Prefer fixed-offset zones: the site
+# renders timeline labels with flat one-hour-per-index arithmetic from the
+# run anchor, so a DST transition inside a run would make labels disagree
+# with the per-file date_time strings (America/Bahia observes no DST).
+LABMIM_TIMEZONE_ENV = "LABMIM_TIMEZONE"
+DEFAULT_TIMEZONE = "America/Bahia"
+
+
+@lru_cache(maxsize=1)
+def _cached_timezone(name: str) -> tzinfo:
+    return ZoneInfo(name)
+
+
+def product_timezone() -> tzinfo:
+    """The timezone all exported local datetimes are expressed in."""
+    return _cached_timezone(os.environ.get(LABMIM_TIMEZONE_ENV) or DEFAULT_TIMEZONE)
 
 
 def _decode_wrf_time_strings(times_raw: Any) -> list[str]:
@@ -125,8 +150,9 @@ class WRFDataset:
         entries: list[dict] = []
         start_label = ""
 
+        tz = product_timezone()
         for i, dt_utc in enumerate(times):
-            dt_local = dt_utc.astimezone(tz=None)
+            dt_local = dt_utc.astimezone(tz)
             if i == 0:
                 start_label = dt_utc.strftime("%d/%m/%Y %H") + " (UTC)"
 
@@ -135,30 +161,16 @@ class WRFDataset:
                 f"Previsão: {dt_local.strftime('%d/%m/%Y %H')}HL "
                 f"({WEEKDAY_PT.get(dt_local.isoweekday(), '')})"
             )
-            suffix = f"{grade}_{i:03d}"
-
-            if i < skip_first_n:
-                entries.append(
-                    {
-                        "index": i,
-                        "datetime_utc": dt_utc,
-                        "datetime_local": dt_local,
-                        "label": label,
-                        "name_suffix": suffix,
-                        "skip": True,
-                    }
-                )
-            else:
-                entries.append(
-                    {
-                        "index": i,
-                        "datetime_utc": dt_utc,
-                        "datetime_local": dt_local,
-                        "label": label,
-                        "name_suffix": suffix,
-                        "skip": False,
-                    }
-                )
+            entries.append(
+                {
+                    "index": i,
+                    "datetime_utc": dt_utc,
+                    "datetime_local": dt_local,
+                    "label": label,
+                    "name_suffix": f"{grade}_{i:03d}",
+                    "skip": i < skip_first_n,
+                }
+            )
         return entries
 
     # ------------------------------------------------------------------
