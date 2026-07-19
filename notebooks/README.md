@@ -8,7 +8,7 @@ logs persisted to Google Drive.
 Every notebook in this repository can be opened directly from GitHub:
 
 ```
-https://colab.research.google.com/github/Bruno-Mascarenhas/micrometeorology/blob/master/notebooks/<NOTEBOOK>.ipynb
+https://colab.research.google.com/github/Bruno-Mascarenhas/micrometeorology/blob/main/notebooks/<NOTEBOOK>.ipynb
 ```
 
 | Notebook | Purpose |

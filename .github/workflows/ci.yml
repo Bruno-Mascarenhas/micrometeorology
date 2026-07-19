@@ -2,18 +2,18 @@ name: CI
 
 on:
   push:
-    branches: ["master", "main"]
+    branches: ["main"]
   pull_request:
-    branches: ["master", "main"]
+    branches: ["main"]
 
 permissions:
   contents: read
 
-# Superseded runs on the same ref are cancelled, except on master where every
+# Superseded runs on the same ref are cancelled, except on main where every
 # push keeps its own complete record.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # Lightweight vulnerability gate: needs only uv + the lockfile, so an
