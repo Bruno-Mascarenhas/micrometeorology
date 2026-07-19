@@ -61,6 +61,7 @@ allsky = [
     "imageio-ffmpeg>=0.6",
     "tqdm>=4.66",
     "tensorboard>=2.14",
+    "safetensors>=0.5",
 ]
 # TCC: ML-based solar radiation correction (CPU-only PyTorch)
 tcc = [
