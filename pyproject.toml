@@ -150,7 +150,6 @@ select = [
     "UP",   # pyupgrade
     "B",    # flake8-bugbear
     "SIM",  # flake8-simplify
-    "TCH",  # flake8-type-checking
     "PERF", # perflint — catch performance anti-patterns
     "RUF",  # ruff-specific rules
     "C4",   # flake8-comprehensions
