@@ -197,6 +197,14 @@ def validate_embeddings(
     return EmbeddingValidationReport(missing=missing, duplicate=duplicate)
 
 
+@dataclass(frozen=True, slots=True)
+class _EmbeddingLocation:
+    """Named position of one embedding inside the sharded store."""
+
+    shard_index: int
+    row_index: int
+
+
 class SafetensorsEmbeddingReader:
     """``sample_id -> (dim,) float32`` reader over safetensors shards.
 
@@ -239,35 +247,42 @@ class SafetensorsEmbeddingReader:
     ) -> None:
         if cache_size < 1:
             raise ValueError(f"cache_size must be >= 1, got {cache_size}")
-        self._dir = Path(embeddings_dir)
-        index = read_index(self._dir)
-        if index is None:
-            raise FileNotFoundError(f"no embedding index ({INDEX_FILENAME}) found in {self._dir}")
-        self._locations: dict[str, tuple[int, int]] = {
-            str(sid): (int(shard), int(row))
-            for sid, shard, row in zip(
-                index["sample_id"], index["shard"], index["row"], strict=True
+        self._embeddings_dir = Path(embeddings_dir)
+        embedding_index = read_index(self._embeddings_dir)
+        if embedding_index is None:
+            raise FileNotFoundError(
+                f"no embedding index ({INDEX_FILENAME}) found in {self._embeddings_dir}"
+            )
+        self._location_by_sample_id: dict[str, _EmbeddingLocation] = {
+            str(sample_id): _EmbeddingLocation(
+                shard_index=int(shard_index), row_index=int(row_index)
+            )
+            for sample_id, shard_index, row_index in zip(
+                embedding_index["sample_id"],
+                embedding_index["shard"],
+                embedding_index["row"],
+                strict=True,
             )
         }
-        self.meta = read_meta(self._dir)
-        self._dim = int(self.meta["dim"])
-        self._cache_size = cache_size
-        self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
-        #: True when all shards are resident in ``self._matrix`` (preload mode).
+        self.meta = read_meta(self._embeddings_dir)
+        self._embedding_dim = int(self.meta["dim"])
+        self._shard_cache_size = cache_size
+        self._shard_cache: OrderedDict[int, np.ndarray] = OrderedDict()
+        #: True when all shards are resident in ``self._preloaded_embeddings``.
         self.preloaded = False
-        self._matrix: np.ndarray | None = None
-        self._row_of: dict[str, int] = {}
+        self._preloaded_embeddings: np.ndarray | None = None
+        self._preloaded_row_by_sample_id: dict[str, int] = {}
         if preload:
             self._preload_all()
 
     @property
     def dim(self) -> int:
         """Embedding dimension (from ``embeddings.meta.json``)."""
-        return self._dim
+        return self._embedding_dim
 
     def sample_ids(self) -> list[str]:
         """All ``sample_id`` values the reader can serve (index order)."""
-        return list(self._locations)
+        return list(self._location_by_sample_id)
 
     def _preload_all(self) -> None:
         """Load every shard once into one contiguous, read-only ``(N, dim)`` fp32 array.
@@ -277,43 +292,46 @@ class SafetensorsEmbeddingReader:
         the base immutable stops a caller mutating the shared store through a
         returned vector (the views inherit the read-only flag).
         """
-        n = len(self._locations)
-        matrix = np.empty((n, self._dim), dtype=np.float32)
-        row_of: dict[str, int] = {}
-        by_shard: dict[int, list[tuple[str, int]]] = {}
-        for sid, (shard, row) in self._locations.items():
-            by_shard.setdefault(shard, []).append((sid, row))
-        cursor = 0
-        for shard in sorted(by_shard):
-            arr = load_shard(shard_path(self._dir, shard))
-            for sid, row in by_shard[shard]:
-                matrix[cursor] = arr[row]
-                row_of[sid] = cursor
-                cursor += 1
-        matrix.setflags(write=False)
-        self._matrix = matrix
-        self._row_of = row_of
+        embedding_count = len(self._location_by_sample_id)
+        preloaded_embeddings = np.empty((embedding_count, self._embedding_dim), dtype=np.float32)
+        preloaded_row_by_sample_id: dict[str, int] = {}
+        sample_ids_by_shard: dict[int, list[str]] = {}
+        for sample_id, location in self._location_by_sample_id.items():
+            sample_ids_by_shard.setdefault(location.shard_index, []).append(sample_id)
+
+        preloaded_row_index = 0
+        for shard_index in sorted(sample_ids_by_shard):
+            shard_embeddings = load_shard(shard_path(self._embeddings_dir, shard_index))
+            for sample_id in sample_ids_by_shard[shard_index]:
+                location = self._location_by_sample_id[sample_id]
+                preloaded_embeddings[preloaded_row_index] = shard_embeddings[location.row_index]
+                preloaded_row_by_sample_id[sample_id] = preloaded_row_index
+                preloaded_row_index += 1
+        preloaded_embeddings.setflags(write=False)
+        self._preloaded_embeddings = preloaded_embeddings
+        self._preloaded_row_by_sample_id = preloaded_row_by_sample_id
         self.preloaded = True
         logger.info(
             "preloaded %d embedding(s) into a resident %d x %d fp32 array (%.1f MiB) from %s",
-            n,
-            n,
-            self._dim,
-            matrix.nbytes / (1024 * 1024),
-            self._dir,
+            embedding_count,
+            embedding_count,
+            self._embedding_dim,
+            preloaded_embeddings.nbytes / (1024 * 1024),
+            self._embeddings_dir,
         )
 
-    def _shard(self, shard_index: int) -> np.ndarray:
-        cached = self._cache.get(shard_index)
-        if cached is not None:
-            self._cache.move_to_end(shard_index)
-            return cached
-        arr = load_shard(shard_path(self._dir, shard_index))
-        self._cache[shard_index] = arr
-        self._cache.move_to_end(shard_index)
-        while len(self._cache) > self._cache_size:
-            self._cache.popitem(last=False)
-        return arr
+    def _load_cached_shard(self, shard_index: int) -> np.ndarray:
+        """Load one shard, retaining it in the bounded least-recently-used cache."""
+        cached_shard_embeddings = self._shard_cache.get(shard_index)
+        if cached_shard_embeddings is not None:
+            self._shard_cache.move_to_end(shard_index)
+            return cached_shard_embeddings
+        shard_embeddings = load_shard(shard_path(self._embeddings_dir, shard_index))
+        self._shard_cache[shard_index] = shard_embeddings
+        self._shard_cache.move_to_end(shard_index)
+        while len(self._shard_cache) > self._shard_cache_size:
+            self._shard_cache.popitem(last=False)
+        return shard_embeddings
 
     def __call__(self, sample_id: str) -> np.ndarray:
         """Return the ``(dim,) float32`` embedding for *sample_id*.
@@ -323,22 +341,25 @@ class SafetensorsEmbeddingReader:
         KeyError
             If *sample_id* has no embedding in the index (message names it).
         """
-        key = str(sample_id)
-        if self._matrix is not None:
-            row = self._row_of.get(key)
-            if row is None:
+        normalized_sample_id = str(sample_id)
+        if self._preloaded_embeddings is not None:
+            preloaded_row_index = self._preloaded_row_by_sample_id.get(normalized_sample_id)
+            if preloaded_row_index is None:
                 raise KeyError(
-                    f"sample_id {sample_id!r} not found in embedding index at {self._dir}"
+                    f"sample_id {sample_id!r} not found in embedding index at "
+                    f"{self._embeddings_dir}"
                 )
             # Zero-copy view into the resident store; the store is read-only
             # (see _preload_all) so this view is immutable and cannot corrupt it.
-            resident: np.ndarray = self._matrix[row]
-            return resident
-        location = self._locations.get(key)
+            embedding: np.ndarray = self._preloaded_embeddings[preloaded_row_index]
+            return embedding
+        location = self._location_by_sample_id.get(normalized_sample_id)
         if location is None:
-            raise KeyError(f"sample_id {sample_id!r} not found in embedding index at {self._dir}")
-        shard_index, row = location
-        return np.asarray(self._shard(shard_index)[row], dtype=np.float32)
+            raise KeyError(
+                f"sample_id {sample_id!r} not found in embedding index at {self._embeddings_dir}"
+            )
+        shard_embeddings = self._load_cached_shard(location.shard_index)
+        return np.asarray(shard_embeddings[location.row_index], dtype=np.float32)
 
     def __len__(self) -> int:
-        return len(self._locations)
+        return len(self._location_by_sample_id)
