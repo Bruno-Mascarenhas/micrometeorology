@@ -19,9 +19,93 @@ from solrad_correction.config import (
     RuntimeConfig,
     SplitConfig,
 )
-from solrad_correction.experiments.pipeline import build_features
-from solrad_correction.experiments.results import LoadedData
+from solrad_correction.data.preprocessing import PreprocessingPipeline
+from solrad_correction.datasets.sequence import WindowedSequenceDataset
+from solrad_correction.datasets.tabular import TabularDataset
+from solrad_correction.experiments.pipeline import build_datasets, build_features
+from solrad_correction.experiments.results import LoadedData, PreprocessedSplits
 from solrad_correction.experiments.runner import run_experiment
+
+
+def _preprocessed_dataset_splits() -> PreprocessedSplits:
+    index = pd.date_range("2024-01-01", periods=30, freq="1h")
+    frame = pd.DataFrame(
+        {
+            "feature_a": np.arange(30, dtype=np.float32),
+            "feature_b": np.arange(100, 130, dtype=np.float32),
+            "target": np.arange(200, 230, dtype=np.float32),
+        },
+        index=index,
+    )
+    training_frame = frame.iloc[:12]
+    validation_frame = frame.iloc[12:20]
+    test_frame = frame.iloc[20:]
+    preprocessing_pipeline = PreprocessingPipeline(
+        scaler_type="none",
+        impute_strategy="drop",
+        feature_columns=["feature_a", "feature_b"],
+        target_column="target",
+    )
+    preprocessing_pipeline.fit(training_frame)
+    return PreprocessedSplits(
+        train=preprocessing_pipeline.transform(training_frame),
+        val=preprocessing_pipeline.transform(validation_frame),
+        test=preprocessing_pipeline.transform(test_frame),
+        pipeline=preprocessing_pipeline,
+        feature_cols=["feature_a", "feature_b"],
+    )
+
+
+def test_build_datasets_tabular_bundle_preserves_model_native_alignment() -> None:
+    preprocessed_splits = _preprocessed_dataset_splits()
+    config = ExperimentConfig(
+        data=DataConfig(
+            target_column="target",
+            feature_columns=["feature_a", "feature_b"],
+        ),
+        model=ModelConfig(
+            model_type="svm",
+            sequence_length=3,
+            evaluation_policy="model_native",
+        ),
+    )
+
+    dataset_bundle = build_datasets(config, preprocessed_splits)
+
+    assert isinstance(dataset_bundle.train, TabularDataset)
+    assert isinstance(dataset_bundle.val, TabularDataset)
+    assert isinstance(dataset_bundle.test, TabularDataset)
+    assert dataset_bundle.input_size is None
+    assert dataset_bundle.prediction_index is not None
+    assert dataset_bundle.prediction_index.equals(preprocessed_splits.test.index)
+    np.testing.assert_array_equal(
+        dataset_bundle.y_true,
+        preprocessed_splits.test["target"].to_numpy(dtype=np.float32),
+    )
+
+
+def test_build_datasets_sequence_bundle_aligns_targets_to_window_end() -> None:
+    preprocessed_splits = _preprocessed_dataset_splits()
+    config = ExperimentConfig(
+        data=DataConfig(
+            target_column="target",
+            feature_columns=["feature_a", "feature_b"],
+        ),
+        model=ModelConfig(model_type="lstm", sequence_length=3),
+    )
+
+    dataset_bundle = build_datasets(config, preprocessed_splits)
+
+    assert isinstance(dataset_bundle.train, WindowedSequenceDataset)
+    assert isinstance(dataset_bundle.val, WindowedSequenceDataset)
+    assert isinstance(dataset_bundle.test, WindowedSequenceDataset)
+    assert dataset_bundle.input_size == 2
+    assert dataset_bundle.prediction_index is not None
+    assert dataset_bundle.prediction_index.equals(preprocessed_splits.test.index[2:])
+    np.testing.assert_array_equal(
+        dataset_bundle.y_true,
+        preprocessed_splits.test["target"].to_numpy(dtype=np.float32)[2:],
+    )
 
 
 def test_build_features_keeps_requested_temporal_and_cyclic_columns() -> None:

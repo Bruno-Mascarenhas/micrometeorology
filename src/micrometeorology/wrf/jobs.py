@@ -242,96 +242,158 @@ class _SiteArtifactAccumulator:
         return [str(series_path), summary_path]
 
 
-def _values_unit_frames(
-    ds: WRFDataset,
-    variable: str,
-) -> tuple[Callable[[int], NDArray], float, float] | None:
-    """Return ``(frame(i), vmin, vmax)`` for a plain values-JSON variable.
+@dataclass(frozen=True, slots=True)
+class _ValueFrameSource:
+    """Values and color-scale bounds for one exported WRF variable."""
+
+    frame_for_step: Callable[[int], NDArray]
+    scale_min: float
+    scale_max: float
+
+
+def _build_value_frame_source(
+    dataset: WRFDataset,
+    variable_name: str,
+) -> _ValueFrameSource | None:
+    """Build a frame reader and color-scale bounds for a values-JSON variable.
 
     Mirrors the per-variable branches of the legacy task builder exactly —
     same extractors, same per-step arithmetic — so output bytes match.
     Returns ``None`` when the variable is absent from the file.
     """
-    if variable == WRFVariable.TEMPERATURE:
-        t2, vmin, vmax = variables.extract_temperature(ds)
-        return (
-            lambda i: variables.materialize_2d(
-                variables.extract_temperature_step(t2[i : i + 1, :, :])
+    if variable_name == WRFVariable.TEMPERATURE:
+        temperature_kelvin, scale_min, scale_max = variables.extract_temperature(dataset)
+        return _ValueFrameSource(
+            frame_for_step=lambda time_step_index: variables.materialize_2d(
+                variables.extract_temperature_step(
+                    temperature_kelvin[time_step_index : time_step_index + 1, :, :]
+                )
             ),
-            vmin,
-            vmax,
+            scale_min=scale_min,
+            scale_max=scale_max,
         )
-    if variable == WRFVariable.SKIN_TEMPERATURE:
-        tsk, vmin, vmax = variables.extract_skin_temperature(ds)
-        return (
-            lambda i: variables.materialize_2d(
-                variables.extract_temperature_step(tsk[i : i + 1, :, :])
+    if variable_name == WRFVariable.SKIN_TEMPERATURE:
+        skin_temperature_kelvin, scale_min, scale_max = variables.extract_skin_temperature(dataset)
+        return _ValueFrameSource(
+            frame_for_step=lambda time_step_index: variables.materialize_2d(
+                variables.extract_temperature_step(
+                    skin_temperature_kelvin[time_step_index : time_step_index + 1, :, :]
+                )
             ),
-            vmin,
-            vmax,
+            scale_min=scale_min,
+            scale_max=scale_max,
         )
-    if variable == WRFVariable.RELATIVE_HUMIDITY:
-        rh, vmin, vmax = variables.extract_relative_humidity(ds)
-        return lambda i: variables.materialize_2d(rh[i : i + 1, :, :]), vmin, vmax
-    if variable == WRFVariable.RAIN:
-        total, vmin, vmax = variables.extract_rain(ds)
-        return lambda i: variables.materialize_2d(variables.extract_rain_step(total, i)), vmin, vmax
-    if variable == WRFVariable.WIND:
-        u10, v10, vmin, vmax = variables.extract_wind(ds)
+    if variable_name == WRFVariable.RELATIVE_HUMIDITY:
+        relative_humidity, scale_min, scale_max = variables.extract_relative_humidity(dataset)
+        return _ValueFrameSource(
+            frame_for_step=lambda time_step_index: variables.materialize_2d(
+                relative_humidity[time_step_index : time_step_index + 1, :, :]
+            ),
+            scale_min=scale_min,
+            scale_max=scale_max,
+        )
+    if variable_name == WRFVariable.RAIN:
+        cumulative_rain, scale_min, scale_max = variables.extract_rain(dataset)
+        return _ValueFrameSource(
+            frame_for_step=lambda time_step_index: variables.materialize_2d(
+                variables.extract_rain_step(cumulative_rain, time_step_index)
+            ),
+            scale_min=scale_min,
+            scale_max=scale_max,
+        )
+    if variable_name == WRFVariable.WIND:
+        u10_values, v10_values, scale_min, scale_max = variables.extract_wind(dataset)
 
-        def wind_frame(i: int) -> NDArray:
-            u = variables.materialize_2d(u10[i : i + 1])
-            v = variables.materialize_2d(v10[i : i + 1])
-            speed: NDArray = np.hypot(u, v)
-            return speed
+        def wind_speed_for_step(time_step_index: int) -> NDArray:
+            u10_step = variables.materialize_2d(u10_values[time_step_index : time_step_index + 1])
+            v10_step = variables.materialize_2d(v10_values[time_step_index : time_step_index + 1])
+            wind_speed: NDArray = np.hypot(u10_step, v10_step)
+            return wind_speed
 
-        return wind_frame, vmin, vmax
-    if variable == WRFVariable.WIND_POWER_DENSITY_10M:
-        power_density, vmin, vmax = variables.extract_wind_power_density_10m(ds)
-        return lambda i: variables.materialize_2d(power_density[i : i + 1, :, :]), vmin, vmax
-    if variable == WRFVariable.PRESSURE:
-        var_data, vmin, vmax = variables.extract_pressure(ds)
-    elif variable == WRFVariable.VAPOR:
-        var_data, vmin, vmax = variables.extract_vapor(ds)
+        return _ValueFrameSource(
+            frame_for_step=wind_speed_for_step,
+            scale_min=scale_min,
+            scale_max=scale_max,
+        )
+    if variable_name == WRFVariable.WIND_POWER_DENSITY_10M:
+        power_density, scale_min, scale_max = variables.extract_wind_power_density_10m(dataset)
+        return _ValueFrameSource(
+            frame_for_step=lambda time_step_index: variables.materialize_2d(
+                power_density[time_step_index : time_step_index + 1, :, :]
+            ),
+            scale_min=scale_min,
+            scale_max=scale_max,
+        )
+    if variable_name == WRFVariable.PRESSURE:
+        scalar_values, scale_min, scale_max = variables.extract_pressure(dataset)
+    elif variable_name == WRFVariable.VAPOR:
+        scalar_values, scale_min, scale_max = variables.extract_vapor(dataset)
     else:
-        nc_var = variable.upper()
-        if not ds.has_variable(nc_var):
+        netcdf_variable_name = variable_name.upper()
+        if not dataset.has_variable(netcdf_variable_name):
             return None
-        var_data, vmin, vmax = variables.extract_scalar(ds, nc_var)
-    return lambda i: variables.materialize_2d(var_data[i : i + 1, :, :]), vmin, vmax
+        scalar_values, scale_min, scale_max = variables.extract_scalar(
+            dataset, netcdf_variable_name
+        )
+    return _ValueFrameSource(
+        frame_for_step=lambda time_step_index: variables.materialize_2d(
+            scalar_values[time_step_index : time_step_index + 1, :, :]
+        ),
+        scale_min=scale_min,
+        scale_max=scale_max,
+    )
 
 
-def _run_values_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list[str]]:
-    files: list[str] = []
-    warnings: list[str] = []
-    grid = ds.grid_level.value
-    nc_suffix = VARIABLE_NETCDF_MAP.get(unit.variable, unit.variable.upper())
-    time_meta = ds.build_date_metadata(skip_first_n=unit.skip_first)
+def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str]]:
+    written_files: list[str] = []
+    unit_warnings: list[str] = []
+    grid_level = dataset.grid_level.value
+    output_variable_id = VARIABLE_NETCDF_MAP.get(unit.variable, unit.variable.upper())
+    time_step_metadata = dataset.build_date_metadata(skip_first_n=unit.skip_first)
 
-    frames = _values_unit_frames(ds, unit.variable)
-    if frames is None:
-        warnings.append(f"Variable {unit.variable.upper()} not found — skipped")
-        return files, warnings
-    frame, vmin, vmax = frames
+    frame_source = _build_value_frame_source(dataset, unit.variable)
+    if frame_source is None:
+        unit_warnings.append(f"Variable {unit.variable.upper()} not found — skipped")
+        return written_files, unit_warnings
 
-    acc = _SiteArtifactAccumulator(ds.n_time_steps) if unit.site_artifacts else None
-    for meta in time_meta:
-        if meta.get("skip"):
+    site_artifact_accumulator = (
+        _SiteArtifactAccumulator(dataset.n_time_steps) if unit.site_artifacts else None
+    )
+    for step_metadata in time_step_metadata:
+        if step_metadata.get("skip"):
             continue
         if unit.variable == WRFVariable.SWDOWN:
-            local_hour = meta["datetime_local"].hour
+            local_hour = step_metadata["datetime_local"].hour
             if local_hour < 6 or local_hour > 18:
                 continue
-        i = meta["index"]
-        data = frame(i)
-        date_str = _format_datetime(meta["datetime_local"])
-        out = Path(unit.json_dir) / f"{grid}_{nc_suffix}_{i:03d}.json"
-        files.append(_atomic_values_json(out, data, vmin, vmax, date_str, None))
-        if acc is not None:
-            acc.add(i, data, date_str)
-    if acc is not None:
-        files.extend(acc.write(unit.json_dir, f"{grid}_{nc_suffix}", grid, nc_suffix))
-    return files, warnings
+        time_step_index = step_metadata["index"]
+        frame_values = frame_source.frame_for_step(time_step_index)
+        formatted_local_time = _format_datetime(step_metadata["datetime_local"])
+        output_path = (
+            Path(unit.json_dir) / f"{grid_level}_{output_variable_id}_{time_step_index:03d}.json"
+        )
+        written_files.append(
+            _atomic_values_json(
+                output_path,
+                frame_values,
+                frame_source.scale_min,
+                frame_source.scale_max,
+                formatted_local_time,
+                None,
+            )
+        )
+        if site_artifact_accumulator is not None:
+            site_artifact_accumulator.add(time_step_index, frame_values, formatted_local_time)
+    if site_artifact_accumulator is not None:
+        written_files.extend(
+            site_artifact_accumulator.write(
+                unit.json_dir,
+                f"{grid_level}_{output_variable_id}",
+                grid_level,
+                output_variable_id,
+            )
+        )
+    return written_files, unit_warnings
 
 
 def _run_poteolico_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list[str]]:

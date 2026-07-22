@@ -11,8 +11,12 @@ import numpy as np
 import pandas as pd
 
 from solrad_correction.data.preprocessing import PreprocessingPipeline
+from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
+from solrad_correction.datasets.tabular import TabularDataset
 from solrad_correction.evaluation.reports import ExperimentReport
 from solrad_correction.models.base import BaseRegressorModel, TrainingResult
+
+ExperimentDataset = TabularDataset | SequenceDataset | WindowedSequenceDataset
 
 
 @dataclass(slots=True)
@@ -73,9 +77,9 @@ class PreprocessedSplits:
 class DatasetBundle:
     """Datasets and evaluation payload for a model family."""
 
-    train: Any
-    val: Any | None
-    test: Any
+    train: ExperimentDataset
+    val: ExperimentDataset | None
+    test: ExperimentDataset
     input_size: int | None
     y_true: np.ndarray
     prediction_index: pd.DatetimeIndex | None

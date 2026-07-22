@@ -114,7 +114,7 @@ class TestReader:
         reader = SafetensorsEmbeddingReader(tmp_path, cache_size=2)
         for sid in ids:
             reader(sid)
-        assert len(reader._cache) <= 2  # asserting the LRU bound
+        assert len(reader._shard_cache) <= 2  # asserting the LRU bound
 
 
 class TestPreload:

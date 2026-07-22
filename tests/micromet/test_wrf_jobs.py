@@ -118,6 +118,35 @@ def _run_units(wrf_path: Path, out_root: Path, workers: int) -> list[jobs.UnitRe
     return jobs.execute_units(units, workers)
 
 
+def test_value_frame_source_exposes_named_scale_and_step_contract(tmp_path):
+    wrf = tmp_path / "wrfout_d02_frame_source.nc"
+    _write_full_wrf_file(wrf, seed=6)
+
+    with jobs.WRFDataset(wrf) as dataset:
+        temperature_source = jobs._build_value_frame_source(dataset, "temperature")
+        assert isinstance(temperature_source, jobs._ValueFrameSource)
+
+        temperature_kelvin, expected_min, expected_max = jobs.variables.extract_temperature(dataset)
+        assert temperature_source.scale_min == expected_min
+        assert temperature_source.scale_max == expected_max
+        np.testing.assert_array_equal(
+            temperature_source.frame_for_step(2),
+            jobs.variables.extract_temperature_step(temperature_kelvin[2:3, :, :]),
+        )
+
+        wind_source = jobs._build_value_frame_source(dataset, "wind")
+        assert isinstance(wind_source, jobs._ValueFrameSource)
+        u10_values, v10_values, expected_min, expected_max = jobs.variables.extract_wind(dataset)
+        assert wind_source.scale_min == expected_min
+        assert wind_source.scale_max == expected_max
+        np.testing.assert_array_equal(
+            wind_source.frame_for_step(1),
+            np.hypot(u10_values[1], v10_values[1]),
+        )
+
+        assert jobs._build_value_frame_source(dataset, "GLW") is None
+
+
 def test_values_json_matches_reference_payload_with_int_formatting(tmp_path):
     """The values-JSON content is pinned by the frozen reference oracle.
 
