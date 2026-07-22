@@ -2,7 +2,7 @@
 
 Drop-in replacement for the legacy ``graficos3_UFBA_v1.py`` script.
 Reads the same ``.dat`` files produced by the datalogger and outputs
-visually identical PNG graphs for the website.
+layout-compatible PNG graphs for the website.
 
 Optionally overlays WRF model output (``series_operacional.dat``) on
 applicable graphs as dashed black lines.
@@ -41,6 +41,7 @@ from micrometeorology.common.logging import setup_logging
 from micrometeorology.sensors.aggregation import aggregate_to_hourly
 from micrometeorology.sensors.ingestion import read_campbell_dat
 from micrometeorology.sensors.plotting import (
+    BALANCE_COMPONENT_COLORS,
     add_labmim_watermark,
     add_timestamp_label,
     add_top_legend,
@@ -199,23 +200,75 @@ def _plot_balanco(raw: pd.DataFrame, hourly: pd.DataFrame, out_dir: Path, dt: da
 
     # Raw dots
     if lw_dw in raw.columns:
-        ax.plot(raw.index, raw[lw_dw], "o", color="silver", markersize=6)
+        ax.plot(
+            raw.index,
+            raw[lw_dw],
+            "o",
+            color=BALANCE_COMPONENT_COLORS["lw_down"],
+            markersize=6,
+            alpha=0.35,
+        )
     if sw_dw in raw.columns:
-        ax.plot(raw.index, raw[sw_dw], "o", color="yellow", markersize=6)
+        ax.plot(
+            raw.index,
+            raw[sw_dw],
+            "o",
+            color=BALANCE_COMPONENT_COLORS["sw_down"],
+            markersize=6,
+            alpha=0.35,
+        )
     if lw_up in raw.columns:
-        ax.plot(raw.index, -raw[lw_up], "o", color="silver", markersize=6)
+        ax.plot(
+            raw.index,
+            -raw[lw_up],
+            "o",
+            color=BALANCE_COMPONENT_COLORS["lw_up"],
+            markersize=6,
+            alpha=0.35,
+        )
     if sw_up in raw.columns:
-        ax.plot(raw.index, -raw[sw_up], "o", color="silver", markersize=6)
+        ax.plot(
+            raw.index,
+            -raw[sw_up],
+            "o",
+            color=BALANCE_COMPONENT_COLORS["sw_up"],
+            markersize=6,
+            alpha=0.35,
+        )
 
     # Hourly means
     if lw_dw in hourly.columns:
-        ax.plot(hourly.index, hourly[lw_dw], "p-", color="black", label="LW_dw")
+        ax.plot(
+            hourly.index,
+            hourly[lw_dw],
+            "p-",
+            color=BALANCE_COMPONENT_COLORS["lw_down"],
+            label="LW_dw",
+        )
     if lw_up in hourly.columns:
-        ax.plot(hourly.index, -hourly[lw_up], "p-", color="orange", label="LW_up")
+        ax.plot(
+            hourly.index,
+            -hourly[lw_up],
+            "p-",
+            color=BALANCE_COMPONENT_COLORS["lw_up"],
+            label="LW_up",
+        )
     if sw_dw in hourly.columns:
-        ax.plot(hourly.index, hourly[sw_dw], "p-", color="red", label="SW_dw")
+        ax.plot(
+            hourly.index,
+            hourly[sw_dw],
+            "p-",
+            color=BALANCE_COMPONENT_COLORS["sw_down"],
+            label="SW_dw",
+        )
     if sw_up in hourly.columns:
-        ax.plot(hourly.index, -hourly[sw_up], "p-", color="blue", label="SW_up")
+        ax.plot(
+            hourly.index,
+            -hourly[sw_up],
+            "p-",
+            color=BALANCE_COMPONENT_COLORS["sw_up"],
+            label="SW_up",
+        )
 
     ax.set_ylim(-750, 1200)
     setup_date_axis(ax)

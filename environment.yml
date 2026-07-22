@@ -6,13 +6,14 @@
 #
 #   conda env create -f environment.yml
 #   conda activate micrometeorology
-#   make install-dev          # uv pip install --system ".[dev,tcc,video]"
+#   make install-dev          # uv sync --locked into the active Conda env
 #   # GPU workstation: make install-cuda
-#   # all-sky training:  uv pip install --system -e ".[allsky]"
+#   # base-only install: make install
 name: micrometeorology
 channels:
   - conda-forge
+  - nodefaults
 dependencies:
   - python=3.14
   - pip
-  - uv>=0.11
+  - uv>=0.11.30,<0.12

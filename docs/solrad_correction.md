@@ -71,18 +71,17 @@ src/solrad_correction/
 ## Installation
 
 ```bash
-# With CPU PyTorch:
-uv pip install --torch-backend cpu -e ".[tcc]"
+# With locked CPU PyTorch in the active Conda environment:
+UV_PROJECT_ENVIRONMENT="$CONDA_PREFIX" uv sync --locked --inexact --extra tcc
 
-# With CUDA PyTorch (install torch first):
-uv pip install --torch-backend cu121 torch
-uv pip install -e ".[tcc-cuda]"
+# With CUDA PyTorch plus the locked TCC and all-sky dependencies:
+make install-cuda
 ```
 
-For local development, activate the `labmim` Conda environment before running
-these commands. Conda remains the environment boundary for native scientific
-packages; `uv pip` is used as the faster package installer inside that env. On
-Windows, set `UV_PYTHON` to the active Conda interpreter first:
+For local development, activate the `micrometeorology` Conda environment before
+running these commands. `uv sync --locked` installs the audited lock into that
+environment while preserving Conda's interpreter. On Windows, set `UV_PYTHON`
+to the active Conda interpreter first:
 
 ```powershell
 $env:UV_PYTHON = (python -c "import sys; print(sys.executable)")
@@ -151,7 +150,7 @@ output_dir: output/experiments
 ### 2. Run the Experiment
 
 `solrad-run` and `solrad-colab` are installed console scripts (Typer apps), so
-they can be invoked directly after `uv pip install -e ".[tcc]"`:
+they can be invoked directly after `uv sync --locked --extra tcc`:
 
 ```bash
 solrad-run --config configs/tcc/experiments/my_experiment.yaml
@@ -335,8 +334,8 @@ artifacts stay aligned.
 
 ```bash
 python -m pip install uv
-uv pip install --torch-backend cu121 torch
-uv pip install -e ".[tcc-cuda]"
+uv sync --locked --extra tcc-cuda --no-install-package torch
+uv pip install --python .venv/bin/python --reinstall --torch-backend cu130 "torch==2.13.0"
 
 solrad-colab \
   --config configs/tcc/experiments/lstm_hourly.yaml \

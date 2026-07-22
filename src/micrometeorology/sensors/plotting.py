@@ -1,8 +1,8 @@
 """Plotting utilities for LabMiM station meteorological graphs.
 
-Provides helper functions that reproduce the exact visual style of the
-legacy ``graficos1_UFBA_v5.py`` / ``graficos3_UFBA_v1.py`` scripts:
-watermark placement, date-axis formatting, legend style, etc.
+Provides helpers that preserve the layout of the legacy
+``graficos1_UFBA_v5.py`` / ``graficos3_UFBA_v1.py`` scripts while sharing
+accessible color, watermark, date-axis, and legend conventions.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import matplotlib
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
@@ -27,6 +28,18 @@ WATERMARK_FONTSIZE = 16
 
 # Default figure size matching legacy graficos3 (8x4)
 DEFAULT_FIGSIZE: tuple[float, float] = (8, 4)
+
+# Matplotlib 3.11 exposes the color-vision-deficiency-friendly Okabe-Ito
+# sequence through the public registry. Keep radiation-channel semantics
+# consistent across both station-graph producers without changing global
+# scientific colormaps.
+_OKABE_ITO = matplotlib.color_sequences["okabe_ito"]
+BALANCE_COMPONENT_COLORS = {
+    "sw_down": _OKABE_ITO[1],  # orange
+    "sw_up": _OKABE_ITO[2],  # sky blue
+    "lw_down": _OKABE_ITO[3],  # bluish green
+    "lw_up": _OKABE_ITO[7],  # reddish purple
+}
 
 
 # ---------------------------------------------------------------------------

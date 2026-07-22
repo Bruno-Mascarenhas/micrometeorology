@@ -55,22 +55,22 @@ src/micrometeorology/
 ## Installation
 
 ```bash
-# Micrometeorology only:
-uv pip install -e "."
+# Micrometeorology only in the active Conda environment:
+UV_PROJECT_ENVIRONMENT="$CONDA_PREFIX" uv sync --locked --inexact
 
 # With development dependencies:
-uv pip install -e ".[dev]"
+UV_PROJECT_ENVIRONMENT="$CONDA_PREFIX" uv sync --locked --inexact --extra dev
 
 # With video generation (moviepy):
-uv pip install -e ".[video]"
+UV_PROJECT_ENVIRONMENT="$CONDA_PREFIX" uv sync --locked --inexact --extra video
 
 ```
 
-For local development, prefer activating the existing `labmim` Conda
-environment first and then running the `uv pip` commands inside it. Conda keeps
-native scientific binaries stable; `uv` speeds up dependency resolution and
-editable installs. On Windows, set `UV_PYTHON` to the active Conda interpreter
-first:
+For local development, activate the `micrometeorology` Conda environment first.
+The commands above install the audited lock while preserving Conda's interpreter
+and bootstrap packages. Run `uv sync --locked` without
+`UV_PROJECT_ENVIRONMENT` when you want a separate project `.venv`. On Windows,
+set `UV_PYTHON` to the active Conda interpreter first:
 
 ```powershell
 $env:UV_PYTHON = (python -c "import sys; print(sys.executable)")

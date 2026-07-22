@@ -56,43 +56,43 @@ Recommended workflow: Conda provides the interpreter + `uv`
 ```bash
 conda env create -f environment.yml
 conda activate micrometeorology
-make install-dev            # uv pip install --system --torch-backend cpu -e ".[dev,tcc,video]"
+make install-dev            # locked dev + CPU ML + video + all-sky extras
 ```
 
-`--system` targets the active Conda interpreter, so the lockfile-driven uv
-resolution and the Conda env stay one and the same. Use `uv venv` / `uv sync`
-only if you intentionally want a separate `.venv` — CI does exactly that with
-`uv sync --locked`.
+The Make targets set `UV_PROJECT_ENVIRONMENT` to the active Conda prefix and
+run `uv sync --locked --inexact`. This installs the exact lock into that
+environment while preserving Conda's interpreter and bootstrap packages. Run
+`uv sync --locked` directly if you intentionally want a separate `.venv` — CI
+uses that workflow.
 
 ### Base Scientific Suite
 
 ```bash
-uv pip install -e "."
+uv sync --locked
 ```
 
 ### Machine Learning Environment (CPU)
 
 ```bash
-uv pip install --torch-backend cpu -e ".[tcc]"
+uv sync --locked --extra tcc
 ```
 
 ### Machine Learning Environment (CUDA)
 
 ```bash
-uv pip install --torch-backend cu121 torch
-uv pip install -e ".[tcc-cuda]"
+make install-cuda
 ```
 
 ### All-Sky DNN (`allsky`)
 
 ```bash
-uv pip install --torch-backend cpu -e ".[allsky]"
+uv sync --locked --extra allsky
 ```
 
 ### Development Environment
 
 ```bash
-uv pip install --torch-backend cpu -e ".[dev,tcc,video]"
+uv sync --locked --extra dev --extra tcc --extra video --extra allsky
 ```
 
 ---
@@ -167,7 +167,7 @@ allsky evaluate --checkpoint output/allsky-mm/experiments/v4_film/run/best.ckpt 
 allsky export-colab-bundle -o bundle.tar.gz --config configs/allsky/data/local_prepare.yaml
 ```
 
-Install extras with `pip install -e ".[allsky]"`. For Google Colab GPU training use
+Install the locked extra with `uv sync --locked --extra allsky`. For Google Colab GPU training use
 [`notebooks/allsky_multimodal_colab.ipynb`](notebooks/allsky_multimodal_colab.ipynb).
 Full documentation: [`docs/allsky.md`](docs/allsky.md); the internal design is in
 [`docs/allsky-architecture.md`](docs/allsky-architecture.md).

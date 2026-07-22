@@ -61,6 +61,7 @@ import yaml
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.paths import ensure_dir
 from micrometeorology.sensors.plotting import (
+    BALANCE_COMPONENT_COLORS,
     add_labmim_watermark,
     add_timestamp_label,
     add_top_legend,
@@ -285,15 +286,21 @@ def _plot_balance(
     """
     ax.plot(net.index, net.to_numpy(), "p-", color="black", label="Rn")
     styling = {
-        "sw_down": ("SW_dw", "red", 1.0),
-        "sw_up": ("SW_up", "blue", -1.0),
-        "lw_down": ("LW_dw", "green", 1.0),
-        "lw_up": ("LW_up", "orange", -1.0),
+        "sw_down": ("SW_dw", 1.0),
+        "sw_up": ("SW_up", -1.0),
+        "lw_down": ("LW_dw", 1.0),
+        "lw_up": ("LW_up", -1.0),
     }
-    for channel, (label, color, sign) in styling.items():
+    for channel, (label, sign) in styling.items():
         series = components.get(channel)
         if series is not None:
-            ax.plot(series.index, sign * series.to_numpy(), "-", color=color, label=label)
+            ax.plot(
+                series.index,
+                sign * series.to_numpy(),
+                "-",
+                color=BALANCE_COMPONENT_COLORS[channel],
+                label=label,
+            )
 
 
 # ---------------------------------------------------------------------------
