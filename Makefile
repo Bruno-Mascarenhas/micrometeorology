@@ -1,22 +1,27 @@
-.PHONY: install-uv install install-dev install-cuda fix check typecheck test test-verbose audit lock-check bench clean all
+.PHONY: install-uv require-conda install install-dev install-cuda fix check typecheck test test-verbose audit lock-check bench clean all
 
 # Variables
 PYTHON ?= python
 UV ?= uv
 UV_PIP = $(UV) pip install --system
+TORCH_BACKEND ?= cu130
+TORCH_VERSION ?= 2.13.0
 
 install-uv:
 	$(PYTHON) -m pip install uv
 
-install:
-	$(UV_PIP) -e .
+require-conda:
+	@test -n "$(CONDA_PREFIX)" || (echo "Activate the micrometeorology Conda environment first." && exit 1)
 
-install-dev:
-	$(UV_PIP) --torch-backend cpu -e ".[dev,tcc,video,allsky]"
+install: require-conda
+	UV_PROJECT_ENVIRONMENT="$(CONDA_PREFIX)" $(UV) sync --locked --inexact
 
-install-cuda:
-	$(UV_PIP) --torch-backend cu121 torch
-	$(UV_PIP) -e ".[tcc-cuda]"
+install-dev: require-conda
+	UV_PROJECT_ENVIRONMENT="$(CONDA_PREFIX)" $(UV) sync --locked --inexact --extra dev --extra tcc --extra video --extra allsky
+
+install-cuda: require-conda
+	UV_PROJECT_ENVIRONMENT="$(CONDA_PREFIX)" $(UV) sync --locked --inexact --extra tcc-cuda --extra allsky --no-install-package torch
+	$(UV_PIP) --reinstall --torch-backend $(TORCH_BACKEND) "torch==$(TORCH_VERSION)"
 
 fix:
 	ruff format .
@@ -35,7 +40,7 @@ test-verbose:
 # dev+video+allsky is the widest auditable set. torch ships from the PyTorch
 # index (as a +cpu local version), not PyPI, so pip-audit cannot resolve it — it
 # is excluded via --no-emit-package while the rest of the allsky extra
-# (safetensors, tensorboard, tqdm, imageio-ffmpeg) gets audited.
+# (safetensors, tensorboard, imageio-ffmpeg) gets audited.
 audit:
 	$(UV) export --frozen --extra dev --extra video --extra allsky --no-emit-package torch --format requirements-txt --no-emit-project -o requirements-audit.txt
 	uvx pip-audit --strict --disable-pip -r requirements-audit.txt

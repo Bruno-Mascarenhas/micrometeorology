@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.31,<2"]
 build-backend = "hatchling.build"
 
 [project]
@@ -26,20 +26,18 @@ dependencies = [
     "pandas>=3.0",
     "xarray>=2024.6",
     "netCDF4>=1.7.4",
-    "matplotlib>=3.9",
+    "matplotlib>=3.11",
     "cartopy>=0.23",
-    "seaborn>=0.13.2",
     "scikit-learn>=1.5",
-    "scipy>=1.13",
     "typer>=0.15",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "pyyaml>=6.0",
     "imageio>=2.34",
     "pyarrow>=15.0",
-    # Transitive of matplotlib/imageio. Floor covers CVE-2026-25990 / 40192 /
-    # 42308-42311 plus PYSEC-2026-2253..2257 / 3451..3453 (fixed in 12.3.0).
-    # Bump when new pillow advisories land or matplotlib/imageio require newer.
+    # Used directly by allsky and transitively by matplotlib/imageio. The floor
+    # covers CVE-2026-25990 / 40192 / 42308-42311 plus
+    # PYSEC-2026-2253..2257 / 3451..3453 (fixed in 12.3.0).
     "pillow>=12.3.0",
 ]
 
@@ -60,7 +58,6 @@ video = [
 allsky = [
     "torch>=2.6.0",
     "imageio-ffmpeg>=0.6",
-    "tqdm>=4.66",
     "tensorboard>=2.14",
     "safetensors>=0.5",
 ]
@@ -68,13 +65,11 @@ allsky = [
 tcc = [
     "torch>=2.6.0",
     "joblib>=1.3",
-    "tqdm>=4.66",
     "tensorboard>=2.14",
 ]
-# TCC with CUDA support (install separately: uv pip install --torch-backend cu121 torch)
+# TCC with CUDA support (install the current CUDA wheel with `make install-cuda`)
 tcc-cuda = [
     "joblib>=1.3",
-    "tqdm>=4.66",
     "tensorboard>=2.14",
 ]
 
@@ -99,7 +94,7 @@ packages = ["src/micrometeorology", "src/solrad_correction", "src/allsky"]
 # Lock torch against the CPU wheel index on Linux/macOS so the resolver does not
 # pull the multi-GB CUDA dependency stack into uv.lock. Windows wheels on PyPI
 # are already CPU-only. For CUDA installs use `make install-cuda`, which
-# overrides this via `uv pip install --torch-backend cu121 torch`.
+# replaces the CPU wheel with the locked public version from the CUDA index.
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
@@ -112,6 +107,9 @@ torch = [
 ]
 
 [tool.uv]
+# Keep the isolated build backend reproducible even though build requirements
+# are intentionally separate from the runtime lock graph.
+build-constraint-dependencies = ["hatchling==1.31.0"]
 # moviepy 2.2.x caps pillow<12.0, but pillow 11.x/12.2 have known CVEs and
 # PYSECs (see the pillow floor comment above). Override the cap so the lock can
 # include pillow>=12.3.0. Revisit when moviepy allows pillow 12.

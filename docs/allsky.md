@@ -51,23 +51,25 @@ Configs live under `configs/allsky/`; tests are under `tests/allsky/`.
 
 ## Installation
 
-The `allsky` extra pulls the heavy dependencies (`torch`, `imageio-ffmpeg`, `tqdm`, `tensorboard`):
+The `allsky` extra pulls the heavy dependencies (`torch`, `imageio-ffmpeg`, `tensorboard`, `safetensors`):
 
 ```bash
-# CPU PyTorch (uv.lock pins torch to the CPU wheel index on Linux/macOS):
-uv pip install -e ".[allsky]"
+# CPU PyTorch in the active Conda environment (locked):
+UV_PROJECT_ENVIRONMENT="$CONDA_PREFIX" uv sync --locked --inexact --extra allsky
 
-# CUDA PyTorch (install torch from the CUDA index first):
-uv pip install --torch-backend cu121 torch
-uv pip install -e ".[allsky]"
+# CUDA PyTorch plus the locked TCC and all-sky dependencies:
+make install-cuda
 
-# Plain pip also works:
+# A separate project .venv instead of Conda:
+uv sync --locked --extra allsky
+
+# Plain pip remains available for downstream installs outside this checkout:
 pip install -e ".[allsky]"
 ```
 
-For local development, activate the `labmim` Conda environment before running these commands, as with the other packages in this repository.
+For the Conda workflows, activate the `micrometeorology` environment first. The Make target installs the locked extras without the CPU torch wheel, then force-installs Torch 2.13 from the CUDA 13.0 index. `TORCH_BACKEND` and `TORCH_VERSION` can be overridden together when another matching index/version pair is required.
 
-**torch is optional for most of the package.** `torch`, `tqdm`, `tensorboard`, and `imageio-ffmpeg` are imported lazily: `allsky --help`, frame extraction (`extract-frames`), dataset preparation, manifest building, day splits, and validation all work in a torch-free environment. Only embedding extraction, training, and evaluation require torch — install the `allsky` extra for those.
+**torch is optional for most of the package.** Heavy modules are imported lazily, and `imageio-ffmpeg` is loaded as a video backend only when needed: `allsky --help`, frame extraction (`extract-frames`), dataset preparation, manifest building, day splits, and validation all work in a torch-free environment. Only embedding extraction, training, and evaluation require torch — install the `allsky` extra for those.
 
 ---
 

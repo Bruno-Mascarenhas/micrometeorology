@@ -7,23 +7,109 @@ backend (set on import of the CLI module), and the Typer app driven through
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib import pyplot as plt
+from matplotlib.colors import to_hex
 from typer.testing import CliRunner
 
+from micrometeorology.cli import generate_station_graphs
 from micrometeorology.cli.plot_station_graphs import (
     DEFAULT_COLUMNS,
     GRAPH_SPECS,
+    _plot_balance,
     app,
 )
+from micrometeorology.sensors.plotting import BALANCE_COMPONENT_COLORS, create_figure
 
 runner = CliRunner()
 
 # The nine fixed filenames the monitoring page reads by exact name.
 CONTRACT_PNGS = tuple(spec.filename for spec in GRAPH_SPECS)
+
+
+def test_balance_uses_okabe_ito_colors_and_negates_upward_channels():
+    """The four streams stay distinguishable and retain their physical signs."""
+    index = pd.date_range("2026-06-01", periods=2, freq="1h")
+    net = pd.Series([1.0, 2.0], index=index)
+    components = {
+        channel: pd.Series([offset, offset + 1.0], index=index)
+        for offset, channel in enumerate(BALANCE_COMPONENT_COLORS, start=1)
+    }
+    fig, ax = create_figure()
+
+    try:
+        _plot_balance(ax, net, components)
+        lines = {line.get_label(): line for line in ax.get_lines()}
+
+        assert set(lines) == {"Rn", "SW_dw", "SW_up", "LW_dw", "LW_up"}
+        assert to_hex(lines["Rn"].get_color()) == "#000000"
+
+        palette = {to_hex(color) for color in matplotlib.color_sequences["okabe_ito"]}
+        component_colors = {
+            to_hex(lines[label].get_color()) for label in ("SW_dw", "SW_up", "LW_dw", "LW_up")
+        }
+        assert len(component_colors) == 4
+        assert component_colors <= palette
+        assert "#000000" not in component_colors
+        assert {channel: to_hex(color) for channel, color in BALANCE_COMPONENT_COLORS.items()} == {
+            "sw_down": "#e69f00",
+            "sw_up": "#56b4e9",
+            "lw_down": "#009e73",
+            "lw_up": "#cc79a7",
+        }
+        for label, channel in {
+            "SW_dw": "sw_down",
+            "SW_up": "sw_up",
+            "LW_dw": "lw_down",
+            "LW_up": "lw_up",
+        }.items():
+            assert to_hex(lines[label].get_color()) == to_hex(BALANCE_COMPONENT_COLORS[channel])
+        np.testing.assert_array_equal(lines["SW_up"].get_ydata(), -components["sw_up"])
+        np.testing.assert_array_equal(lines["LW_up"].get_ydata(), -components["lw_up"])
+    finally:
+        plt.close(fig)
+
+
+def test_legacy_balance_uses_shared_palette_and_negates_upward_channels(monkeypatch, tmp_path):
+    """The datalogger graph uses the same accessible four-stream semantics."""
+    index = pd.date_range("2026-06-01", periods=2, freq="1h")
+    columns = {
+        "CG3Up_Wm2Cr_Avg": [1.0, 2.0],
+        "CM3Up_Wm2_Avg": [3.0, 4.0],
+        "CG3Dn_Wm2Cr_Avg": [5.0, 6.0],
+        "CM3Dn_Wm2_Avg": [7.0, 8.0],
+    }
+    frame = pd.DataFrame(columns, index=index)
+    monkeypatch.setattr(generate_station_graphs, "save_figure", lambda *_args, **_kwargs: None)
+
+    generate_station_graphs._plot_balanco(
+        frame,
+        frame,
+        tmp_path,
+        datetime(2026, 6, 1, 1),
+    )
+    fig = plt.gcf()
+
+    try:
+        lines = {line.get_label(): line for line in fig.axes[0].get_lines() if line.get_label()}
+        expected_channels = {
+            "SW_dw": "sw_down",
+            "SW_up": "sw_up",
+            "LW_dw": "lw_down",
+            "LW_up": "lw_up",
+        }
+        for label, channel in expected_channels.items():
+            assert to_hex(lines[label].get_color()) == to_hex(BALANCE_COMPONENT_COLORS[channel])
+        np.testing.assert_array_equal(lines["SW_up"].get_ydata(), -frame["CM3Dn_Wm2_Avg"])
+        np.testing.assert_array_equal(lines["LW_up"].get_ydata(), -frame["CG3Dn_Wm2Cr_Avg"])
+    finally:
+        plt.close(fig)
 
 
 def _write_hourly_csv(path: Path, *, columns: dict[str, str] | None = None, days: int = 10) -> Path:

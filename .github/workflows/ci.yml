@@ -29,14 +29,14 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
-          version: "0.11.26"
+          version: "0.11.30"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
       # dev+video+allsky is the widest auditable set. torch ships from the
       # PyTorch index (as a +cpu local version), not PyPI, so pip-audit cannot
       # resolve it and it is excluded via --no-emit-package; the rest of the
-      # allsky extra (safetensors, tensorboard, tqdm, imageio-ffmpeg) is
+      # allsky extra (safetensors, tensorboard, imageio-ffmpeg) is
       # audited. The tcc torch stack remains uncovered for the same index reason.
       - name: Audit dependencies for known vulnerabilities
         run: |
@@ -73,7 +73,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
-          version: "0.11.26"
+          version: "0.11.30"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
@@ -87,6 +87,16 @@ jobs:
       - name: Install dependencies (locked)
         run: |
           uv sync --locked --extra dev --extra tcc --extra allsky
+
+      # Exercises the constrained Hatchling backend before publishing a release.
+      - name: Build distributions
+        run: |
+          uv build --no-sources
+
+      - name: Smoke-test built wheel
+        run: |
+          uv pip install --python .venv/bin/python --reinstall --no-deps dist/*.whl
+          .venv/bin/python -c 'from importlib.metadata import version; import allsky, micrometeorology, solrad_correction; assert micrometeorology.__version__ == version("labmim-micrometeorology")'
 
       - name: Cache MyPy
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6

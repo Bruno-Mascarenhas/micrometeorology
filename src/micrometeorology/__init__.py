@@ -6,4 +6,9 @@ Provides modules for:
 - Statistical comparison between model and observational data
 """
 
-__version__ = "1.2.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("labmim-micrometeorology")
+except PackageNotFoundError:  # Support direct source-tree imports before installation.
+    __version__ = "0+unknown"
