@@ -73,6 +73,11 @@ tcc-cuda = [
     "tensorboard>=2.14",
 ]
 
+[project.urls]
+Homepage = "https://labmim.if.ufba.br"
+Repository = "https://github.com/Bruno-Mascarenhas/micrometeorology"
+Issues = "https://github.com/Bruno-Mascarenhas/micrometeorology/issues"
+
 [project.scripts]
 # Micrometeorology CLIs
 labmim-wrf-figures = "micrometeorology.cli.render_wrf_maps:main"
