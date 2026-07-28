@@ -148,7 +148,13 @@ overwrite.
 
 ### Checkpoint payload (`last.ckpt` / `best.ckpt`)
 
-`torch.save` (atomic; `weights_only=False` — a trusted local file). Contains:
+`torch.save` (atomic). Read back under torch's **restricted** unpickler
+(`weights_only=True` plus an explicit allowlist of the payload's own types): a
+checkpoint travels through Colab and shared Drives, so it is not a trusted local
+file, and one carrying an object outside the allowlist is refused rather than
+executed. `allsky train --trust-checkpoint` / `allsky evaluate
+--trust-checkpoint` (both default off) opt back into the unrestricted reader for
+a file you produced yourself. Contains:
 `model_state`, `optimizer_state`, `scheduler_state`, `scaler_state`, `epoch`,
 `global_step`, `epochs_no_improve` (the early-stopping patience counter, so a
 resumed run continues from the exact point on the patience curve; optional —
@@ -229,8 +235,12 @@ silent drop — a leakage-prone request stops the run.
 
 ## Alignment strategies
 
-Registered in `data/alignment.py` (`get_strategy(name)`, extend via
-`register_strategy`):
+The accepted names are the `AlignmentStrategyName` literal in `config.py` (a leaf
+module, so it is the single owner of the set); `data/alignment.py` implements the
+build-time pairing and `data/datasets.py` implements the dataset-level windowing.
+A windowed strategy requires `data.input_mode: embedding` — the image dataset has
+no windowing, so the combination is rejected at config load instead of silently
+training a centre-frame model:
 
 | Strategy | Stage | Status |
 |---|---|---|

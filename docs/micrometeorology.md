@@ -36,13 +36,15 @@ src/micrometeorology/
 │   └── export.py            # Formatted CSV export
 ├── stats/
 │   ├── metrics.py           # Model vs. observation metrics (RMSE, MAE, etc.)
-│   ├── comparison.py        # Full comparison pipeline: alignment + metrics + plots
+│   ├── comparison.py        # Alignment + pairing + metric tables (pure pandas)
+│   ├── comparison_plots.py  # Time-series/scatter figure for a paired frame
 │   ├── climatology.py       # Diurnal / monthly / seasonal groupings of station series
 │   └── radiation.py         # Station-Series clearness index (Kt) and diffuse fraction (Kd)
 └── wrf/
     ├── reader.py            # NetCDF dataset wrapper (WRFDataset context manager)
     ├── variables.py         # Variable extraction and unit conversion
-    ├── plotting.py          # Cartopy-based map rendering (replaces Basemap)
+    ├── value_source.py      # Per-variable frames + scale bounds (figures and JSON)
+    ├── plotting.py          # Colormap saturation helper (rendering lives in batch.py)
     ├── batch.py             # Parallel rendering engine (ProcessPoolExecutor)
     ├── animation.py         # PNG → WebM / GIF creation (parallel batch support)
     ├── interpolation.py     # Vectorised vertical interpolation (replaces wrf-python)
@@ -116,6 +118,19 @@ Environment variables use the `LABMIM_` prefix:
 export LABMIM_DATA_DIR=/mnt/data/labmim
 export LABMIM_ENV=server
 ```
+
+`configs_dir` is where the sensor pipeline looks for `default.yaml` (QC limits,
+summed columns, wind-direction columns) and `calibrations.yaml`, so it must name
+the directory those two files actually live in: `configs/micromet/`. The shipped
+`default.yaml` deliberately does **not** redeclare `configs_dir` — the field
+default in `common/config.py` owns that path, and a YAML copy of it is what let
+the two drift apart historically. Pointing `configs_dir` at a directory without
+those files does not fail the run: it silently disables quality control,
+calibration, precipitation summing and wind-direction vector averaging. Measured
+on one hour of 5-minute data, that costs `precip` 0.5 mm instead of 6.0 mm,
+`WD_WXT` 180° instead of 0°, `Temp1` +2.1 °C from an unfiltered 50 °C spike,
+`PSP1_Wm2` +117 W/m² from an unfiltered 2000 W/m² spike, and `CM3Up_Wm2_Avg`
++24.5 W/m² from the missing 0.9694 sensitivity factor.
 
 ### 2. Sensor Data Ingestion
 
@@ -564,7 +579,16 @@ This writes the per-step value JSONs, `WIND_VECTORS`, the `.geojson` +
 and the v2 `manifest.json` — the complete set the WebGIS consumes. A single
 `wrfout` file is fine too: `-d /path/to/wrfout_d03_2026-05-03_00_00_00`
 (the domain is read from the filename). Omit `--date` to batch every `wrfout*`
-in `--wrf-dir`.
+file in `--wrf-dir`, restricted to `--domains` when given (subdirectories named
+`wrfout*` are skipped). A `--date` that is not at least an 8-digit day is
+refused rather than reported as a day WRF produced nothing for; separators are
+tolerated, so `--date 2026-05-03` and `--date 20260503` are the same request.
+
+An empty or partial selection warns and still exits `0`, so a cron chain
+survives a day whose run is late. Pass `--strict` to turn both "no wrfout
+selected" and "a requested `--domains` is missing" into a non-zero exit before
+anything is written — the right choice when the JSON feeding the WebGIS must
+never silently go stale.
 
 ### Monitoring page (site-labmim)
 
