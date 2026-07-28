@@ -8,7 +8,13 @@ import netCDF4
 import numpy as np
 import pytest
 
-from micrometeorology.wrf.reader import WRFDataset, resolve_wrfout_paths
+from micrometeorology.common.types import GridLevel
+from micrometeorology.wrf.reader import (
+    WRFDataset,
+    assert_one_file_per_domain,
+    detect_grid_level,
+    resolve_wrfout_paths,
+)
 from micrometeorology.wrf.variables import (
     compute_air_density,
     compute_relative_humidity,
@@ -160,6 +166,57 @@ def test_build_date_metadata_uses_pinned_product_timezone(tmp_path, monkeypatch)
     with WRFDataset(path) as wrf:
         entries = wrf.build_date_metadata()
     assert entries[0]["datetime_local"].utcoffset() == timedelta(0)
+
+
+def test_detect_grid_level_reads_the_token_from_any_name_shape():
+    assert detect_grid_level("wrfout_d03.nc") is GridLevel.D03
+    assert detect_grid_level("/archive/WRFOUT_D03_2026-07-27") is GridLevel.D03
+    assert detect_grid_level(Path("wrfout_d01_2013-07-01_01_00_00-003_")) is GridLevel.D01
+    assert detect_grid_level("wrfout_2026-07-27_00_00_00") is None
+    assert detect_grid_level("wrfout_d06_2026-07-27") is None
+
+
+def test_undetectable_domain_refuses_to_publish_as_d01(tmp_path):
+    """Guessing D01 would republish this file's grid and values over the real
+    D01 products, since every output name is built from the detected level."""
+    path = tmp_path / "wrfout_2026-07-27_00_00_00.nc"
+    _write_tiny_wrf_file(path)
+
+    with pytest.raises(ValueError, match="Could not detect grid level"):
+        WRFDataset(path)
+
+
+def test_untokenized_open_leaves_no_dangling_netcdf_handle(tmp_path):
+    """The refusal happens before the open, so no HDF5 handle outlives it —
+    ``__exit__`` never runs for a constructor that raised."""
+    path = tmp_path / "wrfout_d06_2026-07-27.nc"
+    _write_tiny_wrf_file(path)
+
+    with pytest.raises(ValueError, match="Could not detect grid level"):
+        WRFDataset(path)
+    # A second writer can only take the file if nothing still holds it open.
+    with netCDF4.Dataset(path, "a") as ds:
+        ds.setncattr("REOPENED", 1)
+
+
+def test_assert_one_file_per_domain_names_the_colliding_files():
+    first = "/wrf/wrfout_d02_2026-05-03_09:00:00"
+    second = "/wrf/wrfout_d02_2026-05-04_09:00:00"
+
+    assert_one_file_per_domain([first, "/wrf/wrfout_d03_2026-05-03_09:00:00"])
+
+    with pytest.raises(ValueError, match="would overwrite each other") as excinfo:
+        assert_one_file_per_domain([first, second, "/wrf/wrfout_d03_2026-05-03_09:00:00"])
+    message = str(excinfo.value)
+    assert "D02" in message
+    assert Path(first).name in message
+    assert Path(second).name in message
+    assert "D03" not in message
+
+
+def test_assert_one_file_per_domain_ignores_untokenized_names():
+    """Those units fail individually in the worker, so they never collide."""
+    assert_one_file_per_domain(["/wrf/renamed_a.nc", "/wrf/renamed_b.nc"])
 
 
 def test_build_date_metadata_flags_skipped_steps(tmp_path):
