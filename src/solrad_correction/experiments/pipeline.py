@@ -7,7 +7,7 @@ import time
 
 import pandas as pd
 
-from solrad_correction.config import ExperimentConfig
+from solrad_correction.config import DataConfig, ExperimentConfig
 from solrad_correction.data.preprocessing import PreprocessingPipeline
 from solrad_correction.data.splits import temporal_train_val_test_split
 from solrad_correction.datasets.sequence import WindowedSequenceDataset
@@ -48,8 +48,16 @@ def prepare_runtime(config: ExperimentConfig) -> None:
 
 
 def load_data(config: ExperimentConfig) -> LoadedData:
-    """Load configured input data."""
-    if config.data.hourly_data_path:
+    """Load configured input data.
+
+    ``data.use_raw`` decides only when a config populates both input paths;
+    otherwise the populated path selects the loader, so every config that
+    already works keeps its branch.
+    """
+    _warn_about_ignored_site_coordinates(config)
+    if config.data.use_raw and config.data.sensor_data_path:
+        loaded_frame = _load_raw_sensor_frame(config, config.data.sensor_data_path)
+    elif config.data.hourly_data_path:
         from solrad_correction.data.loaders import load_sensor_hourly
 
         projected_columns = config.data.load_columns or None
@@ -66,21 +74,40 @@ def load_data(config: ExperimentConfig) -> LoadedData:
             cache_dir=config.data.cache_dir,
         )
     elif config.data.sensor_data_path:
-        from solrad_correction.data.loaders import load_sensor_raw
-
-        loaded_frame = load_sensor_raw(
-            config.data.sensor_data_path,
-            pattern=config.data.sensor_pattern,
-            calibrations_path=config.data.calibrations_path,
-            resample_freq=config.data.resample_freq,
-            min_samples=config.data.sensor_min_samples,
-        )
-        if config.runtime.limit_rows is not None:
-            loaded_frame = loaded_frame.iloc[: config.runtime.limit_rows].copy()
+        loaded_frame = _load_raw_sensor_frame(config, config.data.sensor_data_path)
     else:
         raise ValueError("No data path provided in config")
 
     return LoadedData(frame=loaded_frame)
+
+
+def _load_raw_sensor_frame(config: ExperimentConfig, sensor_data_path: str) -> pd.DataFrame:
+    """Ingest the raw ``.dat`` sensor tree configured by ``data.sensor_data_path``."""
+    from solrad_correction.data.loaders import load_sensor_raw
+
+    loaded_frame = load_sensor_raw(
+        sensor_data_path,
+        pattern=config.data.sensor_pattern,
+        calibrations_path=config.data.calibrations_path,
+        resample_freq=config.data.resample_freq,
+        min_samples=config.data.sensor_min_samples,
+    )
+    if config.runtime.limit_rows is not None:
+        loaded_frame = loaded_frame.iloc[: config.runtime.limit_rows].copy()
+    return loaded_frame
+
+
+def _warn_about_ignored_site_coordinates(config: ExperimentConfig) -> None:
+    """Say out loud that station coordinates cannot retarget a run to another site."""
+    coordinate_defaults = DataConfig()
+    if (config.data.station_lat, config.data.station_lon) != (
+        coordinate_defaults.station_lat,
+        coordinate_defaults.station_lon,
+    ):
+        logger.warning(
+            "data.station_lat/data.station_lon are accepted for backward compatibility "
+            "and no feature stage reads them; the site comes from the configured data path"
+        )
 
 
 def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame:
@@ -373,69 +400,33 @@ def run_pipeline(config: ExperimentConfig) -> ExperimentReport:
     experiment_writer = ExperimentWriter.from_config(config)
     experiment_writer.prepare()
 
-    loaded_data = pipeline_profile.time_stage("load_data", load_data, config)
-    feature_frame = pipeline_profile.time_stage(
-        "build_features",
-        build_features,
-        loaded_data,
-        config,
-    )
-    split_frames = pipeline_profile.time_stage("split_data", split_data, config, feature_frame)
-    preprocessed_splits = pipeline_profile.time_stage(
-        "preprocess_splits",
-        preprocess_splits,
-        config,
-        feature_frame,
-        split_frames,
-    )
+    with pipeline_profile.stage("load_data"):
+        loaded_data = load_data(config)
+    with pipeline_profile.stage("build_features"):
+        feature_frame = build_features(loaded_data, config)
+    with pipeline_profile.stage("split_data"):
+        split_frames = split_data(config, feature_frame)
+    with pipeline_profile.stage("preprocess_splits"):
+        preprocessed_splits = preprocess_splits(config, feature_frame, split_frames)
     # Persist the fitted preprocessing state before any downstream stage can
     # fail, so a crash after training never discards reusable state.
-    pipeline_profile.time_stage(
-        "persist_preprocessing",
-        experiment_writer.write_preprocessing,
-        preprocessed_splits.pipeline,
-    )
-    dataset_bundle = pipeline_profile.time_stage(
-        "build_datasets",
-        build_datasets,
-        config,
-        preprocessed_splits,
-    )
-    configured_model = pipeline_profile.time_stage(
-        "build_model",
-        build_configured_model,
-        config,
-        dataset_bundle,
-    )
-    training_output = pipeline_profile.time_stage(
-        "train_model",
-        train_model,
-        config,
-        configured_model,
-        dataset_bundle,
-    )
+    with pipeline_profile.stage("persist_preprocessing"):
+        experiment_writer.write_preprocessing(preprocessed_splits.pipeline)
+    with pipeline_profile.stage("build_datasets"):
+        dataset_bundle = build_datasets(config, preprocessed_splits)
+    with pipeline_profile.stage("build_model"):
+        configured_model = build_configured_model(config, dataset_bundle)
+    with pipeline_profile.stage("train_model"):
+        training_output = train_model(config, configured_model, dataset_bundle)
     trained_model = training_output.result.model
     # Persist the trained model immediately after fit: a crash during
     # prediction or evaluation must leave the model recoverable on disk.
-    pipeline_profile.time_stage(
-        "persist_model",
-        experiment_writer.write_model,
-        config,
-        trained_model,
-    )
-    prediction_output = pipeline_profile.time_stage(
-        "predict_model",
-        predict_model,
-        trained_model,
-        dataset_bundle,
-    )
-    evaluation_result = pipeline_profile.time_stage(
-        "evaluate_predictions",
-        evaluate_predictions,
-        preprocessed_splits,
-        config,
-        prediction_output,
-    )
+    with pipeline_profile.stage("persist_model"):
+        experiment_writer.write_model(config, trained_model)
+    with pipeline_profile.stage("predict_model"):
+        prediction_output = predict_model(trained_model, dataset_bundle)
+    with pipeline_profile.stage("evaluate_predictions"):
+        evaluation_result = evaluate_predictions(preprocessed_splits, config, prediction_output)
 
     experiment_report = ExperimentReport(
         experiment_name=config.name,
@@ -458,9 +449,9 @@ def run_pipeline(config: ExperimentConfig) -> ExperimentReport:
         predictions=prediction_output,
         evaluation=evaluation_result,
     )
-    pipeline_profile.time_stage(
-        "write_experiment_results",
-        experiment_writer.write_result,
+    # ``write_result`` records its own ``write_experiment_results`` stage, so
+    # the timing it serializes into profile.json includes the artifact writes.
+    experiment_writer.write_result(
         config=config,
         result=experiment_result,
         profile=pipeline_profile,

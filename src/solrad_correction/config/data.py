@@ -7,7 +7,13 @@ from dataclasses import dataclass, field
 
 @dataclass(slots=True)
 class DataConfig:
-    """Data loading and preparation settings."""
+    """Data loading and preparation settings.
+
+    ``wrf_data_path``, ``station_lat`` and ``station_lon`` are accepted for
+    backward compatibility with existing YAML files and are read by no pipeline
+    stage: the site a run describes is selected by ``sensor_data_path`` /
+    ``hourly_data_path``, never by coordinates.
+    """
 
     sensor_data_path: str | None = None
     sensor_pattern: str = "*.dat"
