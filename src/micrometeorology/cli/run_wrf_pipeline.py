@@ -145,10 +145,18 @@ def run(
     typer.echo(f"  Workers: {resolved_workers}")
 
     # Phase 1: Figures
+    failed_figures = 0
     if not no_figures:
         typer.echo("\n── Phase 1: Figure Generation ──")
         from micrometeorology.cli.render_wrf_maps import _build_tasks_for_domain
+        from micrometeorology.cli.render_wrf_maps import (
+            _normalize_var_list as _collapse_poteolico_heights,
+        )
         from micrometeorology.wrf.batch import run_figure_tasks
+
+        # The figure renderer has no per-height poteolico arm, so heights collapse
+        # here only. Phase 2 must keep them: they select which JSON files exist.
+        figure_var_list = _collapse_poteolico_heights(var_list)
 
         # One process pool is hoisted over the figure stage so each 16-task
         # batch reuses warm workers instead of paying pool spawn overhead.
@@ -164,6 +172,7 @@ def run(
         with figure_pool_ctx as figure_pool:
 
             def render_task_batch(tasks: list[FigureTask], label: str) -> None:
+                nonlocal failed_figures
                 rendered = run_figure_tasks(
                     tasks,
                     resolved_workers,
@@ -171,7 +180,8 @@ def run(
                     executor=figure_pool,
                 )
                 png_paths.extend(rendered)
-                typer.echo(f"    -> {len(rendered)} figures generated for {label}")
+                failed_figures += len(tasks) - len(rendered)
+                typer.echo(f"    -> {len(rendered)}/{len(tasks)} figures generated for {label}")
 
             for wrf_path in paths:
                 typer.echo(f"  Loading {wrf_path.name}...")
@@ -179,7 +189,7 @@ def run(
                 with wrf_reader.WRFDataset(wrf_path) as ds:
                     _build_tasks_for_domain(
                         ds,
-                        var_list,
+                        figure_var_list,
                         str(figures_dir),
                         shapes_dir,
                         skip_first,
@@ -218,6 +228,7 @@ def run(
             raise typer.Exit(code=1)
 
     # Phase 3: WebM Videos
+    failed_videos = 0
     if also_video and png_paths:
         typer.echo("\n── Phase 3: WebM Video Generation ──")
         from micrometeorology.wrf.animation import batch_create_webm
@@ -232,6 +243,7 @@ def run(
                 grouped[stem].append(p)
 
         webm_paths = batch_create_webm(grouped, str(video_dir), fps=2, workers=resolved_workers)
+        failed_videos = len(grouped) - len(webm_paths)
         typer.echo(f"  ✓ {len(webm_paths)} videos generated")
 
     elapsed = time.perf_counter() - t0
@@ -239,6 +251,12 @@ def run(
     typer.echo(f"  ✓ Complete in {elapsed:.1f}s")
     typer.echo(f"  Output: {base_out.resolve()}")
     typer.echo("=" * 70)
+
+    # Deferred past Phase 2/3 on purpose: dropped frames must not cost the run
+    # its front-end JSON/GeoJSON, but they must still be a non-zero exit.
+    if failed_figures or failed_videos:
+        typer.echo(f"  ✗ {failed_figures} figures and {failed_videos} videos failed (see log)")
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

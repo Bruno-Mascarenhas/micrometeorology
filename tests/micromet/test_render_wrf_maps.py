@@ -1,0 +1,256 @@
+"""Characterization + CLI contracts for the WRF figure command.
+
+``_build_tasks_for_domain`` decides the filename, title, colour scale and
+overlay of every published PNG/WebM frame, so the snapshot below pins that
+whole surface. Nothing else in the suite covers it.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import NamedTuple
+
+from typer.testing import CliRunner
+
+from micrometeorology.cli import render_wrf_maps
+from micrometeorology.wrf import reader
+from micrometeorology.wrf.batch import FigureTask
+from tests.micromet.test_wrf_jobs import NT, _write_full_wrf_file
+
+
+def _build_tasks(wrf_path: Path, var_list: list[str], output_dir: Path) -> list[FigureTask]:
+    with reader.WRFDataset(wrf_path) as ds:
+        return render_wrf_maps._build_tasks_for_domain(
+            ds,
+            var_list,
+            output_dir,
+            None,
+            skip_first=0,
+            dpi=100,
+        )
+
+
+class _Snapshot(NamedTuple):
+    """Everything about a ``FigureTask`` that reaches the published PNG."""
+
+    title: str
+    vmin: float
+    vmax: float
+    cmap_name: str
+    overlay_levels: list[float] | None
+    has_overlay: bool
+    has_wind_vectors: bool
+    dpi: int
+    saturation: float
+    data_shape: tuple[int, ...]
+
+
+def _snapshot(task: FigureTask) -> _Snapshot:
+    assert (task.u is None) == (task.v is None)
+    return _Snapshot(
+        title=task.title,
+        vmin=task.vmin,
+        vmax=task.vmax,
+        cmap_name=task.cmap_name,
+        overlay_levels=task.overlay_levels,
+        has_overlay=task.overlay_data is not None,
+        has_wind_vectors=task.u is not None,
+        dpi=task.dpi,
+        saturation=task.saturation,
+        data_shape=task.data.shape,
+    )
+
+
+def _expected(title: str, vmin: float, vmax: float, cmap_name: str) -> _Snapshot:
+    return _Snapshot(
+        title=title,
+        vmin=vmin,
+        vmax=vmax,
+        cmap_name=cmap_name,
+        overlay_levels=None,
+        has_overlay=False,
+        has_wind_vectors=False,
+        dpi=100,
+        saturation=2.0,
+        data_shape=(4, 5),
+    )
+
+
+def test_default_variable_set_builds_the_pinned_figure_task_surface(tmp_path, monkeypatch):
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_figures.nc"
+    _write_full_wrf_file(wrf, seed=5)
+
+    tasks = _build_tasks(wrf, list(render_wrf_maps.DEFAULT_VARS), tmp_path / "figs")
+
+    # LH and GLW are absent from the synthetic file and are skipped with a
+    # warning; the other ten variables each emit one task per time step.
+    by_variable: dict[str, list[str]] = {}
+    for task in tasks:
+        by_variable.setdefault(Path(task.output_path).name.split("_D02_")[0], []).append(
+            Path(task.output_path).name
+        )
+    assert sorted(by_variable) == [
+        "HFX",
+        "PRES",
+        "RAIN",
+        "RH2",
+        "SWDOWN",
+        "TEMP",
+        "TSK",
+        "VAPOR",
+        "WIND",
+        "WIND_POWER_DENSITY_10M",
+    ]
+    for names in by_variable.values():
+        assert len(names) == NT
+
+    label = "\nInício Análise: 03/05/2026 09 (UTC)\nPrevisão: 03/05/2026 06HL (Domingo)"
+    first_frames = {
+        Path(task.output_path).name.split("_D02_")[0]: _snapshot(task)
+        for task in tasks
+        if task.output_path.endswith("_000.png")
+    }
+    # Titles, colormaps and scale bounds are baked into the published PNGs, so
+    # every one of them is pinned. The generic-scalar arm (HFX/PRES/VAPOR)
+    # titles from the NetCDF suffix rather than a per-variable phrase, and only
+    # temperature carries the pressure-contour overlay.
+    assert first_frames == {
+        "TEMP": _expected(
+            f"Temperature (°C){label}", 16.863793945312523, 31.418969726562523, "hot_r"
+        )._replace(overlay_levels=[880, 900, 950, 1000, 1013], has_overlay=True),
+        "TSK": _expected(
+            f"Skin Temperature (°C){label}", 15.146752929687523, 35.90810546875002, "hot_r"
+        ),
+        "RH2": _expected(f"Relative Humidity 2m (%){label}", 42.125858306884766, 100.0, "YlGnBu"),
+        "WIND": _expected(
+            f"Wind 10m (m/s){label}", 0.36391976475715637, 10.99991512298584, "PuBu"
+        )._replace(has_wind_vectors=True),
+        "RAIN": _expected(f"Rain (mm){label}", 0.31824588775634766, 4.724166393280029, "afmhot_r"),
+        "SWDOWN": _expected(f"SWDOWN (W/m²){label}", 7.392277240753174, 878.29052734375, "hot_r"),
+        "WIND_POWER_DENSITY_10M": _expected(
+            f"Wind Power Density 10m (W/m²){label}",
+            0.028288070112466812,
+            572.7734985351562,
+            "YlOrRd",
+        ),
+        "HFX": _expected(f"HFX{label}", -14.924610137939453, 380.68243408203125, "jet"),
+        "PRES": _expected(f"PRES{label}", 990.17140625, 1018.40984375, "Blues"),
+        "VAPOR": _expected(f"VAPOR{label}", 10.211358778178692, 19.896673038601875, "YlGnBu"),
+    }
+
+
+def test_swdown_drops_night_steps_but_other_variables_keep_them(tmp_path, monkeypatch):
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_night.nc"
+    # 19..23 UTC = 16..20 local: the 6-18h daylight gate keeps three steps.
+    _write_full_wrf_file(wrf, seed=31, start_hour_utc=19)
+
+    tasks = _build_tasks(wrf, ["temperature", "SWDOWN"], tmp_path / "figs")
+
+    names = [Path(task.output_path).name for task in tasks]
+    assert [n for n in names if n.startswith("SWDOWN")] == [
+        f"SWDOWN_D02_{i:03d}.png" for i in range(3)
+    ]
+    assert [n for n in names if n.startswith("TEMP")] == [
+        f"TEMP_D02_{i:03d}.png" for i in range(NT)
+    ]
+
+
+def test_skip_first_drops_leading_steps(tmp_path, monkeypatch):
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_skip.nc"
+    _write_full_wrf_file(wrf, seed=5)
+
+    with reader.WRFDataset(wrf) as ds:
+        tasks = render_wrf_maps._build_tasks_for_domain(
+            ds, ["temperature"], tmp_path / "figs", None, skip_first=2, dpi=100
+        )
+
+    assert [Path(t.output_path).name for t in tasks] == [
+        f"TEMP_D02_{i:03d}.png" for i in range(2, NT)
+    ]
+
+
+def test_missing_swdown_warns_and_skips_instead_of_aborting(tmp_path, monkeypatch):
+    """A truncated wrfout must not kill the whole cron run."""
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_no_swdown.nc"
+    _write_full_wrf_file(wrf, seed=5)
+    _drop_variable(wrf, "SWDOWN")
+
+    tasks = _build_tasks(wrf, ["SWDOWN", "temperature"], tmp_path / "figs")
+
+    assert [Path(t.output_path).name for t in tasks] == [f"TEMP_D02_{i:03d}.png" for i in range(NT)]
+
+
+def _drop_variable(wrf_path: Path, name: str) -> None:
+    """Rewrite *wrf_path* without variable *name*."""
+    import netCDF4
+
+    trimmed = wrf_path.with_suffix(".trimmed.nc")
+    with netCDF4.Dataset(wrf_path) as src, netCDF4.Dataset(trimmed, "w") as dst:
+        dst.setncatts({key: src.getncattr(key) for key in src.ncattrs()})
+        for dim_name, dim in src.dimensions.items():
+            dst.createDimension(dim_name, len(dim))
+        for var_name, var in src.variables.items():
+            if var_name == name:
+                continue
+            clone = dst.createVariable(var_name, var.datatype, var.dimensions)
+            clone[:] = var[:]
+    trimmed.replace(wrf_path)
+
+
+# ---------------------------------------------------------------------------
+# Duplicate suppression and CLI exit status
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_variable_requests_do_not_render_the_same_png_twice(tmp_path, monkeypatch):
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_dup.nc"
+    _write_full_wrf_file(wrf, seed=5)
+
+    tasks = _build_tasks(wrf, ["temperature", "temperature"], tmp_path / "figs")
+
+    assert len({task.output_path for task in tasks}) == len(tasks) == NT
+
+
+def test_cli_exits_non_zero_when_every_figure_fails(tmp_path, monkeypatch):
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_cli.nc"
+    _write_full_wrf_file(wrf, seed=5)
+
+    monkeypatch.setattr(
+        render_wrf_maps,
+        "run_figure_tasks",
+        lambda *_args, **_kwargs: [],
+    )
+
+    result = CliRunner().invoke(
+        render_wrf_maps.app,
+        ["-d", str(wrf), "-o", str(tmp_path / "figs"), "-v", "temperature", "-w", "2"],
+    )
+
+    assert result.exit_code == 1
+    assert f"✗ {NT} figures" in result.output
+
+
+def test_cli_exits_zero_when_every_figure_renders(tmp_path, monkeypatch):
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_cli_ok.nc"
+    _write_full_wrf_file(wrf, seed=5)
+
+    monkeypatch.setattr(
+        render_wrf_maps,
+        "run_figure_tasks",
+        lambda tasks, *_args, **_kwargs: [task.output_path for task in tasks],
+    )
+
+    result = CliRunner().invoke(
+        render_wrf_maps.app,
+        ["-d", str(wrf), "-o", str(tmp_path / "figs"), "-v", "temperature", "-w", "2"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"✓ Generated {NT} figures" in result.output

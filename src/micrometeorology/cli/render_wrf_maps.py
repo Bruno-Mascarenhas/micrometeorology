@@ -132,10 +132,16 @@ def _build_tasks_for_domain(
     time_meta = ds.build_date_metadata(skip_first_n=skip_first)
 
     tasks: list[FigureTask] = []
+    scheduled_output_paths: set[str] = set()
 
     for var_name in var_list:
 
         def add_task(task: FigureTask, label: str = var_name) -> None:
+            # Two requests for the same frame would race on the non-atomic
+            # savefig and duplicate the frame in the WebM.
+            if task.output_path in scheduled_output_paths:
+                return
+            scheduled_output_paths.add(task.output_path)
             tasks.append(task)
             if task_sink is not None and len(tasks) >= task_batch_size:
                 task_sink(tasks, label)
@@ -298,6 +304,9 @@ def _build_tasks_for_domain(
 
         elif var_name == WRFVariable.SWDOWN:
             # Solar radiation — skip nighttime (local hours 0-5 and 19-23)
+            if not ds.has_variable("SWDOWN"):
+                typer.echo("  ⚠ Variable SWDOWN not found in dataset — skipping")
+                continue
             var_data, vmin, vmax = vmod.extract_scalar(ds, "SWDOWN")
             for meta in time_meta:
                 if meta.get("skip"):
@@ -482,6 +491,7 @@ def run(
     # One process pool is hoisted over the whole run so each 16-task batch reuses
     # warm workers instead of paying pool spawn overhead per flush.
     png_paths: list[str] = []
+    failed_figures = 0
     pool_ctx: ProcessPoolExecutor | nullcontext[None] = (
         ProcessPoolExecutor(
             max_workers=resolved_workers,
@@ -493,6 +503,7 @@ def run(
     with pool_ctx as pool:
 
         def render_task_batch(tasks: list[FigureTask], label: str) -> None:
+            nonlocal failed_figures
             rendered = run_figure_tasks(
                 tasks,
                 resolved_workers,
@@ -500,7 +511,8 @@ def run(
                 executor=pool,
             )
             png_paths.extend(rendered)
-            typer.echo(f"  -> {len(rendered)} figures generated for {label}")
+            failed_figures += len(tasks) - len(rendered)
+            typer.echo(f"  -> {len(rendered)}/{len(tasks)} figures generated for {label}")
 
         for wrf_path in paths:
             typer.echo(f"\nLoading {wrf_path.name}...")
@@ -519,6 +531,7 @@ def run(
     typer.echo(f"\n✓ Generated {len(png_paths)} figures")
 
     # Phase 3: WebM (optional)
+    failed_videos = 0
     if also_video and png_paths:
         typer.echo("\nGenerating WebM videos...")
         from micrometeorology.wrf.animation import batch_create_webm
@@ -534,9 +547,16 @@ def run(
                 grouped[stem].append(p)
 
         webm_paths = batch_create_webm(grouped, output, fps=2, workers=resolved_workers)
+        failed_videos = len(grouped) - len(webm_paths)
         typer.echo(f"✓ Generated {len(webm_paths)} videos")
 
     typer.echo("\n✓ Done")
+
+    # Cron chains on the exit status: a run that dropped frames is not a success,
+    # matching labmim-wrf-geojson. Videos and successful PNGs are already final.
+    if failed_figures or failed_videos:
+        typer.echo(f"✗ {failed_figures} figures and {failed_videos} videos failed (see log)")
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

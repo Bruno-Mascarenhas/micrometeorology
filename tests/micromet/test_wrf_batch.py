@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from micrometeorology.wrf import batch
 from micrometeorology.wrf.batch import (
     FigureMemmapTask,
     FigureTask,
@@ -118,3 +120,169 @@ def test_broken_process_pool_propagates_instead_of_being_swallowed(tmp_path):
             tmp_dir=tmp_path / "memmap-tmp",
             executor=_BrokenPoolExecutor(),  # type: ignore[arg-type]
         )
+
+
+def test_failed_render_is_logged_with_the_frame_it_lost(tmp_path, caplog):
+    """A batch-local ordinal is unresolvable; the operator needs the PNG name."""
+
+    class _FailingPoolExecutor:
+        def submit(self, *_args, **_kwargs):
+            future: Future[str] = Future()
+            future.set_exception(RuntimeError("cartopy is unhappy"))
+            return future
+
+    task = _figure_task(tmp_path / "TEMP_D03_007.png")
+
+    with caplog.at_level(logging.ERROR, logger="micrometeorology.wrf.batch"):
+        paths = run_figure_tasks(
+            [task],
+            workers=2,
+            backend="memmap",
+            tmp_dir=tmp_path / "memmap-tmp",
+            executor=_FailingPoolExecutor(),  # type: ignore[arg-type]
+        )
+
+    assert paths == []
+    assert str(tmp_path / "TEMP_D03_007.png") in caplog.text
+    assert "1 of 1 figure tasks failed to render" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# In-process rendering behaviour
+# ---------------------------------------------------------------------------
+
+
+class _StopBeforeSavefigError(Exception):
+    """Raised from a stubbed colormap lookup to end a render early."""
+
+
+def _stop_before_savefig(*_args, **_kwargs):
+    raise _StopBeforeSavefigError
+
+
+def _inner_domain_task(output_path: Path, shapes_dir: Path | None) -> FigureTask:
+    return _figure_task(output_path)._replace(
+        map_config=MapConfig(
+            "D03", 0.0, 1.0, 0.0, 1.0, 2, 2, True, str(shapes_dir) if shapes_dir else None
+        )
+    )
+
+
+def test_municipality_outlines_are_drawn_from_the_shapes_dir(tmp_path, monkeypatch):
+    """--shapes-dir was accepted and pickled to every worker but never read."""
+    import cartopy.mpl.geoaxes as geoaxes
+
+    from micrometeorology.wrf import plotting
+
+    requested: list[str] = []
+    drawn: list[tuple] = []
+
+    def fake_geometries(shp_path: str) -> tuple[object, ...]:
+        requested.append(shp_path)
+        return ("municipality-mesh",)
+
+    monkeypatch.setattr(batch, "_municipality_geometries", fake_geometries)
+    monkeypatch.setattr(
+        geoaxes.GeoAxes,
+        "add_geometries",
+        lambda _self, geoms, _crs, **kwargs: drawn.append((tuple(geoms), kwargs)),
+    )
+    monkeypatch.setattr(plotting, "saturated_cmap", _stop_before_savefig)
+
+    with pytest.raises(_StopBeforeSavefigError):
+        batch._render_figure(_inner_domain_task(tmp_path / "figure.png", tmp_path / "shapes"))
+
+    assert requested == [str(tmp_path / "shapes" / "BRMUE250GC_SIR.shp")]
+    assert drawn == [
+        (
+            ("municipality-mesh",),
+            {"facecolor": "none", "edgecolor": "gray", "linewidth": 0.5},
+        )
+    ]
+
+
+@pytest.mark.parametrize("shapes_dir", [None, "unset"])
+def test_municipality_outlines_are_skipped_without_shapes_or_inner_domain(
+    tmp_path, monkeypatch, shapes_dir
+):
+    import cartopy.mpl.geoaxes as geoaxes
+
+    from micrometeorology.wrf import plotting
+
+    drawn: list[tuple] = []
+    monkeypatch.setattr(
+        geoaxes.GeoAxes,
+        "add_geometries",
+        lambda _self, geoms, _crs, **kwargs: drawn.append((tuple(geoms), kwargs)),
+    )
+    monkeypatch.setattr(plotting, "saturated_cmap", _stop_before_savefig)
+
+    task = (
+        _inner_domain_task(tmp_path / "figure.png", None)
+        if shapes_dir is None
+        else _figure_task(tmp_path / "figure.png")  # D01: no municipality overlay
+    )
+    with pytest.raises(_StopBeforeSavefigError):
+        batch._render_figure(task)
+
+    assert drawn == []
+
+
+def test_missing_shapefile_warns_once_per_process_and_draws_nothing(tmp_path, caplog):
+    batch._municipality_geometries.cache_clear()
+    shp_path = str(tmp_path / "absent" / "BRMUE250GC_SIR.shp")
+
+    with caplog.at_level(logging.WARNING, logger="micrometeorology.wrf.batch"):
+        assert batch._municipality_geometries(shp_path) == ()
+        assert batch._municipality_geometries(shp_path) == ()
+
+    assert caplog.text.count("Municipality shapefile not found") == 1
+
+
+def test_wind_figure_with_pressure_overlay_renders_end_to_end(tmp_path):
+    """Real cartopy + saturated_cmap draw path: catches a bad import prune."""
+    import cartopy
+
+    natural_earth = Path(cartopy.config["data_dir"]) / "shapefiles" / "natural_earth"
+    required = (
+        natural_earth / "physical" / "ne_10m_coastline.shp",
+        natural_earth / "cultural" / "ne_10m_admin_1_states_provinces_lines.shp",
+    )
+    if not all(shapefile.exists() for shapefile in required):
+        pytest.skip("Natural Earth 10m data is not pre-downloaded")
+
+    lon, lat = np.meshgrid(
+        np.linspace(-38.6, -38.2, 8, dtype=np.float32),
+        np.linspace(-13.2, -12.8, 8, dtype=np.float32),
+    )
+    wind = np.full((8, 8), 3.0, dtype=np.float32)
+    out_path = tmp_path / "WIND_D05_000.png"
+    task = _figure_task(out_path)._replace(
+        lon=lon,
+        lat=lat,
+        data=wind,
+        u=wind,
+        v=wind,
+        overlay_data=np.full((8, 8), 1000.0, dtype=np.float32),
+        overlay_levels=[880, 900, 950, 1000, 1013],
+        map_config=MapConfig("D05", -38.6, -38.2, -13.2, -12.8, 3, 2, True, None),
+    )
+
+    assert batch._render_figure(task) == str(out_path)
+    assert out_path.stat().st_size > 0
+
+
+def test_render_figure_closes_its_pyplot_figure_when_the_render_fails(tmp_path):
+    """pyplot's global registry holds a strong reference to every open figure."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    task = _figure_task(tmp_path / "figure.png")._replace(cmap_name="NOT_A_REAL_CMAP")
+
+    open_before = set(plt.get_fignums())
+    with pytest.raises(KeyError):
+        batch._render_figure(task)
+
+    assert set(plt.get_fignums()) == open_before

@@ -6,17 +6,26 @@ payloads to temporary ``.npy`` files, and dispatches them to a process pool
 
 JSON generation does not live here: see ``micrometeorology.wrf.jobs`` for the
 work-unit pipeline where each worker reads the NetCDF itself.
+
+Cartopy Data Requirements
+-------------------------
+Cartopy needs Natural Earth data for coastlines and borders.  On systems
+without internet access, pre-download the data::
+
+    python -c "import cartopy; cartopy.config['data_dir'] = '/path/to/data'"
+
+See https://scitools.org.uk/cartopy/docs/latest/installing.html#data
 """
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import shutil
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
@@ -112,6 +121,23 @@ class FigureMemmapTask(NamedTuple):
 # ---------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=4)
+def _municipality_geometries(shp_path: str) -> tuple[object, ...]:
+    """Read the IBGE municipality mesh once per worker process.
+
+    ``BRMUE250GC_SIR`` carries every Brazilian municipality (~5.5k polygons);
+    re-parsing it per frame would dominate the render. Returns an empty tuple
+    (warning once per process) when the shapefile is not where ``--shapes-dir``
+    says it is.
+    """
+    import cartopy.io.shapereader as shapereader
+
+    if not Path(shp_path).exists():
+        logger.warning("Municipality shapefile not found: %s", shp_path)
+        return ()
+    return tuple(shapereader.Reader(shp_path).geometries())
+
+
 def _render_figure(task: FigureTask) -> str:
     """Render a single map figure. Runs in a worker process."""
     import matplotlib
@@ -126,94 +152,112 @@ def _render_figure(task: FigureTask) -> str:
     map_config = task.map_config
 
     fig = plt.figure(figsize=(8, 6))
-    ax = fig.add_subplot(1, 1, 1, projection=ccrs.Mercator())
-    ax.set_extent(
-        [map_config.lon_min, map_config.lon_max, map_config.lat_min, map_config.lat_max],
-        crs=ccrs.PlateCarree(),
-    )
-
-    # Map features
-    ax.coastlines(resolution="10m", linewidth=map_config.coast_width)
-    ax.add_feature(
-        cfeature.NaturalEarthFeature("cultural", "admin_1_states_provinces_lines", "10m"),
-        linewidth=map_config.state_width,
-        edgecolor="black",
-        facecolor="none",
-    )
-
-    # Gridlines
-    gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="gray", alpha=0.5)
-    gl.top_labels = False
-    gl.right_labels = False
-
-    transform = ccrs.PlateCarree()
-    cmap = saturated_cmap(task.cmap_name, task.saturation)
-
-    if task.u is not None and task.v is not None:
-        # Wind field
-        speed = task.data
-        mesh = ax.pcolormesh(
-            task.lon,
-            task.lat,
-            speed,
-            alpha=0.4,
-            cmap=cmap,
-            vmin=task.vmin,
-            vmax=task.vmax,
-            transform=transform,
-            shading="auto",
+    try:
+        ax = fig.add_subplot(1, 1, 1, projection=ccrs.Mercator())
+        ax.set_extent(
+            [map_config.lon_min, map_config.lon_max, map_config.lat_min, map_config.lat_max],
+            crs=ccrs.PlateCarree(),
         )
-        cb = plt.colorbar(mesh, ax=ax, shrink=0.5, pad=0.04)
-        cb.ax.tick_params(labelsize=10)
 
-        # Quiver (sub-sampled)
-        stride_map = {"D01": 6, "D02": 3, "D03": 4, "D04": 4, "D05": 4}
-        stride = stride_map.get(map_config.grid_level, 4)
-        ax.quiver(
-            task.lon[::stride, ::stride],
-            task.lat[::stride, ::stride],
-            task.u[::stride, ::stride],
-            task.v[::stride, ::stride],
-            transform=transform,
-            scale=50,
-            width=0.003,
+        # Map features
+        ax.coastlines(resolution="10m", linewidth=map_config.coast_width)
+        ax.add_feature(
+            cfeature.NaturalEarthFeature("cultural", "admin_1_states_provinces_lines", "10m"),
+            linewidth=map_config.state_width,
+            edgecolor="black",
+            facecolor="none",
         )
-    else:
-        # Scalar field — single pcolormesh (no double contourf+pcolor)
-        mesh = ax.pcolormesh(
-            task.lon,
-            task.lat,
-            task.data,
-            alpha=0.4,
-            cmap=cmap,
-            vmin=task.vmin,
-            vmax=task.vmax,
-            transform=transform,
-            shading="auto",
-        )
-        cb = plt.colorbar(mesh, ax=ax, shrink=0.5, pad=0.04)
-        cb.ax.tick_params(labelsize=10)
 
-    # Pressure contour overlay
-    if task.overlay_data is not None:
-        levels = task.overlay_levels or [880, 900, 950, 1000, 1013]
-        cs = ax.contour(
-            task.lon,
-            task.lat,
-            task.overlay_data,
-            levels=levels,
-            linewidths=0.8,
-            colors="black",
-            transform=transform,
-        )
-        ax.clabel(cs, colors="black", fmt="%.0f")
+        # Municipality outlines (inner domains only, from --shapes-dir)
+        if map_config.draw_municipalities and map_config.shapes_dir:
+            geometries = _municipality_geometries(
+                str(Path(map_config.shapes_dir) / "BRMUE250GC_SIR.shp")
+            )
+            if geometries:
+                ax.add_geometries(
+                    geometries,
+                    ccrs.PlateCarree(),
+                    facecolor="none",
+                    edgecolor="gray",
+                    linewidth=0.5,
+                )
 
-    ax.set_title(task.title, fontsize=9)
+        # Gridlines
+        gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="gray", alpha=0.5)
+        gl.top_labels = False
+        gl.right_labels = False
 
-    out = Path(task.output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(out), dpi=task.dpi)
-    plt.close(fig)
+        transform = ccrs.PlateCarree()
+        cmap = saturated_cmap(task.cmap_name, task.saturation)
+
+        if task.u is not None and task.v is not None:
+            # Wind field
+            speed = task.data
+            mesh = ax.pcolormesh(
+                task.lon,
+                task.lat,
+                speed,
+                alpha=0.4,
+                cmap=cmap,
+                vmin=task.vmin,
+                vmax=task.vmax,
+                transform=transform,
+                shading="auto",
+            )
+            cb = plt.colorbar(mesh, ax=ax, shrink=0.5, pad=0.04)
+            cb.ax.tick_params(labelsize=10)
+
+            # Quiver (sub-sampled)
+            stride_map = {"D01": 6, "D02": 3, "D03": 4, "D04": 4, "D05": 4}
+            stride = stride_map.get(map_config.grid_level, 4)
+            ax.quiver(
+                task.lon[::stride, ::stride],
+                task.lat[::stride, ::stride],
+                task.u[::stride, ::stride],
+                task.v[::stride, ::stride],
+                transform=transform,
+                scale=50,
+                width=0.003,
+            )
+        else:
+            # Scalar field — single pcolormesh (no double contourf+pcolor)
+            mesh = ax.pcolormesh(
+                task.lon,
+                task.lat,
+                task.data,
+                alpha=0.4,
+                cmap=cmap,
+                vmin=task.vmin,
+                vmax=task.vmax,
+                transform=transform,
+                shading="auto",
+            )
+            cb = plt.colorbar(mesh, ax=ax, shrink=0.5, pad=0.04)
+            cb.ax.tick_params(labelsize=10)
+
+        # Pressure contour overlay
+        if task.overlay_data is not None:
+            levels = task.overlay_levels or [880, 900, 950, 1000, 1013]
+            cs = ax.contour(
+                task.lon,
+                task.lat,
+                task.overlay_data,
+                levels=levels,
+                linewidths=0.8,
+                colors="black",
+                transform=transform,
+            )
+            ax.clabel(cs, colors="black", fmt="%.0f")
+
+        ax.set_title(task.title, fontsize=9)
+
+        out = Path(task.output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(str(out), dpi=task.dpi)
+    finally:
+        # pyplot's global registry keeps a strong reference: without this the
+        # figure survives every failure path until the worker is recycled.
+        plt.close(fig)
 
     return str(out)
 
@@ -376,15 +420,13 @@ def _save_memmap_payload(
     return path_str
 
 
-def _collect_pool_paths[TaskT](
+def _collect_pool_paths(
     pool: ProcessPoolExecutor,
-    worker: Callable[[TaskT], str],
-    tasks: list[TaskT],
-    task_kind: str,
+    tasks: list[FigureMemmapTask],
 ) -> list[str]:
     """Submit memmap tasks to *pool* and collect result paths as they complete."""
     paths: list[str] = []
-    futures = {pool.submit(worker, task): i for i, task in enumerate(tasks)}
+    futures = {pool.submit(_render_figure_memmap, task): task for task in tasks}
     for future in as_completed(futures):
         try:
             paths.append(future.result())
@@ -393,8 +435,13 @@ def _collect_pool_paths[TaskT](
             # task is doomed, so surface the failure instead of logging it away.
             raise
         except Exception:
-            idx = futures[future]
-            logger.exception("Failed to %s task %d", task_kind, idx)
+            failed_task = futures[future]
+            logger.exception(
+                "Failed to render figure %s (%s)", failed_task.output_path, failed_task.title
+            )
+    dropped = len(tasks) - len(paths)
+    if dropped:
+        logger.error("%d of %d figure tasks failed to render", dropped, len(tasks))
     return paths
 
 
@@ -453,17 +500,13 @@ def _run_figure_tasks_memmap(
         if n_workers == 1:
             paths = [_render_figure_memmap(task) for task in memmap_tasks]
         elif executor is not None:
-            paths = _collect_pool_paths(
-                executor, _render_figure_memmap, memmap_tasks, "render memmap figure"
-            )
+            paths = _collect_pool_paths(executor, memmap_tasks)
         else:
             with ProcessPoolExecutor(
                 max_workers=n_workers,
                 max_tasks_per_child=_max_tasks_per_child(n_workers),
             ) as pool:
-                paths = _collect_pool_paths(
-                    pool, _render_figure_memmap, memmap_tasks, "render memmap figure"
-                )
+                paths = _collect_pool_paths(pool, memmap_tasks)
     finally:
         if run_dir_ctx is not None:
             run_dir_ctx.cleanup()
