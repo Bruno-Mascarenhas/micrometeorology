@@ -71,6 +71,17 @@ def run_colab_cli(
     resume: Annotated[
         Path | None, typer.Option(help="Path to checkpoints/last.pt.", exists=True)
     ] = None,
+    allow_preprocessing_change: Annotated[
+        bool,
+        typer.Option(
+            "--allow-preprocessing-change",
+            help=(
+                "Resume even when the refitted preprocessing no longer matches the "
+                "one the checkpoint's weights were trained under (accepting that the "
+                "restored model now sees differently-scaled inputs)."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Run a solrad neural-network experiment with Colab-friendly defaults."""
     cfg = load_colab_config(
@@ -85,6 +96,7 @@ def run_colab_cli(
         amp=amp,
         torch_compile=torch_compile,
         resume=str(resume) if resume else None,
+        allow_preprocessing_change=allow_preprocessing_change,
     )
 
     try:
@@ -139,6 +151,7 @@ def load_colab_config(
     amp: bool | None = None,
     torch_compile: bool | None = None,
     resume: str | None = None,
+    allow_preprocessing_change: bool = False,
 ):
     """Load config with the same override path used by local CLI."""
     return load_config_with_overrides(
@@ -154,6 +167,7 @@ def load_colab_config(
             amp=amp,
             torch_compile=torch_compile,
             resume=resume,
+            allow_preprocessing_change=allow_preprocessing_change,
         ),
     )
 

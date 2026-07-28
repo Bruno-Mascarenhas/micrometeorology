@@ -296,33 +296,34 @@ class WindHeightSeries:
 
 
 def _package_wind_vectors_step(
-    u_target: NDArray,
-    v_target: NDArray,
-    ny: int,
-    nx: int,
-    downsampling: int,
+    u_subgrid: NDArray,
+    v_subgrid: NDArray,
+    linear_index: NDArray,
 ) -> dict:
-    """Package one timestep's wind vectors.
+    """Package one timestep's wind vectors from the already-downsampled components.
 
-    Angles are rounded to 1 decimal and magnitudes to 2 — the same convention
+    *u_subgrid*/*v_subgrid* carry only the cells the payload keeps and
+    *linear_index* their full-grid row-major cell ids; both are built once per
+    block by :func:`stream_wind_at_heights`, because computing the
+    transcendentals over the full grid would discard 15 of every 16 results at
+    the default stride.
+
+    Angles are the bearing the flow blows TOWARD, degrees clockwise from North
+    — the meteorological "comes FROM" bearing is ``(angle + 180) % 360``.
+    They are rounded to 1 decimal and magnitudes to 2 — the same convention
     as the standalone overlay files (``geojson.create_wind_vectors_json``).
     The front-end only draws arrows from these numbers; anything beyond
     0.1°/0.01 m/s is float64 interpolation noise, and serializing it used to
     inflate every POT_EOLICO values file by ~21%.
     """
-    magnitude = np.hypot(u_target, v_target)
-    angle = np.arctan2(u_target, v_target) * 180.0 / np.pi
-    angle = np.where(angle < 0, angle + 360.0, angle)
+    magnitude = np.hypot(u_subgrid, v_subgrid)
+    flow_bearing_deg = np.arctan2(u_subgrid, v_subgrid) * 180.0 / np.pi
+    flow_bearing_deg = np.where(flow_bearing_deg < 0, flow_bearing_deg + 360.0, flow_bearing_deg)
 
-    i_idx, j_idx = np.mgrid[0:ny:downsampling, 0:nx:downsampling]
-    i_flat = i_idx.ravel()
-    j_flat = j_idx.ravel()
-
-    angles_flat = angle[i_flat, j_flat]
-    mags_flat = magnitude[i_flat, j_flat]
+    angles_flat = flow_bearing_deg.ravel()
+    mags_flat = magnitude.ravel()
 
     valid = ~np.isnan(angles_flat)
-    linear_indices = (i_flat * nx + j_flat)[valid]
 
     # float64 before rounding: rounding a float32 array snaps to the nearest
     # float32 (320.6 -> 320.6000061...), which would defeat the compact
@@ -330,7 +331,7 @@ def _package_wind_vectors_step(
     return {
         "downsampled_angles": np.round(angles_flat[valid].astype(np.float64), 1).tolist(),
         "downsampled_magnitudes": np.round(mags_flat[valid].astype(np.float64), 2).tolist(),
-        "downsampled_linear_indices": linear_indices.tolist(),
+        "downsampled_linear_indices": linear_index[valid].tolist(),
     }
 
 
@@ -345,9 +346,10 @@ def stream_wind_at_heights(
 
     Reads U/V/PH/PHB/HGT in ``block_steps``-sized time blocks so peak memory is
     bounded by the block size instead of the file's full time dimension, and
-    interpolates u/v/speed for all target heights from ONE bracket pass per
-    block. Arithmetic matches the eager whole-array path bit-for-bit (float32
-    chain, same operand order), which the byte-diff gates pin.
+    interpolates speed (full grid) and u/v (the ``downsampling`` subgrid the
+    wind-vector payload keeps) for all target heights from one bracket pass per
+    block and grid. Arithmetic matches the eager whole-array path bit-for-bit
+    (float32 chain, same operand order), which the byte-diff gates pin.
 
     Requires an eager :class:`~micrometeorology.wrf.reader.WRFDataset` (uses
     ``get_variable_block``).
@@ -364,44 +366,77 @@ def stream_wind_at_heights(
 
     for t0 in range(0, n_t, block_steps):
         t1 = min(t0 + block_steps, n_t)
+        # Each staggering step is split into an allocation plus an in-place
+        # second operation: the chained ``(a + b) / 2.0`` form materialized a
+        # second full-size block per line for nothing.
         u_raw = ds.get_variable_block("U", t0, t1)
-        u_c = (u_raw[:, :, :, :-1] + u_raw[:, :, :, 1:]) / 2.0
+        u_c = u_raw[:, :, :, :-1] + u_raw[:, :, :, 1:]
+        u_c /= 2.0
         del u_raw
         v_raw = ds.get_variable_block("V", t0, t1)
-        v_c = (v_raw[:, :, :-1, :] + v_raw[:, :, 1:, :]) / 2.0
+        v_c = v_raw[:, :, :-1, :] + v_raw[:, :, 1:, :]
+        v_c /= 2.0
         del v_raw
 
         ph = ds.get_variable_block("PH", t0, t1)
         phb = ds.get_variable_block("PHB", t0, t1)
-        height = (ph + phb) / 9.81
+        height = ph + phb
+        height /= 9.81
         del ph, phb
-        height_c = (height[:, :-1, :, :] + height[:, 1:, :, :]) / 2.0
+        height_agl = height[:, :-1, :, :] + height[:, 1:, :, :]
+        height_agl /= 2.0
         del height
         hgt = ds.get_variable_block("HGT", t0, t1)
-        height_adjusted = height_c - hgt[:, np.newaxis, :, :]
-        del height_c, hgt
+        height_agl -= hgt[:, np.newaxis, :, :]  # level-centered height -> meters AGL
+        del hgt
 
         speed_4d = np.hypot(u_c, v_c)
         ny, nx = speed_4d.shape[2], speed_4d.shape[3]
+        linear_index = (
+            np.arange(0, ny, downsampling)[:, np.newaxis] * nx
+            + np.arange(0, nx, downsampling)[np.newaxis, :]
+        ).ravel()
 
-        interpolator = VerticalInterpolator(height_adjusted, axis=1)
-        for target in targets:
+        target_heights = [float(target) for target in targets]
+        interpolator = VerticalInterpolator(height_agl, axis=1)
+        speed_at_targets = interpolator.interpolate_many(speed_4d, target_heights)
+
+        # Only the wind-vector subgrid of u/v is ever serialized, and the
+        # bracket is per-column, so interpolating the strided components is
+        # bit-identical at 1/downsampling^2 of the cost. A contiguous copy of
+        # the subgrid beats handing the interpolator a strided view.
+        if downsampling > 1:
+            subgrid_interpolator = VerticalInterpolator(
+                np.ascontiguousarray(height_agl[:, :, ::downsampling, ::downsampling]), axis=1
+            )
+            u_subgrid = np.ascontiguousarray(u_c[:, :, ::downsampling, ::downsampling])
+            v_subgrid = np.ascontiguousarray(v_c[:, :, ::downsampling, ::downsampling])
+        else:
+            subgrid_interpolator = interpolator
+            u_subgrid, v_subgrid = u_c, v_c
+        del u_c, v_c
+        u_at_targets = subgrid_interpolator.interpolate_many(u_subgrid, target_heights)
+        v_at_targets = subgrid_interpolator.interpolate_many(v_subgrid, target_heights)
+        del u_subgrid, v_subgrid
+
+        for target_index, target in enumerate(targets):
             if target not in speed_out:
                 speed_out[target] = np.empty((n_t, ny, nx), dtype=speed_4d.dtype)
-            speed_out[target][t0:t1] = interpolator.interpolate(speed_4d, float(target))
-            u_3d = interpolator.interpolate(u_c, float(target))
-            v_3d = interpolator.interpolate(v_c, float(target))
+            speed_out[target][t0:t1] = speed_at_targets[target_index]
+            u_3d = u_at_targets[target_index]
+            v_3d = v_at_targets[target_index]
             for k in range(t1 - t0):
                 try:
                     vectors_out[target].append(
-                        _package_wind_vectors_step(u_3d[k], v_3d[k], ny, nx, downsampling)
+                        _package_wind_vectors_step(u_3d[k], v_3d[k], linear_index)
                     )
                 except Exception:
                     logger.warning(
                         "Wind vector packaging failed for step %d at %dm", t0 + k, target
                     )
                     vectors_out[target].append(None)
-        del u_c, v_c, height_adjusted, speed_4d, interpolator
+        del height_agl, speed_4d, interpolator, subgrid_interpolator
+        del speed_at_targets, u_at_targets, v_at_targets
 
     series: list[WindHeightSeries] = []
     for target in targets:

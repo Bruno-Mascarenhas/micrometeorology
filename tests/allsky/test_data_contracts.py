@@ -135,6 +135,31 @@ class TestPortablePaths:
         with pytest.raises(ValueError, match="not inside data_root"):
             to_relative(outside, root)
 
+    def test_relative_root_prefix_is_stripped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A relative data_root is stripped too, or resolve() double-prefixes it."""
+        monkeypatch.chdir(tmp_path)
+        stored = to_relative("out/ds/frames/allsky-20260101-1100.jpg", "out/ds")
+        assert stored == "frames/allsky-20260101-1100.jpg"
+
+    def test_relative_root_roundtrips_through_resolve(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        written = "out/ds/frames/allsky-20260101-1100.jpg"
+        assert resolve(to_relative(written, "out/ds"), "out/ds") == Path(written)
+
+    def test_relative_root_normalizes_dot_segments(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        assert to_relative("./out/ds/frames/a.jpg", "./out/ds") == "frames/a.jpg"
+        assert to_relative("out/ds/frames/a.jpg", "out/other/../ds") == "frames/a.jpg"
+
+    def test_relative_path_outside_relative_root_passes_through(self):
+        assert to_relative("frames/a.jpg", "out/ds") == "frames/a.jpg"
+
     def test_resolve_roundtrip(self, tmp_path: Path):
         resolved = resolve("frames/x.jpg", tmp_path)
         assert resolved == tmp_path / "frames" / "x.jpg"

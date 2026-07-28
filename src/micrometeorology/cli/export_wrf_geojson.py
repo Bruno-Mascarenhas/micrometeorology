@@ -18,12 +18,15 @@ Usage::
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from micrometeorology.common.cli_options import parse_csv, parse_int_csv
 from micrometeorology.common.logging import setup_logging
+from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import jobs
 from micrometeorology.wrf.batch import default_workers
 from micrometeorology.wrf.reader import resolve_wrfout_paths
@@ -48,8 +51,35 @@ DEFAULT_VARS = [
 ]
 
 
+_WRFOUT_DOMAIN_RE = re.compile(r"^wrfout_(d\d+)_", re.IGNORECASE)
+
+_CANONICAL_VARIABLES: dict[str, str] = {
+    **{variable.value.casefold(): variable.value for variable in WRFVariable},
+    **{f"poteolico{height}": f"poteolico{height}" for height in jobs.POTEOLICO_ALL_HEIGHTS},
+    "wind_vectors": "wind_vectors",
+}
+
+# Output file ids whose input spelling is a DIFFERENT word. Passing one of
+# these as ``-v`` reaches the raw-NetCDF passthrough and publishes unconverted
+# values into the files the derived variable owns.
+_OUTPUT_ID_OWNERS: dict[str, str] = {
+    netcdf_id.upper(): str(variable)
+    for variable, netcdf_id in VARIABLE_NETCDF_MAP.items()
+    if str(variable).casefold() != netcdf_id.casefold()
+}
+
+
 def _normalize_var_list(var_list: list[str]) -> list[str]:
-    """Deduplicate variables; a bare ``poteolico`` supersedes height-specific requests."""
+    """Canonicalize spelling and deduplicate; a bare ``poteolico`` supersedes height requests.
+
+    Case is folded to the canonical spelling first, because every downstream
+    branch compares against ``WRFVariable`` values with ``==``: a mis-cased
+    ``-v swdown`` used to miss its own handling (including the daylight gate)
+    and fall through to the raw-NetCDF passthrough. Tokens that name no known
+    variable are left untouched — raw NetCDF fields such as ``T2`` are a
+    supported passthrough.
+    """
+    var_list = [_CANONICAL_VARIABLES.get(v.casefold(), v) for v in var_list]
     if "poteolico" in var_list:
         var_list = [v for v in var_list if not (v.startswith("poteolico") and v != "poteolico")]
     normalized: list[str] = []
@@ -61,50 +91,76 @@ def _normalize_var_list(var_list: list[str]) -> list[str]:
     return normalized
 
 
+def _missing_domains(paths: list[Path], domains: tuple[int, ...]) -> tuple[int, ...]:
+    """Explicitly requested domains that no selected file provides."""
+    found = {
+        match.group(1).lower()
+        for match in (_WRFOUT_DOMAIN_RE.match(p.name) for p in paths)
+        if match is not None
+    }
+    return tuple(d for d in sorted(set(domains)) if f"d{d:02d}" not in found)
+
+
+def _matching_wrfout_paths(wrf_dir: Path | str, date: str, domains: tuple[int, ...]) -> list[Path]:
+    """Glob the requested day, reporting a mistyped ``--date`` as a usage error."""
+    try:
+        return resolve_wrfout_paths(wrf_dir, date, domains or None)
+    except ValueError as invalid_date:
+        raise typer.BadParameter(str(invalid_date)) from invalid_date
+
+
 def _resolve_paths(
     wrf_dir: Path | str | None,
     date: str | None,
     domains: tuple[int, ...],
     dataset: Path | str | None,
-) -> list[Path]:
+) -> tuple[list[Path], tuple[int, ...]]:
+    """Return the wrfout files to process and the requested domains that are missing."""
     if dataset:
-        return [Path(dataset)]
+        return [Path(dataset)], ()
     if not wrf_dir:
         raise typer.BadParameter("Provide either --dataset or --wrf-dir (optionally with --date)")
     if not date:
-        # No date: batch mode — every wrfout file in the directory.
-        paths = sorted(Path(wrf_dir).glob("wrfout*"))
+        # No date: batch mode — every wrfout FILE in the directory, restricted
+        # to --domains when the operator named them.
+        candidates = [p for p in sorted(Path(wrf_dir).glob("wrfout*")) if p.is_file()]
+        if domains:
+            wanted = {f"d{d:02d}" for d in domains}
+            paths = [
+                p
+                for p in candidates
+                if (match := _WRFOUT_DOMAIN_RE.match(p.name)) and match.group(1).lower() in wanted
+            ]
+            if len(paths) != len(candidates):
+                typer.echo(
+                    f"  --domains {sorted(set(domains))} selected "
+                    f"{len(paths)} of {len(candidates)} wrfout files"
+                )
+        else:
+            paths = candidates
         if not paths:
             typer.echo(f"  ⚠ No wrfout files found in {wrf_dir}")
-        return paths
-    paths = resolve_wrfout_paths(wrf_dir, date, domains or None)
-    if not paths:
-        typer.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
-    return paths
+    else:
+        paths = _matching_wrfout_paths(wrf_dir, date, domains)
+        if not paths:
+            typer.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
+    return paths, _missing_domains(paths, domains)
 
 
-def _parse_int_csv(raw: str | list[str] | None) -> tuple[int, ...]:
-    """Parse comma-separated or repeated integers."""
-    if not raw:
-        return ()
-    if isinstance(raw, str):
-        raw = [raw]
-    res: list[int] = []
-    for item in raw:
-        res.extend(int(x.strip()) for x in item.split(",") if x.strip())
-    return tuple(res)
+def _reject_output_id_variables(var_list: list[str]) -> None:
+    """Reject tokens that name an OUTPUT file id instead of an input variable.
 
-
-def _parse_csv(raw: str | list[str] | None) -> tuple[str, ...]:
-    """Parse comma-separated or repeated strings."""
-    if not raw:
-        return ()
-    if isinstance(raw, str):
-        raw = [raw]
-    res: list[str] = []
-    for item in raw:
-        res.extend(x.strip() for x in item.split(",") if x.strip())
-    return tuple(res)
+    ``-v TSK`` falls through to the raw-NetCDF passthrough and writes Kelvin
+    into the very ``D0X_TSK_*.json`` files ``skin_temperature`` publishes in
+    °C. These ids cannot produce correct site bytes, so they fail loudly
+    instead of silently mislabelling the map.
+    """
+    for variable in var_list:
+        owner = _OUTPUT_ID_OWNERS.get(variable.upper())
+        if owner:
+            raise typer.BadParameter(
+                f"{variable} is the output file id of {owner}; pass -v {owner}"
+            )
 
 
 @app.command()
@@ -115,7 +171,12 @@ def run(
     wrf_dir: Annotated[Path | None, typer.Option(help="Directory with wrfout files.")] = None,
     date: Annotated[
         str | None,
-        typer.Option(help="Simulation date YYYYMMDD. Omit to process every wrfout in --wrf-dir."),
+        typer.Option(
+            help=(
+                "Simulation date YYYYMMDD. Omit to batch every wrfout in --wrf-dir "
+                "(restricted to --domains when given)."
+            )
+        ),
     ] = None,
     domains: Annotated[
         list[str] | None,
@@ -150,17 +211,34 @@ def run(
         int | None,
         typer.Option("-w", "--workers", help=f"Parallel workers (default: {default_workers()})."),
     ] = None,
+    strict: Annotated[
+        bool,
+        typer.Option(
+            "--strict",
+            help="Exit non-zero when no wrfout is selected or a requested --domains is missing.",
+        ),
+    ] = False,
     log_level: Annotated[str, typer.Option(help="Logging level.")] = "INFO",
 ) -> None:
-    """Generate GeoJSON and value JSON files with parallel work units."""
+    """Generate GeoJSON and value JSON files with parallel work units.
+
+    A day whose selection is empty or partial logs a warning and still exits 0
+    -- unless ``--strict`` is given, which turns both into a non-zero exit
+    before anything is written.
+    """
     setup_logging(log_level)
 
-    var_list = list(_parse_csv(variables)) if variables else DEFAULT_VARS
+    var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
     var_list = _normalize_var_list(var_list)
-    paths = _resolve_paths(wrf_dir, date, _parse_int_csv(domains), dataset)
+    _reject_output_id_variables(var_list)
+    paths, missing_domains = _resolve_paths(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")
-        return
+        raise typer.Exit(code=1 if strict else 0)
+    for domain in missing_domains:
+        typer.echo(f"  ⚠ No wrfout file for requested domain d{domain:02d}")
+    if strict and missing_domains:
+        raise typer.Exit(code=1)
 
     resolved_workers = workers or default_workers()
     if resolved_workers < 1:
@@ -170,9 +248,14 @@ def run(
     typer.echo(f"Variables: {var_list}")
     typer.echo(f"Workers: {resolved_workers}")
 
-    units = jobs.build_units(
-        paths, var_list, output_dir, geojson_dir, skip_first, site_artifacts=site_artifacts
-    )
+    try:
+        units = jobs.build_units(
+            paths, var_list, output_dir, geojson_dir, skip_first, site_artifacts=site_artifacts
+        )
+    except ValueError as invalid_selection:
+        # A selection covering one domain twice is an operator mistake about
+        # -d/-D/-o, so it reads as a usage error rather than a traceback.
+        raise typer.BadParameter(str(invalid_selection)) from invalid_selection
     results = jobs.execute_units(units, resolved_workers, echo=typer.echo)
 
     for result in results:

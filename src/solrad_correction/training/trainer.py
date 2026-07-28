@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 import torch
@@ -10,7 +11,11 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from solrad_correction.config import ModelConfig, RuntimeConfig
-from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
+from solrad_correction.datasets.sequence import (
+    SequenceDataset,
+    WindowedSequenceDataset,
+    collate_sequence_batch,
+)
 from solrad_correction.training.callbacks import EarlyStopping
 from solrad_correction.training.checkpoints import CheckpointManager
 from solrad_correction.training.dataloaders import DataLoaderSettings, resolve_dataloader_settings
@@ -23,7 +28,7 @@ from solrad_correction.training.factories import (
 from solrad_correction.training.loops import evaluate_epoch, train_one_epoch
 from solrad_correction.training.progress import TrainingProgress
 from solrad_correction.training.state import BestModelState, TrainingPlan, TrainingState
-from solrad_correction.utils.serialization import load_torch_checkpoint
+from solrad_correction.utils.serialization import load_torch_checkpoint, restore_rng_state
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +69,8 @@ class Trainer:
         best_metric: float | None = None,
         best_epoch: int | None = None,
         epochs_no_improve: int = 0,
+        rng_state: dict[str, Any] | None = None,
+        preprocessing_fingerprint: str | None = None,
     ) -> None:
         self.model: nn.Module = model
         self.device = device
@@ -95,6 +102,12 @@ class Trainer:
         # Early-stopping no-improvement counter carried across a resume so
         # patience is not silently reset to zero when training continues.
         self.epochs_no_improve = epochs_no_improve
+        # Python/numpy/torch RNG snapshot from a resume checkpoint, applied once
+        # the module and optimizer exist (both draw from the global RNGs).
+        self._resume_rng_state = rng_state or {}
+        # Digest of the transform this run's features were scaled with, baked
+        # into every checkpoint so a later resume can refuse a changed scaler.
+        self._preprocessing_fingerprint = preprocessing_fingerprint
         self.dataloader_settings: DataLoaderSettings | None = None
 
     def train(
@@ -106,6 +119,16 @@ class Trainer:
 
         ``config.max_epochs`` is the total epoch budget of the run: a resumed
         run trains only the remaining ``max_epochs - start_epoch`` epochs.
+
+        The monitored metric driving ``scheduler.step``, early stopping and
+        best-model selection is the sample-weighted mean loss returned by
+        ``evaluate_epoch`` (``train_one_epoch`` when there is no val set), i.e.
+        the val-set MSE in standard-scaled target units. It replaced a
+        mean-of-per-batch-means, which over-weighted the partial tail batch by
+        ``n_samples / n_batches``; checkpoints written before that change carry
+        ``best_metric``/``monitor_metric`` on the retired scale, so a run must
+        not be resumed across it — the seeded best would be compared against a
+        differently-scaled epoch value.
 
         Returns ``(trained_model, history)`` where history contains
         per-epoch losses.
@@ -157,6 +180,13 @@ class Trainer:
         # All persistence (checkpoints, best-state capture) uses the plain
         # module so state_dict keys never carry the `_orig_mod.` prefix.
         plain_model = _unwrap_compiled(self.model)
+
+        if self._resume_rng_state:
+            # Continue the interrupted random stream instead of replaying it: the
+            # shuffle order, dropout masks and lazy initializations after this
+            # point are the ones the uninterrupted run would have drawn.
+            restore_rng_state(self._resume_rng_state)
+            logger.info("Restored RNG state from the resume checkpoint")
 
         train_loader = self._build_loader(train_data, settings=settings, shuffle=True)
         val_loader = (
@@ -223,60 +253,91 @@ class Trainer:
         checkpoint_manager = CheckpointManager.from_runtime(
             self.runtime,
             checkpoint_config=self._checkpoint_config,
+            preprocessing_fingerprint=self._preprocessing_fingerprint,
         )
 
-        for epoch in range(self.start_epoch, self.max_epochs):
-            self.completed_epochs = epoch + 1
-            progress.start_epoch(epoch)
+        # The writer is released in `finally` so a raise mid-training still
+        # flushes the queued scalars: its event-file thread is a daemon with no
+        # atexit hook, so an unclosed writer loses exactly the epochs leading up
+        # to the failure. `progress.finish()` stays on the success path — it
+        # prints "Training complete".
+        try:
+            for epoch in range(self.start_epoch, self.max_epochs):
+                self.completed_epochs = epoch + 1
+                progress.start_epoch(epoch)
 
-            # Train
-            train_loss = train_one_epoch(
-                self.model,
-                train_loader,
-                optimizer,
-                criterion,
-                self.device,
-                scaler=scaler,
-                clip_val=settings.gradient_clip,
-                progress_callback=progress.update_batch,
-            )
-            history["train_loss"].append(train_loss)
-
-            # Validate
-            val_loss = None
-            if val_loader:
-                val_loss = evaluate_epoch(
+                # Train
+                train_loss = train_one_epoch(
                     self.model,
-                    val_loader,
+                    train_loader,
+                    optimizer,
                     criterion,
                     self.device,
-                    amp_enabled=use_amp,
+                    scaler=scaler,
+                    clip_val=settings.gradient_clip,
+                    progress_callback=progress.update_batch,
                 )
-                history["val_loss"].append(val_loss)
+                # Absolute epoch number: `epoch` counts from start_epoch, so a
+                # resumed run labels its rows 41..60 rather than 1..20.
+                history["epoch"].append(float(epoch + 1))
+                history["train_loss"].append(train_loss)
 
-            # TensorBoard logging
-            if writer:
-                writer.add_scalar("Loss/Train", train_loss, epoch)
-                if val_loss is not None:
-                    writer.add_scalar("Loss/Validation", val_loss, epoch)
-                    writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], epoch)
+                # Validate
+                val_loss = None
+                if val_loader:
+                    val_loss = evaluate_epoch(
+                        self.model,
+                        val_loader,
+                        criterion,
+                        self.device,
+                        amp_enabled=use_amp,
+                    )
+                    history["val_loss"].append(val_loss)
 
-            monitor = val_loss if val_loss is not None else train_loss
+                # TensorBoard logging
+                if writer:
+                    writer.add_scalar("Loss/Train", train_loss, epoch)
+                    if val_loss is not None:
+                        writer.add_scalar("Loss/Validation", val_loss, epoch)
+                        writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], epoch)
 
-            # LR Scheduler step
-            scheduler.step(monitor)
+                monitor = val_loss if val_loss is not None else train_loss
+                if not math.isfinite(monitor):
+                    logger.warning(
+                        "Epoch %d monitored loss is non-finite (%r): training has diverged and "
+                        "best-model tracking ignores this epoch",
+                        epoch + 1,
+                        monitor,
+                    )
 
-            # Update early stopping BEFORE persisting so any checkpoint written
-            # this epoch records the current no-improvement counter; a later
-            # resume restores it instead of resetting patience to zero.
-            stop = early_stop(monitor)
+                # LR Scheduler step
+                scheduler.step(monitor)
 
-            # Best-model tracking keeps only CPU model weights in memory.
-            if best.capture_if_better(plain_model, monitor, epoch + 1):
-                self.best_metric = best.metric
-                self.best_epoch = best.epoch
-                if checkpoint_manager.enabled:
-                    checkpoint_manager.save_best(
+                # Update early stopping BEFORE persisting so any checkpoint written
+                # this epoch records the current no-improvement counter; a later
+                # resume restores it instead of resetting patience to zero.
+                stop = early_stop(monitor)
+
+                # Best-model tracking keeps only CPU model weights in memory.
+                if best.capture_if_better(plain_model, monitor, epoch + 1):
+                    self.best_metric = best.metric
+                    self.best_epoch = best.epoch
+                    if checkpoint_manager.enabled:
+                        checkpoint_manager.save_best(
+                            epoch=epoch + 1,
+                            model=plain_model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            scaler=scaler,
+                            metric=monitor,
+                            dataloader_settings=self.dataloader_settings,
+                            best_metric=self.best_metric,
+                            best_epoch=self.best_epoch,
+                            epochs_no_improve=early_stop.counter,
+                        )
+
+                if checkpoint_manager.should_save_last(epoch + 1):
+                    checkpoint_manager.save_last(
                         epoch=epoch + 1,
                         model=plain_model,
                         optimizer=optimizer,
@@ -289,32 +350,19 @@ class Trainer:
                         epochs_no_improve=early_stop.counter,
                     )
 
-            if checkpoint_manager.should_save_last(epoch + 1):
-                checkpoint_manager.save_last(
-                    epoch=epoch + 1,
-                    model=plain_model,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    scaler=scaler,
-                    metric=monitor,
-                    dataloader_settings=self.dataloader_settings,
-                    best_metric=self.best_metric,
-                    best_epoch=self.best_epoch,
-                    epochs_no_improve=early_stop.counter,
-                )
+                extra = ""
+                # Early stopping
+                if stop:
+                    extra = " [EARLY STOP]"
+                    progress.end_epoch(train_loss, val_loss, extra)
+                    break
 
-            extra = ""
-            # Early stopping
-            if stop:
-                extra = " [EARLY STOP]"
                 progress.end_epoch(train_loss, val_loss, extra)
-                break
-
-            progress.end_epoch(train_loss, val_loss, extra)
+        finally:
+            if writer:
+                writer.close()
 
         progress.finish()
-        if writer:
-            writer.close()
 
         # Restore best weights before returning. If this (resumed) run never
         # beat the seeded best metric, fall back to the on-disk best.pt so the
@@ -367,4 +415,5 @@ class Trainer:
             pin_memory=settings.pin_memory,
             persistent_workers=settings.persistent_workers,
             prefetch_factor=settings.prefetch_factor,
+            collate_fn=collate_sequence_batch,
         )

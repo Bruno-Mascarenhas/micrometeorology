@@ -19,6 +19,7 @@ Three things are fixed here:
 
 from __future__ import annotations
 
+import posixpath
 from collections.abc import Mapping, Sequence
 from enum import IntFlag
 from pathlib import Path, PurePosixPath
@@ -200,13 +201,24 @@ def manifest_column_dtypes(feature_columns: Sequence[str]) -> dict[str, str]:
 def to_relative(path: str | Path, data_root: str | Path) -> str:
     """Convert *path* to a relative POSIX string against *data_root*.
 
-    An already-relative *path* is normalized to POSIX separators.  An absolute
-    *path* must live inside *data_root*; otherwise a :class:`ValueError` is
-    raised (a manifest must never encode a location outside its data root).
+    An already-relative *path* is normalized to POSIX separators; when
+    *data_root* is itself relative — both are then relative to the same working
+    directory, as with the shipped ``output/allsky/dataset`` default — its
+    prefix is stripped too, so ``resolve(to_relative(p, root), root)`` names the
+    same file it started from.  An absolute *path* must live inside *data_root*;
+    otherwise a :class:`ValueError` is raised (a manifest must never encode a
+    location outside its data root).
     """
     candidate = Path(path)
     if not candidate.is_absolute():
-        return PurePosixPath(candidate.as_posix()).as_posix()
+        candidate_posix = PurePosixPath(posixpath.normpath(candidate.as_posix()))
+        root_posix = PurePosixPath(posixpath.normpath(Path(data_root).as_posix()))
+        if not root_posix.is_absolute():
+            try:
+                return candidate_posix.relative_to(root_posix).as_posix()
+            except ValueError:
+                pass  # relative path that is not under the relative root
+        return candidate_posix.as_posix()
 
     root = Path(data_root)
     base = root if root.is_absolute() else root.resolve()

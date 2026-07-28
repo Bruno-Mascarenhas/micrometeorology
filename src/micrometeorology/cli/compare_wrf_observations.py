@@ -21,9 +21,9 @@ from micrometeorology.common.paths import ensure_dir
 from micrometeorology.stats.comparison import (
     compare_all_variables,
     pair_dataframes,
-    plot_comparison,
     read_dataset,
 )
+from micrometeorology.stats.comparison_plots import plot_comparison
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 

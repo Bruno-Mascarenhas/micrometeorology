@@ -12,4 +12,9 @@ pseudo-targets derived from global horizontal irradiance — every dataset row
 carries its ``target_source`` so real measurements can replace them later.
 """
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("labmim-micrometeorology")
+except PackageNotFoundError:  # Support direct source-tree imports before installation.
+    __version__ = "0+unknown"

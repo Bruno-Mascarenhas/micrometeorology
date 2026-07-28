@@ -1,5 +1,11 @@
 """CLI: Process raw sensor .dat files into aggregated hourly data.
 
+The QC limits, the sum-aggregated columns, the vector-averaged wind-direction
+columns and the default sample floor all come from ``get_settings()``, so the
+full ``default.yaml`` -> ``LABMIM_ENV`` -> ``LABMIM_CONFIG_PATH`` -> ``LABMIM_*``
+layering applies. Earlier revisions re-parsed ``configs_dir/default.yaml`` here
+and therefore ignored every layer above the shipped defaults.
+
 Examples
 --------
 Process raw sensor data with default settings:
@@ -15,7 +21,6 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-import yaml
 
 from micrometeorology.common.config import get_settings
 from micrometeorology.common.logging import setup_logging
@@ -45,7 +50,10 @@ def run(
     ] = None,
     pattern: Annotated[str, typer.Option(help="File glob pattern.")] = "*.dat",
     freq: Annotated[str, typer.Option(help="Aggregation frequency.")] = "1h",
-    min_samples: Annotated[int, typer.Option(help="Min samples per window.")] = 6,
+    min_samples: Annotated[
+        int | None,
+        typer.Option(help="Min samples per window. Defaults to sensor_min_samples_per_hour."),
+    ] = None,
     datetime_columns: Annotated[
         bool,
         typer.Option(
@@ -65,27 +73,27 @@ def run(
 
     typer.echo(f"Found {len(files)} files")
 
-    df = merge_dat_files(files)  # type: ignore
+    df = merge_dat_files(files)
 
-    config: dict = {}
-    config_file = settings.configs_dir / "default.yaml"
-    if config_file.exists():
-        with open(config_file, encoding="utf-8") as fh:
-            config = yaml.safe_load(fh) or {}
-        limits = config.get("sensor_limits", [])
-        if limits:
-            df = apply_physical_limits(df, limits)
+    if settings.sensor_limits:
+        df = apply_physical_limits(df, settings.sensor_limits)
+    else:
+        typer.echo("  ⚠ No sensor_limits configured: skipping QC limits")
 
-    cal_path = calibrations or str(settings.configs_dir / "calibrations.yaml")
-    if Path(cal_path).exists():
-        cals = load_calibrations(cal_path)
-        df = apply_calibrations(df, cals)
-
-    sum_cols = config.get("sensor_sum_columns", []) if config_file.exists() else []
-    wd_cols = config.get("sensor_wind_dir_columns", []) if config_file.exists() else []
+    cal_path = calibrations or settings.configs_dir / "calibrations.yaml"
+    if cal_path.is_file():
+        df = apply_calibrations(df, load_calibrations(cal_path))
+    else:
+        typer.echo(f"  ⚠ No calibrations at {cal_path}: exporting uncalibrated values")
 
     df_hourly = aggregate_to_hourly(
-        df, min_samples=min_samples, sum_columns=sum_cols, wind_dir_columns=wd_cols, freq=freq
+        df,
+        min_samples=(
+            min_samples if min_samples is not None else settings.sensor_min_samples_per_hour
+        ),
+        sum_columns=settings.sensor_sum_columns,
+        wind_dir_columns=settings.sensor_wind_dir_columns,
+        freq=freq,
     )
 
     export_csv(df_hourly, output_path, include_datetime_columns=datetime_columns)

@@ -23,11 +23,14 @@ MetricFn = Callable[[NDArray, NDArray], float]
 def mape(observed: NDArray, predicted: NDArray) -> float:
     """Mean Absolute Percentage Error.
 
-    Observations with value 0 are excluded to avoid division by zero.
+    Observations with value 0 are excluded to avoid division by zero, and
+    non-finite pairs are dropped for the same reason
+    :func:`micrometeorology.stats.metrics._clean_pairs` drops them: a single
+    ``±inf`` survives an ``isnan`` filter and then poisons the whole mean.
     """
     o = np.asarray(observed, dtype=float)
     p = np.asarray(predicted, dtype=float)
-    mask = ~(np.isnan(o) | np.isnan(p)) & (o != 0)
+    mask = np.isfinite(o) & np.isfinite(p) & (o != 0)
     o, p = o[mask], p[mask]
     if len(o) < 2:
         return float("nan")

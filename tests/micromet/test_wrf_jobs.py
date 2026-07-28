@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from concurrent.futures.process import BrokenProcessPool
@@ -16,6 +17,7 @@ import pytest
 
 from micrometeorology.cli.export_wrf_geojson import _normalize_var_list
 from micrometeorology.wrf import jobs
+from micrometeorology.wrf.value_source import ValueFrameSource, build_value_frame_source
 from tests.micromet import _reference
 
 NT, NZ, NY, NX = 5, 4, 4, 5
@@ -123,8 +125,8 @@ def test_value_frame_source_exposes_named_scale_and_step_contract(tmp_path):
     _write_full_wrf_file(wrf, seed=6)
 
     with jobs.WRFDataset(wrf) as dataset:
-        temperature_source = jobs._build_value_frame_source(dataset, "temperature")
-        assert isinstance(temperature_source, jobs._ValueFrameSource)
+        temperature_source = build_value_frame_source(dataset, "temperature")
+        assert isinstance(temperature_source, ValueFrameSource)
 
         temperature_kelvin, expected_min, expected_max = jobs.variables.extract_temperature(dataset)
         assert temperature_source.scale_min == expected_min
@@ -134,8 +136,8 @@ def test_value_frame_source_exposes_named_scale_and_step_contract(tmp_path):
             jobs.variables.extract_temperature_step(temperature_kelvin[2:3, :, :]),
         )
 
-        wind_source = jobs._build_value_frame_source(dataset, "wind")
-        assert isinstance(wind_source, jobs._ValueFrameSource)
+        wind_source = build_value_frame_source(dataset, "wind")
+        assert isinstance(wind_source, ValueFrameSource)
         u10_values, v10_values, expected_min, expected_max = jobs.variables.extract_wind(dataset)
         assert wind_source.scale_min == expected_min
         assert wind_source.scale_max == expected_max
@@ -144,7 +146,7 @@ def test_value_frame_source_exposes_named_scale_and_step_contract(tmp_path):
             np.hypot(u10_values[1], v10_values[1]),
         )
 
-        assert jobs._build_value_frame_source(dataset, "GLW") is None
+        assert build_value_frame_source(dataset, "GLW") is None
 
 
 def test_values_json_matches_reference_payload_with_int_formatting(tmp_path):
@@ -623,6 +625,172 @@ def test_manifest_omits_features_when_any_unit_failed(tmp_path):
     assert "features" not in manifest
     assert manifest["index_min"] == 0
     assert manifest["index_max"] == NT - 1
+
+
+def test_build_units_refuses_two_files_of_the_same_domain(tmp_path):
+    """Both files would write D02_TEMP_000.json, D02_TEMP.series.bin and
+    D02.geojson, concurrently, and the survivor would be whichever unit
+    finished last — a timeline whose frames come from two forecast days."""
+    first = tmp_path / "wrfout_d02_2026-05-03_09:00:00"
+    second = tmp_path / "wrfout_d02_2026-05-04_09:00:00"
+
+    with pytest.raises(ValueError, match="would overwrite each other") as excinfo:
+        jobs.build_units([first, second], ["temperature"], tmp_path, tmp_path)
+
+    message = str(excinfo.value)
+    assert "D02" in message
+    assert first.name in message
+    assert second.name in message
+
+
+def test_build_units_accepts_one_file_per_domain(tmp_path):
+    units = jobs.build_units(
+        [tmp_path / "wrfout_d01_x", tmp_path / "wrfout_d02_y"], ["temperature"], tmp_path, tmp_path
+    )
+    assert sorted({Path(u.wrf_path).name for u in units}) == ["wrfout_d01_x", "wrfout_d02_y"]
+
+
+def test_untokenized_filename_fails_the_unit_instead_of_publishing_as_d01(tmp_path):
+    wrf = tmp_path / "wrfout_2026-07-27_00_00_00.nc"
+    _write_full_wrf_file(wrf, seed=51)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+    json_dir.mkdir()
+    geo_dir.mkdir()
+
+    units = jobs.build_units([wrf], ["temperature"], json_dir, geo_dir)
+    results = jobs.execute_units(units, workers=1)
+
+    assert all("Could not detect grid level" in (r.error or "") for r in results)
+    assert list(json_dir.iterdir()) == []
+    assert list(geo_dir.iterdir()) == []
+
+    manifest_path = jobs.write_run_manifest(json_dir, results)
+    assert manifest_path is not None
+    with open(manifest_path, encoding="utf-8") as fh:
+        assert json.load(fh)["domains"] == []
+
+
+def test_manifest_domains_follow_the_same_rule_as_the_published_filenames(tmp_path):
+    """``wrfout_d03.nc`` has no trailing token underscore: the manifest used to
+    advertise no domain at all while publishing a full set of D03_* files."""
+    wrf = tmp_path / "wrfout_d03.nc"
+    _write_full_wrf_file(wrf, seed=53)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], ["temperature"], json_dir, geo_dir)
+    results = jobs.execute_units(units, workers=1)
+    assert [r for r in results if r.error] == []
+
+    manifest_path = jobs.write_run_manifest(json_dir, results)
+    assert manifest_path is not None
+    with open(manifest_path, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    assert manifest["domains"] == ["D03"]
+    assert (json_dir / "D03_TEMP_000.json").exists()
+
+
+def test_manifest_publishes_a_variable_the_wrfout_does_not_carry_as_empty(tmp_path):
+    """GLW is requested but absent: its fixed-name files from the previous run
+    are still on disk, so the manifest must neither omit it (read as "full
+    range") nor vouch for the stale .series.bin through ``features``."""
+    wrf = tmp_path / "wrfout_d02_jobs_absent.nc"
+    _write_full_wrf_file(wrf, seed=57)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], ["temperature", "GLW"], json_dir, geo_dir)
+    results = jobs.execute_units(units, workers=1)
+    assert [r for r in results if r.error] == []
+    assert {r.missing_variables for r in results} == {(), ("GLW",)}
+
+    manifest_path = jobs.write_run_manifest(json_dir, results)
+    assert manifest_path is not None
+    with open(manifest_path, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    assert manifest["availability"] == {"GLW": []}
+    assert "features" not in manifest
+    assert manifest["index_max"] == NT - 1
+
+
+def test_atomic_json_dump_writes_exactly_the_compact_encoder_bytes(tmp_path):
+    """Encoding through ``json.dumps`` must be byte-identical to the
+    ``json.dump(obj, fp)`` spelling it replaced — only 3x cheaper."""
+    payload = {
+        "format": "domain-summary-v1",
+        "variable": "POT_EOLICO_150M",
+        "label": "Previsão · Sábado",
+        "indices": [0, 1, 2],
+        "mean": [1.0, -3.25, 1e-07],
+        "max": [305.0, 2.5, 0],
+    }
+    out = tmp_path / "payload.json"
+
+    jobs._atomic_json_dump(out, payload)
+
+    expected = json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    assert out.read_text(encoding="utf-8") == expected
+    assert json.loads(expected) == payload
+
+
+def test_atomic_json_dump_still_refuses_non_finite_payloads(tmp_path):
+    out = tmp_path / "bad.json"
+    with pytest.raises(ValueError, match="not JSON compliant"):
+        jobs._atomic_json_dump(out, {"mean": [float("nan")]})
+    assert not out.exists()
+
+
+def test_worker_logging_is_configured_with_pid_and_level_on_stderr(tmp_path):
+    """Forkserver children inherit no handlers, so worker records used to fall
+    through to ``logging.lastResort``: bare text, no timestamp, no pid, from 44
+    interleaved streams at once."""
+    script = f"""
+from micrometeorology.common.logging import setup_logging
+from micrometeorology.wrf import jobs
+
+setup_logging("INFO")
+units = [
+    jobs.WorkUnit(
+        kind="values_json",
+        wrf_path={str(tmp_path / "missing_wrfout_d02")!r},
+        variable="temperature",
+        json_dir={str(tmp_path)!r},
+        geojson_dir={str(tmp_path)!r},
+    ),
+    jobs.WorkUnit(
+        kind="values_json",
+        wrf_path={str(tmp_path / "missing_wrfout_d03")!r},
+        variable="temperature",
+        json_dir={str(tmp_path)!r},
+        geojson_dir={str(tmp_path)!r},
+    ),
+]
+results = jobs.execute_units(units, workers=2, echo=lambda _msg: None)
+assert all(r.error for r in results), results
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+
+    worker_records = [line for line in proc.stderr.splitlines() if "Work unit failed" in line]
+    assert worker_records, proc.stderr[-2000:]
+    pattern = re.compile(
+        r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \| (\d+) \| micrometeorology\.wrf\.jobs\s+"
+        r"\| ERROR\s+\| Work unit failed"
+    )
+    pids = set()
+    for line in worker_records:
+        match = pattern.match(line)
+        assert match is not None, line
+        pids.add(match.group(1))
+    assert pids
+    assert str(os.getpid()) not in pids
 
 
 def test_serial_run_sweeps_its_own_failed_unit_debris(tmp_path):

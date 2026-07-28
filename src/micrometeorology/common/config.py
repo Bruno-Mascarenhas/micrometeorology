@@ -97,6 +97,18 @@ class Settings(BaseSettings):
         default=-900.0,
         description="Sentinel value in Campbell Scientific data indicating missing data",
     )
+    sensor_limits: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Quality-control ranges, one dict per column: {column, lower, upper}",
+    )
+    sensor_sum_columns: list[str] = Field(
+        default_factory=list,
+        description="Columns aggregated by sum instead of mean",
+    )
+    sensor_wind_dir_columns: list[str] = Field(
+        default_factory=list,
+        description="Columns aggregated as vector wind direction",
+    )
 
     # Logging
     log_level: str = Field(default="INFO", description="Logging level")
@@ -139,7 +151,15 @@ def get_settings() -> Settings:
     if config_path:
         merged.update(_load_yaml(Path(config_path)))
 
-    # Build settings; env vars (Layer 4) are handled by pydantic-settings
-    settings = Settings(**merged)
+    # Layer 4: environment variables. pydantic-settings ranks init kwargs above
+    # env vars, so YAML keys the operator has already set in the environment are
+    # withheld from the constructor to keep the documented order.
+    environment_names = {name.upper() for name in os.environ}
+    yaml_without_env_overrides = {
+        key: value
+        for key, value in merged.items()
+        if f"LABMIM_{key.upper()}" not in environment_names
+    }
+    settings = Settings(**yaml_without_env_overrides)
     settings.resolve_paths(root)
     return settings

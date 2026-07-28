@@ -240,10 +240,94 @@ class TestAtomicity:
         assert list(loaded) == [EMBEDDINGS_TENSOR_KEY]
 
 
+def _worker_pickle(reader: SafetensorsEmbeddingReader) -> bytes:
+    """Serialize *reader* exactly as a DataLoader ships it to a worker.
+
+    ``ForkingPickler`` is what ``multiprocessing`` uses for process arguments,
+    and importing ``torch.multiprocessing`` is what registers the reducer that
+    turns a shared-memory tensor into a handle instead of its bytes.
+    """
+    pytest.importorskip("torch")
+    from multiprocessing.reduction import ForkingPickler
+
+    import torch.multiprocessing  # noqa: F401  (registers the tensor reducers)
+
+    return bytes(ForkingPickler.dumps(reader))
+
+
+def _revive_in_worker(reader: SafetensorsEmbeddingReader) -> SafetensorsEmbeddingReader:
+    import pickle
+
+    revived: SafetensorsEmbeddingReader = pickle.loads(_worker_pickle(reader))
+    return revived
+
+
+class TestPreloadIsSharedAcrossProcesses:
+    """A DataLoader worker must MAP the resident store, not receive a copy.
+
+    Python 3.14 starts workers with ``forkserver``, so the reader is pickled
+    into each one. Before the store was allocated in shared memory the pickle
+    carried the whole matrix, giving ``num_workers=4`` four private copies of a
+    store that is hundreds of MiB on a full-year run.
+    """
+
+    def test_worker_pickle_ships_a_handle_not_the_matrix(self, tmp_path: Path) -> None:
+        ids = [f"allsky-20250321-{h:02d}00" for h in range(24)]
+        _write_store(tmp_path, ids, dim=256, shard_size=4)
+        reader = SafetensorsEmbeddingReader(tmp_path, preload=True)
+        assert reader.preloaded is True
+        assert reader._shared_store is not None, "expected a shared-memory store"
+        matrix_bytes = 24 * 256 * 4
+
+        payload = _worker_pickle(reader)
+
+        assert len(payload) < matrix_bytes // 4, (
+            f"worker payload is {len(payload)} bytes for a {matrix_bytes}-byte store"
+        )
+
+    def test_a_worker_serves_the_same_immutable_vectors(self, tmp_path: Path) -> None:
+        ids = [f"allsky-20250321-09{m:02d}" for m in range(0, 60, 10)]
+        _write_store(tmp_path, ids, dim=4, shard_size=2)
+        reader = SafetensorsEmbeddingReader(tmp_path, preload=True)
+
+        revived = _revive_in_worker(reader)
+
+        assert revived.preloaded is True
+        for sample_id in ids:
+            np.testing.assert_array_equal(revived(sample_id), reader(sample_id))
+        # The immutability guarantee must hold in the worker too, not only in
+        # the parent: the write flag lives on the view, not on the store.
+        with pytest.raises(ValueError, match="read-only"):
+            revived(ids[0])[0] = 123.0
+
+    def test_the_worker_maps_the_same_pages(self, tmp_path: Path) -> None:
+        """A write through the parent's store is visible to the worker's reader."""
+        ids = ["allsky-20250321-0900", "allsky-20250321-0930"]
+        _write_store(tmp_path, ids, dim=4, shard_size=2)
+        reader = SafetensorsEmbeddingReader(tmp_path, preload=True)
+        assert reader._shared_store is not None, "expected a shared-memory store"
+
+        revived = _revive_in_worker(reader)
+        reader._shared_store[0, 0] = 42.0
+
+        assert revived(ids[0])[0] == pytest.approx(42.0)
+
+    def test_a_lru_reader_still_pickles(self, tmp_path: Path) -> None:
+        ids = ["allsky-20250321-0900", "allsky-20250321-0930"]
+        _write_store(tmp_path, ids, dim=4, shard_size=2)
+        reader = SafetensorsEmbeddingReader(tmp_path)
+        reader(ids[0])  # populate the shard cache
+
+        revived = _revive_in_worker(reader)
+
+        assert revived.preloaded is False
+        np.testing.assert_array_equal(revived(ids[1]), reader(ids[1]))
+
+
 class TestPreloadReadOnly:
     def test_preloaded_vectors_are_immutable_views(self, tmp_path: Path):
-        # The resident matrix is shared across every caller (and COW-shared
-        # across fork workers); a mutable row view would let one consumer
+        # The resident matrix is shared across every caller (and mapped by every
+        # forkserver worker); a mutable row view would let one consumer
         # silently corrupt the store for all others.
         ids = [f"allsky-20250321-09{m:02d}" for m in range(0, 30, 10)]
         _write_store(tmp_path, ids, dim=4, shard_size=2)

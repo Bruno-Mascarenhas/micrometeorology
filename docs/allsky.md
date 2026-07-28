@@ -136,7 +136,7 @@ Campbell TOA5 `.dat` files listed in `sensor.paths` are read through `micrometeo
 - `sky_class` — weak sky-condition label from k-index bins (`-1` marks missing/unlabelable).
 - `target_source` — `"measured"` or `"erbs_pseudo"`.
 
-Rows are flagged in a `qc_flags` bitmask (low sun, sensor gap, far alignment, k-index artifact) and night frames below the configured solar-elevation floor are dropped.
+Rows are flagged in a `qc_flags` bitmask (low sun, sensor gap, far alignment, k-index artifact) and night frames below the configured solar-elevation floor are dropped. A `prepare-local` run ORs two more bits in from the frame-QC pass: `FRAME_DARK` when the frame's mean BT.601 luminance is below `DARK_LUMINANCE_THRESHOLD = 10.0`, and `FRAME_SATURATED` when more than `SATURATED_FRACTION_THRESHOLD = 0.2` of the pixels have every channel at `SATURATED_LEVEL = 255`. QC is computed on the raw extracted frame *before* mask/crop/resize, so the black surround outside the fisheye disc drags the dark-luminance mean down. Manifests built without that pass (a standalone `extract-frames` run, or `build_manifest` called directly) leave both bits unset, so filter on them explicitly rather than treating `qc_flags == 0` as "clean".
 
 ### The diffuse target — read this before changing `targets.diffuse_column`
 
@@ -212,7 +212,7 @@ Experiment files stay tiny by composing with `extends:` (a path or list, resolve
 1. **Uses persisted day splits.** The split artifact (`splits.json`) assigns whole calendar days to train/val/test, so near-duplicate frames of the same day never cross splits, and carries a `split_id` (no silent regeneration). Consecutive frames one minute apart are near-duplicates — a row-level split would leak validation information into training.
 2. **Standardizes features and targets from the training split only.** The `FeatureNormalizer` / `TargetNormalizer` are fit on the train split and stored in the checkpoint; validation/test reuse them verbatim (computing one locally is refused).
 3. **Resolves the device**: `device: auto` picks CUDA → MPS → CPU; on CUDA, automatic mixed precision is available (`--amp`, `fp16`/`bf16`).
-4. **Runs the engine**: optimizer/param groups (optional separate backbone LR), scheduler (`none`/`cosine`/`plateau`), gradient accumulation and clipping, early stopping, and full resume. It writes `last.ckpt` every epoch, `best.ckpt` at the best monitored metric, `metrics.json`, and a run manifest.
+4. **Runs the engine**: optimizer/param groups (optional separate backbone LR), scheduler (`none`/`cosine`/`plateau`), gradient accumulation and clipping, early stopping, and full resume. It writes `last.ckpt` every epoch, `best.ckpt` at the best monitored metric, `metrics.json` and `metrics.csv` every epoch, and TensorBoard events under `runs/`. There is no separate run-manifest file: run provenance (`split_id`, `manifest_sha256`, `feature_columns`, `feature_groups`, `dataset_version`, the resolved config dump and `code_version_info`) is embedded in **both** checkpoints, and that is what `allsky evaluate` re-verifies.
 
 `--resume auto` restores from `last.ckpt` in the run dir and continues; `--epochs` is the total budget, so resuming trains only the remainder.
 

@@ -127,6 +127,44 @@ class TestEvaluateCommand:
         assert result.exit_code != 0
 
 
+class TestTrustCheckpointFlag:
+    """``load_checkpoint``'s escape hatch must be reachable from the CLI.
+
+    Without it, a checkpoint the restricted reader refuses can only be loaded by
+    editing code — so the safe default would be un-overridable in the field.
+    """
+
+    def test_the_flag_reaches_load_checkpoint(self, tmp_path: Path, monkeypatch) -> None:
+        from allsky.evaluation import evaluator
+
+        seen: list[bool] = []
+
+        def record_trust(_path, *, map_location="cpu", trust_pickle=False):  # noqa: ARG001
+            seen.append(trust_pickle)
+            raise RuntimeError("stop after the load call")
+
+        monkeypatch.setattr("allsky.training.checkpointing.load_checkpoint", record_trust)
+        checkpoint = tmp_path / "last.ckpt"
+        checkpoint.write_bytes(b"not really a checkpoint")
+
+        for extra_flags, expected in (([], False), (["--trust-checkpoint"], True)):
+            seen.clear()
+            result = runner.invoke(
+                app,
+                [
+                    "evaluate",
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--data-root",
+                    str(tmp_path),
+                    *extra_flags,
+                ],
+            )
+            assert result.exit_code == 1, result.output
+            assert seen == [expected]
+        assert evaluator is not None  # the patched symbol is imported inside the function
+
+
 class TestCompareExperiments:
     def test_compare_two_runs_produces_table(self, tmp_path: Path):
         root, run_dir = _train(tmp_path)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,48 @@ class ExperimentConfig:
             errors.append("data.source_format must be one of: auto, csv, parquet")
         if self.data.sensor_min_samples <= 0:
             errors.append("data.sensor_min_samples must be positive")
+        if self.data.use_raw and not self.data.sensor_data_path:
+            errors.append("data.use_raw=true requires data.sensor_data_path")
+        if self.data.wrf_data_path and (self.data.hourly_data_path or self.data.sensor_data_path):
+            errors.append(
+                "data.wrf_data_path is read by no loader and would be ignored next to "
+                "data.hourly_data_path/data.sensor_data_path; remove it from the config"
+            )
+
+        if not self.data.feature_columns and (
+            self.features.lag_steps or self.features.rolling_windows or self.features.add_diffs
+        ):
+            errors.append(
+                "features.lag_steps/rolling_windows/add_diffs are applied only to the columns "
+                "declared in data.feature_columns, which is empty; declare the base columns "
+                "to engineer or disable those stages"
+            )
+        if self.data.target_column in self.data.feature_columns and (
+            self.features.rolling_windows or self.features.add_diffs
+        ):
+            errors.append(
+                f"data.feature_columns must not contain data.target_column "
+                f"('{self.data.target_column}') while features.rolling_windows/add_diffs are "
+                f"enabled: '{self.data.target_column}_roll_*' (trailing window with "
+                f"min_periods=1 includes the current row) and "
+                f"'{self.data.target_column}_diff_1' are same-row functions of the target"
+            )
+        if any(step < 1 for step in self.features.lag_steps):
+            errors.append(
+                "features.lag_steps entries must be >= 1: 0 copies a column onto itself and a "
+                "negative step reads a future value"
+            )
+        if any(window < 1 for window in self.features.rolling_windows):
+            errors.append("features.rolling_windows entries must be >= 1")
+
+        if self.preprocess.scaler_type not in {"standard", "minmax", "none"}:
+            errors.append("preprocess.scaler_type must be one of: standard, minmax, none")
+        if self.preprocess.impute_strategy not in {"drop", "ffill", "mean", "interpolate"}:
+            errors.append(
+                "preprocess.impute_strategy must be one of: drop, ffill, mean, interpolate"
+            )
+        if not 0.0 <= self.preprocess.drop_na_threshold <= 1.0:
+            errors.append("preprocess.drop_na_threshold must be in [0, 1]")
 
         if self.model.evaluation_policy not in {"model_native", "common_sequence_horizon"}:
             errors.append(
@@ -118,19 +161,68 @@ class ExperimentConfig:
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ExperimentConfig:
-        """Build a config from a YAML file, filling unspecified fields with defaults."""
+        """Build a config from a YAML file, filling unspecified fields with defaults.
+
+        A key no config field accepts is a typo that would otherwise run with
+        the default value, so it is rejected here — at the top level and inside
+        every section. Keys starting with ``_`` are left to YAML anchor blocks.
+
+        Raises
+        ------
+        ValueError
+            If the file is not a mapping or carries an unknown key.
+        """
         with open(path, encoding="utf-8") as handle:
             data = yaml.safe_load(handle) or {}
+
+        if not isinstance(data, dict):
+            raise ValueError(f"config file {path} must contain a YAML mapping")
+
+        known_keys = {config_field.name for config_field in dataclasses.fields(cls)}
+        unknown_keys = sorted(
+            str(key) for key in data if key not in known_keys and not str(key).startswith("_")
+        )
+        if unknown_keys:
+            raise ValueError(
+                f"unknown top-level config key(s): {', '.join(unknown_keys)}; "
+                f"expected one of: {', '.join(sorted(known_keys))}"
+            )
 
         return cls(
             name=data.get("name", "unnamed"),
             description=data.get("description", ""),
             seed=data.get("seed", 42),
-            data=DataConfig(**data.get("data", {})),
-            split=SplitConfig(**data.get("split", {})),
-            preprocess=PreprocessConfig(**data.get("preprocess", {})),
-            features=FeatureConfig(**data.get("features", {})),
-            model=ModelConfig(**data.get("model", {})),
-            runtime=RuntimeConfig(**data.get("runtime", {})),
+            data=_build_section(DataConfig, data.get("data"), "data"),
+            split=_build_section(SplitConfig, data.get("split"), "split"),
+            preprocess=_build_section(PreprocessConfig, data.get("preprocess"), "preprocess"),
+            features=_build_section(FeatureConfig, data.get("features"), "features"),
+            model=_build_section(ModelConfig, data.get("model"), "model"),
+            runtime=_build_section(RuntimeConfig, data.get("runtime"), "runtime"),
             output_dir=data.get("output_dir", "output/experiments"),
         )
+
+
+def _build_section[SectionT](
+    section_type: Callable[..., SectionT], payload: object, section_name: str
+) -> SectionT:
+    """Build one config section, naming the section and the offending key on failure.
+
+    A missing or null section (``data:`` with every line below it commented
+    out) falls back to that section's defaults, and an unknown key surfaces as
+    a ``ValueError`` instead of a raw dataclass ``TypeError``.
+
+    Raises
+    ------
+    ValueError
+        If the section is not a mapping or carries a key the section rejects.
+    """
+    if payload is None:
+        return section_type()
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"config section '{section_name}' must be a mapping, got {type(payload).__name__}"
+        )
+    try:
+        return section_type(**payload)
+    except TypeError as exc:
+        raise ValueError(f"invalid config section '{section_name}': {exc}") from exc

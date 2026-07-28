@@ -4,15 +4,44 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, NamedTuple
 
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, default_collate
 
 from solrad_correction.utils.memory import assert_array_size
 
 SequenceArray = np.ndarray | np.memmap | torch.Tensor
+
+
+class PreCollatedBatch(NamedTuple):
+    """A ``(features, targets)`` batch a dataset already assembled itself.
+
+    Marks the output of :meth:`WindowedSequenceDataset.__getitems__` so
+    :func:`collate_sequence_batch` hands it straight to the model instead of
+    trying to collate it a second time.
+    """
+
+    features: torch.Tensor
+    targets: torch.Tensor
+
+
+def collate_sequence_batch(
+    samples: PreCollatedBatch | list[Any],
+) -> tuple[torch.Tensor, torch.Tensor] | Any:
+    """Collate for any loader that may be fed a batched dataset.
+
+    ``WindowedSequenceDataset`` assembles whole batches in ``__getitems__``,
+    which torch's fetcher prefers over per-index ``__getitem__`` at EVERY
+    DataLoader site — it is not opt-in. This must therefore be the ``collate_fn``
+    of every loader over that dataset; anything else (a plain
+    ``SequenceDataset``, a ``TensorDataset``) falls through to the default.
+    """
+    if isinstance(samples, PreCollatedBatch):
+        return samples.features, samples.targets
+    return default_collate(samples)
 
 
 class SequenceDataset(Dataset):
@@ -194,6 +223,39 @@ class WindowedSequenceDataset(Dataset):
             y_tensor = torch.as_tensor(target, dtype=torch.float32)
 
         return x_tensor, y_tensor
+
+    def __getitems__(self, indices: list[int]) -> PreCollatedBatch:
+        """Gather a whole batch of windows in one indexing operation.
+
+        ``torch.utils.data._MapDatasetFetcher`` calls this instead of
+        ``__getitem__`` per index whenever it exists, so a batch costs one fancy
+        index into the base matrix rather than ``batch_size`` Python-level
+        slices, tensor conversions and a stack. The result is already batched,
+        which is why every loader over this dataset must use
+        :func:`collate_sequence_batch` — the default collate would try to stack
+        the ``(B, L, F)`` block with the ``(B,)`` targets.
+        """
+        length = self._length
+        positions = np.fromiter(
+            (idx + length if idx < 0 else idx for idx in indices),
+            dtype=np.int64,
+            count=len(indices),
+        )
+        if positions.size and (positions.min() < 0 or positions.max() >= length):
+            raise IndexError(f"index out of range for {length} windows")
+        starts = positions if self._starts is None else self._starts[positions]
+        window_rows = starts[:, None] + np.arange(self.sequence_length, dtype=np.int64)
+        target_rows = starts + self.target_offset
+
+        if isinstance(self.X, torch.Tensor):
+            x_batch = self.X[torch.from_numpy(window_rows)].to(dtype=torch.float32)
+        else:
+            x_batch = torch.as_tensor(self.X[window_rows], dtype=torch.float32)
+        if isinstance(self.y, torch.Tensor):
+            y_batch = self.y[torch.from_numpy(target_rows)].to(dtype=torch.float32)
+        else:
+            y_batch = torch.as_tensor(self.y[target_rows], dtype=torch.float32)
+        return PreCollatedBatch(x_batch, y_batch)
 
     @property
     def n_features(self) -> int:

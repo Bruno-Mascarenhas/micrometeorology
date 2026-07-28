@@ -38,10 +38,16 @@ class ExperimentReport:
         # Config
         save_json(self.config, layout.config_resolved)
 
-        # Training history
+        # Training history. Absolute epoch numbers, when the history carries
+        # them, become the index; otherwise the positional index is labelled
+        # "epoch". Writing both would emit the column twice.
         if self.train_history:
             history_df = pd.DataFrame(self.train_history)
-            history_df.to_csv(layout.training_history, index_label="epoch")
+            if "epoch" in history_df.columns:
+                history_df["epoch"] = history_df["epoch"].astype("int64")
+                history_df.set_index("epoch").to_csv(layout.training_history)
+            else:
+                history_df.to_csv(layout.training_history, index_label="epoch")
 
         if self.metadata:
             save_json(self.metadata, layout.metadata)

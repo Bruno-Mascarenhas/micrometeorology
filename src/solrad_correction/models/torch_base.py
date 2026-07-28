@@ -11,7 +11,11 @@ import torch
 from torch import nn
 
 from solrad_correction.config import ModelConfig
-from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
+from solrad_correction.datasets.sequence import (
+    SequenceDataset,
+    WindowedSequenceDataset,
+    collate_sequence_batch,
+)
 from solrad_correction.models.base import SequenceRegressorModel, TrainingResult
 from solrad_correction.training.dataloaders import DataLoaderSettings
 from solrad_correction.utils.memory import assert_array_size
@@ -45,6 +49,9 @@ class TorchRegressorModel(SequenceRegressorModel):
         self._best_metric: float | None = None
         self._best_epoch: int | None = None
         self._epochs_no_improve: int = 0
+        self._rng_state: dict[str, Any] = {}
+        self._preprocessing_fingerprint: str | None = None
+        self._resume_preprocessing_fingerprint: str | None = None
         self._dataloader_settings: DataLoaderSettings | None = None
         logger.info("Device: %s", self._device)
 
@@ -64,6 +71,12 @@ class TorchRegressorModel(SequenceRegressorModel):
         self._epochs_no_improve = self._resolve_resume_epochs_no_improve(
             checkpoint, self._best_epoch, self._start_epoch
         )
+        # Carried, not applied here: the RNG must be restored AFTER the module
+        # and optimizer are built (both draw from it), which is why Trainer
+        # applies it at the top of train().
+        metadata = checkpoint.get("metadata") or {}
+        self._rng_state = metadata.get("rng_state") or {}
+        self._resume_preprocessing_fingerprint = metadata.get("preprocessing_fingerprint")
         logger.info("Loaded resume checkpoint from %s (epoch %d)", path, self._start_epoch)
 
     @staticmethod
@@ -115,6 +128,39 @@ class TorchRegressorModel(SequenceRegressorModel):
             return max(0, int(start_epoch) - int(best_epoch))
         return 0
 
+    def _assert_preprocessing_unchanged(self, *, allow_change: bool, path: str) -> None:
+        """Refuse a resume whose scaler no longer matches the trained weights.
+
+        A resume refits the preprocessing from whatever is on disk now and never
+        loads the checkpoint's own transform, so a changed feature set, target,
+        scaler type or fitted mean/scale silently feeds the restored weights a
+        differently-scaled input — the loss looks like a fresh run's and every
+        metric derived from it is meaningless. Checkpoints written before the
+        fingerprint existed carry none and are resumed with a warning.
+        """
+        stored = self._resume_preprocessing_fingerprint
+        current = self._preprocessing_fingerprint
+        if stored is None or current is None:
+            logger.warning(
+                "Resuming %s without a preprocessing fingerprint on %s: the refitted "
+                "scaler is NOT verified against the one these weights were trained under",
+                path,
+                "the checkpoint" if stored is None else "this run",
+            )
+            return
+        if stored == current:
+            return
+        message = (
+            f"the preprocessing refitted for this run ({current[:12]}) does not match the "
+            f"one {path} was trained under ({stored[:12]}): the restored weights would "
+            "receive differently-scaled inputs. Re-run without --resume, or pass "
+            "--allow-preprocessing-change to accept the re-scaling."
+        )
+        if allow_change:
+            logger.warning("Resuming anyway: %s", message)
+            return
+        raise ValueError(message)
+
     def fit(
         self,
         train_data: SequenceDataset | WindowedSequenceDataset,
@@ -126,9 +172,14 @@ class TorchRegressorModel(SequenceRegressorModel):
         from solrad_correction.training.trainer import Trainer
 
         runtime = kwargs.get("runtime")
+        self._preprocessing_fingerprint = kwargs.get("preprocessing_fingerprint")
 
         if runtime and runtime.resume:
             self._load_resume_checkpoint(runtime.resume)
+            self._assert_preprocessing_unchanged(
+                allow_change=bool(getattr(runtime, "allow_preprocessing_change", False)),
+                path=runtime.resume,
+            )
 
         trainer = Trainer(
             model=self._module,
@@ -140,9 +191,11 @@ class TorchRegressorModel(SequenceRegressorModel):
             scheduler_state=self._scheduler_state,
             scaler_state=self._scaler_state,
             checkpoint_config=getattr(self, "_config_kwargs", None),
+            preprocessing_fingerprint=self._preprocessing_fingerprint,
             best_metric=self._best_metric,
             best_epoch=self._best_epoch,
             epochs_no_improve=self._epochs_no_improve,
+            rng_state=self._rng_state,
         )
         self._module, history = trainer.train(train_data, val_data)
         self._start_epoch = trainer.completed_epochs
@@ -215,6 +268,7 @@ class TorchRegressorModel(SequenceRegressorModel):
                 pin_memory=settings.pin_memory,
                 persistent_workers=settings.persistent_workers,
                 prefetch_factor=settings.prefetch_factor,
+                collate_fn=collate_sequence_batch,
             )
         else:
             loader = DataLoader(
@@ -223,6 +277,7 @@ class TorchRegressorModel(SequenceRegressorModel):
                 shuffle=False,
                 num_workers=0,
                 pin_memory=False,
+                collate_fn=collate_sequence_batch,
             )
         all_preds = []
 

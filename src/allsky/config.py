@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class VideoConfig(BaseModel):
@@ -42,18 +42,28 @@ class SiteConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+#: The window modes a dataset can build. This module is the single owner of the
+#: name set: it is a leaf (stdlib + yaml + pydantic only), so both the config
+#: and :mod:`allsky.data.datasets` can read it without an import cycle, and a
+#: typo such as ``centre_frame`` fails at ``load_experiment_config`` time rather
+#: than deep inside dataset construction — or, in image mode, not at all.
+AlignmentStrategyName = Literal["center_frame", "mean_embedding", "attention_pooling"]
+
+
 class AlignmentConfig(BaseModel):
     """Image <-> sensor temporal alignment for a sample window.
 
-    ``strategy`` selects an :class:`allsky.data.alignment.AlignmentStrategy`
-    (``center_frame`` picks the frame nearest the window centre at
-    manifest-build time; windowed poolers act at the dataset level).
-    ``window_minutes`` is the full width of the alignment window.
+    ``strategy`` is the window mode: ``center_frame`` picks the frame nearest
+    the window centre at manifest-build time, while ``mean_embedding`` and
+    ``attention_pooling`` pool every frame in the window at dataset level (both
+    implemented for ``input_mode: embedding`` only — see
+    :class:`DataSourceConfig`). ``window_minutes`` is the full width of the
+    alignment window.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    strategy: str = "center_frame"
+    strategy: AlignmentStrategyName = "center_frame"
     window_minutes: float = 10.0
 
 
@@ -70,6 +80,10 @@ class DataSourceConfig(BaseModel):
     into one resident ``(N, dim)`` array for training/eval, instead of the small
     LRU of open shards that thrashes under shuffled access; set it ``False`` to
     keep the lazy LRU path (e.g. when the store does not fit in memory).
+
+    Windowed pooling is implemented for ``embedding`` mode only, so a windowed
+    ``alignment.strategy`` combined with ``input_mode: image`` is rejected rather
+    than silently reduced to a single centre frame.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -81,6 +95,17 @@ class DataSourceConfig(BaseModel):
     split_artifact: str = "splits.json"
     input_mode: Literal["image", "embedding"] = "image"
     alignment: AlignmentConfig = Field(default_factory=AlignmentConfig)
+
+    @model_validator(mode="after")
+    def _windowed_pooling_needs_embedding_mode(self) -> DataSourceConfig:
+        if self.input_mode == "image" and self.alignment.strategy != "center_frame":
+            raise ValueError(
+                f"alignment.strategy {self.alignment.strategy!r} pools every frame in the "
+                "window, which is implemented for input_mode 'embedding' only: the image "
+                "dataset has no windowing and the visual encoder ignores temporal_pooling "
+                "in image mode. Use input_mode: embedding, or strategy: center_frame."
+            )
+        return self
 
 
 class FeaturesConfig(BaseModel):
@@ -111,8 +136,20 @@ class DHITargetConfig(BaseModel):
 class KIndexTargetConfig(BaseModel):
     """Clearness / clear-sky index target head.
 
-    ``kind`` selects k* (``kstar``, GHI over Haurwitz clear-sky GHI) or the
-    clearness index k_t (``kt``).
+    ``kind`` does **not** select the target: the ``target_kindex`` column is
+    baked at prepare time from :attr:`PrepareTargetsConfig.kindex_kind` and the
+    head trains on that column verbatim. ``kind`` only *asserts* which of k*
+    (``kstar``, GHI over Haurwitz clear-sky GHI) or the clearness index k_t
+    (``kt``) the manifest was built with, and the two must match —
+    :func:`allsky.evaluation.evaluator.evaluate_checkpoint` compares it against
+    the manifest's ``kindex_kind``, warning by default and raising under
+    ``strict``, and surfaces the verdict as ``kindex_kind_ok``.
+
+    The assertion is gated on ``enabled``: ``sky_class`` is derived from the same
+    k-index array, but an experiment with only the sky head enabled is
+    deliberately not checked, since ``kind`` defaults to ``kstar`` and an
+    unconditional check would reject every default experiment against a
+    kt-prepared dataset.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -186,12 +223,20 @@ class AMPConfig(BaseModel):
 
 
 class EarlyStoppingConfig(BaseModel):
-    """Early-stopping controller (monitor a validation metric)."""
+    """Early-stopping controller (monitor a validation metric).
+
+    ``patience`` is the number of non-improving epochs tolerated before the run
+    stops; ``patience=1`` already means "stop at the first non-improving epoch",
+    so ``0`` (which would fire before any epoch could improve) is rejected. A
+    negative ``min_delta`` would make a *worsening* metric count as an
+    improvement — resetting the patience counter forever and overwriting
+    ``best.ckpt`` with a strictly worse model — so it is rejected too.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    patience: int = 10
-    min_delta: float = 0.0
+    patience: int = Field(default=10, ge=1)
+    min_delta: float = Field(default=0.0, ge=0)
     monitor: str = "val_loss"
 
 
@@ -201,11 +246,17 @@ class ExperimentTrainConfig(BaseModel):
     ``backbone_lr`` (when set) drives a separate parameter group for the visual
     backbone; ``out_subdir`` is the run directory created under
     ``ExperimentConfig.output_dir``.
+
+    ``epochs`` must be at least 1: both checkpoint writes live inside the epoch
+    loop, so ``epochs: 0`` would exit 0 while advertising ``last.ckpt`` /
+    ``best.ckpt`` paths that were never written. (Resuming a finished run — where
+    the loop body is skipped because the start epoch already equals ``epochs`` —
+    is unaffected; those checkpoints are already on disk.)
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    epochs: int = 20
+    epochs: int = Field(default=20, ge=1)
     batch_size: int = 32
     lr: float = 3e-4
     backbone_lr: float | None = None
@@ -312,7 +363,16 @@ class DatasetOutputConfig(BaseModel):
 
 
 class EmbeddingsConfig(BaseModel):
-    """Visual-embedding precompute settings (DINOv2 by default)."""
+    """Visual-embedding precompute settings (DINOv2 by default).
+
+    .. warning::
+       ``revision`` is currently **inert**: nothing reads it.
+       :class:`allsky.embeddings.backbone.DinoV2Backbone` pins
+       ``DINOV2_REVISION`` from a module constant, and that pinned SHA — not this
+       value — is what ``embeddings.meta.json`` records.  Editing it changes no
+       embedding, only the section hash that gates ``precompute-embeddings``
+       resume.  Do not treat a value written here as the provenance of a store.
+    """
 
     model_config = ConfigDict(extra="forbid")
 

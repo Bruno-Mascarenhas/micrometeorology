@@ -17,11 +17,19 @@
    over ``model.param_groups`` when available, an optional scheduler and AMP;
 #. run per-epoch train/val passes computing loss components **and** physical-unit
    metrics (denormalized DHI/kindex MAE, sky accuracy), logging to TensorBoard,
-   ``metrics.csv`` (appended) and ``metrics.json`` (atomically rewritten);
+   ``metrics.csv`` (appended) and ``metrics.json`` (atomically rewritten).  Each
+   reported ``loss_<head>`` is the mean over the rows that head actually had a
+   target for, and the reported ``loss`` is the configured weighted sum of those
+   means, so the monitored quantity does not move with ``train.batch_size``;
 #. checkpoint ``last.ckpt`` every epoch and ``best.ckpt`` on monitor improvement
    (resume-safe best seeding), with early stopping;
 #. resume fully from ``last.ckpt`` (``resume="auto"`` or a path), restoring
-   model / optimizer / scheduler / scaler / epoch / global_step / best / RNG.
+   model / optimizer / scheduler / scaler / epoch / global_step / best / RNG —
+   but only after the checkpoint's dataset provenance matches this run (a rebuilt
+   manifest is refused, not silently re-scaled), with the stored best discarded
+   when the early-stopping monitor changed, a restored cosine horizon re-pointed
+   at the current epoch budget, and nothing trained at all when the stopping rule
+   was already satisfied.
 
 The engine imports torch at module scope and is therefore only ever imported
 lazily (from the CLI or via :func:`allsky.training.__getattr__`), so
@@ -34,6 +42,7 @@ import contextlib
 import csv
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import Callable, Mapping
@@ -46,8 +55,8 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 from allsky.atomic import atomic_write, atomic_write_json
-from allsky.config import ExperimentConfig, SchedulerConfig
-from allsky.data.datasets import EmbeddingReader, WindowMode
+from allsky.config import ExperimentConfig, SchedulerConfig, TargetsConfig
+from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
     default_embedding_reader,
     load_manifest,
@@ -99,6 +108,7 @@ def run_experiment(
     device: str | None = None,
     amp: bool | None = None,
     resume: str | Path | None = None,
+    trust_checkpoint: bool = False,
     image_backbone_builder: Callable[[], nn.Module] | None = None,
     embedding_reader: EmbeddingReader | None = None,
 ) -> dict[str, Any]:
@@ -121,6 +131,11 @@ def run_experiment(
     resume:
         ``"auto"`` loads ``<run_dir>/last.ckpt`` if present; a path loads that
         checkpoint; ``None`` starts fresh.
+    trust_checkpoint:
+        Read the resumed checkpoint with the unrestricted unpickler. Off by
+        default: a checkpoint that travelled through Colab or a shared Drive is
+        an untrusted input, so it is read under torch's restricted reader and a
+        payload outside the allowlist is refused rather than executed.
     image_backbone_builder:
         Zero-arg factory returning the image backbone for ``input_mode="image"``
         visual models.  The DINOv2 backbone is only used when explicitly injected
@@ -208,7 +223,7 @@ def run_experiment(
     if is_climatology:
         _fit_climatology(model, cfg, train_df, target_normalizers)
 
-    optimizer = _build_optimizer(model, cfg)
+    optimizer, lr_labels = _build_optimizer(model, cfg)
     monitor_key = _monitor_key(cfg.train.early_stopping.monitor)
     monitor_mode = "max" if "acc" in monitor_key else "min"
     scheduler, scheduler_is_plateau = _build_scheduler(
@@ -234,8 +249,28 @@ def run_experiment(
     history: list[dict[str, Any]] = []
     resume_path = _resume_path(resume, run_dir)
     if resume_path is not None:
+        # Load once, then check the payload against this run before any of it is
+        # applied: a refused resume must leave the model, the optimizer and the
+        # metrics files exactly as it found them.
+        checkpoint = load_checkpoint(
+            resume_path, map_location=resolved_device, trust_pickle=trust_checkpoint
+        )
+        _check_resume_provenance(
+            checkpoint,
+            path=resume_path,
+            split_id=split.split_id,
+            meta=meta,
+            feature_columns=feature_columns,
+        )
+        stored_monitor = (checkpoint.get("best_metric") or {}).get("name")
+        monitor_changed = stored_monitor is not None and str(stored_monitor) != monitor_key
         start_epoch, global_step, best_value, best_epoch, restored_no_improve = _restore(
-            resume_path, resolved_device, model, optimizer, scheduler, scaler
+            checkpoint,
+            model,
+            optimizer,
+            scheduler,
+            scaler,
+            skip_scheduler_state=monitor_changed and scheduler_is_plateau,
         )
         # Restore the patience counter; a pre-field checkpoint yields a safe lower
         # bound (epochs since the recorded best), never a negative value.
@@ -244,6 +279,23 @@ def run_experiment(
             if restored_no_improve is not None
             else (max(0, start_epoch - best_epoch) if best_epoch is not None else 0)
         )
+        if monitor_changed:
+            # The stored best belongs to another metric — another scale, and often
+            # the other comparison direction — so seeding from it would make every
+            # improvement test meaningless.
+            logger.warning(
+                "resume: early-stopping monitor changed %r -> %r; discarding the stored "
+                "best (%s=%s @ epoch %s) and the patience counter — only epochs from here "
+                "on are candidates for best.ckpt under the new monitor",
+                stored_monitor,
+                monitor_key,
+                stored_monitor,
+                best_value,
+                best_epoch,
+            )
+            best_value, best_epoch, epochs_no_improve = None, None, 0
+            _rotate_stale_best(run_dir)
+        _reconcile_cosine_horizon(scheduler, optimizer, cfg)
         # Crash-window dedupe: metrics.csv/json are written before last.ckpt each
         # epoch, so a crash in that gap can leave rows for an epoch the checkpoint
         # never completed. Drop rows past the resumed epoch and rewrite both files
@@ -267,93 +319,105 @@ def run_experiment(
 
     dhi_mean, dhi_std = _stats_or_identity(target_normalizers, "dhi")
     kindex_mean, kindex_std = _stats_or_identity(target_normalizers, "kindex")
-    writer = SummaryWriter(log_dir=str(run_dir / "runs"))
+    component_weights = _loss_component_weights(cfg.targets)
     epochs_ran = 0
     last_val_metrics: dict[str, float] = {}
     patience = int(cfg.train.early_stopping.patience)
     min_delta = float(cfg.train.early_stopping.min_delta)
-    try:
-        for epoch in range(start_epoch, cfg.train.epochs):
-            # Deterministic, resume-stable batch order: order = f(seed, epoch),
-            # independent of the resume point, persistent_workers, or global-RNG
-            # draw count (finding 1).
-            train_sampler_generator.manual_seed(cfg.seed * 100003 + epoch)
-            train_metrics, global_step = _train_epoch(
-                model=model,
-                loader=train_loader,
-                optimizer=optimizer,
-                loss_fn=loss_fn,
-                device=resolved_device,
-                autocast_device=autocast_device,
-                autocast_dtype=autocast_dtype,
-                scaler=scaler,
-                grad_accum_steps=max(1, int(cfg.train.grad_accum_steps)),
-                grad_clip_norm=cfg.train.grad_clip_norm,
-                skip_optimization=is_climatology,
-                global_step=global_step,
-                target_stats=(dhi_mean, dhi_std, kindex_mean, kindex_std),
-            )
-            val_metrics = _eval_epoch(
-                model=model,
-                loader=val_loader,
-                loss_fn=loss_fn,
-                device=resolved_device,
-                autocast_device=autocast_device,
-                autocast_dtype=autocast_dtype,
-                amp_enabled=amp_enabled,
-                target_stats=(dhi_mean, dhi_std, kindex_mean, kindex_std),
-            )
-            last_val_metrics = val_metrics
-
-            monitor_value = val_metrics.get(monitor_key)
-            if monitor_value is None:
-                raise KeyError(
-                    f"early-stopping monitor {cfg.train.early_stopping.monitor!r} "
-                    f"resolves to {monitor_key!r}, absent from val metrics {sorted(val_metrics)}"
+    if resume_path is not None and epochs_no_improve >= patience:
+        # The stopping rule is only re-tested at the END of an epoch, so a resume
+        # into an already-early-stopped checkpoint would train one more epoch per
+        # invocation — and a cron re-running `--resume auto` would walk the whole
+        # remaining budget past the declared stop.
+        logger.info(
+            "early stopping already satisfied at epoch %d (no %s improvement for %d >= "
+            "patience %d); nothing to train — raise train.early_stopping.patience to continue",
+            start_epoch,
+            monitor_key,
+            epochs_no_improve,
+            patience,
+        )
+    else:
+        writer = SummaryWriter(log_dir=str(run_dir / "runs"))
+        try:
+            for epoch in range(start_epoch, cfg.train.epochs):
+                # Deterministic, resume-stable batch order: order = f(seed, epoch),
+                # independent of the resume point, persistent_workers, or global-RNG
+                # draw count (finding 1).
+                train_sampler_generator.manual_seed(cfg.seed * 100003 + epoch)
+                # Read the rates BEFORE the epoch trains and before scheduler.step():
+                # what is logged must be the rate this epoch actually ran at, per
+                # named group (param_groups[0] is the backbone whenever backbone_lr
+                # is set, not the rate driving the trunk and heads).
+                lrs = _current_lrs(optimizer, lr_labels)
+                train_metrics, global_step = _train_epoch(
+                    model=model,
+                    loader=train_loader,
+                    optimizer=optimizer,
+                    loss_fn=loss_fn,
+                    device=resolved_device,
+                    autocast_device=autocast_device,
+                    autocast_dtype=autocast_dtype,
+                    scaler=scaler,
+                    grad_accum_steps=max(1, int(cfg.train.grad_accum_steps)),
+                    grad_clip_norm=cfg.train.grad_clip_norm,
+                    skip_optimization=is_climatology,
+                    global_step=global_step,
+                    target_stats=(dhi_mean, dhi_std, kindex_mean, kindex_std),
+                    component_weights=component_weights,
                 )
-            if scheduler is not None:
-                scheduler.step(monitor_value) if scheduler_is_plateau else scheduler.step()
+                val_metrics = _eval_epoch(
+                    model=model,
+                    loader=val_loader,
+                    loss_fn=loss_fn,
+                    device=resolved_device,
+                    autocast_device=autocast_device,
+                    autocast_dtype=autocast_dtype,
+                    amp_enabled=amp_enabled,
+                    target_stats=(dhi_mean, dhi_std, kindex_mean, kindex_std),
+                    component_weights=component_weights,
+                )
+                last_val_metrics = val_metrics
 
-            improved = _improved(monitor_value, best_value, monitor_mode, min_delta)
-            if improved:
-                best_value, best_epoch, epochs_no_improve = monitor_value, epoch + 1, 0
-            else:
-                epochs_no_improve += 1
+                monitor_value = val_metrics.get(monitor_key)
+                if monitor_value is None:
+                    raise KeyError(
+                        f"early-stopping monitor {cfg.train.early_stopping.monitor!r} "
+                        f"resolves to {monitor_key!r}, absent from val metrics "
+                        f"{sorted(val_metrics)}"
+                    )
+                if scheduler is not None:
+                    scheduler.step(monitor_value) if scheduler_is_plateau else scheduler.step()
 
-            current_lr = float(optimizer.param_groups[0]["lr"])
-            _log_epoch(writer, epoch, current_lr, train_metrics, val_metrics)
-            row = _epoch_row(fields, epoch + 1, current_lr, train_metrics, val_metrics)
-            _append_csv(run_dir / "metrics.csv", fields, row)
-            history.append(row)
-            atomic_write_json(run_dir / "metrics.json", history)
+                improved = _improved(monitor_value, best_value, monitor_mode, min_delta)
+                if improved:
+                    best_value, best_epoch, epochs_no_improve = monitor_value, epoch + 1, 0
+                else:
+                    epochs_no_improve += 1
 
-            best_metric = {"name": monitor_key, "value": best_value, "epoch": best_epoch}
-            common = _checkpoint_common(
-                cfg=cfg,
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                feature_normalizer=feature_normalizer,
-                target_normalizers=target_normalizers,
-                feature_columns=feature_columns,
-                meta=meta,
-                split_id=split.split_id,
-                image_backbone=image_backbone,
-            )
-            rng_state = capture_rng_state()
-            save_checkpoint(
-                run_dir / LAST_CHECKPOINT,
-                epoch=epoch + 1,
-                global_step=global_step,
-                best_metric=best_metric,
-                rng_state=rng_state,
-                epochs_no_improve=epochs_no_improve,
-                **common,
-            )
-            if improved:
+                _log_epoch(writer, epoch, lrs, train_metrics, val_metrics)
+                row = _epoch_row(fields, epoch + 1, lrs, train_metrics, val_metrics)
+                _append_csv(run_dir / "metrics.csv", fields, row)
+                history.append(row)
+                atomic_write_json(run_dir / "metrics.json", history)
+
+                best_metric = {"name": monitor_key, "value": best_value, "epoch": best_epoch}
+                common = _checkpoint_common(
+                    cfg=cfg,
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    scaler=scaler,
+                    feature_normalizer=feature_normalizer,
+                    target_normalizers=target_normalizers,
+                    feature_columns=feature_columns,
+                    meta=meta,
+                    split_id=split.split_id,
+                    image_backbone=image_backbone,
+                )
+                rng_state = capture_rng_state()
                 save_checkpoint(
-                    run_dir / BEST_CHECKPOINT,
+                    run_dir / LAST_CHECKPOINT,
                     epoch=epoch + 1,
                     global_step=global_step,
                     best_metric=best_metric,
@@ -361,28 +425,38 @@ def run_experiment(
                     epochs_no_improve=epochs_no_improve,
                     **common,
                 )
-            epochs_ran += 1
-            logger.info(
-                "epoch %d/%d — train loss %.4f | val loss %.4f | %s %.4f (best %.4f @ %s)",
-                epoch + 1,
-                cfg.train.epochs,
-                train_metrics.get("loss", float("nan")),
-                val_metrics.get("loss", float("nan")),
-                monitor_key,
-                monitor_value,
-                best_value if best_value is not None else float("nan"),
-                best_epoch,
-            )
-            if epochs_no_improve >= patience:
+                if improved:
+                    save_checkpoint(
+                        run_dir / BEST_CHECKPOINT,
+                        epoch=epoch + 1,
+                        global_step=global_step,
+                        best_metric=best_metric,
+                        rng_state=rng_state,
+                        epochs_no_improve=epochs_no_improve,
+                        **common,
+                    )
+                epochs_ran += 1
                 logger.info(
-                    "early stopping at epoch %d (no %s improvement for %d)",
+                    "epoch %d/%d — train loss %.4f | val loss %.4f | %s %.4f (best %.4f @ %s)",
                     epoch + 1,
+                    cfg.train.epochs,
+                    train_metrics.get("loss", float("nan")),
+                    val_metrics.get("loss", float("nan")),
                     monitor_key,
-                    patience,
+                    monitor_value,
+                    best_value if best_value is not None else float("nan"),
+                    best_epoch,
                 )
-                break
-    finally:
-        writer.close()
+                if epochs_no_improve >= patience:
+                    logger.info(
+                        "early stopping at epoch %d (no %s improvement for %d)",
+                        epoch + 1,
+                        monitor_key,
+                        patience,
+                    )
+                    break
+        finally:
+            writer.close()
 
     return {
         "best_metric": {"name": monitor_key, "value": best_value, "epoch": best_epoch},
@@ -451,9 +525,10 @@ def _build_datasets(
         _validate_embedding_coverage(reader, train_df, val_df)
         # Wire the alignment strategy end to end: center_frame (default) keeps the
         # single-frame embedding; mean_embedding / attention_pooling resolve each
-        # row's same-day co-frame window (dataset-level) and pool accordingly. The
-        # dataset validates the mode against its supported WindowMode set.
-        window = cast("WindowMode", cfg.data.alignment.strategy)
+        # row's same-day co-frame window (dataset-level) and pool accordingly.
+        # The config's AlignmentStrategyName IS the dataset's WindowMode, so the
+        # two can no longer disagree about which modes exist.
+        window = cfg.data.alignment.strategy
         window_minutes = float(cfg.data.alignment.window_minutes)
         train_ds = MultimodalEmbeddingDataset(
             train_df,
@@ -622,14 +697,50 @@ def _fit_climatology(
     )
 
 
-def _build_optimizer(model: nn.Module, cfg: ExperimentConfig) -> torch.optim.Optimizer:
-    """AdamW over ``model.param_groups(backbone_lr)`` when available, else parameters."""
+def _build_optimizer(
+    model: nn.Module, cfg: ExperimentConfig
+) -> tuple[torch.optim.Optimizer, list[str]]:
+    """AdamW over ``model.param_groups(backbone_lr)`` when available, else parameters.
+
+    Also returns one metrics label per parameter group, captured here while the
+    per-group override is still visible — AdamW fills ``lr`` into *every* group, so
+    after construction the backbone group is no longer distinguishable.  A group
+    carrying its own ``lr`` is the image backbone (the only group
+    :meth:`MultimodalModel.param_groups` sets it on); everything else runs at
+    ``train.lr`` and is labelled ``lr``.
+    """
     param_groups_fn = getattr(model, "param_groups", None)
     if callable(param_groups_fn):
         params: Any = param_groups_fn(cfg.train.backbone_lr)
+        labels = ["lr_backbone" if "lr" in group else "lr" for group in params]
     else:
         params = [p for p in model.parameters() if p.requires_grad]
-    return torch.optim.AdamW(params, lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
+        labels = ["lr"]
+    if cfg.train.backbone_lr is not None and "lr_backbone" not in labels:
+        # Either the model has no param_groups at all or its backbone contributed
+        # no trainable parameter: nothing runs at backbone_lr, which is only
+        # obvious from the metrics much later (an lr_backbone column left blank).
+        logger.warning(
+            "train.backbone_lr=%s is set but model %r produced no separate backbone "
+            "parameter group; every trainable parameter runs at train.lr=%s",
+            cfg.train.backbone_lr,
+            cfg.model.name,
+            cfg.train.lr,
+        )
+    optimizer = torch.optim.AdamW(params, lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
+    return optimizer, labels
+
+
+def _current_lrs(optimizer: torch.optim.Optimizer, labels: list[str]) -> dict[str, float]:
+    """The learning rate in effect per labelled parameter group.
+
+    ``strict=True`` is safe across a resume: ``load_state_dict`` already raises on
+    a group-count mismatch, so the labels stay index-aligned with the groups.
+    """
+    return {
+        label: float(group["lr"])
+        for label, group in zip(labels, optimizer.param_groups, strict=True)
+    }
 
 
 def _build_scheduler(
@@ -698,10 +809,11 @@ def _train_epoch(
     skip_optimization: bool,
     global_step: int,
     target_stats: tuple[float, float, float, float],
+    component_weights: Mapping[str, float],
 ) -> tuple[dict[str, float], int]:
     """Run one training epoch with grad accumulation/clipping; return metrics + step."""
     model.train()
-    accumulator = _MetricAccumulator(target_stats)
+    accumulator = _MetricAccumulator(target_stats, component_weights)
     n_batches = len(loader)
     pending = 0
     optimizer.zero_grad(set_to_none=True)
@@ -742,10 +854,11 @@ def _eval_epoch(
     autocast_dtype: Any,
     amp_enabled: bool,
     target_stats: tuple[float, float, float, float],
+    component_weights: Mapping[str, float],
 ) -> dict[str, float]:
     """Run one validation epoch (no grad); return loss components + physical metrics."""
     model.eval()
-    accumulator = _MetricAccumulator(target_stats)
+    accumulator = _MetricAccumulator(target_stats, component_weights)
     with torch.no_grad():
         for raw in loader:
             batch = _move(raw, device)
@@ -756,14 +869,72 @@ def _eval_epoch(
     return accumulator.result()
 
 
-class _MetricAccumulator:
-    """Accumulate loss components and physical-unit quick metrics over an epoch."""
+#: Loss-component key -> the batch column whose *present* rows that component was
+#: reduced over.  ``MultitaskLoss`` averages every component over its own mask
+#: (finite target, or ``sky_class >= 0``), so the epoch average has to weight each
+#: batch by those counts and not by the batch size.
+_COMPONENT_TARGET_COLUMNS = {
+    "loss_dhi": "dhi",
+    "loss_kindex": "kindex",
+    "loss_cloud_fraction": "cloud_fraction",
+    "loss_sky": "sky_class",
+}
 
-    def __init__(self, target_stats: tuple[float, float, float, float]) -> None:
+
+def _loss_component_weights(targets: TargetsConfig) -> dict[str, float]:
+    """Per-head weights, keyed by loss-component name, for the epoch loss total.
+
+    :meth:`allsky.training.losses.MultitaskLoss.forward` sums its per-head
+    components with these same configured weights; the epoch metrics rebuild that
+    weighted sum from the per-head epoch means, so both must read the one
+    :class:`~allsky.config.TargetsConfig`.
+    """
+    return {
+        "loss_dhi": float(targets.dhi.weight),
+        "loss_kindex": float(targets.kindex.weight),
+        "loss_sky": float(targets.sky.weight),
+        "loss_cloud_fraction": float(targets.cloud_fraction.weight),
+    }
+
+
+def _present_target_count(batch: Mapping[str, Tensor], column: str) -> int:
+    """Rows of *column* a loss component counted: finite value, or class ``>= 0``."""
+    target = batch[column]
+    mask = target >= 0 if column == "sky_class" else torch.isfinite(target)
+    return int(mask.sum())
+
+
+class _MetricAccumulator:
+    """Accumulate loss components and physical-unit quick metrics over an epoch.
+
+    Every component :class:`~allsky.training.losses.MultitaskLoss` returns is a
+    mean over the rows whose target is present, so each batch is folded in
+    weighted by *its own* count of present rows and divided by the epoch's count
+    for that head — not by the batch row count, which made the epoch metrics
+    depend on ``train.batch_size`` whenever labels were missing (an all-missing
+    batch contributed an exact 0 with full weight).  The reported ``loss`` is
+    likewise rebuilt from the per-head epoch means and *component_weights* — the
+    same weighted sum the loss module computes per batch — instead of averaging
+    the per-batch totals.
+
+    Only the reported metrics changed: ``losses["loss"]`` still drives
+    ``backward()`` per batch, unweighted by anything here.
+
+    A head with no present row in the whole epoch keeps its ``loss_<head>`` key
+    (metrics.csv has a column for it and it is a legal early-stopping monitor)
+    with value ``0.0``, contributes nothing to the total, and is named in a
+    warning.
+    """
+
+    def __init__(
+        self,
+        target_stats: tuple[float, float, float, float],
+        component_weights: Mapping[str, float],
+    ) -> None:
         self._dhi_mean, self._dhi_std, self._kindex_mean, self._kindex_std = target_stats
-        self._n = 0
-        self._loss_sum = 0.0
+        self._component_weights = dict(component_weights)
         self._component_sums: dict[str, float] = {}
+        self._component_counts: dict[str, int] = {}
         self._dhi_abs = 0.0
         self._dhi_n = 0
         self._kindex_abs = 0.0
@@ -776,14 +947,18 @@ class _MetricAccumulator:
     ) -> None:
         """Fold one batch's outputs/targets/losses into the running sums."""
         size = int(batch["features"].shape[0])
-        self._n += size
-        self._loss_sum += float(losses["loss"].detach()) * size
         for key, value in losses.items():
             if key == "loss":
                 continue
-            self._component_sums[key] = (
-                self._component_sums.get(key, 0.0) + float(value.detach()) * size
-            )
+            column = _COMPONENT_TARGET_COLUMNS.get(key)
+            # An unrecognised (future) component falls back to the batch row count.
+            count = size if column is None else _present_target_count(batch, column)
+            self._component_sums.setdefault(key, 0.0)
+            self._component_counts.setdefault(key, 0)
+            if count == 0:
+                continue
+            self._component_sums[key] += float(value.detach()) * count
+            self._component_counts[key] += count
         if "dhi" in outputs:
             self._dhi_abs, self._dhi_n = _mae_accumulate(
                 outputs["dhi"],
@@ -810,11 +985,25 @@ class _MetricAccumulator:
                 self._sky_n += int(mask.sum())
 
     def result(self) -> dict[str, float]:
-        """Finalize the sample-weighted averages for the epoch."""
-        denom = max(self._n, 1)
-        metrics: dict[str, float] = {"loss": self._loss_sum / denom}
-        for key, value in self._component_sums.items():
-            metrics[key] = value / denom
+        """Finalize the epoch: per-head masked means and their weighted total."""
+        components: dict[str, float] = {}
+        total = 0.0
+        heads_without_labels: list[str] = []
+        for key, summed in self._component_sums.items():
+            count = self._component_counts[key]
+            if count == 0:
+                components[key] = 0.0
+                heads_without_labels.append(key)
+                continue
+            components[key] = summed / count
+            total += self._component_weights.get(key, 1.0) * components[key]
+        if heads_without_labels:
+            logger.warning(
+                "epoch metrics: %s had no valid target row in the whole split; reported as 0.0 "
+                "and excluded from the total loss — check the head is meant to be enabled",
+                ", ".join(sorted(heads_without_labels)),
+            )
+        metrics: dict[str, float] = {"loss": total, **components}
         if self._dhi_n:
             metrics["dhi_mae"] = self._dhi_abs / self._dhi_n
         if self._kindex_n:
@@ -858,24 +1047,82 @@ def _resume_path(resume: str | Path | None, run_dir: Path) -> Path | None:
     return path
 
 
-def _restore(
+def _check_resume_provenance(
+    checkpoint: Mapping[str, Any],
+    *,
     path: Path,
-    device: str,
+    split_id: str,
+    meta: Mapping[str, Any],
+    feature_columns: list[str],
+) -> None:
+    """Refuse a resume whose checkpoint was trained against a different dataset.
+
+    ``run_experiment`` re-fits the feature and target normalizers on whatever is on
+    disk *before* restoring, so resuming into a rebuilt manifest would silently
+    reinterpret converged weights in a re-scaled target space — and compare
+    ``best.ckpt`` across two different validation day sets.  Every recorded field
+    is compared exactly; a field the checkpoint does not carry is skipped so
+    pre-provenance checkpoints still resume, mirroring the evaluator's
+    ``_check_split_id``.  Unlike an evaluation, a resume has no legitimate reason
+    to continue on a mismatch.
+    """
+    mismatches: list[str] = []
+    for field, stored, current in (
+        ("split_id", checkpoint.get("split_id"), split_id),
+        ("manifest_sha256", checkpoint.get("manifest_sha256"), meta.get("manifest_sha256")),
+        ("dataset_version", checkpoint.get("dataset_version"), _dataset_version(meta)),
+    ):
+        if stored is None:
+            logger.info("resume: %s is not recorded in %s; skipping that check", field, path)
+        elif str(stored) != str(current):
+            mismatches.append(
+                f"{field}: checkpoint {str(stored)[:12]} vs current {str(current)[:12]}"
+            )
+    stored_columns = checkpoint.get("feature_columns")
+    if stored_columns is None:
+        logger.info("resume: feature_columns is not recorded in %s; skipping that check", path)
+    elif list(stored_columns) != feature_columns:
+        mismatches.append(
+            f"feature_columns: checkpoint {list(stored_columns)} vs current {feature_columns}"
+        )
+    if mismatches:
+        raise RuntimeError(
+            f"refusing to resume from {path}: it was trained against a different dataset "
+            + "; ".join(mismatches)
+            + ". Run without --resume (or point --out-dir at a fresh run directory) to "
+            "train from scratch on the current dataset."
+        )
+
+
+def _restore(
+    checkpoint: Mapping[str, Any],
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: Any | None,
     scaler: Any | None,
+    *,
+    skip_scheduler_state: bool = False,
 ) -> tuple[int, int, float | None, int | None, int | None]:
-    """Restore all training state from *path*.
+    """Restore all training state from an already-loaded *checkpoint*.
+
+    :func:`run_experiment` loads the payload itself so the provenance and monitor
+    checks can run before any state is applied.  *skip_scheduler_state* drops the
+    stored scheduler state, which is what a ``ReduceLROnPlateau`` needs when the
+    monitor changed: its ``mode``/``best``/``num_bad_epochs`` belong to the old
+    metric, while the reduced learning rate itself survives in the optimizer's
+    param groups.
 
     Returns ``(epoch, global_step, best_value, best_epoch, epochs_no_improve)``;
     ``epochs_no_improve`` is ``None`` on pre-field checkpoints (the caller then
     reconstructs a lower bound from ``epoch``/``best_epoch``).
     """
-    checkpoint = load_checkpoint(path, map_location=device)
     model.load_state_dict(checkpoint["model_state"])
     optimizer.load_state_dict(checkpoint["optimizer_state"])
-    if scheduler is not None and checkpoint.get("scheduler_state") is not None:
+    if (
+        scheduler is not None
+        and not skip_scheduler_state
+        and checkpoint.get("scheduler_state") is not None
+    ):
         scheduler.load_state_dict(checkpoint["scheduler_state"])
     if scaler is not None and checkpoint.get("scaler_state") is not None:
         scaler.load_state_dict(checkpoint["scaler_state"])
@@ -888,6 +1135,67 @@ def _restore(
         best.get("value"),
         best.get("epoch"),
         None if stored_no_improve is None else int(stored_no_improve),
+    )
+
+
+def _reconcile_cosine_horizon(
+    scheduler: Any | None, optimizer: torch.optim.Optimizer, cfg: ExperimentConfig
+) -> None:
+    """Re-point a restored cosine schedule at the run's *current* epoch budget.
+
+    ``scheduler.load_state_dict`` brings back the checkpoint's ``T_max``, so a
+    resume that extends the budget keeps annealing against the old horizon: past
+    ``T_max`` the cosine turns around and the learning rate climbs back to its
+    initial value over the second half of the run.  A ``T_max`` pinned explicitly
+    in ``train.scheduler.params`` is the operator's contract and is honoured.
+
+    The rate is re-derived in closed form rather than left to the scheduler:
+    ``CosineAnnealingLR.get_lr`` is a multiplicative recursion off each group's
+    current rate, which the old horizon may already have annealed to ``eta_min``.
+    """
+    sched_cfg = cfg.train.scheduler
+    if scheduler is None or sched_cfg.name != "cosine" or "T_max" in sched_cfg.params:
+        return
+    budget = int(cfg.train.epochs)
+    if int(scheduler.T_max) == budget:
+        return
+    logger.warning(
+        "resume: cosine T_max %d from the checkpoint reconciled to the current budget %d; "
+        "the learning rate is re-derived from the closed-form cosine at epoch %d",
+        scheduler.T_max,
+        budget,
+        scheduler.last_epoch,
+    )
+    scheduler.T_max = budget
+    lrs = [
+        scheduler.eta_min
+        + (base_lr - scheduler.eta_min)
+        * (1 + math.cos(math.pi * scheduler.last_epoch / budget))
+        / 2
+        for base_lr in scheduler.base_lrs
+    ]
+    for group, lr in zip(optimizer.param_groups, lrs, strict=True):
+        group["lr"] = lr
+    scheduler._last_lr = list(lrs)
+
+
+def _rotate_stale_best(run_dir: Path) -> None:
+    """Move an existing ``best.ckpt`` aside when a monitor change invalidates it.
+
+    Mirrors :func:`_reset_stale_metrics`: once the stored best is discarded the
+    first resumed epoch unconditionally improves on ``None`` and rewrites
+    ``best.ckpt``, which would destroy the previous monitor's best weights with no
+    record of them.
+    """
+    path = run_dir / BEST_CHECKPOINT
+    if not path.exists():
+        return
+    backup = path.with_name(f"{BEST_CHECKPOINT}.stale")
+    os.replace(path, backup)
+    logger.warning(
+        "resume: rotated %s aside to %s (it was selected under the previous monitor)",
+        path,
+        backup.name,
     )
 
 
@@ -906,8 +1214,6 @@ def _checkpoint_common(
     image_backbone: nn.Module | None,
 ) -> dict[str, Any]:
     """Assemble the checkpoint fields shared by last.ckpt and best.ckpt."""
-    from allsky.data.contracts import DATASET_VERSION
-
     normalizers = {
         "feature_normalizer": feature_normalizer.to_dict(),
         "target_normalizers": {k: v.to_dict() for k, v in target_normalizers.items()},
@@ -930,12 +1236,19 @@ def _checkpoint_common(
         "normalizers": normalizers,
         "feature_columns": feature_columns,
         "feature_groups": active_feature_groups(cfg.features.feature_set),
-        "dataset_version": str(meta.get("dataset_version", DATASET_VERSION)),
+        "dataset_version": _dataset_version(meta),
         "split_id": split_id,
         "manifest_sha256": meta.get("manifest_sha256"),
         "backbone_info": backbone_info,
         "code_version_info": code_version(),
     }
+
+
+def _dataset_version(meta: Mapping[str, Any]) -> str:
+    """The dataset version a checkpoint records for *meta* (the code's when absent)."""
+    from allsky.data.contracts import DATASET_VERSION
+
+    return str(meta.get("dataset_version", DATASET_VERSION))
 
 
 # ---------------------------------------------------------------------------
@@ -971,8 +1284,13 @@ def _stats_or_identity(
 
 
 def _csv_fields(cfg: ExperimentConfig) -> list[str]:
-    """Stable, config-derived CSV column order (identical across resumes)."""
-    fields = ["epoch", "lr"]
+    """Stable, config-derived CSV column order (identical across resumes).
+
+    ``lr_backbone`` is always emitted rather than made to depend on the optimizer's
+    group count: the header must not change mid-run, and a run without a separate
+    backbone rate simply leaves the cell blank.
+    """
+    fields = ["epoch", "lr", "lr_backbone"]
     for split in ("train", "val"):
         fields.append(f"{split}_loss")
         if cfg.targets.dhi.enabled:
@@ -989,14 +1307,14 @@ def _csv_fields(cfg: ExperimentConfig) -> list[str]:
 def _epoch_row(
     fields: list[str],
     epoch: int,
-    lr: float,
+    lrs: Mapping[str, float],
     train_metrics: Mapping[str, float],
     val_metrics: Mapping[str, float],
 ) -> dict[str, Any]:
     """Build a metrics row keyed by the canonical *fields* (missing -> empty)."""
     row: dict[str, Any] = dict.fromkeys(fields, "")
     row["epoch"] = epoch
-    row["lr"] = lr
+    row.update({key: value for key, value in lrs.items() if key in row})
     for key, value in train_metrics.items():
         field = f"train_{key}"
         if field in row:
@@ -1011,12 +1329,13 @@ def _epoch_row(
 def _log_epoch(
     writer: Any,
     epoch: int,
-    lr: float,
+    lrs: Mapping[str, float],
     train_metrics: Mapping[str, float],
     val_metrics: Mapping[str, float],
 ) -> None:
     """Write per-epoch TensorBoard scalars."""
-    writer.add_scalar("lr", lr, epoch)
+    for name, value in lrs.items():
+        writer.add_scalar(name, value, epoch)
     for key, value in train_metrics.items():
         writer.add_scalar(f"train/{key}", value, epoch)
     for key, value in val_metrics.items():

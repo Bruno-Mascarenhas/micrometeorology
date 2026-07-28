@@ -24,6 +24,7 @@ class ExperimentOverrides:
     amp: bool | None = None
     torch_compile: bool | None = None
     resume: str | None = None
+    allow_preprocessing_change: bool = False
 
 
 def load_config_with_overrides(
@@ -71,5 +72,7 @@ def apply_overrides(cfg: ExperimentConfig, overrides: ExperimentOverrides) -> Ex
         cfg.runtime.torch_compile = overrides.torch_compile
     if overrides.resume is not None:
         cfg.runtime.resume = overrides.resume
+    if overrides.allow_preprocessing_change:
+        cfg.runtime.allow_preprocessing_change = True
 
     return cfg

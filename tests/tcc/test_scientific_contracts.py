@@ -342,6 +342,68 @@ def test_common_sequence_horizon_aligns_tabular_rows_to_sequence_targets() -> No
         align_test_frame(test_df, model_type="svm", sequence_length=3, evaluation_policy="bad")
 
 
+def test_common_sequence_horizon_reproduces_the_windowed_dataset_horizon_over_a_gap() -> None:
+    """The policy's gap rule must stay identical to WindowedSequenceDataset's."""
+    full_index = pd.date_range("2024-01-01", periods=12, freq="1h")
+    keep = np.array([0, 1, 2, 3, 4, 7, 8, 9, 10, 11])
+    index = full_index[keep]
+    test_df = pd.DataFrame(
+        {"feature": np.arange(10, dtype=np.float32), "target": np.arange(10, dtype=np.float32)},
+        index=index,
+    )
+    windowed = WindowedSequenceDataset(
+        test_df[["feature"]].to_numpy(dtype=np.float32),
+        test_df["target"].to_numpy(dtype=np.float32),
+        sequence_length=3,
+        index=index,
+    )
+
+    selected = align_test_frame(
+        test_df,
+        model_type="svm",
+        sequence_length=3,
+        evaluation_policy="common_sequence_horizon",
+    )
+    pred_index = prediction_index(
+        index,
+        model_type="svm",
+        sequence_length=3,
+        evaluation_policy="common_sequence_horizon",
+    )
+
+    window_targets = windowed.prediction_index()
+    assert window_targets is not None
+    assert len(selected) == len(windowed) == 6
+    assert selected.index.equals(window_targets)
+    assert pred_index.equals(window_targets)
+    np.testing.assert_array_equal(
+        selected["target"].to_numpy(dtype=np.float32), windowed.target_values()
+    )
+
+
+def test_common_sequence_horizon_refuses_a_split_whose_every_window_spans_a_gap() -> None:
+    """Zero common rows must fail loudly, as the sequence dataset already does."""
+    index = pd.DatetimeIndex(
+        ["2024-01-01 00:00", "2024-01-01 01:00", "2024-01-01 06:00", "2024-01-01 07:00"]
+    )
+    test_df = pd.DataFrame({"feature": np.arange(4.0), "target": np.arange(4.0)}, index=index)
+
+    with pytest.raises(ValueError, match="No sequence windows can be generated"):
+        align_test_frame(
+            test_df,
+            model_type="svm",
+            sequence_length=3,
+            evaluation_policy="common_sequence_horizon",
+        )
+    with pytest.raises(ValueError, match="No sequence windows can be generated"):
+        WindowedSequenceDataset(
+            test_df[["feature"]].to_numpy(dtype=np.float32),
+            test_df["target"].to_numpy(dtype=np.float32),
+            sequence_length=3,
+            index=index,
+        )
+
+
 def test_common_sequence_horizon_does_not_trim_sequence_model_test_frame() -> None:
     index = pd.date_range("2024-01-01", periods=8, freq="1h")
     test_df = pd.DataFrame({"feature": np.arange(8), "target": np.arange(8)}, index=index)
@@ -356,3 +418,118 @@ def test_common_sequence_horizon_does_not_trim_sequence_model_test_frame() -> No
     assert selected.index.equals(index)
     with pytest.raises(ValueError, match="Unknown evaluation_policy"):
         prediction_index(index, model_type="lstm", sequence_length=3, evaluation_policy="bad")
+
+
+class TestBatchedWindowGather:
+    """``__getitems__`` must be an exact, faster substitute for per-index reads.
+
+    torch's fetcher prefers ``__getitems__`` at EVERY DataLoader site the moment
+    the attribute exists — it is not opt-in — so the batched gather has to agree
+    with ``__getitem__`` element for element, and every loader over this dataset
+    has to use ``collate_sequence_batch``.
+    """
+
+    @staticmethod
+    def _dataset(**kwargs: object) -> WindowedSequenceDataset:
+        rng = np.random.default_rng(7)
+        features = rng.normal(0, 1, (60, 4)).astype(np.float32)
+        target = rng.normal(0, 1, 60).astype(np.float32)
+        return WindowedSequenceDataset(features, target, sequence_length=5, **kwargs)  # type: ignore[arg-type]
+
+    def test_batched_gather_matches_per_index_reads(self) -> None:
+        import torch
+
+        dataset = self._dataset()
+        indices = [0, 7, 3, len(dataset) - 1, 12]
+
+        batch = dataset.__getitems__(indices)
+
+        assert batch.features.shape == (len(indices), 5, 4)
+        assert batch.targets.shape == (len(indices),)
+        assert batch.features.dtype == torch.float32
+        for position, idx in enumerate(indices):
+            window, target = dataset[idx]
+            torch.testing.assert_close(batch.features[position], window)
+            torch.testing.assert_close(batch.targets[position], target)
+
+    def test_gapped_windows_and_negative_indices_agree_too(self) -> None:
+        import torch
+
+        index = pd.date_range("2024-01-01", periods=60, freq="1h").delete(30)
+        rng = np.random.default_rng(3)
+        features = rng.normal(0, 1, (59, 4)).astype(np.float32)
+        target = rng.normal(0, 1, 59).astype(np.float32)
+        dataset = WindowedSequenceDataset(features, target, sequence_length=5, index=index)
+
+        batch = dataset.__getitems__([-1, 0, -2])
+
+        for position, idx in enumerate([-1, 0, -2]):
+            window, target_value = dataset[idx]
+            torch.testing.assert_close(batch.features[position], window)
+            torch.testing.assert_close(batch.targets[position], target_value)
+
+    def test_an_out_of_range_index_is_refused(self) -> None:
+        dataset = self._dataset()
+        with pytest.raises(IndexError):
+            dataset.__getitems__([len(dataset)])
+
+    def test_a_dataloader_over_this_dataset_yields_usable_batches(self) -> None:
+        """Without the shared collate this raises ``stack expects ... equal size``."""
+        import torch
+        from torch.utils.data import DataLoader
+
+        from solrad_correction.datasets.sequence import collate_sequence_batch
+
+        dataset = self._dataset()
+        loader = DataLoader(dataset, batch_size=8, shuffle=False, collate_fn=collate_sequence_batch)
+
+        seen = 0
+        for features, targets in loader:
+            assert features.ndim == 3
+            assert features.shape[1:] == (5, 4)
+            assert targets.shape == (features.shape[0],)
+            torch.testing.assert_close(features[0], dataset[seen][0])
+            seen += features.shape[0]
+        assert seen == len(dataset)
+
+    def test_the_default_collate_cannot_handle_the_batched_dataset(self) -> None:
+        """Pins WHY every loader site must pass the shared collate."""
+        from torch.utils.data import DataLoader
+
+        loader = DataLoader(self._dataset(), batch_size=8, shuffle=False)
+
+        with pytest.raises(RuntimeError, match="equal size"):
+            next(iter(loader))
+
+
+class TestMapeDropsNonFinitePairs:
+    """``mape`` must drop ±inf, not just NaN, like every sibling metric does.
+
+    An ``isnan``-only mask lets a single overflowed prediction through, and the
+    mean of a set containing ``inf`` is ``inf`` — so one diverged row used to
+    destroy the MAPE of an otherwise usable run while RMSE and R² (which route
+    through the shared ``_clean_pairs``) stayed reportable.
+    """
+
+    observed = np.array([100.0, 200.0, 300.0, 400.0])
+
+    def test_one_infinite_prediction_does_not_poison_the_mean(self) -> None:
+        from solrad_correction.evaluation.metrics import mape
+
+        predicted = np.array([110.0, 190.0, np.inf, 380.0])
+
+        assert mape(self.observed, predicted) == pytest.approx(20.0 / 3.0)
+
+    def test_negative_infinity_is_dropped_too(self) -> None:
+        from solrad_correction.evaluation.metrics import mape
+
+        predicted = np.array([110.0, 190.0, -np.inf, 380.0])
+
+        assert mape(self.observed, predicted) == pytest.approx(20.0 / 3.0)
+
+    def test_finite_input_is_unchanged(self) -> None:
+        from solrad_correction.evaluation.metrics import mape
+
+        predicted = np.array([110.0, 190.0, 330.0, 380.0])
+
+        assert mape(self.observed, predicted) == pytest.approx(7.5)

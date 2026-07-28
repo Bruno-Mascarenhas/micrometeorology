@@ -22,6 +22,7 @@ import pandas as pd
 
 from allsky.config import ExperimentConfig
 from allsky.data.datasets import EmbeddingReader
+from allsky.data.splits import DaySplit, load_split_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +64,8 @@ def load_manifest(manifest_path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
     return manifest, meta
 
 
-def load_split(path: Path) -> Any:
+def load_split(path: Path) -> DaySplit:
     """Load the persisted day-split artifact from *path*."""
-    from allsky.data.splits import load_split_artifact
-
     if not path.exists():
         raise FileNotFoundError(f"split artifact not found: {path}")
     return load_split_artifact(path)

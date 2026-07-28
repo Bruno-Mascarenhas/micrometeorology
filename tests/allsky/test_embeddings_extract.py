@@ -96,6 +96,36 @@ class TestEndToEnd:
         assert not shard_path(out, 3).exists()
 
 
+class TestFrameDecoding:
+    """Frame bytes are the FakeBackbone/DINOv2 input: the decoder must not shift them."""
+
+    @staticmethod
+    def _imageio_recipe(path: Path) -> np.ndarray:
+        image = np.asarray(iio.imread(path))
+        if image.ndim == 2:
+            image = np.stack([image] * 3, axis=-1)
+        return image.astype(np.uint8, copy=False)
+
+    def test_matches_imageio_recipe(self, tmp_path: Path):
+        manifest = _make_dataset(tmp_path, n=3, size=32)
+        for path in manifest["image_path"]:
+            full = tmp_path / str(path)
+            loaded = _load_uint8(full)
+            expected = self._imageio_recipe(full)
+            assert loaded.dtype == expected.dtype
+            assert loaded.shape == expected.shape
+            np.testing.assert_array_equal(loaded, expected)
+
+    def test_grayscale_is_channel_replicated(self, tmp_path: Path):
+        gray = tmp_path / "frames" / "gray.jpg"
+        gray.parent.mkdir(parents=True, exist_ok=True)
+        rng = np.random.default_rng(12)
+        iio.imwrite(gray, rng.integers(0, 256, (24, 24), dtype=np.uint8), quality=90)
+        loaded = _load_uint8(gray)
+        assert loaded.shape == (24, 24, 3)
+        np.testing.assert_array_equal(loaded, self._imageio_recipe(gray))
+
+
 class TestResume:
     def test_second_run_encodes_nothing(self, tmp_path: Path):
         manifest = _make_dataset(tmp_path, n=5)
@@ -313,6 +343,139 @@ class TestIncrementalIndex:
             )
 
 
+class TestCrashedOverwrite:
+    """A crashed --no-resume rerun must never leave an index describing old shards."""
+
+    @staticmethod
+    def _crash_after_first_shard(monkeypatch: pytest.MonkeyPatch) -> None:
+        import allsky.embeddings.extract as ex
+
+        original = ex.save_shard
+        calls = {"n": 0}
+
+        def flaky(path: Path, embeddings: np.ndarray) -> Path:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("crash mid-run")
+            return original(path, embeddings)
+
+        monkeypatch.setattr(ex, "save_shard", flaky)
+
+    def test_crashed_no_resume_then_resume_serves_each_id_its_own_vector(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        manifest = _make_dataset(tmp_path, n=4)
+        out = tmp_path / "emb"
+        extract_embeddings(
+            manifest, FakeBackbone(dim=8), out, data_root=tmp_path, batch_size=2, shard_size=2
+        )
+
+        # Re-extract from scratch with the rows in the opposite order (a re-filtered
+        # manifest), and die after the first shard has landed.
+        reordered = manifest.iloc[::-1].reset_index(drop=True)
+        self._crash_after_first_shard(monkeypatch)
+        with pytest.raises(RuntimeError, match="crash mid-run"):
+            extract_embeddings(
+                reordered,
+                FakeBackbone(dim=8),
+                out,
+                data_root=tmp_path,
+                batch_size=2,
+                shard_size=2,
+                resume=False,
+            )
+        monkeypatch.undo()
+
+        # The stale consolidated index is gone, so the store fails closed instead
+        # of mapping sample_ids onto the shard rows this run overwrote.
+        assert not (out / "index.parquet").exists()
+        with pytest.raises(FileNotFoundError, match="no embedding index"):
+            SafetensorsEmbeddingReader(out)
+
+        extract_embeddings(
+            reordered, FakeBackbone(dim=8), out, data_root=tmp_path, batch_size=2, shard_size=2
+        )
+        reader = SafetensorsEmbeddingReader(out)
+        backbone = FakeBackbone(dim=8)
+        for _, row in manifest.iterrows():
+            expected = backbone._embed_one(_load_uint8(tmp_path / row["image_path"]))
+            np.testing.assert_allclose(
+                reader(row["sample_id"]), expected.astype(np.float16), rtol=0
+            )
+
+    def test_crashed_run_leaves_provenance_so_a_backbone_change_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        manifest = _make_dataset(tmp_path, n=4)
+        out = tmp_path / "emb"
+        self._crash_after_first_shard(monkeypatch)
+        with pytest.raises(RuntimeError, match="crash mid-run"):
+            extract_embeddings(
+                manifest, FakeBackbone(dim=8), out, data_root=tmp_path, batch_size=2, shard_size=2
+            )
+        monkeypatch.undo()
+
+        assert read_meta(out)["dim"] == 8  # provenance survives the crash
+        with pytest.raises(RuntimeError, match="incompatible"):
+            extract_embeddings(
+                manifest, FakeBackbone(dim=32), out, data_root=tmp_path, batch_size=2, shard_size=2
+            )
+        # The same backbone still resumes and only re-extracts what is missing.
+        summary = extract_embeddings(
+            manifest, FakeBackbone(dim=8), out, data_root=tmp_path, batch_size=2, shard_size=2
+        )
+        assert summary["skipped"] == 2
+        assert summary["encoded"] == 2
+
+    def test_indexed_store_without_provenance_refuses_resume(self, tmp_path: Path):
+        manifest = _make_dataset(tmp_path, n=2)
+        out = tmp_path / "emb"
+        extract_embeddings(
+            manifest, FakeBackbone(dim=8), out, data_root=tmp_path, batch_size=2, shard_size=2
+        )
+        (out / "embeddings.meta.json").unlink()  # a store from an older version
+        with pytest.raises(RuntimeError, match=r"no embeddings\.meta\.json"):
+            extract_embeddings(
+                manifest, FakeBackbone(dim=8), out, data_root=tmp_path, batch_size=2, shard_size=2
+            )
+
+
+class TestDecodeWorkers:
+    def test_bad_decode_workers_raises(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="decode_workers"):
+            extract_embeddings(
+                _make_dataset(tmp_path, n=1),
+                FakeBackbone(dim=8),
+                tmp_path / "emb",
+                data_root=tmp_path,
+                decode_workers=0,
+            )
+
+    def test_thread_count_does_not_change_the_store(self, tmp_path: Path):
+        manifest = _make_dataset(tmp_path, n=6)
+        serial = tmp_path / "serial"
+        threaded = tmp_path / "threaded"
+        for out, workers in ((serial, 1), (threaded, 4)):
+            extract_embeddings(
+                manifest,
+                FakeBackbone(dim=8),
+                out,
+                data_root=tmp_path,
+                batch_size=4,
+                shard_size=4,
+                decode_workers=workers,
+            )
+        left = read_index(serial)
+        right = read_index(threaded)
+        assert left is not None
+        assert right is not None
+        pd.testing.assert_frame_equal(left, right)
+        for shard in (0, 1):
+            assert (
+                shard_path(serial, shard).read_bytes() == shard_path(threaded, shard).read_bytes()
+            )
+
+
 class TestDryRun:
     def test_dry_run_writes_nothing(self, tmp_path: Path):
         manifest = _make_dataset(tmp_path, n=4)
@@ -329,6 +492,29 @@ class TestDryRun:
         assert summary["dry_run"] is True
         assert summary["encoded"] == 0
         assert not out.exists(), "dry-run must not create the output directory"
+
+    def test_no_resume_dry_run_destroys_nothing(self, tmp_path: Path):
+        """--no-resume drops the stale index, but only once it is really writing."""
+        manifest = _make_dataset(tmp_path, n=4)
+        out = tmp_path / "emb"
+        extract_embeddings(
+            manifest, FakeBackbone(dim=8), out, data_root=tmp_path, batch_size=2, shard_size=2
+        )
+        leftover = out / "index.part-00007.parquet"
+        leftover.write_bytes((out / "index.parquet").read_bytes())
+        before = {p.name: p.read_bytes() for p in sorted(out.iterdir())}
+
+        extract_embeddings(
+            manifest,
+            FakeBackbone(dim=8),
+            out,
+            data_root=tmp_path,
+            batch_size=2,
+            shard_size=2,
+            resume=False,
+            dry_run=True,
+        )
+        assert {p.name: p.read_bytes() for p in sorted(out.iterdir())} == before
 
 
 class TestValidation:

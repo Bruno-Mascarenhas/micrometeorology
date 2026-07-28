@@ -217,6 +217,19 @@ Crash safety: the fitted preprocessing pipeline is written right after fitting
 and the trained model right after `fit()` returns — before prediction and
 evaluation run — so a crash in a later stage never loses hours of training.
 
+`metrics/training_history.csv` is indexed by the **absolute 1-based epoch**, so a
+resumed run's rows continue the numbering of the run they continue (epochs 41-60,
+not 1-20 again) and a `--resume` run merges its rows with the ones already on
+disk instead of replacing them — the file always covers the whole training curve.
+When two runs report the same epoch, the newer rows win.
+
+Resuming also re-checks the preprocessing: the transform every checkpoint was
+trained under is fingerprinted into the checkpoint, and a `--resume` whose
+refitted scaler no longer matches is refused (`--allow-preprocessing-change`
+downgrades it to a warning). The Python/numpy/torch RNG state is checkpointed
+too, so a resumed run continues the random stream rather than replaying the
+first epochs' shuffle order.
+
 ---
 
 ## Using Each Model

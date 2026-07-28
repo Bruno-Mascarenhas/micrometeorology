@@ -7,7 +7,9 @@ config (or no config at all) is rejected with a clear pointer to the experiment
 configs.
 
 torch is imported lazily inside the run helper so ``allsky --help`` stays light
-and torch-free.
+and torch-free; :func:`micrometeorology.common.optional.require` guards that
+boundary so a core-only install gets the extra's install command instead of a
+bare ``ModuleNotFoundError``.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from typing import Annotated
 import typer
 
 from allsky.config import is_experiment_config, load_experiment_config
+from micrometeorology.common.optional import require
 
 ConfigOption = Annotated[
     Path | None,
@@ -63,12 +66,24 @@ def train(
         bool | None,
         typer.Option("--amp/--no-amp", help="Override mixed precision."),
     ] = None,
+    trust_checkpoint: Annotated[
+        bool,
+        typer.Option(
+            "--trust-checkpoint/--no-trust-checkpoint",
+            help=(
+                "Read the --resume checkpoint with the unrestricted unpickler. Only for "
+                "a file you produced yourself: the default restricted reader refuses a "
+                "payload carrying unexpected Python objects instead of executing it."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Run a multimodal training experiment from an experiment: true config.
 
     ``--resume`` accepts ``auto`` (find ``last.ckpt`` in the run dir) or a path;
     ``--data-root`` / ``--amp`` / the override flags apply to the resolved
-    experiment config.
+    experiment config. A resumed checkpoint is read under torch's restricted
+    unpickler unless ``--trust-checkpoint`` is passed.
     """
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
@@ -98,6 +113,7 @@ def train(
             )
         resume_arg = resume
 
+    require("torch", "allsky")
     from allsky.training import run_experiment  # lazy: pulls torch at run time
 
     summary = run_experiment(
@@ -107,6 +123,7 @@ def train(
         device=str(device) if device is not None else None,
         amp=amp,
         resume=resume_arg,
+        trust_checkpoint=trust_checkpoint,
     )
     typer.echo(json.dumps(summary, indent=2, default=str))
 

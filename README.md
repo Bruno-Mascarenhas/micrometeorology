@@ -175,7 +175,7 @@ Full documentation: [`docs/allsky.md`](docs/allsky.md); the internal design is i
 ### 3. Sensor Data Processing & Calibration
 
 ```bash
-labmim-sensor-process --input data/raw/ --output data/hourly/
+labmim-sensor-process --input data/raw/ --output data/hourly/sensor_data.csv
 
 # Nine fixed-name monitoring-page PNGs from the hourly CSV (site-labmim consumer)
 labmim-site-graphs site -i data/hourly/sensor_data.csv -o ../site-labmim/site/assets/graphs

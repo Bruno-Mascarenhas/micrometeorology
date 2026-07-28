@@ -32,6 +32,7 @@ from typing import Annotated
 
 import typer
 
+from micrometeorology.common.cli_options import parse_csv, parse_int_csv
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.wrf.batch import FigureTask, _max_tasks_per_child, default_workers
 
@@ -52,30 +53,6 @@ DEFAULT_VARS = [
     "GLW",
     "wind_power_density_10m",
 ]
-
-
-def _parse_int_csv(raw: str | list[str] | None) -> tuple[int, ...]:
-    """Parse comma-separated or repeated integers."""
-    if not raw:
-        return ()
-    if isinstance(raw, str):
-        raw = [raw]
-    res: list[int] = []
-    for item in raw:
-        res.extend(int(x.strip()) for x in item.split(",") if x.strip())
-    return tuple(res)
-
-
-def _parse_csv(raw: str | list[str] | None) -> tuple[str, ...]:
-    """Parse comma-separated or repeated strings."""
-    if not raw:
-        return ()
-    if isinstance(raw, str):
-        raw = [raw]
-    res: list[str] = []
-    for item in raw:
-        res.extend(x.strip() for x in item.split(",") if x.strip())
-    return tuple(res)
 
 
 @app.command()
@@ -117,6 +94,7 @@ def run(
 ) -> None:
     """Run WRF processing locally: figures + GeoJSON + WebM."""
     setup_logging(log_level)
+    from micrometeorology.cli.export_wrf_geojson import _reject_output_id_variables
     from micrometeorology.cli.render_wrf_maps import _resolve_wrfout_paths
     from micrometeorology.wrf import reader as wrf_reader
 
@@ -130,8 +108,12 @@ def run(
     if resolved_workers < 1:
         raise typer.BadParameter("--workers must be >= 1")
 
-    var_list = list(_parse_csv(variables)) if variables else DEFAULT_VARS
-    paths = _resolve_wrfout_paths(wrf_dir, date, _parse_int_csv(domains), dataset)
+    var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
+    # An output file id (-v TSK) reaches the raw-NetCDF passthrough in BOTH
+    # phases and publishes unconverted Kelvin into the PNGs and JSONs that
+    # skin_temperature owns. Refuse before a single frame is rendered.
+    _reject_output_id_variables(var_list)
+    paths = _resolve_wrfout_paths(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")
         return
@@ -145,10 +127,18 @@ def run(
     typer.echo(f"  Workers: {resolved_workers}")
 
     # Phase 1: Figures
+    failed_figures = 0
     if not no_figures:
         typer.echo("\n── Phase 1: Figure Generation ──")
         from micrometeorology.cli.render_wrf_maps import _build_tasks_for_domain
+        from micrometeorology.cli.render_wrf_maps import (
+            _normalize_var_list as _collapse_poteolico_heights,
+        )
         from micrometeorology.wrf.batch import run_figure_tasks
+
+        # The figure renderer has no per-height poteolico arm, so heights collapse
+        # here only. Phase 2 must keep them: they select which JSON files exist.
+        figure_var_list = _collapse_poteolico_heights(var_list)
 
         # One process pool is hoisted over the figure stage so each 16-task
         # batch reuses warm workers instead of paying pool spawn overhead.
@@ -164,6 +154,7 @@ def run(
         with figure_pool_ctx as figure_pool:
 
             def render_task_batch(tasks: list[FigureTask], label: str) -> None:
+                nonlocal failed_figures
                 rendered = run_figure_tasks(
                     tasks,
                     resolved_workers,
@@ -171,7 +162,8 @@ def run(
                     executor=figure_pool,
                 )
                 png_paths.extend(rendered)
-                typer.echo(f"    -> {len(rendered)} figures generated for {label}")
+                failed_figures += len(tasks) - len(rendered)
+                typer.echo(f"    -> {len(rendered)}/{len(tasks)} figures generated for {label}")
 
             for wrf_path in paths:
                 typer.echo(f"  Loading {wrf_path.name}...")
@@ -179,7 +171,7 @@ def run(
                 with wrf_reader.WRFDataset(wrf_path) as ds:
                     _build_tasks_for_domain(
                         ds,
-                        var_list,
+                        figure_var_list,
                         str(figures_dir),
                         shapes_dir,
                         skip_first,
@@ -197,7 +189,12 @@ def run(
         from micrometeorology.wrf import jobs
 
         json_var_list = _normalize_var_list(var_list)
-        units = jobs.build_units(paths, json_var_list, json_dir, geojson_dir, skip_first)
+        try:
+            units = jobs.build_units(paths, json_var_list, json_dir, geojson_dir, skip_first)
+        except ValueError as invalid_selection:
+            # A selection covering one domain twice is an operator mistake about
+            # -d/-D/-o, so it reads as a usage error rather than a traceback.
+            raise typer.BadParameter(str(invalid_selection)) from invalid_selection
         results = jobs.execute_units(units, resolved_workers, echo=typer.echo)
 
         for result in results:
@@ -218,6 +215,7 @@ def run(
             raise typer.Exit(code=1)
 
     # Phase 3: WebM Videos
+    failed_videos = 0
     if also_video and png_paths:
         typer.echo("\n── Phase 3: WebM Video Generation ──")
         from micrometeorology.wrf.animation import batch_create_webm
@@ -232,6 +230,7 @@ def run(
                 grouped[stem].append(p)
 
         webm_paths = batch_create_webm(grouped, str(video_dir), fps=2, workers=resolved_workers)
+        failed_videos = len(grouped) - len(webm_paths)
         typer.echo(f"  ✓ {len(webm_paths)} videos generated")
 
     elapsed = time.perf_counter() - t0
@@ -239,6 +238,12 @@ def run(
     typer.echo(f"  ✓ Complete in {elapsed:.1f}s")
     typer.echo(f"  Output: {base_out.resolve()}")
     typer.echo("=" * 70)
+
+    # Deferred past Phase 2/3 on purpose: dropped frames must not cost the run
+    # its front-end JSON/GeoJSON, but they must still be a non-zero exit.
+    if failed_figures or failed_videos:
+        typer.echo(f"  ✗ {failed_figures} figures and {failed_videos} videos failed (see log)")
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

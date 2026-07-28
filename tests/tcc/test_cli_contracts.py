@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import json
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -19,6 +22,23 @@ def scratch_config(tmp_path: Path) -> Path:
     return tmp_path / "cli_contract.yaml"
 
 
+@pytest.fixture(autouse=True)
+def isolated_root_logger() -> Iterator[logging.Logger]:
+    """Yield the root logger, restoring it after a command reconfigures it.
+
+    ``solrad-run`` calls ``setup_logging``, which replaces the root handlers
+    with ``force=True``; restoring them keeps that out of unrelated tests.
+    """
+    root = logging.getLogger()
+    saved_level = root.level
+    saved_handlers = root.handlers[:]
+    try:
+        yield root
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+
+
 def test_cli_validate_print_and_dry_run_config_modes(scratch_config: Path) -> None:
     scratch_config.write_text(yaml.safe_dump({"name": "cli_contract"}), encoding="utf-8")
     runner = CliRunner()
@@ -33,6 +53,41 @@ def test_cli_validate_print_and_dry_run_config_modes(scratch_config: Path) -> No
     assert '"name": "cli_contract"' in printed.output
     assert dry_run.exit_code == 0, dry_run.output
     assert "Dry run" in dry_run.output
+
+
+def test_cli_configures_logging_so_info_diagnostics_are_emitted(
+    scratch_config: Path, isolated_root_logger: logging.Logger
+) -> None:
+    """solrad-run must configure logging; otherwise every INFO diagnostic is discarded."""
+    scratch_config.write_text(yaml.safe_dump({"name": "cli_logging"}), encoding="utf-8")
+    runner = CliRunner()
+    root = isolated_root_logger
+
+    root.setLevel(logging.WARNING)
+    default_level = runner.invoke(
+        solrad_app, ["--config", str(scratch_config), "--validate-config"]
+    )
+    assert default_level.exit_code == 0, default_level.output
+    assert root.level == logging.INFO
+    assert root.handlers
+
+    root.setLevel(logging.WARNING)
+    debug_level = runner.invoke(
+        solrad_app,
+        ["--config", str(scratch_config), "--validate-config", "--log-level", "DEBUG"],
+    )
+    assert debug_level.exit_code == 0, debug_level.output
+    assert root.level == logging.DEBUG
+
+
+def test_cli_print_config_stdout_stays_parseable_json(scratch_config: Path) -> None:
+    """External cron pipes --print-config into a JSON reader; log records must not pollute it."""
+    scratch_config.write_text(yaml.safe_dump({"name": "cli_json"}), encoding="utf-8")
+
+    result = CliRunner().invoke(solrad_app, ["--config", str(scratch_config), "--print-config"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["name"] == "cli_json"
 
 
 def test_cli_invalid_config_reports_error(scratch_config: Path) -> None:

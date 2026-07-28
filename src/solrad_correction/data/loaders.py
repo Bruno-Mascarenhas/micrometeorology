@@ -8,6 +8,7 @@ caching for CSV inputs.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -71,9 +72,11 @@ def load_table(
     limit_rows:
         Optional positive row cap applied during read when supported.
     cache_dir:
-        When set and the source is CSV, a Parquet cache is written to this
-        directory on first load.  Subsequent loads read the cache if it is
-        newer than the source file.
+        Parquet cache directory for CSV sources.  The cache holds the whole
+        table, so it is written only by a read that projects no ``columns`` and
+        sets no ``limit_rows``; a partial read is never cached, because a later
+        wider read could not be served from it.  Subsequent loads read the cache
+        if it is newer than the source file.
     """
     if limit_rows is not None and limit_rows <= 0:
         raise ValueError("limit_rows must be positive when set")
@@ -115,6 +118,12 @@ def load_table(
         if cache_dir is not None and limit_rows is None and not projected:
             cache_path = _resolve_cache_path(p, cache_dir)
             _write_cache(df, cache_path)
+        elif cache_dir is not None:
+            logger.info(
+                "No Parquet cache written for %s: the cache holds the whole table, so it is "
+                "populated only by a read with no column projection and no row limit",
+                p,
+            )
     else:
         df = _read_parquet_table(
             p,
@@ -133,9 +142,16 @@ def load_table(
 
 
 def _resolve_cache_path(source: Path, cache_dir: str | Path) -> Path:
-    """Derive the Parquet cache path for a CSV source."""
-    cd = Path(cache_dir)
-    return cd / (source.stem + ".parquet")
+    """Derive the Parquet cache path for a CSV source.
+
+    The digest of the resolved source path is part of the file name so two
+    same-named sources in different directories can never share a cache entry
+    — a stem-only key silently served one archive's data for the other's.
+    Resolving first keeps every spelling (relative, symlinked) of one file on a
+    single entry.
+    """
+    digest = hashlib.sha256(str(source.resolve()).encode("utf-8")).hexdigest()[:16]
+    return Path(cache_dir) / f"{source.stem}-{digest}.parquet"
 
 
 def _is_cache_fresh(source: Path, cache: Path) -> bool:
@@ -334,7 +350,7 @@ def load_sensor_raw(
     if not files:
         raise FileNotFoundError(f"No files matching '{pattern}' in {data_dir}")
 
-    df = merge_dat_files(files)  # type: ignore
+    df = merge_dat_files(files)
 
     if calibrations_path and Path(calibrations_path).exists():
         from micrometeorology.sensors.calibration import (

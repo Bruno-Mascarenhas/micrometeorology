@@ -22,10 +22,14 @@ Guarantees
   and the meta sidecar are each written to a temp file and ``os.replace``-d into
   place.  A part is written only *after* its shard lands, so a crash never leaves
   a part referencing a missing shard; a crash before consolidation is recovered
-  on the next resume by reading consolidated + parts.
+  on the next resume by reading consolidated + parts.  The meta sidecar is
+  written *before* the first shard (and a non-resume run drops the index it is
+  about to invalidate before that), so every store on disk is self-describing
+  and no crash state can be resumed into with a different backbone.
 - **Single-process** — the backbone (and any model download) is created once by
   the caller; this loop never forks workers, so a hub model is fetched at most
-  once.
+  once.  Only the per-batch JPEG decode is threaded (``decode_workers``), which
+  touches no model state.
 
 ``torch`` is only reached transitively through ``backbone.encode``; importing
 this module never pulls it.
@@ -35,15 +39,18 @@ from __future__ import annotations
 
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from allsky.atomic import atomic_write
 from allsky.data.contracts import resolve
 from allsky.embeddings.backbone import VisualBackbone
 from allsky.embeddings.storage import (
+    INDEX_FILENAME,
     META_FILENAME,
     read_index,
     read_meta,
@@ -67,13 +74,16 @@ def _index_part_path(out: Path, shard_index: int) -> Path:
 
 
 def _load_uint8(path: Path) -> np.ndarray:
-    """Load an image as a ``uint8`` HWC RGB array (grayscale -> 3-channel)."""
-    import imageio.v3 as iio
+    """Load an image as a ``uint8`` HWC RGB array (grayscale -> 3-channel).
 
-    image = np.asarray(iio.imread(path))
-    if image.ndim == 2:  # pragma: no cover - grayscale safety net
-        image = np.stack([image] * 3, axis=-1)
-    return image.astype(np.uint8, copy=False)
+    Decoding straight with PIL is byte-identical to reading through imageio
+    (which decodes with PIL anyway) and skips its per-call plugin dispatch, so
+    previously extracted stores stay valid.
+    """
+    from PIL import Image
+
+    with Image.open(path) as handle:
+        return np.asarray(handle.convert("RGB"), dtype=np.uint8)
 
 
 def _encode_batch(backbone: VisualBackbone, images: list[np.ndarray]) -> np.ndarray:
@@ -97,6 +107,7 @@ def extract_embeddings(
     resume: bool = True,
     dry_run: bool = False,
     config_sha256: str | None = None,
+    decode_workers: int = 4,
 ) -> dict[str, Any]:
     """Extract visual embeddings for every manifest sample into sharded storage.
 
@@ -127,6 +138,10 @@ def extract_embeddings(
         shards, index or meta are created).
     config_sha256:
         Optional content hash of the embeddings config, stored in the meta.
+    decode_workers:
+        Threads used to decode each batch's JPEGs (>= 1, capped at the CPU
+        count).  Decode order — and therefore every shard, row and index entry —
+        is unchanged; only the wall clock of the decode step moves.
 
     Returns
     -------
@@ -139,6 +154,8 @@ def extract_embeddings(
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     if shard_size < 1:
         raise ValueError(f"shard_size must be >= 1, got {shard_size}")
+    if decode_workers < 1:
+        raise ValueError(f"decode_workers must be >= 1, got {decode_workers}")
     for column in ("sample_id", "image_path"):
         if column not in manifest_df.columns:
             raise ValueError(f"manifest is missing required column {column!r}")
@@ -146,6 +163,7 @@ def extract_embeddings(
     out = Path(out_dir)
     pooling = getattr(backbone, "pooling", "n/a")
     dtype = "fp16"  # storage dtype (safetensors shards are always fp16)
+    decode_threads = min(decode_workers, os.cpu_count() or 1)
 
     # Resume must not silently mix incompatible embeddings into one store: if a
     # prior meta exists, the incoming backbone/config must match it exactly.
@@ -153,14 +171,10 @@ def extract_embeddings(
         _check_resume_compatible(out, backbone, pooling, config_sha256)
 
     # Resume bookkeeping: the index (consolidated + any un-consolidated parts from
-    # an interrupted run) is the source of truth for done work.
-    if resume:
-        existing_index = _read_index_and_parts(out)
-    else:
-        # A non-resume run overwrites: drop any stale parts up front so a crash
-        # cannot leave a mix of this run's and the old run's parts.
-        _remove_index_parts(out)
-        existing_index = None
+    # an interrupted run) is the source of truth for done work.  A non-resume run
+    # ignores it; its stale index/parts are dropped below, after the dry-run and
+    # nothing-to-do early returns and before any shard is written.
+    existing_index = _read_index_and_parts(out) if resume else None
     done_ids: set[str] = set()
     next_shard = 0
     prior_rows = 0
@@ -221,6 +235,19 @@ def extract_embeddings(
         return summary
 
     out.mkdir(parents=True, exist_ok=True)
+    if not resume:
+        # index.parquet describes the shard bytes this run is about to overwrite
+        # from shard 0 onward, so it goes before the first flush: a crash then
+        # leaves an index-less store that fails loudly, instead of an index that
+        # silently maps sample_ids onto other samples' rows.
+        _remove_index_parts(out)
+        (out / INDEX_FILENAME).unlink(missing_ok=True)
+    # Provenance before the first shard, not only at completion: any store with a
+    # shard on disk is then self-describing, so a later resume cannot slip past
+    # _check_resume_compatible (which short-circuits on a missing meta) and append
+    # a different backbone's vectors onto these shards.  The final _write_meta
+    # only corrects ``count``.
+    _write_meta(out, backbone, pooling, dtype, config_sha256, prior_rows)
 
     buffer: np.ndarray | None = None
     buffer_ids: list[str] = []
@@ -251,19 +278,32 @@ def extract_embeddings(
             buffer = remainder if len(remainder) > 0 else None
             buffer_ids = buffer_ids[take:]
 
-    for start in range(0, len(samples), batch_size):
-        batch = samples[start : start + batch_size]
-        images = [_load_uint8(resolve(path, data_root)) for _, path in batch]
-        vectors = _encode_batch(backbone, images)
-        if vectors.shape[1] != backbone.dim:
-            raise ValueError(
-                f"backbone {backbone.name!r} produced dim {vectors.shape[1]}, "
-                f"expected {backbone.dim}"
+    # Pillow releases the GIL while decoding, so a small thread pool overlaps the
+    # batch's JPEG decodes.  One pool for the whole run and one batch in flight:
+    # ``Executor.map`` returns results in submission order, so shard/row assignment
+    # (and therefore the index) is exactly as it is single-threaded.
+    from PIL import Image
+
+    Image.preinit()  # register the JPEG plugin here, not in N threads at once
+    with ThreadPoolExecutor(max_workers=decode_threads) as decode_pool:
+        for start in range(0, len(samples), batch_size):
+            batch = samples[start : start + batch_size]
+            images = list(
+                decode_pool.map(
+                    lambda path: _load_uint8(resolve(path, data_root)),
+                    [path for _, path in batch],
+                )
             )
-        buffer = vectors if buffer is None else np.vstack([buffer, vectors])
-        buffer_ids.extend(sid for sid, _ in batch)
-        encoded += len(batch)
-        flush(final=False)
+            vectors = _encode_batch(backbone, images)
+            if vectors.shape[1] != backbone.dim:
+                raise ValueError(
+                    f"backbone {backbone.name!r} produced dim {vectors.shape[1]}, "
+                    f"expected {backbone.dim}"
+                )
+            buffer = vectors if buffer is None else np.vstack([buffer, vectors])
+            buffer_ids.extend(sid for sid, _ in batch)
+            encoded += len(batch)
+            flush(final=False)
 
     flush(final=True)
     # Consolidate all parts (+ prior rows) into a single index.parquet atomically,
@@ -297,14 +337,27 @@ def _check_resume_compatible(
     embeddings from two different encoders into one index, so this raises a clear
     :class:`RuntimeError` instead.
 
+    An indexed store with **no** provenance at all is refused too: it can only
+    come from a version that wrote the meta at completion, so there is nothing to
+    check the incoming backbone against.
+
     Raises
     ------
     RuntimeError
         If any of ``backbone``/``revision``/``pooling``/``dim``/``config_sha256``
-        in the existing meta differs from the incoming values.
+        in the existing meta differs from the incoming values, or the store has an
+        index but no ``embeddings.meta.json``.
     """
     if not (out / META_FILENAME).exists():
-        return
+        if read_index(out) is None and not _index_parts(out):
+            return
+        raise RuntimeError(
+            f"cannot resume embedding extraction into {out}: it has an embedding "
+            f"index but no {META_FILENAME} (an extraction interrupted by an older "
+            f"version), so the backbone/pooling/dtype that produced those shards is "
+            f"unknown. Drop in a matching {META_FILENAME}, or rerun with --no-resume "
+            f"(resume=False) to re-extract from scratch."
+        )
     prior = read_meta(out)
     incoming = {
         "backbone": backbone.name,
@@ -337,17 +390,7 @@ def _index_frame(index_rows: list[dict[str, Any]]) -> pd.DataFrame:
 def _write_index_part(out: Path, shard_index: int, part_rows: list[dict[str, Any]]) -> None:
     """Atomically write a per-shard index part (only *shard_index*'s rows)."""
     frame = _index_frame(part_rows)
-    tmp = _index_part_path(out, shard_index).with_name(
-        f".index.part-{shard_index:05d}.parquet.tmp-{os.getpid()}"
-    )
-    ok = False
-    try:
-        frame.to_parquet(tmp, index=False)
-        os.replace(tmp, _index_part_path(out, shard_index))
-        ok = True
-    finally:
-        if not ok:
-            tmp.unlink(missing_ok=True)
+    atomic_write(_index_part_path(out, shard_index), lambda tmp: frame.to_parquet(tmp, index=False))
 
 
 def _index_parts(out: Path) -> list[Path]:

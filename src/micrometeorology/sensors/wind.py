@@ -42,17 +42,24 @@ def wind_components(
 def wind_direction_from_components(u: NDArray | float, v: NDArray | float) -> NDArray | float:
     """Compute wind direction element-wise from U/V components.
 
-    Returns the direction in degrees [0, 360).
+    Returns the direction in degrees [0, 360), or ``NaN`` where the resultant
+    vector has zero length.  A zero-length resultant carries no directional
+    information: ``arctan2(0, 0)`` is 0, which would otherwise publish a
+    confident 270° (or 90°, depending on the operands' sign bits) for a calm
+    window or a stalled anemometer.
     """
     alpha = np.arctan2(v, u)
     direction = np.fmod(3.0 * (np.pi / 2.0) - alpha, 2.0 * np.pi) * (180.0 / np.pi)
-    return direction % 360.0
+    resultant_magnitude = np.hypot(u, v)
+    return np.where(resultant_magnitude == 0.0, np.nan, direction % 360.0)
 
 
 def vector_mean_direction(u: NDArray, v: NDArray) -> float:
     """Compute mean wind direction from U/V component arrays.
 
-    Returns the direction in degrees [0, 360).
+    Returns the direction in degrees [0, 360), or ``NaN`` when the mean
+    components cancel to a zero-length resultant (see
+    :func:`wind_direction_from_components`).
     """
     u_mean = float(np.nanmean(u))
     v_mean = float(np.nanmean(v))

@@ -1,12 +1,13 @@
 """Torch-gated tests for allsky.training.checkpointing.
 
 Covers payload completeness against the executor spec, atomic-write safety on an
-injected failure, a full state round-trip and the ``_orig_mod.`` compile-prefix
-strip on load.
+injected failure, a full state round-trip, the ``_orig_mod.`` compile-prefix
+strip on load and the restricted unpickler that refuses a poisoned checkpoint.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,16 @@ from allsky.training.checkpointing import (  # noqa: E402
     restore_rng_state,
     save_checkpoint,
 )
+
+
+class OperatorObject:
+    """A benign non-tensor object outside the load allowlist (pickles by class ref)."""
+
+    def __init__(self, note: str) -> None:
+        self.note = note
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, OperatorObject) and other.note == self.note
 
 
 def _tiny_state() -> tuple[nn.Module, Any, Any]:
@@ -172,6 +183,59 @@ class TestRoundTrip:
         assert all(not k.startswith("_orig_mod.") for k in ckpt["model_state"])
         # And it loads back into a plain module.
         nn.Linear(3, 2).load_state_dict(ckpt["model_state"])
+
+
+class TestRestrictedUnpickler:
+    """Checkpoints round-trip through Colab/Drive, so loading must not execute code."""
+
+    @staticmethod
+    def _poisoned(path: Path, marker: Path) -> None:
+        """Write a shape-identical checkpoint whose ``config`` runs a command on unpickle."""
+
+        class Payload:
+            def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+                return (os.system, (f"touch {marker}",))
+
+        torch.save(
+            {
+                "model_state": {"weight": torch.zeros(2, 3), "bias": torch.zeros(2)},
+                "config": Payload(),
+                "feature_columns": ["a", "b", "c"],
+                "epoch": 3,
+            },
+            path,
+        )
+
+    def test_poisoned_checkpoint_is_refused_without_executing(self, tmp_path: Path):
+        marker = tmp_path / "PWNED.txt"
+        path = tmp_path / "poisoned.ckpt"
+        self._poisoned(path, marker)
+
+        with pytest.raises(ValueError, match="outside the checkpoint allowlist"):
+            load_checkpoint(path)
+        assert not marker.exists(), "the poisoned payload executed during load"
+
+    def test_trust_pickle_reaches_the_unrestricted_reader(self, tmp_path: Path):
+        # The escape hatch must still exist for a payload the operator produced
+        # themselves — proven here on a plain object the allowlist does not cover.
+        path = tmp_path / "custom.ckpt"
+        payload = OperatorObject("hand-rolled")
+        torch.save({"model_state": {"w": torch.zeros(1)}, "config": payload}, path)
+
+        with pytest.raises(ValueError, match="trust_pickle=True"):
+            load_checkpoint(path)
+        assert load_checkpoint(path, trust_pickle=True)["config"] == payload
+
+    def test_real_payload_loads_under_the_allowlist(self, tmp_path: Path):
+        # The restricted reader must still accept everything save_checkpoint writes,
+        # including the numpy MT19937 array inside rng_state.
+        model, optimizer, scheduler = _tiny_state()
+        _save(tmp_path / "last.ckpt", model, optimizer, scheduler, epochs_no_improve=2)
+        ckpt = load_checkpoint(tmp_path / "last.ckpt")
+
+        restore_rng_state(ckpt["rng_state"])
+        assert ckpt["epoch"] == 2
+        assert ckpt["rng_state"]["numpy"][0] == "MT19937"
 
 
 class TestRngState:

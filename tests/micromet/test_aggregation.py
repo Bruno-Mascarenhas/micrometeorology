@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
+from micrometeorology.common.config import Settings, get_settings
 from micrometeorology.sensors.aggregation import aggregate_to_hourly
 
 
@@ -85,3 +89,127 @@ class TestAggregateToHourly:
         dir1 = result["WD_WXT"].iloc[0]
         dir2 = result["WD_WXT"].iloc[1]
         assert abs(dir1 - dir2) > 1.0, f"Hours 1 and 2 identical: {dir1} == {dir2}"
+
+        # The vector mean must not coincide with the arithmetic mean
+        arithmetic = sample_5min_data["WD_WXT"][:12].mean()
+        assert dir1 != pytest.approx(arithmetic, abs=1.0)
+
+    def test_wind_direction_wraps_around_north(self):
+        """350° and 10° in the same hour average to 0°, not to the arithmetic 180°."""
+        idx = pd.date_range("2024-01-01 00:00", periods=12, freq="5min")
+        df = pd.DataFrame({"WD_WXT": [350.0, 10.0] * 6, "WS_WXT": [3.0] * 12}, index=idx)
+        result = aggregate_to_hourly(
+            df,
+            min_samples=6,
+            wind_dir_columns=["WD_WXT"],
+            wind_speed_column_map={"WD_WXT": "WS_WXT"},
+        )
+        d = float(result["WD_WXT"].iloc[0])
+        assert d < 1.0 or d > 359.0, d
+
+    def test_speed_weighted_mean_differs_from_unit_speed(self):
+        """The mapped speed column weights the components; without it speeds are unit."""
+        idx = pd.date_range("2024-01-01 00:00", periods=12, freq="5min")
+        df = pd.DataFrame({"WD_WXT": [90.0, 180.0] * 6, "WS_WXT": [10.0, 1.0] * 6}, index=idx)
+        weighted = aggregate_to_hourly(
+            df,
+            min_samples=6,
+            wind_dir_columns=["WD_WXT"],
+            wind_speed_column_map={"WD_WXT": "WS_WXT"},
+        )
+        unit = aggregate_to_hourly(df, min_samples=6, wind_dir_columns=["WD_WXT"])
+        # The 10 m/s easterly dominates the 1 m/s southerly
+        assert weighted["WD_WXT"].iloc[0] == pytest.approx(95.71, abs=0.5)
+        # Unit speeds give the plain bisector of 090 and 180
+        assert unit["WD_WXT"].iloc[0] == pytest.approx(135.0, abs=0.5)
+
+    def test_unit_speed_fallback_when_mapped_speed_column_is_absent(self):
+        idx = pd.date_range("2024-01-01 00:00", periods=12, freq="5min")
+        df = pd.DataFrame({"WD_WXT": [90.0, 180.0] * 6, "WS_WXT": [10.0, 1.0] * 6}, index=idx)
+        result = aggregate_to_hourly(
+            df,
+            min_samples=6,
+            wind_dir_columns=["WD_WXT"],
+            wind_speed_column_map={"WD_WXT": "MISSING"},
+        )
+        assert result["WD_WXT"].iloc[0] == pytest.approx(135.0, abs=0.5)
+
+
+@pytest.fixture
+def settings_without_ambient_overrides(monkeypatch: pytest.MonkeyPatch) -> Iterator[Settings]:
+    """``get_settings()`` free of ambient ``LABMIM_*`` and of the process-wide cache."""
+    monkeypatch.delenv("LABMIM_ENV", raising=False)
+    monkeypatch.delenv("LABMIM_CONFIG_PATH", raising=False)
+    for field_name in Settings.model_fields:
+        monkeypatch.delenv(f"LABMIM_{field_name.upper()}", raising=False)
+    get_settings.cache_clear()
+    yield get_settings()
+    get_settings.cache_clear()
+
+
+class TestShippedConfigDrivesSpecialAggregation:
+    """The sum / wind-direction rules only apply if the shipped YAML is findable.
+
+    ``configs_dir`` is the directory the sensor pipeline resolves its
+    configuration from, and every reader of it is guarded by an
+    ``if ...exists()``.  When it names a directory without ``default.yaml``
+    those guards fall through silently and both rule lists come back empty, so
+    every column is arithmetically meaned: an hour of rain tips is reported as
+    its per-sample average, and a bearing straddling north is reported as the
+    opposite bearing.
+    """
+
+    def _rules_from_the_resolved_configs_dir(
+        self, settings: Settings
+    ) -> tuple[list[str], list[str]]:
+        """Resolve the sum / wind-direction columns through ``configs_dir``.
+
+        Missing file means "no special aggregation", which is exactly how the
+        pipeline treats it, so a wrong ``configs_dir`` surfaces here as wrong
+        physics rather than as an ``OSError``.
+        """
+        config_file = settings.configs_dir / "default.yaml"
+        if not config_file.exists():
+            return [], []
+        with open(config_file, encoding="utf-8") as fh:
+            config = yaml.safe_load(fh) or {}
+        return config.get("sensor_sum_columns", []), config.get("sensor_wind_dir_columns", [])
+
+    def test_hourly_rain_is_the_total_and_wind_direction_is_the_vector_mean(
+        self, settings_without_ambient_overrides: Settings
+    ) -> None:
+        """Twelve 0.5 mm tips are 6 mm of rain, and 350/010 averages to north."""
+        sum_columns, wind_dir_columns = self._rules_from_the_resolved_configs_dir(
+            settings_without_ambient_overrides
+        )
+        idx = pd.date_range("2024-01-01 00:00", periods=12, freq="5min")
+        df = pd.DataFrame(
+            {
+                "precip": [0.5] * 12,
+                "WD_WXT": [350.0, 10.0] * 6,
+                "WS_WXT": [3.0] * 12,
+            },
+            index=idx,
+        )
+
+        result = aggregate_to_hourly(
+            df,
+            min_samples=6,
+            sum_columns=sum_columns,
+            wind_dir_columns=wind_dir_columns,
+            wind_speed_column_map={"WD_WXT": "WS_WXT"},
+        )
+
+        assert result["precip"].iloc[0] == pytest.approx(6.0), "rain was meaned, not summed"
+        direction = float(result["WD_WXT"].iloc[0])
+        assert direction < 1.0 or direction > 359.0, f"scalar-meaned bearing {direction}"
+
+    def test_the_resolved_configs_dir_agrees_with_the_settings_fields(
+        self, settings_without_ambient_overrides: Settings
+    ) -> None:
+        """Both routes to the rules must name the same columns, forever."""
+        settings = settings_without_ambient_overrides
+        sum_columns, wind_dir_columns = self._rules_from_the_resolved_configs_dir(settings)
+
+        assert sum_columns == settings.sensor_sum_columns
+        assert wind_dir_columns == settings.sensor_wind_dir_columns

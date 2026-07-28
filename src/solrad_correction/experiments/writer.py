@@ -37,16 +37,51 @@ class ExperimentWriter:
         result: ExperimentResult,
         profile: PipelineProfile,
     ) -> None:
-        """Write the full v2 artifact set and final manifest."""
-        self.prepare()
-        self.write_config(config)
-        self.write_preprocessing(result.processed.pipeline)
-        self.write_datasets(result)
-        self.write_model(config, result.model)
-        self.write_report(result.report)
-        self.write_predictions(result)
+        """Write the run-final artifacts and the manifest.
+
+        The fitted preprocessing and the trained model are written by their own
+        pipeline stages as soon as they exist, so this finalizer requires them
+        already on disk instead of writing the identical bytes a second time.
+
+        The artifact writes are timed as the ``write_experiment_results`` stage
+        and the stage closes before ``profile.json`` is serialized, so the
+        profile reports its own artifact-writing cost.
+        """
+        self._require_persisted_stages(config)
+        with profile.stage("write_experiment_results"):
+            self.prepare()
+            self.write_config(config)
+            self.write_datasets(result)
+            self.write_report(result.report, merge_existing=bool(config.runtime.resume))
+            self.write_predictions(result)
         self.write_profile(config, profile)
         self.write_manifest(config)
+
+    def _require_persisted_stages(self, config: ExperimentConfig) -> None:
+        """Fail loudly when preprocessing or the model was never persisted.
+
+        Raises
+        ------
+        RuntimeError
+            If any artifact written by the ``persist_preprocessing`` or
+            ``persist_model`` stage is missing.
+        """
+        spec = get_model_spec(config.model.model_type)
+        model_path = self.layout.model_pt if spec.kind == "sequence" else self.layout.model_joblib
+        missing = [
+            str(path)
+            for path in (
+                self.layout.preprocessing_joblib,
+                self.layout.preprocessing_state,
+                model_path,
+            )
+            if not path.exists()
+        ]
+        if missing:
+            raise RuntimeError(
+                "write_result called before persist_preprocessing/persist_model; "
+                f"missing artifacts: {', '.join(missing)}"
+            )
 
     def write_config(self, config: ExperimentConfig) -> None:
         """Write the run's ``config.yaml``."""
@@ -83,19 +118,45 @@ class ExperimentWriter:
         else:
             model.save(self.layout.model_joblib)
 
-    def write_report(self, report: ExperimentReport) -> None:
-        """Write metrics, resolved config, and (when present) training history and metadata."""
+    def write_report(self, report: ExperimentReport, *, merge_existing: bool = False) -> None:
+        """Write metrics, resolved config, and (when present) training history and metadata.
+
+        A history that already carries absolute ``epoch`` numbers uses them as
+        the CSV index; one without them falls back to positional epochs, so the
+        column is never written twice.
+
+        ``merge_existing`` (set for a resumed run) folds the rows already on disk
+        in ahead of this run's, so ``training_history.csv`` covers the whole
+        training curve instead of only the epochs since the resume. Requires
+        absolute epoch numbers — without them the two runs' rows cannot be
+        distinguished and the file is overwritten as before.
+        """
         save_json(report.metrics, self.layout.metrics)
         save_json(report.config, self.layout.config_resolved)
         if report.train_history:
-            import pandas as pd
-
-            pd.DataFrame(report.train_history).to_csv(
-                self.layout.training_history,
-                index_label="epoch",
-            )
+            self._write_training_history(report.train_history, merge_existing=merge_existing)
         if report.metadata:
             save_json(report.metadata, self.layout.metadata)
+
+    def _write_training_history(
+        self, train_history: dict[str, list[float]], *, merge_existing: bool
+    ) -> None:
+        """Write ``training_history.csv``, optionally continuing an earlier run's rows."""
+        import pandas as pd
+
+        history_frame = pd.DataFrame(train_history)
+        if "epoch" not in history_frame.columns:
+            history_frame.to_csv(self.layout.training_history, index_label="epoch")
+            return
+        history_frame["epoch"] = history_frame["epoch"].astype("int64")
+        if merge_existing and self.layout.training_history.exists():
+            previous = pd.read_csv(self.layout.training_history)
+            if "epoch" in previous.columns:
+                history_frame = pd.concat([previous, history_frame], ignore_index=True)
+                # This run's rows win a collision: they are the ones just trained.
+                history_frame = history_frame.drop_duplicates(subset="epoch", keep="last")
+        history_frame = history_frame.sort_values("epoch")
+        history_frame.set_index("epoch").to_csv(self.layout.training_history)
 
     def write_predictions(self, result: ExperimentResult) -> None:
         """Write the aligned ``y_true``/``y_pred`` table to ``predictions.csv``."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import torch
@@ -41,8 +42,10 @@ class TrainingState:
     """Mutable training state exposed back to model wrappers."""
 
     completed_epochs: int
+    # ``epoch`` holds the ABSOLUTE 1-based epoch number, so a resumed run's rows
+    # keep the numbering of the run they continue instead of restarting at 0.
     history: dict[str, list[float]] = field(
-        default_factory=lambda: {"train_loss": [], "val_loss": []}
+        default_factory=lambda: {"epoch": [], "train_loss": [], "val_loss": []}
     )
     best_metric: float | None = None
     best_epoch: int | None = None
@@ -71,8 +74,13 @@ class BestModelState:
         On improvement the tensors are detached, cloned and moved to CPU, and the
         method returns ``True``; otherwise nothing is stored and it returns
         ``False``. Lower ``metric`` is treated as better.
+
+        A non-finite ``metric`` is never an improvement: every comparison with
+        ``nan`` is False, so a single diverged epoch would otherwise be captured
+        as best and leave ``self.metric`` permanently ``nan``, making every
+        later epoch look better than the genuine best.
         """
-        if metric >= self.metric:
+        if not math.isfinite(metric) or metric >= self.metric:
             return False
         self.metric = metric
         self.epoch = epoch

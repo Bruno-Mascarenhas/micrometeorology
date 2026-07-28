@@ -1,0 +1,153 @@
+"""One per-variable dispatcher shared by every WRF publication path.
+
+Both published products — the values JSON written by
+:mod:`micrometeorology.wrf.jobs` and the map figures built by
+:mod:`micrometeorology.cli.render_wrf_maps` — need the same three things for a
+variable: how to read one time step's 2-D frame, and the colour-scale bounds
+that frame is drawn against. They used to carry independent copies of the same
+eight extractor branches (including the SWDOWN daylight rule), so a variable
+added or a scale bound fixed on one side silently skipped the other.
+
+Adding a variable here reaches both products.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+import numpy as np
+from numpy.typing import NDArray
+
+from micrometeorology.common.types import WRFVariable
+from micrometeorology.wrf import variables
+from micrometeorology.wrf.reader import WRFDataset
+
+# Solar radiation is only published for the local hours the sun is up; every
+# other variable publishes all 24. Both products gate SWDOWN on this window.
+FIRST_DAYLIGHT_HOUR = 6
+LAST_DAYLIGHT_HOUR = 18
+
+
+@dataclass(frozen=True, slots=True)
+class ValueFrameSource:
+    """Values and color-scale bounds for one exported WRF variable."""
+
+    frame_for_step: Callable[[int], NDArray]
+    scale_min: float
+    scale_max: float
+    # Set only for variables whose frame is the magnitude of a vector field.
+    # The figure path draws the components as a quiver on top of that
+    # magnitude; re-deriving them from the dataset would materialize every
+    # step twice, so the components the magnitude was built from are exposed.
+    vector_for_step: Callable[[int], tuple[NDArray, NDArray]] | None = None
+
+
+def is_daylight_step(step_metadata: Mapping[str, Any]) -> bool:
+    """Whether a time step's local hour falls inside the daylight window.
+
+    Callers gate on the variable, not on this alone: only SWDOWN drops its
+    night steps.
+    """
+    local_datetime: datetime = step_metadata["datetime_local"]
+    return FIRST_DAYLIGHT_HOUR <= local_datetime.hour <= LAST_DAYLIGHT_HOUR
+
+
+def build_value_frame_source(
+    dataset: WRFDataset,
+    variable_name: str,
+) -> ValueFrameSource | None:
+    """Build a frame reader and color-scale bounds for one exported variable.
+
+    Returns ``None`` when the variable is absent from the file, which every
+    caller reports as a skipped variable rather than failing the run.
+    """
+    if variable_name == WRFVariable.TEMPERATURE:
+        temperature_kelvin, scale_min, scale_max = variables.extract_temperature(dataset)
+        return ValueFrameSource(
+            frame_for_step=lambda time_step_index: variables.materialize_2d(
+                variables.extract_temperature_step(
+                    temperature_kelvin[time_step_index : time_step_index + 1, :, :]
+                )
+            ),
+            scale_min=scale_min,
+            scale_max=scale_max,
+        )
+    if variable_name == WRFVariable.SKIN_TEMPERATURE:
+        skin_temperature_kelvin, scale_min, scale_max = variables.extract_skin_temperature(dataset)
+        return ValueFrameSource(
+            frame_for_step=lambda time_step_index: variables.materialize_2d(
+                variables.extract_temperature_step(
+                    skin_temperature_kelvin[time_step_index : time_step_index + 1, :, :]
+                )
+            ),
+            scale_min=scale_min,
+            scale_max=scale_max,
+        )
+    if variable_name == WRFVariable.RELATIVE_HUMIDITY:
+        relative_humidity, scale_min, scale_max = variables.extract_relative_humidity(dataset)
+        return ValueFrameSource(
+            frame_for_step=lambda time_step_index: variables.materialize_2d(
+                relative_humidity[time_step_index : time_step_index + 1, :, :]
+            ),
+            scale_min=scale_min,
+            scale_max=scale_max,
+        )
+    if variable_name == WRFVariable.RAIN:
+        cumulative_rain, scale_min, scale_max = variables.extract_rain(dataset)
+        return ValueFrameSource(
+            frame_for_step=lambda time_step_index: variables.materialize_2d(
+                variables.extract_rain_step(cumulative_rain, time_step_index)
+            ),
+            scale_min=scale_min,
+            scale_max=scale_max,
+        )
+    if variable_name == WRFVariable.WIND:
+        u10_values, v10_values, scale_min, scale_max = variables.extract_wind(dataset)
+
+        def wind_components_for_step(time_step_index: int) -> tuple[NDArray, NDArray]:
+            return (
+                variables.materialize_2d(u10_values[time_step_index : time_step_index + 1]),
+                variables.materialize_2d(v10_values[time_step_index : time_step_index + 1]),
+            )
+
+        def wind_speed_for_step(time_step_index: int) -> NDArray:
+            u10_step, v10_step = wind_components_for_step(time_step_index)
+            wind_speed: NDArray = np.hypot(u10_step, v10_step)
+            return wind_speed
+
+        return ValueFrameSource(
+            frame_for_step=wind_speed_for_step,
+            scale_min=scale_min,
+            scale_max=scale_max,
+            vector_for_step=wind_components_for_step,
+        )
+    if variable_name == WRFVariable.WIND_POWER_DENSITY_10M:
+        power_density, scale_min, scale_max = variables.extract_wind_power_density_10m(dataset)
+        return ValueFrameSource(
+            frame_for_step=lambda time_step_index: variables.materialize_2d(
+                power_density[time_step_index : time_step_index + 1, :, :]
+            ),
+            scale_min=scale_min,
+            scale_max=scale_max,
+        )
+    if variable_name == WRFVariable.PRESSURE:
+        scalar_values, scale_min, scale_max = variables.extract_pressure(dataset)
+    elif variable_name == WRFVariable.VAPOR:
+        scalar_values, scale_min, scale_max = variables.extract_vapor(dataset)
+    else:
+        netcdf_variable_name = variable_name.upper()
+        if not dataset.has_variable(netcdf_variable_name):
+            return None
+        scalar_values, scale_min, scale_max = variables.extract_scalar(
+            dataset, netcdf_variable_name
+        )
+    return ValueFrameSource(
+        frame_for_step=lambda time_step_index: variables.materialize_2d(
+            scalar_values[time_step_index : time_step_index + 1, :, :]
+        ),
+        scale_min=scale_min,
+        scale_max=scale_max,
+    )

@@ -15,7 +15,8 @@ frames that are unusable for radiometric reasons:
   ``FRAME_DARK`` (mean luminance below a threshold) and ``FRAME_SATURATED``
   (too large a fraction of fully-clipped white pixels);
 - :func:`process_frame` composes mask -> crop -> resize from a
-  :class:`~allsky.config.PrepareConfig`.
+  :class:`~allsky.config.PrepareConfig`, optionally reusing a mask decoded once
+  by :func:`resolve_mask` instead of re-reading the PNG for every frame.
 
 Everything is pure numpy + PIL: importing this module never pulls torch.
 """
@@ -42,6 +43,7 @@ __all__ = [
     "load_mask",
     "process_frame",
     "resize_image",
+    "resolve_mask",
     "visual_qc",
 ]
 
@@ -229,8 +231,16 @@ def visual_qc(
     if float(luminance.mean()) < dark_threshold:
         flags.add(QCFlag.FRAME_DARK)
 
-    saturated = (arr >= saturated_level).all(axis=2)
-    if float(saturated.mean()) > saturated_fraction_threshold:
+    # Counting the per-channel comparisons costs a fraction of materializing the
+    # (H, W, 3) boolean and reducing it along the channel axis, and is exactly
+    # equal: both are the same integer count divided by the same pixel total.
+    channels = arr.reshape(-1, 3)
+    saturated = np.count_nonzero(
+        (channels[:, 0] >= saturated_level)
+        & (channels[:, 1] >= saturated_level)
+        & (channels[:, 2] >= saturated_level)
+    )
+    if saturated / channels.shape[0] > saturated_fraction_threshold:
         flags.add(QCFlag.FRAME_SATURATED)
 
     return flags
@@ -241,7 +251,23 @@ def _needs_preprocessing(cfg: PrepareConfig) -> bool:
     return cfg.mask.path is not None or cfg.crop.enabled or cfg.resize is not None
 
 
-def process_frame(image: np.ndarray, cfg: PrepareConfig) -> np.ndarray:
+def resolve_mask(cfg: PrepareConfig) -> np.ndarray | None:
+    """Decode *cfg*'s static mask once, for reuse across every frame of a run.
+
+    Returns ``None`` when no ``cfg.mask.path`` is configured, else the read-only
+    keep-array :func:`load_mask` produces — read-only because the same buffer is
+    then shared by every :func:`process_frame` call in the loop.
+    """
+    if cfg.mask.path is None:
+        return None
+    keep = load_mask(cfg.mask.path, threshold=cfg.mask.threshold)
+    keep.setflags(write=False)
+    return keep
+
+
+def process_frame(
+    image: np.ndarray, cfg: PrepareConfig, *, mask: np.ndarray | None = None
+) -> np.ndarray:
     """Compose mask -> crop -> resize from a :class:`~allsky.config.PrepareConfig`.
 
     Each stage is skipped when its config leaves it unset: the static mask is
@@ -250,9 +276,16 @@ def process_frame(image: np.ndarray, cfg: PrepareConfig) -> np.ndarray:
     A decentred/auto circular mask is intentionally **not** applied by default
     (it would silently zero pixels); call :func:`apply_static_mask` with
     ``mask=None`` explicitly to opt into the heuristic estimate.
+
+    *mask* is an already-decoded keep-array from :func:`resolve_mask`; passing it
+    skips the per-frame PNG decode and yields the same pixels.  ``mask=None``
+    falls back to decoding ``cfg.mask.path`` — it never means "estimate a
+    circular mask", which is why the two branches stay explicit here.
     """
     out = image
-    if cfg.mask.path is not None:
+    if mask is not None:
+        out = apply_static_mask(out, mask)
+    elif cfg.mask.path is not None:
         out = apply_static_mask(out, cfg.mask.path, threshold=cfg.mask.threshold)
     out = center_crop(out, cfg.crop)
     if cfg.resize is not None:

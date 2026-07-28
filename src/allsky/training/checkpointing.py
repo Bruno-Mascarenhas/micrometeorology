@@ -20,12 +20,16 @@ the model was trained against:
   and ``rng_state`` (python / numpy / torch / cuda) for deterministic resume.
 
 Every write is atomic (temp file in the same directory + ``os.replace``), so a
-crash never leaves a half-written checkpoint.  :func:`load_checkpoint` reads with
-``weights_only=False`` — these files are our own, locally written, trusted
-artifacts that legitimately contain non-tensor Python objects (config dicts,
-RNG state, numpy arrays); they are never fetched from an untrusted source.
-``torch.compile``'s ``_orig_mod.`` key prefixes are stripped on load so a
-compiled-then-checkpointed model loads back into a plain module.
+crash never leaves a half-written checkpoint.  A checkpoint is **not** a trusted
+local artifact: the documented Colab workflow trains on a third-party runtime and
+copies the run directory to a shared Drive folder, from which ``allsky evaluate``
+and ``allsky train --resume`` read it back.  :func:`load_checkpoint` therefore
+reads under torch's restricted unpickler (``weights_only=True``) extended with
+:func:`_safe_checkpoint_globals` — the non-tensor globals a real payload
+legitimately contains — and only unpickles freely when the caller opts in with
+``trust_pickle=True``.  ``torch.compile``'s ``_orig_mod.`` key prefixes are
+stripped on load so a compiled-then-checkpointed model loads back into a plain
+module.
 """
 
 from __future__ import annotations
@@ -158,16 +162,65 @@ def save_checkpoint(
     return out
 
 
-def load_checkpoint(path: str | Path, *, map_location: str = "cpu") -> dict[str, Any]:
+def _safe_checkpoint_globals() -> list[Any]:
+    """The non-tensor globals a :func:`save_checkpoint` payload legitimately contains.
+
+    ``numpy`` entries cover the legacy MT19937 state array that
+    :func:`capture_rng_state` snapshots.  ``datetime`` entries cover an unquoted
+    ISO date in a free-form config section (``SchedulerConfig.params`` is
+    ``dict[str, Any]``): ``yaml.safe_load`` turns it into a ``date``/``datetime``
+    that reaches ``checkpoint["config"]`` through ``cfg.model_dump()``.
+
+    ``numpy._core.multiarray._reconstruct`` is private and has moved once already
+    (``np.core`` -> ``np._core``), so it is resolved defensively — a numpy that
+    moves it again degrades to :func:`load_checkpoint`'s actionable error instead
+    of an ``AttributeError`` on the load path.
+    """
+    import datetime
+
+    allowed: list[Any] = [
+        np.ndarray,
+        np.dtype,
+        np.dtypes.UInt32DType,
+        datetime.date,
+        datetime.datetime,
+    ]
+    numpy_core = getattr(np, "_core", None) or getattr(np, "core", None)
+    reconstruct = getattr(getattr(numpy_core, "multiarray", None), "_reconstruct", None)
+    if reconstruct is not None:
+        allowed.append(reconstruct)
+    return allowed
+
+
+def load_checkpoint(
+    path: str | Path, *, map_location: str = "cpu", trust_pickle: bool = False
+) -> dict[str, Any]:
     """Load a checkpoint written by :func:`save_checkpoint`.
 
-    Uses ``weights_only=False`` (trusted, locally written file — see the module
-    docstring) and strips any ``_orig_mod.`` compile prefixes from the model
-    state so it loads into a plain module.
+    Reads under torch's restricted unpickler (``weights_only=True``) extended with
+    :func:`_safe_checkpoint_globals`, so a checkpoint that travelled through Colab
+    or a shared Drive cannot execute code on load; a payload carrying anything
+    outside the allowlist raises :class:`ValueError` without unpickling it.  Pass
+    ``trust_pickle=True`` to fall back to the unrestricted reader for a file you
+    produced yourself.  Any ``_orig_mod.`` compile prefixes are stripped from the
+    model state so it loads into a plain module.
     """
+    import pickle
+
     import torch
 
-    checkpoint: dict[str, Any] = torch.load(path, map_location=map_location, weights_only=False)
+    if trust_pickle:
+        checkpoint: dict[str, Any] = torch.load(path, map_location=map_location, weights_only=False)
+    else:
+        try:
+            with torch.serialization.safe_globals(_safe_checkpoint_globals()):
+                checkpoint = torch.load(path, map_location=map_location, weights_only=True)
+        except pickle.UnpicklingError as exc:
+            raise ValueError(
+                f"{path} carries a Python object outside the checkpoint allowlist and was "
+                "NOT unpickled — this is what a poisoned checkpoint looks like. If the file "
+                f"is one you produced yourself, re-read it with trust_pickle=True. Cause: {exc}"
+            ) from exc
     model_state = checkpoint.get("model_state")
     if isinstance(model_state, dict):
         checkpoint["model_state"] = _strip_compiled_prefix(model_state)

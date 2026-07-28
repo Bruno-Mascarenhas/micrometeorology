@@ -8,6 +8,7 @@ once and serves the monotonic bracket fast path with automatic fallback.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -129,8 +130,9 @@ class VerticalInterpolator:
     monotonic bracket search that is bitwise-identical to
     :func:`vertical_interpolate` while skipping the per-call ``argsort``.
     Per-target brackets are cached so interpolating several fields to the same
-    height reuses them.  Whenever the fast-path preconditions do not hold
-    (NaN heights, non-monotonic columns, NaN values, fewer than two levels),
+    height reuses them, and :meth:`interpolate_many` amortizes the per-field
+    validation over several targets.  Whenever the fast-path preconditions do
+    not hold (NaN heights, non-monotonic columns, NaN values, <2 levels),
     the call falls back to :func:`vertical_interpolate`, so results are always
     identical to the eager reference.
 
@@ -149,43 +151,91 @@ class VerticalInterpolator:
         self.axis = axis
         self._heights = heights_arr
         self._shape = heights_arr.shape
+        self._levels = heights_arr.shape[axis]
 
-        h_moved = np.moveaxis(heights_arr, axis, 0)
-        self._levels = h_moved.shape[0]
-        self._n_cols = int(np.prod(h_moved.shape[1:]))
-        self._h2d = h_moved.reshape(self._levels, self._n_cols)
-        self._cols = np.arange(self._n_cols)
-
+        # Strictly-increasing test in the array's own layout: comparing the
+        # level-shifted slices avoids materializing a full-size np.diff array.
+        above = [slice(None)] * heights_arr.ndim
+        below = list(above)
+        above[axis] = slice(1, None)
+        below[axis] = slice(None, -1)
         self._fast_ok = (
             self._levels >= 2
-            and not np.isnan(self._h2d).any()
-            and bool((np.diff(self._h2d, axis=0) > 0).all())
+            and not np.isnan(heights_arr).any()
+            and bool((heights_arr[tuple(above)] > heights_arr[tuple(below)]).all())
         )
-        # target height -> (lower_idx, frac, dtype) for the bracket fast path.
-        self._bracket_cache: dict[float, tuple[NDArray, NDArray, np.dtype]] = {}
+        # target height -> (lower_idx, upper_idx, frac, dtype) for the bracket
+        # fast path. Both index arrays are cached: recomputing ``lower_idx + 1``
+        # per gather reallocates a full-size int64 array for nothing.
+        self._bracket_cache: dict[float, tuple[NDArray, NDArray, NDArray, np.dtype]] = {}
 
-    def _bracket(self, target_height: float, dtype: np.dtype) -> tuple[NDArray, NDArray]:
-        """Return cached ``(lower_idx, frac)`` for *target_height* in *dtype*."""
+    def _bracket(self, target_height: float, dtype: np.dtype) -> tuple[NDArray, NDArray, NDArray]:
+        """Return cached ``(lower_idx, upper_idx, frac)`` for *target_height* in *dtype*.
+
+        The index arrays keep a singleton vertical axis so they gather with
+        :func:`numpy.take_along_axis` straight from the block's native layout.
+        """
         cached = self._bracket_cache.get(target_height)
-        if cached is not None and cached[2] == dtype:
-            return cached[0], cached[1]
+        if cached is not None and cached[3] == dtype:
+            return cached[0], cached[1], cached[2]
 
-        h = self._h2d.astype(dtype, copy=False)
+        h = self._heights.astype(dtype, copy=False)
         greater = h > target_height
-        any_greater = np.any(greater, axis=0)
-        first_gt = np.argmax(greater, axis=0)
+        any_greater = np.any(greater, axis=self.axis)
+        first_gt = np.argmax(greater, axis=self.axis)
 
-        lower_idx = np.where(any_greater, first_gt - 1, self._levels - 2)
-        lower_idx = np.clip(lower_idx, 0, self._levels - 2)
+        lower = np.where(any_greater, first_gt - 1, self._levels - 2)
+        lower_idx = np.expand_dims(np.clip(lower, 0, self._levels - 2), self.axis)
+        upper_idx = lower_idx + 1
 
-        h1 = h[lower_idx, self._cols]
-        h2 = h[lower_idx + 1, self._cols]
+        h1 = np.take_along_axis(h, lower_idx, self.axis)
+        h2 = np.take_along_axis(h, upper_idx, self.axis)
         with np.errstate(invalid="ignore", divide="ignore"):
             frac = (target_height - h1) / (h2 - h1)
         frac = np.where(np.isfinite(frac), frac, 0.0)
 
-        self._bracket_cache[target_height] = (lower_idx, frac, dtype)
-        return lower_idx, frac
+        self._bracket_cache[target_height] = (lower_idx, upper_idx, frac, dtype)
+        return lower_idx, upper_idx, frac
+
+    def interpolate_many(self, values: NDArray, targets: Sequence[float]) -> list[NDArray]:
+        """Interpolate *values* to every height in *targets* (meters AGL).
+
+        The shape check, the NaN scan and the dtype cast run once for the whole
+        field instead of once per target — the scan alone is a full pass over
+        the block, and the pipeline asks for the same field at three heights.
+
+        Returns
+        -------
+        list[NDArray]
+            One (N-1)-D array per target, in *targets* order, each
+            bitwise-identical to :meth:`interpolate` for that target.
+        """
+        values_arr = np.asarray(values)
+        if values_arr.shape != self._shape:
+            raise ValueError("values and heights must have the same shape")
+
+        if not self._fast_ok or np.isnan(values_arr).any():
+            return [
+                vertical_interpolate(values_arr, self._heights, float(target), axis=self.axis)
+                for target in targets
+            ]
+
+        dtype = np.result_type(values_arr.dtype, self._heights.dtype, np.float32)
+        assert_reasonable_array_size(
+            values_arr.shape,
+            dtype,
+            context="vertical interpolation block",
+            multiplier=6.0,
+        )
+        v = values_arr.astype(dtype, copy=False)
+
+        results: list[NDArray] = []
+        for target in targets:
+            lower_idx, upper_idx, frac = self._bracket(float(target), dtype)
+            s1 = np.take_along_axis(v, lower_idx, self.axis)
+            s2 = np.take_along_axis(v, upper_idx, self.axis)
+            results.append(np.squeeze(s1 + frac * (s2 - s1), axis=self.axis))
+        return results
 
     def interpolate(self, values: NDArray, target: float) -> NDArray:
         """Interpolate *values* to *target* height (meters AGL).
@@ -204,29 +254,4 @@ class VerticalInterpolator:
             (N-1)-D array with interpolated values, bitwise-identical to
             ``vertical_interpolate(values, heights, target, axis=self.axis)``.
         """
-        target = float(target)
-        values_arr = np.asarray(values)
-        if values_arr.shape != self._shape:
-            raise ValueError("values and heights must have the same shape")
-
-        if not self._fast_ok or np.isnan(values_arr).any():
-            return vertical_interpolate(values_arr, self._heights, target, axis=self.axis)
-
-        dtype = np.result_type(values_arr.dtype, self._heights.dtype, np.float32)
-        assert_reasonable_array_size(
-            values_arr.shape,
-            dtype,
-            context="vertical interpolation block",
-            multiplier=6.0,
-        )
-        lower_idx, frac = self._bracket(target, dtype)
-
-        v = values_arr.astype(dtype, copy=False)
-        s = np.moveaxis(v, self.axis, 0).reshape(self._levels, self._n_cols)
-        s1 = s[lower_idx, self._cols]
-        s2 = s[lower_idx + 1, self._cols]
-        result: NDArray = s1 + frac * (s2 - s1)
-
-        result_shape = list(values_arr.shape)
-        result_shape.pop(self.axis)
-        return result.reshape(result_shape)
+        return self.interpolate_many(values, (target,))[0]

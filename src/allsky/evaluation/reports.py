@@ -234,10 +234,12 @@ def _markdown_table(header: Sequence[str], rows: Sequence[Sequence[Any]]) -> lis
 
 
 def _fmt(value: Any) -> str:
-    """Compact string form for a metric value (4-sig-fig floats)."""
+    """Compact string form for a metric value (4-sig-fig floats, exact integrals)."""
     if isinstance(value, float):
         if value != value:  # NaN
             return "nan"
+        if value.is_integer() and abs(value) < 1e15:  # exact counts such as ``n``
+            return str(int(value))
         return f"{value:.4g}"
     return str(value)
 

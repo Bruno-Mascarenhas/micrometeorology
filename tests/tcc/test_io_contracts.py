@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -18,7 +20,12 @@ from solrad_correction.config import (
     RuntimeConfig,
     SplitConfig,
 )
-from solrad_correction.data.loaders import load_sensor_hourly, load_sensor_raw, load_table
+from solrad_correction.data.loaders import (
+    _resolve_cache_path,
+    load_sensor_hourly,
+    load_sensor_raw,
+    load_table,
+)
 from solrad_correction.utils.io import save_predictions
 
 
@@ -223,7 +230,7 @@ def test_invalid_auto_format_and_csv_cache_contracts() -> None:
         df1 = load_table(csv_path, datetime_column="timestamp", cache_dir=str(cache_dir))
         df2 = load_table(csv_path, datetime_column="timestamp", cache_dir=str(cache_dir))
 
-        assert (cache_dir / "hourly.parquet").exists()
+        assert _resolve_cache_path(csv_path, cache_dir).exists()
         pd.testing.assert_frame_equal(df1, df2)
     finally:
         if scratch.exists():
@@ -255,7 +262,63 @@ def test_csv_cache_refreshes_when_source_is_newer_and_skips_limited_reads() -> N
         )
 
         assert refreshed["f1"].iloc[0] == 99.0
-        assert not (limited_cache / "hourly.parquet").exists()
+        # _write_cache is what creates the directory, so "no cache written for a
+        # limited read" means the directory never appears at all.
+        assert not limited_cache.exists()
+    finally:
+        if scratch.exists():
+            shutil.rmtree(scratch)
+
+
+def test_csv_cache_keys_on_the_source_path_not_its_stem() -> None:
+    """Two same-named CSVs sharing a cache dir must never serve each other's data."""
+    scratch = Path("scratch") / "test_table_cache_collision_contract"
+    older_path = scratch / "2023" / "hourly.csv"
+    newer_path = scratch / "2024" / "hourly.csv"
+    cache_dir = scratch / "cache"
+    try:
+        older_path.parent.mkdir(parents=True, exist_ok=True)
+        newer_path.parent.mkdir(parents=True, exist_ok=True)
+        _synthetic_frame().to_csv(older_path, index=False)
+        other_frame = _synthetic_frame()
+        other_frame["f1"] += 100.0
+        other_frame.to_csv(newer_path, index=False)
+        # The second archive was extracted earlier, so its mtime predates the
+        # cache the first load is about to write.
+        os.utime(newer_path, (0, 0))
+
+        first = load_table(older_path, datetime_column="timestamp", cache_dir=str(cache_dir))
+        second = load_table(newer_path, datetime_column="timestamp", cache_dir=str(cache_dir))
+
+        assert first["f1"].iloc[0] == 0.0
+        assert second["f1"].iloc[0] == 100.0
+        assert len(list(cache_dir.glob("*.parquet"))) == 2
+    finally:
+        if scratch.exists():
+            shutil.rmtree(scratch)
+
+
+def test_projected_csv_read_reports_that_no_cache_was_written(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """cache_dir is inert for a projected read; say so instead of silently skipping."""
+    scratch = Path("scratch") / "test_table_cache_projection_notice"
+    csv_path = scratch / "hourly.csv"
+    cache_dir = scratch / "cache"
+    try:
+        scratch.mkdir(parents=True, exist_ok=True)
+        _synthetic_frame().to_csv(csv_path, index=False)
+
+        with caplog.at_level(logging.INFO, logger="solrad_correction.data.loaders"):
+            load_table(
+                csv_path,
+                columns=["f1", "target"],
+                datetime_column="timestamp",
+                cache_dir=str(cache_dir),
+            )
+
+        assert any("No Parquet cache written" in record.message for record in caplog.records)
+        assert not cache_dir.exists()
     finally:
         if scratch.exists():
             shutil.rmtree(scratch)

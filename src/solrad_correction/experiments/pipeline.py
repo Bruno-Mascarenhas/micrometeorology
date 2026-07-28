@@ -7,7 +7,7 @@ import time
 
 import pandas as pd
 
-from solrad_correction.config import ExperimentConfig
+from solrad_correction.config import DataConfig, ExperimentConfig
 from solrad_correction.data.preprocessing import PreprocessingPipeline
 from solrad_correction.data.splits import temporal_train_val_test_split
 from solrad_correction.datasets.sequence import WindowedSequenceDataset
@@ -48,8 +48,16 @@ def prepare_runtime(config: ExperimentConfig) -> None:
 
 
 def load_data(config: ExperimentConfig) -> LoadedData:
-    """Load configured input data."""
-    if config.data.hourly_data_path:
+    """Load configured input data.
+
+    ``data.use_raw`` decides only when a config populates both input paths;
+    otherwise the populated path selects the loader, so every config that
+    already works keeps its branch.
+    """
+    _warn_about_ignored_site_coordinates(config)
+    if config.data.use_raw and config.data.sensor_data_path:
+        loaded_frame = _load_raw_sensor_frame(config, config.data.sensor_data_path)
+    elif config.data.hourly_data_path:
         from solrad_correction.data.loaders import load_sensor_hourly
 
         projected_columns = config.data.load_columns or None
@@ -66,21 +74,40 @@ def load_data(config: ExperimentConfig) -> LoadedData:
             cache_dir=config.data.cache_dir,
         )
     elif config.data.sensor_data_path:
-        from solrad_correction.data.loaders import load_sensor_raw
-
-        loaded_frame = load_sensor_raw(
-            config.data.sensor_data_path,
-            pattern=config.data.sensor_pattern,
-            calibrations_path=config.data.calibrations_path,
-            resample_freq=config.data.resample_freq,
-            min_samples=config.data.sensor_min_samples,
-        )
-        if config.runtime.limit_rows is not None:
-            loaded_frame = loaded_frame.iloc[: config.runtime.limit_rows].copy()
+        loaded_frame = _load_raw_sensor_frame(config, config.data.sensor_data_path)
     else:
         raise ValueError("No data path provided in config")
 
     return LoadedData(frame=loaded_frame)
+
+
+def _load_raw_sensor_frame(config: ExperimentConfig, sensor_data_path: str) -> pd.DataFrame:
+    """Ingest the raw ``.dat`` sensor tree configured by ``data.sensor_data_path``."""
+    from solrad_correction.data.loaders import load_sensor_raw
+
+    loaded_frame = load_sensor_raw(
+        sensor_data_path,
+        pattern=config.data.sensor_pattern,
+        calibrations_path=config.data.calibrations_path,
+        resample_freq=config.data.resample_freq,
+        min_samples=config.data.sensor_min_samples,
+    )
+    if config.runtime.limit_rows is not None:
+        loaded_frame = loaded_frame.iloc[: config.runtime.limit_rows].copy()
+    return loaded_frame
+
+
+def _warn_about_ignored_site_coordinates(config: ExperimentConfig) -> None:
+    """Say out loud that station coordinates cannot retarget a run to another site."""
+    coordinate_defaults = DataConfig()
+    if (config.data.station_lat, config.data.station_lon) != (
+        coordinate_defaults.station_lat,
+        coordinate_defaults.station_lon,
+    ):
+        logger.warning(
+            "data.station_lat/data.station_lon are accepted for backward compatibility "
+            "and no feature stage reads them; the site comes from the configured data path"
+        )
 
 
 def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame:
@@ -91,9 +118,19 @@ def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame
     (temporal/cyclic/lag/rolling/diff) — engineered columns are included
     explicitly because they were requested via the feature config, never by
     name-prefix accident.
+
+    Rolling and diff features read the current row, so they are built from the
+    declared base columns *other than the target*: ``{target}_roll_*`` and
+    ``{target}_diff_*`` are same-row functions of ``y[t]`` and would leak the
+    target into the features. Lags are built from every declared base column,
+    because ``{target}_lag_{n}`` with ``n >= 1`` (enforced by
+    ``ExperimentConfig.validate``) is legitimate autoregression.
     """
     engineered_frame = loaded.frame
     source_columns = set(engineered_frame.columns)
+    non_target_feature_columns = [
+        column for column in config.data.feature_columns if column != config.data.target_column
+    ]
     if config.features.add_temporal:
         from solrad_correction.features.temporal import (
             add_all_cyclic_encodings,
@@ -118,7 +155,7 @@ def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame
 
         engineered_frame = add_rolling_features(
             engineered_frame,
-            config.data.feature_columns,
+            non_target_feature_columns,
             config.features.rolling_windows,
             config.features.rolling_aggs,
         )
@@ -126,7 +163,7 @@ def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame
     if config.features.add_diffs:
         from solrad_correction.features.engineering import add_diff_features
 
-        engineered_frame = add_diff_features(engineered_frame, config.data.feature_columns)
+        engineered_frame = add_diff_features(engineered_frame, non_target_feature_columns)
 
     feature_columns = [
         column for column in engineered_frame.columns if column != config.data.target_column
@@ -326,11 +363,26 @@ def train_model(
     config: ExperimentConfig,
     model: BaseRegressorModel,
     bundle: DatasetBundle,
+    *,
+    preprocessing_fingerprint: str | None = None,
 ) -> TrainingOutput:
-    """Train the configured model."""
+    """Train the configured model.
+
+    ``preprocessing_fingerprint`` identifies the transform this run's features
+    were scaled with. It is baked into every checkpoint and re-checked on a
+    resume: a resume refits the scaler from the data on disk now and never loads
+    the checkpoint's own transform, so without the check a changed feature set
+    or re-fitted mean/scale feeds the restored weights differently-scaled inputs.
+    """
     started = time.monotonic()
     if get_model_spec(config.model.model_type).kind == "sequence":
-        training_result = model.fit(bundle.train, bundle.val, config.model, runtime=config.runtime)
+        training_result = model.fit(
+            bundle.train,
+            bundle.val,
+            config.model,
+            runtime=config.runtime,
+            preprocessing_fingerprint=preprocessing_fingerprint,
+        )
     else:
         training_result = model.fit(bundle.train, bundle.val, config.model)
     return TrainingOutput(duration_seconds=time.monotonic() - started, result=training_result)
@@ -373,69 +425,38 @@ def run_pipeline(config: ExperimentConfig) -> ExperimentReport:
     experiment_writer = ExperimentWriter.from_config(config)
     experiment_writer.prepare()
 
-    loaded_data = pipeline_profile.time_stage("load_data", load_data, config)
-    feature_frame = pipeline_profile.time_stage(
-        "build_features",
-        build_features,
-        loaded_data,
-        config,
-    )
-    split_frames = pipeline_profile.time_stage("split_data", split_data, config, feature_frame)
-    preprocessed_splits = pipeline_profile.time_stage(
-        "preprocess_splits",
-        preprocess_splits,
-        config,
-        feature_frame,
-        split_frames,
-    )
+    with pipeline_profile.stage("load_data"):
+        loaded_data = load_data(config)
+    with pipeline_profile.stage("build_features"):
+        feature_frame = build_features(loaded_data, config)
+    with pipeline_profile.stage("split_data"):
+        split_frames = split_data(config, feature_frame)
+    with pipeline_profile.stage("preprocess_splits"):
+        preprocessed_splits = preprocess_splits(config, feature_frame, split_frames)
     # Persist the fitted preprocessing state before any downstream stage can
     # fail, so a crash after training never discards reusable state.
-    pipeline_profile.time_stage(
-        "persist_preprocessing",
-        experiment_writer.write_preprocessing,
-        preprocessed_splits.pipeline,
-    )
-    dataset_bundle = pipeline_profile.time_stage(
-        "build_datasets",
-        build_datasets,
-        config,
-        preprocessed_splits,
-    )
-    configured_model = pipeline_profile.time_stage(
-        "build_model",
-        build_configured_model,
-        config,
-        dataset_bundle,
-    )
-    training_output = pipeline_profile.time_stage(
-        "train_model",
-        train_model,
-        config,
-        configured_model,
-        dataset_bundle,
-    )
+    with pipeline_profile.stage("persist_preprocessing"):
+        experiment_writer.write_preprocessing(preprocessed_splits.pipeline)
+    with pipeline_profile.stage("build_datasets"):
+        dataset_bundle = build_datasets(config, preprocessed_splits)
+    with pipeline_profile.stage("build_model"):
+        configured_model = build_configured_model(config, dataset_bundle)
+    with pipeline_profile.stage("train_model"):
+        training_output = train_model(
+            config,
+            configured_model,
+            dataset_bundle,
+            preprocessing_fingerprint=preprocessed_splits.pipeline.state.fingerprint(),
+        )
     trained_model = training_output.result.model
     # Persist the trained model immediately after fit: a crash during
     # prediction or evaluation must leave the model recoverable on disk.
-    pipeline_profile.time_stage(
-        "persist_model",
-        experiment_writer.write_model,
-        config,
-        trained_model,
-    )
-    prediction_output = pipeline_profile.time_stage(
-        "predict_model",
-        predict_model,
-        trained_model,
-        dataset_bundle,
-    )
-    evaluation_result = pipeline_profile.time_stage(
-        "evaluate_predictions",
-        evaluate_predictions,
-        preprocessed_splits,
-        config,
-        prediction_output,
-    )
+    with pipeline_profile.stage("persist_model"):
+        experiment_writer.write_model(config, trained_model)
+    with pipeline_profile.stage("predict_model"):
+        prediction_output = predict_model(trained_model, dataset_bundle)
+    with pipeline_profile.stage("evaluate_predictions"):
+        evaluation_result = evaluate_predictions(preprocessed_splits, config, prediction_output)
 
     experiment_report = ExperimentReport(
         experiment_name=config.name,
@@ -458,9 +479,9 @@ def run_pipeline(config: ExperimentConfig) -> ExperimentReport:
         predictions=prediction_output,
         evaluation=evaluation_result,
     )
-    pipeline_profile.time_stage(
-        "write_experiment_results",
-        experiment_writer.write_result,
+    # ``write_result`` records its own ``write_experiment_results`` stage, so
+    # the timing it serializes into profile.json includes the artifact writes.
+    experiment_writer.write_result(
         config=config,
         result=experiment_result,
         profile=pipeline_profile,

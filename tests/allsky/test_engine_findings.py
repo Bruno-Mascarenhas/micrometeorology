@@ -93,6 +93,26 @@ class TestImageBackboneProduction:
         assert (run_dir / "best.ckpt").exists()
         assert len(pd.read_csv(run_dir / "metrics.csv")) == 1
 
+    def test_backbone_and_main_rates_are_logged_apart(self, tmp_path: Path):
+        # MultimodalModel.param_groups appends the backbone group FIRST, so the
+        # single logged `lr` used to be backbone_lr (30x below the rate training the
+        # fusion, trunk and heads) and the head's schedule was never plotted at all.
+        root, _manifest, _ = synthetic.make_dataset(
+            tmp_path, n_days=3, per_day=6, write_images=True, image_px=8
+        )
+        cfg = _image_cfg(root, model="film", epochs=1)
+        run_dir = tmp_path / "run"
+        run_experiment(
+            cfg,
+            data_root=root,
+            output_dir=run_dir,
+            image_backbone_builder=lambda: TinyConvBackbone(dim=12),
+        )
+
+        row = pd.read_csv(run_dir / "metrics.csv").iloc[0]
+        assert row["lr"] == pytest.approx(cfg.train.lr)
+        assert row["lr_backbone"] == pytest.approx(cfg.train.backbone_lr)
+
     def test_default_builder_calls_build_backbone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

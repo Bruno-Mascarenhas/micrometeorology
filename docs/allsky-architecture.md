@@ -88,9 +88,14 @@ One row per paired sample. Columns (see `data/contracts.py`):
   `target_kindex`, `kindex_kind` (`kstar`/`kt`), `sky_class`
   (`0/1/2`, `-1` = missing), `cloud_fraction` (nullable, all-NaN today),
   `qc_flags` (`int64` `QCFlag` bitmask: `LOW_SUN`, `SENSOR_GAP`,
-  `ALIGNMENT_FAR`, `KT_ARTIFACT`, `FRAME_DARK`, `FRAME_SATURATED` — the manifest
-  builder sets only the first four; `FRAME_DARK`/`FRAME_SATURATED` are reserved
-  for the image-preprocessing wave and stay unset here).
+  `ALIGNMENT_FAR`, `KT_ARTIFACT`, `FRAME_DARK`, `FRAME_SATURATED`).
+  `build_manifest` sets the first four; `FRAME_DARK`/`FRAME_SATURATED` are ORed
+  in afterwards by `prepare-local`'s frame-QC pass
+  (`allsky.preprocessing.visual_qc` → `_apply_frame_qc`), so a `prepare-local`
+  manifest **may** carry all six. Those two bits are present only when the
+  per-video parquet carries a `qc_frame_flags` column: a manifest built from a
+  standalone `extract-frames` run, from a resumed pre-frame-QC extraction, or
+  straight from the `build_manifest` library API leaves them unset.
 - **Provenance (constant per row)**: `dataset_version`, `alignment_id` (mirror
   the sidecar meta so a manifest is self-describing), and `split` — a **nullable**
   label, empty at build and filled in place by
@@ -143,7 +148,13 @@ overwrite.
 
 ### Checkpoint payload (`last.ckpt` / `best.ckpt`)
 
-`torch.save` (atomic; `weights_only=False` — a trusted local file). Contains:
+`torch.save` (atomic). Read back under torch's **restricted** unpickler
+(`weights_only=True` plus an explicit allowlist of the payload's own types): a
+checkpoint travels through Colab and shared Drives, so it is not a trusted local
+file, and one carrying an object outside the allowlist is refused rather than
+executed. `allsky train --trust-checkpoint` / `allsky evaluate
+--trust-checkpoint` (both default off) opt back into the unrestricted reader for
+a file you produced yourself. Contains:
 `model_state`, `optimizer_state`, `scheduler_state`, `scaler_state`, `epoch`,
 `global_step`, `epochs_no_improve` (the early-stopping patience counter, so a
 resumed run continues from the exact point on the patience curve; optional —
@@ -224,8 +235,12 @@ silent drop — a leakage-prone request stops the run.
 
 ## Alignment strategies
 
-Registered in `data/alignment.py` (`get_strategy(name)`, extend via
-`register_strategy`):
+The accepted names are the `AlignmentStrategyName` literal in `config.py` (a leaf
+module, so it is the single owner of the set); `data/alignment.py` implements the
+build-time pairing and `data/datasets.py` implements the dataset-level windowing.
+A windowed strategy requires `data.input_mode: embedding` — the image dataset has
+no windowing, so the combination is rejected at config load instead of silently
+training a centre-frame model:
 
 | Strategy | Stage | Status |
 |---|---|---|

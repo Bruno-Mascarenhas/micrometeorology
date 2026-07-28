@@ -19,6 +19,7 @@ from typing import Annotated
 import pandas as pd
 import typer
 
+from micrometeorology.common.cli_options import parse_csv
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.stats.comparison import read_dataset
 from micrometeorology.stats.metrics import compute_all
@@ -37,13 +38,6 @@ class JoinMethod(StrEnum):
 
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
-
-
-def _parse_csv(value: str | None) -> list[str]:
-    """Parse comma-separated strings."""
-    if not value:
-        return []
-    return [x.strip() for x in value.split(",")]
 
 
 @app.command()
@@ -89,7 +83,12 @@ def run(
     df_a = read_dataset(str(dataset_a), separator=separator)
     df_b = read_dataset(str(dataset_b), separator=separator)
 
-    col_list = _parse_csv(columns)
+    col_list = parse_csv(columns)
+    if columns is not None and not col_list:
+        # Naming no column at all must not quietly widen to "every common
+        # column": -c " " used to fail the run, and silently comparing
+        # everything instead would be reported as a success.
+        raise typer.BadParameter(f"--columns names no column (got {columns!r})")
     if col_list:
         cols = [c for c in col_list if c in df_a.columns and c in df_b.columns]
         missing = [c for c in col_list if c not in cols]
@@ -105,7 +104,15 @@ def run(
     typer.echo(f"Comparing {len(cols)} columns: {cols}")
 
     # Align datasets
-    if join == JoinMethod.nearest and hasattr(df_a.index, "tz"):
+    if join == JoinMethod.by_index and not (
+        isinstance(df_a.index, pd.DatetimeIndex) and isinstance(df_b.index, pd.DatetimeIndex)
+    ):
+        typer.echo(
+            "Warning: no DatetimeIndex on one or both datasets — "
+            "rows are aligned by position, not by time"
+        )
+
+    if join == JoinMethod.nearest and isinstance(df_a.index, pd.DatetimeIndex):
         aligned = pd.merge_asof(
             df_a[cols].sort_index(),
             df_b[cols].sort_index(),

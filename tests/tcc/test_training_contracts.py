@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from solrad_correction.config import ModelConfig, RuntimeConfig
@@ -489,3 +490,260 @@ def test_training_progress_uses_absolute_epoch_budget_on_resume(
     assert "Epoch 10/10" in out
     assert "Overall: 100.0%" in out
     assert "/18" not in out
+
+
+def test_non_finite_epoch_never_becomes_the_best_model() -> None:
+    """A diverged (NaN) epoch must not be captured as best, nor poison later comparisons."""
+    pytest.importorskip("torch")
+    from torch import nn
+
+    from solrad_correction.training.state import BestModelState
+
+    model = nn.Linear(2, 1)
+    best = BestModelState()
+    captured = [
+        best.capture_if_better(model, metric, epoch)
+        for epoch, metric in enumerate([0.5, 0.4, float("nan"), 10.0, 20.0], start=1)
+    ]
+
+    assert captured == [True, True, False, False, False]
+    assert best.metric == 0.4
+    assert best.epoch == 2
+
+
+@pytest.mark.parametrize("n_samples", [101, 4001])
+def test_epoch_loss_is_sample_weighted_not_a_mean_of_batch_means(n_samples: int) -> None:
+    """The epoch loss must equal the dataset MSE when the tail batch is partial.
+
+    ``nn.MSELoss`` already averages inside a batch, so summing ``loss.item()``
+    and dividing by the batch count weighted every batch equally regardless of
+    size. With ``n_samples=4001`` at ``batch_size=32`` the 1-sample tail batch
+    carried 1/126 of the reported loss instead of 1/4001: the retired
+    batch-mean-of-means reported 79.365079 where the dataset MSE is 2.499375, a
+    31.75x inflation of the monitored metric. ``n_samples=101`` (tail of 5)
+    reported 500.0 against a dataset MSE of 99.009901.
+    """
+    pytest.importorskip("torch")
+    import torch
+    from torch import nn
+    from torch.utils.data import DataLoader
+
+    from solrad_correction.datasets.sequence import SequenceDataset
+    from solrad_correction.training.loops import evaluate_epoch, train_one_epoch
+
+    class ZeroPredictor(nn.Module):
+        """Predicts exactly zero, so the loss is the mean squared target."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.gain = nn.Parameter(torch.zeros(1))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return (x.sum(dim=(1, 2)) * self.gain).unsqueeze(-1)
+
+    batch_size = 32
+    rng = np.random.default_rng(7)
+    features = rng.normal(0, 1, (n_samples, 3, 2)).astype(np.float32)
+    targets = np.zeros(n_samples, dtype=np.float32)
+    # The single outlier sits in the partial tail batch, where equal-per-batch
+    # weighting over-weights it by n_samples / n_batches.
+    targets[-1] = 100.0
+    loader = DataLoader(SequenceDataset(features, targets), batch_size=batch_size, shuffle=False)
+    dataset_mse = float((targets.astype(np.float64) ** 2).mean())
+
+    model = ZeroPredictor()
+    criterion = nn.MSELoss()
+
+    val_loss = evaluate_epoch(model, loader, criterion, "cpu", amp_enabled=False)
+    assert val_loss == pytest.approx(dataset_mse, rel=1e-6)
+
+    # lr=0 freezes the weights mid-epoch, so the training loop reports the same
+    # quantity and the comparison against the dataset MSE stays exact.
+    train_loss = train_one_epoch(
+        model,
+        loader,
+        torch.optim.SGD(model.parameters(), lr=0.0),
+        criterion,
+        "cpu",
+    )
+    assert train_loss == pytest.approx(dataset_mse, rel=1e-6)
+
+
+def test_trainer_closes_summary_writer_when_an_epoch_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raise inside the epoch loop must still flush and close the TensorBoard writer."""
+    pytest.importorskip("torch")
+    from torch import nn
+
+    import solrad_correction.training.trainer as trainer_module
+
+    class RecordingWriter:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def add_scalar(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+    writer = RecordingWriter()
+    monkeypatch.setattr(trainer_module, "create_summary_writer", lambda _log_dir: writer)
+
+    def failing_epoch(*_args: Any, **_kwargs: Any) -> float:
+        raise RuntimeError("simulated OOM at epoch 1")
+
+    monkeypatch.setattr(trainer_module, "train_one_epoch", failing_epoch)
+
+    train_ds, val_ds = _synthetic_sequence_split()
+    trainer = trainer_module.Trainer(
+        model=nn.Linear(4, 1),
+        device="cpu",
+        config=ModelConfig(model_type="lstm", max_epochs=2, batch_size=16, patience=3),
+        runtime=RuntimeConfig(device="cpu", num_workers=0, amp=False),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated OOM"):
+        trainer.train(train_ds, val_ds)
+
+    assert writer.closed
+
+
+def test_import_model_contracts_is_torch_free() -> None:
+    """The model name/kind table must be readable without torch installed."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "import solrad_correction.models.contracts as contracts\n"
+        "assert contracts.get_model_spec('lstm').kind == 'sequence'\n"
+        "assert 'torch' not in sys.modules, 'torch was imported eagerly'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_registry_re_exports_the_contract_names() -> None:
+    """models.registry stays the single import site for metadata plus the factory."""
+    from solrad_correction.models import contracts, registry
+
+    assert registry.MODEL_REGISTRY is contracts.MODEL_REGISTRY
+    assert registry.get_model_spec is contracts.get_model_spec
+    assert registry.supported_model_names is contracts.supported_model_names
+    assert registry.ModelSpec is contracts.ModelSpec
+
+
+class TestResumePreprocessingGuard:
+    """A resume refits the scaler; it must not silently re-scale the weights.
+
+    ``_load_resume_checkpoint`` restores model/optimizer state but never the
+    preprocessing the weights were trained under — that is refitted from
+    whatever is on disk now. Without the fingerprint check, a changed feature
+    set or a re-fitted mean/scale feeds the restored network differently-scaled
+    inputs and every metric derived from it is meaningless.
+    """
+
+    @staticmethod
+    def _fitted_state(seed: int, columns: list[str]) -> Any:
+        from solrad_correction.data.preprocessing import Preprocessor
+
+        rng = np.random.default_rng(seed)
+        frame = pd.DataFrame(rng.normal(0, 1, (50, len(columns))), columns=columns)
+        return (
+            Preprocessor(feature_columns=columns[:-1], target_column=columns[-1]).fit(frame).state
+        )
+
+    def test_the_fingerprint_ignores_provenance_but_tracks_the_transform(self) -> None:
+        state = self._fitted_state(1, ["a", "b", "y"])
+        baseline = state.fingerprint()
+
+        state.row_counts = {"fit_input": 999}
+        state.dropped_columns = {"noise": "nan_ratio"}
+        assert state.fingerprint() == baseline
+
+        state.scaling["a"] = {"mean": 12.5, "scale": 3.0}
+        assert state.fingerprint() != baseline
+
+    def test_a_changed_scaler_refuses_the_resume(self) -> None:
+        pytest.importorskip("torch")
+        from solrad_correction.models.lstm import LSTMRegressor
+
+        model = LSTMRegressor(input_size=2, hidden_size=4, num_layers=1, device="cpu")
+        model._resume_preprocessing_fingerprint = self._fitted_state(
+            1, ["a", "b", "y"]
+        ).fingerprint()
+        model._preprocessing_fingerprint = self._fitted_state(2, ["a", "b", "y"]).fingerprint()
+
+        with pytest.raises(ValueError, match="differently-scaled inputs"):
+            model._assert_preprocessing_unchanged(allow_change=False, path="last.pt")
+
+    def test_an_unchanged_scaler_resumes_silently(self) -> None:
+        pytest.importorskip("torch")
+        from solrad_correction.models.lstm import LSTMRegressor
+
+        fingerprint = self._fitted_state(1, ["a", "b", "y"]).fingerprint()
+        model = LSTMRegressor(input_size=2, hidden_size=4, num_layers=1, device="cpu")
+        model._resume_preprocessing_fingerprint = fingerprint
+        model._preprocessing_fingerprint = fingerprint
+
+        model._assert_preprocessing_unchanged(allow_change=False, path="last.pt")
+
+    def test_the_opt_out_downgrades_the_refusal_to_a_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        pytest.importorskip("torch")
+        from solrad_correction.models.lstm import LSTMRegressor
+
+        model = LSTMRegressor(input_size=2, hidden_size=4, num_layers=1, device="cpu")
+        model._resume_preprocessing_fingerprint = self._fitted_state(
+            1, ["a", "b", "y"]
+        ).fingerprint()
+        model._preprocessing_fingerprint = self._fitted_state(2, ["a", "b", "y"]).fingerprint()
+
+        with caplog.at_level(logging.WARNING):
+            model._assert_preprocessing_unchanged(allow_change=True, path="last.pt")
+
+        assert "Resuming anyway" in caplog.text
+
+    def test_a_pre_fingerprint_checkpoint_warns_instead_of_failing(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Checkpoints written before the fingerprint existed must still resume."""
+        pytest.importorskip("torch")
+        from solrad_correction.models.lstm import LSTMRegressor
+
+        model = LSTMRegressor(input_size=2, hidden_size=4, num_layers=1, device="cpu")
+        model._resume_preprocessing_fingerprint = None
+        model._preprocessing_fingerprint = self._fitted_state(1, ["a", "b", "y"]).fingerprint()
+
+        with caplog.at_level(logging.WARNING):
+            model._assert_preprocessing_unchanged(allow_change=False, path="last.pt")
+
+        assert "is NOT verified" in caplog.text
+
+    def test_the_fingerprint_reaches_the_checkpoint_metadata(self, tmp_path: Path) -> None:
+        torch = pytest.importorskip("torch")
+
+        from solrad_correction.training.checkpoints import CheckpointManager
+        from solrad_correction.utils.serialization import load_torch_checkpoint
+
+        fingerprint = self._fitted_state(1, ["a", "b", "y"]).fingerprint()
+        module = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.SGD(module.parameters(), lr=0.1)
+        CheckpointManager(directory=tmp_path, preprocessing_fingerprint=fingerprint).save_last(
+            epoch=1,
+            model=module,
+            optimizer=optimizer,
+            scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer),
+            scaler=None,
+            metric=0.25,
+            dataloader_settings=None,
+        )
+
+        metadata = load_torch_checkpoint(tmp_path / "last.pt")["metadata"]
+        assert metadata["preprocessing_fingerprint"] == fingerprint

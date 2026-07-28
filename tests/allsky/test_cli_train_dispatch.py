@@ -23,6 +23,7 @@ from allsky.config import SiteConfig  # noqa: E402
 from allsky.data.manifest import build_manifest, write_manifest_parquet  # noqa: E402
 from allsky.data.splits import create_day_splits, save_split_artifact  # noqa: E402
 from allsky.embeddings.storage import save_shard, shard_path, write_index, write_meta  # noqa: E402
+from allsky.training.checkpointing import load_checkpoint as _load_checkpoint  # noqa: E402
 
 runner = CliRunner()
 
@@ -189,6 +190,65 @@ class TestExperimentDispatch:
             ],
         )
         assert result.exit_code != 0
+
+
+class TestTrustCheckpointFlag:
+    def test_the_flag_reaches_the_resume_load(self, tmp_path: Path, monkeypatch) -> None:
+        """The restricted-unpickler default must be overridable from the CLI.
+
+        Without a flag, a checkpoint the allowlist refuses could only be resumed
+        by editing code — so the safe default would be un-overridable in the field.
+        """
+        trust_values: list[bool] = []
+
+        def record_trust(_cfg, **kwargs):
+            trust_values.append(bool(kwargs["trust_checkpoint"]))
+            return {"ok": True}
+
+        monkeypatch.setattr("allsky.training.run_experiment", record_trust)
+        root, config_path = _build_experiment(tmp_path)
+
+        for extra_flags, expected in (([], False), (["--trust-checkpoint"], True)):
+            trust_values.clear()
+            result = runner.invoke(
+                app,
+                ["train", "--config", str(config_path), "--data-root", str(root), *extra_flags],
+            )
+            assert result.exit_code == 0, result.output
+            assert trust_values == [expected]
+
+    def test_a_resumed_checkpoint_is_read_under_the_restricted_reader_by_default(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        seen: list[bool] = []
+        real_load = _load_checkpoint
+
+        def record_trust(path, *, map_location="cpu", trust_pickle=False):
+            seen.append(trust_pickle)
+            return real_load(path, map_location=map_location, trust_pickle=trust_pickle)
+
+        root, config_path = _build_experiment(tmp_path)
+        run_dir = tmp_path / "run"
+        base = [
+            "train",
+            "--config",
+            str(config_path),
+            "--epochs",
+            "1",
+            "--data-root",
+            str(root),
+            "--out-dir",
+            str(run_dir),
+        ]
+        assert runner.invoke(app, base).exit_code == 0
+
+        monkeypatch.setattr("allsky.training.engine.load_checkpoint", record_trust)
+        assert runner.invoke(app, [*base, "--resume", "auto"]).exit_code == 0
+        assert seen == [False]
+
+        seen.clear()
+        assert runner.invoke(app, [*base, "--resume", "auto", "--trust-checkpoint"]).exit_code == 0
+        assert seen == [True]
 
 
 class TestNonExperimentRejected:

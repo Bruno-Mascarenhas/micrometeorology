@@ -7,6 +7,7 @@ backbones (no DINOv2 download), and runs in well under a couple of seconds.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -15,7 +16,7 @@ torch = pytest.importorskip("torch")
 
 from torch import nn  # noqa: E402
 
-from allsky.config import ExperimentConfig  # noqa: E402
+from allsky.config import ExperimentConfig, load_experiment_config  # noqa: E402
 from allsky.features import active_feature_groups, resolve_feature_set  # noqa: E402
 from allsky.features.normalization import TargetNormalizer  # noqa: E402
 from allsky.modeling.baselines import ClimatologyModel  # noqa: E402
@@ -27,9 +28,18 @@ from allsky.modeling.fusion import (  # noqa: E402
 )
 from allsky.modeling.heads import DHIHeteroscedasticHead, Heads, Trunk  # noqa: E402
 from allsky.modeling.multimodal import MultimodalNet  # noqa: E402
-from allsky.modeling.registry import MODEL_BUILDERS, build_model  # noqa: E402
+from allsky.modeling.registry import (  # noqa: E402
+    MODEL_BUILDERS,
+    _warn_unknown_params,
+    build_model,
+)
 from allsky.modeling.sensor_encoder import SensorEncoder  # noqa: E402
 from allsky.modeling.visual_encoder import ImageEncoder, PrecomputedEmbedding  # noqa: E402
+
+#: The shipped V0-V7 experiment configs, checked for registry drift below.
+SHIPPED_EXPERIMENT_CONFIGS = sorted(
+    (Path(__file__).resolve().parents[2] / "configs" / "allsky" / "experiments").glob("v*.yaml")
+)
 
 SAFE_FEATURES = resolve_feature_set("safe")
 N_FEATURES = len(SAFE_FEATURES)
@@ -485,6 +495,44 @@ def test_build_model_no_warning_for_known_hyperparameters(caplog):
     )
     with caplog.at_level(logging.WARNING, logger="allsky.modeling.registry"):
         build_model(cfg, N_FEATURES, embedding_dim=EMBED_DIM)
+    assert not any("unknown hyper-parameter" in record.getMessage() for record in caplog.records)
+
+
+def test_documented_image_knobs_do_not_warn(caplog):
+    # backbone / backbone_pooling are read by engine._default_image_backbone_builder
+    # and named in its error message, so warning about them trains operators to
+    # ignore the only protection against a real typo.
+    cfg = ExperimentConfig.model_validate(
+        {
+            "features": {"set": "safe"},
+            "targets": {"dhi": {"enabled": True, "loss": "huber"}},
+            "model": {
+                "name": "film",
+                "backbone": "dinov2_vits14",
+                "backbone_pooling": "cls",
+                "image_size": 224,
+                "backbone_frozen": False,
+                "unfreeze_last_n": 2,
+            },
+            "data": {"input_mode": "image"},
+        }
+    )
+    with caplog.at_level(logging.WARNING, logger="allsky.modeling.registry"):
+        _warn_unknown_params(cfg.model.name, cfg)
+    assert not any("unknown hyper-parameter" in record.getMessage() for record in caplog.records)
+
+
+def test_shipped_experiment_configs_are_discovered():
+    assert SHIPPED_EXPERIMENT_CONFIGS, "no shipped experiment configs found to check for drift"
+
+
+@pytest.mark.parametrize("config_path", SHIPPED_EXPERIMENT_CONFIGS, ids=lambda p: p.stem)
+def test_shipped_experiment_configs_have_no_unknown_params(config_path: Path, caplog):
+    # Pins the drift surface in both directions: a shipped config gaining a knob the
+    # registry does not list, or the registry dropping one a config relies on.
+    cfg = load_experiment_config(config_path)
+    with caplog.at_level(logging.WARNING, logger="allsky.modeling.registry"):
+        _warn_unknown_params(cfg.model.name, cfg)
     assert not any("unknown hyper-parameter" in record.getMessage() for record in caplog.records)
 
 

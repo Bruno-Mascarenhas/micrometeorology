@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -33,7 +34,13 @@ from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import geojson, variables
 from micrometeorology.wrf.batch import _max_tasks_per_child
 from micrometeorology.wrf.geojson import create_wind_vectors_json, write_values_json_stream
-from micrometeorology.wrf.reader import WRFDataset, product_timezone
+from micrometeorology.wrf.reader import (
+    WRFDataset,
+    assert_one_file_per_domain,
+    detect_grid_level,
+    product_timezone,
+)
+from micrometeorology.wrf.value_source import build_value_frame_source, is_daylight_step
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +103,13 @@ class UnitResult:
     # like every JSON date_time) and the file's time-step count.
     start_local: str | None = None
     n_steps: int | None = None
+    # The domain this unit publishes under, derived from its filename so it is
+    # known even when the unit never managed to open the file.
+    domain: str | None = None
+    # Output variable ids the unit requested but the wrfout does not carry, so
+    # the manifest can say "no steps this run" instead of leaving the previous
+    # run's files silently vouched for under the freshly bumped version.
+    missing_variables: tuple[str, ...] = ()
 
 
 def apply_hdf5_locking_policy() -> None:
@@ -146,8 +160,10 @@ def _atomic_json_dump(output_path: Path, payload: dict) -> str:
     with open(tmp, "w", encoding="utf-8") as f:
         # allow_nan=False: a NaN that slips into a payload must fail the work
         # unit here, not ship as an invalid-JSON token that only breaks in
-        # every visitor's browser.
-        json.dump(payload, f, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        # every visitor's browser. Encode with json.dumps and write once:
+        # json.dump(obj, fp) is the only spelling that never reaches the C
+        # encoder, and costs 3x for the same bytes on a wind-vector payload.
+        f.write(json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False))
     os.replace(tmp, output_path)
     return str(output_path)
 
@@ -242,119 +258,24 @@ class _SiteArtifactAccumulator:
         return [str(series_path), summary_path]
 
 
-@dataclass(frozen=True, slots=True)
-class _ValueFrameSource:
-    """Values and color-scale bounds for one exported WRF variable."""
+def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str], list[str]]:
+    """Write every timestep JSON of one values variable.
 
-    frame_for_step: Callable[[int], NDArray]
-    scale_min: float
-    scale_max: float
-
-
-def _build_value_frame_source(
-    dataset: WRFDataset,
-    variable_name: str,
-) -> _ValueFrameSource | None:
-    """Build a frame reader and color-scale bounds for a values-JSON variable.
-
-    Mirrors the per-variable branches of the legacy task builder exactly —
-    same extractors, same per-step arithmetic — so output bytes match.
-    Returns ``None`` when the variable is absent from the file.
+    Returns the files written, the unit's warnings, and the output variable
+    ids this wrfout does not carry — the only case where "no files" means the
+    previous run's files are still the newest ones on disk, as opposed to the
+    legitimately empty ones (an all-night SWDOWN window, ``--skip-first``).
     """
-    if variable_name == WRFVariable.TEMPERATURE:
-        temperature_kelvin, scale_min, scale_max = variables.extract_temperature(dataset)
-        return _ValueFrameSource(
-            frame_for_step=lambda time_step_index: variables.materialize_2d(
-                variables.extract_temperature_step(
-                    temperature_kelvin[time_step_index : time_step_index + 1, :, :]
-                )
-            ),
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.SKIN_TEMPERATURE:
-        skin_temperature_kelvin, scale_min, scale_max = variables.extract_skin_temperature(dataset)
-        return _ValueFrameSource(
-            frame_for_step=lambda time_step_index: variables.materialize_2d(
-                variables.extract_temperature_step(
-                    skin_temperature_kelvin[time_step_index : time_step_index + 1, :, :]
-                )
-            ),
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.RELATIVE_HUMIDITY:
-        relative_humidity, scale_min, scale_max = variables.extract_relative_humidity(dataset)
-        return _ValueFrameSource(
-            frame_for_step=lambda time_step_index: variables.materialize_2d(
-                relative_humidity[time_step_index : time_step_index + 1, :, :]
-            ),
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.RAIN:
-        cumulative_rain, scale_min, scale_max = variables.extract_rain(dataset)
-        return _ValueFrameSource(
-            frame_for_step=lambda time_step_index: variables.materialize_2d(
-                variables.extract_rain_step(cumulative_rain, time_step_index)
-            ),
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.WIND:
-        u10_values, v10_values, scale_min, scale_max = variables.extract_wind(dataset)
-
-        def wind_speed_for_step(time_step_index: int) -> NDArray:
-            u10_step = variables.materialize_2d(u10_values[time_step_index : time_step_index + 1])
-            v10_step = variables.materialize_2d(v10_values[time_step_index : time_step_index + 1])
-            wind_speed: NDArray = np.hypot(u10_step, v10_step)
-            return wind_speed
-
-        return _ValueFrameSource(
-            frame_for_step=wind_speed_for_step,
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.WIND_POWER_DENSITY_10M:
-        power_density, scale_min, scale_max = variables.extract_wind_power_density_10m(dataset)
-        return _ValueFrameSource(
-            frame_for_step=lambda time_step_index: variables.materialize_2d(
-                power_density[time_step_index : time_step_index + 1, :, :]
-            ),
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.PRESSURE:
-        scalar_values, scale_min, scale_max = variables.extract_pressure(dataset)
-    elif variable_name == WRFVariable.VAPOR:
-        scalar_values, scale_min, scale_max = variables.extract_vapor(dataset)
-    else:
-        netcdf_variable_name = variable_name.upper()
-        if not dataset.has_variable(netcdf_variable_name):
-            return None
-        scalar_values, scale_min, scale_max = variables.extract_scalar(
-            dataset, netcdf_variable_name
-        )
-    return _ValueFrameSource(
-        frame_for_step=lambda time_step_index: variables.materialize_2d(
-            scalar_values[time_step_index : time_step_index + 1, :, :]
-        ),
-        scale_min=scale_min,
-        scale_max=scale_max,
-    )
-
-
-def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str]]:
     written_files: list[str] = []
     unit_warnings: list[str] = []
     grid_level = dataset.grid_level.value
     output_variable_id = VARIABLE_NETCDF_MAP.get(unit.variable, unit.variable.upper())
     time_step_metadata = dataset.build_date_metadata(skip_first_n=unit.skip_first)
 
-    frame_source = _build_value_frame_source(dataset, unit.variable)
+    frame_source = build_value_frame_source(dataset, unit.variable)
     if frame_source is None:
         unit_warnings.append(f"Variable {unit.variable.upper()} not found — skipped")
-        return written_files, unit_warnings
+        return written_files, unit_warnings, [output_variable_id]
 
     site_artifact_accumulator = (
         _SiteArtifactAccumulator(dataset.n_time_steps) if unit.site_artifacts else None
@@ -362,10 +283,8 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
     for step_metadata in time_step_metadata:
         if step_metadata.get("skip"):
             continue
-        if unit.variable == WRFVariable.SWDOWN:
-            local_hour = step_metadata["datetime_local"].hour
-            if local_hour < 6 or local_hour > 18:
-                continue
+        if unit.variable == WRFVariable.SWDOWN and not is_daylight_step(step_metadata):
+            continue
         time_step_index = step_metadata["index"]
         frame_values = frame_source.frame_for_step(time_step_index)
         formatted_local_time = _format_datetime(step_metadata["datetime_local"])
@@ -393,7 +312,7 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
                 output_variable_id,
             )
         )
-    return written_files, unit_warnings
+    return written_files, unit_warnings, []
 
 
 def _run_poteolico_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list[str]]:
@@ -509,13 +428,9 @@ def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> P
     if not results:
         return None
     written = sum(len(result.files) for result in results)
-    domains = sorted(
-        {
-            match.group(1).upper()
-            for result in results
-            if (match := re.search(r"_(d\d+)_", result.label)) is not None
-        }
-    )
+    # The same filename->domain rule the writers name their files with, so the
+    # advertised domains can never disagree with the published `{D}_*` files.
+    domains = sorted({result.domain for result in results if result.domain})
     payload: dict = {
         "version": time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
         "generated_utc": time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime()),
@@ -533,6 +448,12 @@ def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> P
     have_summary = False
     have_series = False
     for result in results:
+        # A variable the wrfout does not carry wrote no file, and its fixed
+        # output names still hold the previous run's data: seed it with an
+        # empty index set so availability publishes it as "no steps this run"
+        # instead of omitting it, which the front-end reads as "full range".
+        for missing_variable in result.missing_variables:
+            var_indices.setdefault(missing_variable, set())
         for file_path in result.files:
             name = Path(file_path).name
             match = _TIMESTEP_FILE_RE.match(name)
@@ -577,11 +498,13 @@ def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> P
             payload["availability"] = availability
 
         # Consolidated-artifact descriptors are a byte-offset contract: a
-        # failed unit leaves LAST run's {D}_{VAR}.series.bin/.summary.json in
-        # place under this run's version, so only vouch for the artifacts
-        # when every unit succeeded (the site falls back to the per-step
-        # JSONs otherwise).
-        run_clean = not any(r.error for r in results)
+        # failed unit — or one whose variable the wrfout no longer carries —
+        # leaves LAST run's {D}_{VAR}.series.bin/.summary.json in place under
+        # this run's version, and a stale matrix of a different step count is
+        # read at the wrong byte offsets, not merely stale. Only vouch for the
+        # artifacts when every unit both succeeded and found its variable (the
+        # site falls back to the per-step JSONs otherwise).
+        run_clean = not any(r.error or r.missing_variables for r in results)
         features: dict = {}
         if have_summary and run_clean:
             features["domain_summary"] = {
@@ -649,16 +572,23 @@ def _sweep_stale_temp_files(
     return removed
 
 
+def _unit_domain(unit: WorkUnit) -> str | None:
+    """The domain a unit publishes under, from its filename alone."""
+    level = detect_grid_level(unit.wrf_path)
+    return level.value if level is not None else None
+
+
 def process_unit(unit: WorkUnit) -> UnitResult:
     """Execute one work unit. Runs in a worker process; never raises."""
     if os.environ.get("LABMIM_TEST_CRASH_UNIT") == unit.variable:
         # Test hook: simulate an OOM-killed worker (exercises pool-break recovery).
         os._exit(137)
     t0 = time.perf_counter()
+    missing_variables: list[str] = []
     try:
         with WRFDataset(unit.wrf_path) as ds:
             if unit.kind == "values_json":
-                files, warnings = _run_values_unit(unit, ds)
+                files, warnings, missing_variables = _run_values_unit(unit, ds)
             elif unit.kind == "poteolico":
                 files, warnings = _run_poteolico_unit(unit, ds)
             elif unit.kind == "wind_vectors":
@@ -676,6 +606,8 @@ def process_unit(unit: WorkUnit) -> UnitResult:
             warnings=tuple(warnings),
             start_local=start_local,
             n_steps=n_steps,
+            domain=_unit_domain(unit),
+            missing_variables=tuple(missing_variables),
         )
     except Exception as exc:
         logger.exception("Work unit failed: %s", unit.label)
@@ -684,10 +616,33 @@ def process_unit(unit: WorkUnit) -> UnitResult:
             kind=unit.kind,
             seconds=time.perf_counter() - t0,
             error=f"{type(exc).__name__}: {exc}",
+            domain=_unit_domain(unit),
         )
 
 
 _KIND_COST_RANK = {"poteolico": 0, "values_json": 1, "wind_vectors": 1, "grid_geojson": 2}
+
+
+def _init_worker_logging(level: int) -> None:
+    """Give a fresh worker the logging config forkserver children never inherit.
+
+    Without this, every worker-side record falls through to
+    ``logging.lastResort``: no timestamp, no logger name, no level, and no way
+    to tell which of 44 concurrent workers wrote it. Records go to stderr so
+    the CLI's progress lines keep stdout to themselves, and carry the pid so
+    interleaved streams stay attributable.
+
+    Held at WARNING or above regardless of the parent's level: the streaming
+    writers log their ``.tmp-<pid>`` argument rather than the final path, so
+    worker INFO would name files that never exist.
+    """
+    logging.basicConfig(
+        level=max(level, logging.WARNING),
+        format="%(asctime)s | %(process)d | %(name)-40s | %(levelname)-7s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stderr)],
+        force=True,
+    )
 
 
 def build_units(
@@ -698,7 +653,13 @@ def build_units(
     skip_first: int = 0,
     site_artifacts: bool = True,
 ) -> list[WorkUnit]:
-    """Expand (files x variables) into work units, one grid GeoJSON per file."""
+    """Expand (files x variables) into work units, one grid GeoJSON per file.
+
+    Raises ``ValueError`` before any unit is built when two of *wrf_paths*
+    belong to the same domain: see
+    :func:`~micrometeorology.wrf.reader.assert_one_file_per_domain`.
+    """
+    assert_one_file_per_domain(wrf_paths)
     units: list[WorkUnit] = []
     for path in wrf_paths:
         units.append(
@@ -767,10 +728,13 @@ def execute_units(
     results: list[UnitResult] = []
     pending: list[WorkUnit] = list(ordered)
     completed: set[int] = set()
+    worker_log_level = logging.getLogger().getEffectiveLevel()
     try:
         with ProcessPoolExecutor(
             max_workers=n_workers,
             max_tasks_per_child=_max_tasks_per_child(n_workers),
+            initializer=_init_worker_logging,
+            initargs=(worker_log_level,),
         ) as pool:
             futures = {pool.submit(process_unit, unit): idx for idx, unit in enumerate(pending)}
             for future in as_completed(futures):
@@ -794,13 +758,18 @@ def execute_units(
             echo(f"  swept {swept} stale temp file(s) left by killed workers")
     for unit in pending:
         try:
-            with ProcessPoolExecutor(max_workers=1) as retry_pool:
+            with ProcessPoolExecutor(
+                max_workers=1,
+                initializer=_init_worker_logging,
+                initargs=(worker_log_level,),
+            ) as retry_pool:
                 result = retry_pool.submit(process_unit, unit).result()
         except BrokenProcessPool:
             result = UnitResult(
                 label=unit.label,
                 kind=unit.kind,
                 error="worker crashed while processing this unit (possible OOM kill)",
+                domain=_unit_domain(unit),
             )
         results.append(result)
         status = f"✗ {result.error}" if result.error else f"{len(result.files)} files"

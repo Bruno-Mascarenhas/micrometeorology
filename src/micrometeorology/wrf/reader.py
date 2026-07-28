@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence
 from datetime import UTC, datetime, tzinfo
 from functools import lru_cache
 from pathlib import Path
@@ -54,6 +55,53 @@ def _decode_wrf_time_strings(times_raw: Any) -> list[str]:
     return [str(ts) for ts in netCDF4.chartostring(arr)]
 
 
+def detect_grid_level(path: str | Path) -> GridLevel | None:
+    """The domain a wrfout file name carries (``wrfout_d01_…`` → ``D01``).
+
+    Purely name-based, so callers can group files by domain without opening a
+    single NetCDF. ``None`` when the name carries no ``D01``..``D05`` token —
+    the caller decides whether that is fatal (:class:`WRFDataset` refuses to
+    guess) or merely not groupable.
+    """
+    name = Path(path).name.lower()
+    for level in GridLevel:
+        if level.value.lower() in name:
+            return level
+    return None
+
+
+def assert_one_file_per_domain(paths: Sequence[str | Path]) -> None:
+    """Raise ``ValueError`` when two files would publish under the same domain.
+
+    Every WRF product name holds exactly one slot per domain —
+    ``{D}_{VAR}_{nnn}.json``, ``{D}_{VAR}.series.bin``, ``{D}_{VAR}.summary.json``,
+    ``{D}.geojson``, ``{D}.grid.json`` — so a run covering two files of the same
+    domain can only overwrite, and because the units run concurrently on one
+    pool the surviving mix of per-step JSONs, series matrix and summary is
+    whichever unit happened to finish last. Names with no recognizable domain
+    are left out: :class:`WRFDataset` fails those units individually rather
+    than letting them publish under a guessed domain.
+    """
+    names_by_domain: dict[GridLevel, list[str]] = {}
+    for path in paths:
+        level = detect_grid_level(path)
+        if level is not None:
+            names_by_domain.setdefault(level, []).append(Path(path).name)
+    collisions = [
+        f"{level.value}: {', '.join(sorted(names))}"
+        for level, names in sorted(names_by_domain.items())
+        if len(names) > 1
+    ]
+    if collisions:
+        raise ValueError(
+            "A run publishes one set of files per domain, but these files map to "
+            f"the same domain and would overwrite each other — {'; '.join(collisions)}. "
+            "Cover at most one file per domain: narrow the selection with "
+            "-d/--dataset or -D/--domains, or give each file its own -o/-g "
+            "output directories."
+        )
+
+
 class WRFDataset:
     """Thin wrapper around a WRF ``netCDF4.Dataset``.
 
@@ -65,9 +113,11 @@ class WRFDataset:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        # Detected before the open: it needs only the name, and raising here
+        # would otherwise strand an HDF5 handle no ``__exit__`` ever closes.
+        self._grid_level = self._detect_grid_level()
         self._ds = netCDF4.Dataset(str(self.path), mode="r")
         self._ds.set_auto_mask(False)  # Return plain ndarray, not MaskedArray
-        self._grid_level = self._detect_grid_level()
         self._grid_cache: tuple[NDArray, NDArray] | None = None
         self._time_cache: list[datetime] | None = None
         logger.info("Opened WRF dataset: %s (grid %s)", self.path.name, self._grid_level)
@@ -227,13 +277,19 @@ class WRFDataset:
     # ------------------------------------------------------------------
 
     def _detect_grid_level(self) -> GridLevel:
-        """Infer the grid level from the file name (e.g. ``wrfout_d01_…``)."""
-        name = self.path.name.lower()
-        for level in GridLevel:
-            if level.value.lower() in name:
-                return level
-        logger.warning("Could not detect grid level from %s; defaulting to D01", name)
-        return GridLevel.D01
+        """Infer the grid level from the file name (e.g. ``wrfout_d01_…``).
+
+        Refuses to guess: every product name is built from this value, so
+        defaulting an untokenized (or out-of-range, e.g. ``d06``) file to
+        ``D01`` republishes its grid and values over the real D01 products.
+        """
+        level = detect_grid_level(self.path)
+        if level is None:
+            raise ValueError(
+                f"Could not detect grid level ({', '.join(g.value for g in GridLevel)}) "
+                f"from WRF filename {self.path.name!r}"
+            )
+        return level
 
     def close(self) -> None:
         """Close the underlying NetCDF file handle."""
@@ -244,6 +300,21 @@ class WRFDataset:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+def normalize_run_date(date: str) -> str:
+    """Return the digit run :func:`resolve_wrfout_paths` slices, rejecting typos.
+
+    ``2026-07-27`` and ``2026/07/27`` are accepted — the wrfout names are
+    themselves ISO, so those are the natural typo — and a longer
+    ``YYYYMMDDHH`` prefix keeps working. Anything that is not at least a full
+    8-digit day raises ``ValueError``: silently slicing it would report a
+    mistyped date as a day on which WRF produced no files.
+    """
+    digits = date.replace("-", "").replace("/", "")
+    if not digits.isdigit() or len(digits) < 8:
+        raise ValueError(f"--date must be YYYYMMDD (got {date!r})")
+    return digits
 
 
 def resolve_wrfout_paths(
@@ -262,7 +333,10 @@ def resolve_wrfout_paths(
     wrf_dir:
         Directory containing ``wrfout_*`` files.
     date:
-        Simulation date in ``YYYYMMDD`` format.
+        Simulation date in ``YYYYMMDD`` format; separators are tolerated and a
+        longer ``YYYYMMDDHH`` run prefix is accepted. Validated here so every
+        CLI reaching for wrfout files rejects the same typos —
+        see :func:`normalize_run_date`.
     domains:
         Exact domain numbers to search (no range widening: ``(1, 4)``
         matches only d01 and d04). Defaults to ``(1, 2, 3, 4)``.
@@ -271,7 +345,13 @@ def resolve_wrfout_paths(
     -------
     list[Path]
         Sorted list of matching paths.
+
+    Raises
+    ------
+    ValueError
+        When *date* is not at least an 8-digit day.
     """
+    date = normalize_run_date(date)
     year, month, day = date[:4], date[4:6], date[6:8]
     selected = sorted(set(domains)) if domains else [1, 2, 3, 4]
 

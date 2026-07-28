@@ -158,10 +158,15 @@ def daily_totals(
     Returns
     -------
     pandas.DataFrame
-        One row per calendar day, one column per selected variable.
+        One row per calendar day, one column per selected variable. NaNs are
+        skipped within a day; a day with no valid sample yields NaN for either
+        aggregation, so a 24 h outage stays distinguishable from a genuinely
+        dry (all-zero) day.
     """
     cols = _select_columns(df, columns)
     grouped = df[cols].resample("1D")
     if agg == "sum":
-        return grouped.sum()
+        # ``min_count=1`` keeps an all-NaN day out of the totals: plain ``sum()``
+        # reports it as 0.0, which reads as a dry day instead of a sensor gap.
+        return grouped.sum(min_count=1)
     return grouped.mean()

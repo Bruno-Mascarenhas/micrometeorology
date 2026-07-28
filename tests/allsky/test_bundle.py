@@ -16,7 +16,7 @@ import pandas as pd
 import pytest
 
 from allsky import solar
-from allsky.bundle import _safe_arcname, export_colab_bundle, validate_bundle
+from allsky.bundle import _read_member, _safe_arcname, export_colab_bundle, validate_bundle
 from allsky.config import PrepareConfig, SiteConfig
 from allsky.data.manifest import build_manifest, write_manifest_parquet
 from allsky.data.splits import create_day_splits, save_split_artifact
@@ -186,3 +186,82 @@ class TestPrepareCfgExport:
         cfg = PrepareConfig.model_validate({"output": {"dataset_dir": str(tmp_path / "nope")}})
         with pytest.raises(ValueError, match="manifest not found"):
             export_colab_bundle(tmp_path / "b.tar.gz", prepare_cfg=cfg)
+
+
+def _write_frames(dataset_dir: Path) -> list[str]:
+    """Write a tiny JPEG at every manifest ``image_path``; return those paths."""
+    import numpy as np
+    from PIL import Image
+
+    manifest = pd.read_parquet(dataset_dir / "manifest.parquet")
+    relatives = sorted({str(value) for value in manifest["image_path"]})
+    for relative in relatives:
+        full = dataset_dir / relative
+        full.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(np.full((4, 4, 3), 128, dtype=np.uint8)).save(full)
+    return relatives
+
+
+class TestIncludeFrames:
+    def test_frames_absent_by_default_and_readme_says_so(self, dataset_dir: Path, tmp_path: Path):
+        _write_frames(dataset_dir)
+        out = tmp_path / "bundle.tar.gz"
+        summary = export_colab_bundle(out, manifest_path=dataset_dir / "manifest.parquet")
+
+        assert summary["frame_files"] == 0
+        assert not any(name.endswith(".jpg") for name in summary["members"])
+        with tarfile.open(out, "r:gz") as tar:
+            readme = _read_member(tar, "allsky_bundle/BUNDLE_README.md").decode("utf-8")
+        assert "carries **no frames**" in readme
+        assert "--include-frames" in readme
+
+    def test_include_frames_packs_every_referenced_image_path(
+        self, dataset_dir: Path, tmp_path: Path
+    ):
+        relatives = _write_frames(dataset_dir)
+        out = tmp_path / "bundle.tar.gz"
+        summary = export_colab_bundle(
+            out, manifest_path=dataset_dir / "manifest.parquet", include_frames=True
+        )
+
+        assert summary["frame_files"] == len(relatives)
+        for relative in relatives:
+            assert f"allsky_bundle/{relative}" in summary["members"]
+        with tarfile.open(out, "r:gz") as tar:
+            readme = _read_member(tar, "allsky_bundle/BUNDLE_README.md").decode("utf-8")
+        assert "resolved against the" in readme
+        assert "carries **no frames**" not in readme
+
+    def test_unreferenced_frames_are_not_packed(self, dataset_dir: Path, tmp_path: Path):
+        # Night / QC-dropped JPEGs live in the frames tree but address no row.
+        _write_frames(dataset_dir)
+        stray = dataset_dir / "frames" / "allsky-20250321-0300.jpg"
+        stray.write_bytes(b"not-referenced")
+
+        summary = export_colab_bundle(
+            tmp_path / "bundle.tar.gz",
+            manifest_path=dataset_dir / "manifest.parquet",
+            include_frames=True,
+        )
+        assert f"allsky_bundle/frames/{stray.name}" not in summary["members"]
+
+    def test_missing_frame_raises(self, dataset_dir: Path, tmp_path: Path):
+        with pytest.raises(ValueError, match="cannot include frames"):
+            export_colab_bundle(
+                tmp_path / "bundle.tar.gz",
+                manifest_path=dataset_dir / "manifest.parquet",
+                include_frames=True,
+            )
+
+
+class TestTarHygiene:
+    def test_copied_members_carry_no_local_account_or_mtime(
+        self, dataset_dir: Path, tmp_path: Path
+    ):
+        out = tmp_path / "bundle.tar.gz"
+        export_colab_bundle(out, manifest_path=dataset_dir / "manifest.parquet")
+        with tarfile.open(out, "r:gz") as tar:
+            for member in tar.getmembers():
+                assert (member.uid, member.gid) == (0, 0), member.name
+                assert (member.uname, member.gname) == ("", ""), member.name
+                assert member.mtime == 0, member.name
