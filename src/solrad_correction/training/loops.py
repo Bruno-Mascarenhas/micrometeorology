@@ -26,13 +26,21 @@ def train_one_epoch(
 
     Parameters
     ----------
+    criterion:
+        Must reduce with ``reduction='mean'`` over the batch dimension: the
+        returned value re-weights each batch by its sample count, which is only
+        correct for a batch-mean loss.
     progress_callback:
         Called with ``(batch_idx, total_batches)`` for progress display.
 
-    Returns the average loss for the epoch.
+    Returns the sample-weighted average of the per-batch losses over the epoch,
+    so a partial tail batch counts in proportion to its size. This is not the
+    dataset MSE: the parameters change after every optimizer step, so it is a
+    running average over a moving model.
     """
     model.train()
     total_loss = 0.0
+    total_samples = 0
     n_batches = len(dataloader)
 
     for batch_idx, (x_batch, y_batch) in enumerate(dataloader):
@@ -62,12 +70,14 @@ def train_one_epoch(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
             optimizer.step()
 
-        total_loss += loss.item()
+        batch_samples = y_batch.shape[0]
+        total_loss += loss.item() * batch_samples
+        total_samples += batch_samples
 
         if progress_callback:
             progress_callback(batch_idx + 1, n_batches)
 
-    return total_loss / max(n_batches, 1)
+    return total_loss / max(total_samples, 1)
 
 
 def evaluate_epoch(
@@ -80,11 +90,21 @@ def evaluate_epoch(
 ) -> float:
     """Run one evaluation pass.
 
-    Returns the average loss.
+    Parameters
+    ----------
+    criterion:
+        Must reduce with ``reduction='mean'`` over the batch dimension: the
+        returned value re-weights each batch by its sample count, which is only
+        correct for a batch-mean loss.
+
+    Returns the sample-weighted mean loss over the whole dataset. With a
+    batch-mean criterion and a fixed model this is exactly the dataset-level
+    loss (for ``nn.MSELoss``, the dataset MSE), independent of how the samples
+    are split into batches.
     """
     model.eval()
     total_loss = 0.0
-    n_batches = len(dataloader)
+    total_samples = 0
 
     with torch.inference_mode():
         for x_batch, y_batch in dataloader:
@@ -97,6 +117,8 @@ def evaluate_epoch(
                 y_pred = model(x_batch)
                 loss = criterion(y_pred, y_batch)
 
-            total_loss += loss.item()
+            batch_samples = y_batch.shape[0]
+            total_loss += loss.item() * batch_samples
+            total_samples += batch_samples
 
-    return total_loss / max(n_batches, 1)
+    return total_loss / max(total_samples, 1)
