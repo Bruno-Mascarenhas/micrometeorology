@@ -75,11 +75,17 @@ def run(
         limits = config.get("sensor_limits", [])
         if limits:
             df = apply_physical_limits(df, limits)
+    else:
+        typer.echo(
+            f"  ⚠ No sensor config at {config_file}: skipping QC limits and sum/wind columns"
+        )
 
     cal_path = calibrations or str(settings.configs_dir / "calibrations.yaml")
     if Path(cal_path).exists():
         cals = load_calibrations(cal_path)
         df = apply_calibrations(df, cals)
+    else:
+        typer.echo(f"  ⚠ No calibrations at {cal_path}: exporting uncalibrated values")
 
     sum_cols = config.get("sensor_sum_columns", []) if config_file.exists() else []
     wd_cols = config.get("sensor_wind_dir_columns", []) if config_file.exists() else []
