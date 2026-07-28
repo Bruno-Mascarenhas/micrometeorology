@@ -212,14 +212,14 @@ class AttentionPooling(_WindowStrategy):
 
 
 #: Name -> strategy class registry.  Extend via :func:`register_strategy`.
-_STRATEGIES: dict[str, type] = {
+_STRATEGIES: dict[str, type[AlignmentStrategy]] = {
     CenterFrame.id: CenterFrame,
     MeanEmbedding.id: MeanEmbedding,
     AttentionPooling.id: AttentionPooling,
 }
 
 
-def register_strategy(name: str, cls: type) -> None:
+def register_strategy(name: str, cls: type[AlignmentStrategy]) -> None:
     """Register a new alignment strategy class under *name* (overwrites)."""
     _STRATEGIES[name] = cls
 
@@ -243,8 +243,7 @@ def get_strategy(name: str, **kwargs: float) -> AlignmentStrategy:
         raise KeyError(
             f"unknown alignment strategy {name!r}; known: {sorted(_STRATEGIES)}"
         ) from exc
-    strategy: AlignmentStrategy = cls(**kwargs)
-    return strategy
+    return cls(**kwargs)
 
 
 def _ordered_sample_frames(

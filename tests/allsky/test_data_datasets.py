@@ -74,6 +74,24 @@ def _build_minutely(tmp_path: Path, periods: int = 11):
     return manifest
 
 
+def _reference_windows(manifest: pd.DataFrame, window_minutes: float) -> list[list[int]]:
+    """Per-row window members straight from the docstring definition (O(n^2))."""
+    times = pd.DatetimeIndex(manifest["timestamp_utc"]).tz_convert("UTC").tz_localize(None)
+    times_ns = times.as_unit("ns").to_numpy().astype("int64")
+    days = manifest["day_id"].astype(str).to_numpy()
+    half_ns = round(window_minutes / 2.0 * 60_000_000_000)
+    windows = []
+    for row in range(len(manifest)):
+        members = [
+            other
+            for other in range(len(manifest))
+            if days[other] == days[row] and abs(times_ns[other] - times_ns[row]) <= half_ns
+        ]
+        # time order, ties broken by original position (a stable sort)
+        windows.append(sorted(members, key=lambda p: (times_ns[p], p)))
+    return windows
+
+
 class FakeEmbeddingReader:
     """Deterministic hash-based embedding reader (no torch, no I/O)."""
 
@@ -186,6 +204,113 @@ class TestImageDatasetContract:
         assert batch["features"].shape == (3, len(resolve_feature_set("safe")))
         assert batch["sky_class"].shape == (3,)
         assert batch["sky_class"].dtype == torch.long
+
+
+class TestTargetItemTensors:
+    """The shared target tensors are views into cached whole-column tensors."""
+
+    def test_values_dtypes_and_shapes_match_the_manifest(self, torch: Any, tmp_path: Path):
+        manifest, root = _build(tmp_path)
+        features = resolve_feature_set("safe")
+        dataset = MultimodalImageDataset(
+            manifest, features, data_root=root, image_size=16, train=True
+        )
+        for idx in range(len(dataset)):
+            item = dataset[idx]
+            assert item["features"].dtype == torch.float32
+            assert item["features"].shape == (len(features),)
+            np.testing.assert_array_equal(
+                item["features"].numpy(), dataset.stats.transform(manifest)[idx].astype(np.float32)
+            )
+            assert item["dhi"].shape == ()
+            assert float(item["dhi"]) == pytest.approx(
+                float(manifest["target_dhi"].iloc[idx]), rel=1e-6
+            )
+            assert int(item["sky_class"]) == int(manifest["sky_class"].iloc[idx])
+            assert item["sky_class"].dtype == torch.long
+            assert bool(torch.isnan(item["cloud_fraction"]))
+
+    def test_items_share_storage_but_batches_do_not(self, torch: Any, tmp_path: Path):
+        from torch.utils.data import default_collate
+
+        manifest, root = _build(tmp_path)
+        dataset = MultimodalImageDataset(
+            manifest, resolve_feature_set("safe"), data_root=root, image_size=16, train=True
+        )
+        batch = default_collate([dataset[0], dataset[1]])
+        original = float(dataset[0]["dhi"])
+        dataset[0]["dhi"].add_(1.0)  # in-place on a view into the dataset's column
+        assert float(dataset[0]["dhi"]) == pytest.approx(original + 1.0)
+        # default_collate stacks (and copies), so the batch kept the original value.
+        assert float(batch["dhi"][0]) == pytest.approx(original)
+        assert batch["dhi"].dtype == torch.float32
+
+    def test_column_tensors_are_writable(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+        """A read-only pandas view would make torch.from_numpy warn about UB."""
+        manifest, root = _build(tmp_path)
+        dataset = MultimodalImageDataset(
+            manifest, resolve_feature_set("safe"), data_root=root, image_size=16, train=True
+        )
+        for array in (
+            dataset._features,
+            dataset._dhi,
+            dataset._kindex,
+            dataset._cloud_fraction,
+            dataset._sky_class,
+        ):
+            assert array.flags.writeable
+
+
+class TestImageDecoding:
+    """The PIL decode path must be pixel-identical to the imageio+fromarray one."""
+
+    @staticmethod
+    def _imageio_recipe(path: Path, size: int) -> np.ndarray:
+        from PIL import Image
+
+        image = iio.imread(path)
+        if image.ndim == 2:
+            image = np.stack([image] * 3, axis=-1)
+        if image.shape[0] != size or image.shape[1] != size:
+            image = np.asarray(
+                Image.fromarray(image).resize((size, size), Image.Resampling.BILINEAR)
+            )
+        scaled = image.astype(np.float32) / 255.0
+        return np.ascontiguousarray(scaled.transpose(2, 0, 1))
+
+    def test_matches_imageio_recipe_on_rgb_jpeg(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+        manifest, root = _build(tmp_path, n=3, image_size=64)
+        dataset = MultimodalImageDataset(
+            manifest, resolve_feature_set("safe"), data_root=root, image_size=32, train=True
+        )
+        for path in manifest["image_path"]:
+            loaded = dataset._load_image(str(path))
+            expected = self._imageio_recipe(root / str(path), 32)
+            assert loaded.dtype == expected.dtype
+            np.testing.assert_array_equal(loaded, expected)
+
+    def test_grayscale_is_channel_replicated(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+        manifest, root = _build(tmp_path, n=1, image_size=16)
+        gray = root / "frames" / "gray.jpg"
+        rng = np.random.default_rng(4)
+        iio.imwrite(gray, rng.integers(0, 256, (16, 16), dtype=np.uint8), quality=90)
+        dataset = MultimodalImageDataset(
+            manifest, resolve_feature_set("safe"), data_root=root, image_size=16, train=True
+        )
+        loaded = dataset._load_image("frames/gray.jpg")
+        assert loaded.shape == (3, 16, 16)
+        np.testing.assert_array_equal(loaded, self._imageio_recipe(gray, 16))
+
+    def test_rgba_source_is_reduced_to_three_channels(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+        """The old recipe served a 4-channel array the 3-channel encoder cannot take."""
+        manifest, root = _build(tmp_path, n=1, image_size=16)
+        rgba = root / "frames" / "rgba.png"
+        rng = np.random.default_rng(5)
+        iio.imwrite(rgba, rng.integers(0, 256, (16, 16, 4), dtype=np.uint8))
+        dataset = MultimodalImageDataset(
+            manifest, resolve_feature_set("safe"), data_root=root, image_size=16, train=True
+        )
+        assert dataset._load_image("frames/rgba.png").shape == (3, 16, 16)
 
 
 class TestEmbeddingDatasetContract:
@@ -328,6 +453,42 @@ class TestEmbeddingWindowModes:
         idx = 5
         expected = reader(str(manifest["sample_id"].iloc[idx]))
         np.testing.assert_allclose(dataset[idx]["embedding"].numpy(), expected, rtol=1e-6)
+
+    def test_resolved_windows_match_the_reference_definition(self, torch: Any):  # noqa: ARG002
+        """Vectorized grouping must equal the per-row definition, adversarially."""
+        rng = np.random.default_rng(9)
+        for trial in range(25):
+            n_days = int(rng.integers(1, 4))
+            days: list[np.ndarray] = []
+            for day in range(n_days):
+                base = pd.Timestamp("2025-03-21 12:00") + pd.Timedelta(days=day)
+                # ragged day sizes, duplicate timestamps and gaps
+                offsets = rng.integers(0, 14, int(rng.integers(1, 12)))
+                days.append((base + pd.to_timedelta(sorted(offsets), unit="m")).to_numpy())
+            times = pd.DatetimeIndex(np.concatenate(days))
+            order = rng.permutation(len(times))  # shuffled row order
+            times = times[order]
+            manifest = pd.DataFrame(
+                {
+                    "sample_id": [f"s{i}" for i in range(len(times))],
+                    "timestamp_utc": times.tz_localize("UTC"),
+                    "day_id": [f"{t:%Y-%m-%d}" for t in times],
+                    "f": rng.normal(size=len(times)),
+                    "target_dhi": rng.normal(size=len(times)),
+                    "target_kindex": rng.normal(size=len(times)),
+                    "cloud_fraction": np.full(len(times), np.nan),
+                    "sky_class": rng.integers(-1, 3, len(times)).astype(np.int64),
+                }
+            )
+            window_minutes = float([0.5, 1.0, 7.0, 10.0, 13.0][trial % 5])
+            dataset = MultimodalEmbeddingDataset(
+                manifest,
+                ["f"],
+                embedding_reader=FakeEmbeddingReader(dim=2),
+                window="mean_embedding",
+                window_minutes=window_minutes,
+            )
+            assert dataset._windows == _reference_windows(manifest, window_minutes)
 
     def test_invalid_window_raises(self, torch: Any, tmp_path: Path):  # noqa: ARG002
         manifest = _build_minutely(tmp_path)

@@ -3,7 +3,7 @@
 Two datasets share one batch contract (see :meth:`MultimodalImageDataset.__getitem__`):
 
 - :class:`MultimodalImageDataset` loads sky JPEGs (paths relative to
-  ``data_root``) end-to-end with an imageio read -> PIL bilinear resize -> CHW
+  ``data_root``) end-to-end with a PIL decode -> RGB -> bilinear resize -> CHW
   float32 in ``[0, 1]`` recipe.
 - :class:`MultimodalEmbeddingDataset` reads a precomputed visual embedding per
   sample through an :class:`EmbeddingReader` (the real safetensors reader lands
@@ -16,12 +16,13 @@ guard).  Targets are emitted in **raw physical units**;
 ``sky_class == -1`` and NaN regression targets mark missing labels for the loss
 to mask.
 
-``torch`` is imported lazily inside ``__getitem__`` so importing
-``allsky.data.datasets`` never pulls torch.
+``torch`` is imported lazily on the first item (never at module import), so
+importing ``allsky.data.datasets`` never pulls torch.
 """
 
 from __future__ import annotations
 
+import itertools
 import math
 from collections.abc import Sequence
 from pathlib import Path
@@ -40,7 +41,7 @@ __all__ = [
 ]
 
 #: One dataset item: a ``str -> torch.Tensor`` mapping. ``torch`` is imported
-#: lazily inside ``__getitem__``, so importing this module never pulls it.
+#: lazily on the first item, so importing this module never pulls it.
 type SampleTensors = dict[str, Any]
 
 #: Regression target columns (raw physical units; NaN = missing).
@@ -106,29 +107,56 @@ class _BaseMultimodalDataset:
         self._dhi = self._raw_target("target_dhi")
         self._kindex = self._raw_target("target_kindex")
         self._cloud_fraction = self._raw_target("cloud_fraction")
-        self._sky_class = self.manifest["sky_class"].to_numpy(dtype=np.int64)
+        self._sky_class = self.manifest["sky_class"].to_numpy(dtype=np.int64, copy=True)
         self._sample_ids = [str(s) for s in self.manifest["sample_id"]]
+        #: Whole-column tensors, built on the first item (see _column_tensors).
+        self._columns: SampleTensors | None = None
 
     def _raw_target(self, column: str) -> np.ndarray:
-        """Raw physical target column as float32 (NaN preserved as missing)."""
+        """Raw physical target column as float32 (NaN preserved as missing).
+
+        The copy is deliberate: pandas hands back a read-only block view when no
+        cast is needed, and ``torch.from_numpy`` on a read-only array warns and
+        yields a tensor whose writes are undefined behaviour.
+        """
         if column in self.manifest.columns:
-            return self.manifest[column].to_numpy(dtype=np.float32)
+            return self.manifest[column].to_numpy(dtype=np.float32, copy=True)
         return np.full(len(self.manifest), np.nan, dtype=np.float32)
 
     def __len__(self) -> int:
         return len(self.manifest)
 
-    def _target_item(self, idx: int) -> SampleTensors:
-        """Build the shared target tensors for row *idx* (torch imported lazily)."""
-        import torch
+    def _column_tensors(self) -> SampleTensors:
+        """Whole-column tensors over the resident numpy columns, built once.
 
-        return {
-            "features": torch.from_numpy(np.ascontiguousarray(self._features[idx])),
-            "dhi": torch.tensor(self._dhi[idx], dtype=torch.float32),
-            "kindex": torch.tensor(self._kindex[idx], dtype=torch.float32),
-            "sky_class": torch.tensor(self._sky_class[idx], dtype=torch.long),
-            "cloud_fraction": torch.tensor(self._cloud_fraction[idx], dtype=torch.float32),
-        }
+        Built on first use rather than in ``__init__`` so importing this module
+        stays torch-free and so each DataLoader worker builds its own instead of
+        having them pickled in (Python 3.14 defaults to the forkserver start
+        method).  ``features`` is copied C-contiguous once here, which turns
+        every per-sample row read into a contiguous view.
+        """
+        if self._columns is None:
+            import torch
+
+            self._columns = {
+                "features": torch.from_numpy(np.ascontiguousarray(self._features)),
+                "dhi": torch.from_numpy(self._dhi),
+                "kindex": torch.from_numpy(self._kindex),
+                "sky_class": torch.from_numpy(self._sky_class),
+                "cloud_fraction": torch.from_numpy(self._cloud_fraction),
+            }
+        return self._columns
+
+    def _target_item(self, idx: int) -> SampleTensors:
+        """Shared target tensors for row *idx*, as views into the column tensors.
+
+        Indexing the prebuilt columns replaces four per-sample ``torch.tensor``
+        allocations.  The emitted tensors are **views** into dataset-owned
+        buffers: ``default_collate`` stacks (and therefore copies) them, so
+        batches are unaffected, but a caller that mutates an item in place would
+        be mutating the dataset.
+        """
+        return {name: column[idx] for name, column in self._column_tensors().items()}
 
 
 class MultimodalImageDataset(_BaseMultimodalDataset):
@@ -176,23 +204,21 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
     def _load_image(self, relative_path: str) -> np.ndarray:
         """Load a JPEG as float32 CHW in [0, 1], resized to ``image_size``.
 
-        imageio read, grayscale->RGB safety net, PIL bilinear resize; resolves
-        the manifest's relative POSIX path against ``data_root``.
+        PIL decode -> RGB (``convert`` channel-replicates grayscale) -> bilinear
+        resize; resolves the manifest's relative POSIX path against
+        ``data_root``.  Decoding straight with PIL is pixel-identical to reading
+        through imageio and wrapping the array back into an image to resize it,
+        without the two full-frame numpy<->PIL copies.
         """
-        import imageio.v3 as iio
+        from PIL import Image
 
         full = resolve(relative_path, self.data_root)
-        image = iio.imread(full)
-        if image.ndim == 2:  # pragma: no cover - grayscale safety net
-            image = np.stack([image] * 3, axis=-1)
         size = self.image_size
-        if image.shape[0] != size or image.shape[1] != size:
-            from PIL import Image
-
-            image = np.asarray(
-                Image.fromarray(image).resize((size, size), Image.Resampling.BILINEAR)
-            )
-        scaled = image.astype(np.float32) / 255.0
+        with Image.open(full) as handle:
+            frame = handle.convert("RGB")
+        if frame.size != (size, size):
+            frame = frame.resize((size, size), Image.Resampling.BILINEAR)
+        scaled = np.asarray(frame, dtype=np.uint8).astype(np.float32) / 255.0
         return np.ascontiguousarray(scaled.transpose(2, 0, 1))
 
     def __getitem__(self, idx: int) -> SampleTensors:
@@ -282,19 +308,26 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         """
         index = pd.DatetimeIndex(self.manifest["timestamp_utc"]).tz_convert("UTC").tz_localize(None)
         times_ns = index.as_unit("ns").to_numpy().astype("int64")
-        days = self.manifest["day_id"].astype(str).to_numpy()
+        day_codes = pd.factorize(self.manifest["day_id"].astype(str), sort=False)[0]
         half_ns = round(self.window_minutes / 2.0 * _NS_PER_MINUTE)
-        windows: list[list[int]] = [[] for _ in range(len(self.manifest))]
-        for day in np.unique(days):
-            idx = np.nonzero(days == day)[0]
-            order = np.argsort(times_ns[idx], kind="stable")
-            idx_sorted = idx[order]
-            t_sorted = times_ns[idx_sorted]
-            for k, position in enumerate(idx_sorted):
-                in_window = (t_sorted >= t_sorted[k] - half_ns) & (
-                    t_sorted <= t_sorted[k] + half_ns
-                )
-                windows[int(position)] = [int(p) for p in idx_sorted[in_window]]
+        n_rows = len(self.manifest)
+        windows: list[list[int]] = [[] for _ in range(n_rows)]
+        # One grouping pass (day, then time, then original position) instead of
+        # rescanning the day column per day; the per-day bounds are then a pair of
+        # searchsorted calls over that day's already-sorted times.
+        order = np.lexsort((np.arange(n_rows), times_ns, day_codes))
+        sorted_days = day_codes[order]
+        sorted_times = times_ns[order]
+        day_starts = np.concatenate(
+            ([0], np.flatnonzero(sorted_days[1:] != sorted_days[:-1]) + 1, [n_rows])
+        )
+        for start, stop in itertools.pairwise(day_starts):
+            idx_sorted = order[start:stop]
+            t_sorted = sorted_times[start:stop]
+            low = np.searchsorted(t_sorted, t_sorted - half_ns, side="left")
+            high = np.searchsorted(t_sorted, t_sorted + half_ns, side="right")
+            for k in range(stop - start):
+                windows[int(idx_sorted[k])] = idx_sorted[low[k] : high[k]].tolist()
         return windows
 
     def _read(self, sample_id: str) -> np.ndarray:

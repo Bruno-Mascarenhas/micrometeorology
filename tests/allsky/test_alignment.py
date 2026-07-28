@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import get_type_hints
+
 import pandas as pd
 import pytest
 
@@ -118,3 +120,8 @@ class TestRegistry:
 
     def test_center_frame_satisfies_protocol(self):
         assert isinstance(CenterFrame(), AlignmentStrategy)
+
+    def test_registry_declares_the_strategy_protocol(self):
+        """A bare ``type`` here let a non-strategy class in and only failed later."""
+        assert get_type_hints(register_strategy)["cls"] == type[AlignmentStrategy]
+        assert get_type_hints(get_strategy)["return"] is AlignmentStrategy

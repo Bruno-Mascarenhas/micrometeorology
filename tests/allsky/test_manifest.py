@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import get_type_hints
 
 import numpy as np
 import pandas as pd
@@ -17,7 +18,7 @@ import pytest
 
 from allsky import solar
 from allsky.config import SiteConfig
-from allsky.data.alignment import CenterFrame
+from allsky.data.alignment import CenterFrame, MeanEmbedding
 from allsky.data.contracts import (
     DATASET_VERSION,
     QCFlag,
@@ -189,6 +190,81 @@ class TestBuildManifest:
         with pytest.raises(ValueError, match="kindex_kind"):
             build_manifest(
                 frames, make_sensor_frame(site), site=site, data_root=tmp_path, kindex_kind="bogus"
+            )
+
+    def test_relative_data_root_keeps_paths_resolvable(
+        self, site: SiteConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A relative data_root must not survive in image_path (it double-prefixes)."""
+        monkeypatch.chdir(tmp_path)
+        dataset_dir = tmp_path / "out" / "dataset"
+        frames = make_frames(dataset_dir, ["2025-03-21 09:00"], create_files=True)
+        frames["frame_path"] = [
+            str(Path(p).relative_to(tmp_path)) for p in frames["frame_path"]
+        ]  # as allsky.video.extract_frames writes them under a relative dataset_dir
+        manifest, _ = build_manifest(
+            frames, make_sensor_frame(site), site=site, data_root="out/dataset"
+        )
+        rel = manifest["image_path"].iloc[0]
+        assert rel == "frames/allsky-20250321-0900.jpg"
+        assert resolve(rel, "out/dataset").exists()
+
+
+class TestDeadSensorChannel:
+    """A logger channel that only ever reads 0.0 must be refused, not trained on."""
+
+    def test_all_zero_diffuse_column_raises(self, site: SiteConfig, tmp_path: Path):
+        frames = make_frames(
+            tmp_path, pd.date_range("2025-03-21 09:00", "2025-03-21 15:00", freq="1h")
+        )
+        sensor = make_sensor_frame(site)
+        sensor["CMP21_Wm2_Avg"] = 0.0  # the dead CR5000 diffuse input
+        with pytest.raises(ValueError, match=r"CMP21_Wm2_Avg.*dead logger channel"):
+            build_manifest(
+                frames,
+                sensor,
+                site=site,
+                data_root=tmp_path,
+                diffuse_column="CMP21_Wm2_Avg",
+            )
+
+    def test_all_zero_ghi_column_raises(self, site: SiteConfig, tmp_path: Path):
+        frames = make_frames(
+            tmp_path, pd.date_range("2025-03-21 09:00", "2025-03-21 15:00", freq="1h")
+        )
+        sensor = make_sensor_frame(site)
+        sensor["CMP21_Wm2_Avg"] = 0.0
+        with pytest.raises(ValueError, match=r"CMP21_Wm2_Avg.*dead logger channel"):
+            build_manifest(
+                frames, sensor, site=site, data_root=tmp_path, ghi_column="CMP21_Wm2_Avg"
+            )
+
+    def test_live_channel_with_some_zeros_is_accepted(self, site: SiteConfig, tmp_path: Path):
+        """Only an *identically* zero channel is dead: single zeros are legitimate."""
+        times = pd.date_range("2025-03-21 09:00", "2025-03-21 15:00", freq="1h")
+        frames = make_frames(tmp_path, times)
+        sensor = make_sensor_frame(site)
+        sensor["PSP_Wm2_Avg"] = 0.0
+        sensor.loc["2025-03-21 12:00", "PSP_Wm2_Avg"] = 120.0
+        manifest, _ = build_manifest(frames, sensor, site=site, data_root=tmp_path)
+        assert (manifest["target_dhi"] == 0.0).sum() == len(manifest) - 1
+
+
+class TestBuildTimeAlignmentType:
+    """The declared alignment type must match the type the builder actually takes."""
+
+    def test_signature_declares_center_frame(self):
+        assert get_type_hints(build_manifest)["alignment"] == CenterFrame | None
+
+    def test_windowed_strategy_rejected(self, site: SiteConfig, tmp_path: Path):
+        frames = make_frames(tmp_path, ["2025-03-21 12:00"])
+        with pytest.raises(TypeError, match="must be a CenterFrame"):
+            build_manifest(
+                frames,
+                make_sensor_frame(site),
+                site=site,
+                data_root=tmp_path,
+                alignment=MeanEmbedding(),  # type: ignore[arg-type]
             )
 
 

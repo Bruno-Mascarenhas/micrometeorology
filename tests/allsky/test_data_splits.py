@@ -126,6 +126,29 @@ class TestSplitArtifact:
         save_split_artifact(other, path, force=True)
         assert load_split_artifact(path).split_id == other.split_id
 
+    def test_failed_write_leaves_no_temp_debris(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A crashing write must clean up its temp file (allsky has no sweeper)."""
+        split = create_day_splits(DAYS, seed=1)
+        path = tmp_path / "splits.json"
+
+        def exploding_dump(*args: object, **kwargs: object) -> None:  # noqa: ARG001
+            raise OSError("disk full")
+
+        monkeypatch.setattr(json, "dump", exploding_dump)
+        with pytest.raises(OSError, match="disk full"):
+            save_split_artifact(split, path)
+        assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+    def test_written_bytes_are_indented_utf8_json(self, tmp_path: Path):
+        """Pins the artifact encoding across the move to the atomic_write helper."""
+        split = create_day_splits(DAYS, seed=1)
+        path = tmp_path / "splits.json"
+        save_split_artifact(split, path)
+        expected = json.dumps(split.to_dict(), indent=2, ensure_ascii=False)
+        assert path.read_bytes() == expected.encode("utf-8")
+
     def test_corrupt_split_id_detected_on_load(self, tmp_path: Path):
         split = create_day_splits(DAYS, seed=1)
         path = tmp_path / "splits.json"

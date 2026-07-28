@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,6 +25,7 @@ from typing import Any
 
 import numpy as np
 
+from allsky.atomic import atomic_write
 from allsky.data.contracts import DATASET_VERSION
 
 __all__ = [
@@ -204,12 +204,11 @@ def save_split_artifact(split: DaySplit, path: str | Path, *, force: bool = Fals
             "pass force=True to overwrite"
         )
 
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(f".{out.name}.tmp-{os.getpid()}")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(split.to_dict(), handle, indent=2, ensure_ascii=False)
-    os.replace(tmp, out)
-    return out
+    def write_payload(tmp: Path) -> None:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(split.to_dict(), handle, indent=2, ensure_ascii=False)
+
+    return atomic_write(out, write_payload)
 
 
 def load_split_artifact(path: str | Path) -> DaySplit:

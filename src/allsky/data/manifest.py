@@ -38,7 +38,7 @@ import pandas as pd
 from allsky.atomic import atomic_write, atomic_write_json
 from allsky.clearsky import clear_sky_index
 from allsky.config import PrepareConfig, SiteConfig
-from allsky.data.alignment import AlignmentStrategy, CenterFrame
+from allsky.data.alignment import CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
     GEOMETRY_COLUMNS,
@@ -84,7 +84,7 @@ def build_manifest(
     ghi_column: str = "CM3Up_Wm2_Avg",
     diffuse_column: str | None = "PSP_Wm2_Avg",
     kindex_kind: str = "kstar",
-    alignment: AlignmentStrategy | None = None,
+    alignment: CenterFrame | None = None,
     class_clear: float = 0.65,
     class_overcast: float = 0.35,
     min_elevation_deg: float = 10.0,
@@ -121,7 +121,9 @@ def build_manifest(
         ``"kstar"`` (GHI over Haurwitz clear-sky GHI) or ``"kt"`` (clearness
         index).
     alignment:
-        Build-time pairing strategy; defaults to :class:`CenterFrame`.
+        Build-time pairing strategy; must be a :class:`CenterFrame` (the
+        default) — the windowed strategies pool at dataset level and have no
+        ``pair`` method.
     class_clear, class_overcast:
         k-index thresholds for the ``sky_class`` bins (>= clear, >= overcast,
         else overcast).
@@ -161,8 +163,10 @@ def build_manifest(
         If ``ghi_column``, a configured ``diffuse_column`` or a required feature
         source column is missing from *sensor_df*.
     ValueError
-        If *kindex_kind* is not ``"kstar"``/``"kt"``, or the resolved feature
-        set contains a forbidden (leakage-prone) column.
+        If *kindex_kind* is not ``"kstar"``/``"kt"``, the resolved feature set
+        contains a forbidden (leakage-prone) column, or a configured radiometry
+        column is identically zero over every paired row (a dead logger
+        channel — see :func:`_reject_dead_channel`).
     """
     if kindex_kind not in ("kstar", "kt"):
         raise ValueError(f"kindex_kind must be 'kstar' or 'kt', got {kindex_kind!r}")
@@ -275,6 +279,7 @@ def build_manifest(
 
     # --- targets -----------------------------------------------------------
     ghi = paired_sensor[ghi_column].to_numpy(dtype=np.float64)
+    _reject_dead_channel(ghi, ghi_column, "the live GHI channel is 'CM3Up_Wm2_Avg'")
     kt = clearness_index(ghi, frame_times, site, utc_offset)
     if kindex_kind == "kstar":
         kindex = clear_sky_index(ghi, frame_times, site, min_elevation_deg, utc_offset)
@@ -283,6 +288,12 @@ def build_manifest(
 
     if diffuse_column is not None:
         target_dhi = paired_sensor[diffuse_column].to_numpy(dtype=np.float64)
+        _reject_dead_channel(
+            target_dhi,
+            diffuse_column,
+            "the live diffuse sensor is 'PSP_Wm2_Avg' (pass diffuse_column=None "
+            "for the Erbs pseudo-target)",
+        )
     else:
         target_dhi = pseudo_diffuse(ghi, kt)
 
@@ -528,6 +539,29 @@ def _check_sample_id_unique(sample_ids: list[str]) -> None:
         "sample_id is 'allsky-YYYYMMDD-HHMM' (minute cadence), so two frames in the "
         "same minute collide. Space frames >= 1 min apart, or extend sample_id to "
         "sub-minute resolution before building the manifest."
+    )
+
+
+def _reject_dead_channel(values: np.ndarray, column: str, remedy: str) -> None:
+    """Refuse a radiometry channel that is identically zero over every paired row.
+
+    An all-zero irradiance channel is the CR5000 dead-input signature (the
+    CMP21 diffuse channel logs exactly this).  Accepted as a target it trains a
+    model to predict 0 and then reports a near-perfect MAE against it, labelled
+    ``target_source="measured"`` — indistinguishable in ``metrics.json`` from a
+    real run — so the build refuses it here, at the only place that knows which
+    logger column was configured.
+
+    Only an *identically zero* channel is refused: an all-NaN channel is a
+    sensor gap, which ``QCFlag.SENSOR_GAP`` and the missing-label machinery
+    already handle, so it passes through untouched.
+    """
+    finite = values[np.isfinite(values)]
+    if finite.size == 0 or np.any(finite != 0.0):
+        return
+    raise ValueError(
+        f"sensor column {column!r} is identically zero across all {finite.size} "
+        f"paired rows with a reading (dead logger channel); {remedy}"
     )
 
 
