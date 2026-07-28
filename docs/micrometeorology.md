@@ -281,10 +281,19 @@ JSON/manifest.json                    # run manifest (v2)
 index (the front-end reads it as the forecast hour), and `{variableId}` is the
 output file suffix from `VARIABLE_NETCDF_MAP` (`micrometeorology.common.types`).
 
-The last four artifacts are the **consolidated site artifacts** written by
-default; pass `--no-site-artifacts` to emit only the per-step value JSONs, the
-grid files, and a v1 manifest. `--skip-first N` drops the first `N` spin-up
-time steps (their indices become gaps in the timeline).
+The `.series.bin` and `.summary.json` pair are the **consolidated site
+artifacts** written by default; pass `--no-site-artifacts` to skip just those
+two. Everything else is unchanged: the per-step value JSONs, the wind-vector
+overlays (whenever `wind_vectors` is among the requested variables), the grid
+files, and `JSON/manifest.json` are always written. The
+manifest still declares `"format": "labmim-data-manifest-v2"` with `timezone`,
+`index_min`, `index_max` and — when every unit agrees on the anchor —
+`start_local`; only the `features` block is omitted, which is the documented
+signal for a consumer to fall back to the per-step value JSONs. The v2 fields
+are dropped entirely only when the run wrote no per-step value JSON at all, and
+`availability` appears only for variables that do not span the full step range.
+`--skip-first N` drops the first `N` spin-up time steps (their indices become
+gaps in the timeline).
 
 - **`{domain}.grid.json`** — compact cell geometry the front-end prefers over
   the multi-MB `.geojson`. `grid-edges-v1` stores only the shared 1-D
@@ -394,7 +403,9 @@ windows); the `features` descriptors are advertised only when every unit
 succeeded and agreed on the step count, because the consolidated artifacts are
 a byte-offset contract and a failed unit could leave a previous run's file in
 place. A consumer that sees no `features` block falls back to the per-step
-value JSONs. `start_local` always pairs with file index `0`, even when
+value JSONs — that is also exactly what a `--no-site-artifacts` run emits: still
+`labmim-data-manifest-v2`, still with the timeline fields, just without
+`features`. `start_local` always pairs with file index `0`, even when
 `--skip-first` makes `index_min > 0`.
 
 To run single-process, pass `--workers 1`. There is deliberately no reader or
@@ -428,7 +439,7 @@ python -m micrometeorology.cli.run_wrf_pipeline \
 ### Sensor processing
 
 ```bash
-labmim-sensor-process --input data/raw/ --output data/hourly/
+labmim-sensor-process --input data/raw/ --output data/hourly/sensor_data.csv
 ```
 
 ### Monitoring-page graphs (site)
@@ -681,11 +692,11 @@ Recommended server commands:
 
 ```bash
 labmim-wrf-geojson --wrf-dir /data/wrf --date 20240101 --domains 1,4 \
-  --variables temperature wind rain wind_vectors --workers 8 \
+  --variables temperature,wind,rain,wind_vectors --workers 8 \
   -o output/JSON -g output/GeoJSON
 
 labmim-wrf-figures --wrf-dir /data/wrf --date 20240101 --domains 3 \
-  --variables temperature wind SWDOWN --workers 8 -o output/figures
+  --variables temperature,wind,SWDOWN --workers 8 -o output/figures
 ```
 
 Architecture remains modular:

@@ -88,9 +88,14 @@ One row per paired sample. Columns (see `data/contracts.py`):
   `target_kindex`, `kindex_kind` (`kstar`/`kt`), `sky_class`
   (`0/1/2`, `-1` = missing), `cloud_fraction` (nullable, all-NaN today),
   `qc_flags` (`int64` `QCFlag` bitmask: `LOW_SUN`, `SENSOR_GAP`,
-  `ALIGNMENT_FAR`, `KT_ARTIFACT`, `FRAME_DARK`, `FRAME_SATURATED` — the manifest
-  builder sets only the first four; `FRAME_DARK`/`FRAME_SATURATED` are reserved
-  for the image-preprocessing wave and stay unset here).
+  `ALIGNMENT_FAR`, `KT_ARTIFACT`, `FRAME_DARK`, `FRAME_SATURATED`).
+  `build_manifest` sets the first four; `FRAME_DARK`/`FRAME_SATURATED` are ORed
+  in afterwards by `prepare-local`'s frame-QC pass
+  (`allsky.preprocessing.visual_qc` → `_apply_frame_qc`), so a `prepare-local`
+  manifest **may** carry all six. Those two bits are present only when the
+  per-video parquet carries a `qc_frame_flags` column: a manifest built from a
+  standalone `extract-frames` run, from a resumed pre-frame-QC extraction, or
+  straight from the `build_manifest` library API leaves them unset.
 - **Provenance (constant per row)**: `dataset_version`, `alignment_id` (mirror
   the sidecar meta so a manifest is self-describing), and `split` — a **nullable**
   label, empty at build and filled in place by
