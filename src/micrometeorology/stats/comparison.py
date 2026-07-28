@@ -9,8 +9,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import pandas as pd
+from matplotlib.figure import Figure
+from pandas.api.types import is_numeric_dtype
 
 from micrometeorology.stats.metrics import compute_all
 
@@ -34,7 +35,7 @@ def read_dataset(
         Column separator.
     timestamp_columns:
         Columns to combine into a datetime index (e.g. ``['year','month','day','hour']``).
-        If ``None``, tries ``TIMESTAMP`` column or the first column.
+        If ``None``, tries ``TIMESTAMP`` column or the unnamed leading index column.
     """
     df = pd.read_csv(path, sep=separator, low_memory=False)
 
@@ -50,11 +51,25 @@ def read_dataset(
         if len(dt_cols) >= 3:
             df.index = pd.to_datetime(df[dt_cols])
             df = df.drop(columns=dt_cols, errors="ignore")
+        elif len(df.columns) > 0:
+            # The unnamed leading column that ``sensors.export.export_csv`` writes
+            # for the index. Numeric leading columns are excluded on purpose:
+            # ``pd.to_datetime`` reads an integer RECORD/year column as
+            # nanoseconds since the epoch and would fabricate a 1970 index.
+            leading = df.columns[0]
+            is_unnamed = str(leading).startswith("Unnamed:") or not str(leading).strip()
+            if is_unnamed and not is_numeric_dtype(df[leading]):
+                parsed = pd.to_datetime(df[leading], errors="coerce")
+                if parsed.notna().all():
+                    df.index = parsed
+                    df = df.drop(columns=[leading])
 
     df.index.name = None
 
-    # Coerce only object columns to numeric
-    obj_cols = df.select_dtypes(include=["object"]).columns
+    # Coerce only text columns to numeric. Both dtype names are needed: pandas 3
+    # reads text as ``str`` dtype, and ``include=["object"]`` matches it only
+    # through a shim that is scheduled for removal.
+    obj_cols = df.select_dtypes(include=["object", "str"]).columns
     if len(obj_cols) > 0:
         df[obj_cols] = df[obj_cols].apply(pd.to_numeric, errors="coerce")
 
@@ -77,13 +92,19 @@ def pair_dataframes(
         logger.warning("No common columns between observation and model datasets")
         return pd.DataFrame()
 
+    if not isinstance(obs.index, pd.DatetimeIndex) or not isinstance(model.index, pd.DatetimeIndex):
+        raise TypeError(
+            "pair_dataframes needs a DatetimeIndex on both frames, got "
+            f"{type(obs.index).__name__} (observation) and {type(model.index).__name__} (model)"
+        )
+
     obs_subset = obs[common_cols].sort_index()
     model_subset = model[common_cols].sort_index()
 
     # Merge on nearest timestamp
     merged = pd.merge_asof(
-        obs_subset.reset_index().rename(columns={"index": "time"}),
-        model_subset.reset_index().rename(columns={"index": "time"}),
+        obs_subset.rename_axis("time").reset_index(),
+        model_subset.rename_axis("time").reset_index(),
         on="time",
         tolerance=pd.Timedelta(tolerance),
         suffixes=("_obs", "_model"),
@@ -135,12 +156,17 @@ def plot_comparison(
     paired_df: pd.DataFrame,
     variable: str,
     output_path: str | Path | None = None,
-) -> plt.Figure:
-    """Create a comparison plot (time series + scatter) for a variable."""
+) -> Figure:
+    """Create a comparison plot (time series + scatter) for a variable.
+
+    The figure is built off the pyplot state machine, so it is never registered
+    with the global figure manager and the caller owns its lifetime.
+    """
     obs_col = f"{variable}_obs"
     model_col = f"{variable}_model"
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig = Figure(figsize=(14, 5))
+    axes = fig.subplots(1, 2)
 
     # Time series
     ax1 = axes[0]
@@ -167,7 +193,7 @@ def plot_comparison(
     ax2.set_title(f"{variable} — Scatter")
     ax2.set_aspect("equal", adjustable="box")
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     if output_path:
         fig.savefig(str(output_path), bbox_inches="tight")

@@ -77,8 +77,11 @@ def read_campbell_dat(
         if existing:
             df = df.drop(columns=existing)
 
-    # Coerce only object columns to numeric (pyarrow already types most columns correctly)
-    obj_cols = df.select_dtypes(include=["object"]).columns
+    # Coerce only text columns to numeric -- this is what turns the datalogger's
+    # literal ``NAN`` token into a real NaN. Both dtype names are needed: pandas 3
+    # reads text as ``str`` dtype, and ``include=["object"]`` matches it only
+    # through a shim that is scheduled for removal.
+    obj_cols = df.select_dtypes(include=["object", "str"]).columns
     if len(obj_cols) > 0:
         df[obj_cols] = df[obj_cols].apply(pd.to_numeric, errors="coerce")
 

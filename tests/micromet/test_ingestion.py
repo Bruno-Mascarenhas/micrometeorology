@@ -7,14 +7,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from micrometeorology.sensors.ingestion import merge_dat_files
+from micrometeorology.sensors.ingestion import merge_dat_files, read_campbell_dat
 
 
-def _write_toa5(path: Path, columns: list[str], rows: list[tuple[str, list[float]]]) -> str:
+def _write_toa5(path: Path, columns: list[str], rows: list[tuple[str, list[float | str]]]) -> str:
     """Write a synthetic TOA5 file with the real 4-line header structure.
 
     ``columns`` are the data columns (beyond TIMESTAMP/RECORD), letting each
-    file declare a different sensor set.
+    file declare a different sensor set.  A cell given as ``str`` is written
+    verbatim, which is how the datalogger's literal ``NAN`` token is reproduced.
     """
     names = ",".join(f'"{c}"' for c in ["TIMESTAMP", "RECORD", *columns])
     units = ",".join(f'"{u}"' for u in ["TS", "RN", *["W/meter^2"] * len(columns)])
@@ -26,10 +27,36 @@ def _write_toa5(path: Path, columns: list[str], rows: list[tuple[str, list[float
         aggs,
     ]
     for i, (ts, values) in enumerate(rows):
-        cells = ",".join(f"{v:.1f}" for v in values)
+        cells = ",".join(v if isinstance(v, str) else f"{v:.1f}" for v in values)
         lines.append(f'"{ts}",{i},{cells}')
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return str(path)
+
+
+class TestReadCampbellDat:
+    @pytest.mark.filterwarnings("error::pandas.errors.PandasChangeWarning")
+    def test_literal_nan_token_becomes_a_float_nan(self, tmp_path: Path) -> None:
+        """The datalogger writes ``NAN``, which is not in read_csv's NA list.
+
+        Without the text-to-numeric coercion the column stays textual and the
+        sentinel comparison below it raises ``TypeError``.
+        """
+        path = _write_toa5(
+            tmp_path / "nan.dat",
+            ["shared"],
+            [
+                ("2025-06-25 12:00:00", ["NAN"]),
+                ("2025-06-25 12:05:00", [-999.0]),
+                ("2025-06-25 12:10:00", [450.0]),
+            ],
+        )
+
+        df = read_campbell_dat(path)
+
+        assert df["shared"].dtype == "float64"
+        assert pd.isna(df.loc["2025-06-25 12:00:00", "shared"])
+        assert pd.isna(df.loc["2025-06-25 12:05:00", "shared"])
+        assert df.loc["2025-06-25 12:10:00", "shared"] == pytest.approx(450.0)
 
 
 class TestMergeDatFiles:

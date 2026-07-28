@@ -150,7 +150,7 @@ def _plot_radiacao_difusa(
     out_dir: Path,
     dt: datetime,
     wrf: pd.DataFrame | None = None,
-) -> None:
+) -> Path | None:
     """Graph 1 -- Solar Radiation (SW global + diffuse)."""
     fig, ax = create_figure()
 
@@ -175,6 +175,11 @@ def _plot_radiacao_difusa(
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["radiacao_difusa"], label="SW_dw-wrf 1h")
 
+    if not ax.get_lines():
+        logger.warning("No solar radiation columns found -- skipping radiacao_difusa.png")
+        plt.close(fig)
+        return None
+
     ax.set_ylim(0, 1360)
     setup_date_axis(ax)
     plt.ylabel(
@@ -186,10 +191,12 @@ def _plot_radiacao_difusa(
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=4)
-    save_figure(fig, out_dir / "radiacao_difusa.png")
+    return save_figure(fig, out_dir / "radiacao_difusa.png")
 
 
-def _plot_balanco(raw: pd.DataFrame, hourly: pd.DataFrame, out_dir: Path, dt: datetime) -> None:
+def _plot_balanco(
+    raw: pd.DataFrame, hourly: pd.DataFrame, out_dir: Path, dt: datetime
+) -> Path | None:
     """Graph 2 -- Radiation Balance (all four components)."""
     fig, ax = create_figure()
 
@@ -270,6 +277,11 @@ def _plot_balanco(raw: pd.DataFrame, hourly: pd.DataFrame, out_dir: Path, dt: da
             label="SW_up",
         )
 
+    if not ax.get_lines():
+        logger.warning("No radiation balance columns found -- skipping balanco.png")
+        plt.close(fig)
+        return None
+
     ax.set_ylim(-750, 1200)
     setup_date_axis(ax)
     plt.ylabel(
@@ -281,17 +293,17 @@ def _plot_balanco(raw: pd.DataFrame, hourly: pd.DataFrame, out_dir: Path, dt: da
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=4)
-    save_figure(fig, out_dir / "balanco.png")
+    return save_figure(fig, out_dir / "balanco.png")
 
 
 def _plot_radiacao_liq(
     raw: pd.DataFrame, hourly: pd.DataFrame, out_dir: Path, dt: datetime
-) -> None:
+) -> Path | None:
     """Graph 3 -- Net Radiation."""
     col = "Net_Wm2_Avg"
     if col not in raw.columns:
         logger.warning("Column %s not found -- skipping radiacao_liq.png", col)
-        return
+        return None
 
     fig, ax = create_figure()
     ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
@@ -309,17 +321,17 @@ def _plot_radiacao_liq(
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=4)
-    save_figure(fig, out_dir / "radiacao_liq.png")
+    return save_figure(fig, out_dir / "radiacao_liq.png")
 
 
 def _plot_radiacao_par(
     raw: pd.DataFrame, hourly: pd.DataFrame, out_dir: Path, dt: datetime
-) -> None:
+) -> Path | None:
     """Graph 4 -- PAR Radiation."""
     col = "PAR_Wm2_Avg"
     if col not in raw.columns:
         logger.warning("Column %s not found -- skipping radiacao_par.png", col)
-        return
+        return None
 
     fig, ax = create_figure()
     ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
@@ -337,7 +349,7 @@ def _plot_radiacao_par(
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=2)
-    save_figure(fig, out_dir / "radiacao_par.png")
+    return save_figure(fig, out_dir / "radiacao_par.png")
 
 
 def _plot_temperatura(
@@ -346,7 +358,7 @@ def _plot_temperatura(
     out_dir: Path,
     dt: datetime,
     wrf: pd.DataFrame | None = None,
-) -> None:
+) -> Path | None:
     """Graph 5 -- Air Temperature (WXT + CS215)."""
     fig, ax = create_figure()
 
@@ -364,6 +376,11 @@ def _plot_temperatura(
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["temperatura"])
 
+    if not ax.get_lines():
+        logger.warning("No air temperature columns found -- skipping temperatura.png")
+        plt.close(fig)
+        return None
+
     ax.set_ylim(18, 32)
     setup_date_axis(ax)
     plt.ylabel(
@@ -375,7 +392,7 @@ def _plot_temperatura(
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=3)
-    save_figure(fig, out_dir / "temperatura.png")
+    return save_figure(fig, out_dir / "temperatura.png")
 
 
 def _plot_umidade(
@@ -385,7 +402,7 @@ def _plot_umidade(
     dt: datetime,
     rh_offset: float,
     wrf: pd.DataFrame | None = None,
-) -> None:
+) -> Path | None:
     """Graph 6 -- Relative Humidity (WXT + CS215)."""
     fig, ax = create_figure()
 
@@ -410,6 +427,11 @@ def _plot_umidade(
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["umidade"])
 
+    if not ax.get_lines():
+        logger.warning("No relative humidity columns found -- skipping umidade.png")
+        plt.close(fig)
+        return None
+
     ax.set_ylim(50, 100)
     setup_date_axis(ax)
     plt.ylabel(
@@ -430,7 +452,7 @@ def _plot_umidade(
     )
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=3)
-    save_figure(fig, out_dir / "umidade.png")
+    return save_figure(fig, out_dir / "umidade.png")
 
 
 def _plot_pressao(
@@ -439,13 +461,13 @@ def _plot_pressao(
     out_dir: Path,
     dt: datetime,
     wrf: pd.DataFrame | None = None,
-) -> None:
+) -> Path | None:
     """Graph 7 -- Atmospheric Pressure."""
     col = "Pmb_WXT"
     col2 = "BP1_mbar_Avg"
     if col not in raw.columns and col2 not in raw.columns:
         logger.warning("No pressure columns found -- skipping pressao.png")
-        return
+        return None
 
     fig, ax = create_figure()
     if col in raw.columns:
@@ -470,7 +492,7 @@ def _plot_pressao(
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=3)
-    save_figure(fig, out_dir / "pressao.png")
+    return save_figure(fig, out_dir / "pressao.png")
 
 
 def _plot_velocidade(
@@ -479,14 +501,14 @@ def _plot_velocidade(
     out_dir: Path,
     dt: datetime,
     wrf: pd.DataFrame | None = None,
-) -> None:
+) -> Path | None:
     """Graph 8 -- Wind Speed."""
     col = "WS_WXT_Avg"
     col_ws1 = "WS1_ms_GMX"
     col_ws2 = "WS_ms"
     if col not in raw.columns and col_ws1 not in raw.columns and col_ws2 not in raw.columns:
         logger.warning("No wind speed columns found -- skipping velocidade.png")
-        return
+        return None
 
     fig, ax = create_figure()
     if col in raw.columns:
@@ -520,7 +542,7 @@ def _plot_velocidade(
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=3)
-    save_figure(fig, out_dir / "velocidade.png")
+    return save_figure(fig, out_dir / "velocidade.png")
 
 
 def _plot_direcao(
@@ -529,14 +551,14 @@ def _plot_direcao(
     out_dir: Path,
     dt: datetime,
     wrf: pd.DataFrame | None = None,
-) -> None:
+) -> Path | None:
     """Graph 9 -- Wind Direction."""
     col = "WD_WXT_Avg"
     col_wd1 = "WindDir1_GMX"
     col_wd2 = "WindDir"
     if col not in raw.columns and col_wd1 not in raw.columns and col_wd2 not in raw.columns:
         logger.warning("No wind direction columns found -- skipping direcao.png")
-        return
+        return None
 
     fig, ax = create_figure()
     if col in raw.columns:
@@ -569,17 +591,17 @@ def _plot_direcao(
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=3)
-    save_figure(fig, out_dir / "direcao.png")
+    return save_figure(fig, out_dir / "direcao.png")
 
 
 def _plot_precipitacao(
     raw_rain: pd.DataFrame, hourly: pd.DataFrame, out_dir: Path, dt: datetime
-) -> None:
+) -> Path | None:
     """Graph 10 -- Precipitation."""
     col = RAIN_COLUMN
     if col not in raw_rain.columns:
         logger.warning("Column %s not found -- skipping precipitacao.png", col)
-        return
+        return None
 
     fig, ax = create_figure()
     ax.plot(raw_rain.index, raw_rain[col], "-", color="grey", lw=2, label="Acumulada 5 min")
@@ -594,7 +616,7 @@ def _plot_precipitacao(
     add_timestamp_label(ax, dt)
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=3, loc=1)
-    save_figure(fig, out_dir / "precipitacao.png")
+    return save_figure(fig, out_dir / "precipitacao.png")
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +654,9 @@ def run(
     rh_offset: Annotated[
         float, typer.Option(help="Additive bias correction for RH_WXT sensor.")
     ] = RH_WXT_OFFSET,
+    strict: Annotated[
+        bool, typer.Option("--strict", help="Exit non-zero if any graph was skipped.")
+    ] = False,
     log_level: Annotated[str, typer.Option(help="Logging level.")] = "INFO",
 ) -> None:
     """Generate LabMiM station graphs from raw .dat sensor files.
@@ -639,6 +664,10 @@ def run(
     Reads Campbell Scientific .dat files directly from the datalogger,
     performs quality control, hourly aggregation, and generates 10 PNG
     graphs for the LabMiM website with the standard watermark and layout.
+
+    A graph whose source columns are all absent from the .dat file is
+    skipped rather than written blank, and reported as `[skip]`; `--strict`
+    turns any such skip into a non-zero exit.
 
     Optionally overlays WRF model series (series_operacional.dat) as
     dashed black lines on radiation, temperature, humidity, pressure,
@@ -742,37 +771,40 @@ def run(
     # ------------------------------------------------------------------
     typer.echo("Generating graphs...")
 
-    _plot_radiacao_difusa(raw, hourly, out, graph_dt, wrf=wrf)
-    typer.echo("  [ok] radiacao_difusa.png")
+    written: list[str] = []
+    skipped: list[str] = []
 
-    _plot_balanco(raw, hourly, out, graph_dt)
-    typer.echo("  [ok] balanco.png")
+    def report(name: str, saved: Path | None) -> None:
+        """Echo one graph's outcome, counting only files actually on disk."""
+        if saved is None:
+            skipped.append(name)
+            typer.echo(f"  [skip] {name} (missing source column)")
+        else:
+            written.append(name)
+            typer.echo(f"  [ok] {name}")
 
-    _plot_radiacao_liq(raw, hourly, out, graph_dt)
-    typer.echo("  [ok] radiacao_liq.png")
+    report("radiacao_difusa.png", _plot_radiacao_difusa(raw, hourly, out, graph_dt, wrf=wrf))
+    report("balanco.png", _plot_balanco(raw, hourly, out, graph_dt))
+    report("radiacao_liq.png", _plot_radiacao_liq(raw, hourly, out, graph_dt))
+    report("radiacao_par.png", _plot_radiacao_par(raw, hourly, out, graph_dt))
+    report("temperatura.png", _plot_temperatura(raw, hourly, out, graph_dt, wrf=wrf))
+    report("umidade.png", _plot_umidade(raw, hourly, out, graph_dt, rh_offset, wrf=wrf))
+    report("pressao.png", _plot_pressao(raw, hourly, out, graph_dt, wrf=wrf))
+    report("velocidade.png", _plot_velocidade(raw, hourly, out, graph_dt, wrf=wrf))
+    report("direcao.png", _plot_direcao(raw, hourly, out, graph_dt, wrf=wrf))
+    report("precipitacao.png", _plot_precipitacao(raw_rain, hourly, out, graph_dt))
 
-    _plot_radiacao_par(raw, hourly, out, graph_dt)
-    typer.echo("  [ok] radiacao_par.png")
+    total = len(written) + len(skipped)
+    if skipped:
+        typer.echo(
+            f"\n[!] {len(written)}/{total} graphs written to {out}, "
+            f"{len(skipped)} skipped: {', '.join(skipped)}"
+        )
+    else:
+        typer.echo(f"\n[ok] All graphs saved to {out}")
 
-    _plot_temperatura(raw, hourly, out, graph_dt, wrf=wrf)
-    typer.echo("  [ok] temperatura.png")
-
-    _plot_umidade(raw, hourly, out, graph_dt, rh_offset, wrf=wrf)
-    typer.echo("  [ok] umidade.png")
-
-    _plot_pressao(raw, hourly, out, graph_dt, wrf=wrf)
-    typer.echo("  [ok] pressao.png")
-
-    _plot_velocidade(raw, hourly, out, graph_dt, wrf=wrf)
-    typer.echo("  [ok] velocidade.png")
-
-    _plot_direcao(raw, hourly, out, graph_dt, wrf=wrf)
-    typer.echo("  [ok] direcao.png")
-
-    _plot_precipitacao(raw_rain, hourly, out, graph_dt)
-    typer.echo("  [ok] precipitacao.png")
-
-    typer.echo(f"\n[ok] All graphs saved to {out}")
+    if strict and skipped:
+        raise typer.Exit(code=1)
 
 
 def main() -> None:
