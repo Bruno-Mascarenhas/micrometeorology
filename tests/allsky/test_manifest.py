@@ -18,7 +18,7 @@ import pytest
 
 from allsky import solar
 from allsky.config import SiteConfig
-from allsky.data.alignment import CenterFrame, MeanEmbedding
+from allsky.data.alignment import CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
     QCFlag,
@@ -250,13 +250,19 @@ class TestDeadSensorChannel:
         assert (manifest["target_dhi"] == 0.0).sum() == len(manifest) - 1
 
 
+class _NotCenterFrame:
+    """An object satisfying the pairing protocol's ``id`` but not ``CenterFrame``."""
+
+    id = "not_center_frame"
+
+
 class TestBuildTimeAlignmentType:
     """The declared alignment type must match the type the builder actually takes."""
 
     def test_signature_declares_center_frame(self):
         assert get_type_hints(build_manifest)["alignment"] == CenterFrame | None
 
-    def test_windowed_strategy_rejected(self, site: SiteConfig, tmp_path: Path):
+    def test_a_non_center_frame_alignment_is_rejected(self, site: SiteConfig, tmp_path: Path):
         frames = make_frames(tmp_path, ["2025-03-21 12:00"])
         with pytest.raises(TypeError, match="must be a CenterFrame"):
             build_manifest(
@@ -264,7 +270,7 @@ class TestBuildTimeAlignmentType:
                 make_sensor_frame(site),
                 site=site,
                 data_root=tmp_path,
-                alignment=MeanEmbedding(),  # type: ignore[arg-type]
+                alignment=_NotCenterFrame(),  # type: ignore[arg-type]
             )
 
 

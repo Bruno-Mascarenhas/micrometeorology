@@ -225,6 +225,12 @@ class SafetensorsEmbeddingReader:
       cannot be used to mutate the shared store.  Keep the LRU path for ad-hoc
       access to stores that do not fit in memory.
 
+    The resident store is allocated in **shared memory**, because a DataLoader
+    worker on Python 3.14 is started with ``forkserver`` and therefore receives
+    a *pickle* of this reader rather than inheriting its pages: pickling passes
+    a handle every worker maps, not the matrix. Hosts without usable shared
+    memory fall back to a private array with a warning.
+
     Parameters
     ----------
     embeddings_dir:
@@ -271,6 +277,10 @@ class SafetensorsEmbeddingReader:
         #: True when all shards are resident in ``self._preloaded_embeddings``.
         self.preloaded = False
         self._preloaded_embeddings: np.ndarray | None = None
+        # The shared-memory torch tensor `_preloaded_embeddings` is a view of,
+        # when preloading succeeded in shared memory. It is what crosses the
+        # process boundary (as a handle); the view itself never does.
+        self._shared_store: Any | None = None
         self._preloaded_row_by_sample_id: dict[str, int] = {}
         if preload:
             self._preload_all()
@@ -284,6 +294,51 @@ class SafetensorsEmbeddingReader:
         """All ``sample_id`` values the reader can serve (index order)."""
         return list(self._location_by_sample_id)
 
+    def _allocate_resident_store(self, embedding_count: int) -> np.ndarray:
+        """Allocate the ``(N, dim)`` fp32 destination, in shared memory when possible.
+
+        A DataLoader worker is started with ``forkserver`` on Python 3.14, so the
+        reader is **pickled** into every worker rather than inherited by
+        copy-on-write. Allocating the store as a shared-memory torch tensor makes
+        the pickle a few hundred bytes of handle instead of hundreds of MiB of
+        matrix, and every worker maps the same pages.
+
+        Falls back to a private heap array when shared memory is unavailable or
+        too small — a container with a 64 MiB ``/dev/shm`` must still preload,
+        just without the sharing.
+        """
+        try:
+            import torch
+
+            shared_store = torch.empty(
+                (embedding_count, self._embedding_dim), dtype=torch.float32
+            ).share_memory_()
+        except (ImportError, OSError, RuntimeError) as shared_memory_unavailable:
+            logger.warning(
+                "could not allocate the resident embedding store in shared memory (%s); "
+                "falling back to a private array, which every DataLoader worker will "
+                "receive its own copy of",
+                shared_memory_unavailable,
+            )
+            self._shared_store = None
+            return np.empty((embedding_count, self._embedding_dim), dtype=np.float32)
+        self._shared_store = shared_store
+        destination: np.ndarray = shared_store.numpy()
+        return destination
+
+    def _bind_preloaded_view(self) -> None:
+        """Point ``_preloaded_embeddings`` at the shared store as a read-only view.
+
+        Re-applied after unpickling: the write flag is a property of the numpy
+        view, not of the shared tensor, so a worker that skipped this would hand
+        out mutable rows into a store every other worker also maps.
+        """
+        if self._shared_store is None:
+            raise RuntimeError("no shared store to bind a preloaded view onto")
+        view: np.ndarray = self._shared_store.numpy()
+        view.setflags(write=False)
+        self._preloaded_embeddings = view
+
     def _preload_all(self) -> None:
         """Load every shard once into one contiguous, read-only ``(N, dim)`` fp32 array.
 
@@ -291,9 +346,13 @@ class SafetensorsEmbeddingReader:
         populated: ``__call__`` returns zero-copy row *views* into it, so making
         the base immutable stops a caller mutating the shared store through a
         returned vector (the views inherit the read-only flag).
+
+        The store is allocated in shared memory when available, so DataLoader
+        workers map it instead of each unpickling a private copy — see
+        :meth:`_allocate_resident_store` and :meth:`__getstate__`.
         """
         embedding_count = len(self._location_by_sample_id)
-        preloaded_embeddings = np.empty((embedding_count, self._embedding_dim), dtype=np.float32)
+        preloaded_embeddings = self._allocate_resident_store(embedding_count)
         preloaded_row_by_sample_id: dict[str, int] = {}
         sample_ids_by_shard: dict[int, list[str]] = {}
         for sample_id, location in self._location_by_sample_id.items():
@@ -312,13 +371,40 @@ class SafetensorsEmbeddingReader:
         self._preloaded_row_by_sample_id = preloaded_row_by_sample_id
         self.preloaded = True
         logger.info(
-            "preloaded %d embedding(s) into a resident %d x %d fp32 array (%.1f MiB) from %s",
+            "preloaded %d embedding(s) into a resident %d x %d fp32 array (%.1f MiB, %s) from %s",
             embedding_count,
             embedding_count,
             self._embedding_dim,
             preloaded_embeddings.nbytes / (1024 * 1024),
+            "shared memory" if self._shared_store is not None else "private memory",
             self._embeddings_dir,
         )
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Pickle the shared-memory handle, never the matrix.
+
+        A numpy view of a shared tensor still pickles BY VALUE, so leaving
+        ``_preloaded_embeddings`` in the state ships the whole store to every
+        DataLoader worker — which is exactly the cost the shared allocation
+        exists to avoid. Cached shards are dropped for the same reason. When
+        shared memory was unavailable there is no handle to map, so the array
+        travels by value as it always did.
+        """
+        state = self.__dict__.copy()
+        state["_shard_cache"] = OrderedDict()
+        if self._shared_store is not None:
+            state["_preloaded_embeddings"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Re-bind the read-only view onto the shared store in the child process."""
+        self.__dict__.update(state)
+        if self._shared_store is not None:
+            self._bind_preloaded_view()
+        elif self._preloaded_embeddings is not None:
+            # Pickling an array by value loses its flags; a worker's rows stay
+            # immutable so the guarantee is not parent-only.
+            self._preloaded_embeddings.setflags(write=False)
 
     def _load_cached_shard(self, shard_index: int) -> np.ndarray:
         """Load one shard, retaining it in the bounded least-recently-used cache."""

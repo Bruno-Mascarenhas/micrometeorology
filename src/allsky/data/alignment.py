@@ -1,24 +1,23 @@
-"""Temporal alignment strategies for image <-> sensor pairing.
+"""Build-time temporal alignment for image <-> sensor pairing.
 
-Two families share one :class:`AlignmentStrategy` protocol (each carries a
-stable string ``id`` stored in the manifest sidecar meta):
+:class:`CenterFrame` maps each video frame to the single nearest sensor record
+within a maximum distance, carrying a stable string ``id`` that is stored in the
+manifest sidecar meta so a loaded dataset knows which pairing produced it. It is
+what :func:`allsky.data.manifest.build_manifest` uses to attach met/target
+values to a frame.
 
-- **Build-time pairing** — :class:`CenterFrame` (the default) maps each video
-  frame to the single nearest sensor record within a maximum distance.  It is
-  what :func:`allsky.data.manifest.build_manifest` uses to attach met/target
-  values to a frame.
-- **Dataset-level windowing** — :class:`MeanEmbedding` and
-  :class:`AttentionPooling` return, for a sample timestamp, the ordered list of
-  frame positions falling inside an alignment window.  The dataset then pools
-  the corresponding embeddings (mean / attention); those poolers land in a
-  later wave, so here they only resolve the per-sample frame list.
+Dataset-level windowing (``mean_embedding`` / ``attention_pooling``) is NOT
+here: it is implemented once, vectorized per day, by
+:class:`allsky.data.datasets.MultimodalEmbeddingDataset`, and the name set it
+accepts is owned by :data:`allsky.config.AlignmentStrategyName`. This module
+briefly carried a second, unreachable windowing implementation with different
+semantics (no same-day restriction), which is what made the two disagree.
 
 Pure numpy/pandas; importing this module never pulls torch.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -28,12 +27,7 @@ import pandas as pd
 __all__ = [
     "AlignmentResult",
     "AlignmentStrategy",
-    "AttentionPooling",
     "CenterFrame",
-    "MeanEmbedding",
-    "available_strategies",
-    "get_strategy",
-    "register_strategy",
 ]
 
 #: Nanoseconds per minute (int64 timestamp arithmetic is done in ns).
@@ -48,17 +42,19 @@ def _ns(index: pd.DatetimeIndex) -> np.ndarray:
 
 @runtime_checkable
 class AlignmentStrategy(Protocol):
-    """Temporal alignment strategy with a stable string identity.
+    """Build-time frame/sensor pairing with a stable string identity.
 
     ``id`` is persisted in the manifest meta so a rebuilt/loaded dataset knows
-    which pairing produced it.  Every strategy can resolve the ordered frame
-    positions inside its window for a sample timestamp.
+    which pairing produced it. This is the contract
+    :func:`allsky.data.manifest.build_manifest` annotates and isinstance-checks.
     """
 
     id: str
 
-    def select_frames(self, sample_time: pd.Timestamp, frame_index: pd.DatetimeIndex) -> list[int]:
-        """Positions in *frame_index* inside this strategy's window, time-ordered."""
+    def pair(
+        self, frame_times: pd.DatetimeIndex, sensor_times: pd.DatetimeIndex
+    ) -> AlignmentResult:
+        """Pair every frame with a sensor record (``-1`` where none is close enough)."""
         ...
 
 
@@ -86,28 +82,13 @@ class AlignmentResult:
         return result
 
 
-def _window_positions(
-    sample_time: pd.Timestamp, frame_index: pd.DatetimeIndex, window_minutes: float
-) -> list[int]:
-    """Time-ordered positions of *frame_index* within a centred window."""
-    half = pd.Timedelta(minutes=window_minutes / 2.0)
-    low = pd.Timestamp(sample_time) - half
-    high = pd.Timestamp(sample_time) + half
-    values = frame_index.as_unit("ns").to_numpy()
-    mask = (values >= low.to_datetime64()) & (values <= high.to_datetime64())
-    positions = np.nonzero(mask)[0]
-    order = np.argsort(values[positions], kind="stable")
-    ordered: list[int] = [int(p) for p in positions[order]]
-    return ordered
-
-
 class CenterFrame:
     """Pair each frame to the nearest sensor record within ``max_distance_minutes``.
 
-    The default build-time strategy.  ``window_minutes`` is retained for
-    interface symmetry with the windowed poolers (and drives
-    :meth:`select_frames`), while :meth:`pair` — the method the manifest builder
-    calls — matches on ``max_distance_minutes`` only.
+    The one build-time strategy.  ``window_minutes`` is carried for the manifest
+    meta and for the dataset that reads it back as its window width, while
+    :meth:`pair` — the method the manifest builder calls — matches on
+    ``max_distance_minutes`` only.
     """
 
     id = "center_frame"
@@ -166,90 +147,3 @@ class CenterFrame:
         sensor_pos[within] = nearest[within]
         distance_minutes[within] = nearest_dist_ns[within] / _NS_PER_MINUTE
         return AlignmentResult(sensor_pos=sensor_pos, distance_minutes=distance_minutes)
-
-    def select_frames(self, sample_time: pd.Timestamp, frame_index: pd.DatetimeIndex) -> list[int]:
-        """Position of the single nearest frame within ``max_distance_minutes``.
-
-        Returns a one- or zero-element list, so it composes with the windowed
-        strategies' list return type.
-        """
-        if len(frame_index) == 0:
-            return []
-        frame_ns = _ns(frame_index)
-        sample_ns = np.int64(pd.Timestamp(sample_time).as_unit("ns").value)
-        distances = np.abs(frame_ns - sample_ns)
-        nearest = int(np.argmin(distances))
-        if distances[nearest] <= self.max_distance_minutes * _NS_PER_MINUTE:
-            return [nearest]
-        return []
-
-
-class _WindowStrategy:
-    """Shared implementation for the dataset-level windowed poolers."""
-
-    id = "window"
-
-    def __init__(self, window_minutes: float = 10.0) -> None:
-        if window_minutes <= 0:
-            raise ValueError(f"window_minutes must be positive, got {window_minutes}")
-        self.window_minutes = float(window_minutes)
-
-    def select_frames(self, sample_time: pd.Timestamp, frame_index: pd.DatetimeIndex) -> list[int]:
-        """All frame positions inside the centred window, ordered by time."""
-        return _window_positions(sample_time, frame_index, self.window_minutes)
-
-
-class MeanEmbedding(_WindowStrategy):
-    """Window strategy whose per-sample frames are mean-pooled at dataset level."""
-
-    id = "mean_embedding"
-
-
-class AttentionPooling(_WindowStrategy):
-    """Window strategy whose per-sample frames are attention-pooled at dataset level."""
-
-    id = "attention_pooling"
-
-
-#: Name -> strategy class registry.  Extend via :func:`register_strategy`.
-_STRATEGIES: dict[str, type[AlignmentStrategy]] = {
-    CenterFrame.id: CenterFrame,
-    MeanEmbedding.id: MeanEmbedding,
-    AttentionPooling.id: AttentionPooling,
-}
-
-
-def register_strategy(name: str, cls: type[AlignmentStrategy]) -> None:
-    """Register a new alignment strategy class under *name* (overwrites)."""
-    _STRATEGIES[name] = cls
-
-
-def available_strategies() -> tuple[str, ...]:
-    """Registered alignment strategy names, in registration order."""
-    return tuple(_STRATEGIES)
-
-
-def get_strategy(name: str, **kwargs: float) -> AlignmentStrategy:
-    """Instantiate the registered alignment strategy *name* with *kwargs*.
-
-    Raises
-    ------
-    KeyError
-        If *name* is not registered (message lists the known strategies).
-    """
-    try:
-        cls = _STRATEGIES[name]
-    except KeyError as exc:
-        raise KeyError(
-            f"unknown alignment strategy {name!r}; known: {sorted(_STRATEGIES)}"
-        ) from exc
-    return cls(**kwargs)
-
-
-def _ordered_sample_frames(
-    strategy: AlignmentStrategy,
-    sample_times: Sequence[pd.Timestamp],
-    frame_index: pd.DatetimeIndex,
-) -> list[list[int]]:
-    """Per-sample ordered frame positions (helper for windowed dataset use)."""
-    return [strategy.select_frames(pd.Timestamp(t), frame_index) for t in sample_times]

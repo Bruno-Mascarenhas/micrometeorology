@@ -26,11 +26,12 @@ import itertools
 import math
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Protocol, get_args, runtime_checkable
 
 import numpy as np
 import pandas as pd
 
+from allsky.config import AlignmentStrategyName
 from allsky.data.contracts import resolve
 from allsky.features.normalization import FeatureNormalizer
 
@@ -47,9 +48,12 @@ type SampleTensors = dict[str, Any]
 #: Regression target columns (raw physical units; NaN = missing).
 _REGRESSION_TARGETS = ("target_dhi", "target_kindex", "cloud_fraction")
 
-#: Dataset-level temporal windowing modes for the embedding dataset.
-WindowMode = Literal["center_frame", "mean_embedding", "attention_pooling"]
-_WINDOW_MODES: tuple[WindowMode, ...] = ("center_frame", "mean_embedding", "attention_pooling")
+#: Dataset-level temporal windowing modes for the embedding dataset. The name
+#: set is owned by :data:`allsky.config.AlignmentStrategyName` (a leaf module),
+#: so the config that selects a mode and the dataset that implements it can
+#: never disagree about which modes exist.
+type WindowMode = AlignmentStrategyName
+_WINDOW_MODES: tuple[WindowMode, ...] = get_args(AlignmentStrategyName)
 #: Nanoseconds per minute (int64 timestamp arithmetic is done in ns).
 _NS_PER_MINUTE = 60_000_000_000
 
