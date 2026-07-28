@@ -7,7 +7,9 @@ config (or no config at all) is rejected with a clear pointer to the experiment
 configs.
 
 torch is imported lazily inside the run helper so ``allsky --help`` stays light
-and torch-free.
+and torch-free; :func:`micrometeorology.common.optional.require` guards that
+boundary so a core-only install gets the extra's install command instead of a
+bare ``ModuleNotFoundError``.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from typing import Annotated
 import typer
 
 from allsky.config import is_experiment_config, load_experiment_config
+from micrometeorology.common.optional import require
 
 ConfigOption = Annotated[
     Path | None,
@@ -98,6 +101,7 @@ def train(
             )
         resume_arg = resume
 
+    require("torch", "allsky")
     from allsky.training import run_experiment  # lazy: pulls torch at run time
 
     summary = run_experiment(

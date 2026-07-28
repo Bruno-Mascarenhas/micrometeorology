@@ -6,6 +6,8 @@ needs to train on a locally prepared dataset into a single ``tar.gz``:
 - the manifest parquet and its ``.meta.json`` sidecar;
 - the persisted split artifact (when present);
 - the precomputed embedding shards + index + meta (optional);
+- the JPEG frames the manifest references (optional, off by default — only
+  ``input_mode: image`` experiments need them);
 - every config YAML used, plus a resolved dump of the
   :class:`~allsky.config.PrepareConfig`;
 - a generated ``BUNDLE_README.md`` describing the contents and how to consume
@@ -89,6 +91,7 @@ def export_colab_bundle(
     embeddings_dir: str | Path | None = None,
     config_paths: Iterable[str | Path] = (),
     include_embeddings: bool = True,
+    include_frames: bool = False,
     bundle_name: str = "allsky_bundle",
 ) -> dict[str, Any]:
     """Pack a prepared dataset into a Colab-ready ``tar.gz`` at *out_path*.
@@ -113,20 +116,28 @@ def export_colab_bundle(
     include_embeddings:
         When ``False`` (or the embeddings directory is missing) embedding shards
         are omitted.
+    include_frames:
+        When ``True`` every JPEG the manifest's ``image_path`` column references
+        is packed under its own relative path, so image-mode experiments can
+        train straight from the bundle.  Off by default: an embedding-mode
+        bundle needs no frames, and packing the whole frames tree would ship the
+        night/QC-dropped JPEGs no manifest row can address.
     bundle_name:
         Top-level directory every member is nested under.
 
     Returns
     -------
     dict
-        ``{"path", "size_bytes", "members"}`` — the written archive path, its
-        size in bytes and the sorted list of member arcnames.
+        ``{"path", "size_bytes", "members", "frame_files"}`` — the written
+        archive path, its size in bytes, the sorted list of member arcnames and
+        the number of frames packed.
 
     Raises
     ------
     ValueError
-        If no manifest can be resolved, the manifest/meta is missing on disk, or
-        a constructed member name would be unsafe.
+        If no manifest can be resolved, the manifest/meta is missing on disk, a
+        constructed member name would be unsafe, or *include_frames* is set and
+        a referenced frame is absent from disk.
     """
     manifest_file, meta_file, split_file, emb_dir = _resolve_sources(
         prepare_cfg=prepare_cfg,
@@ -157,6 +168,10 @@ def export_colab_bundle(
             file_members[arc] = path
             embedded_files += 1
 
+    frame_files = 0
+    if include_frames:
+        frame_files = _add_manifest_frames(file_members, root=root, manifest_file=manifest_file)
+
     for cfg_path in config_paths:
         src = Path(cfg_path)
         arc = _safe_arcname((root / "config" / src.name).as_posix())
@@ -174,7 +189,9 @@ def export_colab_bundle(
     all_names = sorted(
         [*file_members, *text_members, _safe_arcname((root / BUNDLE_README_NAME).as_posix())]
     )
-    readme = _render_readme(bundle_name=bundle_name, members=all_names, meta=meta)
+    readme = _render_readme(
+        bundle_name=bundle_name, members=all_names, meta=meta, frames_included=frame_files > 0
+    )
     text_members[_safe_arcname((root / BUNDLE_README_NAME).as_posix())] = readme
 
     members = sorted([*file_members, *text_members])
@@ -183,13 +200,14 @@ def export_colab_bundle(
     out = Path(out_path)
     size = out.stat().st_size
     logger.info(
-        "export_colab_bundle: wrote %s (%d members, %d embedding files, %d bytes)",
+        "export_colab_bundle: wrote %s (%d members, %d embedding files, %d frames, %d bytes)",
         out,
         len(members),
         embedded_files,
+        frame_files,
         size,
     )
-    return {"path": str(out), "size_bytes": size, "members": members}
+    return {"path": str(out), "size_bytes": size, "members": members, "frame_files": frame_files}
 
 
 def validate_bundle(path: str | Path) -> dict[str, Any]:
@@ -291,6 +309,52 @@ def _resolve_sources(
     return manifest_file, meta_file, split_file, emb_dir
 
 
+def _add_manifest_frames(
+    file_members: dict[str, Path], *, root: PurePosixPath, manifest_file: Path
+) -> int:
+    """Add the JPEGs the manifest references to *file_members*; return the count.
+
+    The manifest's own relative ``image_path`` values are the member names, so a
+    bundled manifest needs no path rewriting and any frame layout works.  Only
+    referenced frames are packed — the frames tree also holds the night and
+    QC-dropped JPEGs no manifest row can address.
+    """
+    from allsky.data.contracts import resolve
+
+    referenced = pd.read_parquet(manifest_file, columns=["image_path"])
+    missing: list[str] = []
+    added = 0
+    for relative in sorted({str(value) for value in referenced["image_path"]}):
+        source = resolve(relative, manifest_file.parent)
+        if not source.is_file():
+            missing.append(relative)
+            continue
+        file_members[_safe_arcname((root / relative).as_posix())] = source
+        added += 1
+    if missing:
+        raise ValueError(
+            f"cannot include frames: {len(missing)} manifest image_path value(s) are missing "
+            f"under {manifest_file.parent} (first: {missing[0]!r})"
+        )
+    return added
+
+
+def _normalize_member(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Strip the local account and mtime a copied file would otherwise carry.
+
+    Without this, members added from disk record the exporting machine's
+    ``uid``/``gid``/``uname``/``gname`` and file mtimes while the generated
+    members record ``uid=0, mtime=0``.  (This does not make the archive
+    byte-reproducible: ``tarfile``'s gzip header still stores the wall clock.)
+    """
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
+    info.mtime = 0
+    return info
+
+
 def _write_tar_atomic(
     out_path: str | Path,
     *,
@@ -304,7 +368,7 @@ def _write_tar_atomic(
         with tarfile.open(tmp, "w:gz") as tar:
             for arc in order:
                 if arc in file_members:
-                    tar.add(file_members[arc], arcname=arc)
+                    tar.add(file_members[arc], arcname=arc, filter=_normalize_member)
                 else:
                     data = text_members[arc].encode("utf-8")
                     info = tarfile.TarInfo(name=arc)
@@ -330,13 +394,26 @@ def _read_member(tar: tarfile.TarFile, name: str) -> bytes:
         return handle.read()
 
 
-def _render_readme(*, bundle_name: str, members: list[str], meta: dict[str, Any]) -> str:
+def _render_readme(
+    *, bundle_name: str, members: list[str], meta: dict[str, Any], frames_included: bool
+) -> str:
     """Render the ``BUNDLE_README.md`` describing the archive and how to use it."""
     member_lines = "\n".join(f"- `{name}`" for name in members)
     dataset_version = meta.get("dataset_version", "?")
     row_count = meta.get("row_count", "?")
     feature_set = meta.get("feature_set", "?")
     manifest_sha = str(meta.get("manifest_sha256", "?"))
+    images = (
+        f"""Image paths in the manifest are **relative POSIX** paths resolved against the
+`{bundle_name}/` directory (the data root); resolve them with
+`allsky.data.contracts.resolve(image_path, data_root)`."""
+        if frames_included
+        else f"""This bundle carries **no frames** — it is embedding-mode only.  The manifest's
+relative POSIX `image_path` values do not resolve against `{bundle_name}/`, so
+image-mode experiments (`v6_film_finetune`, any `input_mode: image` config) need
+a bundle exported with `--include-frames`.  Validate a frame-less bundle with
+`allsky validate-dataset --skip-image-check`."""
+    )
     return f"""# All-sky dataset bundle
 
 Self-contained export of a locally prepared all-sky dataset (manifest v{dataset_version}).
@@ -372,11 +449,9 @@ print(manifest.head())
 PY
 ```
 
-Image paths in the manifest are **relative POSIX** paths resolved against the
-`{bundle_name}/` directory (the data root); resolve them with
-`allsky.data.contracts.resolve(image_path, data_root)`.  If embedding shards are
-included they live under `{bundle_name}/{_EMBEDDINGS_DIRNAME}/` with their index
-and `embeddings.meta.json`.
+{images}  If embedding shards are included they live under
+`{bundle_name}/{_EMBEDDINGS_DIRNAME}/` with their index and
+`embeddings.meta.json`.
 
 Verify integrity after unpacking with
 `allsky.bundle.validate_bundle("{bundle_name}.tar.gz")`, which re-hashes the

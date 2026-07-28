@@ -176,6 +176,22 @@ class TestValidateDataset:
         assert result.exit_code == 1
         assert "ERROR" in result.output
 
+    def test_skip_image_check_accepts_a_frameless_dataset(self, tmp_path: Path):
+        # The shape of an embedding-mode Colab bundle: manifest + meta, no JPEGs.
+        dataset_dir = tmp_path / "frameless"
+        _write_manifest(dataset_dir, ["2025-03-21 12:00"], create_files=False)
+        config = _write_config(
+            tmp_path / "c.yaml",
+            dataset_dir=dataset_dir,
+            video_pattern="none-*.mp4",
+            dat_path=tmp_path / "x.dat",
+        )
+        result = runner.invoke(
+            app, ["validate-dataset", "--config", str(config), "--skip-image-check"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "OK" in result.output
+
     def test_missing_manifest_exit_one(self, tmp_path: Path):
         config = _write_config(
             tmp_path / "c.yaml",
@@ -347,3 +363,29 @@ class TestExportColabBundle:
         report = validate_bundle(out)
         assert report["manifest_sha256_ok"] is True
         assert "allsky_bundle/config/c.yaml" in report["members"]
+        assert not any(name.endswith(".jpg") for name in report["members"])
+
+    def test_include_frames_packs_the_manifest_images(self, tmp_path: Path):
+        dataset_dir = tmp_path / "dataset"
+        _write_manifest(dataset_dir, ["2025-03-21 12:00"], create_files=True)
+        config = _write_config(
+            tmp_path / "c.yaml",
+            dataset_dir=dataset_dir,
+            video_pattern="none-*.mp4",
+            dat_path=tmp_path / "x.dat",
+        )
+        out = tmp_path / "bundle.tar.gz"
+        result = runner.invoke(
+            app,
+            [
+                "export-colab-bundle",
+                "--config",
+                str(config),
+                "--out",
+                str(out),
+                "--include-frames",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        members = validate_bundle(out)["members"]
+        assert "allsky_bundle/frames/allsky-20250321-1200.jpg" in members

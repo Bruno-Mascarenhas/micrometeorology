@@ -19,6 +19,7 @@ from allsky.preprocessing import (
     load_mask,
     process_frame,
     resize_image,
+    resolve_mask,
     visual_qc,
 )
 
@@ -145,6 +146,25 @@ class TestVisualQC:
         image[:2, :] = 255  # 20% saturated
         assert QCFlag.FRAME_SATURATED in visual_qc(image, saturated_fraction_threshold=0.1)
 
+    @pytest.mark.parametrize("saturated_level", [0, 1, 128, 200, 254, 255])
+    @pytest.mark.parametrize("saturated_rows", [0, 1, 2, 3, 5, 10])
+    def test_saturated_fraction_matches_the_channel_axis_reduction(
+        self, saturated_level: int, saturated_rows: int
+    ):
+        # The counted form must agree with the (arr >= level).all(axis=2).mean()
+        # reduction it replaced, exactly, at every threshold — including rows
+        # straddling the 0.2 default fraction.
+        image = _rgb(10, 10, fill=128)
+        image[:saturated_rows] = 255
+        expected = float((image >= saturated_level).all(axis=2).mean())
+        for threshold in (0.0, 0.1, expected, 0.2, 0.5, 1.0):
+            flagged = QCFlag.FRAME_SATURATED in visual_qc(
+                image,
+                saturated_level=saturated_level,
+                saturated_fraction_threshold=threshold,
+            )
+            assert flagged == (expected > threshold)
+
 
 class TestProcessFrame:
     def test_default_config_is_identity(self):
@@ -175,3 +195,55 @@ class TestProcessFrame:
         out = process_frame(_rgb(16, 16, fill=210), cfg)
         assert (out[0, 0] == 0).all()
         assert (out[8, 8] == 210).all()
+
+
+class TestResolveMask:
+    @staticmethod
+    def _mask_config(tmp_path: Path) -> PrepareConfig:
+        from PIL import Image
+
+        keep = np.full((16, 16), 255, dtype=np.uint8)
+        keep[0, 0] = 0
+        mask_path = tmp_path / "m.png"
+        Image.fromarray(keep, mode="L").save(mask_path)
+        return PrepareConfig.model_validate({"mask": {"path": str(mask_path)}})
+
+    def test_no_mask_path_resolves_to_none(self):
+        assert resolve_mask(PrepareConfig()) is None
+
+    def test_resolved_mask_is_read_only(self, tmp_path: Path):
+        keep = resolve_mask(self._mask_config(tmp_path))
+        assert keep is not None
+        # The same buffer is shared by every frame of the run.
+        with pytest.raises(ValueError, match="read-only"):
+            keep[0, 0] = True
+
+    def test_preresolved_mask_is_byte_identical_to_the_path(self, tmp_path: Path):
+        cfg = self._mask_config(tmp_path)
+        image = _rgb(16, 16, fill=210)
+        assert np.array_equal(
+            process_frame(image, cfg, mask=resolve_mask(cfg)), process_frame(image, cfg)
+        )
+
+    def test_mask_none_never_falls_back_to_the_circular_estimate(self):
+        # process_frame must not silently zero pixels when no mask is configured.
+        image = _rgb(24, 24, fill=77)
+        assert np.array_equal(process_frame(image, PrepareConfig(), mask=None), image)
+
+    def test_extract_step_decodes_the_mask_once_per_video(self, tmp_path: Path, monkeypatch):
+        import allsky.preprocessing as preprocessing
+
+        cfg = self._mask_config(tmp_path)
+        decodes = 0
+        original = preprocessing.load_mask
+
+        def counting_load_mask(path, **kwargs):
+            nonlocal decodes
+            decodes += 1
+            return original(path, **kwargs)
+
+        monkeypatch.setattr(preprocessing, "load_mask", counting_load_mask)
+        mask = preprocessing.resolve_mask(cfg)
+        for _ in range(5):
+            process_frame(_rgb(16, 16, fill=210), cfg, mask=mask)
+        assert decodes == 1

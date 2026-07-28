@@ -124,6 +124,7 @@ def evaluate_checkpoint(
     split: str = "val",
     data_root: str | Path | None = None,
     batch_size: int | None = None,
+    num_workers: int | None = None,
     device: str | None = None,
     report_dir: str | Path | None = None,  # noqa: ARG001 - reserved; report writing is in reports.py
     strict: bool = False,
@@ -144,6 +145,11 @@ def evaluate_checkpoint(
         against).
     batch_size:
         Inference batch size (defaults to the config's train batch size).
+    num_workers:
+        Inference DataLoader workers.  Defaults to ``cfg.train.num_workers`` in
+        ``input_mode="image"`` (where every sample pays a full JPEG decode that
+        must overlap the forward pass) and to ``0`` in embedding mode, whose
+        preloaded resident array would only be copied into each worker.
     device:
         ``"auto"`` | ``"cpu"`` | ``"cuda"`` | ``"mps"`` (defaults to the config's
         train device); a clear error is raised for unavailable CUDA.
@@ -179,6 +185,8 @@ def evaluate_checkpoint(
 
     manifest, meta = load_manifest(resolve_against_root(cfg.data.manifest, root))
     manifest_hash_ok = _check_manifest_hash(checkpoint.get("manifest_sha256"), meta, strict=strict)
+    manifest_kind = _manifest_kindex_kind(manifest, meta)
+    kindex_kind_ok = _check_kindex_kind(cfg, manifest_kind, strict=strict)
     split_obj = load_split(resolve_against_root(cfg.data.split_artifact, root))
     split_id_ok = _check_split_id(checkpoint.get("split_id"), split_obj.split_id, strict=strict)
     split_df = _select_split_rows(manifest, split_obj, split)
@@ -202,6 +210,7 @@ def evaluate_checkpoint(
         enabled_targets=enabled_targets,
         device=resolved_device,
         batch_size=int(batch_size) if batch_size is not None else int(cfg.train.batch_size),
+        num_workers=num_workers,
         root=root,
         embedding_reader=embedding_reader,
         image_backbone_builder=image_backbone_builder,
@@ -226,6 +235,8 @@ def evaluate_checkpoint(
         "split_id_ok": split_id_ok,
         "manifest_sha256": meta.get("manifest_sha256"),
         "manifest_hash_ok": manifest_hash_ok,
+        "kindex_kind": manifest_kind,
+        "kindex_kind_ok": kindex_kind_ok,
         "dataset_version": str(meta.get("dataset_version", checkpoint.get("dataset_version"))),
     }
     logger.info(
@@ -290,6 +301,46 @@ def _check_split_id(stored: str | None, current: str, *, strict: bool) -> bool:
     return False
 
 
+def _manifest_kindex_kind(manifest: pd.DataFrame, meta: Mapping[str, Any]) -> str | None:
+    """Which k-index the manifest's ``target_kindex`` column holds, if recorded.
+
+    The sidecar meta is authoritative (the manifest builder always writes
+    ``kindex_kind``); the constant manifest column is the fallback for a dataset
+    whose sidecar was lost.  Returns ``None`` when neither source carries it, so
+    a hand-built or pre-v2 manifest keeps loading.
+    """
+    kind = meta.get("kindex_kind")
+    if not kind and "kindex_kind" in manifest.columns and not manifest.empty:
+        values = manifest["kindex_kind"].dropna().unique()
+        kind = str(values[0]) if len(values) == 1 else None
+    return str(kind) if kind else None
+
+
+def _check_kindex_kind(cfg: ExperimentConfig, manifest_kind: str | None, *, strict: bool) -> bool:
+    """Compare the experiment's asserted k-index kind against the manifest's.
+
+    ``cfg.targets.kindex.kind`` does not select anything at eval time — the head
+    scores the frozen ``target_kindex`` column — so a disagreement means the
+    report would label k* numbers as k_t (or the reverse).  Follows this
+    function's other provenance checks: warn by default, raise under *strict*.
+    Skipped when the k-index head is disabled, since the field then defaults to
+    ``kstar`` for every experiment regardless of how the dataset was built.
+    """
+    if not cfg.targets.kindex.enabled or manifest_kind is None:
+        return False
+    if manifest_kind == cfg.targets.kindex.kind:
+        return True
+    message = (
+        f"targets.kindex.kind={cfg.targets.kindex.kind!r} but the manifest was built with "
+        f"kindex_kind={manifest_kind!r} — the reported k-index is the manifest's, not the "
+        "config's; rebuild the dataset or fix the experiment config"
+    )
+    if strict:
+        raise ValueError(message)
+    logger.warning(message)
+    return False
+
+
 def _select_split_rows(manifest: pd.DataFrame, split_obj: Any, split: str) -> pd.DataFrame:
     """Slice the manifest rows whose ``day_id`` belongs to *split*."""
     days = set(split_obj.days_for(split))
@@ -334,6 +385,7 @@ def _run_inference(
     enabled_targets: Sequence[str],
     device: str,
     batch_size: int,
+    num_workers: int | None,
     root: Path,
     embedding_reader: EmbeddingReader | None,
     image_backbone_builder: Any | None,
@@ -375,8 +427,21 @@ def _run_inference(
     model = model.to(device)
     model.eval()
 
+    # Evaluation never shuffles and uses no sampler, so the worker count cannot
+    # reorder samples: every emitted prediction row is identical at any setting.
+    workers = (
+        int(num_workers)
+        if num_workers is not None
+        else (int(cfg.train.num_workers) if cfg.data.input_mode == "image" else 0)
+    )
     loader: DataLoader[Any] = DataLoader(
-        dataset, batch_size=batch_size, shuffle=False, num_workers=0, drop_last=False
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=workers,
+        pin_memory=device == "cuda",
+        persistent_workers=False,
+        drop_last=False,
     )
     collected: dict[str, list[np.ndarray]] = {name: [] for name in enabled_targets}
     with torch.no_grad():

@@ -25,6 +25,7 @@ from typing import Annotated, Any
 
 import typer
 
+from allsky.atomic import atomic_write
 from allsky.config import PrepareConfig, load_prepare_config
 
 logger = logging.getLogger(__name__)
@@ -65,9 +66,76 @@ def _load_prepare(config: Path | None) -> PrepareConfig:
 
 
 def _config_sha256(cfg: PrepareConfig) -> str:
-    """Content hash of the resolved config (used to detect a stale manifest)."""
+    """Content hash of the whole resolved config, recorded as manifest provenance."""
     canonical = json.dumps(cfg.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+#: :class:`PrepareConfig` sections that reach the manifest.  ``embeddings`` and
+#: ``splits`` are deliberately excluded from :func:`_manifest_inputs_sha256`:
+#: neither influences a single manifest row, so an unrelated edit (lowering
+#: ``embeddings.batch_size`` after an OOM) must not force a full rebuild.
+_MANIFEST_CONFIG_SECTIONS = (
+    "video",
+    "site",
+    "features",
+    "mask",
+    "crop",
+    "resize",
+    "night_filter",
+    "sensor",
+    "targets",
+    "alignment",
+    "output",
+)
+
+
+def _file_sha256(path: Path) -> str:
+    """Content hash of *path*, or a stable marker when it is absent."""
+    if not path.is_file():
+        return f"absent:{path}"
+    with open(path, "rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]) -> str:
+    """Content hash of everything the manifest is actually built from.
+
+    ``_config_sha256`` covers none of it, which is why a newly extracted video
+    day used to be silently dropped ("resume: manifest up to date") while an edit
+    to an irrelevant section forced a full rebuild.  Three inputs are folded in:
+
+    - the extracted frame set — the ``frame_path`` values of the per-video
+      manifests that ``pd.concat`` feeds to the builder;
+    - each sensor file's **content** hash.  Not ``(size, mtime_ns)``: ``cp``/
+      ``scp`` of an unchanged archive bumps mtime and would force a pointless
+      rebuild, while ``rsync -a`` preserves mtime across a real in-place edit.
+      The build step already parses these files in full, so hashing them is
+      cheap relative to the work it gates;
+    - only the config sections that reach the manifest
+      (:data:`_MANIFEST_CONFIG_SECTIONS`).
+
+    Note that the live, appended sensor archive changes content on essentially
+    every logger write, so a rebuild on every run is the expected steady state —
+    the manifest's targets are re-derived from the newest sensor data, which is
+    the point.
+    """
+    unknown = [name for name in _MANIFEST_CONFIG_SECTIONS if name not in PrepareConfig.model_fields]
+    if unknown:
+        raise RuntimeError(
+            f"PrepareConfig has no field(s) {unknown}; pydantic ignores bogus include keys, so "
+            "the manifest inputs hash would silently stop covering them"
+        )
+    digest = hashlib.sha256()
+    for frame in per_video:
+        for frame_path in sorted(str(value) for value in frame["frame_path"]):
+            digest.update(frame_path.encode("utf-8"))
+            digest.update(b"\0")
+    for sensor_path in cfg.sensor.paths:
+        digest.update(_file_sha256(Path(sensor_path)).encode("utf-8"))
+    sections = cfg.model_dump(mode="json", include=set(_MANIFEST_CONFIG_SECTIONS))
+    digest.update(json.dumps(sections, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    return digest.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +153,14 @@ def validate_dataset(
     ] = None,
     strict: Annotated[
         bool, typer.Option("--strict", help="Promote warnings to failures (exit 1).")
+    ] = False,
+    skip_image_check: Annotated[
+        bool,
+        typer.Option(
+            "--skip-image-check",
+            help="Do not verify that every image_path exists on disk (use on a frame-less "
+            "Colab bundle, where only the embeddings travelled).",
+        ),
     ] = False,
 ) -> None:
     """Validate a prepared manifest; exit 1 on errors (or on warnings if --strict)."""
@@ -123,6 +199,7 @@ def validate_dataset(
         data_root=data_root,
         split_artifact=split_artifact,
         strict=strict,
+        check_files=not skip_image_check,
     )
 
     for warning in report.warnings:
@@ -204,6 +281,7 @@ def prepare_local(
             dataset_dir=dataset_dir,
             manifest_path=manifest_path,
             meta_path=meta_path,
+            split_path=split_path,
             config_sha=config_sha,
             force=force,
         )
@@ -232,6 +310,14 @@ def export_colab_bundle_cmd(
             help="Include precomputed embedding shards when present.",
         ),
     ] = True,
+    include_frames: Annotated[
+        bool,
+        typer.Option(
+            "--include-frames/--no-include-frames",
+            help="Include the JPEG frames the manifest references (needed by image-mode "
+            "experiments; off by default because embedding-mode bundles do not use them).",
+        ),
+    ] = False,
 ) -> None:
     """Pack a prepared dataset into a Colab-ready tar.gz bundle."""
     _configure_logging()
@@ -245,6 +331,7 @@ def export_colab_bundle_cmd(
         prepare_cfg=cfg,
         config_paths=config_paths,
         include_embeddings=include_embeddings,
+        include_frames=include_frames,
     )
     typer.echo(json.dumps(summary, indent=2, default=str))
 
@@ -300,27 +387,73 @@ def _run_extract_step(
 
     When *run_extract* is False the existing per-video manifests are loaded so a
     later ``build-manifest`` step can proceed on a previously extracted dataset.
-    """
-    import pandas as pd
 
+    Resume keys on a **complete** per-video manifest, never on the mere existence
+    of the file: :func:`allsky.video.extract_frames` publishes
+    ``manifest.parquet`` before the visual-QC pass runs, so an interruption
+    inside that pass leaves a manifest without the ``qc_frame_flags`` column
+    (every FRAME_DARK / FRAME_SATURATED bit silently lost) and an interrupted
+    write leaves one that cannot be read at all.  Both are re-extracted.
+    """
     per_video: list[PandasDataFrame] = []
     for video in videos:
         stem = Path(video).stem
         vdir = frames_root / stem
         vman = vdir / _MANIFEST_NAME
+        existing = _read_frame_manifest(vman)
+        qc_complete = existing is not None and "qc_frame_flags" in existing.columns
+
         if not run_extract:
-            if vman.exists():
-                per_video.append(pd.read_parquet(vman))
+            if existing is None:
+                if vman.exists():
+                    typer.echo(f"WARNING: skipping {stem}: frame manifest {vman} is unreadable")
+                continue
+            if not qc_complete:
+                typer.echo(
+                    f"WARNING: frame manifest {vman} has no qc_frame_flags; FRAME_DARK/"
+                    "FRAME_SATURATED will be unset (re-run the extract-frames step to "
+                    "populate them)"
+                )
+            per_video.append(existing)
+            continue
+
+        if qc_complete and not force:
+            typer.echo(f"resume: skipping extraction for {stem} (frames already present)")
+            per_video.append(existing)
             continue
         if vman.exists() and not force:
-            typer.echo(f"resume: skipping extraction for {stem} (frames already present)")
-            per_video.append(pd.read_parquet(vman))
-            continue
+            typer.echo(
+                f"resume: frame manifest for {stem} is unreadable or predates visual QC, "
+                "re-extracting"
+            )
         frame_manifest = _extract_and_qc(video, vdir, cfg)
-        frame_manifest.to_parquet(vman, index=False)
+        _write_frame_manifest(vman, frame_manifest)
         per_video.append(frame_manifest)
         typer.echo(f"extract-frames: {len(frame_manifest)} frames from {stem} -> {vdir}")
     return per_video
+
+
+def _read_frame_manifest(vman: Path) -> PandasDataFrame | None:
+    """Read a per-video frame manifest, or None when it is missing or unreadable.
+
+    A truncated parquet (a kill or a full disk during the write) must not wedge
+    every later run inside ``pd.read_parquet``: it is logged and reported as
+    absent so the caller can re-extract that one video.
+    """
+    import pandas as pd
+
+    if not vman.exists():
+        return None
+    try:
+        return pd.read_parquet(vman)
+    except Exception as exc:
+        logger.warning("frame manifest %s is unreadable (%s); treating it as absent", vman, exc)
+        return None
+
+
+def _write_frame_manifest(vman: Path, frame_manifest: PandasDataFrame) -> None:
+    """Atomically persist a per-video frame manifest (temp file + ``os.replace``)."""
+    atomic_write(vman, lambda tmp: frame_manifest.to_parquet(tmp, index=False))
 
 
 def _extract_and_qc(video: str, vdir: Path, cfg: PrepareConfig) -> PandasDataFrame:
@@ -330,19 +463,24 @@ def _extract_and_qc(video: str, vdir: Path, cfg: PrepareConfig) -> PandasDataFra
     to compute :func:`allsky.preprocessing.visual_qc` flags (stored in a
     ``qc_frame_flags`` column the manifest builder later ORs into ``qc_flags``)
     and, when the config configures a mask/crop/resize, rewritten through
-    :func:`allsky.preprocessing.process_frame`.  The read-back costs one JPEG
-    decode per frame — cheap relative to extraction, and it keeps the QC and
-    preprocessing on the exact bytes that ship in the dataset.
+    :func:`allsky.preprocessing.process_frame`.  The static mask is decoded once
+    per video (:func:`allsky.preprocessing.resolve_mask`) rather than once per
+    frame.
+
+    QC therefore describes the frame **as extracted**: with a mask/crop/resize
+    configured the file is overwritten afterwards, so the flags do not describe
+    the preprocessed bytes that ship.
     """
     import imageio.v3 as iio
     import numpy as np
     import pandas as pd
 
-    from allsky.preprocessing import _needs_preprocessing, process_frame, visual_qc
+    from allsky.preprocessing import _needs_preprocessing, process_frame, resolve_mask, visual_qc
     from allsky.video import JPEG_QUALITY, extract_frames
 
     frame_manifest = extract_frames(video, vdir, cfg.video, step=1, resize=None)
     needs = _needs_preprocessing(cfg)
+    mask = resolve_mask(cfg) if needs else None
 
     qc_flags: list[int] = []
     for frame_path in frame_manifest["frame_path"]:
@@ -352,7 +490,7 @@ def _extract_and_qc(video: str, vdir: Path, cfg: PrepareConfig) -> PandasDataFra
             bits |= int(flag)
         qc_flags.append(bits)
         if needs:
-            iio.imwrite(frame_path, process_frame(image, cfg), quality=JPEG_QUALITY)
+            iio.imwrite(frame_path, process_frame(image, cfg, mask=mask), quality=JPEG_QUALITY)
 
     result = frame_manifest.copy()
     result["qc_frame_flags"] = pd.array(qc_flags, dtype="int64")
@@ -366,18 +504,23 @@ def _run_build_manifest_step(
     dataset_dir: Path,
     manifest_path: Path,
     meta_path: Path,
+    split_path: Path,
     config_sha: str,
     force: bool,
 ) -> None:
-    """Build + persist the v2 manifest, skipping when up to date (resume)."""
+    """Build + persist the v2 manifest, skipping when its inputs are unchanged."""
     import pandas as pd
 
+    inputs_sha = _manifest_inputs_sha256(cfg, per_video) if per_video else None
     if manifest_path.exists() and meta_path.exists() and not force:
         existing = json.loads(meta_path.read_text(encoding="utf-8"))
-        if existing.get("config_sha256") == config_sha:
-            typer.echo("resume: manifest up to date (config unchanged), skipping build-manifest")
+        if _manifest_is_up_to_date(existing, inputs_sha=inputs_sha, config_sha=config_sha):
+            typer.echo("resume: manifest up to date (inputs unchanged), skipping build-manifest")
             return
-        typer.echo("build-manifest: config changed since last build, rebuilding")
+        typer.echo(
+            "build-manifest: inputs changed since last build (frame set, sensor data or a "
+            "manifest-relevant config section), rebuilding"
+        )
 
     if not per_video:
         typer.echo(
@@ -392,12 +535,58 @@ def _run_build_manifest_step(
     manifest, meta = build_manifest_from_prepare_config(
         frames_manifest, sensor_df, cfg, data_root=dataset_dir, config_sha256=config_sha
     )
+    meta["inputs_sha256"] = inputs_sha
     manifest = _apply_frame_qc(manifest, frames_manifest)
+    manifest = _carry_split_labels(manifest, split_path)
     written = write_manifest_parquet(manifest, meta, manifest_path)
     typer.echo(
         f"build-manifest: {written['row_count']} rows -> {manifest_path} "
         f"(sha256 {str(written['manifest_sha256'])[:12]})"
     )
+
+
+def _manifest_is_up_to_date(
+    existing_meta: dict[str, Any], *, inputs_sha: str | None, config_sha: str
+) -> bool:
+    """Whether the persisted manifest was built from the current inputs.
+
+    A sidecar written before ``inputs_sha256`` existed (or a run with no frame
+    manifests to hash) falls back to the old config-only comparison, so
+    upgrading does not silently rebuild — and re-split — every already-prepared
+    archive on its next cron run.
+    """
+    recorded = existing_meta.get("inputs_sha256")
+    if recorded is None or inputs_sha is None:
+        return existing_meta.get("config_sha256") == config_sha
+    return bool(recorded == inputs_sha)
+
+
+def _carry_split_labels(manifest: PandasDataFrame, split_path: Path) -> PandasDataFrame:
+    """Fill a freshly built manifest's ``split`` column from the existing artifact.
+
+    ``build_manifest`` writes ``split`` as all-null, so a rebuild drops every
+    label; if the splits step then aborts (a grown day set hashes to a different
+    ``split_id``) the manifest is left with no split at all and no way back
+    except ``--force``.  Only days the artifact already assigns are filled — no
+    assignment is invented, changed or re-drawn.
+    """
+    if not split_path.exists():
+        return manifest
+
+    from allsky.data.splits import load_split_artifact
+
+    try:
+        split = load_split_artifact(split_path)
+    except (ValueError, OSError) as exc:
+        typer.echo(f"WARNING: cannot reuse split labels from {split_path} ({exc})")
+        return manifest
+    out = manifest.copy()
+    out["split"] = manifest["day_id"].astype("string").map(split.assignment).astype("string")
+    typer.echo(
+        f"build-manifest: carried {int(out['split'].notna().sum())} existing split "
+        f"label(s) forward from {split_path.name}"
+    )
+    return out
 
 
 def _run_splits_step(
@@ -431,6 +620,11 @@ def _run_splits_step(
         save_split_artifact(split, split_path, force=force)
     except SplitExistsError as exc:
         typer.echo(f"ERROR: {exc}")
+        typer.echo(
+            "ERROR: the manifest's day set or the split parameters changed since that artifact "
+            "was written; re-run the splits step with --force to re-derive it — which re-draws "
+            "every day, so metrics from models trained on the old split stop being comparable"
+        )
         raise typer.Exit(1) from exc
     typer.echo(f"splits: {split.split_id[:12]} -> {split_path}")
 
@@ -460,16 +654,32 @@ def _load_sensor_df(cfg: PrepareConfig) -> PandasDataFrame:
 
 
 def _apply_frame_qc(manifest: PandasDataFrame, frames_manifest: PandasDataFrame) -> PandasDataFrame:
-    """OR the per-frame visual QC bits into the manifest ``qc_flags`` by sample_id."""
+    """OR the per-frame visual QC bits into the manifest ``qc_flags`` by sample_id.
+
+    Frames extracted by the low-level ``allsky extract-frames`` command carry no
+    ``qc_frame_flags`` at all, and concatenating such a video with a QC'd one
+    yields a float column with gaps.  Neither is fatal — both are reported and
+    the affected frames simply contribute no extra QC bits.
+    """
     import pandas as pd
 
     if "qc_frame_flags" not in frames_manifest.columns:
+        typer.echo(
+            "WARNING: frame manifest has no qc_frame_flags; FRAME_DARK/FRAME_SATURATED will "
+            "be unset (re-run the extract-frames step to populate them)"
+        )
         return manifest
+    frame_flags = frames_manifest["qc_frame_flags"]
+    unflagged = frame_flags.isna()
+    if unflagged.any():
+        videos = sorted(frames_manifest.loc[unflagged, "video"].astype(str).unique())
+        typer.echo(
+            f"WARNING: no visual QC for video(s) {videos}; their FRAME_DARK/FRAME_SATURATED "
+            "bits will be unset (re-run the extract-frames step for them)"
+        )
     timestamps = pd.to_datetime(frames_manifest["timestamp"])
     sample_ids = [f"allsky-{ts:%Y%m%d-%H%M}" for ts in timestamps]
-    qc_by_sample = dict(
-        zip(sample_ids, frames_manifest["qc_frame_flags"].astype("int64"), strict=False)
-    )
+    qc_by_sample = dict(zip(sample_ids, frame_flags.fillna(0).astype("int64"), strict=False))
     extra = manifest["sample_id"].map(qc_by_sample).fillna(0).astype("int64")
     out = manifest.copy()
     out["qc_flags"] = (out["qc_flags"].astype("int64") | extra).astype("int64")
