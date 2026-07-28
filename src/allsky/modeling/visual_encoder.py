@@ -12,10 +12,14 @@ magic constants):
   selected by ``temporal_pooling``.
 - :class:`ImageEncoder` — wraps any ``nn.Module`` exposing an integer ``.dim``
   attribute (the DINOv2 wrapper from the embeddings wave, or a small conv net
-  in tests).  Supports a frozen backbone, unfreezing the last *n* ViT blocks
-  when the backbone exposes a ``blocks`` sequence, and a
-  :meth:`ImageEncoder.param_groups` helper for a separate backbone learning
-  rate.
+  in tests).  Supports a frozen backbone, partial fine-tuning of the last *n*
+  ViT blocks when the backbone exposes a ``blocks`` sequence (independently of
+  ``frozen``), and a :meth:`ImageEncoder.param_groups` helper for a separate
+  backbone learning rate.
+
+:func:`split_backbone_param_groups` builds the two optimizer groups (image
+backbone at its own learning rate, then everything else) that any model owning a
+visual encoder hands to the engine.
 
 :func:`build_visual_encoder` picks the source from ``input_mode``.
 """
@@ -38,6 +42,7 @@ __all__ = [
     "PrecomputedEmbedding",
     "build_visual_encoder",
     "coerce_image_backbone",
+    "split_backbone_param_groups",
 ]
 
 
@@ -196,9 +201,14 @@ class ImageEncoder(nn.Module):
     frozen:
         Freeze every backbone parameter (``requires_grad=False``).
     unfreeze_last_n:
-        When ``> 0`` and the backbone exposes a ``blocks`` sequence, re-enable
-        gradients on its last *n* blocks (typical ViT fine-tuning).  Ignored
-        for backbones without a ``blocks`` attribute.
+        When ``> 0`` and the backbone exposes a ``blocks`` sequence, exactly its
+        last *n* blocks keep gradients: the backbone is frozen first and those
+        blocks are then re-enabled (typical ViT fine-tuning).  That happens
+        **independently of** *frozen* — asking for the last *n* blocks is asking
+        for partial fine-tuning, so ``frozen=False`` no longer means "train every
+        block".  Ignored, with a warning, for a backbone without a ``blocks``
+        attribute: there is nothing to unfreeze, so its parameters keep whatever
+        *frozen* set.
     out_dim:
         Optional projection width; ``None`` or ``== backbone.dim`` leaves an
         identity passthrough.
@@ -221,21 +231,39 @@ class ImageEncoder(nn.Module):
             raise AttributeError("image backbone must expose an integer 'dim' attribute")
         self.backbone = backbone
         self.backbone_dim = int(dim)
-        if frozen:
+        partial_finetune = unfreeze_last_n > 0 and getattr(backbone, "blocks", None) is not None
+        if frozen or partial_finetune:
             for param in self.backbone.parameters():
                 param.requires_grad_(False)
-            if unfreeze_last_n > 0:
-                self._unfreeze_last_blocks(unfreeze_last_n)
+        if unfreeze_last_n > 0:
+            self._unfreeze_last_blocks(unfreeze_last_n)
         self.projection, self._out_dim = _projection(self.backbone_dim, out_dim, dropout)
 
     def _unfreeze_last_blocks(self, n: int) -> None:
         """Re-enable gradients on the last *n* transformer blocks, if any."""
         blocks = getattr(self.backbone, "blocks", None)
         if blocks is None:
+            logger.warning(
+                "unfreeze_last_n=%d is inert: image backbone %s exposes no 'blocks' sequence, "
+                "so there is nothing to unfreeze and its parameters keep the requires_grad "
+                "'backbone_frozen' set",
+                n,
+                type(self.backbone).__name__,
+            )
             return
-        for block in list(blocks)[-n:]:
+        unfrozen = list(blocks)[-n:]
+        for block in unfrozen:
             for param in block.parameters():
                 param.requires_grad_(True)
+        logger.info(
+            "image backbone %s: unfroze the last %d of %d block(s) — %d of %d backbone "
+            "parameters are trainable",
+            type(self.backbone).__name__,
+            len(unfrozen),
+            len(list(blocks)),
+            sum(p.numel() for p in self.backbone.parameters() if p.requires_grad),
+            sum(p.numel() for p in self.backbone.parameters()),
+        )
 
     @property
     def out_dim(self) -> int:
@@ -267,6 +295,39 @@ class ImageEncoder(nn.Module):
         if other_params:
             groups.append({"params": other_params})
         return groups
+
+
+def split_backbone_param_groups(
+    model: nn.Module, visual_encoder: nn.Module, backbone_lr: float | None
+) -> list[dict[str, Any]]:
+    """Optimizer groups for *model* with its image backbone on its own rate.
+
+    Returns ``[backbone_at_backbone_lr, everything_else]`` when *visual_encoder*
+    exposes a ``param_groups`` method (only :class:`ImageEncoder` does) and
+    *backbone_lr* is set, else a single group holding every trainable parameter of
+    *model*.  A wholly frozen backbone contributes no parameters, so it collapses
+    to that single group too.
+
+    The group ORDER is part of the contract: ``torch`` matches optimizer groups
+    positionally in ``load_state_dict``, so ``--resume`` on an existing checkpoint
+    requires the backbone group to stay first.
+    """
+    get_backbone_groups = getattr(visual_encoder, "param_groups", None)
+    if backbone_lr is None or get_backbone_groups is None:
+        return [{"params": [p for p in model.parameters() if p.requires_grad]}]
+    backbone_params = {
+        id(p): p
+        for group in get_backbone_groups(backbone_lr)
+        if "lr" in group
+        for p in group["params"]
+    }
+    other = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_params]
+    groups: list[dict[str, Any]] = []
+    if backbone_params:
+        groups.append({"params": list(backbone_params.values()), "lr": backbone_lr})
+    if other:
+        groups.append({"params": other})
+    return groups
 
 
 class _HubVisualBackbone(nn.Module):
@@ -301,6 +362,29 @@ class _HubVisualBackbone(nn.Module):
         # which makes forward_features(...) un-analyzable. Runtime registration as a
         # submodule still happens because the assigned value *is* an nn.Module.
         self.model: Any = loader()
+        self._warn_if_blocks_are_chunked()
+
+    def _warn_if_blocks_are_chunked(self) -> None:
+        """Warn when ``blocks`` holds chunks instead of one entry per transformer block.
+
+        DINOv2 built with ``block_chunks > 0`` exposes ``blocks`` as a ``ModuleList``
+        of ``BlockChunk`` wrappers, so ``unfreeze_last_n=2`` would unfreeze the last
+        two *chunks* (six blocks for a depth-12/4-chunk build), not two blocks.  The
+        hub module advertises the real depth as ``n_blocks``.
+        """
+        blocks = getattr(self.model, "blocks", None)
+        depth = getattr(self.model, "n_blocks", None)
+        if blocks is None or depth is None or len(blocks) == int(depth):
+            return
+        logger.warning(
+            "image backbone %s exposes %d 'blocks' entries for a depth-%d transformer: "
+            "'blocks' is chunked, so unfreeze_last_n counts chunks of ~%.1f blocks each, "
+            "not single blocks",
+            type(self.model).__name__,
+            len(blocks),
+            int(depth),
+            int(depth) / max(len(blocks), 1),
+        )
 
     @property
     def blocks(self) -> Any:

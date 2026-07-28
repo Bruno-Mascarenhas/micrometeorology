@@ -18,7 +18,7 @@ contract (``forward(batch) -> ModelOutputs``).
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -30,6 +30,7 @@ from allsky.features.normalization import TargetNormalizer
 from allsky.modeling.contracts import ModelOutputs
 from allsky.modeling.heads import Heads, Trunk
 from allsky.modeling.sensor_encoder import SensorEncoder
+from allsky.modeling.visual_encoder import split_backbone_param_groups
 
 __all__ = [
     "ClimatologyModel",
@@ -178,6 +179,9 @@ class ImageOnlyModel(nn.Module):
         integer ``out_dim`` and a ``forward(batch)``.
     targets:
         Enabled heads.
+    backbone_lr:
+        Learning rate for the image backbone's own parameter group (see
+        :meth:`param_groups`); ``None`` trains everything at the run's ``train.lr``.
     """
 
     def __init__(
@@ -188,9 +192,11 @@ class ImageOnlyModel(nn.Module):
         trunk_hidden: int = 256,
         trunk_layers: int = 2,
         dropout: float = 0.1,
+        backbone_lr: float | None = None,
     ) -> None:
         super().__init__()
         self.visual_encoder = visual_encoder
+        self.backbone_lr = backbone_lr
         visual_dim = cast("int", visual_encoder.out_dim)
         self.trunk = Trunk(visual_dim, trunk_hidden, trunk_layers, dropout=dropout)
         self.heads = Heads(int(self.trunk.out_dim), targets)
@@ -200,3 +206,14 @@ class ImageOnlyModel(nn.Module):
         visual = self.visual_encoder(batch)
         outputs: ModelOutputs = self.heads(self.trunk(visual))
         return outputs
+
+    def param_groups(self, backbone_lr: float | None = None) -> list[dict[str, Any]]:
+        """Optimizer parameter groups; the image backbone gets its own LR.
+
+        Same split (and same group order) as
+        :meth:`allsky.modeling.multimodal.MultimodalNet.param_groups`: without it
+        the engine would fall back to one group and train the unfrozen ViT blocks
+        at the head learning rate.  *backbone_lr* overrides the constructor value.
+        """
+        lr = backbone_lr if backbone_lr is not None else self.backbone_lr
+        return split_backbone_param_groups(self, self.visual_encoder, lr)
