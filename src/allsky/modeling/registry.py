@@ -169,6 +169,7 @@ def _build_image_only(
         trunk_hidden=int(params.get("trunk_hidden", 256)),
         trunk_layers=int(params.get("trunk_layers", 2)),
         dropout=float(params.get("dropout", 0.1)),
+        backbone_lr=cfg.train.backbone_lr,
     )
 
 

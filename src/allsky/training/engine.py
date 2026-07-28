@@ -17,7 +17,10 @@
    over ``model.param_groups`` when available, an optional scheduler and AMP;
 #. run per-epoch train/val passes computing loss components **and** physical-unit
    metrics (denormalized DHI/kindex MAE, sky accuracy), logging to TensorBoard,
-   ``metrics.csv`` (appended) and ``metrics.json`` (atomically rewritten);
+   ``metrics.csv`` (appended) and ``metrics.json`` (atomically rewritten).  Each
+   reported ``loss_<head>`` is the mean over the rows that head actually had a
+   target for, and the reported ``loss`` is the configured weighted sum of those
+   means, so the monitored quantity does not move with ``train.batch_size``;
 #. checkpoint ``last.ckpt`` every epoch and ``best.ckpt`` on monitor improvement
    (resume-safe best seeding), with early stopping;
 #. resume fully from ``last.ckpt`` (``resume="auto"`` or a path), restoring
@@ -52,8 +55,8 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 from allsky.atomic import atomic_write, atomic_write_json
-from allsky.config import ExperimentConfig, SchedulerConfig
-from allsky.data.datasets import EmbeddingReader, WindowMode
+from allsky.config import ExperimentConfig, SchedulerConfig, TargetsConfig
+from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
     default_embedding_reader,
     load_manifest,
@@ -105,6 +108,7 @@ def run_experiment(
     device: str | None = None,
     amp: bool | None = None,
     resume: str | Path | None = None,
+    trust_checkpoint: bool = False,
     image_backbone_builder: Callable[[], nn.Module] | None = None,
     embedding_reader: EmbeddingReader | None = None,
 ) -> dict[str, Any]:
@@ -127,6 +131,11 @@ def run_experiment(
     resume:
         ``"auto"`` loads ``<run_dir>/last.ckpt`` if present; a path loads that
         checkpoint; ``None`` starts fresh.
+    trust_checkpoint:
+        Read the resumed checkpoint with the unrestricted unpickler. Off by
+        default: a checkpoint that travelled through Colab or a shared Drive is
+        an untrusted input, so it is read under torch's restricted reader and a
+        payload outside the allowlist is refused rather than executed.
     image_backbone_builder:
         Zero-arg factory returning the image backbone for ``input_mode="image"``
         visual models.  The DINOv2 backbone is only used when explicitly injected
@@ -243,7 +252,9 @@ def run_experiment(
         # Load once, then check the payload against this run before any of it is
         # applied: a refused resume must leave the model, the optimizer and the
         # metrics files exactly as it found them.
-        checkpoint = load_checkpoint(resume_path, map_location=resolved_device)
+        checkpoint = load_checkpoint(
+            resume_path, map_location=resolved_device, trust_pickle=trust_checkpoint
+        )
         _check_resume_provenance(
             checkpoint,
             path=resume_path,
@@ -308,6 +319,7 @@ def run_experiment(
 
     dhi_mean, dhi_std = _stats_or_identity(target_normalizers, "dhi")
     kindex_mean, kindex_std = _stats_or_identity(target_normalizers, "kindex")
+    component_weights = _loss_component_weights(cfg.targets)
     epochs_ran = 0
     last_val_metrics: dict[str, float] = {}
     patience = int(cfg.train.early_stopping.patience)
@@ -352,6 +364,7 @@ def run_experiment(
                     skip_optimization=is_climatology,
                     global_step=global_step,
                     target_stats=(dhi_mean, dhi_std, kindex_mean, kindex_std),
+                    component_weights=component_weights,
                 )
                 val_metrics = _eval_epoch(
                     model=model,
@@ -362,6 +375,7 @@ def run_experiment(
                     autocast_dtype=autocast_dtype,
                     amp_enabled=amp_enabled,
                     target_stats=(dhi_mean, dhi_std, kindex_mean, kindex_std),
+                    component_weights=component_weights,
                 )
                 last_val_metrics = val_metrics
 
@@ -511,9 +525,10 @@ def _build_datasets(
         _validate_embedding_coverage(reader, train_df, val_df)
         # Wire the alignment strategy end to end: center_frame (default) keeps the
         # single-frame embedding; mean_embedding / attention_pooling resolve each
-        # row's same-day co-frame window (dataset-level) and pool accordingly. The
-        # dataset validates the mode against its supported WindowMode set.
-        window = cast("WindowMode", cfg.data.alignment.strategy)
+        # row's same-day co-frame window (dataset-level) and pool accordingly.
+        # The config's AlignmentStrategyName IS the dataset's WindowMode, so the
+        # two can no longer disagree about which modes exist.
+        window = cfg.data.alignment.strategy
         window_minutes = float(cfg.data.alignment.window_minutes)
         train_ds = MultimodalEmbeddingDataset(
             train_df,
@@ -701,6 +716,17 @@ def _build_optimizer(
     else:
         params = [p for p in model.parameters() if p.requires_grad]
         labels = ["lr"]
+    if cfg.train.backbone_lr is not None and "lr_backbone" not in labels:
+        # Either the model has no param_groups at all or its backbone contributed
+        # no trainable parameter: nothing runs at backbone_lr, which is only
+        # obvious from the metrics much later (an lr_backbone column left blank).
+        logger.warning(
+            "train.backbone_lr=%s is set but model %r produced no separate backbone "
+            "parameter group; every trainable parameter runs at train.lr=%s",
+            cfg.train.backbone_lr,
+            cfg.model.name,
+            cfg.train.lr,
+        )
     optimizer = torch.optim.AdamW(params, lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
     return optimizer, labels
 
@@ -783,10 +809,11 @@ def _train_epoch(
     skip_optimization: bool,
     global_step: int,
     target_stats: tuple[float, float, float, float],
+    component_weights: Mapping[str, float],
 ) -> tuple[dict[str, float], int]:
     """Run one training epoch with grad accumulation/clipping; return metrics + step."""
     model.train()
-    accumulator = _MetricAccumulator(target_stats)
+    accumulator = _MetricAccumulator(target_stats, component_weights)
     n_batches = len(loader)
     pending = 0
     optimizer.zero_grad(set_to_none=True)
@@ -827,10 +854,11 @@ def _eval_epoch(
     autocast_dtype: Any,
     amp_enabled: bool,
     target_stats: tuple[float, float, float, float],
+    component_weights: Mapping[str, float],
 ) -> dict[str, float]:
     """Run one validation epoch (no grad); return loss components + physical metrics."""
     model.eval()
-    accumulator = _MetricAccumulator(target_stats)
+    accumulator = _MetricAccumulator(target_stats, component_weights)
     with torch.no_grad():
         for raw in loader:
             batch = _move(raw, device)
@@ -841,14 +869,72 @@ def _eval_epoch(
     return accumulator.result()
 
 
-class _MetricAccumulator:
-    """Accumulate loss components and physical-unit quick metrics over an epoch."""
+#: Loss-component key -> the batch column whose *present* rows that component was
+#: reduced over.  ``MultitaskLoss`` averages every component over its own mask
+#: (finite target, or ``sky_class >= 0``), so the epoch average has to weight each
+#: batch by those counts and not by the batch size.
+_COMPONENT_TARGET_COLUMNS = {
+    "loss_dhi": "dhi",
+    "loss_kindex": "kindex",
+    "loss_cloud_fraction": "cloud_fraction",
+    "loss_sky": "sky_class",
+}
 
-    def __init__(self, target_stats: tuple[float, float, float, float]) -> None:
+
+def _loss_component_weights(targets: TargetsConfig) -> dict[str, float]:
+    """Per-head weights, keyed by loss-component name, for the epoch loss total.
+
+    :meth:`allsky.training.losses.MultitaskLoss.forward` sums its per-head
+    components with these same configured weights; the epoch metrics rebuild that
+    weighted sum from the per-head epoch means, so both must read the one
+    :class:`~allsky.config.TargetsConfig`.
+    """
+    return {
+        "loss_dhi": float(targets.dhi.weight),
+        "loss_kindex": float(targets.kindex.weight),
+        "loss_sky": float(targets.sky.weight),
+        "loss_cloud_fraction": float(targets.cloud_fraction.weight),
+    }
+
+
+def _present_target_count(batch: Mapping[str, Tensor], column: str) -> int:
+    """Rows of *column* a loss component counted: finite value, or class ``>= 0``."""
+    target = batch[column]
+    mask = target >= 0 if column == "sky_class" else torch.isfinite(target)
+    return int(mask.sum())
+
+
+class _MetricAccumulator:
+    """Accumulate loss components and physical-unit quick metrics over an epoch.
+
+    Every component :class:`~allsky.training.losses.MultitaskLoss` returns is a
+    mean over the rows whose target is present, so each batch is folded in
+    weighted by *its own* count of present rows and divided by the epoch's count
+    for that head — not by the batch row count, which made the epoch metrics
+    depend on ``train.batch_size`` whenever labels were missing (an all-missing
+    batch contributed an exact 0 with full weight).  The reported ``loss`` is
+    likewise rebuilt from the per-head epoch means and *component_weights* — the
+    same weighted sum the loss module computes per batch — instead of averaging
+    the per-batch totals.
+
+    Only the reported metrics changed: ``losses["loss"]`` still drives
+    ``backward()`` per batch, unweighted by anything here.
+
+    A head with no present row in the whole epoch keeps its ``loss_<head>`` key
+    (metrics.csv has a column for it and it is a legal early-stopping monitor)
+    with value ``0.0``, contributes nothing to the total, and is named in a
+    warning.
+    """
+
+    def __init__(
+        self,
+        target_stats: tuple[float, float, float, float],
+        component_weights: Mapping[str, float],
+    ) -> None:
         self._dhi_mean, self._dhi_std, self._kindex_mean, self._kindex_std = target_stats
-        self._n = 0
-        self._loss_sum = 0.0
+        self._component_weights = dict(component_weights)
         self._component_sums: dict[str, float] = {}
+        self._component_counts: dict[str, int] = {}
         self._dhi_abs = 0.0
         self._dhi_n = 0
         self._kindex_abs = 0.0
@@ -861,14 +947,18 @@ class _MetricAccumulator:
     ) -> None:
         """Fold one batch's outputs/targets/losses into the running sums."""
         size = int(batch["features"].shape[0])
-        self._n += size
-        self._loss_sum += float(losses["loss"].detach()) * size
         for key, value in losses.items():
             if key == "loss":
                 continue
-            self._component_sums[key] = (
-                self._component_sums.get(key, 0.0) + float(value.detach()) * size
-            )
+            column = _COMPONENT_TARGET_COLUMNS.get(key)
+            # An unrecognised (future) component falls back to the batch row count.
+            count = size if column is None else _present_target_count(batch, column)
+            self._component_sums.setdefault(key, 0.0)
+            self._component_counts.setdefault(key, 0)
+            if count == 0:
+                continue
+            self._component_sums[key] += float(value.detach()) * count
+            self._component_counts[key] += count
         if "dhi" in outputs:
             self._dhi_abs, self._dhi_n = _mae_accumulate(
                 outputs["dhi"],
@@ -895,11 +985,25 @@ class _MetricAccumulator:
                 self._sky_n += int(mask.sum())
 
     def result(self) -> dict[str, float]:
-        """Finalize the sample-weighted averages for the epoch."""
-        denom = max(self._n, 1)
-        metrics: dict[str, float] = {"loss": self._loss_sum / denom}
-        for key, value in self._component_sums.items():
-            metrics[key] = value / denom
+        """Finalize the epoch: per-head masked means and their weighted total."""
+        components: dict[str, float] = {}
+        total = 0.0
+        heads_without_labels: list[str] = []
+        for key, summed in self._component_sums.items():
+            count = self._component_counts[key]
+            if count == 0:
+                components[key] = 0.0
+                heads_without_labels.append(key)
+                continue
+            components[key] = summed / count
+            total += self._component_weights.get(key, 1.0) * components[key]
+        if heads_without_labels:
+            logger.warning(
+                "epoch metrics: %s had no valid target row in the whole split; reported as 0.0 "
+                "and excluded from the total loss — check the head is meant to be enabled",
+                ", ".join(sorted(heads_without_labels)),
+            )
+        metrics: dict[str, float] = {"loss": total, **components}
         if self._dhi_n:
             metrics["dhi_mae"] = self._dhi_abs / self._dhi_n
         if self._kindex_n:

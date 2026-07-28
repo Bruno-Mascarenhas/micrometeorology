@@ -1,8 +1,10 @@
 """Run a trained checkpoint over a split and compute stratified metrics.
 
-:func:`evaluate_checkpoint` is the entry point: it loads a C4a checkpoint
-(``weights_only=False`` — a trusted, locally written file), rebuilds the model
-from the stored :class:`~allsky.config.ExperimentConfig` via
+:func:`evaluate_checkpoint` is the entry point: it loads a C4a checkpoint under
+torch's **restricted** unpickler (a checkpoint travels through Colab and shared
+Drives, so it is not a trusted local file; ``trust_checkpoint=True`` /
+``--trust-checkpoint`` opts back into the unrestricted reader), rebuilds the
+model from the stored :class:`~allsky.config.ExperimentConfig` via
 :func:`allsky.modeling.registry.build_model`, restores the train-split feature /
 target normalizers and the ordered ``feature_columns``, re-reads the v2 manifest
 and its meta sidecar, and re-loads the persisted day split.  Provenance is
@@ -30,14 +32,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from allsky.config import ExperimentConfig
 from allsky.data.contracts import SKY_CLASS_NAMES, sky_class_name
-from allsky.data.datasets import EmbeddingReader, WindowMode
+from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
     default_embedding_reader,
     load_manifest,
@@ -128,6 +130,7 @@ def evaluate_checkpoint(
     device: str | None = None,
     report_dir: str | Path | None = None,  # noqa: ARG001 - reserved; report writing is in reports.py
     strict: bool = False,
+    trust_checkpoint: bool = False,
     embedding_reader: EmbeddingReader | None = None,
     image_backbone_builder: Any | None = None,
 ) -> EvaluationResult:
@@ -159,6 +162,12 @@ def evaluate_checkpoint(
     strict:
         When ``True`` a manifest-hash or split-id mismatch raises instead of only
         logging a warning.
+    trust_checkpoint:
+        Read the checkpoint with the unrestricted unpickler. Off by default: a
+        checkpoint is an untrusted input (it travels through Colab and shared
+        Drives), so it is read under torch's restricted reader and a payload
+        outside the allowlist is refused rather than executed. Turn this on only
+        for a file you know you produced.
     embedding_reader:
         Injected reader for ``input_mode="embedding"`` (tests pass a dict-backed
         fake); defaults to a
@@ -178,7 +187,9 @@ def evaluate_checkpoint(
 
     ckpt_path = Path(checkpoint_path)
     resolved_device = resolve_run_device(device if device is not None else "cpu")
-    checkpoint = load_checkpoint(ckpt_path, map_location=resolved_device)
+    checkpoint = load_checkpoint(
+        ckpt_path, map_location=resolved_device, trust_pickle=trust_checkpoint
+    )
 
     cfg = ExperimentConfig.model_validate(checkpoint["config"])
     root = Path(data_root) if data_root is not None else Path(cfg.data.data_root)
@@ -486,7 +497,7 @@ def _build_split_dataset(
         # Mirror training's alignment strategy so the eval batches match what the
         # model was trained on (plain embedding for center_frame/mean_embedding,
         # padded embedding_seq + frame_mask for attention_pooling).
-        window = cast("WindowMode", cfg.data.alignment.strategy)
+        window = cfg.data.alignment.strategy
         dataset: Any = MultimodalEmbeddingDataset(
             split_df,
             feature_columns,

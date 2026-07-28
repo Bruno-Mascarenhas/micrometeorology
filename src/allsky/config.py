@@ -42,37 +42,29 @@ class SiteConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+#: The window modes a dataset can build. This module is the single owner of the
+#: name set: it is a leaf (stdlib + yaml + pydantic only), so both the config
+#: and :mod:`allsky.data.datasets` can read it without an import cycle, and a
+#: typo such as ``centre_frame`` fails at ``load_experiment_config`` time rather
+#: than deep inside dataset construction — or, in image mode, not at all.
+AlignmentStrategyName = Literal["center_frame", "mean_embedding", "attention_pooling"]
+
+
 class AlignmentConfig(BaseModel):
     """Image <-> sensor temporal alignment for a sample window.
 
-    ``strategy`` selects an :class:`allsky.data.alignment.AlignmentStrategy`
-    (``center_frame`` picks the frame nearest the window centre at
-    manifest-build time; windowed poolers act at the dataset level).
-    ``window_minutes`` is the full width of the alignment window.
-
-    The name is checked against the live strategy registry at load time, so a
-    typo such as ``centre_frame`` fails here instead of deep inside dataset
-    construction (or, in image mode, not at all).  The check reads
-    :func:`allsky.data.alignment.available_strategies` rather than a duplicated
-    literal so a class registered through
-    :func:`allsky.data.alignment.register_strategy` stays valid.
+    ``strategy`` is the window mode: ``center_frame`` picks the frame nearest
+    the window centre at manifest-build time, while ``mean_embedding`` and
+    ``attention_pooling`` pool every frame in the window at dataset level (both
+    implemented for ``input_mode: embedding`` only — see
+    :class:`DataSourceConfig`). ``window_minutes`` is the full width of the
+    alignment window.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    strategy: str = "center_frame"
+    strategy: AlignmentStrategyName = "center_frame"
     window_minutes: float = 10.0
-
-    @model_validator(mode="after")
-    def _strategy_is_registered(self) -> AlignmentConfig:
-        from allsky.data.alignment import available_strategies
-
-        known = available_strategies()
-        if self.strategy not in known:
-            raise ValueError(
-                f"unknown alignment strategy {self.strategy!r}; known: {sorted(known)}"
-            )
-        return self
 
 
 class DataSourceConfig(BaseModel):
@@ -88,6 +80,10 @@ class DataSourceConfig(BaseModel):
     into one resident ``(N, dim)`` array for training/eval, instead of the small
     LRU of open shards that thrashes under shuffled access; set it ``False`` to
     keep the lazy LRU path (e.g. when the store does not fit in memory).
+
+    Windowed pooling is implemented for ``embedding`` mode only, so a windowed
+    ``alignment.strategy`` combined with ``input_mode: image`` is rejected rather
+    than silently reduced to a single centre frame.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -99,6 +95,17 @@ class DataSourceConfig(BaseModel):
     split_artifact: str = "splits.json"
     input_mode: Literal["image", "embedding"] = "image"
     alignment: AlignmentConfig = Field(default_factory=AlignmentConfig)
+
+    @model_validator(mode="after")
+    def _windowed_pooling_needs_embedding_mode(self) -> DataSourceConfig:
+        if self.input_mode == "image" and self.alignment.strategy != "center_frame":
+            raise ValueError(
+                f"alignment.strategy {self.alignment.strategy!r} pools every frame in the "
+                "window, which is implemented for input_mode 'embedding' only: the image "
+                "dataset has no windowing and the visual encoder ignores temporal_pooling "
+                "in image mode. Use input_mode: embedding, or strategy: center_frame."
+            )
+        return self
 
 
 class FeaturesConfig(BaseModel):

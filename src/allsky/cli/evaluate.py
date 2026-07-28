@@ -66,6 +66,17 @@ def evaluate_cmd(
         bool,
         typer.Option("--strict/--no-strict", help="Error (not warn) on manifest/split mismatch."),
     ] = False,
+    trust_checkpoint: Annotated[
+        bool,
+        typer.Option(
+            "--trust-checkpoint/--no-trust-checkpoint",
+            help=(
+                "Read the checkpoint with the unrestricted unpickler. Only for a file "
+                "you produced yourself: the default restricted reader refuses a payload "
+                "carrying unexpected Python objects instead of executing it."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Evaluate a trained checkpoint on a split and write a report directory."""
     logging.basicConfig(
@@ -86,6 +97,7 @@ def evaluate_cmd(
             batch_size=batch_size,
             device=str(device) if device is not None else None,
             strict=strict,
+            trust_checkpoint=trust_checkpoint,
         )
         written = write_evaluation_report(result, out_dir, predictions=predictions)
     except Exception as exc:

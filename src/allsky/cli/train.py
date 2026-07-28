@@ -66,12 +66,24 @@ def train(
         bool | None,
         typer.Option("--amp/--no-amp", help="Override mixed precision."),
     ] = None,
+    trust_checkpoint: Annotated[
+        bool,
+        typer.Option(
+            "--trust-checkpoint/--no-trust-checkpoint",
+            help=(
+                "Read the --resume checkpoint with the unrestricted unpickler. Only for "
+                "a file you produced yourself: the default restricted reader refuses a "
+                "payload carrying unexpected Python objects instead of executing it."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Run a multimodal training experiment from an experiment: true config.
 
     ``--resume`` accepts ``auto`` (find ``last.ckpt`` in the run dir) or a path;
     ``--data-root`` / ``--amp`` / the override flags apply to the resolved
-    experiment config.
+    experiment config. A resumed checkpoint is read under torch's restricted
+    unpickler unless ``--trust-checkpoint`` is passed.
     """
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
@@ -111,6 +123,7 @@ def train(
         device=str(device) if device is not None else None,
         amp=amp,
         resume=resume_arg,
+        trust_checkpoint=trust_checkpoint,
     )
     typer.echo(json.dumps(summary, indent=2, default=str))
 

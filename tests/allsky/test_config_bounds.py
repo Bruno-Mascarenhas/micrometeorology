@@ -51,27 +51,46 @@ class TestEarlyStoppingBounds:
 
 
 class TestAlignmentStrategy:
-    def test_every_registered_strategy_is_accepted(self):
-        from allsky.data.alignment import available_strategies
+    def test_every_window_mode_the_dataset_implements_is_accepted(self):
+        """One name set, owned here and read by the dataset that implements it."""
+        from allsky.data.datasets import _WINDOW_MODES
 
-        for name in available_strategies():
+        for name in _WINDOW_MODES:
             assert AlignmentConfig(strategy=name).strategy == name
 
     def test_typo_is_rejected_at_load_time(self):
-        with pytest.raises(ValidationError, match="unknown alignment strategy"):
-            AlignmentConfig(strategy="centre_frame")
+        with pytest.raises(ValidationError):
+            AlignmentConfig.model_validate({"strategy": "centre_frame"})
 
     def test_typo_rejected_through_both_config_roots(self):
-        with pytest.raises(ValidationError, match="unknown alignment strategy"):
+        with pytest.raises(ValidationError):
             ExperimentConfig.model_validate({"data": {"alignment": {"strategy": "attention"}}})
-        with pytest.raises(ValidationError, match="unknown alignment strategy"):
+        with pytest.raises(ValidationError):
             PrepareConfig.model_validate({"alignment": {"strategy": "attention"}})
 
-    def test_a_registered_custom_strategy_is_allowed_through(self):
-        from allsky.data.alignment import _STRATEGIES, CenterFrame, register_strategy
 
-        register_strategy("bench_custom_strategy", CenterFrame)
-        try:
-            assert AlignmentConfig(strategy="bench_custom_strategy").strategy
-        finally:
-            _STRATEGIES.pop("bench_custom_strategy", None)
+class TestWindowedPoolingNeedsEmbeddingMode:
+    """Image mode has no windowing, so asking for it must not be silent.
+
+    ``MultimodalImageDataset`` never windows and ``build_visual_encoder`` ignores
+    ``temporal_pooling`` in image mode, so ``mean_embedding`` + ``input_mode:
+    image`` used to train a plain centre-frame model while the config — and the
+    manifest meta derived from it — reported a windowed experiment.
+    """
+
+    @pytest.mark.parametrize("strategy", ["mean_embedding", "attention_pooling"])
+    def test_windowed_strategy_with_image_mode_is_rejected(self, strategy):
+        with pytest.raises(ValidationError, match="input_mode 'embedding' only"):
+            ExperimentConfig.model_validate(
+                {"data": {"input_mode": "image", "alignment": {"strategy": strategy}}}
+            )
+
+    def test_windowed_strategy_with_embedding_mode_is_accepted(self):
+        cfg = ExperimentConfig.model_validate(
+            {"data": {"input_mode": "embedding", "alignment": {"strategy": "mean_embedding"}}}
+        )
+        assert cfg.data.alignment.strategy == "mean_embedding"
+
+    def test_center_frame_with_image_mode_stays_the_default(self):
+        cfg = ExperimentConfig.model_validate({"data": {"input_mode": "image"}})
+        assert cfg.data.alignment.strategy == "center_frame"
