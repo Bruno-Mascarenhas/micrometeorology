@@ -1,13 +1,11 @@
 """Contract tests for the shipped ``configs/micromet/`` YAML tree.
 
-``ingest_sensor_data`` resolves the sensor QC limits and the calibration table
-through ``Settings.configs_dir``, and both lookups are guarded by
-``if ...exists()``.  When that directory does not name the place the shipped
-configs actually live, the guards fail silently: physical limits and
-sensitivity calibrations are skipped, ``precip`` is averaged instead of summed,
-and wind direction is averaged as a scalar — all with exit code 0.  These tests
-pin the resolved directory so the field default and the YAML cannot drift apart
-again.
+``ingest_sensor_data`` resolves the calibration table through
+``Settings.configs_dir`` behind an ``is_file()`` guard.  When that directory
+does not name the place the shipped configs actually live, the guard fails
+silently and sensitivity calibrations are skipped with exit code 0.  These
+tests pin the resolved directory so the field default and the YAML cannot drift
+apart again.
 """
 
 from __future__ import annotations
@@ -32,11 +30,11 @@ def _shipped_defaults() -> dict[str, Any]:
 
 
 def _settings_from_shipped_defaults() -> Settings:
-    """Build ``Settings`` the way ``get_settings()`` does, minus the extra keys.
+    """Build ``Settings`` the way ``get_settings()`` does, minus any undeclared key.
 
-    ``sensor_limits`` / ``sensor_sum_columns`` / ``sensor_wind_dir_columns`` are
-    read straight from the raw YAML by the CLI and are not ``Settings`` fields,
-    so they are dropped here to isolate the path resolution.
+    Every shipped key is a declared field today; the filter stays so that a
+    schema-drift failure surfaces in ``test_config.py`` rather than as a
+    confusing path assertion here.
     """
     declared = {k: v for k, v in _shipped_defaults().items() if k in Settings.model_fields}
     settings = Settings(**declared)
