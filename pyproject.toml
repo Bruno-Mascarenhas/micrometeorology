@@ -185,8 +185,20 @@ exclude = ["^legacy/"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "--basetemp=.pytest_tmp"
+# Visibility first: the stack is deliberately bleeding-edge (numpy 2.x, pandas
+# 3.x, xarray) and dependabot bumps it monthly, so an upcoming upstream removal
+# must show up in the CI warnings summary during its deprecation window instead
+# of landing as a hard failure. Nothing here is fatal — a blanket
+# "ignore::DeprecationWarning" is what hid them. Silence known third-party noise
+# BY MESSAGE (later entries win), so a reworded or new warning re-surfaces.
 filterwarnings = [
-    "ignore::DeprecationWarning",
-    "ignore::UserWarning",
+    "default::DeprecationWarning",
+    "default::UserWarning",
+    # netCDF4 Variable.__setitem__ and joblib's numpy pickler both assign
+    # ndarray.shape, which numpy 2.5 deprecated. Both are upstream fixes.
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
+    # torch.as_tensor on read-only mmap arrays (safetensors / parquet buffers).
+    "ignore:The given NumPy array is not writable:UserWarning",
+    "ignore:Converting a tensor with requires_grad=True to a scalar:UserWarning",
     "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
