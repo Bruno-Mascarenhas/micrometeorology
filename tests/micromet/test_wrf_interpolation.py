@@ -219,6 +219,75 @@ def test_vertical_interpolator_shape_mismatch_raises():
         interp.interpolate(values, 50.0)
 
 
+def test_interpolate_many_matches_per_target_interpolate():
+    shape = (3, 12, 7, 5)
+    heights = _monotonic_heights(shape, axis=1, seed=26)
+    values = _random_values(shape, seed=27)
+    targets = (-3.0, 50.0, 137.5, 1.0e6)
+
+    interp = VerticalInterpolator(heights, axis=1)
+    many = interp.interpolate_many(values, targets)
+
+    assert len(many) == len(targets)
+    for result, target in zip(many, targets, strict=True):
+        expected = vertical_interpolate(values, heights, target, axis=1)
+        assert result.dtype == expected.dtype
+        assert result.shape == expected.shape
+        assert np.array_equal(result, expected, equal_nan=True)
+
+
+def test_interpolate_many_preserves_a_singleton_time_axis():
+    """A one-step block must keep its time axis: only the vertical axis is
+    dropped, so downstream ``result[k]`` step indexing still works."""
+    shape = (1, 12, 5, 5)
+    heights = _monotonic_heights(shape, axis=1, seed=28)
+    values = _random_values(shape, seed=29)
+
+    interp = VerticalInterpolator(heights, axis=1)
+    (result,) = interp.interpolate_many(values, (75.0,))
+
+    assert result.shape == (1, 5, 5)
+    assert np.array_equal(result, vertical_interpolate(values, heights, 75.0, axis=1))
+
+
+def test_interpolate_many_falls_back_once_per_target(monkeypatch):
+    shape = (2, 9, 4, 4)
+    heights = _monotonic_heights(shape, axis=1, seed=30)
+    values = _random_values(shape, seed=31)
+    values[0, 2, 1, 1] = np.nan
+    targets = (30.0, 90.0)
+
+    calls = _install_fallback_spy(monkeypatch)
+    interp = VerticalInterpolator(heights, axis=1)
+    results = interp.interpolate_many(values, targets)
+
+    assert len(calls) == len(targets)
+    for result, target in zip(results, targets, strict=True):
+        expected = vertical_interpolate(values, heights, target, axis=1)
+        assert np.array_equal(result, expected, equal_nan=True)
+
+
+def test_interpolate_many_keeps_the_block_memory_guard(monkeypatch):
+    """The >16 GiB guard must survive being hoisted out of the target loop:
+    once per field, with the block context and multiplier unchanged."""
+    shape = (2, 6, 4, 4)
+    heights = _monotonic_heights(shape, axis=1, seed=32)
+    values = _random_values(shape, seed=33)
+
+    guard_calls: list[tuple] = []
+    original = interpolation.assert_reasonable_array_size
+
+    def _spy(guarded_shape, dtype, **kwargs):
+        guard_calls.append((guarded_shape, kwargs))
+        original(guarded_shape, dtype, **kwargs)
+
+    monkeypatch.setattr(interpolation, "assert_reasonable_array_size", _spy)
+    interp = VerticalInterpolator(heights, axis=1)
+    interp.interpolate_many(values, (10.0, 50.0, 100.0))
+
+    assert guard_calls == [(shape, {"context": "vertical interpolation block", "multiplier": 6.0})]
+
+
 def test_vertical_interpolator_perf_sanity_large_block():
     shape = (8, 30, 40, 40)
     heights = _monotonic_heights(shape, axis=1, seed=23)

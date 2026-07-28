@@ -138,3 +138,217 @@ def test_cli_wrf_dir_without_date_processes_every_wrfout(tmp_path):
     assert result.exit_code == 0, result.output
     assert len(list((tmp_path / "json").glob("D01_TEMP_*.json"))) == NT
     assert len(list((tmp_path / "json").glob("D02_TEMP_*.json"))) == NT
+
+
+def _invoke(tmp_path, *extra):
+    return runner.invoke(
+        app,
+        [
+            "-o",
+            str(tmp_path / "json"),
+            "-g",
+            str(tmp_path / "geo"),
+            "-v",
+            "temperature",
+            "--workers",
+            "1",
+            "--log-level",
+            "WARNING",
+            *extra,
+        ],
+    )
+
+
+def test_cli_batch_mode_restricts_to_requested_domains(tmp_path):
+    """`--wrf-dir` without `--date` used to ignore `--domains` and process the
+    whole directory, publishing domains nobody asked for."""
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+    for name in ("wrfout_d01_a", "wrfout_d02_b", "wrfout_d04_c"):
+        _write_full_wrf_file(wrf_dir / name, seed=41)
+
+    result = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--domains", "1")
+
+    assert result.exit_code == 0, result.output
+    assert "selected 1 of 3 wrfout files" in result.output
+    assert len(list((tmp_path / "json").glob("D01_TEMP_*.json"))) == NT
+    assert list((tmp_path / "json").glob("D02_TEMP_*.json")) == []
+    assert list((tmp_path / "json").glob("D04_TEMP_*.json")) == []
+
+
+def test_cli_batch_mode_ignores_a_wrfout_subdirectory(tmp_path):
+    """A `wrfout*` directory used to be globbed as a file, failing its units
+    with a NetCDF open error and taking the whole run to exit 1."""
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+    _write_full_wrf_file(wrf_dir / "wrfout_d02_ok", seed=42)
+    (wrf_dir / "wrfout_d03_scratch").mkdir()
+
+    result = _invoke(tmp_path, "--wrf-dir", str(wrf_dir))
+
+    assert result.exit_code == 0, result.output
+    assert len(list((tmp_path / "json").glob("D02_TEMP_*.json"))) == NT
+
+
+def test_cli_domain_filter_excludes_a_file_that_would_collide_on_d01(tmp_path):
+    """`wrfout_d06_*` carries no grid level, so it must not enter a
+    `--domains 1` selection and contend for the D01 output names."""
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+    _write_full_wrf_file(wrf_dir / "wrfout_d01_real", seed=45)
+    _write_full_wrf_file(wrf_dir / "wrfout_d06_unknown", seed=46)
+
+    result = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--domains", "1")
+
+    assert result.exit_code == 0, result.output
+    assert "wrfout_d06_unknown" not in result.output
+    assert len(list((tmp_path / "json").glob("D01_TEMP_*.json"))) == NT
+
+
+def test_cli_rejects_an_output_file_id_as_a_variable(tmp_path):
+    """`-v TSK` reached the raw passthrough and published Kelvin into the
+    files `skin_temperature` publishes in °C."""
+    wrf = tmp_path / "wrfout_d02_cli_tsk.nc"
+    _write_full_wrf_file(wrf, seed=47)
+
+    result = runner.invoke(
+        app,
+        [
+            "-d",
+            str(wrf),
+            "-o",
+            str(tmp_path / "json"),
+            "-g",
+            str(tmp_path / "geo"),
+            "-v",
+            "TSK",
+            "--workers",
+            "1",
+            "--log-level",
+            "WARNING",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "skin_temperature" in result.output
+    assert list((tmp_path / "json").glob("*.json")) == []
+
+
+def test_cli_canonicalizes_variable_case(tmp_path):
+    """`-v TEMPERATURE` used to write nothing while the run reported success."""
+    wrf = tmp_path / "wrfout_d02_cli_case.nc"
+    _write_full_wrf_file(wrf, seed=48)
+
+    result = runner.invoke(
+        app,
+        [
+            "-d",
+            str(wrf),
+            "-o",
+            str(tmp_path / "json"),
+            "-g",
+            str(tmp_path / "geo"),
+            "-v",
+            "TEMPERATURE",
+            "--workers",
+            "1",
+            "--log-level",
+            "WARNING",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(list((tmp_path / "json").glob("D02_TEMP_*.json"))) == NT
+
+
+def test_cli_mis_cased_swdown_still_honours_the_daylight_gate(tmp_path):
+    """`-v swdown` used to miss the exact-match daylight gate and publish night
+    frames the site's availability metadata does not expect."""
+    wrf = tmp_path / "wrfout_d02_cli_swdown.nc"
+    _write_full_wrf_file(wrf, seed=51, nt=3, start_hour_utc=21)  # local 18, 19, 20 h
+
+    result = runner.invoke(
+        app,
+        [
+            "-d",
+            str(wrf),
+            "-o",
+            str(tmp_path / "json"),
+            "-g",
+            str(tmp_path / "geo"),
+            "-v",
+            "swdown",
+            "--workers",
+            "1",
+            "--log-level",
+            "WARNING",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in (tmp_path / "json").glob("D02_SWDOWN_*.json")) == [
+        "D02_SWDOWN_000.json"
+    ]
+
+
+def test_cli_accepts_an_iso_date_and_rejects_a_malformed_one(tmp_path):
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+    _write_full_wrf_file(wrf_dir / "wrfout_d02_2026-05-03_09:00:00", seed=49)
+
+    iso = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "2026-05-03")
+    assert iso.exit_code == 0, iso.output
+    assert len(list((tmp_path / "json").glob("D02_TEMP_*.json"))) == NT
+
+    typo = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "may3")
+    assert typo.exit_code != 0
+    assert "--date must be YYYYMMDD" in typo.output
+
+
+def test_cli_strict_exits_nonzero_when_nothing_is_selected(tmp_path):
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+
+    lenient = _invoke(tmp_path, "--wrf-dir", str(wrf_dir))
+    assert lenient.exit_code == 0, lenient.output
+    assert "No WRF files found." in lenient.output
+
+    strict = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--strict")
+    assert strict.exit_code == 1
+
+
+def test_cli_strict_aborts_on_a_missing_requested_domain_before_writing(tmp_path):
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+    _write_full_wrf_file(wrf_dir / "wrfout_d01_2026-05-03_09:00:00", seed=50)
+
+    lenient = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "20260503", "--domains", "1,4")
+    assert lenient.exit_code == 0, lenient.output
+    assert "No wrfout file for requested domain d04" in lenient.output
+    assert len(list((tmp_path / "json").glob("D01_TEMP_*.json"))) == NT
+
+    strict_dir = tmp_path / "strict"
+    strict = runner.invoke(
+        app,
+        [
+            "--wrf-dir",
+            str(wrf_dir),
+            "--date",
+            "20260503",
+            "--domains",
+            "1,4",
+            "-o",
+            str(strict_dir / "json"),
+            "-g",
+            str(strict_dir / "geo"),
+            "-v",
+            "temperature",
+            "--workers",
+            "1",
+            "--strict",
+            "--log-level",
+            "WARNING",
+        ],
+    )
+    assert strict.exit_code == 1
+    assert not strict_dir.exists()

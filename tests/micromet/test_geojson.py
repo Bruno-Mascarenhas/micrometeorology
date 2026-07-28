@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -121,6 +122,48 @@ class TestCreateValuesJson:
         out = tmp_path / "vals.json"
         write_values_json_stream(out, arr, 0.0, 5.0, "N/A")
         assert '"values":[10.05,100,-0.25]' in out.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("boundary_value", [0.0, -0.0, 7.0, 1.25, np.nan, -1e17, 1e-3], ids=str)
+    def test_whole_float_stripping_survives_chunk_boundaries(self, tmp_path, boundary_value):
+        """The last element of a chunk is the case the old lookahead regex
+        anchored with ``$``; every token type must round-trip there."""
+        arr = np.array([[3.0, boundary_value, 0.0, -0.0, 2.5]], dtype=np.float64)
+        out = tmp_path / "vals.json"
+        write_values_json_stream(out, arr, 0.0, 5.0, "N/A", chunk_size=2)
+
+        with open(out, encoding="utf-8") as f:
+            parsed = json.load(f)
+        expected = [None if np.isnan(v) else v for v in np.round(arr, 2).ravel().tolist()]
+        assert parsed["values"] == expected
+
+    def test_values_text_matches_whole_float_regex_reference(self, tmp_path):
+        """The compact ``.0``-stripping must stay identical to the lookahead
+        regex it replaced, including adjacent whole floats and nulls."""
+        whole_float_re = re.compile(r"(-?\d+)\.0(?=,|$)")
+        rng = np.random.default_rng(3)
+        fields = [
+            np.round(rng.uniform(288.0, 310.0, 1000), 2),
+            np.round(np.where(rng.random(1000) < 0.9, 0.0, rng.uniform(0, 30, 1000)), 2),
+            np.where(rng.random(1000) < 0.2, np.nan, np.round(rng.normal(0, 1e17, 1000), 2)),
+            np.zeros(1000),
+            np.full(1000, -0.0),
+        ]
+        for index, field in enumerate(fields):
+            out = tmp_path / f"vals_{index}.json"
+            write_values_json_stream(out, field, -1.0, 1.0, "N/A", chunk_size=97)
+            text = out.read_text(encoding="utf-8").split('"values":[', 1)[1][:-2]
+
+            chunk = np.round(field.astype(np.float64, copy=False), 2)
+            values: list[float | None] = chunk.tolist()
+            for idx in np.flatnonzero(~np.isfinite(chunk)):
+                values[idx] = None
+            reference = ",".join(
+                whole_float_re.sub(
+                    r"\1", json.dumps(values[s : s + 97], separators=(",", ":"))[1:-1]
+                )
+                for s in range(0, len(values), 97)
+            )
+            assert text == reference
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +309,34 @@ class TestCreateWindVectorsJson:
         assert len(result["downsampled_angles"]) == 3
         assert len(result["downsampled_magnitudes"]) == 3
         assert len(result["downsampled_linear_indices"]) == 3
+
+    @pytest.mark.parametrize("downsampling", [1, 2, 3, 4])
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_downsampled_payload_equals_full_grid_then_sample(self, downsampling, dtype):
+        """Striding before hypot/arctan2 must be exact, not merely close: the
+        payload has to equal the full-grid computation sampled afterwards, for
+        strides that do not divide the grid and for NaN cells."""
+        rng = np.random.default_rng(19)
+        ny, nx = 11, 7
+        u = rng.uniform(-25, 25, size=(ny, nx)).astype(dtype)
+        v = rng.uniform(-25, 25, size=(ny, nx)).astype(dtype)
+        u[rng.random((ny, nx)) < 0.05] = np.nan
+        v[rng.random((ny, nx)) < 0.05] = np.nan
+
+        u64 = np.asarray(u, dtype=np.float64)
+        v64 = np.asarray(v, dtype=np.float64)
+        angle = np.degrees(np.arctan2(u64, v64))
+        angle = np.where(angle < 0, angle + 360.0, angle)
+        i_idx, j_idx = np.mgrid[0:ny:downsampling, 0:nx:downsampling]
+        i_flat, j_flat = i_idx.ravel(), j_idx.ravel()
+        angles = np.round(angle[i_flat, j_flat], 1)
+        mags = np.round(np.hypot(u64, v64)[i_flat, j_flat], 2)
+        valid = ~np.isnan(angles)
+
+        result = create_wind_vectors_json(u, v, None, downsampling=downsampling)
+        assert result["downsampled_angles"] == angles[valid].tolist()
+        assert result["downsampled_magnitudes"] == mags[valid].tolist()
+        assert result["downsampled_linear_indices"] == (i_flat * nx + j_flat)[valid].tolist()
 
 
 # ---------------------------------------------------------------------------
