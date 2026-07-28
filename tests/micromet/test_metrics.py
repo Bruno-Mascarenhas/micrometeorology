@@ -188,3 +188,63 @@ class TestComputeAll:
         pred = np.array([np.nan, 2.0])
         result = compute_all(obs, pred)
         assert all(np.isnan(v) for v in result.values())
+
+
+class TestNonFinitePairsAreDropped:
+    """One diverged prediction must not destroy the whole metrics record.
+
+    ``np.isnan`` lets +-inf through, so a single infinite value used to make
+    RMSE/MAE/MBE/NRMSE inf, R2 -inf, r and d NaN, and IOA a plausible-looking
+    but wrong -1.0.
+    """
+
+    @staticmethod
+    def _pairs() -> tuple[np.ndarray, np.ndarray]:
+        rng = np.random.default_rng(0)
+        obs = rng.normal(200.0, 50.0, 500)
+        pred = obs + rng.normal(0.0, 5.0, 500)
+        return obs, pred
+
+    def test_every_metric_matches_the_finite_subset(self):
+        obs, pred = self._pairs()
+        contaminated_obs = obs.copy()
+        contaminated_pred = pred.copy()
+        contaminated_pred[17] = np.inf
+        contaminated_obs[3] = -np.inf
+        contaminated_pred[42] = -np.inf
+        contaminated_obs[99] = np.inf
+
+        dropped = [3, 17, 42, 99]
+        expected = compute_all(np.delete(obs, dropped), np.delete(pred, dropped))
+        result = compute_all(contaminated_obs, contaminated_pred)
+
+        assert set(result) == set(expected), "compute_all's key set is a cron-parsed contract"
+        for name, value in expected.items():
+            assert result[name] == pytest.approx(value), name
+            assert np.isfinite(result[name]), name
+
+    def test_ioa_is_not_the_misleading_minus_one(self):
+        """IOA is the one metric whose inf breakage looks like a real number."""
+        obs, pred = self._pairs()
+        contaminated_pred = pred.copy()
+        contaminated_pred[17] = np.inf
+        assert ioa(obs, contaminated_pred) != pytest.approx(-1.0)
+        assert ioa(obs, contaminated_pred) == pytest.approx(
+            ioa(np.delete(obs, 17), np.delete(pred, 17))
+        )
+
+    def test_dropping_pairs_is_logged(self, caplog):
+        """Trading a screaming inf for a normal-looking number must stay visible."""
+        obs = np.array([1.0, 2.0, 3.0, np.inf])
+        pred = np.array([1.0, 2.0, 3.0, 4.0])
+        with caplog.at_level("WARNING", logger="micrometeorology.stats.metrics"):
+            rmse(obs, pred)
+        assert "1" in caplog.text
+        assert "4" in caplog.text
+
+    def test_all_finite_input_is_untouched(self):
+        obs, pred = self._pairs()
+        result = compute_all(obs, pred)
+        assert result["RMSE"] == pytest.approx(
+            float(np.sqrt(np.mean(np.square(obs - pred)))), rel=0, abs=0
+        )

@@ -4,25 +4,37 @@ All metrics follow a uniform signature::
 
     metric(observed: NDArray, predicted: NDArray) -> float
 
-NaN values are stripped before computation.  If fewer than 2 valid pairs
-remain, the metric returns ``NaN``.
+Non-finite values (NaN and ±inf) are stripped pairwise before computation, so
+one diverged prediction costs its own pair instead of the whole record.  If
+fewer than 2 valid pairs remain, the metric returns ``NaN``.
 
-Ported from ``wrf/metrics.py`` with added type hints and NaN safety.
+Ported from ``wrf/metrics.py`` with added type hints and non-finite safety.
 """
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 from numpy.typing import NDArray
 
+logger = logging.getLogger(__name__)
+
 
 def _clean_pairs(obs: NDArray, pred: NDArray) -> tuple[NDArray, NDArray]:
-    """Remove pairs where either value is NaN."""
+    """Remove pairs where either value is non-finite (NaN or ±inf).
+
+    ``±inf`` has to go with the NaNs: it survives an ``isnan`` filter and then
+    poisons every reduction downstream (RMSE ``inf``, R² ``-inf``, IOA a
+    plausible-looking ``-1.0``), so a single overflowed model output would
+    destroy the metrics of an otherwise usable run.
+    """
     obs = np.asarray(obs, dtype=float)
     pred = np.asarray(pred, dtype=float)
-    mask = ~(np.isnan(obs) | np.isnan(pred))
+    mask = np.isfinite(obs) & np.isfinite(pred)
     if mask.all():
         return obs, pred
+    logger.warning("dropped %d non-finite pairs of %d", int((~mask).sum()), mask.size)
     return obs[mask], pred[mask]
 
 
