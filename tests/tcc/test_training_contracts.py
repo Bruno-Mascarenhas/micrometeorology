@@ -489,3 +489,91 @@ def test_training_progress_uses_absolute_epoch_budget_on_resume(
     assert "Epoch 10/10" in out
     assert "Overall: 100.0%" in out
     assert "/18" not in out
+
+
+def test_non_finite_epoch_never_becomes_the_best_model() -> None:
+    """A diverged (NaN) epoch must not be captured as best, nor poison later comparisons."""
+    pytest.importorskip("torch")
+    from torch import nn
+
+    from solrad_correction.training.state import BestModelState
+
+    model = nn.Linear(2, 1)
+    best = BestModelState()
+    captured = [
+        best.capture_if_better(model, metric, epoch)
+        for epoch, metric in enumerate([0.5, 0.4, float("nan"), 10.0, 20.0], start=1)
+    ]
+
+    assert captured == [True, True, False, False, False]
+    assert best.metric == 0.4
+    assert best.epoch == 2
+
+
+def test_trainer_closes_summary_writer_when_an_epoch_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raise inside the epoch loop must still flush and close the TensorBoard writer."""
+    pytest.importorskip("torch")
+    from torch import nn
+
+    import solrad_correction.training.trainer as trainer_module
+
+    class RecordingWriter:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def add_scalar(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+    writer = RecordingWriter()
+    monkeypatch.setattr(trainer_module, "create_summary_writer", lambda _log_dir: writer)
+
+    def failing_epoch(*_args: Any, **_kwargs: Any) -> float:
+        raise RuntimeError("simulated OOM at epoch 1")
+
+    monkeypatch.setattr(trainer_module, "train_one_epoch", failing_epoch)
+
+    train_ds, val_ds = _synthetic_sequence_split()
+    trainer = trainer_module.Trainer(
+        model=nn.Linear(4, 1),
+        device="cpu",
+        config=ModelConfig(model_type="lstm", max_epochs=2, batch_size=16, patience=3),
+        runtime=RuntimeConfig(device="cpu", num_workers=0, amp=False),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated OOM"):
+        trainer.train(train_ds, val_ds)
+
+    assert writer.closed
+
+
+def test_import_model_contracts_is_torch_free() -> None:
+    """The model name/kind table must be readable without torch installed."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "import solrad_correction.models.contracts as contracts\n"
+        "assert contracts.get_model_spec('lstm').kind == 'sequence'\n"
+        "assert 'torch' not in sys.modules, 'torch was imported eagerly'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_registry_re_exports_the_contract_names() -> None:
+    """models.registry stays the single import site for metadata plus the factory."""
+    from solrad_correction.models import contracts, registry
+
+    assert registry.MODEL_REGISTRY is contracts.MODEL_REGISTRY
+    assert registry.get_model_spec is contracts.get_model_spec
+    assert registry.supported_model_names is contracts.supported_model_names
+    assert registry.ModelSpec is contracts.ModelSpec

@@ -1,46 +1,32 @@
-"""Model registry and factory helpers."""
+"""Model factory helpers.
+
+The name/kind table lives in the torch-free
+:mod:`solrad_correction.models.contracts` and is re-exported here so
+``models.registry`` stays the single import site for callers that also build
+models. Metadata-only callers should import from ``models.contracts`` directly:
+building a model needs torch, looking one up does not.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
-
 from solrad_correction.config import ModelConfig
 from solrad_correction.models.base import BaseRegressorModel
+from solrad_correction.models.contracts import (
+    MODEL_REGISTRY,
+    ModelKind,
+    ModelSpec,
+    get_model_spec,
+    supported_model_names,
+)
 
-ModelKind = Literal["tabular", "sequence"]
-
-
-@dataclass(frozen=True, slots=True)
-class ModelSpec:
-    """Registered model metadata."""
-
-    name: str
-    kind: ModelKind
-
-
-MODEL_REGISTRY: dict[str, ModelSpec] = {
-    "svm": ModelSpec(name="svm", kind="tabular"),
-    "lstm": ModelSpec(name="lstm", kind="sequence"),
-    "transformer": ModelSpec(name="transformer", kind="sequence"),
-}
-
-
-def supported_model_names() -> tuple[str, ...]:
-    """Return the supported public model names."""
-    return tuple(sorted(MODEL_REGISTRY))
-
-
-def get_model_spec(model_type: str) -> ModelSpec:
-    """Return the registered spec for a model type."""
-    key = model_type.lower()
-    try:
-        return MODEL_REGISTRY[key]
-    except KeyError as exc:
-        available = ", ".join(sorted(MODEL_REGISTRY))
-        raise ValueError(
-            f"Unknown model type: {model_type}. Available models: {available}"
-        ) from exc
+__all__ = [
+    "MODEL_REGISTRY",
+    "ModelKind",
+    "ModelSpec",
+    "build_model",
+    "get_model_spec",
+    "supported_model_names",
+]
 
 
 def build_model(

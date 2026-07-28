@@ -24,6 +24,7 @@ from typing import Annotated
 
 import typer
 
+from micrometeorology.common.logging import setup_logging
 from solrad_correction.experiments.overrides import (
     ExperimentOverrides,
     load_config_with_overrides,
@@ -80,8 +81,11 @@ def run_experiment_cli(
     resume: Annotated[
         Path | None, typer.Option(help="Resume from checkpoint.", exists=True)
     ] = None,
+    log_level: Annotated[str, typer.Option(help="Logging level.")] = "INFO",
 ) -> None:
     """Run a solrad_correction experiment from a YAML config file."""
+    setup_logging(log_level)
+
     if not smoke_test and not config:
         typer.echo("Error: --config is required unless --smoke-test is used", err=True)
         raise typer.Exit(code=1)

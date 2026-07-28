@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -33,25 +33,47 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _find_manifest(path: Path) -> tuple[Path, dict[str, Any]] | None:
-    """Return the nearest ancestor ``manifest.json`` and its parsed contents.
+class ManifestLookup(NamedTuple):
+    """Outcome of the upward walk for an experiment ``manifest.json``.
+
+    ``found`` is the nearest manifest that parses to a JSON object.
+    ``unusable`` is the nearest manifest file that exists but could not be
+    parsed, with the reason: a truncated or unreadable checksum store must not
+    be reported as "no manifest.json found".
+    """
+
+    found: tuple[Path, dict[str, Any]] | None
+    unusable: tuple[Path, str] | None
+
+
+def _find_manifest(path: Path) -> ManifestLookup:
+    """Locate the nearest ancestor ``manifest.json`` and parse its contents.
 
     Walks upward from ``path``; the experiment manifest written by
     ``experiments.artifacts.write_manifest`` lives at the experiment root and
-    covers every file beneath it. Returns ``None`` when no readable manifest is
-    found.
+    covers every file beneath it. An unusable manifest is recorded and the walk
+    continues — the walk reaches ``/``, so an unrelated or unreadable
+    ``manifest.json`` in an outer directory must not mask a usable one.
     """
+    unusable: tuple[Path, str] | None = None
     for parent in path.resolve().parents:
         candidate = parent / "manifest.json"
-        if candidate.is_file():
-            try:
-                data = json.loads(candidate.read_text(encoding="utf-8"))
-            except OSError, json.JSONDecodeError:
-                return None
-            if isinstance(data, dict):
-                return candidate, data
-            return None
-    return None
+        if not candidate.is_file():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            # json.JSONDecodeError is a ValueError; so is the UnicodeDecodeError
+            # a manifest truncated mid multi-byte sequence raises.
+            unusable = unusable or (candidate, f"{type(exc).__name__}: {exc}")
+            continue
+        if isinstance(data, dict):
+            return ManifestLookup(found=(candidate, data), unusable=unusable)
+        unusable = unusable or (
+            candidate,
+            f"top-level JSON value is {type(data).__name__}, not an object",
+        )
+    return ManifestLookup(found=None, unusable=unusable)
 
 
 def verify_pickle_integrity(path: str | Path) -> None:
@@ -63,15 +85,26 @@ def verify_pickle_integrity(path: str | Path) -> None:
     unpickled; a mismatch raises :class:`ModelIntegrityError`. When no manifest
     covers the file, a warning is logged that an unverified pickle is being
     loaded — pickles execute arbitrary code on load, so the absence of a
-    checksum is surfaced rather than hidden.
+    checksum is surfaced rather than hidden. A manifest that exists but cannot
+    be parsed (a run killed mid-write leaves a truncated one) is reported as
+    such instead of as a missing manifest.
     """
     p = Path(path)
-    found = _find_manifest(p)
-    if found is None:
-        logger.warning("Loading unverified pickle (no manifest.json found): %s", p)
+    lookup = _find_manifest(p)
+    if lookup.found is None:
+        if lookup.unusable is not None:
+            candidate, reason = lookup.unusable
+            logger.warning(
+                "Loading unverified pickle (manifest %s is present but unusable: %s): %s",
+                candidate,
+                reason,
+                p,
+            )
+        else:
+            logger.warning("Loading unverified pickle (no manifest.json found): %s", p)
         return
 
-    manifest_path, data = found
+    manifest_path, data = lookup.found
     artifacts = data.get("artifacts", {})
     try:
         relative = p.resolve().relative_to(manifest_path.parent).as_posix()

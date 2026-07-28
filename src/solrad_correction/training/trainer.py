@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 import torch
@@ -225,58 +226,85 @@ class Trainer:
             checkpoint_config=self._checkpoint_config,
         )
 
-        for epoch in range(self.start_epoch, self.max_epochs):
-            self.completed_epochs = epoch + 1
-            progress.start_epoch(epoch)
+        # The writer is released in `finally` so a raise mid-training still
+        # flushes the queued scalars: its event-file thread is a daemon with no
+        # atexit hook, so an unclosed writer loses exactly the epochs leading up
+        # to the failure. `progress.finish()` stays on the success path — it
+        # prints "Training complete".
+        try:
+            for epoch in range(self.start_epoch, self.max_epochs):
+                self.completed_epochs = epoch + 1
+                progress.start_epoch(epoch)
 
-            # Train
-            train_loss = train_one_epoch(
-                self.model,
-                train_loader,
-                optimizer,
-                criterion,
-                self.device,
-                scaler=scaler,
-                clip_val=settings.gradient_clip,
-                progress_callback=progress.update_batch,
-            )
-            history["train_loss"].append(train_loss)
-
-            # Validate
-            val_loss = None
-            if val_loader:
-                val_loss = evaluate_epoch(
+                # Train
+                train_loss = train_one_epoch(
                     self.model,
-                    val_loader,
+                    train_loader,
+                    optimizer,
                     criterion,
                     self.device,
-                    amp_enabled=use_amp,
+                    scaler=scaler,
+                    clip_val=settings.gradient_clip,
+                    progress_callback=progress.update_batch,
                 )
-                history["val_loss"].append(val_loss)
+                history["train_loss"].append(train_loss)
 
-            # TensorBoard logging
-            if writer:
-                writer.add_scalar("Loss/Train", train_loss, epoch)
-                if val_loss is not None:
-                    writer.add_scalar("Loss/Validation", val_loss, epoch)
-                    writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], epoch)
+                # Validate
+                val_loss = None
+                if val_loader:
+                    val_loss = evaluate_epoch(
+                        self.model,
+                        val_loader,
+                        criterion,
+                        self.device,
+                        amp_enabled=use_amp,
+                    )
+                    history["val_loss"].append(val_loss)
 
-            monitor = val_loss if val_loss is not None else train_loss
+                # TensorBoard logging
+                if writer:
+                    writer.add_scalar("Loss/Train", train_loss, epoch)
+                    if val_loss is not None:
+                        writer.add_scalar("Loss/Validation", val_loss, epoch)
+                        writer.add_scalar("LearningRate", optimizer.param_groups[0]["lr"], epoch)
 
-            # LR Scheduler step
-            scheduler.step(monitor)
+                monitor = val_loss if val_loss is not None else train_loss
+                if not math.isfinite(monitor):
+                    logger.warning(
+                        "Epoch %d monitored loss is non-finite (%r): training has diverged and "
+                        "best-model tracking ignores this epoch",
+                        epoch + 1,
+                        monitor,
+                    )
 
-            # Update early stopping BEFORE persisting so any checkpoint written
-            # this epoch records the current no-improvement counter; a later
-            # resume restores it instead of resetting patience to zero.
-            stop = early_stop(monitor)
+                # LR Scheduler step
+                scheduler.step(monitor)
 
-            # Best-model tracking keeps only CPU model weights in memory.
-            if best.capture_if_better(plain_model, monitor, epoch + 1):
-                self.best_metric = best.metric
-                self.best_epoch = best.epoch
-                if checkpoint_manager.enabled:
-                    checkpoint_manager.save_best(
+                # Update early stopping BEFORE persisting so any checkpoint written
+                # this epoch records the current no-improvement counter; a later
+                # resume restores it instead of resetting patience to zero.
+                stop = early_stop(monitor)
+
+                # Best-model tracking keeps only CPU model weights in memory.
+                if best.capture_if_better(plain_model, monitor, epoch + 1):
+                    self.best_metric = best.metric
+                    self.best_epoch = best.epoch
+                    if checkpoint_manager.enabled:
+                        checkpoint_manager.save_best(
+                            epoch=epoch + 1,
+                            model=plain_model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            scaler=scaler,
+                            metric=monitor,
+                            dataloader_settings=self.dataloader_settings,
+                            best_metric=self.best_metric,
+                            best_epoch=self.best_epoch,
+                            epochs_no_improve=early_stop.counter,
+                        )
+
+                if checkpoint_manager.should_save_last(epoch + 1):
+                    checkpoint_manager.save_last(
                         epoch=epoch + 1,
                         model=plain_model,
                         optimizer=optimizer,
@@ -289,32 +317,19 @@ class Trainer:
                         epochs_no_improve=early_stop.counter,
                     )
 
-            if checkpoint_manager.should_save_last(epoch + 1):
-                checkpoint_manager.save_last(
-                    epoch=epoch + 1,
-                    model=plain_model,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    scaler=scaler,
-                    metric=monitor,
-                    dataloader_settings=self.dataloader_settings,
-                    best_metric=self.best_metric,
-                    best_epoch=self.best_epoch,
-                    epochs_no_improve=early_stop.counter,
-                )
+                extra = ""
+                # Early stopping
+                if stop:
+                    extra = " [EARLY STOP]"
+                    progress.end_epoch(train_loss, val_loss, extra)
+                    break
 
-            extra = ""
-            # Early stopping
-            if stop:
-                extra = " [EARLY STOP]"
                 progress.end_epoch(train_loss, val_loss, extra)
-                break
-
-            progress.end_epoch(train_loss, val_loss, extra)
+        finally:
+            if writer:
+                writer.close()
 
         progress.finish()
-        if writer:
-            writer.close()
 
         # Restore best weights before returning. If this (resumed) run never
         # beat the seeded best metric, fall back to the on-disk best.pt so the

@@ -66,3 +66,37 @@ def test_manifest_present_but_artifact_uncovered_warns_and_loads(
 
     assert loaded == {"weights": [2.0]}
     assert any("unverified pickle" in record.message for record in caplog.records)
+
+
+def test_truncated_manifest_is_reported_as_unusable_not_missing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A run killed mid-write leaves truncated JSON; the warning must say so."""
+    root = tmp_path / "experiment"
+    model_path = root / "models" / "model.joblib"
+    save_sklearn_model({"weights": [1.0]}, model_path)
+    write_manifest(ArtifactLayout.from_experiment_dir(root))
+    manifest = root / "manifest.json"
+    manifest.write_text(manifest.read_text(encoding="utf-8")[:40], encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="solrad_correction.utils.serialization"):
+        loaded = load_sklearn_model(model_path)
+
+    assert loaded == {"weights": [1.0]}
+    assert any("present but unusable" in record.message for record in caplog.records)
+    assert not any("no manifest.json found" in record.message for record in caplog.records)
+
+
+def test_unusable_manifest_does_not_mask_the_experiment_manifest(tmp_path: Path) -> None:
+    """A nearer unusable manifest must not stop the walk and disable verification."""
+    root = tmp_path / "experiment"
+    model_path = root / "models" / "model.joblib"
+    save_sklearn_model({"weights": [3.0]}, model_path)
+    write_manifest(ArtifactLayout.from_experiment_dir(root))
+    (root / "models" / "manifest.json").write_text("{not json", encoding="utf-8")
+
+    # Tampered after the experiment manifest recorded its checksum.
+    save_sklearn_model({"weights": [4.4]}, model_path)
+
+    with pytest.raises(ModelIntegrityError, match="Integrity check failed"):
+        load_sklearn_model(model_path)
