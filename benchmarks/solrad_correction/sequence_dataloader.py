@@ -38,7 +38,10 @@ def run(
     import torch
     from torch.utils.data import DataLoader
 
-    from solrad_correction.datasets.sequence import WindowedSequenceDataset
+    from solrad_correction.datasets.sequence import (
+        WindowedSequenceDataset,
+        collate_sequence_batch,
+    )
 
     np = __import__("numpy")
 
@@ -46,7 +49,15 @@ def run(
     feat_data = rng.normal(size=(rows, features)).astype("float32")
     target = rng.normal(size=rows).astype("float32")
     dataset = WindowedSequenceDataset(feat_data, target, sequence_length)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    # The dataset batches itself in __getitems__, so the shared collate is
+    # mandatory here exactly as it is in Trainer and TorchRegressorModel.predict.
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=collate_sequence_batch,
+    )
 
     started = time.perf_counter()
     batches = 0

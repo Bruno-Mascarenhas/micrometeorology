@@ -11,7 +11,11 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from solrad_correction.config import ModelConfig, RuntimeConfig
-from solrad_correction.datasets.sequence import SequenceDataset, WindowedSequenceDataset
+from solrad_correction.datasets.sequence import (
+    SequenceDataset,
+    WindowedSequenceDataset,
+    collate_sequence_batch,
+)
 from solrad_correction.training.callbacks import EarlyStopping
 from solrad_correction.training.checkpoints import CheckpointManager
 from solrad_correction.training.dataloaders import DataLoaderSettings, resolve_dataloader_settings
@@ -24,7 +28,7 @@ from solrad_correction.training.factories import (
 from solrad_correction.training.loops import evaluate_epoch, train_one_epoch
 from solrad_correction.training.progress import TrainingProgress
 from solrad_correction.training.state import BestModelState, TrainingPlan, TrainingState
-from solrad_correction.utils.serialization import load_torch_checkpoint
+from solrad_correction.utils.serialization import load_torch_checkpoint, restore_rng_state
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +69,8 @@ class Trainer:
         best_metric: float | None = None,
         best_epoch: int | None = None,
         epochs_no_improve: int = 0,
+        rng_state: dict[str, Any] | None = None,
+        preprocessing_fingerprint: str | None = None,
     ) -> None:
         self.model: nn.Module = model
         self.device = device
@@ -96,6 +102,12 @@ class Trainer:
         # Early-stopping no-improvement counter carried across a resume so
         # patience is not silently reset to zero when training continues.
         self.epochs_no_improve = epochs_no_improve
+        # Python/numpy/torch RNG snapshot from a resume checkpoint, applied once
+        # the module and optimizer exist (both draw from the global RNGs).
+        self._resume_rng_state = rng_state or {}
+        # Digest of the transform this run's features were scaled with, baked
+        # into every checkpoint so a later resume can refuse a changed scaler.
+        self._preprocessing_fingerprint = preprocessing_fingerprint
         self.dataloader_settings: DataLoaderSettings | None = None
 
     def train(
@@ -107,6 +119,16 @@ class Trainer:
 
         ``config.max_epochs`` is the total epoch budget of the run: a resumed
         run trains only the remaining ``max_epochs - start_epoch`` epochs.
+
+        The monitored metric driving ``scheduler.step``, early stopping and
+        best-model selection is the sample-weighted mean loss returned by
+        ``evaluate_epoch`` (``train_one_epoch`` when there is no val set), i.e.
+        the val-set MSE in standard-scaled target units. It replaced a
+        mean-of-per-batch-means, which over-weighted the partial tail batch by
+        ``n_samples / n_batches``; checkpoints written before that change carry
+        ``best_metric``/``monitor_metric`` on the retired scale, so a run must
+        not be resumed across it — the seeded best would be compared against a
+        differently-scaled epoch value.
 
         Returns ``(trained_model, history)`` where history contains
         per-epoch losses.
@@ -158,6 +180,13 @@ class Trainer:
         # All persistence (checkpoints, best-state capture) uses the plain
         # module so state_dict keys never carry the `_orig_mod.` prefix.
         plain_model = _unwrap_compiled(self.model)
+
+        if self._resume_rng_state:
+            # Continue the interrupted random stream instead of replaying it: the
+            # shuffle order, dropout masks and lazy initializations after this
+            # point are the ones the uninterrupted run would have drawn.
+            restore_rng_state(self._resume_rng_state)
+            logger.info("Restored RNG state from the resume checkpoint")
 
         train_loader = self._build_loader(train_data, settings=settings, shuffle=True)
         val_loader = (
@@ -224,6 +253,7 @@ class Trainer:
         checkpoint_manager = CheckpointManager.from_runtime(
             self.runtime,
             checkpoint_config=self._checkpoint_config,
+            preprocessing_fingerprint=self._preprocessing_fingerprint,
         )
 
         # The writer is released in `finally` so a raise mid-training still
@@ -247,6 +277,9 @@ class Trainer:
                     clip_val=settings.gradient_clip,
                     progress_callback=progress.update_batch,
                 )
+                # Absolute epoch number: `epoch` counts from start_epoch, so a
+                # resumed run labels its rows 41..60 rather than 1..20.
+                history["epoch"].append(float(epoch + 1))
                 history["train_loss"].append(train_loss)
 
                 # Validate
@@ -382,4 +415,5 @@ class Trainer:
             pin_memory=settings.pin_memory,
             persistent_workers=settings.persistent_workers,
             prefetch_factor=settings.prefetch_factor,
+            collate_fn=collate_sequence_batch,
         )

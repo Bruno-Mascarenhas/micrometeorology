@@ -81,6 +81,17 @@ def run_experiment_cli(
     resume: Annotated[
         Path | None, typer.Option(help="Resume from checkpoint.", exists=True)
     ] = None,
+    allow_preprocessing_change: Annotated[
+        bool,
+        typer.Option(
+            "--allow-preprocessing-change",
+            help=(
+                "Resume even when the refitted preprocessing no longer matches the "
+                "one the checkpoint's weights were trained under (accepting that the "
+                "restored model now sees differently-scaled inputs)."
+            ),
+        ),
+    ] = False,
     log_level: Annotated[str, typer.Option(help="Logging level.")] = "INFO",
 ) -> None:
     """Run a solrad_correction experiment from a YAML config file."""
@@ -103,6 +114,7 @@ def run_experiment_cli(
         amp=amp,
         torch_compile=torch_compile,
         resume=str(resume) if resume else None,
+        allow_preprocessing_change=allow_preprocessing_change,
     )
     cfg = load_config_with_overrides(
         str(config) if config else None, smoke_test=smoke_test, overrides=overrides

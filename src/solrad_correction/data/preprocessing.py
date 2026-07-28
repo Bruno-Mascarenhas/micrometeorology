@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +52,32 @@ class PreprocessingState:
             "dropped_columns": self.dropped_columns,
             "fitted": self.fitted,
         }
+
+    def fingerprint(self) -> str:
+        """Stable digest of everything that changes what a feature vector means.
+
+        A resumed run refits the scaler from whatever data is on disk now, so a
+        changed feature set, target, scaler type or fitted mean/scale silently
+        feeds the restored weights a differently-scaled input. Comparing this
+        digest against the one baked into the checkpoint is what turns that into
+        a refusal. ``row_counts`` and ``dropped_columns`` are deliberately
+        excluded: they are provenance, not part of the transform.
+        """
+        material = json.dumps(
+            {
+                "version": self.version,
+                "scaler_type": self.scaler_type,
+                "impute_strategy": self.impute_strategy,
+                "drop_na_threshold": self.drop_na_threshold,
+                "feature_columns": self.feature_columns,
+                "target_column": self.target_column,
+                "fill_values": self.fill_values,
+                "scaling": self.scaling,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PreprocessingState:

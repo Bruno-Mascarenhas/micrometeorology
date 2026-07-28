@@ -350,7 +350,7 @@ def load_sensor_raw(
     if not files:
         raise FileNotFoundError(f"No files matching '{pattern}' in {data_dir}")
 
-    df = merge_dat_files(files)  # type: ignore
+    df = merge_dat_files(files)
 
     if calibrations_path and Path(calibrations_path).exists():
         from micrometeorology.sensors.calibration import (

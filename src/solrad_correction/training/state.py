@@ -42,8 +42,10 @@ class TrainingState:
     """Mutable training state exposed back to model wrappers."""
 
     completed_epochs: int
+    # ``epoch`` holds the ABSOLUTE 1-based epoch number, so a resumed run's rows
+    # keep the numbering of the run they continue instead of restarting at 0.
     history: dict[str, list[float]] = field(
-        default_factory=lambda: {"train_loss": [], "val_loss": []}
+        default_factory=lambda: {"epoch": [], "train_loss": [], "val_loss": []}
     )
     best_metric: float | None = None
     best_epoch: int | None = None

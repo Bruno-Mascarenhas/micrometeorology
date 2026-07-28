@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from solrad_correction.training.dataloaders import DataLoaderSettings
-from solrad_correction.utils.serialization import save_torch_checkpoint
+from solrad_correction.utils.serialization import capture_rng_state, save_torch_checkpoint
 
 
 @dataclass(slots=True)
@@ -20,6 +20,9 @@ class CheckpointManager:
     directory: Path | None
     every: int = 1
     config: dict[str, Any] | None = None
+    #: Digest of the preprocessing transform the saved weights were trained
+    #: under, so a later resume can refuse a refit that changed it.
+    preprocessing_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if self.directory is not None:
@@ -31,6 +34,7 @@ class CheckpointManager:
         runtime: Any,
         *,
         checkpoint_config: dict[str, Any] | None = None,
+        preprocessing_fingerprint: str | None = None,
     ) -> CheckpointManager:
         """Build a manager from a runtime config; disabled when it has no checkpoint dir."""
         directory = (
@@ -41,7 +45,12 @@ class CheckpointManager:
             if runtime is not None and runtime.checkpoint_every is not None
             else 1
         )
-        return cls(directory=directory, every=every, config=checkpoint_config)
+        return cls(
+            directory=directory,
+            every=every,
+            config=checkpoint_config,
+            preprocessing_fingerprint=preprocessing_fingerprint,
+        )
 
     @property
     def enabled(self) -> bool:
@@ -132,8 +141,11 @@ class CheckpointManager:
 
         A no-op when no checkpoint directory is configured. Resume-critical
         metadata (kind, monitored metric, best metric/epoch, early-stopping
-        no-improvement counter, DataLoader settings) is embedded alongside the
-        tensors.
+        no-improvement counter, DataLoader settings, RNG state) is embedded
+        alongside the tensors. The RNG snapshot is what makes a resumed run
+        reproducible: the shuffle order, dropout masks and any initialization
+        drawn after the resume point continue the interrupted sequence instead
+        of restarting from the seed.
         """
         if self.directory is None:
             return
@@ -158,5 +170,14 @@ class CheckpointManager:
                 "dataloader": dataloader_settings.to_dict()
                 if dataloader_settings is not None
                 else {},
+                # Python/numpy/torch RNG snapshot, in weights_only-loadable
+                # types (see capture_rng_state): a resume that reseeds from
+                # scratch replays the first epochs' shuffle order instead of
+                # continuing the stream, so the resumed run is not the run it
+                # claims to continue.
+                "rng_state": capture_rng_state(),
+                # Digest of the transform these weights were trained under; a
+                # resume compares it against the freshly refitted one.
+                "preprocessing_fingerprint": self.preprocessing_fingerprint,
             },
         )
