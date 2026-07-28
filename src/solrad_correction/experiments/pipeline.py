@@ -118,9 +118,19 @@ def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame
     (temporal/cyclic/lag/rolling/diff) — engineered columns are included
     explicitly because they were requested via the feature config, never by
     name-prefix accident.
+
+    Rolling and diff features read the current row, so they are built from the
+    declared base columns *other than the target*: ``{target}_roll_*`` and
+    ``{target}_diff_*`` are same-row functions of ``y[t]`` and would leak the
+    target into the features. Lags are built from every declared base column,
+    because ``{target}_lag_{n}`` with ``n >= 1`` (enforced by
+    ``ExperimentConfig.validate``) is legitimate autoregression.
     """
     engineered_frame = loaded.frame
     source_columns = set(engineered_frame.columns)
+    non_target_feature_columns = [
+        column for column in config.data.feature_columns if column != config.data.target_column
+    ]
     if config.features.add_temporal:
         from solrad_correction.features.temporal import (
             add_all_cyclic_encodings,
@@ -145,7 +155,7 @@ def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame
 
         engineered_frame = add_rolling_features(
             engineered_frame,
-            config.data.feature_columns,
+            non_target_feature_columns,
             config.features.rolling_windows,
             config.features.rolling_aggs,
         )
@@ -153,7 +163,7 @@ def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame
     if config.features.add_diffs:
         from solrad_correction.features.engineering import add_diff_features
 
-        engineered_frame = add_diff_features(engineered_frame, config.data.feature_columns)
+        engineered_frame = add_diff_features(engineered_frame, non_target_feature_columns)
 
     feature_columns = [
         column for column in engineered_frame.columns if column != config.data.target_column
@@ -353,11 +363,26 @@ def train_model(
     config: ExperimentConfig,
     model: BaseRegressorModel,
     bundle: DatasetBundle,
+    *,
+    preprocessing_fingerprint: str | None = None,
 ) -> TrainingOutput:
-    """Train the configured model."""
+    """Train the configured model.
+
+    ``preprocessing_fingerprint`` identifies the transform this run's features
+    were scaled with. It is baked into every checkpoint and re-checked on a
+    resume: a resume refits the scaler from the data on disk now and never loads
+    the checkpoint's own transform, so without the check a changed feature set
+    or re-fitted mean/scale feeds the restored weights differently-scaled inputs.
+    """
     started = time.monotonic()
     if get_model_spec(config.model.model_type).kind == "sequence":
-        training_result = model.fit(bundle.train, bundle.val, config.model, runtime=config.runtime)
+        training_result = model.fit(
+            bundle.train,
+            bundle.val,
+            config.model,
+            runtime=config.runtime,
+            preprocessing_fingerprint=preprocessing_fingerprint,
+        )
     else:
         training_result = model.fit(bundle.train, bundle.val, config.model)
     return TrainingOutput(duration_seconds=time.monotonic() - started, result=training_result)
@@ -417,7 +442,12 @@ def run_pipeline(config: ExperimentConfig) -> ExperimentReport:
     with pipeline_profile.stage("build_model"):
         configured_model = build_configured_model(config, dataset_bundle)
     with pipeline_profile.stage("train_model"):
-        training_output = train_model(config, configured_model, dataset_bundle)
+        training_output = train_model(
+            config,
+            configured_model,
+            dataset_bundle,
+            preprocessing_fingerprint=preprocessed_splits.pipeline.state.fingerprint(),
+        )
     trained_model = training_output.result.model
     # Persist the trained model immediately after fit: a crash during
     # prediction or evaluation must leave the model recoverable on disk.

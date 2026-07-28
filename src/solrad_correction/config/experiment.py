@@ -75,6 +75,32 @@ class ExperimentConfig:
                 "data.hourly_data_path/data.sensor_data_path; remove it from the config"
             )
 
+        if not self.data.feature_columns and (
+            self.features.lag_steps or self.features.rolling_windows or self.features.add_diffs
+        ):
+            errors.append(
+                "features.lag_steps/rolling_windows/add_diffs are applied only to the columns "
+                "declared in data.feature_columns, which is empty; declare the base columns "
+                "to engineer or disable those stages"
+            )
+        if self.data.target_column in self.data.feature_columns and (
+            self.features.rolling_windows or self.features.add_diffs
+        ):
+            errors.append(
+                f"data.feature_columns must not contain data.target_column "
+                f"('{self.data.target_column}') while features.rolling_windows/add_diffs are "
+                f"enabled: '{self.data.target_column}_roll_*' (trailing window with "
+                f"min_periods=1 includes the current row) and "
+                f"'{self.data.target_column}_diff_1' are same-row functions of the target"
+            )
+        if any(step < 1 for step in self.features.lag_steps):
+            errors.append(
+                "features.lag_steps entries must be >= 1: 0 copies a column onto itself and a "
+                "negative step reads a future value"
+            )
+        if any(window < 1 for window in self.features.rolling_windows):
+            errors.append("features.rolling_windows entries must be >= 1")
+
         if self.preprocess.scaler_type not in {"standard", "minmax", "none"}:
             errors.append("preprocess.scaler_type must be one of: standard, minmax, none")
         if self.preprocess.impute_strategy not in {"drop", "ffill", "mean", "interpolate"}:

@@ -13,6 +13,7 @@ import yaml
 from solrad_correction.config import (
     DataConfig,
     ExperimentConfig,
+    FeatureConfig,
     ModelConfig,
     PreprocessConfig,
     RuntimeConfig,
@@ -45,6 +46,53 @@ from solrad_correction.experiments.pipeline import load_data
             ),
             r"data\.wrf_data_path",
         ),
+        (
+            ExperimentConfig(features=FeatureConfig(lag_steps=[1, 24])),
+            r"data\.feature_columns, which is empty",
+        ),
+        (
+            ExperimentConfig(features=FeatureConfig(rolling_windows=[3])),
+            r"data\.feature_columns, which is empty",
+        ),
+        (
+            ExperimentConfig(features=FeatureConfig(add_diffs=True)),
+            r"data\.feature_columns, which is empty",
+        ),
+        (
+            ExperimentConfig(
+                data=DataConfig(target_column="SW_dif", feature_columns=["SWDOWN", "SW_dif"]),
+                features=FeatureConfig(add_diffs=True),
+            ),
+            r"'SW_dif_diff_1' are same-row functions of the target",
+        ),
+        (
+            ExperimentConfig(
+                data=DataConfig(target_column="SW_dif", feature_columns=["SWDOWN", "SW_dif"]),
+                features=FeatureConfig(rolling_windows=[3]),
+            ),
+            r"'SW_dif_roll_\*'",
+        ),
+        (
+            ExperimentConfig(
+                data=DataConfig(feature_columns=["SWDOWN"]),
+                features=FeatureConfig(lag_steps=[0]),
+            ),
+            r"features\.lag_steps entries must be >= 1",
+        ),
+        (
+            ExperimentConfig(
+                data=DataConfig(feature_columns=["SWDOWN"]),
+                features=FeatureConfig(lag_steps=[-1]),
+            ),
+            r"features\.lag_steps entries must be >= 1",
+        ),
+        (
+            ExperimentConfig(
+                data=DataConfig(feature_columns=["SWDOWN"]),
+                features=FeatureConfig(rolling_windows=[0]),
+            ),
+            r"features\.rolling_windows entries must be >= 1",
+        ),
     ],
 )
 def test_validate_catches_config_errors_before_any_stage_runs(
@@ -53,6 +101,15 @@ def test_validate_catches_config_errors_before_any_stage_runs(
     """Regression for findings 3-5: --validate-config must not defer these to stage 4."""
     with pytest.raises(ValueError, match=message):
         cfg.validate()
+
+
+def test_shipped_experiment_configs_still_validate() -> None:
+    """The feature-stage invariants must not reject a config the project ships."""
+    shipped = sorted(Path("configs/tcc/experiments").glob("*.yaml"))
+
+    assert shipped
+    for config_path in shipped:
+        ExperimentConfig.from_yaml(config_path).validate()
 
 
 def _write_raw_sensor_tree(directory: Path) -> None:
