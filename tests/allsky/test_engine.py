@@ -4,7 +4,9 @@ All offline and CPU-only: a tiny synthetic v2 manifest (3 days x 20 samples) is
 built with the real manifest builder, embeddings are served by a deterministic
 dict-backed fake reader, and models train for 1-3 epochs.  Covers a basic run,
 full resume equivalence, early stopping, gradient accumulation, the climatology
-baseline and the clear cuda-unavailable error.
+baseline and the clear cuda-unavailable error, plus the four resume guards: the
+dataset-provenance refusal, the cosine-horizon reconciliation, the already-stopped
+short circuit and the discarded best on a monitor change.
 """
 
 from __future__ import annotations
@@ -25,7 +27,8 @@ from allsky.config import ExperimentConfig, SiteConfig  # noqa: E402
 from allsky.data.manifest import build_manifest, write_manifest_parquet  # noqa: E402
 from allsky.data.splits import create_day_splits, save_split_artifact  # noqa: E402
 from allsky.evaluation.evaluator import evaluate_checkpoint  # noqa: E402
-from allsky.training.engine import run_experiment  # noqa: E402
+from allsky.training.checkpointing import capture_rng_state, load_checkpoint  # noqa: E402
+from allsky.training.engine import _restore, run_experiment  # noqa: E402
 
 _MET = {
     "AirT1_C_Avg": (20.0, 30.0),
@@ -324,6 +327,98 @@ class TestWindowStrategies:
         assert len(result.predictions) == result.n_samples
 
 
+class TestResumeProvenance:
+    def test_resume_into_a_rebuilt_dataset_is_refused(self, tmp_path: Path):
+        # run_experiment re-fits the feature/target normalizers on whatever is on
+        # disk *before* restoring, so a resume into a rebuilt manifest would
+        # reinterpret converged weights in a re-scaled target space and compare
+        # best.ckpt across two different validation day sets — with no error.
+        root, manifest, _ = _make_dataset(tmp_path, n_days=3)
+        run_dir = tmp_path / "run"
+        run_experiment(
+            _cfg(root, epochs=2),
+            data_root=root,
+            output_dir=run_dir,
+            embedding_reader=_reader(manifest),
+        )
+        history_before = (run_dir / "metrics.json").read_text(encoding="utf-8")
+
+        grown_root, grown_manifest, _ = _make_dataset(tmp_path / "grown", n_days=5)
+        with pytest.raises(RuntimeError, match="split_id"):
+            run_experiment(
+                _cfg(grown_root, epochs=4),
+                data_root=grown_root,
+                output_dir=run_dir,
+                resume="auto",
+                embedding_reader=_reader(grown_manifest),
+            )
+        # Refused before _truncate_metrics rewrote anything.
+        assert (run_dir / "metrics.json").read_text(encoding="utf-8") == history_before
+        assert list(pd.read_csv(run_dir / "metrics.csv")["epoch"]) == [1, 2]
+
+    def test_pre_provenance_checkpoint_still_resumes(self, tmp_path: Path):
+        # save_checkpoint allows split_id / manifest_sha256 to be None, so a
+        # checkpoint written before the provenance fields existed must still resume.
+        root, manifest, _ = _make_dataset(tmp_path)
+        reader = _reader(manifest)
+        run_dir = tmp_path / "run"
+        run_experiment(
+            _cfg(root, epochs=2), data_root=root, output_dir=run_dir, embedding_reader=reader
+        )
+
+        checkpoint = load_checkpoint(run_dir / "last.ckpt")
+        for field in ("split_id", "manifest_sha256", "dataset_version", "feature_columns"):
+            checkpoint[field] = None
+        torch.save(checkpoint, run_dir / "last.ckpt")
+
+        summary = run_experiment(
+            _cfg(root, epochs=3),
+            data_root=root,
+            output_dir=run_dir,
+            resume="auto",
+            embedding_reader=reader,
+        )
+        assert summary["epochs_ran"] == 1
+        assert summary["epoch"] == 3
+
+
+class TestResumeCosineHorizon:
+    def test_extended_budget_reuses_the_uninterrupted_lr_schedule(self, tmp_path: Path):
+        # scheduler.load_state_dict brings back the checkpoint's T_max, so past that
+        # horizon the cosine turns around and the LR climbs back to its initial
+        # value. The resumed tail must instead follow the uninterrupted schedule.
+        root, manifest, _ = _make_dataset(tmp_path)
+        reader = _reader(manifest)
+
+        run_experiment(
+            _cfg(root, epochs=6, scheduler="cosine"),
+            data_root=root,
+            output_dir=tmp_path / "runA",
+            embedding_reader=reader,
+        )
+        run_experiment(
+            _cfg(root, epochs=3, scheduler="cosine"),
+            data_root=root,
+            output_dir=tmp_path / "runB",
+            embedding_reader=reader,
+        )
+        run_experiment(
+            _cfg(root, epochs=6, scheduler="cosine"),
+            data_root=root,
+            output_dir=tmp_path / "runB",
+            resume="auto",
+            embedding_reader=reader,
+        )
+
+        uninterrupted = pd.read_csv(tmp_path / "runA" / "metrics.csv")["lr"].tolist()
+        resumed = pd.read_csv(tmp_path / "runB" / "metrics.csv")["lr"].tolist()
+        # Epochs 1-3 ran under the old 3-epoch horizon and cannot be retro-fixed;
+        # every epoch from the resume point on must match the 6-epoch schedule.
+        assert resumed[3:] == pytest.approx(uninterrupted[3:])
+        assert resumed[3:] == sorted(resumed[3:], reverse=True)
+        assert load_checkpoint(tmp_path / "runB" / "last.ckpt")["scheduler_state"]["T_max"] == 6
+
+
 class TestEarlyStopping:
     def test_climatology_plateau_triggers_early_stop(self, tmp_path: Path):
         root, manifest, _ = _make_dataset(tmp_path)
@@ -342,6 +437,114 @@ class TestEarlyStopping:
         assert summary["epochs_ran"] == 2
         assert summary["epochs_ran"] < cfg.train.epochs
         assert summary["best_metric"]["epoch"] == 1
+
+    def test_resume_into_an_already_stopped_run_trains_nothing(self, tmp_path: Path):
+        # The stopping rule is only re-tested at the END of an epoch, so a cron
+        # re-running `--resume auto` used to burn one epoch per invocation, past the
+        # declared stop, up to the whole budget.
+        root, manifest, _ = _make_dataset(tmp_path)
+        reader = _reader(manifest)
+        cfg = _cfg(
+            root,
+            model="climatology",
+            epochs=8,
+            patience=1,
+            monitor="val_loss",
+            targets={"dhi": {"enabled": True, "loss": "mse"}},
+        )
+        run_dir = tmp_path / "run"
+        first = run_experiment(cfg, data_root=root, output_dir=run_dir, embedding_reader=reader)
+        assert first["epochs_ran"] == 2
+
+        resumed = run_experiment(
+            cfg, data_root=root, output_dir=run_dir, resume="auto", embedding_reader=reader
+        )
+        assert resumed["epochs_ran"] == 0
+        assert resumed["epoch"] == 2
+        assert list(pd.read_csv(run_dir / "metrics.csv")["epoch"]) == [1, 2]
+        assert load_checkpoint(run_dir / "last.ckpt")["epoch"] == 2
+
+
+class TestResumeMonitorChange:
+    def test_changed_monitor_discards_the_stored_best(self, tmp_path: Path):
+        # A best seeded from val_dhi_mae (W/m2, minimized) can never be beaten by a
+        # sky accuracy in [0, 1], so the run used to stop after `patience` epochs
+        # with best.ckpt still holding the pre-resume weights.
+        root, manifest, _ = _make_dataset(tmp_path)
+        reader = _reader(manifest)
+        run_dir = tmp_path / "run"
+        run_experiment(
+            _cfg(root, epochs=2, monitor="val_dhi_mae"),
+            data_root=root,
+            output_dir=run_dir,
+            embedding_reader=reader,
+        )
+        stale_best = load_checkpoint(run_dir / "best.ckpt")["best_metric"]
+        assert stale_best["name"] == "dhi_mae"
+
+        summary = run_experiment(
+            _cfg(root, epochs=6, monitor="val_sky_acc", patience=2),
+            data_root=root,
+            output_dir=run_dir,
+            resume="auto",
+            embedding_reader=reader,
+        )
+        assert summary["epochs_ran"] > 2
+        assert summary["best_metric"]["name"] == "sky_acc"
+        assert summary["best_metric"]["value"] <= 1.0
+        assert summary["best_metric"]["epoch"] > 2
+        # The previous monitor's best weights were preserved, not overwritten.
+        assert load_checkpoint(run_dir / "best.ckpt.stale")["best_metric"] == stale_best
+
+    @pytest.mark.parametrize(
+        ("skip_scheduler_state", "expected_mode"), [(True, "max"), (False, "min")]
+    )
+    def test_plateau_direction_follows_the_monitor(
+        self, skip_scheduler_state: bool, expected_mode: str
+    ):
+        # ReduceLROnPlateau.state_dict carries mode/best, so restoring it would keep
+        # the old monitor's direction; the freshly built scheduler must win instead.
+        model = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        stored = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min")
+        stored.step(0.5)
+        checkpoint = {
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": stored.state_dict(),
+            "scaler_state": None,
+            "rng_state": capture_rng_state(),
+            "epoch": 1,
+            "global_step": 4,
+            "best_metric": {"name": "dhi_mae", "value": 0.5, "epoch": 1},
+            "epochs_no_improve": 0,
+        }
+
+        fresh = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max")
+        _restore(
+            checkpoint,
+            model,
+            optimizer,
+            fresh,
+            None,
+            skip_scheduler_state=skip_scheduler_state,
+        )
+        assert fresh.mode == expected_mode
+
+
+class TestLearningRateLogging:
+    def test_first_epoch_logs_the_rate_that_trained_it(self, tmp_path: Path):
+        # The lr column used to be read AFTER scheduler.step(), so epoch 1 reported
+        # epoch 2's rate and the rate that actually trained epoch 1 appeared nowhere.
+        root, manifest, _ = _make_dataset(tmp_path)
+        cfg = _cfg(root, epochs=2, scheduler="cosine")
+        run_dir = tmp_path / "run"
+        run_experiment(cfg, data_root=root, output_dir=run_dir, embedding_reader=_reader(manifest))
+
+        rows = pd.read_csv(run_dir / "metrics.csv")
+        assert rows["lr"].iloc[0] == pytest.approx(cfg.train.lr)
+        # Single-group run: the column exists with a stable position but stays blank.
+        assert rows["lr_backbone"].isna().all()
 
 
 class TestGradAccumulation:

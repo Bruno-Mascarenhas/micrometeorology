@@ -53,11 +53,20 @@ ModelBuilder = Callable[
 # config key outside the selected model's set triggers a typo warning in
 # :func:`build_model`; it is still kept (``extra="allow"``).
 _COMMON_PARAMS = frozenset({"sensor_hidden", "trunk_hidden", "trunk_layers", "dropout"})
-_VISUAL_PARAMS = frozenset(
-    {"visual_out_dim", "backbone_frozen", "unfreeze_last_n", "temporal_pooling", "image_size"}
+# Visual knobs the training/evaluation pipeline reads rather than the builder
+# here — legitimate keys that must not warn: ``image_size`` in
+# ``engine._build_datasets`` and the evaluator, ``backbone`` /
+# ``backbone_pooling`` in ``engine._default_image_backbone_builder`` (which also
+# runs on evaluate).  They are not in ``_COMMON_PARAMS``: ``sensor_only`` and
+# ``climatology`` never build an image backbone, so those must keep warning.
+_PIPELINE_VISUAL_PARAMS = frozenset({"image_size", "backbone", "backbone_pooling"})
+_VISUAL_PARAMS = (
+    frozenset({"visual_out_dim", "backbone_frozen", "unfreeze_last_n", "temporal_pooling"})
+    | _PIPELINE_VISUAL_PARAMS
 )
 _CROSS_ATTENTION_PARAMS = frozenset({"num_heads", "token_dim"})
-#: Model name -> the set of hyper-parameter keys that builder consumes.
+#: Model name -> the hyper-parameter keys that model consumes (the registry
+#: builder plus the engine / evaluator paths the model runs under).
 KNOWN_MODEL_PARAMS: dict[str, frozenset[str]] = {
     "climatology": frozenset(),
     "sensor_only": _COMMON_PARAMS,
