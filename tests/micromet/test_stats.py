@@ -94,6 +94,29 @@ class TestDailyTotals:
         result = daily_totals(hourly_year, columns=["rain"], agg="mean")
         assert result["rain"].iloc[0] == 1.0
 
+    @pytest.mark.parametrize("agg", ["sum", "mean"])
+    def test_day_without_a_valid_sample_is_nan_not_zero(self, hourly_year, agg):
+        """A 24 h sensor outage is a gap, not 0 mm of rain.
+
+        ``Resampler.sum()`` reports an all-NaN group as 0.0, which makes an
+        outage day indistinguishable from a genuinely dry one; ``mean`` already
+        yielded NaN, so this also pins the symmetry between the two branches.
+        """
+        outage = hourly_year.copy()
+        outage.loc["2025-01-02", "rain"] = np.nan
+        result = daily_totals(outage, columns=["rain"], agg=agg)
+        assert np.isnan(result["rain"].loc["2025-01-02"])
+        expected_neighbour = 24.0 if agg == "sum" else 1.0
+        assert result["rain"].loc["2025-01-01"] == expected_neighbour
+        assert result["rain"].loc["2025-01-03"] == expected_neighbour
+
+    def test_dry_day_is_still_zero(self, hourly_year):
+        """The fix must not turn a real all-zero day into a gap."""
+        dry = hourly_year.copy()
+        dry.loc["2025-01-02", "rain"] = 0.0
+        result = daily_totals(dry, columns=["rain"], agg="sum")
+        assert result["rain"].loc["2025-01-02"] == 0.0
+
 
 class TestClearnessIndex:
     def test_basic_ratio(self):
