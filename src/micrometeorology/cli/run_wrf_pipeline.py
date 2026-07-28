@@ -32,6 +32,7 @@ from typing import Annotated
 
 import typer
 
+from micrometeorology.common.cli_options import parse_csv, parse_int_csv
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.wrf.batch import FigureTask, _max_tasks_per_child, default_workers
 
@@ -52,30 +53,6 @@ DEFAULT_VARS = [
     "GLW",
     "wind_power_density_10m",
 ]
-
-
-def _parse_int_csv(raw: str | list[str] | None) -> tuple[int, ...]:
-    """Parse comma-separated or repeated integers."""
-    if not raw:
-        return ()
-    if isinstance(raw, str):
-        raw = [raw]
-    res: list[int] = []
-    for item in raw:
-        res.extend(int(x.strip()) for x in item.split(",") if x.strip())
-    return tuple(res)
-
-
-def _parse_csv(raw: str | list[str] | None) -> tuple[str, ...]:
-    """Parse comma-separated or repeated strings."""
-    if not raw:
-        return ()
-    if isinstance(raw, str):
-        raw = [raw]
-    res: list[str] = []
-    for item in raw:
-        res.extend(x.strip() for x in item.split(",") if x.strip())
-    return tuple(res)
 
 
 @app.command()
@@ -117,6 +94,7 @@ def run(
 ) -> None:
     """Run WRF processing locally: figures + GeoJSON + WebM."""
     setup_logging(log_level)
+    from micrometeorology.cli.export_wrf_geojson import _reject_output_id_variables
     from micrometeorology.cli.render_wrf_maps import _resolve_wrfout_paths
     from micrometeorology.wrf import reader as wrf_reader
 
@@ -130,8 +108,12 @@ def run(
     if resolved_workers < 1:
         raise typer.BadParameter("--workers must be >= 1")
 
-    var_list = list(_parse_csv(variables)) if variables else DEFAULT_VARS
-    paths = _resolve_wrfout_paths(wrf_dir, date, _parse_int_csv(domains), dataset)
+    var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
+    # An output file id (-v TSK) reaches the raw-NetCDF passthrough in BOTH
+    # phases and publishes unconverted Kelvin into the PNGs and JSONs that
+    # skin_temperature owns. Refuse before a single frame is rendered.
+    _reject_output_id_variables(var_list)
+    paths = _resolve_wrfout_paths(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")
         return
@@ -207,7 +189,12 @@ def run(
         from micrometeorology.wrf import jobs
 
         json_var_list = _normalize_var_list(var_list)
-        units = jobs.build_units(paths, json_var_list, json_dir, geojson_dir, skip_first)
+        try:
+            units = jobs.build_units(paths, json_var_list, json_dir, geojson_dir, skip_first)
+        except ValueError as invalid_selection:
+            # A selection covering one domain twice is an operator mistake about
+            # -d/-D/-o, so it reads as a usage error rather than a traceback.
+            raise typer.BadParameter(str(invalid_selection)) from invalid_selection
         results = jobs.execute_units(units, resolved_workers, echo=typer.echo)
 
         for result in results:

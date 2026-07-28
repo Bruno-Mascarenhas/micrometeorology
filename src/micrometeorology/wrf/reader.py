@@ -302,6 +302,21 @@ class WRFDataset:
         self.close()
 
 
+def normalize_run_date(date: str) -> str:
+    """Return the digit run :func:`resolve_wrfout_paths` slices, rejecting typos.
+
+    ``2026-07-27`` and ``2026/07/27`` are accepted — the wrfout names are
+    themselves ISO, so those are the natural typo — and a longer
+    ``YYYYMMDDHH`` prefix keeps working. Anything that is not at least a full
+    8-digit day raises ``ValueError``: silently slicing it would report a
+    mistyped date as a day on which WRF produced no files.
+    """
+    digits = date.replace("-", "").replace("/", "")
+    if not digits.isdigit() or len(digits) < 8:
+        raise ValueError(f"--date must be YYYYMMDD (got {date!r})")
+    return digits
+
+
 def resolve_wrfout_paths(
     wrf_dir: str | Path,
     date: str,
@@ -318,7 +333,10 @@ def resolve_wrfout_paths(
     wrf_dir:
         Directory containing ``wrfout_*`` files.
     date:
-        Simulation date in ``YYYYMMDD`` format.
+        Simulation date in ``YYYYMMDD`` format; separators are tolerated and a
+        longer ``YYYYMMDDHH`` run prefix is accepted. Validated here so every
+        CLI reaching for wrfout files rejects the same typos —
+        see :func:`normalize_run_date`.
     domains:
         Exact domain numbers to search (no range widening: ``(1, 4)``
         matches only d01 and d04). Defaults to ``(1, 2, 3, 4)``.
@@ -327,7 +345,13 @@ def resolve_wrfout_paths(
     -------
     list[Path]
         Sorted list of matching paths.
+
+    Raises
+    ------
+    ValueError
+        When *date* is not at least an 8-digit day.
     """
+    date = normalize_run_date(date)
     year, month, day = date[:4], date[4:6], date[6:8]
     selected = sorted(set(domains)) if domains else [1, 2, 3, 4]
 

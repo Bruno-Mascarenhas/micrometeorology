@@ -28,7 +28,9 @@ from typing import Annotated
 
 import numpy as np
 import typer
+from numpy.typing import NDArray
 
+from micrometeorology.common.cli_options import parse_csv, parse_int_csv
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.types import (
     VARIABLE_COLORMAPS,
@@ -45,6 +47,7 @@ from micrometeorology.wrf.batch import (
     run_figure_tasks,
 )
 from micrometeorology.wrf.reader import resolve_wrfout_paths
+from micrometeorology.wrf.value_source import build_value_frame_source, is_daylight_step
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -95,7 +98,8 @@ def _resolve_wrfout_paths(
     """Resolve WRF output file paths.
 
     Delegates to :func:`micrometeorology.wrf.reader.resolve_wrfout_paths`
-    for robust glob-based matching of any wrfout filename convention.
+    for robust glob-based matching of any wrfout filename convention, which
+    also rejects a mistyped ``--date`` rather than matching nothing.
     """
     if dataset:
         return [Path(dataset)]
@@ -103,10 +107,30 @@ def _resolve_wrfout_paths(
     if not wrf_dir or not date:
         raise typer.BadParameter("Provide either --dataset or --wrf-dir + --date")
 
-    paths = resolve_wrfout_paths(wrf_dir, date, domains or None)
+    try:
+        paths = resolve_wrfout_paths(wrf_dir, date, domains or None)
+    except ValueError as invalid_date:
+        raise typer.BadParameter(str(invalid_date)) from invalid_date
     if not paths:
         typer.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
     return paths
+
+
+# The phrase each variable's figure title opens with. Everything absent from
+# this table titles from its NetCDF output suffix (HFX, PRES, VAPOR, GLW, LH),
+# which is what the published PNGs already carry.
+_FIGURE_TITLES: dict[str, str] = {
+    WRFVariable.TEMPERATURE: "Temperature (°C)",
+    WRFVariable.SKIN_TEMPERATURE: "Skin Temperature (°C)",
+    WRFVariable.RELATIVE_HUMIDITY: "Relative Humidity 2m (%)",
+    WRFVariable.WIND: "Wind 10m (m/s)",
+    WRFVariable.RAIN: "Rain (mm)",
+    WRFVariable.SWDOWN: "SWDOWN (W/m²)",
+    WRFVariable.WIND_POWER_DENSITY_10M: "Wind Power Density 10m (W/m²)",
+}
+
+# Surface-pressure contours drawn over the temperature field, in hPa.
+_PRESSURE_CONTOUR_LEVELS: list[float] = [880, 900, 950, 1000, 1013]
 
 
 def _build_tasks_for_domain(
@@ -119,7 +143,15 @@ def _build_tasks_for_domain(
     task_sink: Callable[[list[FigureTask], str], None] | None = None,
     task_batch_size: int = 16,
 ) -> list[FigureTask]:
-    """Build all FigureTasks for a single domain file."""
+    """Build all FigureTasks for a single domain file.
+
+    Values and colour-scale bounds come from
+    :func:`~micrometeorology.wrf.value_source.build_value_frame_source`, the
+    same dispatcher the values-JSON work units use, so a variable is renderable
+    here exactly when it is exportable there. Only the figure decoration —
+    title phrase, colormap, the temperature pressure contours and the wind
+    quiver — is decided in this module.
+    """
     lon, lat = ds.read_grid()
     bounds = (
         float(np.amin(lon)),
@@ -150,290 +182,64 @@ def _build_tasks_for_domain(
         if var_name in _SKIP_FOR_FIGURES:
             typer.echo(f"  ⚠ Skipping {var_name} (no figure renderer)")
             continue
-        cmap = VARIABLE_COLORMAPS.get(var_name, "viridis")
+        frame_source = build_value_frame_source(ds, var_name)
+        if frame_source is None:
+            typer.echo(f"  ⚠ Variable {var_name.upper()} not found in dataset — skipping")
+            continue
+
         nc_suffix = VARIABLE_NETCDF_MAP.get(var_name, var_name.upper())
+        title_prefix = _FIGURE_TITLES.get(var_name, nc_suffix)
+        cmap = VARIABLE_COLORMAPS.get(var_name, "viridis")
+        # Read once per variable, not once per step: the whole time axis of
+        # PSFC is one eager read either way.
+        surface_pressure_hpa = (
+            ds.get_variable("PSFC") / 100.0 if var_name == WRFVariable.TEMPERATURE else None
+        )
 
-        if var_name == WRFVariable.TEMPERATURE:
-            t2, vmin, vmax = vmod.extract_temperature(ds)
-            psfc = ds.get_variable("PSFC") / 100.0
-            for meta in time_meta:
-                if meta.get("skip"):
-                    continue
-                i = meta["index"]
-                data = vmod.extract_temperature_step(t2[i : i + 1, :, :])
-                pressure = vmod.materialize_2d(psfc[i : i + 1, :, :])
-                add_task(
-                    FigureTask(
-                        lon=lon,
-                        lat=lat,
-                        data=vmod.materialize_2d(data),
-                        vmin=vmin,
-                        vmax=vmax,
-                        cmap_name=cmap,
-                        overlay_data=pressure,
-                        overlay_levels=[880, 900, 950, 1000, 1013],
-                        u=None,
-                        v=None,
-                        title=f"Temperature (°C){meta['label']}",
-                        output_path=str(
-                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
-                        ),
-                        map_config=map_config,
-                        dpi=dpi,
-                        saturation=2.0,
-                    )
-                )
-
-        elif var_name == WRFVariable.SKIN_TEMPERATURE:
-            tsk, vmin, vmax = vmod.extract_skin_temperature(ds)
-            for meta in time_meta:
-                if meta.get("skip"):
-                    continue
-                i = meta["index"]
-                data = vmod.extract_temperature_step(tsk[i : i + 1, :, :])
-                add_task(
-                    FigureTask(
-                        lon=lon,
-                        lat=lat,
-                        data=vmod.materialize_2d(data),
-                        vmin=vmin,
-                        vmax=vmax,
-                        cmap_name=cmap,
-                        overlay_data=None,
-                        overlay_levels=None,
-                        u=None,
-                        v=None,
-                        title=f"Skin Temperature (°C){meta['label']}",
-                        output_path=str(
-                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
-                        ),
-                        map_config=map_config,
-                        dpi=dpi,
-                        saturation=2.0,
-                    )
-                )
-
-        elif var_name == WRFVariable.RELATIVE_HUMIDITY:
-            rh, vmin, vmax = vmod.extract_relative_humidity(ds)
-            for meta in time_meta:
-                if meta.get("skip"):
-                    continue
-                i = meta["index"]
-                data = vmod.materialize_2d(rh[i : i + 1, :, :])
-                add_task(
-                    FigureTask(
-                        lon=lon,
-                        lat=lat,
-                        data=data,
-                        vmin=vmin,
-                        vmax=vmax,
-                        cmap_name=cmap,
-                        overlay_data=None,
-                        overlay_levels=None,
-                        u=None,
-                        v=None,
-                        title=f"Relative Humidity 2m (%){meta['label']}",
-                        output_path=str(
-                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
-                        ),
-                        map_config=map_config,
-                        dpi=dpi,
-                        saturation=2.0,
-                    )
-                )
-
-        elif var_name == WRFVariable.WIND:
-            u10, v10, vmin, vmax = vmod.extract_wind(ds)
-            for meta in time_meta:
-                if meta.get("skip"):
-                    continue
-                i = meta["index"]
-                u = vmod.materialize_2d(u10[i : i + 1])
-                v = vmod.materialize_2d(v10[i : i + 1])
-                speed = np.hypot(u, v)
-                add_task(
-                    FigureTask(
-                        lon=lon,
-                        lat=lat,
-                        data=speed,
-                        vmin=vmin,
-                        vmax=vmax,
-                        cmap_name=cmap,
-                        overlay_data=None,
-                        overlay_levels=None,
-                        u=u,
-                        v=v,
-                        title=f"Wind 10m (m/s){meta['label']}",
-                        output_path=str(
-                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
-                        ),
-                        map_config=map_config,
-                        dpi=dpi,
-                        saturation=2.0,
-                    )
-                )
-
-        elif var_name == WRFVariable.RAIN:
-            total, vmin, vmax = vmod.extract_rain(ds)
-            for meta in time_meta:
-                if meta.get("skip"):
-                    continue
-                i = meta["index"]
-                data = vmod.extract_rain_step(total, i)
-                add_task(
-                    FigureTask(
-                        lon=lon,
-                        lat=lat,
-                        data=vmod.materialize_2d(data),
-                        vmin=vmin,
-                        vmax=vmax,
-                        cmap_name=cmap,
-                        overlay_data=None,
-                        overlay_levels=None,
-                        u=None,
-                        v=None,
-                        title=f"Rain (mm){meta['label']}",
-                        output_path=str(
-                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
-                        ),
-                        map_config=map_config,
-                        dpi=dpi,
-                        saturation=2.0,
-                    )
-                )
-
-        elif var_name == WRFVariable.SWDOWN:
-            # Solar radiation — skip nighttime (local hours 0-5 and 19-23)
-            if not ds.has_variable("SWDOWN"):
-                typer.echo("  ⚠ Variable SWDOWN not found in dataset — skipping")
+        for meta in time_meta:
+            if meta.get("skip"):
                 continue
-            var_data, vmin, vmax = vmod.extract_scalar(ds, "SWDOWN")
-            for meta in time_meta:
-                if meta.get("skip"):
-                    continue
-                local_hour = meta["datetime_local"].hour
-                if local_hour < 6 or local_hour > 18:
-                    continue
-                i = meta["index"]
-                data = vmod.materialize_2d(var_data[i : i + 1, :, :])
-                add_task(
-                    FigureTask(
-                        lon=lon,
-                        lat=lat,
-                        data=data,
-                        vmin=vmin,
-                        vmax=vmax,
-                        cmap_name=cmap,
-                        overlay_data=None,
-                        overlay_levels=None,
-                        u=None,
-                        v=None,
-                        title=f"SWDOWN (W/m²){meta['label']}",
-                        output_path=str(
-                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
-                        ),
-                        map_config=map_config,
-                        dpi=dpi,
-                        saturation=2.0,
-                    )
-                )
-
-        elif var_name == WRFVariable.WIND_POWER_DENSITY_10M:
-            power_density, vmin, vmax = vmod.extract_wind_power_density_10m(ds)
-            for meta in time_meta:
-                if meta.get("skip"):
-                    continue
-                i = meta["index"]
-                data = vmod.materialize_2d(power_density[i : i + 1, :, :])
-                add_task(
-                    FigureTask(
-                        lon=lon,
-                        lat=lat,
-                        data=data,
-                        vmin=vmin,
-                        vmax=vmax,
-                        cmap_name=cmap,
-                        overlay_data=None,
-                        overlay_levels=None,
-                        u=None,
-                        v=None,
-                        title=f"Wind Power Density 10m (W/m²){meta['label']}",
-                        output_path=str(
-                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
-                        ),
-                        map_config=map_config,
-                        dpi=dpi,
-                        saturation=2.0,
-                    )
-                )
-
-        else:
-            # Generic scalar (HFX, LH, pressure, vapor)
-            nc_var = var_name.upper()
-            if var_name == WRFVariable.PRESSURE:
-                var_data, vmin, vmax = vmod.extract_pressure(ds)
-            elif var_name == WRFVariable.VAPOR:
-                var_data, vmin, vmax = vmod.extract_vapor(ds)
-            elif ds.has_variable(nc_var):
-                var_data, vmin, vmax = vmod.extract_scalar(ds, nc_var)
+            if var_name == WRFVariable.SWDOWN and not is_daylight_step(meta):
+                continue
+            i = meta["index"]
+            u: NDArray | None
+            v: NDArray | None
+            if frame_source.vector_for_step is not None:
+                u, v = frame_source.vector_for_step(i)
+                data = np.hypot(u, v)
             else:
-                typer.echo(f"  ⚠ Variable {nc_var} not found in dataset — skipping")
-                continue
-
-            for meta in time_meta:
-                if meta.get("skip"):
-                    continue
-                i = meta["index"]
-                data = vmod.materialize_2d(var_data[i : i + 1, :, :])
-                add_task(
-                    FigureTask(
-                        lon=lon,
-                        lat=lat,
-                        data=data,
-                        vmin=vmin,
-                        vmax=vmax,
-                        cmap_name=cmap,
-                        overlay_data=None,
-                        overlay_levels=None,
-                        u=None,
-                        v=None,
-                        title=f"{nc_suffix}{meta['label']}",
-                        output_path=str(
-                            Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"
-                        ),
-                        map_config=map_config,
-                        dpi=dpi,
-                        saturation=2.0,
-                    )
+                u = v = None
+                data = frame_source.frame_for_step(i)
+            overlay_data = (
+                vmod.materialize_2d(surface_pressure_hpa[i : i + 1, :, :])
+                if surface_pressure_hpa is not None
+                else None
+            )
+            add_task(
+                FigureTask(
+                    lon=lon,
+                    lat=lat,
+                    data=data,
+                    vmin=frame_source.scale_min,
+                    vmax=frame_source.scale_max,
+                    cmap_name=cmap,
+                    overlay_data=overlay_data,
+                    overlay_levels=_PRESSURE_CONTOUR_LEVELS if overlay_data is not None else None,
+                    u=u,
+                    v=v,
+                    title=f"{title_prefix}{meta['label']}",
+                    output_path=str(Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"),
+                    map_config=map_config,
+                    dpi=dpi,
+                    saturation=2.0,
                 )
+            )
 
         if task_sink is not None and tasks:
             task_sink(tasks, var_name)
             tasks.clear()
 
     return tasks
-
-
-def _parse_csv(raw: str | list[str] | None) -> tuple[str, ...]:
-    if not raw:
-        return ()
-    if isinstance(raw, str):
-        raw = [raw]
-    res: list[str] = []
-    for item in raw:
-        res.extend(x.strip() for x in item.split(",") if x.strip())
-    return tuple(res)
-
-
-def _parse_int_csv(raw: str | list[str] | None) -> tuple[int, ...]:
-    if not raw:
-        return ()
-    if isinstance(raw, str):
-        raw = [raw]
-    res: list[int] = []
-    for item in raw:
-        res.extend(int(x.strip()) for x in item.split(",") if x.strip())
-    return tuple(res)
 
 
 @app.command()
@@ -471,9 +277,9 @@ def run(
     """Generate WRF map figures with parallel rendering."""
     setup_logging(log_level)
 
-    var_list = list(_parse_csv(variables)) if variables else DEFAULT_VARS
+    var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
     var_list = _normalize_var_list(var_list)
-    paths = _resolve_wrfout_paths(wrf_dir, date, _parse_int_csv(domains), dataset)
+    paths = _resolve_wrfout_paths(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")
         return

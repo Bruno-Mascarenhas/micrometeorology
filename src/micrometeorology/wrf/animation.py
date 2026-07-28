@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, cast
@@ -56,7 +57,7 @@ def create_gif(
 
 
 def create_webm_from_images(
-    image_paths: list[str | Path],
+    image_paths: Sequence[str | Path],
     output_path: str | Path,
     fps: int = 2,
 ) -> Path:
@@ -136,7 +137,7 @@ def _batch_single_webm(args: tuple[str, list[str], str, int]) -> str | None:
         return None
     out = Path(output_dir) / f"{name}.webm"
     try:
-        create_webm_from_images(paths, out, fps=fps)  # type: ignore
+        create_webm_from_images(paths, out, fps=fps)
         return str(out)
     except Exception:
         logger.exception("Failed to create WebM: %s", name)

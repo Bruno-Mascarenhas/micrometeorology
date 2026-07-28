@@ -24,6 +24,7 @@ from typing import Annotated
 
 import typer
 
+from micrometeorology.common.cli_options import parse_csv, parse_int_csv
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import jobs
@@ -90,20 +91,6 @@ def _normalize_var_list(var_list: list[str]) -> list[str]:
     return normalized
 
 
-def _normalized_date(date: str) -> str:
-    """Return the digit run ``resolve_wrfout_paths`` slices, rejecting typos.
-
-    ``2026-07-27`` and ``2026/07/27`` are accepted (they match nothing today,
-    and the wrfout names themselves are ISO, so they are the natural typo);
-    a longer ``YYYYMMDDHH`` prefix keeps working. Anything else is a mistake
-    that must not be reported as a day on which WRF produced no files.
-    """
-    digits = date.replace("-", "").replace("/", "")
-    if not digits.isdigit() or len(digits) < 8:
-        raise typer.BadParameter(f"--date must be YYYYMMDD (got {date!r})")
-    return digits
-
-
 def _missing_domains(paths: list[Path], domains: tuple[int, ...]) -> tuple[int, ...]:
     """Explicitly requested domains that no selected file provides."""
     found = {
@@ -112,6 +99,14 @@ def _missing_domains(paths: list[Path], domains: tuple[int, ...]) -> tuple[int, 
         if match is not None
     }
     return tuple(d for d in sorted(set(domains)) if f"d{d:02d}" not in found)
+
+
+def _matching_wrfout_paths(wrf_dir: Path | str, date: str, domains: tuple[int, ...]) -> list[Path]:
+    """Glob the requested day, reporting a mistyped ``--date`` as a usage error."""
+    try:
+        return resolve_wrfout_paths(wrf_dir, date, domains or None)
+    except ValueError as invalid_date:
+        raise typer.BadParameter(str(invalid_date)) from invalid_date
 
 
 def _resolve_paths(
@@ -146,7 +141,7 @@ def _resolve_paths(
         if not paths:
             typer.echo(f"  ⚠ No wrfout files found in {wrf_dir}")
     else:
-        paths = resolve_wrfout_paths(wrf_dir, _normalized_date(date), domains or None)
+        paths = _matching_wrfout_paths(wrf_dir, date, domains)
         if not paths:
             typer.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
     return paths, _missing_domains(paths, domains)
@@ -166,30 +161,6 @@ def _reject_output_id_variables(var_list: list[str]) -> None:
             raise typer.BadParameter(
                 f"{variable} is the output file id of {owner}; pass -v {owner}"
             )
-
-
-def _parse_int_csv(raw: str | list[str] | None) -> tuple[int, ...]:
-    """Parse comma-separated or repeated integers."""
-    if not raw:
-        return ()
-    if isinstance(raw, str):
-        raw = [raw]
-    res: list[int] = []
-    for item in raw:
-        res.extend(int(x.strip()) for x in item.split(",") if x.strip())
-    return tuple(res)
-
-
-def _parse_csv(raw: str | list[str] | None) -> tuple[str, ...]:
-    """Parse comma-separated or repeated strings."""
-    if not raw:
-        return ()
-    if isinstance(raw, str):
-        raw = [raw]
-    res: list[str] = []
-    for item in raw:
-        res.extend(x.strip() for x in item.split(",") if x.strip())
-    return tuple(res)
 
 
 @app.command()
@@ -257,10 +228,10 @@ def run(
     """
     setup_logging(log_level)
 
-    var_list = list(_parse_csv(variables)) if variables else DEFAULT_VARS
+    var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
     var_list = _normalize_var_list(var_list)
     _reject_output_id_variables(var_list)
-    paths, missing_domains = _resolve_paths(wrf_dir, date, _parse_int_csv(domains), dataset)
+    paths, missing_domains = _resolve_paths(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")
         raise typer.Exit(code=1 if strict else 0)
@@ -277,9 +248,14 @@ def run(
     typer.echo(f"Variables: {var_list}")
     typer.echo(f"Workers: {resolved_workers}")
 
-    units = jobs.build_units(
-        paths, var_list, output_dir, geojson_dir, skip_first, site_artifacts=site_artifacts
-    )
+    try:
+        units = jobs.build_units(
+            paths, var_list, output_dir, geojson_dir, skip_first, site_artifacts=site_artifacts
+        )
+    except ValueError as invalid_selection:
+        # A selection covering one domain twice is an operator mistake about
+        # -d/-D/-o, so it reads as a usage error rather than a traceback.
+        raise typer.BadParameter(str(invalid_selection)) from invalid_selection
     results = jobs.execute_units(units, resolved_workers, echo=typer.echo)
 
     for result in results:

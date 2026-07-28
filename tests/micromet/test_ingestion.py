@@ -134,3 +134,21 @@ class TestMergeDatFiles:
     def test_empty_paths_rejected(self) -> None:
         with pytest.raises(ValueError, match="No files to merge"):
             merge_dat_files([])
+
+    def test_the_path_lists_real_callers_build_are_accepted(self, tmp_path: Path) -> None:
+        """Both spellings must type-check, not just run.
+
+        ``common.paths.find_files`` hands over a ``list[Path]`` and the CLIs a
+        ``list[str]``; an invariant ``list[str | Path]`` parameter rejects both
+        under mypy, which is what the two bare ``# type: ignore`` comments at
+        the call sites were hiding. This call is the mypy assertion.
+        """
+        written = _write_toa5(
+            tmp_path / "one.dat",
+            ["shared"],
+            [("2025-06-25 12:00:00", [400.0])],
+        )
+        as_strings: list[str] = [written]
+        as_paths: list[Path] = [Path(written)]
+
+        assert merge_dat_files(as_strings).equals(merge_dat_files(as_paths))

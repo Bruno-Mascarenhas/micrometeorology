@@ -67,6 +67,78 @@ def test_failed_figures_still_produce_json_but_exit_non_zero(tmp_path, monkeypat
     )
 
 
+def test_an_output_file_id_is_refused_before_anything_is_written(tmp_path, monkeypatch):
+    """``-v TSK`` would publish raw Kelvin into the files skin_temperature owns.
+
+    The reject list lives with the export CLI; this pipeline used to reach for
+    only half of it, so the same token was refused by ``labmim-wrf-geojson``
+    and quietly honoured here.
+    """
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_pipeline_tsk.nc"
+    _write_full_wrf_file(wrf, seed=5)
+    out = tmp_path / "out"
+
+    result = CliRunner().invoke(
+        run_wrf_pipeline.app,
+        ["-d", str(wrf), "-o", str(out), "-v", "TSK", "-w", "1"],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "TSK is the output file id of skin_temperature" in result.output
+    assert not out.exists()
+
+
+def test_two_files_of_one_domain_are_a_usage_error_not_a_traceback(tmp_path, monkeypatch):
+    """The same-domain guard lives in ``jobs.build_units`` and raises ValueError."""
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+    for suffix in ("00", "06"):
+        _write_full_wrf_file(wrf_dir / f"wrfout_d02_2026-05-03_{suffix}:00:00", seed=5)
+
+    monkeypatch.setattr(
+        batch,
+        "run_figure_tasks",
+        lambda tasks, *_args, **_kwargs: [task.output_path for task in tasks],
+    )
+
+    result = CliRunner().invoke(
+        run_wrf_pipeline.app,
+        [
+            "--wrf-dir",
+            str(wrf_dir),
+            "--date",
+            "20260503",
+            "-o",
+            str(tmp_path / "out"),
+            "-v",
+            "temperature",
+            "--no-figures",
+            "-w",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "A run publishes one set of files per domain" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_a_malformed_date_is_refused_by_the_pipeline(tmp_path):
+    """Every wrfout-resolving CLI shares one ``--date`` validator."""
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+
+    result = CliRunner().invoke(
+        run_wrf_pipeline.app,
+        ["--wrf-dir", str(wrf_dir), "--date", "may3", "-o", str(tmp_path / "out")],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "--date must be YYYYMMDD" in result.output
+
+
 def test_successful_figure_run_exits_zero(tmp_path, monkeypatch):
     monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_pipeline_ok.nc"

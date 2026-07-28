@@ -17,6 +17,7 @@ import pytest
 
 from micrometeorology.cli.export_wrf_geojson import _normalize_var_list
 from micrometeorology.wrf import jobs
+from micrometeorology.wrf.value_source import ValueFrameSource, build_value_frame_source
 from tests.micromet import _reference
 
 NT, NZ, NY, NX = 5, 4, 4, 5
@@ -124,8 +125,8 @@ def test_value_frame_source_exposes_named_scale_and_step_contract(tmp_path):
     _write_full_wrf_file(wrf, seed=6)
 
     with jobs.WRFDataset(wrf) as dataset:
-        temperature_source = jobs._build_value_frame_source(dataset, "temperature")
-        assert isinstance(temperature_source, jobs._ValueFrameSource)
+        temperature_source = build_value_frame_source(dataset, "temperature")
+        assert isinstance(temperature_source, ValueFrameSource)
 
         temperature_kelvin, expected_min, expected_max = jobs.variables.extract_temperature(dataset)
         assert temperature_source.scale_min == expected_min
@@ -135,8 +136,8 @@ def test_value_frame_source_exposes_named_scale_and_step_contract(tmp_path):
             jobs.variables.extract_temperature_step(temperature_kelvin[2:3, :, :]),
         )
 
-        wind_source = jobs._build_value_frame_source(dataset, "wind")
-        assert isinstance(wind_source, jobs._ValueFrameSource)
+        wind_source = build_value_frame_source(dataset, "wind")
+        assert isinstance(wind_source, ValueFrameSource)
         u10_values, v10_values, expected_min, expected_max = jobs.variables.extract_wind(dataset)
         assert wind_source.scale_min == expected_min
         assert wind_source.scale_max == expected_max
@@ -145,7 +146,7 @@ def test_value_frame_source_exposes_named_scale_and_step_contract(tmp_path):
             np.hypot(u10_values[1], v10_values[1]),
         )
 
-        assert jobs._build_value_frame_source(dataset, "GLW") is None
+        assert build_value_frame_source(dataset, "GLW") is None
 
 
 def test_values_json_matches_reference_payload_with_int_formatting(tmp_path):

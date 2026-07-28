@@ -40,6 +40,7 @@ from micrometeorology.wrf.reader import (
     detect_grid_level,
     product_timezone,
 )
+from micrometeorology.wrf.value_source import build_value_frame_source, is_daylight_step
 
 logger = logging.getLogger(__name__)
 
@@ -257,108 +258,6 @@ class _SiteArtifactAccumulator:
         return [str(series_path), summary_path]
 
 
-@dataclass(frozen=True, slots=True)
-class _ValueFrameSource:
-    """Values and color-scale bounds for one exported WRF variable."""
-
-    frame_for_step: Callable[[int], NDArray]
-    scale_min: float
-    scale_max: float
-
-
-def _build_value_frame_source(
-    dataset: WRFDataset,
-    variable_name: str,
-) -> _ValueFrameSource | None:
-    """Build a frame reader and color-scale bounds for a values-JSON variable.
-
-    Mirrors the per-variable branches of the legacy task builder exactly —
-    same extractors, same per-step arithmetic — so output bytes match.
-    Returns ``None`` when the variable is absent from the file.
-    """
-    if variable_name == WRFVariable.TEMPERATURE:
-        temperature_kelvin, scale_min, scale_max = variables.extract_temperature(dataset)
-        return _ValueFrameSource(
-            frame_for_step=lambda time_step_index: variables.materialize_2d(
-                variables.extract_temperature_step(
-                    temperature_kelvin[time_step_index : time_step_index + 1, :, :]
-                )
-            ),
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.SKIN_TEMPERATURE:
-        skin_temperature_kelvin, scale_min, scale_max = variables.extract_skin_temperature(dataset)
-        return _ValueFrameSource(
-            frame_for_step=lambda time_step_index: variables.materialize_2d(
-                variables.extract_temperature_step(
-                    skin_temperature_kelvin[time_step_index : time_step_index + 1, :, :]
-                )
-            ),
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.RELATIVE_HUMIDITY:
-        relative_humidity, scale_min, scale_max = variables.extract_relative_humidity(dataset)
-        return _ValueFrameSource(
-            frame_for_step=lambda time_step_index: variables.materialize_2d(
-                relative_humidity[time_step_index : time_step_index + 1, :, :]
-            ),
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.RAIN:
-        cumulative_rain, scale_min, scale_max = variables.extract_rain(dataset)
-        return _ValueFrameSource(
-            frame_for_step=lambda time_step_index: variables.materialize_2d(
-                variables.extract_rain_step(cumulative_rain, time_step_index)
-            ),
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.WIND:
-        u10_values, v10_values, scale_min, scale_max = variables.extract_wind(dataset)
-
-        def wind_speed_for_step(time_step_index: int) -> NDArray:
-            u10_step = variables.materialize_2d(u10_values[time_step_index : time_step_index + 1])
-            v10_step = variables.materialize_2d(v10_values[time_step_index : time_step_index + 1])
-            wind_speed: NDArray = np.hypot(u10_step, v10_step)
-            return wind_speed
-
-        return _ValueFrameSource(
-            frame_for_step=wind_speed_for_step,
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.WIND_POWER_DENSITY_10M:
-        power_density, scale_min, scale_max = variables.extract_wind_power_density_10m(dataset)
-        return _ValueFrameSource(
-            frame_for_step=lambda time_step_index: variables.materialize_2d(
-                power_density[time_step_index : time_step_index + 1, :, :]
-            ),
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.PRESSURE:
-        scalar_values, scale_min, scale_max = variables.extract_pressure(dataset)
-    elif variable_name == WRFVariable.VAPOR:
-        scalar_values, scale_min, scale_max = variables.extract_vapor(dataset)
-    else:
-        netcdf_variable_name = variable_name.upper()
-        if not dataset.has_variable(netcdf_variable_name):
-            return None
-        scalar_values, scale_min, scale_max = variables.extract_scalar(
-            dataset, netcdf_variable_name
-        )
-    return _ValueFrameSource(
-        frame_for_step=lambda time_step_index: variables.materialize_2d(
-            scalar_values[time_step_index : time_step_index + 1, :, :]
-        ),
-        scale_min=scale_min,
-        scale_max=scale_max,
-    )
-
-
 def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str], list[str]]:
     """Write every timestep JSON of one values variable.
 
@@ -373,7 +272,7 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
     output_variable_id = VARIABLE_NETCDF_MAP.get(unit.variable, unit.variable.upper())
     time_step_metadata = dataset.build_date_metadata(skip_first_n=unit.skip_first)
 
-    frame_source = _build_value_frame_source(dataset, unit.variable)
+    frame_source = build_value_frame_source(dataset, unit.variable)
     if frame_source is None:
         unit_warnings.append(f"Variable {unit.variable.upper()} not found — skipped")
         return written_files, unit_warnings, [output_variable_id]
@@ -384,10 +283,8 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
     for step_metadata in time_step_metadata:
         if step_metadata.get("skip"):
             continue
-        if unit.variable == WRFVariable.SWDOWN:
-            local_hour = step_metadata["datetime_local"].hour
-            if local_hour < 6 or local_hour > 18:
-                continue
+        if unit.variable == WRFVariable.SWDOWN and not is_daylight_step(step_metadata):
+            continue
         time_step_index = step_metadata["index"]
         frame_values = frame_source.frame_for_step(time_step_index)
         formatted_local_time = _format_datetime(step_metadata["datetime_local"])

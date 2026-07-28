@@ -10,11 +10,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
+import numpy as np
 from typer.testing import CliRunner
 
 from micrometeorology.cli import render_wrf_maps
-from micrometeorology.wrf import reader
+from micrometeorology.wrf import jobs, reader, value_source
 from micrometeorology.wrf.batch import FigureTask
+from micrometeorology.wrf.value_source import ValueFrameSource
 from tests.micromet.test_wrf_jobs import NT, _write_full_wrf_file
 
 
@@ -182,6 +184,81 @@ def test_missing_swdown_warns_and_skips_instead_of_aborting(tmp_path, monkeypatc
     tasks = _build_tasks(wrf, ["SWDOWN", "temperature"], tmp_path / "figs")
 
     assert [Path(t.output_path).name for t in tasks] == [f"TEMP_D02_{i:03d}.png" for i in range(NT)]
+
+
+# ---------------------------------------------------------------------------
+# One dispatcher, two products
+# ---------------------------------------------------------------------------
+
+
+def test_figure_values_come_from_the_shared_value_frame_source(tmp_path, monkeypatch):
+    """The figure path must not carry a private copy of the extractor dispatch.
+
+    Values and scale bounds are read from the same dispatcher the values-JSON
+    work units use, so replacing that dispatcher changes what every PNG is
+    drawn from. A second copy in this module would ignore it and keep
+    publishing its own numbers.
+    """
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_shared.nc"
+    _write_full_wrf_file(wrf, seed=5)
+
+    sentinel_frame = np.arange(20, dtype=np.float64).reshape(4, 5)
+    monkeypatch.setattr(
+        render_wrf_maps,
+        "build_value_frame_source",
+        lambda _dataset, _variable_name: ValueFrameSource(
+            frame_for_step=lambda _index: sentinel_frame,
+            scale_min=-1.5,
+            scale_max=2.5,
+        ),
+    )
+
+    tasks = _build_tasks(wrf, ["temperature", "HFX"], tmp_path / "figs")
+
+    assert len(tasks) == 2 * NT
+    for task in tasks:
+        np.testing.assert_array_equal(task.data, sentinel_frame)
+        assert (task.vmin, task.vmax) == (-1.5, 2.5)
+
+
+def _written_step_names(result: jobs.UnitResult) -> list[str]:
+    return sorted(
+        Path(f).name for f in result.files if not f.endswith((".series.bin", ".summary.json"))
+    )
+
+
+def test_the_swdown_daylight_window_has_one_owner_for_figures_and_json(tmp_path, monkeypatch):
+    """Widening or narrowing the daylight window must move both products.
+
+    The rule used to be spelled out twice — once per product — so a change to
+    one silently left the other publishing the old window.
+    """
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    monkeypatch.setattr(value_source, "FIRST_DAYLIGHT_HOUR", 9)
+    wrf = tmp_path / "wrfout_d02_window.nc"
+    # 09..13 UTC = 06..10 local; only the last two steps survive a 09h floor.
+    _write_full_wrf_file(wrf, seed=5, start_hour_utc=9)
+
+    tasks = _build_tasks(wrf, ["SWDOWN"], tmp_path / "figs")
+    assert [Path(task.output_path).name for task in tasks] == [
+        "SWDOWN_D02_003.png",
+        "SWDOWN_D02_004.png",
+    ]
+
+    json_dir = tmp_path / "json"
+    json_dir.mkdir()
+    result = jobs.process_unit(
+        jobs.WorkUnit(
+            kind="values_json",
+            wrf_path=str(wrf),
+            variable="SWDOWN",
+            json_dir=str(json_dir),
+            geojson_dir=str(tmp_path / "geo"),
+        )
+    )
+    assert result.error is None
+    assert _written_step_names(result) == ["D02_SWDOWN_003.json", "D02_SWDOWN_004.json"]
 
 
 def _drop_variable(wrf_path: Path, name: str) -> None:

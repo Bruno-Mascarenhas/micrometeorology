@@ -8,6 +8,8 @@ positional.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -18,11 +20,13 @@ from matplotlib.figure import Figure
 
 from micrometeorology.sensors.export import export_csv
 from micrometeorology.stats.comparison import (
+    compare_all_variables,
     compare_variables,
     pair_dataframes,
-    plot_comparison,
     read_dataset,
 )
+from micrometeorology.stats.comparison_plots import plot_comparison
+from micrometeorology.stats.metrics import ALL_METRICS
 
 STRICT_PANDAS_MIGRATION = pytest.mark.filterwarnings("error::pandas.errors.PandasChangeWarning")
 
@@ -109,6 +113,64 @@ class TestPairDataframes:
 
         assert paired.index.name == "time"
         assert list(paired.columns) == ["T_obs", "T_model"]
+
+
+class TestCompareAllVariables:
+    def test_the_table_is_indexed_by_every_metric_name_with_real_values(self) -> None:
+        """Rows are the metric names and the numbers are the metrics, not NaN.
+
+        A ``compare_all_variables`` that dropped a metric, or a ``compute_all``
+        that returned NaN unconditionally, would still produce a
+        correctly-shaped table; the pinned values are what rule both out.
+        """
+        index = pd.date_range("2020-01-01", periods=5, freq="1h")
+        observed = [1.0, 2.0, 3.0, 4.0, 5.0]
+        paired = pd.DataFrame(
+            {
+                "T_obs": observed,
+                "T_model": [v + 1.0 for v in observed],
+                "RH_obs": observed,
+                "RH_model": observed,
+            },
+            index=index,
+        )
+
+        table = compare_all_variables(paired)
+
+        assert list(table.index) == list(ALL_METRICS)
+        assert list(table.columns) == ["RH", "T"]
+        assert table.loc["RMSE", "T"] == pytest.approx(1.0)
+        assert table.loc["MBE", "T"] == pytest.approx(1.0)
+        assert table.loc["R²", "T"] == pytest.approx(0.5)
+        assert table.loc["RMSE", "RH"] == pytest.approx(0.0)
+
+    def test_an_unpaired_column_is_left_out_of_the_table(self) -> None:
+        index = pd.date_range("2020-01-01", periods=3, freq="1h")
+        paired = pd.DataFrame(
+            {"T_obs": [1.0, 2.0, 3.0], "T_model": [1.0, 2.0, 3.0], "RH_obs": [4.0, 5.0, 6.0]},
+            index=index,
+        )
+
+        assert list(compare_all_variables(paired).columns) == ["T"]
+
+
+def test_reading_and_scoring_a_dataset_does_not_import_matplotlib() -> None:
+    """``labmim-metrics`` pays ~0.5 s per run for a plot it never draws.
+
+    ``stats.comparison`` is pure pandas; the figure lives in
+    ``stats.comparison_plots``. Asserting on the module registry of a fresh
+    interpreter is the only check that survives another test importing
+    matplotlib first.
+    """
+    probe = (
+        "import sys, micrometeorology.stats.comparison, micrometeorology.cli.compute_metrics; "
+        "print(any(m == 'matplotlib' or m.startswith('matplotlib.') for m in sys.modules))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+
+    assert result.stdout.strip() == "False", result.stdout
 
 
 class TestPlotComparison:
