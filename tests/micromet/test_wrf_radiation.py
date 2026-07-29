@@ -517,28 +517,33 @@ def _read_operational(domain: str) -> dict:
     time because radiation has not been called yet, which is spin-up rather
     than a physical state.
     """
+    names = (
+        "EMISS",
+        "TSK",
+        "GLW",
+        "SWDOWN",
+        "ALBEDO",
+        "T2",
+        "COSZEN",
+        "HFX",
+        "LH",
+        "GRDFLX",
+        "SWUPB",
+        "SWDNB",
+        "Q2",
+        "PSFC",
+    )
     with netCDF4.Dataset(_operational_file(domain)) as ds:
-        names = [
-            "EMISS",
-            "TSK",
-            "GLW",
-            "SWDOWN",
-            "ALBEDO",
-            "T2",
-            "COSZEN",
-            "HFX",
-            "LH",
-            "GRDFLX",
-            "SWUPB",
-            "SWDNB",
-            "Q2",
-            "PSFC",
-        ]
-        fields = {n: np.asarray(ds.variables[n][:]).astype(np.float64) for n in names}
+        # Sliced at read time rather than after: step 0 never has to be
+        # materialized, and every field then shares one time axis.
+        fields: dict[str, np.ndarray] = {
+            name: np.asarray(ds.variables[name][1:]).astype(np.float64) for name in names
+        }
+        # Land mask, not a field: 2-D and time-invariant, so it is neither
+        # sliced nor float. Kept in the same dict because every caller wants it
+        # alongside the fields it masks.
         fields["land"] = np.asarray(ds.variables["XLAND"][0]).astype(np.float64) < 1.5
-    live = {k: (v[1:] if v.ndim == 3 else v) for k, v in fields.items()}
-    live["land"] = fields["land"]
-    return live
+    return fields
 
 
 @pytest.mark.skipif(not _LWUPB_FILE.exists(), reason="archive wrfout with LWUPB absent")
