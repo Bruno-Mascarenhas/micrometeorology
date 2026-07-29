@@ -7,7 +7,9 @@ duplicated across the ``drawmap()`` functions in the legacy scripts.
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass
+from datetime import datetime
 
 import numpy as np
 from numpy.typing import NDArray
@@ -228,6 +230,345 @@ def extract_scalar(ds: WRFDataset, var_name: str) -> tuple[NDArray, float, float
     var = ds.get_variable(var_name)
     v_min, v_max = percentile_scale_bounds(var)
     return var, v_min, v_max
+
+
+# ---------------------------------------------------------------------------
+# Derived surface radiation budget
+#
+# wrfout files carry the DOWNWELLING fluxes as diagnostics (SWDOWN, GLW) but
+# the upwelling ones only when the RRTMG bottom-of-atmosphere outputs are
+# switched on: LWUPB/SWUPB are present in the 2013 archive runs and absent
+# from the 2026 operational runs. Everything below is therefore reconstructed
+# from fields every wrfout generation carries — EMISS, TSK, GLW, SWDOWN,
+# ALBEDO, T2, COSZEN — so a budget term publishes identically across runs.
+#
+# The reconstruction is validated against WRF's own fluxes where those exist
+# (d02 2013, 9801 cells x 9 steps): LWUP reproduces LWUPB to MAE 0.82 W/m2
+# (0.11% of a ~420 W/m2 signal) and SWUP reproduces SWUPB exactly.
+# ---------------------------------------------------------------------------
+
+#: Stefan-Boltzmann constant, W m-2 K-4 (CODATA 2018).
+STEFAN_BOLTZMANN = 5.670374419e-8
+
+#: Total solar irradiance at 1 AU, W m-2. Kopp & Lean (2011) measured
+#: 1360.8 +- 0.5; matches ``allsky.solar.SOLAR_CONSTANT_WM2`` so the WRF and
+#: all-sky-camera clearness indices are on one scale. Older references
+#: (Duffie & Beckman, quoting the WRC) still carry 1367, which would shift kt
+#: by 0.4%.
+SOLAR_CONSTANT = 1361.0
+
+#: Sun-elevation floor for the clearness index. Below it the extraterrestrial
+#: denominator is small enough that ``kt`` is dominated by the horizon
+#: singularity rather than by sky condition, so those cells publish "no value".
+#:
+#: cos(z) = 0.1736 is a solar zenith angle of 80 degrees (elevation 10), the
+#: daytime threshold used by the ARM best-estimate radiation VAP (Shi & Long,
+#: DOE/SC-ARM/TR-008); BSRN's component tests tighten further at SZA < 75.
+#: Those thresholds exist to bound pyranometer cosine-response error, which
+#: model output does not have — but the same grazing geometry is also where
+#: WRF's plane-parallel radiative transfer is least trustworthy, so the
+#: threshold carries over for a different reason. On a 76-step operational d04
+#: run this keeps 30 of the 39 daylight frames and ~77% of their cells.
+MIN_COSZEN_FOR_CLEARNESS = 0.1736
+
+
+def _eccentricity_correction(times: list[datetime]) -> NDArray:
+    """Sun-Earth distance correction ``E0 = (r0/r)^2`` per time step (Spencer 1971).
+
+    Same series as :func:`allsky.solar.eccentricity_correction`; duplicated
+    rather than imported because ``micrometeorology`` and ``allsky`` are
+    independent packages. E0 runs 0.9666 (aphelion, early July) to 1.0351
+    (perihelion, early January) — a +-3.4% swing that is not negligible for a
+    clearness index, which is why COSZEN alone is not the denominator.
+    """
+    fractional_year = np.array(
+        [
+            2.0
+            * np.pi
+            / 365.0
+            * (
+                t.timetuple().tm_yday
+                - 1.0
+                + (t.hour + t.minute / 60.0 + t.second / 3600.0 - 12.0) / 24.0
+            )
+            for t in times
+        ],
+        dtype=np.float64,
+    )
+    correction: NDArray = (
+        1.000110
+        + 0.034221 * np.cos(fractional_year)
+        + 0.001280 * np.sin(fractional_year)
+        + 0.000719 * np.cos(2.0 * fractional_year)
+        + 0.000077 * np.sin(2.0 * fractional_year)
+    )
+    return correction
+
+
+def _finite_scale_bounds(values: NDArray, fallback: tuple[float, float]) -> tuple[float, float]:
+    """Percentile scale bounds, falling back when the field is entirely no-value.
+
+    Only the clearness index can reach this: an all-night file leaves every
+    cell NaN, ``nanmin``/``nanpercentile`` return NaN, and the values writer
+    rejects non-finite bounds outright. Those steps are gated out and never
+    published, but the bounds are computed eagerly before the gate runs.
+    """
+    with warnings.catch_warnings():
+        # nanmin/nanpercentile warn (and return NaN) on an all-NaN input; the
+        # NaN is the signal we act on below, so the warning is noise.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        low, high = percentile_scale_bounds(values)
+    if not (np.isfinite(low) and np.isfinite(high)):
+        return fallback
+    return low, high
+
+
+def compute_upwelling_longwave(emiss: NDArray, tsk: NDArray, glw: NDArray) -> NDArray:
+    """Upwelling longwave radiation at the surface.
+
+    Input variables
+        ``EMISS`` surface emissivity (0-1), ``TSK`` skin temperature (K), and
+        ``GLW`` downwelling longwave flux at the ground (W/m2).
+    Formula
+        ``LWup = eps * sigma * TSK^4 + (1 - eps) * GLW``. The first term is the
+        surface's own graybody emission; the second is the fraction of the
+        incoming sky radiance a non-black surface reflects. Dropping the
+        reflected term is the common mistake and costs ~15 W/m2 here — nearly
+        20x the error of the full form.
+
+        This is not an approximation of what WRF does, it is what WRF does.
+        RRTMG's ``rtrnmc`` forms the upward radiance per band as
+        ``radlu = rad0 + reflect * radld`` with ``rad0 = semiss * B(Ts)`` and
+        ``reflect = 1 - semiss`` (``phys/module_ra_rrtmg_lw.F``, under
+        "Add in specular reflection of surface downward radiance"), and the
+        urban branch of Noah writes the same expression out longhand:
+        ``rl_up_rural = -emiss*sigma*tsk**4 - (1.-emiss)*glw``
+        (``phys/module_sf_noahdrv.F``). Noah's own net-longwave term
+        ``emiss*GLW - emiss*sigma*T1**4`` is the same identity with the
+        reflected part already cancelled, not a scheme that ignores it.
+    Output
+        Upwelling longwave flux in W/m2, positive upward.
+    Limitation
+        Uses the grid-mean skin temperature. WRF's own LWUPB is computed by the
+        radiation scheme from the LSM's canopy-adjusted radiative temperature,
+        so over land the two differ by ~1.7 W/m2 (over water, ~0.03 W/m2).
+        A second, far smaller discrepancy is the constant itself: WRF carries
+        ``STBOLT = 5.67051e-8`` (``share/module_model_constants.F``) and Noah
+        rounds to ``5.67e-8``, against the exact CODATA value used here — worth
+        ~0.01 W/m2, i.e. 1% of the land bias above.
+        This is a model diagnostic, not an observed flux.
+    """
+    upwelling: NDArray = emiss * STEFAN_BOLTZMANN * tsk**4 + (1.0 - emiss) * glw
+    return upwelling
+
+
+def compute_upwelling_shortwave(albedo: NDArray, swdown: NDArray) -> NDArray:
+    """Upwelling (reflected) shortwave radiation at the surface.
+
+    Input variables
+        ``ALBEDO`` surface albedo (0-1) and ``SWDOWN`` downwelling shortwave
+        flux at the ground (W/m2).
+    Formula
+        ``SWup = ALBEDO * SWDOWN`` — exactly how WRF forms SWUPB internally,
+        which is why this reproduces that field bit-for-bit where it exists.
+    Output
+        Reflected shortwave flux in W/m2, positive upward.
+    Limitation
+        ``ALBEDO`` is the broadband all-sky surface albedo; no direct/diffuse
+        or spectral split is applied.
+    """
+    reflected: NDArray = albedo * swdown
+    return reflected
+
+
+def compute_net_shortwave(albedo: NDArray, swdown: NDArray) -> NDArray:
+    """Net (absorbed) shortwave radiation at the surface.
+
+    Formula
+        ``SWnet = SWDOWN * (1 - ALBEDO)``, the shortwave the surface keeps.
+    Output
+        Net shortwave flux in W/m2, positive downward (into the surface).
+        Zero at night.
+    """
+    return swdown * (1.0 - albedo)
+
+
+def compute_net_longwave(emiss: NDArray, tsk: NDArray, glw: NDArray) -> NDArray:
+    """Net longwave radiation at the surface.
+
+    Formula
+        ``LWnet = GLW - LWup``, which reduces algebraically to
+        ``eps * (GLW - sigma * TSK^4)`` — the reflected ``(1 - eps) * GLW``
+        term cancels exactly against the same term in ``LWup``. Evaluated in
+        the reduced form: it is the identity a reader should see, and it does
+        half the arithmetic. Float rounding makes it agree with
+        ``GLW - compute_upwelling_longwave(...)`` to within an ulp or so
+        rather than bit-for-bit.
+    Output
+        Net longwave flux in W/m2, positive downward. Almost always negative:
+        the surface is warmer than the effective sky and loses longwave both
+        day and night.
+    """
+    return emiss * (glw - STEFAN_BOLTZMANN * tsk**4)
+
+
+def compute_net_radiation(
+    swdown: NDArray, albedo: NDArray, emiss: NDArray, tsk: NDArray, glw: NDArray
+) -> NDArray:
+    """Net all-wave radiation at the surface.
+
+    Formula
+        ``Rn = SWnet + LWnet = SWDOWN * (1 - ALBEDO) + eps * (GLW - sigma * TSK^4)``.
+    Output
+        Net radiation in W/m2, positive downward. This is the energy actually
+        available to drive the sensible (HFX), latent (LH) and ground (GRDFLX)
+        heat fluxes.
+    Limitation
+        Inherits the skin-temperature caveat of
+        :func:`compute_upwelling_longwave`. It is not reconcilable cell-by-cell
+        with ``NOAHRES``, which is Noah's internal per-tile residual computed
+        against the canopy temperature rather than against these grid-mean
+        fields.
+    """
+    net: NDArray = compute_net_shortwave(albedo, swdown) + compute_net_longwave(emiss, tsk, glw)
+    return net
+
+
+def compute_sky_emissivity(glw: NDArray, t2: NDArray) -> NDArray:
+    """Effective (bulk) emissivity of the sky hemisphere.
+
+    Input variables
+        ``GLW`` downwelling longwave flux (W/m2) and ``T2`` 2-m air
+        temperature (K).
+    Formula
+        ``eps_sky = GLW / (sigma * T2^4)`` — the emissivity a blackbody at
+        screen-level air temperature would need to emit the observed
+        downwelling flux.
+    Output
+        Dimensionless effective emissivity, typically ~0.75 under a dry clear
+        sky and approaching 1 under a warm overcast, which makes it a
+        convenient cloudiness proxy.
+    Limitation
+        Uses 2-m air temperature as the radiating temperature of the whole
+        atmospheric column, so it absorbs any near-surface inversion into the
+        emissivity. Values are not clipped: the first output step of a run can
+        carry ``GLW = 0`` before radiation is first called, which shows up as
+        ``eps_sky = 0``.
+    """
+    with np.errstate(invalid="ignore", divide="ignore"):
+        emissivity: NDArray = glw / (STEFAN_BOLTZMANN * t2**4)
+    return emissivity
+
+
+def compute_clearness_index(swdown: NDArray, coszen: NDArray, eccentricity: NDArray) -> NDArray:
+    """Extraterrestrial clearness index ``kt`` at the surface.
+
+    Input variables
+        ``SWDOWN`` downwelling shortwave (W/m2), ``COSZEN`` cosine of the solar
+        zenith angle, and the per-step Sun-Earth distance correction.
+    Formula
+        ``kt = SWDOWN / (S0 * E0 * cos(z))``, the extraterrestrial-normalized
+        index of Duffie & Beckman eq. (1.10.1). Same definition as
+        :func:`allsky.solar.clearness_index`, so WRF and the all-sky camera
+        pipeline can be compared on one axis. Lower case ``kt`` is deliberate:
+        Duffie & Beckman sect. 2.9 reserve it for the sub-daily index and
+        upper-case ``K_T`` for the daily one, and this field is instantaneous.
+        Do not compare these values against the "typical 0.25-0.75" figures
+        quoted for monthly-mean daily ``K_T`` — daily integration includes the
+        low-sun hours and sits systematically lower.
+    Output
+        Dimensionless clearness index, ~0 under thick cloud and approaching
+        ~0.8 under a high clear sky. Cells where the sun is below
+        :data:`MIN_COSZEN_FOR_CLEARNESS` publish no value (``null`` in the
+        values JSON, ``MISSING`` in the cell-series matrix).
+    Limitation
+        Not clipped at 1: cloud-edge enhancement genuinely produces ``kt > 1``.
+        Duffie & Beckman note there are very few observations above kt = 0.80
+        at all, so sustained field values well above it point at the inputs
+        rather than at an unusually clear sky. ``COSZEN`` is negative at night,
+        which the elevation floor screens out along with the singularity.
+    """
+    denominator = SOLAR_CONSTANT * eccentricity * coszen
+    clearness = np.full(swdown.shape, np.nan, dtype=np.float64)
+    sun_up = coszen >= MIN_COSZEN_FOR_CLEARNESS
+    np.divide(swdown, denominator, out=clearness, where=sun_up)
+    return clearness
+
+
+def extract_upwelling_longwave(ds: WRFDataset) -> tuple[NDArray, float, float]:
+    """Extract derived upwelling longwave radiation (W/m2)."""
+    values = compute_upwelling_longwave(
+        ds.get_variable("EMISS"), ds.get_variable("TSK"), ds.get_variable("GLW")
+    )
+    low, high = percentile_scale_bounds(values)
+    return values, low, high
+
+
+def extract_upwelling_shortwave(ds: WRFDataset) -> tuple[NDArray, float, float]:
+    """Extract derived upwelling (reflected) shortwave radiation (W/m2)."""
+    values = compute_upwelling_shortwave(ds.get_variable("ALBEDO"), ds.get_variable("SWDOWN"))
+    low, high = percentile_scale_bounds(values)
+    return values, low, high
+
+
+def extract_net_shortwave(ds: WRFDataset) -> tuple[NDArray, float, float]:
+    """Extract derived net shortwave radiation (W/m2)."""
+    values = compute_net_shortwave(ds.get_variable("ALBEDO"), ds.get_variable("SWDOWN"))
+    low, high = percentile_scale_bounds(values)
+    return values, low, high
+
+
+def extract_net_longwave(ds: WRFDataset) -> tuple[NDArray, float, float]:
+    """Extract derived net longwave radiation (W/m2, positive downward)."""
+    values = compute_net_longwave(
+        ds.get_variable("EMISS"), ds.get_variable("TSK"), ds.get_variable("GLW")
+    )
+    low, high = percentile_scale_bounds(values)
+    return values, low, high
+
+
+def extract_net_radiation(ds: WRFDataset) -> tuple[NDArray, float, float]:
+    """Extract derived net all-wave radiation (W/m2, positive downward)."""
+    values = compute_net_radiation(
+        ds.get_variable("SWDOWN"),
+        ds.get_variable("ALBEDO"),
+        ds.get_variable("EMISS"),
+        ds.get_variable("TSK"),
+        ds.get_variable("GLW"),
+    )
+    low, high = percentile_scale_bounds(values)
+    return values, low, high
+
+
+def extract_sky_emissivity(ds: WRFDataset) -> tuple[NDArray, float, float]:
+    """Extract derived effective sky emissivity (dimensionless)."""
+    values = compute_sky_emissivity(ds.get_variable("GLW"), ds.get_variable("T2"))
+    low, high = _finite_scale_bounds(values, (0.0, 1.0))
+    return values, low, high
+
+
+def extract_clearness_index(ds: WRFDataset) -> tuple[NDArray, float, float]:
+    """Extract derived clearness index ``kt`` (dimensionless).
+
+    Falls back to ``E0 = 1`` when the ``Times`` axis cannot be matched to the
+    field's time axis, which costs at most 3.3% rather than failing the export.
+    """
+    swdown = ds.get_variable("SWDOWN")
+    coszen = ds.get_variable("COSZEN")
+    times = ds.parse_times()
+    if len(times) == swdown.shape[0]:
+        eccentricity = _eccentricity_correction(times)[:, np.newaxis, np.newaxis]
+    else:
+        logger.warning(
+            "Times axis (%d) does not match SWDOWN time axis (%d); "
+            "clearness index falls back to E0 = 1",
+            len(times),
+            swdown.shape[0],
+        )
+        eccentricity = np.ones((1, 1, 1))
+    values = compute_clearness_index(swdown, coszen, eccentricity)
+    low, high = _finite_scale_bounds(values, (0.0, 1.0))
+    return values, low, high
 
 
 def compute_air_density(t2: NDArray, psfc: NDArray, q2: NDArray) -> NDArray:

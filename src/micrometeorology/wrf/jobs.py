@@ -40,7 +40,7 @@ from micrometeorology.wrf.reader import (
     detect_grid_level,
     product_timezone,
 )
-from micrometeorology.wrf.value_source import build_value_frame_source, is_daylight_step
+from micrometeorology.wrf.value_source import build_value_frame_source, publishes_step
 
 logger = logging.getLogger(__name__)
 
@@ -283,7 +283,7 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
     for step_metadata in time_step_metadata:
         if step_metadata.get("skip"):
             continue
-        if unit.variable == WRFVariable.SWDOWN and not is_daylight_step(step_metadata):
+        if not publishes_step(unit.variable, step_metadata):
             continue
         time_step_index = step_metadata["index"]
         frame_values = frame_source.frame_for_step(time_step_index)

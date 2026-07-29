@@ -47,7 +47,7 @@ from micrometeorology.wrf.batch import (
     run_figure_tasks,
 )
 from micrometeorology.wrf.reader import resolve_wrfout_paths
-from micrometeorology.wrf.value_source import build_value_frame_source, is_daylight_step
+from micrometeorology.wrf.value_source import build_value_frame_source, publishes_step
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -64,6 +64,13 @@ DEFAULT_VARS = [
     "LH",
     "SWDOWN",
     "GLW",
+    "lwup",
+    "swup",
+    "lwnet",
+    "swnet",
+    "rnet",
+    "sky_emissivity",
+    "clearness_index",
     "wind_power_density_10m",
 ]
 
@@ -127,6 +134,13 @@ _FIGURE_TITLES: dict[str, str] = {
     WRFVariable.RAIN: "Rain (mm)",
     WRFVariable.SWDOWN: "SWDOWN (W/m²)",
     WRFVariable.WIND_POWER_DENSITY_10M: "Wind Power Density 10m (W/m²)",
+    WRFVariable.LWUP: "Upwelling Longwave (W/m²)",
+    WRFVariable.SWUP: "Reflected Shortwave (W/m²)",
+    WRFVariable.LWNET: "Net Longwave (W/m²)",
+    WRFVariable.SWNET: "Net Shortwave (W/m²)",
+    WRFVariable.RNET: "Net Radiation (W/m²)",
+    WRFVariable.SKY_EMISSIVITY: "Effective Sky Emissivity (-)",
+    WRFVariable.CLEARNESS_INDEX: "Clearness Index kt (-)",
 }
 
 # Surface-pressure contours drawn over the temperature field, in hPa.
@@ -199,7 +213,7 @@ def _build_tasks_for_domain(
         for meta in time_meta:
             if meta.get("skip"):
                 continue
-            if var_name == WRFVariable.SWDOWN and not is_daylight_step(meta):
+            if not publishes_step(var_name, meta):
                 continue
             i = meta["index"]
             u: NDArray | None
