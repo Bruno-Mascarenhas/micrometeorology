@@ -23,7 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=2.0",
-    "pandas>=3.0",
+    "pandas>=3.0.5",
     "xarray>=2024.6",
     "netCDF4>=1.7.4",
     "matplotlib>=3.11",
@@ -44,7 +44,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "ruff>=0.3",
+    "ruff>=0.16.0",
     "mypy>=1.8",
     "pre-commit>=3.6",
     "pandas-stubs",
