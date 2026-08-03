@@ -91,6 +91,7 @@ $env:UV_PYTHON = (python -c "import sys; print(sys.executable)")
 
 ```python
 from solrad_correction.utils.seeds import get_device
+
 print(get_device())  # "cuda" or "cpu"
 ```
 
@@ -440,12 +441,14 @@ data:
 
 ### 2. Preprocessing with Fit on Train
 
+<!-- fmt: off -->
 ```python
 pipeline = PreprocessingPipeline(scaler_type="standard")
 train_pp = pipeline.fit_transform(train_df)   # ← Fit ONLY here
 val_pp   = pipeline.transform(val_df)         # ← Apply train parameters
 test_pp  = pipeline.transform(test_df)        # ← Apply train parameters
 ```
+<!-- fmt: on -->
 
 The mean and standard deviation used to normalize are calculated **only** on the training set. Validation and testing use these identical values.
 
@@ -551,11 +554,13 @@ python benchmarks/solrad_correction/artifact_checkpoint.py --hidden-size 32 --la
 ```python
 from solrad_correction.evaluation.comparison import compare_experiments
 
-df = compare_experiments([
-    "output/experiments/svm_baseline",
-    "output/experiments/lstm_24h",
-    "output/experiments/transformer_48h",
-])
+df = compare_experiments(
+    [
+        "output/experiments/svm_baseline",
+        "output/experiments/lstm_24h",
+        "output/experiments/transformer_48h",
+    ]
+)
 print(df)
 #                     RMSE     MAE      R²      r      d     MAPE
 # svm_baseline      45.23   32.10   0.847  0.921  0.958   18.5
@@ -634,6 +639,7 @@ and `tcc-cuda` extras ship it.
 ```python
 from solrad_correction.models.sklearn_base import SklearnRegressorModel
 
+
 class MyModel(SklearnRegressorModel):
     @property
     def name(self) -> str:
@@ -641,6 +647,7 @@ class MyModel(SklearnRegressorModel):
 
     def __init__(self, param1: float = 1.0) -> None:
         from sklearn.ensemble import RandomForestRegressor
+
         self._estimator = RandomForestRegressor(n_estimators=100)
 
     @classmethod
@@ -695,6 +702,7 @@ The saved dataset includes `feature_names.csv`:
 
 ```python
 from solrad_correction.datasets.tabular import TabularDataset
+
 ds = TabularDataset.load("output/experiments/svm_v1/datasets/train")
 print(ds.feature_names)
 ```

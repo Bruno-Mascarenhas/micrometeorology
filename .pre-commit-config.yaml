@@ -10,8 +10,13 @@ repos:
       - id: check-merge-conflict
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: 2700fd5671c633760d912769c041bfcde2b9a01b  # frozen: v0.15.22
+    rev: cb8c523fd4835aba42af70f4cad5568db4df0b6c  # frozen: v0.16.0
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
+      # Ruff 0.16 formats Python code blocks inside Markdown, but the upstream
+      # hook only passes python/pyi/jupyter — which would leave `make fix`
+      # rewriting docs/ that CI never checks. Widen it so the hook stays the
+      # single source of truth for `ruff format .`.
       - id: ruff-format
+        types_or: [python, pyi, jupyter, markdown]
