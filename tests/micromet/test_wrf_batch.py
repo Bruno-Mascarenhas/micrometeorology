@@ -170,7 +170,7 @@ def _inner_domain_task(output_path: Path, shapes_dir: Path | None) -> FigureTask
 
 def test_municipality_outlines_are_drawn_from_the_shapes_dir(tmp_path, monkeypatch):
     """--shapes-dir was accepted and pickled to every worker but never read."""
-    import cartopy.mpl.geoaxes as geoaxes
+    from cartopy.mpl import geoaxes
 
     from micrometeorology.wrf import plotting
 
@@ -205,7 +205,7 @@ def test_municipality_outlines_are_drawn_from_the_shapes_dir(tmp_path, monkeypat
 def test_municipality_outlines_are_skipped_without_shapes_or_inner_domain(
     tmp_path, monkeypatch, shapes_dir
 ):
-    import cartopy.mpl.geoaxes as geoaxes
+    from cartopy.mpl import geoaxes
 
     from micrometeorology.wrf import plotting
 

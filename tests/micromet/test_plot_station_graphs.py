@@ -92,7 +92,7 @@ def test_legacy_balance_uses_shared_palette_and_negates_upward_channels(monkeypa
         frame,
         frame,
         tmp_path,
-        datetime(2026, 6, 1, 1),
+        datetime(2026, 6, 1, 1),  # noqa: DTZ001 - only feeds the figure's caption label
     )
     fig = plt.gcf()
 

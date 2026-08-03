@@ -130,7 +130,7 @@ def _municipality_geometries(shp_path: str) -> tuple[object, ...]:
     (warning once per process) when the shapefile is not where ``--shapes-dir``
     says it is.
     """
-    import cartopy.io.shapereader as shapereader
+    from cartopy.io import shapereader
 
     if not Path(shp_path).exists():
         logger.warning("Municipality shapefile not found: %s", shp_path)

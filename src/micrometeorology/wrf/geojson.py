@@ -150,7 +150,7 @@ def create_wind_vectors_json(
         try:
             dt = date_time.replace(minute=0, second=0, microsecond=0, tzinfo=None)
             date_str = dt.strftime("%d/%m/%Y %H:%M:%S")
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort formatting; any datetime-like falls back
             date_str = str(date_time)
 
     return {

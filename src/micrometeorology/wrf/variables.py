@@ -771,7 +771,7 @@ def stream_wind_at_heights(
                     vectors_out[target].append(
                         _package_wind_vectors_step(u_3d[k], v_3d[k], linear_index)
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001 - one bad step must not sink the whole series
                     logger.warning(
                         "Wind vector packaging failed for step %d at %dm", t0 + k, target
                     )

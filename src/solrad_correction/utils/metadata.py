@@ -41,7 +41,8 @@ def collect_run_metadata(
             "config_summary": _config_summary(config),
         }
         return meta
-    except Exception as exc:  # pragma: no cover - defensive by design
+    # Best-effort by contract: no metadata probe may fail the experiment.
+    except Exception as exc:  # noqa: BLE001 # pragma: no cover - defensive by design
         return {"metadata_error": str(exc)}
 
 
@@ -75,7 +76,7 @@ def _device_metadata() -> dict[str, Any]:
             info["cuda_device_count"] = torch.cuda.device_count()
             info["cuda_device_name"] = torch.cuda.get_device_name(0)
             info["torch_cuda_version"] = torch.version.cuda
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — torch optional; import/CUDA fault is recorded
         info["error"] = str(exc)
     return info
 
@@ -103,7 +104,7 @@ def _git(args: list[str], cwd: Path) -> str | None:
         if result.returncode != 0:
             return None
         return result.stdout.strip()
-    except Exception:
+    except Exception:  # noqa: BLE001 — no git, no repo or a hung call all mean "no commit info"
         return None
 
 
@@ -128,7 +129,7 @@ def _model_metadata(model: Any | None) -> dict[str, Any]:
             info["trainable_parameter_count"] = sum(
                 p.numel() for p in module.parameters() if p.requires_grad
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — any model shape is tolerated; count is optional
             info["parameter_count_error"] = str(exc)
     info["best_metric"] = getattr(model, "best_metric", None)
     info["best_epoch"] = getattr(model, "best_epoch", None)
@@ -136,7 +137,7 @@ def _model_metadata(model: Any | None) -> dict[str, Any]:
     if settings is not None:
         try:
             info["dataloader"] = settings.to_dict()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — duck-typed to_dict(); recorded, not raised
             info["dataloader_error"] = str(exc)
     return info
 

@@ -318,7 +318,7 @@ def _check_split_column(
     filled = manifest["split"].notna()
     if not bool(filled.any()):
         return
-    day_map = {day: sorted(s)[0] for day, s in _day_to_splits(split_artifact).items()}
+    day_map = {day: min(s) for day, s in _day_to_splits(split_artifact).items()}
     sub = manifest.loc[filled]
     expected = sub["day_id"].astype(str).map(day_map)
     actual = sub["split"].astype(str)

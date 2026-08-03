@@ -21,6 +21,7 @@ torch-free (pandas + stdlib only).
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -179,11 +180,15 @@ def _render_markdown(result: EvaluationResult) -> str:
         "",
         f"- **model**: `{meta.get('model')}`",
         f"- **split**: `{result.split}` ({result.n_samples} samples)",
-        f"- **input mode**: `{meta.get('input_mode')}` | **feature set**: "
-        f"`{meta.get('feature_set')}` | **device**: `{meta.get('device')}`",
+        (
+            f"- **input mode**: `{meta.get('input_mode')}` | **feature set**: "
+            f"`{meta.get('feature_set')}` | **device**: `{meta.get('device')}`"
+        ),
         f"- **checkpoint**: `{result.checkpoint_path}`",
-        f"- **manifest hash ok**: {meta.get('manifest_hash_ok')} | "
-        f"**split id ok**: {meta.get('split_id_ok')}",
+        (
+            f"- **manifest hash ok**: {meta.get('manifest_hash_ok')} | "
+            f"**split id ok**: {meta.get('split_id_ok')}"
+        ),
         "",
         "## Global metrics",
         "",
@@ -236,7 +241,7 @@ def _markdown_table(header: Sequence[str], rows: Sequence[Sequence[Any]]) -> lis
 def _fmt(value: Any) -> str:
     """Compact string form for a metric value (4-sig-fig floats, exact integrals)."""
     if isinstance(value, float):
-        if value != value:  # NaN
+        if math.isnan(value):
             return "nan"
         if value.is_integer() and abs(value) < 1e15:  # exact counts such as ``n``
             return str(int(value))

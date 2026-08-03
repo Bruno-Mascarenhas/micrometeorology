@@ -135,7 +135,7 @@ def _format_datetime(timestamp: datetime | None) -> str:
         formatted: str = timestamp.replace(minute=0, second=0, microsecond=0, tzinfo=None).strftime(
             "%d/%m/%Y %H:%M:%S"
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - the legacy helper never raised on odd timestamp objects
         return str(timestamp)
     return formatted
 
@@ -392,7 +392,7 @@ def _run_time_metadata(ds: WRFDataset) -> tuple[str | None, int | None]:
         if not times:
             return None, None
         return _format_datetime(times[0].astimezone(product_timezone())), len(times)
-    except Exception:  # metadata is best-effort; units must not fail over it
+    except Exception:  # noqa: BLE001 - metadata is best-effort; units must not fail over it
         return None, None
 
 

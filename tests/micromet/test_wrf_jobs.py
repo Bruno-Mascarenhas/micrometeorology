@@ -168,7 +168,9 @@ def test_values_json_matches_reference_payload_with_int_formatting(tmp_path):
         "downsampled_magnitudes": [4.567890123456789, 0.25],
         "downsampled_linear_indices": [0, 3],
     }
-    dt = datetime(2026, 5, 3, 12, 34, 56)
+    # Naive on purpose: both writers drop tzinfo before strftime, so the byte
+    # oracle is only meaningful for the naive input path.
+    dt = datetime(2026, 5, 3, 12, 34, 56)  # noqa: DTZ001
     out = tmp_path / "values.json"
 
     jobs._atomic_values_json(out, arr, 0.0, 5.0, jobs._format_datetime(dt), wind_data)

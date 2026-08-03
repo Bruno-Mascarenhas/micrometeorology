@@ -238,7 +238,7 @@ class TestSplitLabelsSurviveARebuild:
 
         # The manifest grew AND kept every label the old artifact assigned.
         after = pd.read_parquet(dataset_dir / "manifest.parquet")
-        assert sorted(after["day_id"].astype(str).unique())[-1] == "2026-01-05"
+        assert max(after["day_id"].astype(str).unique()) == "2026-01-05"
         assert after["split"].notna().sum() >= labelled_before
 
         forced = runner.invoke(app, ["prepare-local", "--config", str(config), "--force"])

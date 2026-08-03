@@ -234,7 +234,7 @@ def test_colab_fails_fast_when_cuda_unavailable(
 ) -> None:
     """solrad-colab with device=cuda must abort before any data is loaded."""
     torch = pytest.importorskip("torch")
-    import solrad_correction.experiments.runner as runner
+    from solrad_correction.experiments import runner
 
     scratch_config.write_text(
         yaml.safe_dump({"name": "colab_nogpu", "model": {"model_type": "lstm"}}),

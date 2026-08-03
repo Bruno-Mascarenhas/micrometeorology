@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, tzinfo
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from zoneinfo import ZoneInfo
 
 import netCDF4
@@ -180,7 +180,7 @@ class WRFDataset:
         time_strings = _decode_wrf_time_strings(times_var[:])
         result: list[datetime] = []
         for ts in time_strings:
-            dt = datetime.strptime(ts, "%Y-%m-%d_%H:%M:%S")
+            dt = datetime.strptime(ts, "%Y-%m-%d_%H:%M:%S")  # noqa: DTZ007 - UTC set on next line
             dt = dt.replace(tzinfo=UTC)
             result.append(dt)
         self._time_cache = result
@@ -295,7 +295,7 @@ class WRFDataset:
         """Close the underlying NetCDF file handle."""
         self._ds.close()
 
-    def __enter__(self) -> WRFDataset:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc) -> None:
