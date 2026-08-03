@@ -446,7 +446,7 @@ def _read_frame_manifest(vman: Path) -> PandasDataFrame | None:
         return None
     try:
         return pd.read_parquet(vman)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any parquet/IO failure means "re-extract this video"
         logger.warning("frame manifest %s is unreadable (%s); treating it as absent", vman, exc)
         return None
 

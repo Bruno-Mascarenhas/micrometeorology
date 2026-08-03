@@ -176,7 +176,9 @@ class ExperimentConfig:
             data = yaml.safe_load(handle) or {}
 
         if not isinstance(data, dict):
-            raise ValueError(f"config file {path} must contain a YAML mapping")
+            # The documented contract above is a single ValueError for every config
+            # fault, so a bad top-level shape must not raise a different type.
+            raise ValueError(f"config file {path} must contain a YAML mapping")  # noqa: TRY004
 
         known_keys = {config_field.name for config_field in dataclasses.fields(cls)}
         unknown_keys = sorted(
@@ -219,7 +221,9 @@ def _build_section[SectionT](
     if payload is None:
         return section_type()
     if not isinstance(payload, dict):
-        raise ValueError(
+        # Same contract as the docstring and the TypeError->ValueError funnel below:
+        # every section fault surfaces as a ValueError naming the section.
+        raise ValueError(  # noqa: TRY004
             f"config section '{section_name}' must be a mapping, got {type(payload).__name__}"
         )
     try:

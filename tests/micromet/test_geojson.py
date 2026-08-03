@@ -296,7 +296,7 @@ class TestCreateWindVectorsJson:
 
     def test_date_in_metadata(self, sample_wind_2d):
         u, v = sample_wind_2d
-        dt = datetime(2024, 3, 15, 9, 0, 0)
+        dt = datetime(2024, 3, 15, 9, 0, 0)  # noqa: DTZ001 - the writer drops tzinfo anyway
         result = create_wind_vectors_json(u, v, dt, downsampling=2)
         assert result["metadata"]["date_time"] == "15/03/2024 09:00:00"
 

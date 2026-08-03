@@ -174,7 +174,7 @@ class Trainer:
             try:
                 self.model = torch.compile(self.model)  # type: ignore
                 logger.info("Successfully applied torch.compile to the model")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - optional speedup; any backend fault falls back
                 logger.debug("torch.compile not supported or failed: %s", e)
 
         # All persistence (checkpoints, best-state capture) uses the plain

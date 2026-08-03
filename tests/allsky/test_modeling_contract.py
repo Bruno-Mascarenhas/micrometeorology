@@ -32,14 +32,14 @@ def test_import_allsky_modeling_is_torch_free():
 
 def test_accessing_torch_name_imports_lazily():
     """Accessing a torch-bearing name resolves through the submodule."""
-    import allsky.modeling as modeling
+    from allsky import modeling
 
     assert callable(modeling.build_model)
     assert modeling.SensorEncoder.__name__ == "SensorEncoder"
 
 
 def test_unknown_attribute_raises_attribute_error():
-    import allsky.modeling as modeling
+    from allsky import modeling
 
     with pytest.raises(AttributeError, match="does_not_exist"):
         modeling.does_not_exist  # noqa: B018 - triggering __getattr__ on purpose

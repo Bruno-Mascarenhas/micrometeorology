@@ -27,7 +27,7 @@ missing-input skip path.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import netCDF4
@@ -813,7 +813,7 @@ def test_operational_clearness_index_stays_below_the_erbs_ceiling(domain):
         times = [
             datetime.strptime(
                 b"".join(ds.variables["Times"][i].tolist()).decode(), "%Y-%m-%d_%H:%M:%S"
-            )
+            ).replace(tzinfo=UTC)  # WRF Times are UTC, as in WRFDataset.parse_times
             for i in range(ds.variables["Times"].shape[0])
         ]
     eccentricity = _eccentricity_correction(times)[1:, np.newaxis, np.newaxis]

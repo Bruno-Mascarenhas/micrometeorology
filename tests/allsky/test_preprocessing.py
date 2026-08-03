@@ -231,7 +231,7 @@ class TestResolveMask:
         assert np.array_equal(process_frame(image, PrepareConfig(), mask=None), image)
 
     def test_extract_step_decodes_the_mask_once_per_video(self, tmp_path: Path, monkeypatch):
-        import allsky.preprocessing as preprocessing
+        from allsky import preprocessing
 
         cfg = self._mask_config(tmp_path)
         decodes = 0

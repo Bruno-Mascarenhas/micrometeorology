@@ -335,9 +335,12 @@ Cross-model comparison table (in Python, from several eval report dirs):
 
 ```python
 from allsky.evaluation.reports import compare_experiments
+
 compare_experiments(
-    ["output/allsky-mm/experiments/v3_concat/run/eval-test",
-     "output/allsky-mm/experiments/v4_film/run/eval-test"],
+    [
+        "output/allsky-mm/experiments/v3_concat/run/eval-test",
+        "output/allsky-mm/experiments/v4_film/run/eval-test",
+    ],
     out_dir="output/allsky-mm/compare",
 )  # writes comparison.csv + comparison.md
 ```

@@ -108,8 +108,8 @@ configs/micromet/default.yaml  →  configs/micromet/<LABMIM_ENV>.yaml  →  LAB
 from micrometeorology.common.config import get_settings
 
 settings = get_settings()
-print(settings.data_dir)        # Path to data
-print(settings.output_dir)      # Path to output
+print(settings.data_dir)  # Path to data
+print(settings.output_dir)  # Path to output
 ```
 
 Environment variables use the `LABMIM_` prefix:
@@ -141,11 +141,13 @@ from micrometeorology.sensors.ingestion import read_campbell_dat, merge_dat_file
 df = read_campbell_dat("data_2023.dat")
 
 # Multiple files (headers may differ between them)
-df = merge_dat_files([
-    "data_2023_jan.dat",
-    "data_2023_feb.dat",
-    "data_2023_mar.dat",
-])
+df = merge_dat_files(
+    [
+        "data_2023_jan.dat",
+        "data_2023_feb.dat",
+        "data_2023_mar.dat",
+    ]
+)
 ```
 
 #### Why do headers vary?
@@ -187,6 +189,7 @@ df = apply_calibrations(df, cals)
 
 ### 4. Temporal Aggregation
 
+<!-- fmt: off -->
 ```python
 from micrometeorology.sensors.aggregation import aggregate_to_hourly
 
@@ -198,6 +201,7 @@ df_hourly = aggregate_to_hourly(
     wind_speed_column_map={"WindDir": "WS_ms_Avg"},
 )
 ```
+<!-- fmt: on -->
 
 #### Why vector-mean?
 
@@ -227,7 +231,10 @@ The parallel rendering engine (`wrf/batch.py`) dispatches frames across all avai
 
 ```python
 from micrometeorology.wrf.batch import (
-    FigureTask, build_map_config, default_workers, run_figure_tasks,
+    FigureTask,
+    build_map_config,
+    default_workers,
+    run_figure_tasks,
 )
 
 # Build tasks (one per frame)
@@ -256,7 +263,9 @@ png_paths = run_figure_tasks(tasks, workers=44)
 
 ```python
 from micrometeorology.stats.comparison import (
-    read_dataset, pair_dataframes, compare_all_variables,
+    read_dataset,
+    pair_dataframes,
+    compare_all_variables,
 )
 
 obs = read_dataset("salvador.dat")

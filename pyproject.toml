@@ -23,7 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=2.0",
-    "pandas>=3.0",
+    "pandas>=3.0.5",
     "xarray>=2024.6",
     "netCDF4>=1.7.4",
     "matplotlib>=3.11",
@@ -44,7 +44,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "ruff>=0.3",
+    "ruff>=0.16.0",
     "mypy>=1.8",
     "pre-commit>=3.6",
     "pandas-stubs",
@@ -138,7 +138,11 @@ exclude = [
 ]
 
 [tool.ruff.lint]
-select = [
+# Ruff 0.16 grew its default set from 59 to 413 rules, so this list is
+# `extend-select`, not `select`: the defaults come in on top of it. It still
+# earns its keep — E402 (67 `# noqa: E402` depend on it), the specific N/S rules
+# used here, and ARG/NPY/PD are all absent from the 0.16 defaults.
+extend-select = [
     "E",    # pycodestyle errors
     "W",    # pycodestyle warnings
     "F",    # pyflakes
@@ -167,6 +171,10 @@ ignore = [
 # Tests are made of asserts; the pickle and subprocess uses are deliberate
 # contract tests (WorkUnit picklability, worker crash recovery).
 "tests/**" = ["S101", "S301", "S603"]
+# Byte-oracle copies of the pre-deletion writers. Their own docstring forbids
+# touching the body, so the blind except is suppressed from here rather than
+# with an inline noqa.
+"tests/micromet/_reference.py" = ["BLE001"]
 # Colab notebook drives this package's own CLI over the user's Drive files.
 "notebooks/*.ipynb" = ["S603", "S607"]
 

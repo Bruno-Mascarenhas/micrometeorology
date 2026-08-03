@@ -453,7 +453,7 @@ def test_tensorboard_import_is_lazy() -> None:
     import builtins
     import importlib
 
-    import solrad_correction.training.factories as factories
+    from solrad_correction.training import factories
 
     real_import = builtins.__import__
 

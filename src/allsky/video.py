@@ -80,7 +80,9 @@ def video_date(path: str | Path, cfg: VideoConfig) -> dt.date:
     """
     stem = Path(path).stem
     try:
-        return datetime.strptime(stem, cfg.filename_date_format).date()
+        # Only the calendar date survives (``.date()``), and the module docstring
+        # pins this pipeline to naive local time on purpose.
+        return datetime.strptime(stem, cfg.filename_date_format).date()  # noqa: DTZ007
     except ValueError as exc:
         raise ValueError(
             f"Video filename {stem!r} does not match the configured "
