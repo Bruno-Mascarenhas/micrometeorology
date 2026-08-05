@@ -16,10 +16,11 @@ Pure stdlib + pandas: importing this module never pulls torch.
 """
 
 import hashlib
-import subprocess
 from importlib import metadata as importlib_metadata
 
 import pandas as pd
+
+from micrometeorology.common.git import run_git
 
 __all__ = ["code_version", "content_sha256", "git_commit"]
 
@@ -29,19 +30,10 @@ _DISTRIBUTION = "labmim-micrometeorology"
 
 def git_commit() -> str | None:
     """Current git commit hash, or None when unavailable (best-effort)."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],  # noqa: S607 - git resolved from PATH
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except OSError, subprocess.SubprocessError:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip() or None
+    # `or None` because an empty stdout is no more useful than a failed call
+    # here, even though run_git keeps the two distinguishable for callers that
+    # do care (see solrad_correction.utils.metadata's dirty-tree probe).
+    return run_git(["rev-parse", "HEAD"]) or None
 
 
 def code_version() -> dict[str, str | None]:

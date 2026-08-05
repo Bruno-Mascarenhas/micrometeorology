@@ -1,13 +1,13 @@
 """Best-effort experiment metadata collection."""
 
 import platform
-import shutil
-import subprocess
 import sys
 import time
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
+
+from micrometeorology.common.git import run_git
 
 
 def collect_run_metadata(
@@ -85,41 +85,14 @@ def _device_metadata() -> dict[str, Any]:
 
 def _git_metadata() -> dict[str, Any]:
     cwd = Path.cwd()
-    commit = _git(["rev-parse", "HEAD"], cwd)
-    dirty_text = _git(["status", "--porcelain", "--untracked-files=no"], cwd)
+    commit = run_git(["rev-parse", "HEAD"], cwd=cwd)
+    # `bool` of the porcelain output, so a clean tree ("") and an unavailable
+    # git (None) both read as "not dirty" exactly as before.
+    dirty_text = run_git(["status", "--porcelain", "--untracked-files=no"], cwd=cwd)
     return {
         "commit": commit,
         "dirty": bool(dirty_text),
     }
-
-
-def _git(args: list[str], cwd: Path) -> str | None:
-    # Resolved from PATH up front: an absent git is the common case (a source
-    # tarball, a container without the client) and means "no commit info", the
-    # same answer the exec failure below would have produced.
-    git_executable = shutil.which("git")
-    if git_executable is None:
-        return None
-    try:
-        # S603 has no formulation that clears it here: ruff only stays silent for
-        # an inline list of string literals, which would mean hardcoding an
-        # absolute path to git instead of resolving the one on this machine.
-        result = subprocess.run(  # noqa: S603
-            [git_executable, *args],
-            cwd=cwd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    # A vanished/unexecutable binary (OSError), a hung call (TimeoutExpired, a
-    # SubprocessError) and output that is not valid text (UnicodeDecodeError,
-    # raised while decoding under `text=True`) all mean "no commit info".
-    except OSError, subprocess.SubprocessError, UnicodeDecodeError:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
 
 
 def _elapsed(started_at: float | None) -> float | None:
