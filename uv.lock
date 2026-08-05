@@ -460,7 +460,7 @@ requires-dist = [
     { name = "netcdf4", specifier = ">=1.7.4" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "pandas", specifier = ">=3.0.5" },
-    { name = "pandas-stubs", marker = "extra == 'dev'" },
+    { name = "pandas-stubs", marker = "extra == 'dev'", specifier = ">=3.0.5.260730" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6" },
     { name = "pyarrow", specifier = ">=15.0" },
