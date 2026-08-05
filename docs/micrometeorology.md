@@ -22,11 +22,23 @@ The `micrometeorology` package provides a complete infrastructure for:
 ```
 src/micrometeorology/
 ├── __init__.py              # Package version and docstring
-├── cli.py                   # Console entry points (registered in pyproject.toml)
+├── cli/                     # Console entry points (registered in pyproject.toml)
+│   ├── export_wrf_geojson.py    # labmim-wrf-geojson (WebGIS producer)
+│   ├── render_wrf_maps.py       # labmim-wrf-figures
+│   ├── run_wrf_pipeline.py      # Shared WRF batch driver
+│   ├── ingest_sensor_data.py    # labmim-sensor-process
+│   ├── compare_wrf_observations.py  # labmim-comparison
+│   ├── compute_metrics.py       # labmim-metrics
+│   ├── generate_station_graphs.py   # labmim-station-graphs
+│   └── plot_station_graphs.py   # labmim-site-graphs (monitoring-page PNGs)
 ├── common/
 │   ├── config.py            # Centralised config (pydantic-settings + YAML, 4 layers)
 │   ├── logging.py           # Structured logging setup
 │   ├── paths.py             # Cross-platform path utilities (pathlib)
+│   ├── cli_options.py       # Shared typer option definitions
+│   ├── optional.py          # Optional-dependency guard (`require`)
+│   ├── git.py               # Best-effort `run_git`; the one subprocess call to git,
+│   │                        # shared by the allsky and solrad provenance stamps
 │   └── types.py             # Enums (WRFVariable, GridLevel D01–D05), dataclasses, constants
 ├── sensors/
 │   ├── ingestion.py         # .dat reading with dynamic headers

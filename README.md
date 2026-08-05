@@ -95,6 +95,32 @@ uv sync --locked --extra allsky
 uv sync --locked --extra dev --extra tcc --extra video --extra allsky
 ```
 
+#### Code standards
+
+The tree is kept free of checker-silencing workarounds — when ruff or mypy
+complains, the code gets fixed, not suppressed:
+
+- **No `# noqa` or `# type: ignore`.** The handful that remain are rules that do
+  not *apply* rather than defects being waived (the legacy global RNG that
+  scikit-learn and torch actually draw from, last-resort guards in best-effort
+  provenance paths, and two mutually exclusive `subprocess` rules). Each is
+  documented at its own call site, and the file-scoped ones live in
+  `[tool.ruff.lint.per-file-ignores]` with the reason attached.
+- **No `from __future__ import annotations`** — Python 3.14 evaluates
+  annotations lazily under PEP 649, so the import is a no-op here.
+- **No `if TYPE_CHECKING:` blocks.** Modules that must stay import-light (e.g.
+  `allsky.modeling.contracts` is torch-free at runtime) use PEP 695 type
+  aliases instead.
+
+`pre-commit` is the lint source of truth and is what CI runs — `ruff check`
+alone is not equivalent, since the hooks also cover formatting, Markdown code
+blocks and the `pyproject.toml` schema.
+
+```bash
+make fix      # ruff format + ruff check --fix
+make check    # lockfile sync + lint + typecheck + full suite
+```
+
 ---
 
 ## Quick Start
