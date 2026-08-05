@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from allsky.config import VideoConfig
+from micrometeorology.common.timeparse import parse_naive_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -78,15 +79,11 @@ def video_date(path: str | Path, cfg: VideoConfig) -> dt.date:
     stem = Path(path).stem
     try:
         # Only the calendar date survives (``.date()``), and the module docstring
-        # pins this pipeline to naive local time on purpose — hence pandas rather
-        # than ``datetime.strptime``: it applies the same strftime format with the
-        # same exact-match semantics and stays naive.  Its one divergence is that a
-        # handful of stems ("", "nan", "NaT") parse to NaT instead of raising, so
-        # those are turned back into the ValueError the caller below expects.
-        parsed = pd.to_datetime(stem, format=cfg.filename_date_format)
-        if pd.isna(parsed):
-            raise ValueError(f"time data {stem!r} parsed to NaT, not a date")
-        return parsed.date()
+        # pins this pipeline to naive local time on purpose — hence
+        # :func:`parse_naive_timestamp`, which applies the strftime format with
+        # ``strptime``'s match-or-raise semantics while staying naive (see its
+        # module docstring for the pandas escape hatches it closes).
+        return parse_naive_timestamp(stem, cfg.filename_date_format).date()
     except ValueError as exc:
         raise ValueError(
             f"Video filename {stem!r} does not match the configured "

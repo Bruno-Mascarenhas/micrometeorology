@@ -36,6 +36,7 @@ import typer
 matplotlib.use("Agg")  # headless backend for server
 
 from micrometeorology.common.logging import setup_logging
+from micrometeorology.common.timeparse import parse_naive_timestamp
 from micrometeorology.sensors.aggregation import aggregate_to_hourly
 from micrometeorology.sensors.ingestion import read_campbell_dat
 from micrometeorology.sensors.plotting import (
@@ -715,8 +716,15 @@ def run(
     # ------------------------------------------------------------------
     if start_date is not None:
         # Naive for the same reason as `now` above: this bound is compared
-        # against the datalogger's naive station-local index.
-        date_start = pd.to_datetime(start_date, format="%Y-%m-%d")
+        # against the datalogger's naive station-local index. Parsed strictly —
+        # an unset `--start-date "$VAR"` in a cron wrapper must fail loudly, not
+        # silently filter every row away and exit 0.
+        try:
+            date_start = parse_naive_timestamp(start_date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise typer.BadParameter(
+                f"--start-date must be a YYYY-MM-DD date (got {start_date!r})"
+            ) from exc
         date_end = date_start + pd.Timedelta(days=days)
     else:
         # Always plot from today - days to today if no start_date is given

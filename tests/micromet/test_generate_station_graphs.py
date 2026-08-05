@@ -150,3 +150,37 @@ def test_a_complete_logger_still_writes_all_ten_graphs(full_station, tmp_path):
     assert _claimed_ok(result.output) == {p.name for p in out.glob("*.png")}
     assert "[ok] All graphs saved" in result.output
     assert plt.get_fignums() == []
+
+
+@pytest.mark.parametrize("bad", ["", "nan", "NaT", "today", "now", "not-a-date"])
+def test_an_unparseable_start_date_fails_instead_of_writing_nothing(full_station, tmp_path, bad):
+    """A bad ``--start-date`` must exit non-zero, not filter every row away.
+
+    ``pd.to_datetime`` resolves ``""``/``nan``/``NaT`` to ``NaT`` and ``today``/
+    ``now`` to the current clock, both of which sail past an explicit ``format=``.
+    Left unguarded, a cron wrapper passing an unset ``--start-date "$VAR"`` gets a
+    successful-looking run that silently wrote no graphs and left the monitoring
+    page stale.
+    """
+    lenta, rain = full_station
+    out = tmp_path / "figs"
+    result = runner.invoke(
+        app,
+        [
+            "-l",
+            str(lenta),
+            "-r",
+            str(rain),
+            "-o",
+            str(out),
+            "--start-date",
+            bad,
+            "--days",
+            "2",
+            "--log-level",
+            "WARNING",
+        ],
+    )
+
+    assert result.exit_code != 0, f"--start-date {bad!r} exited 0: {result.output}"
+    assert not out.exists() or not list(out.glob("*.png"))

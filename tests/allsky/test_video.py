@@ -47,6 +47,20 @@ class TestVideoDate:
         with pytest.raises(ValueError, match="does not match"):
             video_date("sky_video.mp4", cfg)
 
+    @pytest.mark.parametrize("stem", ["", "nan", "NaT", "today", "now"])
+    def test_rejects_the_stems_pandas_would_resolve_against_the_clock(
+        self, cfg: VideoConfig, stem: str
+    ):
+        """These sail past an explicit ``format=`` and must not become a date.
+
+        ``pd.to_datetime`` maps ``""``/``nan``/``NaT`` to ``NaT`` and resolves
+        ``today``/``now`` to the current timestamp, ignoring the format outright.
+        Either would stamp every extracted frame and the manifest with the wrong
+        day instead of rejecting the file.
+        """
+        with pytest.raises(ValueError, match="does not match"):
+            video_date(f"{stem}.mp4", cfg)
+
 
 class TestIterFrames:
     def test_streams_all_frames(self, synthetic_video: Path, cfg: VideoConfig):
