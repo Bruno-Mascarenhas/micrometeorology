@@ -5,8 +5,6 @@ hand-built :class:`~allsky.evaluation.evaluator.EvaluationResult`, so no
 checkpoint, dataset or model is needed.
 """
 
-from __future__ import annotations
-
 import math
 
 import pandas as pd

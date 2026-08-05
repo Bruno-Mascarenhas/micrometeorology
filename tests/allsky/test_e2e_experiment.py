@@ -16,8 +16,6 @@ the embedding-mode dataset; the sensor-only model ignores them but the loader
 still reads them). Kept well under a minute: 3 days x 20 rows, a tiny MLP.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import numpy as np

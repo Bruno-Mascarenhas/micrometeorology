@@ -1,7 +1,5 @@
 """I/O, configuration, and serialization contracts."""
 
-from __future__ import annotations
-
 import logging
 import os
 import shutil

@@ -16,8 +16,6 @@ Usage::
         --domains 1,4 -o output/JSON -g output/GeoJSON --workers 44
 """
 
-from __future__ import annotations
-
 import re
 from pathlib import Path
 from typing import Annotated

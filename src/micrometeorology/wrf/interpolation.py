@@ -5,8 +5,6 @@
 once and serves the monotonic bracket fast path with automatic fallback.
 """
 
-from __future__ import annotations
-
 import logging
 from collections.abc import Sequence
 

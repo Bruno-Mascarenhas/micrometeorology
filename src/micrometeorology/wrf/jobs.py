@@ -11,8 +11,6 @@ Output files are written to a temporary name and ``os.replace``d into place
 so a killed worker can never leave a truncated JSON visible to consumers.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import os

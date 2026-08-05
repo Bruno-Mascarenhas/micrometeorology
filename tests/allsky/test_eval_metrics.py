@@ -4,8 +4,6 @@ Torch-free: numpy + scikit-learn only.  Covers nmae/nrmse normalization, NaN and
 empty safety, and degenerate single-class classification input.
 """
 
-from __future__ import annotations
-
 import math
 
 import numpy as np

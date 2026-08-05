@@ -6,8 +6,6 @@ Records are **immutable historical facts** — new calibrations must be
 appended, never overwriting existing entries.
 """
 
-from __future__ import annotations
-
 import itertools
 import logging
 from pathlib import Path

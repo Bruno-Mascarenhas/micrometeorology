@@ -36,8 +36,6 @@ lazily (from the CLI or via :func:`allsky.training.__getattr__`), so
 ``import allsky`` / ``import allsky.cli`` stay torch-free.
 """
 
-from __future__ import annotations
-
 import contextlib
 import csv
 import json

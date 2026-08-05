@@ -1,7 +1,5 @@
 """Work-unit pipeline contracts: byte equivalence, isolation, crash recovery."""
 
-from __future__ import annotations
-
 import json
 import os
 import re

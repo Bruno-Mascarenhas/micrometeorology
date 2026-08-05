@@ -11,8 +11,6 @@ This means the same ingestion code works regardless of which sensors are
 currently connected to the datalogger.
 """
 
-from __future__ import annotations
-
 import logging
 from collections.abc import Sequence
 from pathlib import Path

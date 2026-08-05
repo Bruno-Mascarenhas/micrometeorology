@@ -5,8 +5,6 @@ Provides helpers that preserve the layout of the legacy
 accessible color, watermark, date-axis, and legend conventions.
 """
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 

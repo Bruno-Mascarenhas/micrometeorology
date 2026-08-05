@@ -6,8 +6,6 @@ in use. The parsing lived as four near-identical private copies, one of which
 had already drifted into not dropping empty tokens.
 """
 
-from __future__ import annotations
-
 import typer
 
 

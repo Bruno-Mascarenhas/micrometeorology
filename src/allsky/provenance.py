@@ -15,8 +15,6 @@ there is exactly one implementation of each:
 Pure stdlib + pandas: importing this module never pulls torch.
 """
 
-from __future__ import annotations
-
 import hashlib
 import subprocess
 from importlib import metadata as importlib_metadata

@@ -4,8 +4,6 @@ FakeBackbone.encode is the only torch touch-point, so the whole module is gated
 on torch; no DINOv2 / network is ever exercised.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import imageio.v3 as iio

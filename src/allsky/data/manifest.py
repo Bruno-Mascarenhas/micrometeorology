@@ -23,8 +23,6 @@ writes the parquet and its ``<name>.meta.json`` sidecar atomically and records a
 content ``manifest_sha256``.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 from collections.abc import Iterable, Mapping

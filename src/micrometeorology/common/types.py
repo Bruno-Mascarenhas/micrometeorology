@@ -4,8 +4,6 @@ Centralizes all domain-specific types used across the package so that
 modules depend on stable, well-documented interfaces rather than raw strings.
 """
 
-from __future__ import annotations
-
 from enum import StrEnum
 
 # ---------------------------------------------------------------------------

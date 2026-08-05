@@ -1,7 +1,5 @@
 """Sequence construction for recurrent / transformer models."""
 
-from __future__ import annotations
-
 import numpy as np
 import pandas as pd
 

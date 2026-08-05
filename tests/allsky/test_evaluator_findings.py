@@ -12,8 +12,6 @@ Two independent defects, both exercised through the real
 CPU-only and offline: a tiny conv backbone stands in for DINOv2.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import pandas as pd

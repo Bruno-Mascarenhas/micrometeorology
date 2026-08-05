@@ -17,8 +17,6 @@ Usage::
         -D 1 -D 4 -o output/ --also-video
 """
 
-from __future__ import annotations
-
 from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor

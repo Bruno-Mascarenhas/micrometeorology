@@ -13,8 +13,6 @@ the checkpoint helpers) are resolved lazily through :func:`__getattr__`, so the
 device helper remains usable in a torch-free environment.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from allsky.training.device import resolve_device

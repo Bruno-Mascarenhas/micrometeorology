@@ -11,8 +11,6 @@ as a stream (:func:`imageio.v3.imiter`) — a full one-day 1080p video is never
 loaded into memory at once.
 """
 
-from __future__ import annotations
-
 import datetime as dt
 import logging
 from collections.abc import Iterator

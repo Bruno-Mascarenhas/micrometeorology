@@ -8,8 +8,6 @@ Individual modules obtain their loggers via::
     logger = logging.getLogger(__name__)
 """
 
-from __future__ import annotations
-
 import logging
 import sys
 

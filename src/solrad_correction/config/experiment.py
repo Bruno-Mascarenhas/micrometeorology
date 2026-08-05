@@ -1,7 +1,5 @@
 """Top-level experiment configuration and validation."""
 
-from __future__ import annotations
-
 import dataclasses
 from collections.abc import Callable
 from dataclasses import dataclass, field

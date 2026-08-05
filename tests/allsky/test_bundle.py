@@ -6,8 +6,6 @@ the manifest sha256 matches the sidecar, and ``--no-include-embeddings`` drops
 the shards. No torch, no network.
 """
 
-from __future__ import annotations
-
 import tarfile
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath

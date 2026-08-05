@@ -16,8 +16,6 @@ Offline: a tiny all-dark synthetic mp4 (which does trip ``visual_qc``) plus the
 synthetic TOA5 ``.dat`` from :mod:`tests.allsky.test_cli_prepare`.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import imageio.v3 as iio

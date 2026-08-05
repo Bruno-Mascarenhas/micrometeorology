@@ -1,7 +1,5 @@
 """Tests for allsky.embeddings.storage: shard roundtrip, reader, validation, atomicity."""
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any
 

@@ -7,8 +7,6 @@ Covers:
 - ``create_wind_vectors_json`` → standalone wind vector file schema
 """
 
-from __future__ import annotations
-
 import inspect
 import json
 import re

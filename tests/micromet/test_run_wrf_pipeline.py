@@ -1,7 +1,5 @@
 """Phase interaction contracts for the local three-phase WRF pipeline."""
 
-from __future__ import annotations
-
 from typer.testing import CliRunner
 
 from micrometeorology.cli import run_wrf_pipeline

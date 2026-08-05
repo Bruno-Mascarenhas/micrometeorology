@@ -5,8 +5,6 @@ injected failure, a full state round-trip, the ``_orig_mod.`` compile-prefix
 strip on load and the restricted unpickler that refuses a poisoned checkpoint.
 """
 
-from __future__ import annotations
-
 import os
 from pathlib import Path
 from typing import Any

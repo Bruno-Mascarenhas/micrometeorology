@@ -1,7 +1,5 @@
 """Integrity verification for unpickled model artifacts (serialization.py)."""
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 

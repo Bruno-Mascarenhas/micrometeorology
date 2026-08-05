@@ -24,8 +24,6 @@ https://gml.noaa.gov/grad/solcalc/solareqns.PDF
 Iqbal, M. (1983). *An Introduction to Solar Radiation*. Academic Press.
 """
 
-from __future__ import annotations
-
 from collections.abc import Sequence
 
 import numpy as np

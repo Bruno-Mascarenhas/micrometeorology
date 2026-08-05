@@ -4,8 +4,6 @@ Every model in the project (SVM, LSTM, Transformer, future additions)
 inherits from ``BaseRegressorModel`` to guarantee a consistent interface.
 """
 
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path

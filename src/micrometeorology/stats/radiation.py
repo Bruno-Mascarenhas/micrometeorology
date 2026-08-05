@@ -28,8 +28,6 @@ pick by what you already hold:
   distinct.
 """
 
-from __future__ import annotations
-
 import numpy as np
 import pandas as pd
 

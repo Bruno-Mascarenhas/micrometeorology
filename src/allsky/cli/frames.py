@@ -10,8 +10,6 @@ imageio-ffmpeg is imported lazily inside the command so ``allsky --help`` stays
 light and torch-free.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Annotated
 

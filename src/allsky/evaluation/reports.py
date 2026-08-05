@@ -18,8 +18,6 @@ Every file is written atomically (temp file in the same directory +
 torch-free (pandas + stdlib only).
 """
 
-from __future__ import annotations
-
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence

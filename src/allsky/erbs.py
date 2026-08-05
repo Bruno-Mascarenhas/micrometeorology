@@ -20,8 +20,6 @@ radiation. *Solar Energy* 28(4), 293-302.
 doi:10.1016/0038-092X(82)90302-4
 """
 
-from __future__ import annotations
-
 from collections.abc import Sequence
 
 import numpy as np

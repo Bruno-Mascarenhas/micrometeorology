@@ -4,8 +4,6 @@ Provides utilities to extract point time-series from gridded WRF output
 at specific lat/lon coordinates (e.g. for comparison with observations).
 """
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 

@@ -3,8 +3,6 @@
 Offline and fast: synthetic pandas objects only, no I/O.
 """
 
-from __future__ import annotations
-
 import numpy as np
 import pandas as pd
 import pytest

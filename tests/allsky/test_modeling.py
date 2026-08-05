@@ -4,8 +4,6 @@ Every test is offline and CPU-only, uses synthetic tensors and tiny stub
 backbones (no DINOv2 download), and runs in well under a couple of seconds.
 """
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 from typing import Any

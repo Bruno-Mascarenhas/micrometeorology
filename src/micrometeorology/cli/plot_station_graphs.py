@@ -42,8 +42,6 @@ Ad-hoc per-variable graphs (secondary generic command, legacy filenames)::
         -v AirT1_C_Avg -v RH1 --last-days 14
 """
 
-from __future__ import annotations
-
 import logging
 from dataclasses import dataclass
 from pathlib import Path

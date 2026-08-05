@@ -6,8 +6,6 @@ differences.  Eagerly importing ``torch`` in ``pytest_configure``
 (before test collection) avoids the issue.
 """
 
-from __future__ import annotations
-
 import contextlib
 import os
 import sys

@@ -4,8 +4,6 @@ Provides a thin wrapper around ``netCDF4.Dataset`` to standardize
 grid coordinate extraction, time parsing, and metadata access.
 """
 
-from __future__ import annotations
-
 import logging
 import os
 from collections.abc import Sequence

@@ -6,8 +6,6 @@ optional diffuse) — the same "build the contract, don't parse a file" approach
 as tests/allsky/test_dataset.py.
 """
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import get_type_hints

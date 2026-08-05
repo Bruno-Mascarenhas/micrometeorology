@@ -1,7 +1,5 @@
 """Training, registry, and checkpoint contracts."""
 
-from __future__ import annotations
-
 import logging
 import shutil
 from pathlib import Path

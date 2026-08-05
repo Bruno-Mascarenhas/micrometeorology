@@ -5,8 +5,6 @@ all-missing batch that must contribute an exact, finite zero), the
 heteroscedastic NLL sanity property and the fixed per-head weighting.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 import pytest

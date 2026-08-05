@@ -6,8 +6,6 @@ Compare model output against observations:
     labmim-comparison --obs data/obs/salvador.csv --model data/model/wrf_series.csv -o output/comparison/
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Annotated
 

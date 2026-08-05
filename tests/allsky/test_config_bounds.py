@@ -8,8 +8,6 @@ or, in image mode, never. All are rejected at load time instead. Torch-free:
 pydantic validation only.
 """
 
-from __future__ import annotations
-
 import pytest
 from pydantic import ValidationError
 

@@ -8,8 +8,6 @@ This module consolidates the logic that was duplicated in at least three
 legacy scripts (controle_old.py, graficos1_UFBA_v5.py, graficos3_UFBA_v1.py).
 """
 
-from __future__ import annotations
-
 import numpy as np
 from numpy.typing import NDArray
 

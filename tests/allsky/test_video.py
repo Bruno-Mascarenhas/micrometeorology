@@ -1,7 +1,5 @@
 """Tests for allsky.video — frame/time mapping, streaming, extraction."""
 
-from __future__ import annotations
-
 import itertools
 from datetime import date
 from pathlib import Path

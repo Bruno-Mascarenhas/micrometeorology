@@ -29,8 +29,6 @@ is imported eagerly — this module is only ever imported lazily from the
 training engine / CLIs, keeping ``import allsky`` torch-free.
 """
 
-from __future__ import annotations
-
 from collections.abc import Mapping
 
 import torch

@@ -1,7 +1,5 @@
 """Feature engineering: lags, rolling statistics, differences."""
 
-from __future__ import annotations
-
 import pandas as pd
 
 

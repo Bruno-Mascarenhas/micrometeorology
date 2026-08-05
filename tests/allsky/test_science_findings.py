@@ -16,8 +16,6 @@ Each test fails against the pre-fix behaviour and pins the corrected semantics:
 All offline and CPU-only: tiny stub backbones, synthetic tensors, no downloads.
 """
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 from typing import Any

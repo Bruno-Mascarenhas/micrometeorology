@@ -9,8 +9,6 @@ Run with a larger synthetic dataset:
     python benchmarks/solrad_correction/preprocessing.py --rows 100000 --features 48
 """
 
-from __future__ import annotations
-
 import sys
 import time
 from pathlib import Path

@@ -9,8 +9,6 @@ Compare all common columns:
     labmim-metrics -a observations.csv -b predictions.csv -o metrics.csv
 """
 
-from __future__ import annotations
-
 import sys
 from enum import StrEnum
 from pathlib import Path

@@ -4,8 +4,6 @@ Consolidates the repeated per-variable extraction logic that was
 duplicated across the ``drawmap()`` functions in the legacy scripts.
 """
 
-from __future__ import annotations
-
 import logging
 import warnings
 from dataclasses import dataclass

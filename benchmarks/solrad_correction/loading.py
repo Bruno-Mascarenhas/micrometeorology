@@ -9,8 +9,6 @@ Run with CSV format and row limit:
     python benchmarks/solrad_correction/loading.py --format csv --limit-rows 5000
 """
 
-from __future__ import annotations
-
 import sys
 import time
 from enum import StrEnum

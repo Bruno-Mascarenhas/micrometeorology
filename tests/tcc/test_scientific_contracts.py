@@ -1,7 +1,5 @@
 """Scientific semantics that must not drift during solrad refactors."""
 
-from __future__ import annotations
-
 import shutil
 from pathlib import Path
 

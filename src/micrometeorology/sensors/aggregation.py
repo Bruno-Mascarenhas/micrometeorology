@@ -5,8 +5,6 @@ in controle_old.py, graficos1_UFBA_v5.py, and graficos3_UFBA_v1.py with
 a clean ``pandas.resample()``-based approach.
 """
 
-from __future__ import annotations
-
 import logging
 
 import numpy as np

@@ -1,7 +1,5 @@
 """Tests for allsky.data.splits: determinism, guard, leakage, fractions."""
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 

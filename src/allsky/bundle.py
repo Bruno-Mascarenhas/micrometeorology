@@ -25,8 +25,6 @@ manifest content hash against the value recorded in the sidecar meta — the sam
 Pure stdlib + pandas/pyarrow + PyYAML: importing this module never pulls torch.
 """
 
-from __future__ import annotations
-
 import io
 import json
 import logging

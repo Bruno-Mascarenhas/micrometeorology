@@ -13,12 +13,10 @@ class logits and ``dhi_log_var`` is a predicted log-variance (heteroscedastic
 head, already clamped by the head).
 
 This module is deliberately **torch-free at runtime**: the ``Tensor``
-annotations are typing-only (evaluated lazily under ``from __future__ import
-annotations``), so importing it never pulls torch.  :func:`group_slices` is pure
+annotations are typing-only (Python 3.14 evaluates annotations lazily under
+PEP 649), so importing it never pulls torch.  :func:`group_slices` is pure
 Python and drives the cross-attention sensor tokens.
 """
-
-from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, TypedDict, runtime_checkable

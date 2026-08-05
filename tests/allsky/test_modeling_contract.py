@@ -4,8 +4,6 @@ These do not import torch (the subprocess checks assert it stays out), so the
 module deliberately avoids ``pytest.importorskip('torch')`` at import time.
 """
 
-from __future__ import annotations
-
 import subprocess
 import sys
 

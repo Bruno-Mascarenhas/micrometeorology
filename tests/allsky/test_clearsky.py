@@ -1,7 +1,5 @@
 """Tests for allsky.clearsky (Haurwitz clear-sky GHI and clear-sky index k*)."""
 
-from __future__ import annotations
-
 import numpy as np
 import pandas as pd
 import pytest

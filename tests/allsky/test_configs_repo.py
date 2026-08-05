@@ -18,8 +18,6 @@ scope), so the whole module is skipped when torch is unavailable — offline and
 CPU-only otherwise; no dataset, embeddings or network are touched.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import pytest

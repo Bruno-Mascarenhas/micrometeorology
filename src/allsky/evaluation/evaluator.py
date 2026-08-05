@@ -24,8 +24,6 @@ them, so importing this module (and the light metrics/report helpers around it)
 never pulls torch.
 """
 
-from __future__ import annotations
-
 import itertools
 import logging
 from collections.abc import Mapping, Sequence

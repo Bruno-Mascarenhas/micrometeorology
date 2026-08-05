@@ -18,8 +18,6 @@ name with defaults.  ``extra="allow"`` is kept (unknown keys are preserved), but
 does not recognise — cheap typo protection (e.g. ``droput`` silently ignored).
 """
 
-from __future__ import annotations
-
 import logging
 from collections.abc import Callable
 from typing import Any, Literal, cast

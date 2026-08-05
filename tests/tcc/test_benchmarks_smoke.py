@@ -4,8 +4,6 @@ The benchmark harnesses are not exercised anywhere else, so interface drift
 would rot them silently; each runs here with minimal sizes (<1s apiece).
 """
 
-from __future__ import annotations
-
 import subprocess
 import sys
 from pathlib import Path

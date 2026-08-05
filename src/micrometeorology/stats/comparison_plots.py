@@ -5,8 +5,6 @@ scoring a dataset does not import matplotlib: ``labmim-metrics`` needs the
 pandas half only, and matplotlib costs it ~0.5 s of startup per run.
 """
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 

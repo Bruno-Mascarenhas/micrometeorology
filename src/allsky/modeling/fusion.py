@@ -19,8 +19,6 @@ fusion must be handed the raw standardized feature vector (only cross-attention
 builds per-group tokens from it).
 """
 
-from __future__ import annotations
-
 from collections.abc import Mapping, Sequence
 
 import torch

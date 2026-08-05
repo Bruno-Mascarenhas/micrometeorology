@@ -5,8 +5,6 @@ Every WRF console script and ``labmim-metrics`` accepts ``-x a,b`` and
 of which had drifted. These tests pin the one implementation they now share.
 """
 
-from __future__ import annotations
-
 import pytest
 import typer
 

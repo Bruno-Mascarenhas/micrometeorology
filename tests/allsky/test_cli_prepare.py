@@ -6,8 +6,6 @@ good and a broken manifest; ``export-colab-bundle`` produces a bundle that
 :func:`allsky.bundle.validate_bundle` accepts. CliRunner only, tmp_path only.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import imageio.v3 as iio

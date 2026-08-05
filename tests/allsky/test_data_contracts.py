@@ -1,7 +1,5 @@
 """Tests for allsky.data.contracts: column registry, QC flags, paths, classes."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import pytest

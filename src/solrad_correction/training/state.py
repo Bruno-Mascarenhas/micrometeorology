@@ -1,7 +1,5 @@
 """Training plan and best-state helpers for PyTorch regressors."""
 
-from __future__ import annotations
-
 import math
 from dataclasses import dataclass, field
 

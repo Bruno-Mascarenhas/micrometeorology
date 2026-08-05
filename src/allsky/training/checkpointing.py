@@ -32,8 +32,6 @@ stripped on load so a compiled-then-checkpointed model loads back into a plain
 module.
 """
 
-from __future__ import annotations
-
 import random
 from collections.abc import Mapping, Sequence
 from pathlib import Path

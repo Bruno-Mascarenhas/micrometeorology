@@ -22,8 +22,6 @@ Usage::
         --output-dir output/figures
 """
 
-from __future__ import annotations
-
 import logging
 import sys
 from datetime import datetime

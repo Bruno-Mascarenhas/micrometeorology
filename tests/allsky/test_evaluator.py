@@ -7,8 +7,6 @@ kinds, denormalized (physical-unit) predictions, and the manifest-hash mismatch
 paths (warn by default, error under strict).
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import pytest

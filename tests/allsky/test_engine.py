@@ -9,8 +9,6 @@ dataset-provenance refusal, the cosine-horizon reconciliation, the already-stopp
 short circuit and the discarded best on a monitor change.
 """
 
-from __future__ import annotations
-
 import json
 import math
 from pathlib import Path

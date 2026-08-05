@@ -17,8 +17,6 @@ package (and, transitively, ``import allsky.cli``) never eagerly pulls pandas or
 torch — the heavy work happens only when a name is actually used.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 __all__ = [

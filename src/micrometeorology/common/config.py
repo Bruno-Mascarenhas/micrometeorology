@@ -15,8 +15,6 @@ Set ``LABMIM_CONFIG_PATH`` to point to a custom YAML configuration.
 Set ``LABMIM_ENV`` to ``server`` or ``local`` to auto-load the matching file.
 """
 
-from __future__ import annotations
-
 import os
 from functools import lru_cache
 from pathlib import Path

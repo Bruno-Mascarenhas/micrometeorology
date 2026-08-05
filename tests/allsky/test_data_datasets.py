@@ -1,7 +1,5 @@
 """Tests for allsky.data.datasets: batch contract, train-only stats, torch-free import."""
 
-from __future__ import annotations
-
 import subprocess
 import sys
 from pathlib import Path

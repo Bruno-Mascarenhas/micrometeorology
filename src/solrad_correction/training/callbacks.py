@@ -1,7 +1,5 @@
 """Training callbacks: early stopping and model checkpointing."""
 
-from __future__ import annotations
-
 import logging
 
 logger = logging.getLogger(__name__)

@@ -1,7 +1,5 @@
 """Base class for scikit-learn-based regressors."""
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 from typing import Any

@@ -1,7 +1,5 @@
 """Tests for allsky.data.validation: every failure mode + clean-manifest pass."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import numpy as np

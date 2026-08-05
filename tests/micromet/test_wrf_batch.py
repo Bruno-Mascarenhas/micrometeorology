@@ -1,7 +1,5 @@
 """Synthetic tests for the WRF figure-rendering worker backend."""
 
-from __future__ import annotations
-
 import json
 import logging
 from concurrent.futures import Future, ProcessPoolExecutor

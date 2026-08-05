@@ -7,8 +7,6 @@ backbone builder and the default preloading embedding reader — are exercised
 without hand-injecting anything into ``build_model``.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 from pathlib import Path

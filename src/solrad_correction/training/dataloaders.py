@@ -1,7 +1,5 @@
 """DataLoader and runtime setting resolution."""
 
-from __future__ import annotations
-
 import platform
 from dataclasses import dataclass
 

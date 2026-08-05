@@ -19,8 +19,6 @@ Each entry maps an *engineered* feature name to its source logger column, or
 from a column (see :mod:`allsky.features.engineering`).
 """
 
-from __future__ import annotations
-
 from collections.abc import Iterable, Mapping
 from typing import Literal
 

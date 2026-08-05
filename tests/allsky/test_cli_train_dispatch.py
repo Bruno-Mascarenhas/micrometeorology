@@ -6,8 +6,6 @@ acceptance and bad-resume-path rejection. Non-experiment configs are rejected by
 the command; that torch-free behaviour is covered in ``test_cli.py``.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import numpy as np

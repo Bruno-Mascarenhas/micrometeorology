@@ -1,7 +1,5 @@
 """Regression tests for the WRF memory guardrails."""
 
-from __future__ import annotations
-
 import numpy as np
 import pytest
 

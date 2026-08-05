@@ -4,8 +4,6 @@ The map drawing itself lives in :mod:`micrometeorology.wrf.batch`, which owns
 the single renderer (``_render_figure``) used by every worker process.
 """
 
-from __future__ import annotations
-
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np

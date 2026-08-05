@@ -11,8 +11,6 @@ widths ``F -> 64 -> 128`` follow the executor spec.
 submodules lazily.
 """
 
-from __future__ import annotations
-
 from collections.abc import Sequence
 
 from torch import Tensor, nn

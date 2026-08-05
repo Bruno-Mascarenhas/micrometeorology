@@ -18,8 +18,6 @@ trunk output:
 **normalized-space** values (the engine denormalizes).
 """
 
-from __future__ import annotations
-
 from typing import cast
 
 from torch import Tensor, nn

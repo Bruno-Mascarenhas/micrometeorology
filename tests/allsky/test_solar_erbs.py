@@ -1,7 +1,5 @@
 """Tests for allsky.solar (NOAA solar position) and allsky.erbs (diffuse fraction)."""
 
-from __future__ import annotations
-
 import numpy as np
 import pandas as pd
 import pytest

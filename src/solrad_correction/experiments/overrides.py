@@ -1,7 +1,5 @@
 """Shared config loading and runtime override helpers."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
 

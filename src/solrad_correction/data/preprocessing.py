@@ -1,7 +1,5 @@
 """Current-schema preprocessing for leakage-safe solrad experiments."""
 
-from __future__ import annotations
-
 import hashlib
 import json
 import logging

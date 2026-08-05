@@ -6,8 +6,6 @@ safetensors embeddings, then evaluated through the CLI (the CLI builds a real
 exit 0), a missing checkpoint (non-zero exit) and cross-model comparison.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import numpy as np

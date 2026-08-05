@@ -21,8 +21,6 @@ frames that are unusable for radiometric reasons:
 Everything is pure numpy + PIL: importing this module never pulls torch.
 """
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 

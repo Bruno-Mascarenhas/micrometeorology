@@ -22,8 +22,6 @@ warnings to errors.  Covered failure modes:
 Pure numpy/pandas; importing this module never pulls torch.
 """
 
-from __future__ import annotations
-
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path

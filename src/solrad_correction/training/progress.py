@@ -1,7 +1,5 @@
 """Training progress display with percentage and ETA."""
 
-from __future__ import annotations
-
 import sys
 import time
 

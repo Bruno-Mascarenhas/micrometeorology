@@ -1,7 +1,5 @@
 """Base class for PyTorch-based regressors with transfer learning support."""
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 from typing import Any, cast

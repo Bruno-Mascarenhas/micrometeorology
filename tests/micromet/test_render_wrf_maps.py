@@ -5,8 +5,6 @@ overlay of every published PNG/WebM frame, so the snapshot below pins that
 whole surface. Nothing else in the suite covers it.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import NamedTuple
 

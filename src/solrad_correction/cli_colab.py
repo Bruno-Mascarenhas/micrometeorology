@@ -12,8 +12,6 @@ Resume an interrupted run:
     solrad-colab --config configs/tcc/experiments/lstm_hourly.yaml --resume /content/drive/MyDrive/outputs/checkpoints/last.pt
 """
 
-from __future__ import annotations
-
 import json
 from enum import StrEnum
 from pathlib import Path

@@ -12,8 +12,6 @@ built from, and sensitive to sections that reach no manifest row. So
 Offline: the synthetic mp4/TOA5 fixtures from :mod:`tests.allsky.test_cli_prepare`.
 """
 
-from __future__ import annotations
-
 import json
 import shutil
 from pathlib import Path

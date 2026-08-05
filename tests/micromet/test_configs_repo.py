@@ -8,8 +8,6 @@ tests pin the resolved directory so the field default and the YAML cannot drift
 apart again.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any
 

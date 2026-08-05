@@ -17,8 +17,6 @@ without internet access, pre-download the data::
 See https://scitools.org.uk/cartopy/docs/latest/installing.html#data
 """
 
-from __future__ import annotations
-
 import functools
 import logging
 import os

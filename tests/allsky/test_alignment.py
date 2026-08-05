@@ -7,8 +7,6 @@ implementation with different semantics; see ``test_config_bounds.py`` for the
 config-level contract on the window names.
 """
 
-from __future__ import annotations
-
 import pandas as pd
 import pytest
 

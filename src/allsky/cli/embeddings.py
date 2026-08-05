@@ -14,8 +14,6 @@ Heavy dependencies (torch, safetensors, the backbone model) are imported lazily
 inside the command, so importing :mod:`allsky.cli` never pulls them.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 import logging

@@ -7,8 +7,6 @@ for (or require) a torch import. The factory that actually builds the models
 lives in :mod:`solrad_correction.models.registry`.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Literal
 

@@ -16,8 +16,6 @@ semantics (no same-day restriction), which is what made the two disagree.
 Pure numpy/pandas; importing this module never pulls torch.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 

@@ -5,8 +5,6 @@ must report exactly the PNGs it actually wrote -- an unattended cron job has
 nothing else to go on.
 """
 
-from __future__ import annotations
-
 import re
 from pathlib import Path
 

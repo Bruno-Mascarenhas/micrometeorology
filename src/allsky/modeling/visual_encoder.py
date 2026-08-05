@@ -24,8 +24,6 @@ visual encoder hands to the engine.
 :func:`build_visual_encoder` picks the source from ``input_mode``.
 """
 
-from __future__ import annotations
-
 import logging
 from typing import Any, Literal, cast
 
