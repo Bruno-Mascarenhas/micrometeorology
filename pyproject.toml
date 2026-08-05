@@ -44,10 +44,15 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "ruff>=0.16.0",
+    "ruff>=0.16.1",
     "mypy>=1.8",
     "pre-commit>=3.6",
-    "pandas-stubs",
+    # pandas-stubs versions track the pandas release they were tested against
+    # (3.0.5.260730 = pandas 3.0.5), and the two move together: the 3.0.3 -> 3.0.5
+    # stubs made the `to_*` writers keyword-only and rewrote the `.str` accessor.
+    # Floor it at the stubs for the pandas floor above so an unlocked
+    # `pip install -e .[dev]` cannot typecheck against a different pandas API.
+    "pandas-stubs>=3.0.5.260730",
     "pytest-xdist>=3.5",
     "types-PyYAML",
 ]
