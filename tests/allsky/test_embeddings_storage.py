@@ -1,5 +1,6 @@
 """Tests for allsky.embeddings.storage: shard roundtrip, reader, validation, atomicity."""
 
+import importlib
 from pathlib import Path
 from typing import Any
 
@@ -248,7 +249,7 @@ def _worker_pickle(reader: SafetensorsEmbeddingReader) -> bytes:
     pytest.importorskip("torch")
     from multiprocessing.reduction import ForkingPickler
 
-    import torch.multiprocessing  # noqa: F401  (registers the tensor reducers)
+    importlib.import_module("torch.multiprocessing")  # registers the tensor reducers
 
     return bytes(ForkingPickler.dumps(reader))
 

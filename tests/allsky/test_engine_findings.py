@@ -14,14 +14,11 @@ from typing import Any
 
 import pandas as pd
 import pytest
+from torch import nn
 
-torch = pytest.importorskip("torch")
-
-from torch import nn  # noqa: E402
-
-from allsky.config import ExperimentConfig  # noqa: E402
-from allsky.training.engine import run_experiment  # noqa: E402
-from tests.allsky import _synthetic as synthetic  # noqa: E402
+from allsky.config import ExperimentConfig
+from allsky.training.engine import run_experiment
+from tests.allsky import _synthetic as synthetic
 
 
 class TinyConvBackbone(nn.Module):

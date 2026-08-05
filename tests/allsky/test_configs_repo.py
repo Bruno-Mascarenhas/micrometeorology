@@ -21,16 +21,14 @@ CPU-only otherwise; no dataset, embeddings or network are touched.
 from pathlib import Path
 
 import pytest
+import torch
+from torch import Tensor, nn
 
-torch = pytest.importorskip("torch")
-
-from torch import Tensor, nn  # noqa: E402
-
-from allsky.config import (  # noqa: E402
+from allsky.config import (
     load_experiment_config,
     load_prepare_config,
 )
-from allsky.modeling.registry import MODEL_BUILDERS, build_model  # noqa: E402
+from allsky.modeling.registry import MODEL_BUILDERS, build_model
 
 _CONFIGS = Path(__file__).resolve().parents[2] / "configs" / "allsky"
 _EXPERIMENTS = sorted((_CONFIGS / "experiments").glob("v*.yaml"))

@@ -10,12 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
+from torch import nn
 
-torch = pytest.importorskip("torch")
-
-from torch import nn  # noqa: E402
-
-from allsky.training.checkpointing import (  # noqa: E402
+from allsky.training.checkpointing import (
     capture_rng_state,
     load_checkpoint,
     restore_rng_state,

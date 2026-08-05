@@ -22,26 +22,24 @@ from typing import Any
 
 import numpy as np
 import pytest
+import torch
+from torch import Tensor, nn
 
-torch = pytest.importorskip("torch")
-
-from torch import Tensor, nn  # noqa: E402
-
-from allsky.config import ExperimentConfig, TargetsConfig, load_experiment_config  # noqa: E402
-from allsky.data.loading import load_manifest  # noqa: E402
-from allsky.data.manifest import write_manifest_parquet  # noqa: E402
-from allsky.features import resolve_feature_set  # noqa: E402
-from allsky.modeling.registry import build_model  # noqa: E402
-from allsky.modeling.visual_encoder import ImageEncoder, coerce_image_backbone  # noqa: E402
-from allsky.training.engine import (  # noqa: E402
+from allsky.config import ExperimentConfig, TargetsConfig, load_experiment_config
+from allsky.data.loading import load_manifest
+from allsky.data.manifest import write_manifest_parquet
+from allsky.features import resolve_feature_set
+from allsky.modeling.registry import build_model
+from allsky.modeling.visual_encoder import ImageEncoder, coerce_image_backbone
+from allsky.training.engine import (
     _build_optimizer,
     _loss_component_weights,
     _MetricAccumulator,
     run_experiment,
 )
-from allsky.training.losses import MultitaskLoss  # noqa: E402
-from tests.allsky.test_engine import _cfg, _make_dataset, _reader  # noqa: E402
-from tests.allsky.test_modeling import TinyConvBackbone, TinyViTBackbone  # noqa: E402
+from allsky.training.losses import MultitaskLoss
+from tests.allsky.test_engine import _cfg, _make_dataset, _reader
+from tests.allsky.test_modeling import TinyConvBackbone, TinyViTBackbone
 
 _V6_CONFIG = (
     Path(__file__).resolve().parents[2]

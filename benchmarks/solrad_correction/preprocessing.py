@@ -9,20 +9,14 @@ Run with a larger synthetic dataset:
     python benchmarks/solrad_correction/preprocessing.py --rows 100000 --features 48
 """
 
-import sys
 import time
-from pathlib import Path
 from typing import Annotated
 
 import numpy as np
 import pandas as pd
 import typer
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src"))
-
-from solrad_correction.data.preprocessing import PreprocessingPipeline  # noqa: E402
+from solrad_correction.data.preprocessing import PreprocessingPipeline
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 

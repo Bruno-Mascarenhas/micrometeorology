@@ -9,7 +9,6 @@ Run with CSV format and row limit:
     python benchmarks/solrad_correction/loading.py --format csv --limit-rows 5000
 """
 
-import sys
 import time
 from enum import StrEnum
 from pathlib import Path
@@ -19,11 +18,9 @@ import numpy as np
 import pandas as pd
 import typer
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src"))
+from solrad_correction.data.loaders import load_table
 
-from solrad_correction.data.loaders import load_table  # noqa: E402
+ROOT = Path(__file__).resolve().parents[2]
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 

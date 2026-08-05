@@ -131,7 +131,7 @@ class TestSplitArtifact:
         split = create_day_splits(DAYS, seed=1)
         path = tmp_path / "splits.json"
 
-        def exploding_dump(*args: object, **kwargs: object) -> None:  # noqa: ARG001
+        def exploding_dump(*_args: object, **_kwargs: object) -> None:
             raise OSError("disk full")
 
         monkeypatch.setattr(json, "dump", exploding_dump)

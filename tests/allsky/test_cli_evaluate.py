@@ -10,22 +10,19 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 from typer.testing import CliRunner
 
-torch = pytest.importorskip("torch")
-
-from allsky.cli import app  # noqa: E402
-from allsky.embeddings.storage import (  # noqa: E402
+from allsky.cli import app
+from allsky.embeddings.storage import (
     SafetensorsEmbeddingReader,
     save_shard,
     shard_path,
     write_index,
     write_meta,
 )
-from allsky.evaluation.reports import compare_experiments  # noqa: E402
-from allsky.training.engine import run_experiment  # noqa: E402
-from tests.allsky import _synthetic as synthetic  # noqa: E402
+from allsky.evaluation.reports import compare_experiments
+from allsky.training.engine import run_experiment
+from tests.allsky import _synthetic as synthetic
 
 runner = CliRunner()
 
@@ -135,10 +132,10 @@ class TestTrustCheckpointFlag:
     def test_the_flag_reaches_load_checkpoint(self, tmp_path: Path, monkeypatch) -> None:
         from allsky.evaluation import evaluator
 
-        seen: list[bool] = []
+        seen: list[dict[str, object]] = []
 
-        def record_trust(_path, *, map_location="cpu", trust_pickle=False):  # noqa: ARG001
-            seen.append(trust_pickle)
+        def record_trust(_path, *, map_location="cpu", trust_pickle=False):
+            seen.append({"map_location": map_location, "trust_pickle": trust_pickle})
             raise RuntimeError("stop after the load call")
 
         monkeypatch.setattr("allsky.training.checkpointing.load_checkpoint", record_trust)
@@ -159,7 +156,7 @@ class TestTrustCheckpointFlag:
                 ],
             )
             assert result.exit_code == 1, result.output
-            assert seen == [expected]
+            assert [call["trust_pickle"] for call in seen] == [expected]
         assert evaluator is not None  # the patched symbol is imported inside the function
 
 

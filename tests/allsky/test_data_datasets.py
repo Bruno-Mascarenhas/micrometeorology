@@ -140,7 +140,8 @@ class TestImageDatasetContract:
         assert item["sky_class"].dtype == torch.long
         assert item["cloud_fraction"].dtype == torch.float32
 
-    def test_targets_are_raw_physical(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_targets_are_raw_physical(self, tmp_path: Path):
         manifest, root = _build(tmp_path)
         dataset = MultimodalImageDataset(
             manifest, resolve_feature_set("safe"), data_root=root, image_size=16, train=True
@@ -156,7 +157,8 @@ class TestImageDatasetContract:
         )
         assert bool(torch.isnan(dataset[0]["cloud_fraction"]))
 
-    def test_train_features_standardized(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_train_features_standardized(self, tmp_path: Path):
         manifest, root = _build(tmp_path)
         dataset = MultimodalImageDataset(
             manifest, resolve_feature_set("safe"), data_root=root, image_size=16, train=True
@@ -169,14 +171,16 @@ class TestImageDatasetContract:
         np.testing.assert_allclose(feats.mean(axis=0)[varying], 0.0, atol=1e-4)
         np.testing.assert_allclose(feats.std(axis=0)[varying], 1.0, atol=1e-4)
 
-    def test_val_requires_train_stats(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_val_requires_train_stats(self, tmp_path: Path):
         manifest, root = _build(tmp_path)
         with pytest.raises(ValueError, match="leak"):
             MultimodalImageDataset(
                 manifest, resolve_feature_set("safe"), data_root=root, image_size=16, train=False
             )
 
-    def test_val_uses_train_stats(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_val_uses_train_stats(self, tmp_path: Path):
         manifest, root = _build(tmp_path)
         features = resolve_feature_set("safe")
         train = MultimodalImageDataset(
@@ -243,7 +247,8 @@ class TestTargetItemTensors:
         assert float(batch["dhi"][0]) == pytest.approx(original)
         assert batch["dhi"].dtype == torch.float32
 
-    def test_column_tensors_are_writable(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_column_tensors_are_writable(self, tmp_path: Path):
         """A read-only pandas view would make torch.from_numpy warn about UB."""
         manifest, root = _build(tmp_path)
         dataset = MultimodalImageDataset(
@@ -276,7 +281,8 @@ class TestImageDecoding:
         scaled = image.astype(np.float32) / 255.0
         return np.ascontiguousarray(scaled.transpose(2, 0, 1))
 
-    def test_matches_imageio_recipe_on_rgb_jpeg(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_matches_imageio_recipe_on_rgb_jpeg(self, tmp_path: Path):
         manifest, root = _build(tmp_path, n=3, image_size=64)
         dataset = MultimodalImageDataset(
             manifest, resolve_feature_set("safe"), data_root=root, image_size=32, train=True
@@ -287,7 +293,8 @@ class TestImageDecoding:
             assert loaded.dtype == expected.dtype
             np.testing.assert_array_equal(loaded, expected)
 
-    def test_grayscale_is_channel_replicated(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_grayscale_is_channel_replicated(self, tmp_path: Path):
         manifest, root = _build(tmp_path, n=1, image_size=16)
         gray = root / "frames" / "gray.jpg"
         rng = np.random.default_rng(4)
@@ -299,7 +306,8 @@ class TestImageDecoding:
         assert loaded.shape == (3, 16, 16)
         np.testing.assert_array_equal(loaded, self._imageio_recipe(gray, 16))
 
-    def test_rgba_source_is_reduced_to_three_channels(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_rgba_source_is_reduced_to_three_channels(self, tmp_path: Path):
         """The old recipe served a 4-channel array the 3-channel encoder cannot take."""
         manifest, root = _build(tmp_path, n=1, image_size=16)
         rgba = root / "frames" / "rgba.png"
@@ -331,7 +339,8 @@ class TestEmbeddingDatasetContract:
         assert item["embedding"].dtype == torch.float32
         assert dataset.embedding_dim == 8
 
-    def test_embedding_dim_discovered_without_declared_attr(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_embedding_dim_discovered_without_declared_attr(self, tmp_path: Path):
         manifest, _ = _build(tmp_path)
 
         def reader(sample_id: str) -> np.ndarray:
@@ -343,7 +352,8 @@ class TestEmbeddingDatasetContract:
         )
         assert dataset.embedding_dim == 5  # inferred from the first read
 
-    def test_deterministic_reader_is_repeatable(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_deterministic_reader_is_repeatable(self, tmp_path: Path):
         manifest, _ = _build(tmp_path)
         reader = FakeEmbeddingReader(dim=8)
         dataset = MultimodalEmbeddingDataset(
@@ -353,11 +363,15 @@ class TestEmbeddingDatasetContract:
             dataset[1]["embedding"].numpy(), dataset[1]["embedding"].numpy()
         )
 
-    def test_wrong_dim_raises(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_wrong_dim_raises(self, tmp_path: Path):
         manifest, _ = _build(tmp_path)
         dims = iter([8, 8, 3])  # third read has the wrong length
 
-        def reader(sample_id: str) -> np.ndarray:  # noqa: ARG001
+        def reader(sample_id: str) -> np.ndarray:
+            # The EmbeddingReader protocol names this argument, so it stays put;
+            # this fake is driven by the length sequence, not by the id.
+            del sample_id
             return np.zeros(next(dims), dtype=np.float32)
 
         dataset = MultimodalEmbeddingDataset(
@@ -370,7 +384,8 @@ class TestEmbeddingDatasetContract:
 
 
 class TestEmbeddingWindowModes:
-    def test_center_frame_is_own_embedding(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_center_frame_is_own_embedding(self, tmp_path: Path):
         manifest = _build_minutely(tmp_path)
         reader = FakeEmbeddingReader(dim=8)
         dataset = MultimodalEmbeddingDataset(
@@ -389,7 +404,8 @@ class TestEmbeddingWindowModes:
             item["embedding"].numpy(), reader(str(manifest["sample_id"].iloc[3]))
         )
 
-    def test_mean_embedding_equals_manual_window_mean(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_mean_embedding_equals_manual_window_mean(self, tmp_path: Path):
         manifest = _build_minutely(tmp_path)
         reader = FakeEmbeddingReader(dim=8)
         dataset = MultimodalEmbeddingDataset(
@@ -437,7 +453,8 @@ class TestEmbeddingWindowModes:
             item["embedding_seq"][5].numpy(), np.zeros(8, dtype=np.float32)
         )
 
-    def test_own_frame_always_in_window(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_own_frame_always_in_window(self, tmp_path: Path):
         manifest = _build_minutely(tmp_path)
         reader = FakeEmbeddingReader(dim=8)
         dataset = MultimodalEmbeddingDataset(
@@ -452,7 +469,8 @@ class TestEmbeddingWindowModes:
         expected = reader(str(manifest["sample_id"].iloc[idx]))
         np.testing.assert_allclose(dataset[idx]["embedding"].numpy(), expected, rtol=1e-6)
 
-    def test_resolved_windows_match_the_reference_definition(self, torch: Any):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_resolved_windows_match_the_reference_definition(self):
         """Vectorized grouping must equal the per-row definition, adversarially."""
         rng = np.random.default_rng(9)
         for trial in range(25):
@@ -488,7 +506,8 @@ class TestEmbeddingWindowModes:
             )
             assert dataset._windows == _reference_windows(manifest, window_minutes)
 
-    def test_invalid_window_raises(self, torch: Any, tmp_path: Path):  # noqa: ARG002
+    @pytest.mark.usefixtures("torch")
+    def test_invalid_window_raises(self, tmp_path: Path):
         manifest = _build_minutely(tmp_path)
         with pytest.raises(ValueError, match="window"):
             MultimodalEmbeddingDataset(
