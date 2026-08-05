@@ -7,12 +7,17 @@ differences.  Eagerly importing ``torch`` in ``pytest_configure``
 """
 
 import contextlib
+import importlib
 import os
 import sys
 
 
-def pytest_configure(config):  # noqa: ARG001
-    """Register extra DLL search paths and pre-load torch on Windows."""
+def pytest_configure() -> None:
+    """Register extra DLL search paths and pre-load torch on Windows.
+
+    pluggy passes a hook implementation only the hookspec arguments it declares,
+    so taking none is the honest signature for a hook that needs no ``config``.
+    """
     # Force plain, wide CLI help rendering so substring assertions on typer/rich
     # output are deterministic. typer computes FORCE_TERMINAL at import time
     # from GITHUB_ACTIONS/FORCE_COLOR and then emits bold/dim ANSI styles that
@@ -43,4 +48,4 @@ def pytest_configure(config):  # noqa: ARG001
         # Eagerly import torch so that its DLL loading happens before
         # pytest's collector changes the process DLL state.
         with contextlib.suppress(Exception):
-            import torch  # noqa: F401
+            importlib.import_module("torch")

@@ -138,8 +138,8 @@ class TestMergeDatFiles:
 
         ``common.paths.find_files`` hands over a ``list[Path]`` and the CLIs a
         ``list[str]``; an invariant ``list[str | Path]`` parameter rejects both
-        under mypy, which is what the two bare ``# type: ignore`` comments at
-        the call sites were hiding. This call is the mypy assertion.
+        under mypy, so the parameter has to stay a covariant
+        ``Sequence[str | Path]``. This call is the mypy assertion.
         """
         written = _write_toa5(
             tmp_path / "one.dat",

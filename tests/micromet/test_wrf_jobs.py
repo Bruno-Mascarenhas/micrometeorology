@@ -6,11 +6,11 @@ import re
 import subprocess
 import sys
 from concurrent.futures.process import BrokenProcessPool
-from datetime import datetime
 from pathlib import Path
 
 import netCDF4
 import numpy as np
+import pandas as pd
 import pytest
 
 from micrometeorology.cli.export_wrf_geojson import _normalize_var_list
@@ -167,8 +167,8 @@ def test_values_json_matches_reference_payload_with_int_formatting(tmp_path):
         "downsampled_linear_indices": [0, 3],
     }
     # Naive on purpose: both writers drop tzinfo before strftime, so the byte
-    # oracle is only meaningful for the naive input path.
-    dt = datetime(2026, 5, 3, 12, 34, 56)  # noqa: DTZ001
+    # oracle is only meaningful for the naive input path (pandas keeps it naive).
+    dt = pd.Timestamp(2026, 5, 3, 12, 34, 56)
     out = tmp_path / "values.json"
 
     jobs._atomic_values_json(out, arr, 0.0, 5.0, jobs._format_datetime(dt), wind_data)

@@ -10,10 +10,10 @@ Covers:
 import inspect
 import json
 import re
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from micrometeorology.wrf import jobs
@@ -294,7 +294,8 @@ class TestCreateWindVectorsJson:
 
     def test_date_in_metadata(self, sample_wind_2d):
         u, v = sample_wind_2d
-        dt = datetime(2024, 3, 15, 9, 0, 0)  # noqa: DTZ001 - the writer drops tzinfo anyway
+        # Naive on purpose (the writer drops tzinfo anyway); pandas keeps it so.
+        dt = pd.Timestamp(2024, 3, 15, 9, 0, 0)
         result = create_wind_vectors_json(u, v, dt, downsampling=2)
         assert result["metadata"]["date_time"] == "15/03/2024 09:00:00"
 

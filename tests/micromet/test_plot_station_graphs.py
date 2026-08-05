@@ -5,7 +5,6 @@ backend (set on import of the CLI module), and the Typer app driven through
 :class:`~typer.testing.CliRunner`.
 """
 
-from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -90,7 +89,8 @@ def test_legacy_balance_uses_shared_palette_and_negates_upward_channels(monkeypa
         frame,
         frame,
         tmp_path,
-        datetime(2026, 6, 1, 1),  # noqa: DTZ001 - only feeds the figure's caption label
+        # Naive on purpose; it only feeds the figure's caption label.
+        pd.Timestamp(2026, 6, 1, 1),
     )
     fig = plt.gcf()
 

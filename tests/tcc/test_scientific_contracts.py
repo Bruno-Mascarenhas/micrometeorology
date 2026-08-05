@@ -428,11 +428,11 @@ class TestBatchedWindowGather:
     """
 
     @staticmethod
-    def _dataset(**kwargs: object) -> WindowedSequenceDataset:
+    def _dataset() -> WindowedSequenceDataset:
         rng = np.random.default_rng(7)
         features = rng.normal(0, 1, (60, 4)).astype(np.float32)
         target = rng.normal(0, 1, 60).astype(np.float32)
-        return WindowedSequenceDataset(features, target, sequence_length=5, **kwargs)  # type: ignore[arg-type]
+        return WindowedSequenceDataset(features, target, sequence_length=5)
 
     def test_batched_gather_matches_per_index_reads(self) -> None:
         import torch
