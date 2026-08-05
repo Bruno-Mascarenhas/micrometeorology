@@ -1,6 +1,7 @@
 """Best-effort experiment metadata collection."""
 
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -74,7 +75,10 @@ def _device_metadata() -> dict[str, Any]:
             info["cuda_device_count"] = torch.cuda.device_count()
             info["cuda_device_name"] = torch.cuda.get_device_name(0)
             info["torch_cuda_version"] = torch.version.cuda
-    except Exception as exc:  # noqa: BLE001 — torch optional; import/CUDA fault is recorded
+    # torch is optional and its CUDA probe talks to a driver: a missing package
+    # (ImportError), an unloadable shared library (OSError) and a failed CUDA
+    # init (RuntimeError) are all recorded rather than raised.
+    except (ImportError, OSError, RuntimeError) as exc:
         info["error"] = str(exc)
     return info
 
@@ -90,20 +94,32 @@ def _git_metadata() -> dict[str, Any]:
 
 
 def _git(args: list[str], cwd: Path) -> str | None:
+    # Resolved from PATH up front: an absent git is the common case (a source
+    # tarball, a container without the client) and means "no commit info", the
+    # same answer the exec failure below would have produced.
+    git_executable = shutil.which("git")
+    if git_executable is None:
+        return None
     try:
-        result = subprocess.run(  # noqa: S603 — fixed executable, internal constant args
-            ["git", *args],  # noqa: S607 — git deliberately resolved from PATH
+        # S603 has no formulation that clears it here: ruff only stays silent for
+        # an inline list of string literals, which would mean hardcoding an
+        # absolute path to git instead of resolving the one on this machine.
+        result = subprocess.run(  # noqa: S603
+            [git_executable, *args],
             cwd=cwd,
             check=False,
             capture_output=True,
             text=True,
             timeout=5,
         )
-        if result.returncode != 0:
-            return None
-        return result.stdout.strip()
-    except Exception:  # noqa: BLE001 — no git, no repo or a hung call all mean "no commit info"
+    # A vanished/unexecutable binary (OSError), a hung call (TimeoutExpired, a
+    # SubprocessError) and output that is not valid text (UnicodeDecodeError,
+    # raised while decoding under `text=True`) all mean "no commit info".
+    except OSError, subprocess.SubprocessError, UnicodeDecodeError:
         return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
 
 
 def _elapsed(started_at: float | None) -> float | None:
@@ -127,7 +143,11 @@ def _model_metadata(model: Any | None) -> dict[str, Any]:
             info["trainable_parameter_count"] = sum(
                 p.numel() for p in module.parameters() if p.requires_grad
             )
-        except Exception as exc:  # noqa: BLE001 — any model shape is tolerated; count is optional
+        # `module` is duck-typed: anything that is not an iterable of tensors
+        # fails as AttributeError/TypeError, and a tensor that cannot report its
+        # size (an unmaterialized lazy parameter) as RuntimeError. The count is
+        # optional, so the fault is recorded next to the rest of the metadata.
+        except (AttributeError, TypeError, RuntimeError) as exc:
             info["parameter_count_error"] = str(exc)
     info["best_metric"] = getattr(model, "best_metric", None)
     info["best_epoch"] = getattr(model, "best_epoch", None)
@@ -135,7 +155,9 @@ def _model_metadata(model: Any | None) -> dict[str, Any]:
     if settings is not None:
         try:
             info["dataloader"] = settings.to_dict()
-        except Exception as exc:  # noqa: BLE001 — duck-typed to_dict(); recorded, not raised
+        # Duck-typed `to_dict()`: a missing method is an AttributeError and one
+        # with another signature a TypeError. Recorded, not raised.
+        except (AttributeError, TypeError) as exc:
             info["dataloader_error"] = str(exc)
     return info
 

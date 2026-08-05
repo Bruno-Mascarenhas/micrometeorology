@@ -176,11 +176,11 @@ class WRFDataset:
             return self._time_cache
         times_var = self._ds.variables["Times"]
         time_strings = _decode_wrf_time_strings(times_var[:])
-        result: list[datetime] = []
-        for ts in time_strings:
-            dt = datetime.strptime(ts, "%Y-%m-%d_%H:%M:%S")  # noqa: DTZ007 - UTC set on next line
-            dt = dt.replace(tzinfo=UTC)
-            result.append(dt)
+        # WRF writes ``Times`` without an offset; the values are UTC by
+        # definition, so the tz is attached in the same expression.
+        result: list[datetime] = [
+            datetime.strptime(ts, "%Y-%m-%d_%H:%M:%S").replace(tzinfo=UTC) for ts in time_strings
+        ]
         self._time_cache = result
         return result
 

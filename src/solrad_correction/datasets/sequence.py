@@ -388,7 +388,12 @@ class WindowedSequenceDatasetMeta:
         idx_path = p / "index.csv"
         if idx_path.exists():
             idx_df = pd.read_csv(idx_path)
-            index = pd.to_datetime(idx_df.iloc[:, 0])
+            # ``pd.to_datetime`` of a column returns a Series; wrap it so the
+            # field holds the ``DatetimeIndex`` it is declared to hold. Both
+            # readers of the field already funnel through ``pd.DatetimeIndex``
+            # (``to_torch_dataset``) or ``pd.Series`` (``save``), which carry the
+            # column name across identically either way.
+            index = pd.DatetimeIndex(pd.to_datetime(idx_df.iloc[:, 0]))
 
         return cls(
             features=features,
@@ -396,5 +401,5 @@ class WindowedSequenceDatasetMeta:
             feature_names=feature_names,
             sequence_length=seq_len,
             target_offset=target_offset,
-            index=index,  # type: ignore
+            index=index,
         )

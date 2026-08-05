@@ -16,9 +16,24 @@ def save_json(data: dict, path: str | Path) -> None:
 
 
 def load_json(path: str | Path) -> dict:
-    """Load a JSON file."""
+    """Load a JSON file whose top-level value is an object.
+
+    Every artifact this reads back (``metrics.json``, ``manifest.json``,
+    ``config.json``) is written by :func:`save_json` from a dict, so a top-level
+    array or scalar means the file is not the artifact it was taken for. Saying
+    so here beats returning it as a ``dict`` and failing on the first key access
+    somewhere downstream.
+
+    Raises
+    ------
+    TypeError
+        If the file parses to something other than a JSON object.
+    """
     with open(path, encoding="utf-8") as f:
-        return json.load(f)  # type: ignore
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise TypeError(f"{path} must contain a JSON object, got a top-level {type(data).__name__}")
+    return data
 
 
 def save_predictions(

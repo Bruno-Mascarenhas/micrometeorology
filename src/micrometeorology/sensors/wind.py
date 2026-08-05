@@ -66,4 +66,5 @@ def vector_mean_direction(u: NDArray, v: NDArray) -> float:
 
 def wind_speed_from_components(u: NDArray, v: NDArray) -> NDArray:
     """Compute wind speed from U/V components."""
-    return np.hypot(np.asarray(u), np.asarray(v))  # type: ignore
+    speed: NDArray = np.hypot(np.asarray(u), np.asarray(v))
+    return speed

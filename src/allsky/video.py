@@ -15,7 +15,6 @@ import datetime as dt
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 import imageio.v3 as iio
@@ -79,8 +78,15 @@ def video_date(path: str | Path, cfg: VideoConfig) -> dt.date:
     stem = Path(path).stem
     try:
         # Only the calendar date survives (``.date()``), and the module docstring
-        # pins this pipeline to naive local time on purpose.
-        return datetime.strptime(stem, cfg.filename_date_format).date()  # noqa: DTZ007
+        # pins this pipeline to naive local time on purpose — hence pandas rather
+        # than ``datetime.strptime``: it applies the same strftime format with the
+        # same exact-match semantics and stays naive.  Its one divergence is that a
+        # handful of stems ("", "nan", "NaT") parse to NaT instead of raising, so
+        # those are turned back into the ValueError the caller below expects.
+        parsed = pd.to_datetime(stem, format=cfg.filename_date_format)
+        if pd.isna(parsed):
+            raise ValueError(f"time data {stem!r} parsed to NaT, not a date")
+        return parsed.date()
     except ValueError as exc:
         raise ValueError(
             f"Video filename {stem!r} does not match the configured "

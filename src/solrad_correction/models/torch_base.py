@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
@@ -244,17 +244,21 @@ class TorchRegressorModel(SequenceRegressorModel):
         self._module.to(self._device)
 
         dataset: Dataset
-        if self._is_torch_dataset(data):
-            dataset = cast("Dataset", data)
+        if isinstance(data, Dataset):
+            dataset = data
         else:
             arr = np.asarray(data)
             assert_array_size(arr.shape, np.float32, context="torch prediction input array")
             x_input = torch.as_tensor(arr, dtype=torch.float32)
             dataset = TensorDataset(x_input)
 
-        # Batch size defaults to a reasonable number if not specified in config
+        # Batch size defaults to a reasonable number if not specified in config.
+        # `_config` is absent entirely on an instance built by `load()`, which
+        # bypasses `__init__` — hence the getattr — and is otherwise the
+        # `ModelConfig | None` that `fit()` stored, so "not None" is exactly the
+        # case that carries a `batch_size`.
         config = getattr(self, "_config", None)
-        batch_size = config.batch_size if hasattr(config, "batch_size") else 256  # type: ignore
+        batch_size = 256 if config is None else config.batch_size
 
         settings = self._dataloader_settings
         if settings is not None and settings.num_workers > 0:
@@ -287,12 +291,6 @@ class TorchRegressorModel(SequenceRegressorModel):
                 all_preds.append(preds.float().cpu().numpy().flatten())
 
         return np.concatenate(all_preds)
-
-    @staticmethod
-    def _is_torch_dataset(data: object) -> bool:
-        from torch.utils.data import Dataset
-
-        return isinstance(data, Dataset)
 
     def save(self, path: str | Path) -> None:
         """Save model checkpoint (state_dict + config for transfer learning)."""

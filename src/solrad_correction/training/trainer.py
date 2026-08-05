@@ -170,10 +170,22 @@ class Trainer:
         # Optimize with torch.compile if supported (PyTorch 2.0+)
         if settings.torch_compile and hasattr(torch, "compile"):
             try:
-                self.model = torch.compile(self.model)  # type: ignore
-                logger.info("Successfully applied torch.compile to the model")
+                compiled = torch.compile(self.model)
             except Exception as e:  # noqa: BLE001 - optional speedup; any backend fault falls back
                 logger.debug("torch.compile not supported or failed: %s", e)
+            else:
+                # `torch.compile` is typed as returning the wrapped callable, so
+                # the module identity has to be re-established before the rest of
+                # the loop (`.to`, `.parameters()`, `_unwrap_compiled`) can use
+                # it. Compiling a module always yields an `OptimizedModule`.
+                if isinstance(compiled, nn.Module):
+                    self.model = compiled
+                    logger.info("Successfully applied torch.compile to the model")
+                else:
+                    logger.debug(
+                        "torch.compile returned a %s rather than a module; keeping the eager model",
+                        type(compiled).__name__,
+                    )
 
         # All persistence (checkpoints, best-state capture) uses the plain
         # module so state_dict keys never carry the `_orig_mod.` prefix.

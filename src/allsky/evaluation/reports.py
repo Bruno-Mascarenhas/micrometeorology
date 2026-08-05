@@ -80,7 +80,9 @@ def write_evaluation_report(
     written["stratified"] = str(_atomic_csv(out / "stratified.csv", result.stratified))
 
     if result.confusion is not None:
-        written["confusion"] = str(_atomic_csv(out / "confusion.csv", _confusion_frame(result)))
+        written["confusion"] = str(
+            _atomic_csv(out / "confusion.csv", _confusion_frame(result.confusion))
+        )
 
     if predictions and not result.predictions.empty:
         written["predictions"] = str(
@@ -140,10 +142,13 @@ def compare_experiments(
 # ---------------------------------------------------------------------------
 
 
-def _confusion_frame(result: EvaluationResult) -> pd.DataFrame:
-    """Confusion matrix as a labelled DataFrame (rows = true, cols = predicted)."""
-    confusion = result.confusion
-    assert confusion is not None  # noqa: S101 - guarded by the caller
+def _confusion_frame(confusion: Mapping[str, Any]) -> pd.DataFrame:
+    """Confusion matrix as a labelled DataFrame (rows = true, cols = predicted).
+
+    Takes the ``{"labels": [...], "matrix": [[...]]}`` payload rather than the whole
+    result, so the caller's ``result.confusion is not None`` guard is what makes the
+    payload present — there is no second, unprovable presence check in here.
+    """
     labels = confusion["labels"]
     frame = pd.DataFrame(
         confusion["matrix"],
@@ -194,7 +199,7 @@ def _render_markdown(result: EvaluationResult) -> str:
     lines.extend(_global_metrics_markdown(result))
     if result.confusion is not None:
         lines += ["", "## Sky-class confusion (rows = true, cols = predicted)", ""]
-        lines.extend(_frame_to_markdown(_confusion_frame(result)).splitlines())
+        lines.extend(_frame_to_markdown(_confusion_frame(result.confusion)).splitlines())
     lines.append("")
     return "\n".join(lines)
 

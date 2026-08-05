@@ -59,7 +59,7 @@ def extract_point_series(
     if variables is None:
         variables = ["T2", "PSFC", "U10", "V10", "Q2", "SWDOWN", "HFX", "LH"]
 
-    all_records: list[dict] = []
+    all_records: list[pd.DataFrame] = []
 
     for fpath in files:
         logger.info("Extracting from %s", fpath.name)
@@ -110,12 +110,12 @@ def extract_point_series(
                 continue
 
             df_part = pd.DataFrame(extracted, index=time_idx)
-            all_records.append(df_part)  # type: ignore
+            all_records.append(df_part)
 
     if not all_records:
         return pd.DataFrame()
 
-    df = pd.concat(all_records)  # type: ignore
+    df = pd.concat(all_records)
     df.index.name = "time"
     # Drop rows with NaT index which might happen on failed parses
     df = df[df.index.notna()]

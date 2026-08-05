@@ -677,7 +677,7 @@ def run(
     # Campbell .dat timestamps carry no UTC offset, so `read_campbell_dat`
     # builds a naive station-local index. Both date bounds below must stay
     # naive to match it -- an aware Timestamp raises TypeError on comparison.
-    now = datetime.now()  # noqa: DTZ005 - naive to match the datalogger index
+    now = pd.Timestamp.now()
 
     # ------------------------------------------------------------------
     # 1. Ingest -- read raw .dat files
@@ -716,7 +716,7 @@ def run(
     if start_date is not None:
         # Naive for the same reason as `now` above: this bound is compared
         # against the datalogger's naive station-local index.
-        date_start = pd.Timestamp(datetime.strptime(start_date, "%Y-%m-%d"))  # noqa: DTZ007
+        date_start = pd.to_datetime(start_date, format="%Y-%m-%d")
         date_end = date_start + pd.Timedelta(days=days)
     else:
         # Always plot from today - days to today if no start_date is given

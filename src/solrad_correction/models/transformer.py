@@ -18,6 +18,12 @@ logger = logging.getLogger(__name__)
 class PositionalEncoding(nn.Module):
     """Sinusoidal positional encoding (Vaswani et al., 2017)."""
 
+    # Declares the type of the buffer registered below. ``nn.Module.__getattr__``
+    # is typed ``Tensor | Module``, so without this the slice in ``forward`` is
+    # "not indexable"; an annotation with no value binds nothing at runtime and
+    # leaves ``register_buffer`` as the sole owner of the attribute.
+    pe: torch.Tensor
+
     def __init__(self, d_model: int, max_len: int = 5000, dropout: float = 0.1) -> None:
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
@@ -38,7 +44,7 @@ class PositionalEncoding(nn.Module):
         x:
             Tensor of shape ``(batch, seq_len, d_model)``.
         """
-        x = x + self.pe[:, : x.size(1)]  # type: ignore
+        x = x + self.pe[:, : x.size(1)]
         return self.dropout(x)
 
 

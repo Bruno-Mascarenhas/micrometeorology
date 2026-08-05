@@ -126,7 +126,7 @@ def evaluate_checkpoint(
     batch_size: int | None = None,
     num_workers: int | None = None,
     device: str | None = None,
-    report_dir: str | Path | None = None,  # noqa: ARG001 - reserved; report writing is in reports.py
+    report_dir: str | Path | None = None,
     strict: bool = False,
     trust_checkpoint: bool = False,
     embedding_reader: EmbeddingReader | None = None,
@@ -180,6 +180,10 @@ def evaluate_checkpoint(
     EvaluationResult
         Global + stratified metrics, the predictions frame and provenance.
     """
+    # Kept for signature symmetry with the CLI (see the parameter docs above);
+    # this function never writes reports, so the value is intentionally dropped.
+    del report_dir
+
     from allsky.training.checkpointing import load_checkpoint
     from allsky.training.engine import resolve_run_device
 
