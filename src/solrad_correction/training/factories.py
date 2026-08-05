@@ -1,7 +1,5 @@
 """Replaceable factories for PyTorch training components."""
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any
 

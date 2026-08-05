@@ -36,8 +36,6 @@ lazily (from the CLI or via :func:`allsky.training.__getattr__`), so
 ``import allsky`` / ``import allsky.cli`` stay torch-free.
 """
 
-from __future__ import annotations
-
 import contextlib
 import csv
 import json
@@ -63,8 +61,10 @@ from allsky.data.loading import (
     load_split,
     resolve_against_root,
 )
+from allsky.embeddings.backbone import Pooling
 from allsky.features.normalization import TargetNormalizer
 from allsky.features.policy import active_feature_groups, resolve_feature_set
+from allsky.modeling.baselines import ClimatologyModel
 from allsky.training.checkpointing import (
     BEST_CHECKPOINT,
     LAST_CHECKPOINT,
@@ -197,7 +197,6 @@ def run_experiment(
     val_loader = _make_loader(val_ds, cfg, resolved_device, batch_size, shuffle=False)
 
     # --- model / optimizer / scheduler / amp --------------------------------
-    from allsky.modeling.baselines import ClimatologyModel
     from allsky.modeling.registry import build_model, temporal_pooling_for_strategy
 
     image_backbone = None
@@ -219,9 +218,13 @@ def run_experiment(
         temporal_pooling=temporal_pooling,
     ).to(resolved_device)
 
-    is_climatology = isinstance(model, ClimatologyModel)
-    if is_climatology:
-        _fit_climatology(model, cfg, train_df, target_normalizers)
+    # Bind the narrowed model rather than a bare bool: only ClimatologyModel carries
+    # fit_from_targets, and `climatology is not None` is the same predicate the
+    # isinstance check produced.
+    climatology = model if isinstance(model, ClimatologyModel) else None
+    is_climatology = climatology is not None
+    if climatology is not None:
+        _fit_climatology(climatology, cfg, train_df, target_normalizers)
 
     optimizer, lr_labels = _build_optimizer(model, cfg)
     monitor_key = _monitor_key(cfg.train.early_stopping.monitor)
@@ -659,6 +662,8 @@ def _default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Calla
     """
 
     def build() -> nn.Module:
+        # build_backbone is imported here, not at module scope, so a test that
+        # monkeypatches allsky.embeddings.backbone.build_backbone is honoured.
         from allsky.embeddings.backbone import build_backbone
         from allsky.modeling.visual_encoder import coerce_image_backbone
 
@@ -666,7 +671,7 @@ def _default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Calla
         name = str(params.get("backbone", "dinov2_vits14"))
         pooling = str(params.get("backbone_pooling", "cls"))
         try:
-            backbone = build_backbone(name, pooling=pooling, device=device)  # type: ignore[arg-type]
+            backbone = build_backbone(name, pooling=_backbone_pooling(pooling), device=device)
             return coerce_image_backbone(backbone, pooling=pooling)
         except Exception as exc:
             raise RuntimeError(
@@ -679,14 +684,36 @@ def _default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Calla
     return build
 
 
+def _backbone_pooling(value: str) -> Pooling:
+    """Narrow the free-form ``model.backbone_pooling`` string to the backbone's literal.
+
+    ``ExperimentModelConfig`` is ``extra="allow"``, so the knob arrives as an
+    arbitrary string while :func:`allsky.embeddings.backbone.build_backbone` accepts
+    only these three names.  Rejecting anything else here does not change what a bad
+    value does to a run — it already ended as the ``RuntimeError``
+    :func:`_default_image_backbone_builder` raises, since the only backbone that
+    reads ``pooling`` (``DinoV2Backbone``) rejects an unknown one, and the other
+    (``fake``) is not an ``nn.Module`` and exposes no ``load_torch_module``, so
+    ``coerce_image_backbone`` refuses it regardless of pooling.  It only moves the
+    failure one call earlier, onto a message that names the knob.
+    """
+    if value == "cls":
+        return "cls"
+    if value == "mean":
+        return "mean"
+    if value == "cls+mean":
+        return "cls+mean"
+    raise ValueError(f"unknown backbone pooling {value!r}; expected 'cls', 'mean' or 'cls+mean'")
+
+
 def _fit_climatology(
-    model: nn.Module,
+    model: ClimatologyModel,
     cfg: ExperimentConfig,
     train_df: pd.DataFrame,
     target_normalizers: Mapping[str, TargetNormalizer],
 ) -> None:
     """Fit the constant-prediction climatology model from raw train targets."""
-    model.fit_from_targets(  # type: ignore[operator]
+    model.fit_from_targets(
         dhi=train_df["target_dhi"].to_numpy() if cfg.targets.dhi.enabled else None,
         kindex=train_df["target_kindex"].to_numpy() if cfg.targets.kindex.enabled else None,
         cloud_fraction=(

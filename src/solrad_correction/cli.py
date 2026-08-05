@@ -15,8 +15,6 @@ Resume a neural-network experiment from a checkpoint:
     solrad-run --config configs/tcc/experiments/lstm_hourly.yaml --resume output/checkpoints/last.pt
 """
 
-from __future__ import annotations
-
 import json
 from enum import StrEnum
 from pathlib import Path

@@ -1,7 +1,5 @@
 """Tests for allsky.video — frame/time mapping, streaming, extraction."""
 
-from __future__ import annotations
-
 import itertools
 from datetime import date
 from pathlib import Path
@@ -48,6 +46,20 @@ class TestVideoDate:
     def test_rejects_non_matching_name(self, cfg: VideoConfig):
         with pytest.raises(ValueError, match="does not match"):
             video_date("sky_video.mp4", cfg)
+
+    @pytest.mark.parametrize("stem", ["", "nan", "NaT", "today", "now"])
+    def test_rejects_the_stems_pandas_would_resolve_against_the_clock(
+        self, cfg: VideoConfig, stem: str
+    ):
+        """These sail past an explicit ``format=`` and must not become a date.
+
+        ``pd.to_datetime`` maps ``""``/``nan``/``NaT`` to ``NaT`` and resolves
+        ``today``/``now`` to the current timestamp, ignoring the format outright.
+        Either would stamp every extracted frame and the manifest with the wrong
+        day instead of rejecting the file.
+        """
+        with pytest.raises(ValueError, match="does not match"):
+            video_date(f"{stem}.mp4", cfg)
 
 
 class TestIterFrames:

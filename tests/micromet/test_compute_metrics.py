@@ -5,8 +5,6 @@ it can quietly print the wrong ones — comparing columns nobody asked for, and
 aligning two files by row position instead of by time — are pinned here.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import pandas as pd

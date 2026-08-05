@@ -1,7 +1,5 @@
 """Time-series-aware data splitting with no temporal leakage."""
 
-from __future__ import annotations
-
 import logging
 from collections.abc import Generator
 

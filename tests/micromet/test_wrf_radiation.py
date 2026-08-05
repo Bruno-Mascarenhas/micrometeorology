@@ -25,8 +25,6 @@ Plus the wiring: dispatcher registration, the daylight gate, and the
 missing-input skip path.
 """
 
-from __future__ import annotations
-
 from datetime import UTC, datetime
 from pathlib import Path
 

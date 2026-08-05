@@ -16,8 +16,6 @@ Public surface:
   importing this package never pulls torch).
 """
 
-from __future__ import annotations
-
 from allsky.data.alignment import (
     AlignmentResult,
     AlignmentStrategy,

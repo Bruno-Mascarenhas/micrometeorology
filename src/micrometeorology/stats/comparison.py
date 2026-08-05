@@ -6,8 +6,6 @@ otherwise pay ~0.5 s of matplotlib import on every invocation. The figure that
 consumes these frames lives in :mod:`micrometeorology.stats.comparison_plots`.
 """
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 

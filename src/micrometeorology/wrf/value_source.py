@@ -11,8 +11,6 @@ added or a scale bound fixed on one side silently skipped the other.
 Adding a variable here reaches both products.
 """
 
-from __future__ import annotations
-
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime

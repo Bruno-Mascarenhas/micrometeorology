@@ -35,8 +35,6 @@ Guarantees
 this module never pulls it.
 """
 
-from __future__ import annotations
-
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor

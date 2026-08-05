@@ -30,8 +30,6 @@ Public surface:
   :func:`~allsky.modeling.registry.build_model`.
 """
 
-from __future__ import annotations
-
 import importlib
 from typing import Any
 

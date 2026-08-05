@@ -4,8 +4,6 @@ All path handling uses ``pathlib.Path`` so that the same code runs on
 Windows and Linux without modification.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 

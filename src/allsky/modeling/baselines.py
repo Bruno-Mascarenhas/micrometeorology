@@ -15,8 +15,6 @@ All three honour the :class:`allsky.modeling.contracts.MultimodalModel`
 contract (``forward(batch) -> ModelOutputs``).
 """
 
-from __future__ import annotations
-
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 

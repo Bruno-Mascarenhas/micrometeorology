@@ -16,8 +16,6 @@ Usage::
         --domains 1,4 -o output/JSON -g output/GeoJSON --workers 44
 """
 
-from __future__ import annotations
-
 import re
 from pathlib import Path
 from typing import Annotated
@@ -172,6 +170,17 @@ def _reject_output_id_variables(var_list: list[str]) -> None:
 
 @app.command()
 def run(
+    # The two output directories are the only required options. Typer marks an
+    # option required by the *absence* of a default, and Python forbids a
+    # defaulted parameter before a non-defaulted one, so they lead the
+    # signature. Every flag (name, short name, type, required-ness) is
+    # unchanged; only the order they are listed in ``--help`` differs.
+    output_dir: Annotated[
+        Path, typer.Option("-o", "--output-dir", help="Output dir for value JSON files.")
+    ],
+    geojson_dir: Annotated[
+        Path, typer.Option("-g", "--geojson-dir", help="Output dir for GeoJSON grid files.")
+    ],
     dataset: Annotated[
         Path | None, typer.Option("-d", "--dataset", help="Single WRF file.")
     ] = None,
@@ -189,12 +198,6 @@ def run(
         list[str] | None,
         typer.Option("-D", "--domains", help="Domain numbers. Can be repeated or comma-separated."),
     ] = None,
-    output_dir: Annotated[
-        Path, typer.Option("-o", "--output-dir", help="Output dir for value JSON files.")
-    ] = ...,  # type: ignore[assignment]
-    geojson_dir: Annotated[
-        Path, typer.Option("-g", "--geojson-dir", help="Output dir for GeoJSON grid files.")
-    ] = ...,  # type: ignore[assignment]
     variables: Annotated[
         list[str] | None,
         typer.Option(

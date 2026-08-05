@@ -8,8 +8,6 @@ This module consolidates the logic that was duplicated in at least three
 legacy scripts (controle_old.py, graficos1_UFBA_v5.py, graficos3_UFBA_v1.py).
 """
 
-from __future__ import annotations
-
 import numpy as np
 from numpy.typing import NDArray
 
@@ -68,4 +66,5 @@ def vector_mean_direction(u: NDArray, v: NDArray) -> float:
 
 def wind_speed_from_components(u: NDArray, v: NDArray) -> NDArray:
     """Compute wind speed from U/V components."""
-    return np.hypot(np.asarray(u), np.asarray(v))  # type: ignore
+    speed: NDArray = np.hypot(np.asarray(u), np.asarray(v))
+    return speed

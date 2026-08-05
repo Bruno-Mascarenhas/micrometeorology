@@ -6,8 +6,6 @@ index parsing, dtype hints, development row limits, and optional Parquet
 caching for CSV inputs.
 """
 
-from __future__ import annotations
-
 import hashlib
 import logging
 from pathlib import Path

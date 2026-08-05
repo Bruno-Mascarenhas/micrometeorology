@@ -7,17 +7,14 @@ kinds, denormalized (physical-unit) predictions, and the manifest-hash mismatch
 paths (warn by default, error under strict).
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import pytest
+import torch
 
-torch = pytest.importorskip("torch")
-
-from allsky.evaluation.evaluator import evaluate_checkpoint  # noqa: E402
-from allsky.training.engine import run_experiment  # noqa: E402
-from tests.allsky import _synthetic as synthetic  # noqa: E402
+from allsky.evaluation.evaluator import evaluate_checkpoint
+from allsky.training.engine import run_experiment
+from tests.allsky import _synthetic as synthetic
 
 
 def _train(tmp_path: Path, *, epochs: int = 2, targets: dict | None = None):

@@ -6,8 +6,6 @@ commands (``info`` / ``build-index``) are gone. Torch-free (lazy command
 imports); CliRunner only.
 """
 
-from __future__ import annotations
-
 import importlib
 from pathlib import Path
 

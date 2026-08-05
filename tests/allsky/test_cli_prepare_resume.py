@@ -13,10 +13,8 @@ existence-only resume mishandled:
   with a bare ``IntCastingNaNError``.
 
 Offline: a tiny all-dark synthetic mp4 (which does trip ``visual_qc``) plus the
-synthetic TOA5 ``.dat`` from :mod:`tests.allsky.test_cli_prepare`.
+shared ``synthetic_dat`` TOA5 fixture from :mod:`tests.allsky.conftest`.
 """
-
-from __future__ import annotations
 
 from pathlib import Path
 
@@ -29,7 +27,7 @@ from typer.testing import CliRunner, Result
 from allsky.cli import app
 from allsky.cli.prepare import _apply_frame_qc
 from allsky.data.contracts import QCFlag
-from tests.allsky.test_cli_prepare import _write_config, synthetic_dat  # noqa: F401
+from tests.allsky.test_cli_prepare import _write_config
 
 runner = CliRunner()
 
@@ -67,7 +65,7 @@ class TestResumeCompleteness:
         self,
         tmp_path: Path,
         dark_video: Path,
-        synthetic_dat: Path,  # noqa: F811
+        synthetic_dat: Path,
     ):
         config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
         assert _prepare(config).exit_code == 0
@@ -84,7 +82,7 @@ class TestResumeCompleteness:
         self,
         tmp_path: Path,
         dark_video: Path,
-        synthetic_dat: Path,  # noqa: F811
+        synthetic_dat: Path,
     ):
         config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
         assert _prepare(config).exit_code == 0
@@ -106,7 +104,7 @@ class TestResumeCompleteness:
         self,
         tmp_path: Path,
         dark_video: Path,
-        synthetic_dat: Path,  # noqa: F811
+        synthetic_dat: Path,
     ):
         config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
         assert _prepare(config).exit_code == 0
@@ -124,7 +122,7 @@ class TestBuildManifestWithoutExtract:
         self,
         tmp_path: Path,
         dark_video: Path,
-        synthetic_dat: Path,  # noqa: F811
+        synthetic_dat: Path,
     ):
         # The documented `allsky extract-frames` -> `prepare-local --steps
         # build-manifest` flow: no qc_frame_flags anywhere, must stay exit 0.

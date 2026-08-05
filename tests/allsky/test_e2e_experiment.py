@@ -16,25 +16,20 @@ the embedding-mode dataset; the sensor-only model ignores them but the loader
 still reads them). Kept well under a minute: 3 days x 20 rows, a tiny MLP.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 from typer.testing import CliRunner
 
-torch = pytest.importorskip("torch")
-
-from allsky.cli import app  # noqa: E402
-from allsky.embeddings.storage import (  # noqa: E402
+from allsky.cli import app
+from allsky.embeddings.storage import (
     save_shard,
     shard_path,
     write_index,
     write_meta,
 )
-from tests.allsky import _synthetic as synthetic  # noqa: E402
+from tests.allsky import _synthetic as synthetic
 
 runner = CliRunner()
 

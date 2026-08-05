@@ -12,8 +12,6 @@ boundary so a core-only install gets the extra's install command instead of a
 bare ``ModuleNotFoundError``.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 from enum import StrEnum

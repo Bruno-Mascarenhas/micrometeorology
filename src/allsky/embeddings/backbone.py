@@ -21,8 +21,6 @@ repo revision + weights into the ``torch.hub`` cache); it must therefore never
 run in tests or CI — use :class:`FakeBackbone` there.
 """
 
-from __future__ import annotations
-
 import hashlib
 from collections.abc import Sequence
 from typing import Any, Literal, Protocol, runtime_checkable

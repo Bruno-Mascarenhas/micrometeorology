@@ -12,8 +12,6 @@ to the ref ``notebooks/README.md`` tells users to open the notebook from.
 Confirm against the live remote with ``git ls-remote --heads <REPO_URL>``.
 """
 
-from __future__ import annotations
-
 import json
 import re
 import tomllib

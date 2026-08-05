@@ -9,8 +9,6 @@ dataset-provenance refusal, the cosine-horizon reconciliation, the already-stopp
 short circuit and the discarded best on a monitor change.
 """
 
-from __future__ import annotations
-
 import json
 import math
 from pathlib import Path
@@ -19,16 +17,15 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
-torch = pytest.importorskip("torch")
-
-from allsky import solar  # noqa: E402
-from allsky.config import ExperimentConfig, SiteConfig  # noqa: E402
-from allsky.data.manifest import build_manifest, write_manifest_parquet  # noqa: E402
-from allsky.data.splits import create_day_splits, save_split_artifact  # noqa: E402
-from allsky.evaluation.evaluator import evaluate_checkpoint  # noqa: E402
-from allsky.training.checkpointing import capture_rng_state, load_checkpoint  # noqa: E402
-from allsky.training.engine import _restore, run_experiment  # noqa: E402
+from allsky import solar
+from allsky.config import ExperimentConfig, SiteConfig
+from allsky.data.manifest import build_manifest, write_manifest_parquet
+from allsky.data.splits import create_day_splits, save_split_artifact
+from allsky.evaluation.evaluator import evaluate_checkpoint
+from allsky.training.checkpointing import capture_rng_state, load_checkpoint
+from allsky.training.engine import _restore, run_experiment
 
 _MET = {
     "AirT1_C_Avg": (20.0, 30.0),

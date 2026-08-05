@@ -24,8 +24,6 @@ Provenance:
   is inlined here).
 """
 
-from __future__ import annotations
-
 import json
 from collections import OrderedDict
 from datetime import datetime

@@ -15,8 +15,6 @@ Column order is always :func:`allsky.features.policy.resolve_feature_set`, so
 downstream normalization/checkpoint feature ordering is reproducible.
 """
 
-from __future__ import annotations
-
 from collections.abc import Iterable
 
 import numpy as np

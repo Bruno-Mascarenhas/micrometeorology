@@ -134,12 +134,13 @@ override-dependencies = [
 src = ["src"]
 target-version = "py314"
 line-length = 100
-exclude = [
+# `exclude` REPLACES ruff's 25 built-in exclusions; `extend-exclude` adds to
+# them. `.venv`, `venv` and `.git` are already built-ins, so only these two are
+# ours. Keeping the built-ins matters because `make check` runs a bare
+# `ruff check .` with force-exclude off.
+extend-exclude = [
     "legacy",
-    ".venv",
-    "venv",
     "env",
-    ".git"
 ]
 
 [tool.ruff.lint]
@@ -166,19 +167,46 @@ extend-select = [
     "S",    # flake8-bandit — security anti-patterns
 ]
 ignore = [
-    "E501",  # line too long (handled by formatter)
+    # Line length is enforced at format time by `line-length = 100`, not by
+    # E501, and E501 reaches this repo only via the "E" entry above (it is not
+    # in ruff's default set). It stays off because the violations it reports are
+    # unsplittable string content — f-strings and docstring CLI-usage examples —
+    # that the formatter provably cannot rewrap.
+    "E501",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Global seeding of the legacy numpy RNG is the point here: sklearn and other
-# libraries draw from np.random's global state for reproducibility.
+# Everything below is a rule that does not APPLY to the file, not a defect being
+# waived: the tree carries no inline `# noqa` / `# type: ignore` outside the
+# handful documented at their own call sites. Each entry is scoped as narrowly
+# as the rule allows so a genuinely new violation still surfaces.
+#
+# `np.random.seed` seeds the legacy GLOBAL stream on purpose — that is the one
+# sklearn, torch's DataLoader shuffling and every bare `np.random.*` call draw
+# from. `default_rng` returns an independent Generator none of them observe, so
+# there is no modern spelling of "make this run reproducible".
 "src/solrad_correction/utils/seeds.py" = ["NPY002"]
-# Tests are made of asserts; the pickle and subprocess uses are deliberate
-# contract tests (WorkUnit picklability, worker crash recovery).
-"tests/**" = ["S101", "S301", "S603"]
-# Byte-oracle copies of the pre-deletion writers. Their own docstring forbids
-# touching the body, so the blind except is suppressed from here rather than
-# with an inline noqa.
+# `assert` IS pytest's assertion API (2089 of them); S101 is a production-code
+# rule and ruff documents tests as its exception.
+"tests/**" = ["S101"]
+# Pickle is the thing under test, not an incidental choice: these two assert
+# that a WorkUnit and a torch tensor survive a round-trip through the pickle
+# protocol the process pool actually uses.
+"tests/allsky/test_embeddings_storage.py" = ["S301"]
+"tests/micromet/test_wrf_jobs.py" = ["S301", "S603"]
+# These spawn this package's own CLIs via `sys.executable`. S603 is silent only
+# when every argv element is a string literal, which `sys.executable` never is,
+# so subprocess-based CLI tests cannot satisfy it by construction.
+"tests/allsky/test_cli.py" = ["S603"]
+"tests/allsky/test_data_datasets.py" = ["S603"]
+"tests/allsky/test_data_loading.py" = ["S603"]
+"tests/allsky/test_modeling_contract.py" = ["S603"]
+"tests/micromet/test_comparison.py" = ["S603"]
+"tests/tcc/test_benchmarks_smoke.py" = ["S603"]
+"tests/tcc/test_training_contracts.py" = ["S603"]
+# A verbatim frozen copy of the pre-deletion writer, kept so the production
+# writers can be diffed against it bitwise. Its docstring forbids touching the
+# body, so its blind except is suppressed from here rather than edited.
 "tests/micromet/_reference.py" = ["BLE001"]
 # Colab notebook drives this package's own CLI over the user's Drive files.
 "notebooks/*.ipynb" = ["S603", "S607"]

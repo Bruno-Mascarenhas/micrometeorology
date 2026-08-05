@@ -1,7 +1,5 @@
 """Model serialization utilities dispatching to joblib or torch."""
 
-from __future__ import annotations
-
 import hashlib
 import json
 import logging

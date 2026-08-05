@@ -1,9 +1,8 @@
 """Synthetic tests for the WRF figure-rendering worker backend."""
 
-from __future__ import annotations
-
 import json
 import logging
+from collections.abc import Callable
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
@@ -104,9 +103,21 @@ def test_figure_memmap_backend_cleans_payload_directory(monkeypatch, tmp_path):
 def test_broken_process_pool_propagates_instead_of_being_swallowed(tmp_path):
     """A broken pool dooms every remaining task: it must raise, not log-and-drop."""
 
-    class _BrokenPoolExecutor:
-        def submit(self, *_args, **_kwargs):
-            future: Future[str] = Future()
+    class _BrokenPoolExecutor(ProcessPoolExecutor):
+        """Every submission comes back already broken.
+
+        ``__init__`` deliberately skips the real one: the collector only ever
+        calls ``submit`` on the executor it is handed, so no worker process,
+        call queue, or pipe needs to exist.
+        """
+
+        def __init__(self) -> None:
+            """Build no pool at all."""
+
+        def submit[**P, T](
+            self, _fn: Callable[P, T], /, *_args: P.args, **_kwargs: P.kwargs
+        ) -> Future[T]:
+            future: Future[T] = Future()
             future.set_exception(BrokenProcessPool("worker died"))
             return future
 
@@ -118,16 +129,23 @@ def test_broken_process_pool_propagates_instead_of_being_swallowed(tmp_path):
             workers=2,
             backend="memmap",
             tmp_dir=tmp_path / "memmap-tmp",
-            executor=_BrokenPoolExecutor(),  # type: ignore[arg-type]
+            executor=_BrokenPoolExecutor(),
         )
 
 
 def test_failed_render_is_logged_with_the_frame_it_lost(tmp_path, caplog):
     """A batch-local ordinal is unresolvable; the operator needs the PNG name."""
 
-    class _FailingPoolExecutor:
-        def submit(self, *_args, **_kwargs):
-            future: Future[str] = Future()
+    class _FailingPoolExecutor(ProcessPoolExecutor):
+        """Every submission fails inside the worker (see ``_BrokenPoolExecutor``)."""
+
+        def __init__(self) -> None:
+            """Build no pool at all."""
+
+        def submit[**P, T](
+            self, _fn: Callable[P, T], /, *_args: P.args, **_kwargs: P.kwargs
+        ) -> Future[T]:
+            future: Future[T] = Future()
             future.set_exception(RuntimeError("cartopy is unhappy"))
             return future
 
@@ -139,7 +157,7 @@ def test_failed_render_is_logged_with_the_frame_it_lost(tmp_path, caplog):
             workers=2,
             backend="memmap",
             tmp_dir=tmp_path / "memmap-tmp",
-            executor=_FailingPoolExecutor(),  # type: ignore[arg-type]
+            executor=_FailingPoolExecutor(),
         )
 
     assert paths == []

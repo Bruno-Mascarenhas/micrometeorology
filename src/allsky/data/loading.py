@@ -11,8 +11,6 @@ Importing this module is torch-free: the safetensors reader (and torch itself)
 are imported lazily inside :func:`default_embedding_reader`.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 from pathlib import Path

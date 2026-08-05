@@ -18,8 +18,6 @@ name with defaults.  ``extra="allow"`` is kept (unknown keys are preserved), but
 does not recognise — cheap typo protection (e.g. ``droput`` silently ignored).
 """
 
-from __future__ import annotations
-
 import logging
 from collections.abc import Callable
 from typing import Any, Literal, cast
@@ -36,8 +34,10 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["MODEL_BUILDERS", "build_model", "temporal_pooling_for_strategy"]
 
-#: Builder signature:
+#: Builder signature (positional):
 #: ``(cfg, n_features, embedding_dim, image_backbone, temporal_pooling) -> nn.Module``.
+#: :func:`build_model` dispatches positionally, so every builder takes all five
+#: slots; a builder that does not consume one names it with a leading underscore.
 ModelBuilder = Callable[
     [
         ExperimentConfig,
@@ -119,10 +119,10 @@ def _temporal_pooling(
 
 def _build_climatology(
     cfg: ExperimentConfig,
-    n_features: int,  # noqa: ARG001 - uniform builder signature
-    embedding_dim: int | None,  # noqa: ARG001 - uniform builder signature
-    image_backbone: nn.Module | None,  # noqa: ARG001 - uniform builder signature
-    temporal_pooling: Literal["mean", "attention"] | None,  # noqa: ARG001 - uniform signature
+    _n_features: int,
+    _embedding_dim: int | None,
+    _image_backbone: nn.Module | None,
+    _temporal_pooling: Literal["mean", "attention"] | None,
 ) -> nn.Module:
     return ClimatologyModel(cfg.targets)
 
@@ -130,9 +130,9 @@ def _build_climatology(
 def _build_sensor_only(
     cfg: ExperimentConfig,
     n_features: int,
-    embedding_dim: int | None,  # noqa: ARG001 - uniform builder signature
-    image_backbone: nn.Module | None,  # noqa: ARG001 - uniform builder signature
-    temporal_pooling: Literal["mean", "attention"] | None,  # noqa: ARG001 - uniform signature
+    _embedding_dim: int | None,
+    _image_backbone: nn.Module | None,
+    _temporal_pooling: Literal["mean", "attention"] | None,
 ) -> nn.Module:
     params = _params(cfg)
     return SensorOnlyModel(
@@ -147,7 +147,7 @@ def _build_sensor_only(
 
 def _build_image_only(
     cfg: ExperimentConfig,
-    n_features: int,  # noqa: ARG001 - uniform builder signature
+    _n_features: int,
     embedding_dim: int | None,
     image_backbone: nn.Module | None,
     temporal_pooling: Literal["mean", "attention"] | None,
@@ -178,7 +178,7 @@ def _multimodal_builder(fusion_name: str) -> ModelBuilder:
 
     def builder(
         cfg: ExperimentConfig,
-        n_features: int,  # noqa: ARG001 - width derived from the feature set
+        _n_features: int,
         embedding_dim: int | None,
         image_backbone: nn.Module | None,
         temporal_pooling: Literal["mean", "attention"] | None,

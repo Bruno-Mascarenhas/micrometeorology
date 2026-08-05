@@ -17,8 +17,6 @@ Three things are fixed here:
   directory layout.
 """
 
-from __future__ import annotations
-
 import posixpath
 from collections.abc import Mapping, Sequence
 from enum import IntFlag

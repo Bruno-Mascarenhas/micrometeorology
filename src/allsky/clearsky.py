@@ -23,8 +23,6 @@ Reno, M.J., Hansen, C.W., Stein, J.S. (2012). Global horizontal irradiance
 clear sky models: implementation and analysis. SAND2012-2389.
 """
 
-from __future__ import annotations
-
 from collections.abc import Sequence
 
 import numpy as np

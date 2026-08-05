@@ -15,8 +15,6 @@ Process with custom calibrations:
     labmim-sensor-process -i data/raw/ -o data/hourly/output.csv --calibrations configs/calibrations.yaml
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Annotated
 

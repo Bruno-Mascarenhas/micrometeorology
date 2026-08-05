@@ -7,8 +7,6 @@ manifest builder, a persisted day split, and a deterministic dict-backed
 embedding reader.  Everything is offline, CPU-only and needs no image files.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import numpy as np

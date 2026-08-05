@@ -5,8 +5,6 @@ Deliberately torch-free: the heavy commands are exercised only via ``--help``
 lazily too.
 """
 
-from __future__ import annotations
-
 import subprocess
 import sys
 

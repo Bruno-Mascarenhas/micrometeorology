@@ -7,8 +7,6 @@ the average year, or per-season subsets — the summaries the site and reports
 reuse. All functions preserve the public names operational consumers import.
 """
 
-from __future__ import annotations
-
 import pandas as pd
 
 __all__ = [

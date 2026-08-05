@@ -6,8 +6,6 @@ every key it declares must be a real field on ``Settings``, otherwise
 consumer of ``get_settings()`` dies at import-time of its first statement.
 """
 
-from __future__ import annotations
-
 from collections.abc import Iterator
 from typing import Any
 

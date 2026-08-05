@@ -13,8 +13,6 @@ assignment over an existing file raises :class:`SplitExistsError` unless
 Pure stdlib/numpy; importing this module never pulls torch.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 from collections.abc import Sequence

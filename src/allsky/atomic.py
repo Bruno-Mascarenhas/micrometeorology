@@ -15,8 +15,6 @@ Pure stdlib: importing this module never pulls torch (callers that need torch â€
 e.g. checkpoint saving â€” import it lazily inside the writer callable).
 """
 
-from __future__ import annotations
-
 import json
 import os
 from collections.abc import Callable

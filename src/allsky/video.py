@@ -11,13 +11,10 @@ as a stream (:func:`imageio.v3.imiter`) — a full one-day 1080p video is never
 loaded into memory at once.
 """
 
-from __future__ import annotations
-
 import datetime as dt
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 import imageio.v3 as iio
@@ -25,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from allsky.config import VideoConfig
+from micrometeorology.common.timeparse import parse_naive_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +79,11 @@ def video_date(path: str | Path, cfg: VideoConfig) -> dt.date:
     stem = Path(path).stem
     try:
         # Only the calendar date survives (``.date()``), and the module docstring
-        # pins this pipeline to naive local time on purpose.
-        return datetime.strptime(stem, cfg.filename_date_format).date()  # noqa: DTZ007
+        # pins this pipeline to naive local time on purpose — hence
+        # :func:`parse_naive_timestamp`, which applies the strftime format with
+        # ``strptime``'s match-or-raise semantics while staying naive (see its
+        # module docstring for the pandas escape hatches it closes).
+        return parse_naive_timestamp(stem, cfg.filename_date_format).date()
     except ValueError as exc:
         raise ValueError(
             f"Video filename {stem!r} does not match the configured "

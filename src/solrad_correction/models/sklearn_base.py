@@ -1,7 +1,5 @@
 """Base class for scikit-learn-based regressors."""
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 from typing import Any
@@ -48,7 +46,12 @@ class SklearnRegressorModel(TabularRegressorModel):
         """Predict using the fitted estimator."""
         x_input = data.X if hasattr(data, "X") else np.asarray(data)
         assert_array_size(x_input.shape, np.float32, context="sklearn prediction input array")
-        return self._estimator.predict(x_input).astype(np.float32)  # type: ignore
+        # scikit-learn ships no type information, so `predict` is untyped and its
+        # result has to be re-established as an array before `.astype` can be
+        # trusted to return one. `np.asarray` on the ndarray sklearn returns is
+        # the identity, so the copy `.astype` makes is still the only one.
+        predictions = np.asarray(self._estimator.predict(x_input))
+        return predictions.astype(np.float32)
 
     def save(self, path: str | Path) -> None:
         """Save model via joblib."""

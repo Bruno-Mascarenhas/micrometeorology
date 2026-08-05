@@ -7,8 +7,6 @@ directory (``metrics.json`` / ``stratified.csv`` / ``report.md`` and, unless
 command body so importing :mod:`allsky.cli` remains torch-free.
 """
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 from typing import Annotated

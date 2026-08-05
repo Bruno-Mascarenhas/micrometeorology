@@ -9,8 +9,6 @@ Run with a larger model:
     python benchmarks/solrad_correction/artifact_checkpoint.py --hidden-size 128 --layers 6
 """
 
-from __future__ import annotations
-
 import sys
 import time
 from pathlib import Path

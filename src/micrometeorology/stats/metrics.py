@@ -11,8 +11,6 @@ fewer than 2 valid pairs remain, the metric returns ``NaN``.
 Ported from ``wrf/metrics.py`` with added type hints and non-finite safety.
 """
 
-from __future__ import annotations
-
 import logging
 
 import numpy as np

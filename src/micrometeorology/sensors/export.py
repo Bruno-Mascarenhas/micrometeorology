@@ -1,7 +1,5 @@
 """Formatted export of processed sensor data."""
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 
@@ -42,6 +40,12 @@ def export_csv(
     -------
     Path
         Path to the written CSV file.
+
+    Raises
+    ------
+    TypeError
+        If ``include_datetime_columns`` is requested but the index is not a
+        ``DatetimeIndex`` (there would be no year/month/day/hour to split out).
     """
     out = Path(output_path)
     ensure_dir(out.parent)
@@ -49,10 +53,16 @@ def export_csv(
     export_df = df.copy()
 
     if include_datetime_columns:
-        export_df.insert(0, "year", export_df.index.year)  # type: ignore
-        export_df.insert(1, "month", export_df.index.month)  # type: ignore
-        export_df.insert(2, "day", export_df.index.day)  # type: ignore
-        export_df.insert(3, "hour", export_df.index.hour)  # type: ignore
+        index = export_df.index
+        if not isinstance(index, pd.DatetimeIndex):
+            raise TypeError(
+                "include_datetime_columns requires a DatetimeIndex; "
+                f"got {type(index).__name__}. Parse the timestamp column first."
+            )
+        export_df.insert(0, "year", index.year)
+        export_df.insert(1, "month", index.month)
+        export_df.insert(2, "day", index.day)
+        export_df.insert(3, "hour", index.hour)
 
     export_df.to_csv(
         out,

@@ -1,7 +1,5 @@
 """Synthetic solrad experiment generators for smoke tests and demos."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 from solrad_correction.config import (

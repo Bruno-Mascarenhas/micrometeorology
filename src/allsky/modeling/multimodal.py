@@ -8,8 +8,6 @@ handed the raw standardized feature vector (sliced into per-group tokens); the
 other fusions are not.
 """
 
-from __future__ import annotations
-
 from collections.abc import Sequence
 from typing import Any, Literal, cast
 

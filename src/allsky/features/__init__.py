@@ -14,8 +14,6 @@ Public surface:
 Pure numpy/pandas; importing this package never pulls torch.
 """
 
-from __future__ import annotations
-
 from allsky.features.engineering import build_feature_frame
 from allsky.features.normalization import (
     FeatureNormalizer,

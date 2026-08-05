@@ -20,8 +20,6 @@ This module is deliberately ``torch``-free: safetensors is read/written through
 its numpy API, so importing it (and the reader) never pulls a heavy framework.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 from collections import Counter, OrderedDict

@@ -5,17 +5,14 @@ all-missing batch that must contribute an exact, finite zero), the
 heteroscedastic NLL sanity property and the fixed per-head weighting.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 import pytest
+import torch
 
-torch = pytest.importorskip("torch")
-
-from allsky.config import TargetsConfig  # noqa: E402
-from allsky.features.normalization import TargetNormalizer  # noqa: E402
-from allsky.training.losses import MultitaskLoss  # noqa: E402
+from allsky.config import TargetsConfig
+from allsky.features.normalization import TargetNormalizer
+from allsky.training.losses import MultitaskLoss
 
 # Non-trivial normalizers so "normalization was applied" is observable.
 NORMS = {

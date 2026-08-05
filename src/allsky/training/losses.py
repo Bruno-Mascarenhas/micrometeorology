@@ -29,13 +29,11 @@ is imported eagerly — this module is only ever imported lazily from the
 training engine / CLIs, keeping ``import allsky`` torch-free.
 """
 
-from __future__ import annotations
-
 from collections.abc import Mapping
 
 import torch
 from torch import Tensor, nn
-from torch.nn import functional as F  # noqa: N812 - conventional alias
+from torch.nn import functional
 
 from allsky.config import TargetsConfig
 from allsky.features.normalization import TargetNormalizer
@@ -195,10 +193,10 @@ class MultitaskLoss(nn.Module):
         normalized = (target[mask] - mean) / std
         selected = pred[mask]
         if kind == "mse":
-            return F.mse_loss(selected, normalized)
+            return functional.mse_loss(selected, normalized)
         if kind == "mae":
-            return F.l1_loss(selected, normalized)
-        return F.huber_loss(selected, normalized, delta=self._huber_delta)
+            return functional.l1_loss(selected, normalized)
+        return functional.huber_loss(selected, normalized, delta=self._huber_delta)
 
     @staticmethod
     def _sky_loss(logits: Tensor, sky_class: Tensor) -> Tensor:
@@ -206,7 +204,7 @@ class MultitaskLoss(nn.Module):
         mask = sky_class >= 0
         if not bool(mask.any()):
             return (logits * 0.0).sum()
-        return F.cross_entropy(logits[mask], sky_class[mask])
+        return functional.cross_entropy(logits[mask], sky_class[mask])
 
 
 def _accumulate(total: Tensor | None, weight: float, component: Tensor) -> Tensor:

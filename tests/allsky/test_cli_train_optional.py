@@ -7,8 +7,6 @@ the extra nor the install command. torch itself is never removed here: the
 precondition check is driven by hiding the spec.
 """
 
-from __future__ import annotations
-
 import importlib.util
 import sys
 from pathlib import Path

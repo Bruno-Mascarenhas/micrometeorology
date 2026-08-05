@@ -1,7 +1,5 @@
 """Memory-safety guards for large array operations."""
 
-from __future__ import annotations
-
 import os
 from typing import Any
 

@@ -1,7 +1,5 @@
 """Centralized experiment artifact writer."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any
 

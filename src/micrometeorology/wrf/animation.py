@@ -4,8 +4,6 @@ Supports direct PNG → WebM conversion (no GIF intermediary) for
 production use, and GIF for quick previews.
 """
 
-from __future__ import annotations
-
 import logging
 import os
 from collections.abc import Sequence

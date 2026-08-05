@@ -7,8 +7,6 @@ models. Metadata-only callers should import from ``models.contracts`` directly:
 building a model needs torch, looking one up does not.
 """
 
-from __future__ import annotations
-
 from solrad_correction.config import ModelConfig
 from solrad_correction.models.base import BaseRegressorModel
 from solrad_correction.models.contracts import (

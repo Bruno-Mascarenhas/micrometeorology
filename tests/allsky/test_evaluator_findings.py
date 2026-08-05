@@ -12,24 +12,21 @@ Two independent defects, both exercised through the real
 CPU-only and offline: a tiny conv backbone stands in for DINOv2.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import pandas as pd
 import pytest
+import torch
 
-torch = pytest.importorskip("torch")
-
-from allsky.config import ExperimentConfig  # noqa: E402
-from allsky.evaluation.evaluator import (  # noqa: E402
+from allsky.config import ExperimentConfig
+from allsky.evaluation.evaluator import (
     _check_kindex_kind,
     _manifest_kindex_kind,
     evaluate_checkpoint,
 )
-from allsky.training.engine import run_experiment  # noqa: E402
-from tests.allsky import _synthetic as synthetic  # noqa: E402
-from tests.allsky.test_engine_findings import TinyConvBackbone, _image_cfg  # noqa: E402
+from allsky.training.engine import run_experiment
+from tests.allsky import _synthetic as synthetic
+from tests.allsky.test_engine_findings import TinyConvBackbone, _image_cfg
 
 
 class TestInferenceWorkers:

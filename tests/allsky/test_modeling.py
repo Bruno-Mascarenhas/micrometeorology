@@ -4,37 +4,33 @@ Every test is offline and CPU-only, uses synthetic tensors and tiny stub
 backbones (no DINOv2 download), and runs in well under a couple of seconds.
 """
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
+from torch import nn
 
-torch = pytest.importorskip("torch")
-
-from torch import nn  # noqa: E402
-
-from allsky.config import ExperimentConfig, load_experiment_config  # noqa: E402
-from allsky.features import active_feature_groups, resolve_feature_set  # noqa: E402
-from allsky.features.normalization import TargetNormalizer  # noqa: E402
-from allsky.modeling.baselines import ClimatologyModel  # noqa: E402
-from allsky.modeling.contracts import MultimodalModel  # noqa: E402
-from allsky.modeling.fusion import (  # noqa: E402
+from allsky.config import ExperimentConfig, load_experiment_config
+from allsky.features import active_feature_groups, resolve_feature_set
+from allsky.features.normalization import TargetNormalizer
+from allsky.modeling.baselines import ClimatologyModel
+from allsky.modeling.contracts import MultimodalModel
+from allsky.modeling.fusion import (
     ConcatFusion,
     CrossAttentionFusion,
     FiLMFusion,
 )
-from allsky.modeling.heads import DHIHeteroscedasticHead, Heads, Trunk  # noqa: E402
-from allsky.modeling.multimodal import MultimodalNet  # noqa: E402
-from allsky.modeling.registry import (  # noqa: E402
+from allsky.modeling.heads import DHIHeteroscedasticHead, Heads, Trunk
+from allsky.modeling.multimodal import MultimodalNet
+from allsky.modeling.registry import (
     MODEL_BUILDERS,
     _warn_unknown_params,
     build_model,
 )
-from allsky.modeling.sensor_encoder import SensorEncoder  # noqa: E402
-from allsky.modeling.visual_encoder import ImageEncoder, PrecomputedEmbedding  # noqa: E402
+from allsky.modeling.sensor_encoder import SensorEncoder
+from allsky.modeling.visual_encoder import ImageEncoder, PrecomputedEmbedding
 
 #: The shipped V0-V7 experiment configs, checked for registry drift below.
 SHIPPED_EXPERIMENT_CONFIGS = sorted(

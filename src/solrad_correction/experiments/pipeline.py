@@ -1,9 +1,8 @@
 """Composable experiment pipeline stages."""
 
-from __future__ import annotations
-
 import logging
 import time
+from typing import Literal
 
 import pandas as pd
 
@@ -65,7 +64,7 @@ def load_data(config: ExperimentConfig) -> LoadedData:
             projected_columns = [*config.data.feature_columns, config.data.target_column]
         loaded_frame = load_sensor_hourly(
             config.data.hourly_data_path,
-            source_format=config.data.source_format,  # type: ignore[arg-type]
+            source_format=_resolve_source_format(config.data.source_format),
             columns=projected_columns,
             datetime_column=config.data.datetime_column,
             datetime_index=config.data.datetime_index,
@@ -79,6 +78,27 @@ def load_data(config: ExperimentConfig) -> LoadedData:
         raise ValueError("No data path provided in config")
 
     return LoadedData(frame=loaded_frame)
+
+
+def _resolve_source_format(source_format: str) -> Literal["auto", "csv", "parquet"]:
+    """Re-establish the table format the loader declares from the config string.
+
+    ``DataConfig.source_format`` is a plain ``str`` because YAML hands over
+    nothing narrower, while ``load_sensor_hourly`` accepts only the three values
+    ``detect_table_format`` knows. ``ExperimentConfig.validate`` rejects anything
+    else long before a run reaches this point; the message below is the one
+    ``detect_table_format`` would have raised, so a stage driven without
+    ``validate()`` still fails identically.
+
+    Raises
+    ------
+    ValueError
+        If ``source_format`` is not one of ``auto``, ``csv`` or ``parquet``.
+    """
+    match source_format:
+        case "auto" | "csv" | "parquet":
+            return source_format
+    raise ValueError("data format must be one of: auto, csv, parquet")
 
 
 def _load_raw_sensor_frame(config: ExperimentConfig, sensor_data_path: str) -> pd.DataFrame:

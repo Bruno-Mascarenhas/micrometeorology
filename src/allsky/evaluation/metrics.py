@@ -16,8 +16,6 @@ Keys are lowercase ASCII (``r2`` rather than ``R²``) so the JSON / CSV reports
 stay portable.
 """
 
-from __future__ import annotations
-
 import warnings
 from typing import Any
 

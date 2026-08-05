@@ -9,10 +9,9 @@ built from, and sensitive to sections that reach no manifest row. So
 - lowering ``embeddings.batch_size`` after an OOM forced a full rebuild that
   reset every ``split`` label to null.
 
-Offline: the synthetic mp4/TOA5 fixtures from :mod:`tests.allsky.test_cli_prepare`.
+Offline: the shared ``synthetic_video`` fixture from :mod:`tests.allsky.conftest`
+plus a multi-day TOA5 ``.dat`` built here.
 """
-
-from __future__ import annotations
 
 import json
 import shutil
@@ -25,11 +24,8 @@ from typer.testing import CliRunner, Result
 from allsky.cli import app
 from allsky.cli.prepare import _manifest_inputs_sha256
 from allsky.config import PrepareConfig
-from tests.allsky.test_cli_prepare import (  # noqa: F401
-    _SAFE_COLUMNS,
-    _write_config,
-    synthetic_video,
-)
+from tests.allsky.conftest import _SAFE_COLUMNS
+from tests.allsky.test_cli_prepare import _write_config
 
 runner = CliRunner()
 
@@ -38,9 +34,9 @@ runner = CliRunner()
 def multi_day_dat(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A TOA5 .dat covering 06:00-06:10 on 2026-01-01..2026-01-05.
 
-    ``tests.allsky.test_cli_prepare.synthetic_dat`` covers one day only, so a
-    second video day would produce no manifest rows at all and hide the very
-    staleness these tests are about.
+    The shared ``synthetic_dat`` fixture covers one day only, so a second video
+    day would produce no manifest rows at all and hide the very staleness these
+    tests are about.
     """
     path = tmp_path_factory.mktemp("multi-day-sensors") / "synthetic.dat"
     columns = ["TIMESTAMP", *_SAFE_COLUMNS, "CM3Up_Wm2_Avg", "PSP_Wm2_Avg"]
@@ -89,7 +85,7 @@ def _days(dataset_dir: Path) -> list[str]:
 
 
 @pytest.fixture
-def two_day_videos(tmp_path: Path, synthetic_video: Path) -> Path:  # noqa: F811
+def two_day_videos(tmp_path: Path, synthetic_video: Path) -> Path:
     """A private video directory seeded with day 1 only (day 2 added by the test)."""
     videos = tmp_path / "videos"
     videos.mkdir()

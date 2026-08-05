@@ -4,8 +4,6 @@ These do not import torch (the subprocess checks assert it stays out), so the
 module deliberately avoids ``pytest.importorskip('torch')`` at import time.
 """
 
-from __future__ import annotations
-
 import subprocess
 import sys
 
@@ -42,7 +40,8 @@ def test_unknown_attribute_raises_attribute_error():
     from allsky import modeling
 
     with pytest.raises(AttributeError, match="does_not_exist"):
-        modeling.does_not_exist  # noqa: B018 - triggering __getattr__ on purpose
+        # Binding the result is what makes the lookup a real (failing) read.
+        _ = modeling.does_not_exist
 
 
 def test_group_slices_covers_safe_features_exactly_once():

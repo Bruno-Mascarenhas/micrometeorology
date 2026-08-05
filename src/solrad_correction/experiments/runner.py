@@ -1,7 +1,5 @@
 """Compatibility wrapper for running solrad_correction experiments."""
 
-from __future__ import annotations
-
 from solrad_correction.evaluation.policy import align_test_frame, prediction_index
 from solrad_correction.experiments.pipeline import run_pipeline
 

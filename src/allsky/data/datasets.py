@@ -20,8 +20,6 @@ to mask.
 importing ``allsky.data.datasets`` never pulls torch.
 """
 
-from __future__ import annotations
-
 import itertools
 import math
 from collections.abc import Sequence

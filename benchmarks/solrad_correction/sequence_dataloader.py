@@ -9,8 +9,6 @@ Run with custom parameters:
     python benchmarks/solrad_correction/sequence_dataloader.py --rows 100000 --batch-size 256
 """
 
-from __future__ import annotations
-
 import sys
 import time
 from pathlib import Path

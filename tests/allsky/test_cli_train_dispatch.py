@@ -6,24 +6,19 @@ acceptance and bad-resume-path rejection. Non-experiment configs are rejected by
 the command; that torch-free behaviour is covered in ``test_cli.py``.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 from typer.testing import CliRunner
 
-torch = pytest.importorskip("torch")
-
-from allsky import solar  # noqa: E402
-from allsky.cli import app  # noqa: E402
-from allsky.config import SiteConfig  # noqa: E402
-from allsky.data.manifest import build_manifest, write_manifest_parquet  # noqa: E402
-from allsky.data.splits import create_day_splits, save_split_artifact  # noqa: E402
-from allsky.embeddings.storage import save_shard, shard_path, write_index, write_meta  # noqa: E402
-from allsky.training.checkpointing import load_checkpoint as _load_checkpoint  # noqa: E402
+from allsky import solar
+from allsky.cli import app
+from allsky.config import SiteConfig
+from allsky.data.manifest import build_manifest, write_manifest_parquet
+from allsky.data.splits import create_day_splits, save_split_artifact
+from allsky.embeddings.storage import save_shard, shard_path, write_index, write_meta
+from allsky.training.checkpointing import load_checkpoint as _load_checkpoint
 
 runner = CliRunner()
 

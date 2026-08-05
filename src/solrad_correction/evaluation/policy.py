@@ -1,7 +1,5 @@
 """Evaluation row-alignment policy for experiment predictions."""
 
-from __future__ import annotations
-
 import numpy as np
 import pandas as pd
 

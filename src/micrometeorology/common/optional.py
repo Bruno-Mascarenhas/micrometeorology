@@ -13,8 +13,6 @@ raised from inside first-party code that the guarded import pulls in, and it
 keeps the lazy-import guarantee intact (``find_spec`` does not import torch).
 """
 
-from __future__ import annotations
-
 import importlib.util
 
 __all__ = ["require"]

@@ -3,8 +3,6 @@
 Torch-free: only pydantic + YAML on disk (``tmp_path``), strictly offline.
 """
 
-from __future__ import annotations
-
 import pytest
 from pydantic import ValidationError
 

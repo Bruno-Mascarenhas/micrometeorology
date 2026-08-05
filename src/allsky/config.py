@@ -1,7 +1,5 @@
 """Configuration models for the all-sky pipeline."""
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any, Literal
 

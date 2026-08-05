@@ -1,7 +1,5 @@
 """Typed stage results for experiment orchestration."""
 
-from __future__ import annotations
-
 import contextlib
 import time
 from collections.abc import Iterator

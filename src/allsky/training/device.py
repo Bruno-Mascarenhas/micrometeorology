@@ -6,8 +6,6 @@ unchanged. torch is imported lazily inside the function so this module — and
 thus ``import allsky.training`` — stays importable in a torch-free environment.
 """
 
-from __future__ import annotations
-
 
 def resolve_device(requested: str = "auto") -> str:
     """Resolve ``"auto"`` to the best available device: cuda -> mps -> cpu."""

@@ -1,7 +1,5 @@
 """Tests for allsky.data.loading: the shared artifact loaders' declared types."""
 
-from __future__ import annotations
-
 import subprocess
 import sys
 from pathlib import Path

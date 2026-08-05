@@ -1,7 +1,5 @@
 """End-to-end tests for the labmim-wrf-geojson CLI (work-unit pipeline)."""
 
-from __future__ import annotations
-
 import json
 
 from typer.testing import CliRunner

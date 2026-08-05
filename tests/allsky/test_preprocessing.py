@@ -3,8 +3,6 @@
 Pure numpy/PIL: no torch, no network, synthetic arrays only.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import numpy as np

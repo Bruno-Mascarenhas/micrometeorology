@@ -6,8 +6,6 @@ Records are **immutable historical facts** — new calibrations must be
 appended, never overwriting existing entries.
 """
 
-from __future__ import annotations
-
 import itertools
 import logging
 from pathlib import Path
@@ -28,7 +26,8 @@ def load_calibrations(config_path: str | Path) -> list[dict[str, Any]]:
         return []
     with open(path, encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
-    return data.get("calibrations", [])  # type: ignore
+    records: list[dict[str, Any]] = data.get("calibrations", [])
+    return records
 
 
 def _resolve_inclusive_end(value: Any, fallback: pd.Timestamp) -> pd.Timestamp:
@@ -210,7 +209,8 @@ def load_sensor_switches(config_path: str | Path) -> list[dict[str, Any]]:
         return []
     with open(path, encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
-    return data.get("sensor_switches", [])  # type: ignore
+    switches: list[dict[str, Any]] = data.get("sensor_switches", [])
+    return switches
 
 
 def unify_sensor_columns(

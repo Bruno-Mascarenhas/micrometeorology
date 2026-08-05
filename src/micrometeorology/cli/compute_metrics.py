@@ -9,8 +9,6 @@ Compare all common columns:
     labmim-metrics -a observations.csv -b predictions.csv -o metrics.csv
 """
 
-from __future__ import annotations
-
 import sys
 from enum import StrEnum
 from pathlib import Path
@@ -123,10 +121,14 @@ def run(
             direction="nearest",
         )
     elif join == JoinMethod.nearest:
+        # ``reset_index()`` materialises the index under its own name, or under
+        # "index" when it is unnamed (``read_dataset`` always clears the name).
+        key_a = str(df_a.index.name or "index")
+        key_b = str(df_b.index.name or "index")
         aligned = pd.merge_asof(
-            df_a[cols].reset_index().sort_values(df_a.index.name or "index"),  # type: ignore
-            df_b[cols].reset_index().sort_values(df_b.index.name or "index"),  # type: ignore
-            on=df_a.index.name or "index",
+            df_a[cols].reset_index().sort_values(key_a),
+            df_b[cols].reset_index().sort_values(key_b),
+            on=key_a,
             tolerance=pd.Timedelta(tolerance),
             suffixes=("_a", "_b"),
             direction="nearest",
@@ -144,7 +146,7 @@ def run(
     for col in cols:
         a_col, b_col = f"{col}_a", f"{col}_b"
         if a_col in aligned.columns and b_col in aligned.columns:
-            results[col] = compute_all(aligned[a_col].values, aligned[b_col].values)  # type: ignore
+            results[col] = compute_all(aligned[a_col].to_numpy(), aligned[b_col].to_numpy())
 
     metrics_df = pd.DataFrame(results)
 

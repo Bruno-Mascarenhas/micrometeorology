@@ -13,8 +13,6 @@ Both are frozen dataclasses with :meth:`to_dict`/:meth:`from_dict` for
 JSON round-tripping into run manifests and checkpoints.
 """
 
-from __future__ import annotations
-
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any

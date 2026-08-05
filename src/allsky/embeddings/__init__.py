@@ -19,8 +19,6 @@ All ``torch``/``torch.hub`` imports are lazy: importing this package never pulls
 torch, mirroring the ``allsky.video`` / ``allsky.data`` torch-free contract.
 """
 
-from __future__ import annotations
-
 from allsky.embeddings.backbone import (
     AVAILABLE_BACKBONES,
     DINOV2_MODEL,

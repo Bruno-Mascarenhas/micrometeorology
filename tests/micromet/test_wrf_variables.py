@@ -5,8 +5,6 @@ Covers the Phase 6 behavior bug fixes:
 - min/max helpers must not crash on single-timestep inputs (Fix 3).
 """
 
-from __future__ import annotations
-
 import numpy as np
 
 from micrometeorology.wrf.variables import (

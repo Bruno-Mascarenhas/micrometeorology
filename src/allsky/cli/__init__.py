@@ -27,8 +27,6 @@ to add a command. Heavy dependencies (torch, imageio-ffmpeg) are imported
 lazily inside each command so ``allsky --help`` works in a minimal environment.
 """
 
-from __future__ import annotations
-
 import typer
 
 from allsky.cli import embeddings, evaluate, frames, prepare, train

@@ -15,8 +15,6 @@ Heavy dependencies (pandas, imageio, torch-free sibling modules) are imported
 lazily inside each command so ``allsky --help`` stays light and torch-free.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 import logging
