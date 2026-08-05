@@ -190,14 +190,14 @@ def _read_csv_table(
             usecols = [resolved_datetime_column, *columns]
 
     csv_dtype = {k: v for k, v in dtype_map.items() if columns is None or k in columns} or None
-    kwargs: dict[str, Any] = {
-        "usecols": usecols,
-        "dtype": csv_dtype,
-        "parse_dates": parse_dates,
-        "index_col": index_col,
-        "nrows": limit_rows,
-    }
-    df = cast("pd.DataFrame", pd.read_csv(path, **kwargs))
+    df = pd.read_csv(
+        path,
+        usecols=usecols,
+        dtype=csv_dtype,
+        parse_dates=parse_dates,
+        index_col=index_col,
+        nrows=limit_rows,
+    )
     # pandas does not parse unnamed ("Unnamed: N") datetime columns passed via
     # parse_dates; coerce string-like indexes so the datetime index survives.
     if index_col is not None and not isinstance(df.index, pd.DatetimeIndex):
