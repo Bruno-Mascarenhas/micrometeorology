@@ -134,12 +134,13 @@ override-dependencies = [
 src = ["src"]
 target-version = "py314"
 line-length = 100
-exclude = [
+# `exclude` REPLACES ruff's 25 built-in exclusions; `extend-exclude` adds to
+# them. `.venv`, `venv` and `.git` are already built-ins, so only these two are
+# ours. Keeping the built-ins matters because `make check` runs a bare
+# `ruff check .` with force-exclude off.
+extend-exclude = [
     "legacy",
-    ".venv",
-    "venv",
     "env",
-    ".git"
 ]
 
 [tool.ruff.lint]
@@ -166,7 +167,12 @@ extend-select = [
     "S",    # flake8-bandit — security anti-patterns
 ]
 ignore = [
-    "E501",  # line too long (handled by formatter)
+    # Line length is enforced at format time by `line-length = 100`, not by
+    # E501, and E501 reaches this repo only via the "E" entry above (it is not
+    # in ruff's default set). It stays off because the violations it reports are
+    # unsplittable string content — f-strings and docstring CLI-usage examples —
+    # that the formatter provably cannot rewrap.
+    "E501",
 ]
 
 [tool.ruff.lint.per-file-ignores]

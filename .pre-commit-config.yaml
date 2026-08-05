@@ -14,6 +14,16 @@ repos:
     hooks:
       - id: ruff-check
         args: [--fix]
+      # RUF200 (invalid-pyproject-toml) is default-on and ruff's own `include`
+      # already covers `**/pyproject.toml`, but the upstream hook only passes
+      # python/pyi/jupyter — so CI, which runs only pre-commit, never evaluates
+      # it while `make check`'s bare `ruff check .` does. Same local/CI drift
+      # the ruff-format override below fixes. No --fix: RUF200 has no autofix.
+      - id: ruff-check
+        alias: ruff-check-pyproject
+        name: ruff check (pyproject.toml schema)
+        types_or: [toml]
+        files: ^pyproject\.toml$
       # Ruff 0.16 formats Python code blocks inside Markdown, but the upstream
       # hook only passes python/pyi/jupyter — which would leave `make fix`
       # rewriting docs/ that CI never checks. Widen it so the hook stays the
