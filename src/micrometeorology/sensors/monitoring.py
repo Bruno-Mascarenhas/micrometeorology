@@ -185,7 +185,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         y_limits=(0.0, 360.0),
         caveats=(
             "Todas as camadas são pontos, inclusive a do WRF: direção é circular, e uma linha ligando 350° a 10° varreria o gráfico inteiro passando por um rumo que nunca ocorreu.",
-            "A média horária é vetorial não ponderada — o versor médio das amostras do intervalo, sem peso pela velocidade.",
+            "A média horária é vetorial ponderada pela velocidade — cada amostra do intervalo entra com o peso do vento que a produziu, de modo que uma calmaria não desloca o rumo da hora.",
         ),
     ),
     MonitoringChart(

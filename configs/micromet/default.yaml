@@ -12,21 +12,10 @@ shapes_dir: shapes_BR_cities
 # configs_dir is deliberately absent: this file lives in it, so redeclaring it
 # here is what let the value drift. The Settings field default owns the path.
 
-# WRF processing
-wrf_default_variables:
-  - temperature
-  - pressure
-  - vapor
-  - relative_humidity
-  - skin_temperature
-  - wind
-  - rain
-  - HFX
-  - LH
-  - SWDOWN
-  - poteolico
-  - GLW
-  - wind_power_density_10m
+# Nenhuma configuração de WRF aqui: nem micrometeorology.wrf nem as três CLIs de
+# WRF importam a camada de configuração, então uma lista de variáveis neste
+# arquivo parecia autoritativa e não tinha efeito nenhum. Cada CLI carrega a sua
+# própria DEFAULT_VARS, e elas são deliberadamente diferentes entre si.
 
 # Sensor quality-control limits
 # Revisados em 2026-08-09 contra a distribuicao empirica de todo o acervo
@@ -136,6 +125,23 @@ sensor_wind_dir_columns:
   - WindDir1_GMX
   - WindDir2_GMX
   - WD
+
+# Cada direção com a velocidade que pesa sua média vetorial. Sem o par, todo
+# rumo entra com peso unitário e uma hora de calmaria vale tanto quanto uma
+# rajada: medido contra o acervo real, 10,5% das horas da era v22 e 20,1% das
+# horas da era WXT ficavam a mais de 5° do rumo ponderado, com máximo de 125°.
+# `WD -> WS` é o par unificado, e é o que a aggregate_to_hourly enxerga depois
+# de unify_sensor_columns — sem ele o rumo publicado continuaria não ponderado
+# mesmo com todos os pares de era declarados.
+sensor_wind_speed_column_map:
+  WindDir_D1_WVT: WS_ms_S_WVT
+  Wd_MeanUnitVector: Ws_Mean
+  WD_WXT_Avg: WS_WXT_Avg
+  WindDir: WS_ms
+  WindDir_GMX: WS_ms_GMX
+  WindDir1_GMX: WS1_ms_GMX
+  WindDir2_GMX: WS2_ms_GMX
+  WD: WS
 
 # Minimum valid samples per aggregation window.
 # Mantido em 6 de 12 (50%) por decisão do laboratório: é o valor com que o

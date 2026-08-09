@@ -159,8 +159,8 @@ class TestShippedConfigDrivesSpecialAggregation:
 
     def _rules_from_the_resolved_configs_dir(
         self, settings: Settings
-    ) -> tuple[list[str], list[str]]:
-        """Resolve the sum / wind-direction columns through ``configs_dir``.
+    ) -> tuple[list[str], list[str], dict[str, str]]:
+        """Resolve the sum / wind-direction / speed-pairing rules through ``configs_dir``.
 
         Missing file means "no special aggregation", which is exactly how the
         pipeline treats it, so a wrong ``configs_dir`` surfaces here as wrong
@@ -168,16 +168,20 @@ class TestShippedConfigDrivesSpecialAggregation:
         """
         config_file = settings.configs_dir / "default.yaml"
         if not config_file.exists():
-            return [], []
+            return [], [], {}
         with open(config_file, encoding="utf-8") as fh:
             config = yaml.safe_load(fh) or {}
-        return config.get("sensor_sum_columns", []), config.get("sensor_wind_dir_columns", [])
+        return (
+            config.get("sensor_sum_columns", []),
+            config.get("sensor_wind_dir_columns", []),
+            config.get("sensor_wind_speed_column_map", {}),
+        )
 
     def test_hourly_rain_is_the_total_and_wind_direction_is_the_vector_mean(
         self, settings_without_ambient_overrides: Settings
     ) -> None:
         """Twelve 0.5 mm tips are 6 mm of rain, and 350/010 averages to north."""
-        sum_columns, wind_dir_columns = self._rules_from_the_resolved_configs_dir(
+        sum_columns, wind_dir_columns, speed_map = self._rules_from_the_resolved_configs_dir(
             settings_without_ambient_overrides
         )
         idx = pd.date_range("2024-01-01 00:00", periods=12, freq="5min")
@@ -195,7 +199,7 @@ class TestShippedConfigDrivesSpecialAggregation:
             min_samples=6,
             sum_columns=sum_columns,
             wind_dir_columns=wind_dir_columns,
-            wind_speed_column_map={"WD_WXT": "WS_WXT"},
+            wind_speed_column_map=speed_map,
         )
 
         assert result["precip"].iloc[0] == pytest.approx(6.0), "rain was meaned, not summed"
@@ -207,7 +211,26 @@ class TestShippedConfigDrivesSpecialAggregation:
     ) -> None:
         """Both routes to the rules must name the same columns, forever."""
         settings = settings_without_ambient_overrides
-        sum_columns, wind_dir_columns = self._rules_from_the_resolved_configs_dir(settings)
+        sum_columns, wind_dir_columns, speed_map = self._rules_from_the_resolved_configs_dir(
+            settings
+        )
 
         assert sum_columns == settings.sensor_sum_columns
         assert wind_dir_columns == settings.sensor_wind_dir_columns
+        assert speed_map == settings.sensor_wind_speed_column_map
+
+    def test_every_shipped_direction_column_declares_the_speed_that_weights_it(
+        self, settings_without_ambient_overrides: Settings
+    ) -> None:
+        """A direction with no pairing is silently vector-averaged with unit weight.
+
+        That is what shipped for the whole record: the field existed, both CLIs
+        passed it, and no YAML ever populated it, so a calm sample counted as
+        much as a squall in every published bearing.
+        """
+        settings = settings_without_ambient_overrides
+        unpaired = set(settings.sensor_wind_dir_columns) - set(
+            settings.sensor_wind_speed_column_map
+        )
+
+        assert not unpaired, f"direction columns with no speed pairing: {sorted(unpaired)}"
