@@ -38,6 +38,7 @@ from allsky.config import SiteConfig
 from allsky.solar import extraterrestrial_ghi, solar_elevation
 from micrometeorology.common.git import run_git
 from micrometeorology.common.logging import setup_logging
+from micrometeorology.stats import distributions as dist
 from micrometeorology.stats.climatology import seasonal_groups
 from micrometeorology.stats.climatology_export import (
     CLIMATOLOGY_VARIABLES,
@@ -117,10 +118,15 @@ WRF_COLUMN = {
     "longwave_down": "Lwdw_glw",
 }
 
-# The PAR instrument changed on 2019-03-15 and the later era's PAR/global ratio
-# is inconsistent with the literature, so the two are published side by side
-# rather than pooled. See the caveats on those two variable specs.
-PAR_ERA_SPLIT = pd.Timestamp("2019-03-15")
+# One date, two instruments. The PAR sensor changed here and the later era's
+# PAR/global ratio is inconsistent with the literature, so the two PAR eras are
+# published side by side rather than pooled. The SAME break shows in the albedo:
+# the monthly median daytime Sw_up/Sw_dw is 0.345 / 0.353 / 0.370 in the three
+# months before it and 0.155 in the month after, staying near 0.13 for the rest
+# of the record. It sits inside a 17-day gap that ends on this date, so the two
+# instruments were plainly serviced together — which is why reflected shortwave
+# is restricted to the later era too, and why no new constant is introduced.
+ERA_SPLIT = pd.Timestamp("2019-03-15")
 
 # Wind direction was recorded as an ARITHMETIC mean of an angle over this window
 # — a scalar average across the 0/360 wrap. Measured symptom: not one 5-minute
@@ -135,7 +141,33 @@ MIN_SOLAR_ELEVATION_DEG = 10.0
 
 # Variables restricted to daylight. Without the gate, night fills half the record
 # with zeros and the histogram collapses to a single bar nobody can read.
-DAYTIME_ONLY = ("shortwave_down", "shortwave_up", "net_radiation_day")
+# PAR is here and was not before: it is a shortwave band, so over all hours 38%
+# of the early era's published values were exactly zero because they were night.
+# No density survives that — the same curve scored against the ungated sample
+# gives a KS distance of 0.55 — and the gate is what makes the variable fittable.
+DAYTIME_ONLY = (
+    "shortwave_down",
+    "shortwave_up",
+    "net_radiation_day",
+    "par_early",
+    "par_late",
+)
+
+# Denominator floor for every ratio taken here (albedo, PAR fraction). This is a
+# STATISTICAL necessity and nobody's published threshold: a ratio whose
+# denominator approaches zero has unbounded variance, so a handful of twilight
+# hours would otherwise dominate a bulk mean. Printed wherever it is applied.
+RATIO_DENOMINATOR_FLOOR = 50.0
+
+# Above this, PAR would exceed 60% of the global flux it is a sub-band of, which
+# no instrument state explains. Removed as a point mass rather than clipped.
+MAX_PAR_FRACTION = 0.6
+
+# Equal-count bins of the extraterrestrial irradiance used to marginalise every
+# induced density. Sixty is not an approximation that matters: against the exact
+# mixture over all 35,436 observed values the CDF differs by 1.2e-4, three orders
+# below the KS distance being reported.
+INDUCED_BINS = 60
 
 # Net radiation is a two-regime mixture, so its night half is published on its
 # own: with no shortwave term it is the net longwave loss, narrow enough that a
@@ -227,9 +259,9 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
     series = series.dropna()
 
     if spec_id == "par_early":
-        series = series.loc[series.index < PAR_ERA_SPLIT]
-    elif spec_id == "par_late":
-        series = series.loc[series.index >= PAR_ERA_SPLIT]
+        series = series.loc[series.index < ERA_SPLIT]
+    elif spec_id in ("par_late", "shortwave_up"):
+        series = series.loc[series.index >= ERA_SPLIT]
     elif spec_id == "wind_direction":
         first, last = INVALID_DIRECTION
         series = series.loc[(series.index < first) | (series.index > last)]
@@ -252,7 +284,54 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
         dry = 1.0 - (len(wet) / len(series)) if len(series) else float("nan")
         return wet.to_numpy(), [Atom("dry", "Horas sem chuva", dry)]
 
+    if spec_id == "shortwave_down":
+        # A pyranometer's zero offset makes a few daytime hours slightly negative.
+        # They are outside the induced density's support, so they leave as a mass
+        # rather than being clipped to zero, which would invent a spike at the
+        # origin the instrument never measured.
+        positive = series.loc[series > 0.0]
+        share = 1.0 - (len(positive) / len(series)) if len(series) else float("nan")
+        return positive.to_numpy(), [
+            Atom(
+                "nonpositive",
+                "Horas com fluxo não positivo (deslocamento de zero do sensor)",
+                share,
+            )
+        ]
+
+    if spec_id in ("par_early", "par_late"):
+        return _par_sample(series, frame)
+
     return series.to_numpy(), []
+
+
+def _par_sample(series: pd.Series, frame: pd.DataFrame) -> tuple[np.ndarray, list[Atom]]:
+    """Strip the two point masses the PAR record carries after the daylight gate.
+
+    Both are instrument states, not weather: a logger zero period in late 2018
+    that writes exact zeros in broad daylight, and hours where PAR exceeds 60% of
+    the global flux it is a sub-band of. Fitting over either one drags the curve
+    toward a spike that no atmosphere produced.
+    """
+    total = len(series)
+    if not total:
+        return np.array([]), []
+    global_flux = frame[OBSERVED_COLUMN["shortwave_down"]].reindex(series.index)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        fraction = series / global_flux.where(global_flux > RATIO_DENOMINATOR_FLOOR)
+    zeros = series <= 0.0
+    impossible = fraction > MAX_PAR_FRACTION
+    kept = series.loc[~(zeros | impossible)]
+    return kept.to_numpy(), [
+        Atom("daytime_zero", "Zeros diurnos do registrador", float(zeros.mean())),
+        Atom(
+            "par_over_global",
+            f"Razão PAR/global acima de {MAX_PAR_FRACTION:.1f}, fisicamente impossível".replace(
+                ".", ","
+            ),
+            float(impossible.fillna(False).mean()),
+        ),
+    ]
 
 
 def _wrf_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Atom]]:
@@ -280,6 +359,129 @@ def _wrf_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Ato
         # sources structurally comparable on the page.
         return series.to_numpy(), [Atom("calm", "Calmarias (modelo não produz zero exato)", 0.0)]
     return series.to_numpy(), []
+
+
+def _scale_mixture(top: np.ndarray) -> tuple[list[float], list[float]]:
+    """Equal-count bins of the extraterrestrial irradiance, as scales and weights.
+
+    Marginalising the induced density over the covariate exactly would mean one
+    mixture component per observed hour. Binning by QUANTILE rather than by value
+    keeps every component carrying the same weight, so the tails — where a
+    fixed-width bin would hold three hours and still count as a component — do
+    not get to speak louder than they should.
+    """
+    finite = np.sort(top[np.isfinite(top) & (top > 0.0)])
+    if finite.size == 0:
+        return [], []
+    groups = np.array_split(finite, min(INDUCED_BINS, finite.size))
+    groups = [group for group in groups if group.size]
+    total = float(sum(group.size for group in groups))
+    return (
+        [float(group.mean()) for group in groups],
+        [group.size / total for group in groups],
+    )
+
+
+def _bulk_ratio(numerator: pd.Series, denominator: pd.Series) -> float:
+    """Energy-weighted ratio of two fluxes: sum over sum, not the mean of ratios.
+
+    The mean of hourly ratios weights a 20 W/m2 twilight hour the same as a
+    900 W/m2 noon hour. Summing first is what makes the scalar mean what its
+    name says — the share of the incoming energy that came back or arrived in
+    the band — and it is also far less sensitive to the denominator floor.
+    """
+    paired = pd.concat([numerator, denominator], axis=1, join="inner").dropna()
+    paired = paired.loc[paired.iloc[:, 1] > RATIO_DENOMINATOR_FLOOR]
+    if paired.empty or paired.iloc[:, 1].sum() <= 0.0:
+        return float("nan")
+    return float(paired.iloc[:, 0].sum() / paired.iloc[:, 1].sum())
+
+
+def _induced_options(spec_id: str, frame: pd.DataFrame, source: str) -> dict[str, object] | None:
+    """The covariate-derived options one induced curve needs for one subset.
+
+    SUBSET-MATCHED INHERITANCE: lambda and kt_max come from fitting the clearness
+    index on THIS block, not on the whole record. That is the same rule every
+    other variable on the page already follows — summer is fitted to summer — and
+    it is what keeps the induced curve consistent with the clearness-index panel
+    the reader can open right next to it.
+    """
+    spec = {item.id: item for item in CLIMATOLOGY_VARIABLES}[spec_id]
+    if not spec.fit_options:
+        return None
+
+    global_column = (
+        WRF_COLUMN["shortwave_down"] if source == "wrf" else OBSERVED_COLUMN["shortwave_down"]
+    )
+    if global_column not in frame.columns:
+        return None
+    parent = dist.fit_distribution("hollands_huget", _clearness(frame, global_column).to_numpy())
+    if not np.isfinite(parent.params.get("lambda", np.nan)):
+        return None
+
+    daylight = frame.loc[_elevation(frame) > MIN_SOLAR_ELEVATION_DEG]
+    if spec_id in ("par_late", "shortwave_up"):
+        daylight = daylight.loc[daylight.index >= ERA_SPLIT]
+    elif spec_id == "par_early":
+        daylight = daylight.loc[daylight.index < ERA_SPLIT]
+    if daylight.empty:
+        return None
+
+    top = extraterrestrial_ghi(_times(daylight), SITE, UTC_OFFSET_HOURS)
+    scales, weights = _scale_mixture(np.asarray(top, dtype=float))
+    if not scales:
+        return None
+
+    gain = 1.0
+    incoming = daylight[global_column]
+    if spec_id == "shortwave_up":
+        gain = _bulk_ratio(daylight[OBSERVED_COLUMN["shortwave_up"]], incoming)
+    elif spec_id in ("par_early", "par_late"):
+        gain = _bulk_ratio(daylight[OBSERVED_COLUMN[spec_id]], incoming)
+    if not np.isfinite(gain) or gain <= 0.0:
+        return None
+
+    options: dict[str, object] = {
+        "lam": float(parent.params["lambda"]),
+        "kt_max": float(parent.params["kt_max"]),
+        "scales": scales,
+        "weights": weights,
+        # Named, not folded into the scales: it is the one number estimated for
+        # this variable, and for PAR it is the whole point of publishing the two
+        # eras side by side.
+        "gain": gain,
+    }
+    if spec_id == "net_radiation_day":
+        line = _net_radiation_line(daylight)
+        if line is None:
+            return None
+        options.update(line)
+    return options
+
+
+def _net_radiation_line(daylight: pd.DataFrame) -> dict[str, object] | None:
+    """Local slope, intercept and residual spread of net radiation on shortwave.
+
+    Hu, Wang and Liu (2012) establish that the relation is linear; the
+    coefficients are this station's own, because theirs are in MJ/m2 per day and
+    these are hourly W/m2. The residual spread is what the Gaussian convolution
+    uses, and measuring its shape here is what licenses calling it Gaussian.
+    """
+    columns = [OBSERVED_COLUMN["shortwave_down"], OBSERVED_COLUMN["net_radiation_day"]]
+    if any(column not in daylight.columns for column in columns):
+        return None
+    paired = daylight[columns].dropna()
+    if len(paired) < 100:
+        return None
+    incoming = paired.iloc[:, 0].to_numpy()
+    net = paired.iloc[:, 1].to_numpy()
+    slope, intercept = np.polyfit(incoming, net, 1)
+    residual = net - (slope * incoming + intercept)
+    return {
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "residual_sd": float(residual.std(ddof=1)),
+    }
 
 
 def _coverage(frame: pd.DataFrame) -> dict[str, object]:
@@ -399,6 +601,7 @@ def run(
     for spec in CLIMATOLOGY_VARIABLES:
         samples: dict[str, np.ndarray] = {}
         atoms: dict[str, list[Atom]] = {}
+        options: dict[str, dict[str, object]] = {}
         for subset_id, (source, block) in blocks.items():
             if source == "observed":
                 sample, subset_atoms = _observed_sample(spec.id, block)
@@ -406,7 +609,24 @@ def run(
                 sample, subset_atoms = _wrf_sample(spec.id, block)
             samples[subset_id] = sample
             atoms[subset_id] = subset_atoms
-        payload = build_variable_payload(spec, samples, version=version, atoms=atoms)
+            if spec.fit_options and len(sample):
+                subset_options = _induced_options(spec.id, block, source)
+                if subset_options is None:
+                    # No covariate for this recorte means no curve for this
+                    # recorte, and the bars still publish. Dropping the sample
+                    # instead would delete measurements over a missing model
+                    # input, which is the wrong direction to fail in.
+                    logger.warning(
+                        "%s/%s: no covariate available, publishing bars without a curve",
+                        spec.id,
+                        subset_id,
+                    )
+                    samples[subset_id] = np.array([])
+                else:
+                    options[subset_id] = subset_options
+        payload = build_variable_payload(
+            spec, samples, version=version, atoms=atoms, options=options
+        )
         path = write_json(output_dir / f"{spec.id}.json", payload)
         counts = " ".join(f"{key}={len(value):,}" for key, value in samples.items() if len(value))
         typer.echo(f"  [ok] {path.name:28s} {counts}")

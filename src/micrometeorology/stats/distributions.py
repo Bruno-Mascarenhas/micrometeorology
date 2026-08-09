@@ -56,6 +56,7 @@ must not pay the matplotlib import.
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -148,11 +149,13 @@ class DistributionFit:
     ``params`` carries the natural parameters of the family and is what gets
     serialised: ``{"shape", "scale"}`` for Weibull and gamma, ``{"alpha",
     "beta"}`` for beta, ``{"mu", "sigma"}`` for normal, ``{"lambda", "kt_max"}``
-    for Hollands-Huget.
+    for Hollands-Huget. The induced radiation families add list-valued entries
+    (the scale mixture derived from the extraterrestrial irradiance), which is
+    why the annotation is ``Any`` and not ``float``.
     """
 
     family: str
-    params: dict[str, float]
+    params: dict[str, Any]
     n: int
 
 
@@ -227,10 +230,10 @@ class Family:
     name: str
     # `...` rather than `[NDArray]`: hollands_huget takes an extra keyword-only
     # option, and a precise signature here would reject it at the registry.
-    fit: Callable[..., dict[str, float]]
-    pdf: Callable[[NDArray, Mapping[str, float]], NDArray]
-    cdf: Callable[[NDArray, Mapping[str, float]], NDArray]
-    ppf: Callable[[NDArray, Mapping[str, float]], NDArray]
+    fit: Callable[..., dict[str, Any]]
+    pdf: Callable[[NDArray, Mapping[str, Any]], NDArray]
+    cdf: Callable[[NDArray, Mapping[str, Any]], NDArray]
+    ppf: Callable[[NDArray, Mapping[str, Any]], NDArray]
     # Samples outside this open interval cannot be represented by the family and
     # are dropped before fitting (wind calms for Weibull, dry hours for gamma,
     # the saturation pile-up for beta). The caller reports the removed mass as a
@@ -750,6 +753,347 @@ def _hollands_ppf(q: NDArray, params: Mapping[str, float]) -> NDArray:
     return midpoint
 
 
+# ---------------------------------------------------------------------------
+# Induced densities
+# ---------------------------------------------------------------------------
+#
+# The three families below are not new laws. Each is an EXACT change of variable
+# applied to a law that is already fitted and already published on the page, and
+# that is the whole reason they can carry a citation at all.
+#
+# Irradiance in W/m2 has no canonical density: half the record is night and the
+# extraterrestrial forcing swings with the hour and the season, so the shape of
+# a raw-flux histogram is mostly solar geometry, not climate. The quantity the
+# literature does model is the clearness index kt = global / extraterrestrial.
+# Since the flux IS kt times the extraterrestrial irradiance, the published kt
+# law induces a density on the flux — one that inherits its parameters and
+# introduces no new free ones.
+#
+# Marginalising over the observed extraterrestrial irradiance turns that into a
+# finite scale mixture: bin the covariate, and each bin contributes a rescaled
+# copy of the parent density. The Jacobian 1/s per component is what keeps the
+# result a density; dropping it is the classic error here.
+
+
+# CODATA 2018. Only used to invert Stefan-Boltzmann at unit emissivity, which is
+# an exact relabelling of an upwelling flux as a brightness temperature and so
+# needs no emissivity value.
+STEFAN_BOLTZMANN = 5.670374419e-8
+
+# Gauss-Legendre nodes for the net-radiation convolution. 48, 96 and 192 agree to
+# five decimals on the real record, so 96 carries no quadrature noise.
+_QUADRATURE_NODES = 96
+
+# Chunk width for the convolution's mixture sum. The component count is
+# bins x nodes ~ 5,760, so evaluating a long x in one go would allocate a matrix
+# of millions of doubles for no gain.
+_CHUNK = 2048
+
+
+def _shape_params(params: Mapping[str, Any]) -> dict[str, float]:
+    """The parent Hollands-Huget parameters the induced law inherits."""
+    return {"lambda": float(params["lambda"]), "kt_max": float(params["kt_max"])}
+
+
+def _mixture_arrays(params: Mapping[str, Any]) -> tuple[NDArray, NDArray]:
+    """The scale mixture's scales and weights, as arrays.
+
+    ``gain`` multiplies the scales here rather than being folded into them by the
+    caller. It is the one estimated number in an albedo- or PAR-scaled curve —
+    0,4475 against 0,2579 is the whole PAR era comparison — so it stays a named
+    parameter the page can print instead of disappearing into sixty products.
+    """
+    scales = float(params.get("gain", 1.0)) * np.asarray(params["scales"], dtype=float)
+    weights = np.asarray(params["weights"], dtype=float)
+    return scales, weights
+
+
+def _fit_compound_hollands(
+    values: NDArray,
+    *,
+    lam: float,
+    kt_max: float,
+    scales: Sequence[float],
+    weights: Sequence[float],
+    gain: float = 1.0,
+) -> dict[str, Any]:
+    """Assemble the induced law. Nothing is estimated from ``values`` here.
+
+    The two shape parameters are inherited verbatim from the clearness-index fit
+    the page already publishes, and the mixture comes from the covariate, so the
+    sample only decides how many points the caller kept. The function exists to
+    satisfy the registry contract, and its emptiness is the point: an induced
+    curve with zero new free parameters cannot be accused of fit-shopping.
+    """
+    del values
+    return {
+        "lambda": float(lam),
+        "kt_max": float(kt_max),
+        "gain": float(gain),
+        "scales": [float(scale) for scale in scales],
+        "weights": [float(weight) for weight in weights],
+    }
+
+
+def _compound_pdf(x: NDArray, params: Mapping[str, Any]) -> NDArray:
+    scales, weights = _mixture_arrays(params)
+    shape = _shape_params(params)
+    values = np.asarray(x, dtype=float)[..., None]
+    density: NDArray = np.sum(_hollands_pdf(values / scales, shape) * (weights / scales), axis=-1)
+    return density
+
+
+def _compound_cdf(x: NDArray, params: Mapping[str, Any]) -> NDArray:
+    scales, weights = _mixture_arrays(params)
+    shape = _shape_params(params)
+    values = np.asarray(x, dtype=float)[..., None]
+    cumulative: NDArray = np.clip(
+        np.sum(_hollands_cdf(values / scales, shape) * weights, axis=-1), 0.0, 1.0
+    )
+    return cumulative
+
+
+def _compound_ppf(q: NDArray, params: Mapping[str, Any]) -> NDArray:
+    """Quantiles by bisection, like the parent family: no analytic inverse exists.
+
+    Eighty halvings rather than the parent's sixty-four because the support is
+    ~1300 W/m2 wide instead of ~1, so reaching the same relative precision needs
+    a few more.
+    """
+    scales, _weights = _mixture_arrays(params)
+    ceiling = float(params["kt_max"]) * float(scales.max())
+    quantiles = np.clip(np.asarray(q, dtype=float), 0.0, 1.0)
+    low = np.zeros_like(quantiles)
+    high = np.full_like(quantiles, ceiling)
+    for _iteration in range(80):
+        middle = 0.5 * (low + high)
+        overshoot = _compound_cdf(middle, params) > quantiles
+        high = np.where(overshoot, middle, high)
+        low = np.where(overshoot, low, middle)
+    midpoint: NDArray = 0.5 * (low + high)
+    return midpoint
+
+
+def _em_normal_mixture(sample: NDArray, components: int) -> dict[str, list[float]]:
+    """Gaussian mixture by expectation-maximisation, same shape as the circular one.
+
+    Started from evenly spaced sample quantiles so the run is deterministic; the
+    module already refuses random starts for the von Mises mixture, for the same
+    reason — a page that redraws must not redraw a different answer.
+    """
+    values = np.asarray(sample, dtype=float)
+    quantiles = np.linspace(0.5 / components, 1.0 - 0.5 / components, components)
+    means = np.quantile(values, quantiles)
+    spread = float(np.std(values)) or 1.0
+    sigmas = np.full(components, spread / components)
+    weights = np.full(components, 1.0 / components)
+
+    for _iteration in range(600):
+        densities = (
+            weights
+            * np.exp(-0.5 * ((values[:, None] - means) / sigmas) ** 2)
+            / (sigmas * np.sqrt(2.0 * np.pi))
+        )
+        total = densities.sum(axis=1, keepdims=True)
+        # A point can sit far from every component early on; sharing it equally
+        # keeps the responsibilities a probability instead of producing NaN.
+        responsibility = np.where(
+            total > 0.0, densities / np.maximum(total, 1e-300), 1.0 / components
+        )
+        mass = responsibility.sum(axis=0)
+        weights = mass / values.size
+        means = (responsibility * values[:, None]).sum(axis=0) / np.maximum(mass, 1e-300)
+        variance = (responsibility * (values[:, None] - means) ** 2).sum(axis=0) / np.maximum(
+            mass, 1e-300
+        )
+        sigmas = np.sqrt(np.maximum(variance, 1e-12))
+
+    order = np.argsort(means)
+    return {
+        "weights": [float(value) for value in weights[order]],
+        "mu": [float(value) for value in means[order]],
+        "sigma": [float(value) for value in sigmas[order]],
+    }
+
+
+def _brightness(flux: NDArray) -> NDArray:
+    """Stefan-Boltzmann inverted at unit emissivity: an exact relabelling."""
+    positive = np.maximum(np.asarray(flux, dtype=float), 0.0)
+    temperature: NDArray = (positive / STEFAN_BOLTZMANN) ** 0.25
+    return temperature
+
+
+def _fit_power_normal_mixture(values: NDArray, *, components: int = 2) -> dict[str, Any]:
+    """Fit the mixture on the brightness temperature the flux maps to.
+
+    A sample smaller than the component count returns NaN parameters rather than
+    raising, which is the contract every family here follows: an empty subset is
+    a normal state of the page (a season with no observation) and must produce a
+    chart with no curve, not a failed export.
+    """
+    count = int(components)
+    sample = np.asarray(values, dtype=float)
+    if sample.size < count:
+        nan = [float("nan")] * count
+        return {"weights": nan, "mu": list(nan), "sigma": list(nan)}
+    # The component count is not in the parameters: it is an input, and every
+    # entry of `params` on this page is read as something that was estimated.
+    # It stays recoverable as len(weights).
+    return _em_normal_mixture(_brightness(sample), count)
+
+
+def _power_normal_components(params: Mapping[str, Any]) -> tuple[NDArray, NDArray, NDArray]:
+    return (
+        np.asarray(params["weights"], dtype=float),
+        np.asarray(params["mu"], dtype=float),
+        np.asarray(params["sigma"], dtype=float),
+    )
+
+
+def _power_normal_pdf(x: NDArray, params: Mapping[str, Any]) -> NDArray:
+    weights, mu, sigma = _power_normal_components(params)
+    flux = np.asarray(x, dtype=float)
+    positive = flux > 0.0
+    safe = np.where(positive, flux, 1.0)
+    temperature = _brightness(safe)[..., None]
+    mixture = np.sum(
+        weights * np.exp(-0.5 * ((temperature - mu) / sigma) ** 2) / (sigma * np.sqrt(2.0 * np.pi)),
+        axis=-1,
+    )
+    # d/dL of (L/sigma)^(1/4): the map is a power, so unlike the CDF the density
+    # carries a Jacobian. Omitting it is the mistake that makes a power-normal
+    # integrate to something other than one.
+    jacobian = 0.25 * STEFAN_BOLTZMANN**-0.25 * np.where(positive, safe, 1.0) ** -0.75
+    density: NDArray = np.where(positive, mixture * jacobian, 0.0)
+    return density
+
+
+def _power_normal_cdf(x: NDArray, params: Mapping[str, Any]) -> NDArray:
+    weights, mu, sigma = _power_normal_components(params)
+    flux = np.maximum(np.asarray(x, dtype=float), 0.0)
+    temperature = _brightness(flux)[..., None]
+    # No Jacobian here, and that is not an oversight: the map is monotone, so the
+    # probability below a flux is exactly the probability below its temperature.
+    cumulative: NDArray = np.clip(
+        np.sum(weights * special.ndtr((temperature - mu) / sigma), axis=-1), 0.0, 1.0
+    )
+    return cumulative
+
+
+def _power_normal_ppf(q: NDArray, params: Mapping[str, Any]) -> NDArray:
+    _weights, mu, sigma = _power_normal_components(params)
+    quantiles = np.clip(np.asarray(q, dtype=float), 0.0, 1.0)
+    low = np.zeros_like(quantiles)
+    high = np.full_like(quantiles, float(mu.max() + 12.0 * sigma.max()))
+    for _iteration in range(64):
+        middle = 0.5 * (low + high)
+        overshoot = (
+            np.sum(
+                np.asarray(params["weights"], dtype=float)
+                * special.ndtr((middle[..., None] - mu) / sigma),
+                axis=-1,
+            )
+            > quantiles
+        )
+        high = np.where(overshoot, middle, high)
+        low = np.where(overshoot, low, middle)
+    inverse: NDArray = STEFAN_BOLTZMANN * (0.5 * (low + high)) ** 4
+    return inverse
+
+
+def _fit_compound_hollands_gaussian(
+    values: NDArray,
+    *,
+    lam: float,
+    kt_max: float,
+    scales: Sequence[float],
+    weights: Sequence[float],
+    slope: float,
+    intercept: float,
+    residual_sd: float,
+    gain: float = 1.0,
+) -> dict[str, Any]:
+    """Flatten the induced law plus its residual into one Gaussian mixture.
+
+    Net radiation is ``Rn = a*kt*I0h + b + e``. The first term is the compound
+    above pushed through a line; the second is a Gaussian. Rather than convolve
+    numerically at every evaluation, the quadrature is done once here: each
+    covariate bin is crossed with a Gauss-Legendre rule over kt, giving one
+    Gaussian component per (bin, node) whose mean is ``a*s*k + b`` and whose
+    weight is the bin weight times the node weight times the parent density.
+    Evaluation is then a plain mixture sum.
+    """
+    del values
+    ceiling = float(kt_max)
+    nodes, node_weights = np.polynomial.legendre.leggauss(_QUADRATURE_NODES)
+    # leggauss lives on [-1, 1]; map it onto the parent's support [0, M].
+    grid = 0.5 * ceiling * (nodes + 1.0)
+    grid_weights = 0.5 * ceiling * node_weights
+    parent = _hollands_pdf(grid, {"lambda": float(lam), "kt_max": ceiling})
+
+    scale_array = float(gain) * np.asarray(scales, dtype=float)
+    weight_array = np.asarray(weights, dtype=float)
+    means = float(slope) * scale_array[:, None] * grid[None, :] + float(intercept)
+    component = weight_array[:, None] * (grid_weights * parent)[None, :]
+    total = float(component.sum())
+    return {
+        "mu": [float(value) for value in means.ravel()],
+        "weights": [float(value) for value in (component / total).ravel()],
+        "sigma": float(residual_sd),
+        "lambda": float(lam),
+        "kt_max": ceiling,
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "residual_sd": float(residual_sd),
+        "components": int(means.size),
+    }
+
+
+def _gaussian_mixture_eval(x: NDArray, params: Mapping[str, Any], *, cumulative: bool) -> NDArray:
+    means = np.asarray(params["mu"], dtype=float)
+    weights = np.asarray(params["weights"], dtype=float)
+    sigma = float(params["sigma"])
+    values = np.asarray(x, dtype=float)
+    flat = values.reshape(-1)
+    out: NDArray = np.empty(flat.size, dtype=float)
+    for start in range(0, flat.size, _CHUNK):
+        block = flat[start : start + _CHUNK][:, None]
+        standard = (block - means) / sigma
+        if cumulative:
+            out[start : start + _CHUNK] = np.sum(weights * special.ndtr(standard), axis=-1)
+        else:
+            out[start : start + _CHUNK] = np.sum(
+                weights * np.exp(-0.5 * standard**2) / (sigma * np.sqrt(2.0 * np.pi)), axis=-1
+            )
+    reshaped: NDArray = out.reshape(values.shape)
+    return reshaped
+
+
+def _compound_gaussian_pdf(x: NDArray, params: Mapping[str, Any]) -> NDArray:
+    return _gaussian_mixture_eval(x, params, cumulative=False)
+
+
+def _compound_gaussian_cdf(x: NDArray, params: Mapping[str, Any]) -> NDArray:
+    bounded: NDArray = np.clip(_gaussian_mixture_eval(x, params, cumulative=True), 0.0, 1.0)
+    return bounded
+
+
+def _compound_gaussian_ppf(q: NDArray, params: Mapping[str, Any]) -> NDArray:
+    """Quantiles by interpolation on a dense CDF grid, not bisection.
+
+    Each evaluation touches ~5,760 mixture components, so eighty bisection passes
+    would cost eighty full sweeps; one monotone grid costs one.
+    """
+    means = np.asarray(params["mu"], dtype=float)
+    sigma = float(params["sigma"])
+    low = float(means.min()) - 8.0 * sigma
+    high = float(means.max()) + 8.0 * sigma
+    grid = np.linspace(low, high, 20001)
+    cumulative = _compound_gaussian_cdf(grid, params)
+    inverse: NDArray = np.interp(np.clip(np.asarray(q, dtype=float), 0.0, 1.0), cumulative, grid)
+    return inverse
+
+
 FAMILIES: dict[str, Family] = {
     "weibull": Family(
         name="weibull",
@@ -791,10 +1135,48 @@ FAMILIES: dict[str, Family] = {
         support=(0.0, np.inf),
         options=("kt_max",),
     ),
+    "compound_hollands_huget": Family(
+        name="compound_hollands_huget",
+        fit=_fit_compound_hollands,
+        pdf=_compound_pdf,
+        cdf=_compound_cdf,
+        ppf=_compound_ppf,
+        support=(0.0, np.inf),
+        options=("lam", "kt_max", "scales", "weights", "gain"),
+    ),
+    "power_normal_mixture": Family(
+        name="power_normal_mixture",
+        fit=_fit_power_normal_mixture,
+        pdf=_power_normal_pdf,
+        cdf=_power_normal_cdf,
+        ppf=_power_normal_ppf,
+        support=(0.0, np.inf),
+        options=("components",),
+    ),
+    "compound_hollands_gaussian": Family(
+        name="compound_hollands_gaussian",
+        fit=_fit_compound_hollands_gaussian,
+        pdf=_compound_gaussian_pdf,
+        cdf=_compound_gaussian_cdf,
+        ppf=_compound_gaussian_ppf,
+        # Net radiation goes negative before sunrise and after sunset even inside
+        # the daytime gate, so unlike the other two this support is the real line.
+        support=(-np.inf, np.inf),
+        options=(
+            "lam",
+            "kt_max",
+            "scales",
+            "weights",
+            "gain",
+            "slope",
+            "intercept",
+            "residual_sd",
+        ),
+    ),
 }
 
 
-def fit_distribution(family: str, values: NDArray, **options: float) -> DistributionFit:
+def fit_distribution(family: str, values: NDArray, **options: object) -> DistributionFit:
     """Fit one of :data:`FAMILIES` to a sample.
 
     Parameters
@@ -807,8 +1189,11 @@ def fit_distribution(family: str, values: NDArray, **options: float) -> Distribu
         the caller can turn the difference into the point mass the page prints
         beside the curve.
     **options:
-        Family-specific knobs declared in ``Family.options`` (today only
-        ``kt_max`` for ``hollands_huget``).
+        Family-specific knobs declared in ``Family.options``. Typed ``object``
+        rather than ``float`` because the induced families take sequences: their
+        mixture is derived from a covariate the sample does not carry, so the
+        caller has to hand it in. ``DistributionFit.params`` is list-valued for
+        those families, which the von Mises mixture already established.
 
     Returns
     -------

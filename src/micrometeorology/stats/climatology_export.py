@@ -24,7 +24,7 @@ from the sample by the caller, so the histogram already normalises over what is
 left; scaling the curve by ``1 - sum(atom fractions)`` on top of that would put
 the two on different normalisations and flatten the line against the axis. The
 mass itself is published beside them as a printed probability, which is exactly
-the hybrid density of Takle & Brown (1978) shown as its two pieces.
+the hybrid density of [[takle1978]] shown as its two pieces.
 
 Why the data is not committed
 -----------------------------
@@ -48,10 +48,12 @@ Relationship to the neighbouring modules
 import json
 import logging
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 import numpy as np
 from numpy.typing import NDArray
@@ -65,8 +67,10 @@ __all__ = [
     "CLIMATOLOGY_VARIABLES",
     "MANIFEST_FILENAME",
     "MANIFEST_FORMAT",
+    "REFERENCES",
     "VARIABLE_FORMAT",
     "Atom",
+    "Reference",
     "VariableSpec",
     "build_manifest",
     "build_variable_payload",
@@ -145,7 +149,7 @@ class VariableSpec:
         for a variable the literature gives no canonical density (the payload
         then carries bars and statistics with no curve).
     family_label:
-        Citation shown next to the curve, e.g. ``"Weibull (Justus et al., 1978)"``.
+        Citation shown next to the curve, e.g. ``"Weibull ([[justus1978]])"``.
     edges:
         Frozen bin edges. Identical for every subset by construction — a
         per-subset width would make the summer and winter bars incomparable,
@@ -170,6 +174,217 @@ class VariableSpec:
     edges: tuple[float, ...]
     fit_scale: float = 1.0
     caveats: tuple[str, ...] = ()
+    # Options the family cannot get from the sample, which the caller must supply
+    # per subset. Empty means the family is estimated from the sample alone, as
+    # every non-radiation variable is. Declaring it here is what makes a missing
+    # covariate a build failure instead of a curve quietly fitted on the wrong
+    # thing.
+    fit_options: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Reference:
+    """One bibliographic record, published so the page can link to the source.
+
+    A caption that says only "(Justus et al., 1978)" tells a reader who already
+    knows the field nothing they did not know and tells everyone else nothing at
+    all. Carrying the full record plus a resolvable link is what turns a citation
+    into something a student can actually go and read.
+
+    Attributes
+    ----------
+    key:
+        Slug used in ``[[key]]`` markers inside labels and caveats.
+    short:
+        What the sentence reads as, e.g. ``"Justus et al., 1978"``.
+    citation:
+        Authors, title, journal, volume, pages, year — the tooltip's contents.
+    url:
+        Where to go. A ``doi.org`` link when the DOI was verified against the
+        primary or Crossref; otherwise a Crossref title search, which is an
+        honest "here is where to look" rather than a link that may 404.
+    """
+
+    key: str
+    short: str
+    citation: str
+    url: str
+
+
+def _search(title: str) -> str:
+    """Crossref search link, for records whose DOI was not verified here."""
+    return "https://search.crossref.org/?q=" + quote_plus(title)
+
+
+# Every reference the page prints, in one place. The DOIs below carry a
+# doi.org link only where the identifier was checked against the primary text or
+# Crossref during the review that produced these curves; the rest resolve to a
+# title search, so no link on this page can rot into a wrong paper.
+REFERENCES: dict[str, Reference] = {
+    reference.key: reference
+    for reference in (
+        Reference(
+            "justus1978",
+            "Justus et al., 1978",
+            "Justus, C. G., Hargraves, W. R., Mikhail, A. & Graber, D. (1978). "
+            "Methods for estimating wind speed frequency distributions. "
+            "Journal of Applied Meteorology 17(3), 350-353.",
+            _search("Methods for estimating wind speed frequency distributions"),
+        ),
+        Reference(
+            "thom1958",
+            "Thom, 1958",
+            "Thom, H. C. S. (1958). A note on the gamma distribution. "
+            "Monthly Weather Review 86(4), 117-122.",
+            _search("A note on the gamma distribution Thom"),
+        ),
+        Reference(
+            "wilks2019",
+            "Wilks, 2019",
+            "Wilks, D. S. (2019). Statistical Methods in the Atmospheric Sciences, "
+            "4th edition. Elsevier. Chapter 4 covers the parametric families used here.",
+            _search("Statistical Methods in the Atmospheric Sciences Wilks"),
+        ),
+        Reference(
+            "raschke2011",
+            "Raschke, 2011",
+            "Raschke, M. (2011). Empirical behaviour of tests for the beta distribution "
+            "and their application in environmental research. "
+            "Stochastic Environmental Research and Risk Assessment 25, 79-89.",
+            _search("Empirical behaviour of tests for the beta distribution Raschke"),
+        ),
+        Reference(
+            "carta2008",
+            "Carta, Bueno e Ramirez, 2008",
+            "Carta, J. A., Bueno, C. & Ramirez, P. (2008). Statistical modelling of "
+            "directional wind speeds using mixtures of von Mises distributions: case study. "
+            "Energy Conversion and Management 49(5), 897-907.",
+            _search("Statistical modelling of directional wind speeds mixtures von Mises"),
+        ),
+        Reference(
+            "hollands1983",
+            "Hollands e Huget, 1983",
+            "Hollands, K. G. T. & Huget, R. G. (1983). A probability density function for "
+            "the clearness index, with applications. Solar Energy 30(3), 195-209.",
+            "https://doi.org/10.1016/0038-092X(83)90149-4",
+        ),
+        Reference(
+            "liu1960",
+            "Liu e Jordan, 1960",
+            "Liu, B. Y. H. & Jordan, R. C. (1960). The interrelationship and characteristic "
+            "distribution of direct, diffuse and total solar radiation. Solar Energy 4(3), 1-19. "
+            "The frequency curves the Hollands-Huget density was built to reproduce.",
+            "https://doi.org/10.1016/0038-092X(60)90062-1",
+        ),
+        Reference(
+            "pashiardis2021",
+            "Pashiardis e Kalogirou, 2021",
+            "Pashiardis, S. & Kalogirou, S. A. (2021). Characteristics of downward and upward "
+            "longwave radiation at Athalassa, an inland location of the island of Cyprus. "
+            "Applied Sciences 11(2), 719. Open access.",
+            "https://doi.org/10.3390/app11020719",
+        ),
+        Reference(
+            "freeman2006",
+            "Freeman e Modarres, 2006",
+            "Freeman, J. & Modarres, R. (2006). Inverse Box-Cox: the power-normal distribution. "
+            "Statistics and Probability Letters 76(8), 764-772. "
+            "Defines the single power-normal; the two-component mixture used here is not theirs.",
+            "https://doi.org/10.1016/j.spl.2005.10.036",
+        ),
+        Reference(
+            "hu2012",
+            "Hu, Wang e Liu, 2012",
+            "Hu, B., Wang, Y. & Liu, G. (2012). Relationship between net radiation and broadband "
+            "solar radiation in the Tibetan Plateau. Advances in Atmospheric Sciences 29(1), "
+            "135-143. Note the original works in MJ/m2 per day, not hourly W/m2.",
+            _search("Relationship between net radiation and broadband solar radiation Tibetan"),
+        ),
+        Reference(
+            "yang2008",
+            "Yang, Dickinson e Liang, 2008",
+            "Yang, F., Dickinson, R. E. & Liang, X.-Z. (2008). Solar radiation and its impact on "
+            "land surface albedo parameterisation. Journal of Applied Meteorology and Climatology "
+            "47(11), 2963-2982. Source of the zenith-angle albedo form used here.",
+            "https://doi.org/10.1175/2008JAMC1843.1",
+        ),
+        Reference(
+            "briegleb1992",
+            "Briegleb, 1992",
+            "Briegleb, B. P. (1992). Delta-Eddington approximation for solar radiation in the NCAR "
+            "Community Climate Model. Journal of Geophysical Research 97(D7), 7603-7612. "
+            "Origin of the d = 0,4 prescription for grassland, as transcribed by Yang et al. (2008).",
+            _search("Delta-Eddington approximation solar radiation NCAR Community Climate Model"),
+        ),
+        Reference(
+            "idso1975",
+            "Idso et al., 1975",
+            "Idso, S. B., Jackson, R. D., Reginato, R. J., Kimball, B. A. & Nakayama, F. S. (1975). "
+            "The dependence of bare soil albedo on soil water content. "
+            "Journal of Applied Meteorology 14(1), 109-113.",
+            _search("The dependence of bare soil albedo on soil water content"),
+        ),
+        Reference(
+            "custodio2021",
+            "Custodio, Silva e Santos, 2021",
+            "Custodio, L. L. M., Silva, B. B. da & Santos, C. A. C. dos (2021). Relationship between "
+            "photosynthetically active radiation and global radiation in Petrolina and Brasilia, "
+            "Brazil. Revista Brasileira de Engenharia Agricola e Ambiental 25(9), 612-619. Open access.",
+            "https://doi.org/10.1590/1807-1929/agriambi.v25n9p612-619",
+        ),
+        Reference(
+            "long2008",
+            "Long e Shi, 2008",
+            "Long, C. N. & Shi, Y. (2008). An automated quality assessment and control algorithm for "
+            "surface radiation measurements (QCRad). The Open Atmospheric Science Journal 2, 23-37. "
+            "Source of the site-tuned coefficient ranges quoted here.",
+            _search("automated quality assessment and control algorithm surface radiation QCRad"),
+        ),
+        Reference(
+            "takle1978",
+            "Takle e Brown, 1978",
+            "Takle, E. S. & Brown, J. M. (1978). Note on the use of Weibull statistics to characterize "
+            "wind-speed data. Journal of Applied Meteorology 17(4), 556-559. "
+            "The hybrid density this page reproduces by publishing point masses beside the curve.",
+            _search("Note on the use of Weibull statistics to characterize wind-speed data"),
+        ),
+    )
+}
+
+# Marker syntax inside labels and caveats: [[key]]. The page turns each one into
+# a link carrying the full record; Python only has to guarantee that every marker
+# resolves, which _assert_references does at import time.
+_REFERENCE_MARKER = re.compile(r"\[\[([a-z0-9_]+)\]\]")
+
+
+def _assert_references() -> None:
+    """Fail at import if any published sentence cites a reference that is not declared.
+
+    A dangling ``[[key]]`` would reach the browser as literal brackets in the
+    middle of a caption. Checking here means the typo stops the build that writes
+    the artifacts, not the reader.
+    """
+    unknown: set[str] = set()
+    for spec in CLIMATOLOGY_VARIABLES:
+        for text in (spec.family_label, *spec.caveats):
+            unknown |= {key for key in _REFERENCE_MARKER.findall(text) if key not in REFERENCES}
+    if unknown:
+        raise ValueError(
+            f"undeclared reference marker(s) {sorted(unknown)}; add them to REFERENCES"
+        )
+    # And the reverse: a record must never contain a marker itself. A registry
+    # entry whose `short` reads "[[hu2012]]" renders as literal brackets in the
+    # middle of a caption and resolves to nothing, which is exactly what a
+    # careless global rename of the prose citations once produced here.
+    self_referential = sorted(
+        key
+        for key, reference in REFERENCES.items()
+        if _REFERENCE_MARKER.search(f"{reference.short} {reference.citation} {reference.url}")
+    )
+    if self_referential:
+        raise ValueError(
+            f"reference record(s) {self_referential} contain a [[marker]] of their own"
+        )
 
 
 def _linear_edges(start: float, stop: float, step: float) -> tuple[float, ...]:
@@ -220,6 +435,10 @@ def _rain_edges(
     return tuple(edges)
 
 
+# Options every induced radiation curve needs from the caller. Named once so a
+# spec cannot declare a subset of them by accident.
+INDUCED = ("lam", "kt_max", "scales", "weights", "gain")
+
 CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
     VariableSpec(
         id="air_temperature",
@@ -227,7 +446,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         unit="°C",
         chart="histogram",
         family="normal",
-        family_label="Gaussiana (Wilks, 2019, cap. 4)",
+        family_label="Gaussiana ([[wilks2019]], cap. 4)",
         edges=_linear_edges(14.0, 40.0, 0.5),
         caveats=(
             "Valores horários de todo o registro: a distribuição é uma mistura sobre a hora do dia e a estação do ano, então o afastamento da gaussiana é o conteúdo do gráfico, não um defeito do ajuste.",
@@ -239,7 +458,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         unit="%",
         chart="histogram",
         family="beta",
-        family_label="Beta (Raschke, 2011)",
+        family_label="Beta ([[raschke2011]])",
         edges=_linear_edges(0.0, 100.0, 2.0),
         fit_scale=100.0,
         caveats=(
@@ -252,7 +471,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         unit="%",
         chart="histogram",
         family="beta",
-        family_label="Beta (Raschke, 2011)",
+        family_label="Beta ([[raschke2011]])",
         edges=_linear_edges(0.0, 100.0, 2.0),
         fit_scale=100.0,
         caveats=(
@@ -266,7 +485,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         unit="hPa",
         chart="histogram",
         family="normal",
-        family_label="Gaussiana (Wilks, 2019, cap. 4)",
+        family_label="Gaussiana ([[wilks2019]], cap. 4)",
         edges=_linear_edges(995.0, 1025.0, 0.5),
         caveats=(
             "Em latitudes tropicais a maré barométrica semidiurna S2 impõe uma oscilação determinística de cerca de 1 hPa (Dai e Wang, 1999), que alarga os ombros do histograma — nenhum modelo unimodal a explica.",
@@ -278,10 +497,10 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         unit="m/s",
         chart="histogram",
         family="weibull",
-        family_label="Weibull (Justus et al., 1978)",
+        family_label="Weibull ([[justus1978]])",
         edges=_linear_edges(0.0, 20.0, 0.5),
         caveats=(
-            "A Weibull não representa massa em zero: as calmarias saem do ajuste e são informadas à parte. Barras e curva são densidades condicionais às horas com vento acima do limiar de partida.",
+            "A Weibull não representa massa em zero: as calmarias saem do ajuste e são informadas à parte. Barras e curva são densidades condicionais às horas com vento acima do limiar de partida — é a densidade híbrida de [[takle1978]], mostrada como as suas duas peças.",
         ),
     ),
     VariableSpec(
@@ -290,7 +509,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         unit="°",
         chart="rose",
         family="von_mises_mixture",
-        family_label="Mistura de von Mises (Carta, Bueno e Ramírez, 2008)",
+        family_label="Mistura de von Mises ([[carta2008]])",
         edges=_linear_edges(0.0, 360.0, 360.0 / ROSE_SECTORS),
         caveats=(
             "Direção é uma grandeza circular: 0° e 360° são o mesmo rumo, então o gráfico é uma rosa dos ventos e as estatísticas são circulares. Média e desvio-padrão aritméticos de graus não têm significado aqui.",
@@ -303,7 +522,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         unit="mm/h",
         chart="histogram",
         family="gamma",
-        family_label="Gama (Thom, 1958; Wilks, 2019)",
+        family_label="Gama ([[thom1958]]; [[wilks2019]])",
         edges=_rain_edges(RAIN_BUCKET_MM, 100.0, unit_bins=8, per_decade=6),
         caveats=(
             "Só as horas chuvosas entram no ajuste; a fração de horas secas é reportada à parte. Um histograma sobre todas as horas seria uma única barra em zero.",
@@ -316,12 +535,15 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         label="Radiação PAR (até 2019-03)",
         unit="W/m²",
         chart="histogram",
-        family=None,
-        family_label="sem densidade teórica canônica",
+        family="compound_hollands_huget",
+        family_label="[[hollands1983]] escalada pela fração PAR",
         edges=_linear_edges(0.0, 800.0, 20.0),
+        fit_options=INDUCED,
         caveats=(
-            "A literatura não atribui densidade canônica à PAR: o que ela modela é a RAZÃO entre PAR e irradiância global. As barras são descritivas e não há curva sobreposta.",
-            "Publicada por era, sem correção. A razão PAR/global medida depois de 2019 fica em 0,25 a 0,28 onde se espera cerca de 0,45, o que sugere um erro de escala de aproximadamente 1,7 vezes que nenhuma calibração documentada explica. Separar as eras deixa o degrau visível em vez de escondido numa distribuição única.",
+            "Restrita às horas com elevação solar acima de 10°, como toda variável de onda curta desta página. Até esta versão a PAR era a única exportada sobre TODAS as horas, e 38% dos valores publicados eram exatamente zero porque eram noite; a mesma curva contra a amostra sem o corte daria distância KS de 0,55.",
+            "Mesma densidade induzida da onda curta incidente, com as escalas multiplicadas pela fração PAR média da era (0,4475, razão de energias com o denominador acima de 50 W/m²). A literatura não atribui densidade canônica à PAR em si — o que ela modela é a RAZÃO entre PAR e global —, e é justamente por isso que a curva entra por essa razão em vez de por um ajuste direto.",
+            "[[custodio2021]] medem PAR/global diária de 0,50 em Petrolina e 0,44 em Brasília, e citam a faixa de 0,41 a 0,52 para a banda de 400 a 700 nm, que é a deste sensor. Os 0,4475 desta era estão dentro da faixa.",
+            "Duas massas pontuais saem do ajuste e são impressas ao lado: 552 horas diurnas com PAR exatamente zero, concentradas entre agosto e outubro de 2018 e coincidindo com onda curta negativa, isto é, um período de zero do registrador; e 24 horas com PAR/global acima de 0,6, fisicamente impossível por a PAR ser sub-banda da global.",
         ),
     ),
     VariableSpec(
@@ -329,12 +551,15 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         label="Radiação PAR (a partir de 2019-03)",
         unit="W/m²",
         chart="histogram",
-        family=None,
-        family_label="sem densidade teórica canônica",
+        family="compound_hollands_huget",
+        family_label="[[hollands1983]] escalada pela fração PAR",
         edges=_linear_edges(0.0, 800.0, 20.0),
+        fit_options=INDUCED,
         caveats=(
-            "A literatura não atribui densidade canônica à PAR: o que ela modela é a RAZÃO entre PAR e irradiância global. As barras são descritivas e não há curva sobreposta.",
-            "Era com suspeita de erro de escala de cerca de 1,7 vezes (razão PAR/global de 0,25 a 0,28 contra os ~0,45 esperados). Os valores estão como medidos, sem correção: comparar com a era anterior é o ponto.",
+            "Restrita às horas com elevação solar acima de 10°, como a era anterior. Sem o corte, 21% dos valores publicados eram zeros de noite.",
+            "Mesma densidade induzida da era anterior; a ÚNICA coisa que difere entre as duas curvas é a fração PAR média: 0,4475 antes contra 0,2579 aqui. A razão entre as duas, 1,735, quantifica em quatro dígitos o erro de escala suspeito.",
+            "[[custodio2021]] citam a faixa de 0,41 a 0,52 para a banda de 400 a 700 nm. Os 0,2579 desta era ficam bem abaixo, e nenhuma calibração documentada explica a diferença.",
+            "Os valores estão como medidos, sem correção: comparar as duas eras é o ponto. Após o corte diurno esta era não tem nenhum zero; 18 horas com PAR/global acima de 0,6 saem como massa pontual.",
         ),
     ),
     VariableSpec(
@@ -342,12 +567,15 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         label="Radiação de onda curta incidente",
         unit="W/m²",
         chart="histogram",
-        family=None,
-        family_label="sem densidade teórica canônica",
+        family="compound_hollands_huget",
+        family_label="[[hollands1983]], densidade induzida",
         edges=_linear_edges(0.0, 1400.0, 25.0),
+        fit_options=INDUCED,
         caveats=(
             "Restrito às horas com elevação solar acima de 10°. Sem esse corte metade do registro é noite e o histograma vira uma barra única em zero.",
-            "A irradiância em W/m² não tem densidade canônica: o forçamento extraterrestre varia ao longo do dia e do ano, então a forma da distribuição é em boa parte geometria solar, não clima. A grandeza que a literatura modela é o índice de claridade, publicado à parte nesta mesma página.",
+            "A curva NÃO é um ajuste ao fluxo: é a densidade que a lei do índice de claridade, já publicada nesta página, INDUZ sobre o fluxo por G = Kt · I0h, marginalizada sobre a irradiância extraterrestre observada em 60 faixas de igual contagem. Nenhum parâmetro novo é estimado — lambda e Kt_máx são herdados literalmente do ajuste do índice de claridade deste mesmo recorte.",
+            "Por que não ajustar direto: a irradiância em W/m² não tem densidade canônica, porque o forçamento extraterrestre varia ao longo do dia e do ano e a forma da distribuição é em boa parte geometria solar, não clima. Mudar de variável é o que permite citar uma lei em vez de escolher a família que melhor couber.",
+            "Uma beta de quatro parâmetros ajusta um pouco melhor (distância KS 0,0377 contra 0,0483), mas não tem respaldo na literatura para esta grandeza. A curva publicada é a que tem procedência, e a diferença fica registrada aqui.",
         ),
     ),
     VariableSpec(
@@ -355,13 +583,17 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         label="Radiação de onda curta refletida",
         unit="W/m²",
         chart="histogram",
-        family=None,
-        family_label="sem densidade teórica canônica",
+        family="compound_hollands_huget",
+        family_label="[[hollands1983]] escalada pelo albedo",
         edges=_linear_edges(0.0, 450.0, 10.0),
+        fit_options=INDUCED,
         caveats=(
-            "Restrito às horas com elevação solar acima de 10°, pelo mesmo motivo da onda curta incidente.",
+            "Restrito às horas com elevação solar acima de 10°, pelo mesmo motivo da onda curta incidente, e à era a partir de 15/03/2019.",
+            "A era anterior está fora porque o albedo medido muda de patamar: a mediana mensal diurna é 0,345 / 0,353 / 0,370 em dez/2018, jan/2019 e fev/2019 e cai para 0,155 em mar/2019, ficando entre 0,120 e 0,160 em todos os meses seguintes. A quebra fica dentro de uma interrupção de 17 dias que termina em 15/03/2019 — a mesma data que já separa as eras da PAR.",
+            "Mesma densidade induzida da onda curta incidente, com todas as escalas multiplicadas pelo albedo médio da era (0,1317, razão de energias com o denominador acima de 50 W/m²). Um único escalar é estimado; lambda e Kt_máx seguem herdados.",
+            "O albedo entra como constante porque foi medido como constante: ajustar a forma canônica com dependência do zênite dá d = 0,026 com R² de 0,003 neste sítio, contra o d = 0,4 que [[briegleb1992]] prescreve para pastagem, conforme transcrito por [[yang2008]]. A mediana por faixa de cosseno do zênite varia só de 0,122 a 0,133.",
             "Publicada em magnitude física (positiva). No gráfico de balanço da página de monitoramento os canais ascendentes aparecem negados, que é convenção de desenho para as parcelas somarem visualmente ao saldo — aqui o valor é o medido.",
-            "A forma desta distribuição é dominada pelo albedo da superfície vista pelo sensor, então ela diz mais sobre o entorno da torre do que sobre o clima.",
+            "A forma desta distribuição diz mais sobre o entorno da torre do que sobre o clima: o albedo de solo nu depende da umidade dos primeiros milímetros de superfície, que [[idso1975]] mediram variando de 0,00 a 0,18 num mesmo terreno conforme o teor de água.",
         ),
     ),
     VariableSpec(
@@ -369,12 +601,14 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         label="Radiação de onda longa incidente",
         unit="W/m²",
         chart="histogram",
-        family=None,
-        family_label="sem densidade teórica canônica",
+        family="normal",
+        family_label="Gaussiana ([[pashiardis2021]])",
         edges=_linear_edges(330.0, 540.0, 3.0),
         caveats=(
             "Todas as horas: ao contrário da onda curta, a atmosfera emite dia e noite, então não há corte por elevação solar a fazer.",
-            "Os limites 0,4·sigma·Ta⁴ e sigma·Ta⁴ + 25, usados como controle de qualidade, são COEFICIENTES AJUSTÁVEIS do QCRad calibrados por sítio (Long e Shi, 2008, dão 0,58 a 0,80 e 11 a 23 em estações reais) — não constantes físicas, ao contrário do que sugere a forma da expressão.",
+            "É a única das sete radiações desta página com densidade publicada para o fluxo bruto em si: [[pashiardis2021]] afirmam que a onda longa incidente segue a normal, enquanto a emitida segue uma normal com cauda positiva longa. O registro daqui é compatível — assimetria de -0,05 e curtose em excesso de -0,46.",
+            "Uma mistura de duas gaussianas ajusta sete vezes melhor (distância KS 0,0051 contra 0,0352), mas é escolha estatística sem lei publicada por trás. A curva publicada é a citada, e a diferença fica registrada aqui.",
+            "Os limites 0,4·sigma·Ta⁴ e sigma·Ta⁴ + 25, usados como controle de qualidade, são COEFICIENTES AJUSTÁVEIS do QCRad calibrados por sítio ([[long2008]], dão 0,58 a 0,80 e 11 a 23 em estações reais) — não constantes físicas, ao contrário do que sugere a forma da expressão.",
         ),
     ),
     VariableSpec(
@@ -382,12 +616,14 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         label="Radiação de onda longa emitida",
         unit="W/m²",
         chart="histogram",
-        family=None,
-        family_label="sem densidade teórica canônica",
+        family="power_normal_mixture",
+        family_label="Mistura de dois regimes (dia/noite); componente potência-normal ([[freeman2006]])",
         edges=_linear_edges(400.0, 640.0, 4.0),
         caveats=(
             "Todas as horas, em magnitude física (positiva). No balanço do monitoramento este canal aparece negado por convenção de desenho.",
-            "A onda longa emitida é sigma·epsilon·Ts⁴ da superfície, mas ao contrário do que essa forma sugere a quarta potência quase não deforma a distribuição: com a temperatura de brilho medida aqui, ela sozinha produziria assimetria de 0,14, e a observada é 1,02. A assimetria vem de a população ser DOIS regimes — dia e noite —, não da potência.",
+            "A curva é a densidade que uma mistura de duas normais sobre a TEMPERATURA DE BRILHO induz no fluxo. A temperatura de brilho é Stefan-Boltzmann invertida a emissividade unitária, T = (L/sigma)^(1/4): é uma reetiquetagem exata, então a derivação não precisa supor nenhum valor de emissividade.",
+            "A MISTURA NÃO É DA LITERATURA — [[freeman2006]] definem a potência-normal simples, não a mistura de duas; a composição segue a convenção que esta página já usa para o saldo noturno. O que a defende é que as componentes são IDENTIFICADAS, não escolhidas: rodando o algoritmo às cegas sobre a amostra inteira saem 298,06 K e 305,17 K, e ajustar separadamente as horas de noite e de dia dá 297,89 K e 304,29 K — as mesmas componentes a menos de 0,17 K e 0,87 K.",
+            "A onda longa emitida é sigma·epsilon·Ts⁴ da superfície, mas ao contrário do que essa forma sugere a quarta potência quase não deforma a distribuição: com a temperatura de brilho medida aqui, ela sozinha produziria assimetria de 0,14, e a observada é 1,02. A assimetria vem de a população ser dois regimes, não da potência — que é exatamente por que a mistura, e não uma potência-normal simples, é o que se ajusta (KS 0,0135 contra 0,1138).",
         ),
     ),
     VariableSpec(
@@ -395,12 +631,16 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         label="Saldo de radiação (dia)",
         unit="W/m²",
         chart="histogram",
-        family=None,
-        family_label="sem densidade teórica canônica",
+        family="compound_hollands_gaussian",
+        family_label="[[hollands1983]] com [[hu2012]]",
         edges=_linear_edges(-100.0, 1000.0, 20.0),
+        fit_options=(*INDUCED, "slope", "intercept", "residual_sd"),
         caveats=(
             "O saldo é uma mistura de dois regimes com escalas completamente diferentes, e juntar os dois num histograma só produz uma distribuição bimodal que nenhum modelo explica. Por isso dia e noite são publicados separados: aqui, as horas com elevação solar acima de 10°.",
-            "Saldo diurno é dominado pela onda curta líquida, logo pela cobertura de nuvens. Nenhuma família paramétrica da literatura descreve essa mistura, então não há curva sobreposta.",
+            "A curva compõe dois resultados: a densidade de [[hollands1983]] para o índice de claridade, já publicada nesta página, e a relação linear entre saldo e onda curta incidente de [[hu2012]], reajustada localmente. Rn = a·Kt·I0h + b + erro, com a = 0,775, b = -24,4 W/m² e erro gaussiano de 36,2 W/m², marginalizado sobre a irradiância extraterrestre observada.",
+            "A convolução gaussiana é licenciada por medida, não suposta: o resíduo da regressão tem assimetria 0,010 e curtose em excesso 0,063, com R² de 0,975.",
+            "Atenção ao comparar com [[hu2012]]: o trabalho original é em MJ/m² por dia, não em W/m² horários. Os coeficientes acima são os desta estação, não os deles.",
+            "Uma beta de quatro parâmetros ajusta duas vezes melhor (distância KS 0,0283 contra 0,0559) e não tem lei publicada por trás. A curva publicada é a que tem procedência, e a diferença fica registrada aqui.",
         ),
     ),
     VariableSpec(
@@ -409,7 +649,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         unit="W/m²",
         chart="histogram",
         family="normal",
-        family_label="Gaussiana (regime noturno de céu claro)",
+        family_label="Gaussiana ([[wilks2019]]), regime noturno de céu claro",
         edges=_linear_edges(-120.0, 40.0, 2.0),
         caveats=(
             "Horas com o sol abaixo do horizonte. É o único recorte do saldo em que uma gaussiana é defensável: sem onda curta, o saldo é a perda líquida de onda longa, que num sítio fixo é estreita e quase simétrica.",
@@ -423,11 +663,11 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         unit="",
         chart="histogram",
         family="hollands_huget",
-        family_label="Hollands e Huget (1983)",
+        family_label="[[hollands1983]]",
         edges=_linear_edges(0.0, 1.0, 0.02),
         caveats=(
-            "A irradiância global em W/m² não tem densidade canônica: metade do registro é noite e o forçamento extraterrestre varia ao longo do dia. A grandeza da literatura é o índice de claridade Kt = global / extraterrestre, restrito às horas com elevação solar acima de 10°.",
-            "Num litoral tropical úmido espera-se bimodalidade (céu encoberto perto de 0,25 e céu limpo perto de 0,65), que a curva unimodal de Hollands e Huget não reproduz.",
+            "A irradiância global em W/m² não tem densidade canônica: metade do registro é noite e o forçamento extraterrestre varia ao longo do dia. A grandeza da literatura é o índice de claridade Kt = global / extraterrestre, restrito às horas com elevação solar acima de 10°. A densidade ajustada aqui foi construída para reproduzir as curvas de frequência de [[liu1960]].",
+            "Num litoral tropical úmido espera-se bimodalidade (céu encoberto perto de 0,25 e céu limpo perto de 0,65), que a curva unimodal de [[hollands1983]] não reproduz.",
         ),
     ),
 )
@@ -454,6 +694,35 @@ def _rounded(value: float | None, decimals: int) -> float | None:
 
 def _rounded_list(values: NDArray, decimals: int) -> list[float | None]:
     return [_rounded(float(value), decimals) for value in np.asarray(values, dtype=float)]
+
+
+def _rounded_params(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Round a fit's parameters, including the list-valued ones.
+
+    The induced radiation families carry the scale mixture in their parameters —
+    sixty scales and sixty weights, and for net radiation nearly six thousand
+    mixture means — so a scalar-only rounding raises on the first list. The rose
+    already serialises list-valued parameters, so this is the existing shape
+    rather than a new one.
+    """
+    rounded: dict[str, Any] = {}
+    for name, value in params.items():
+        if isinstance(value, (list, tuple, np.ndarray)):
+            rounded[name] = [_rounded(float(item), _PARAMETER_DECIMALS) for item in value]
+        else:
+            rounded[name] = _rounded(float(value), _PARAMETER_DECIMALS)
+    return rounded
+
+
+def _finite_params(params: Mapping[str, Any]) -> bool:
+    """Whether every parameter of a fit is finite, lists included."""
+    for value in params.values():
+        if isinstance(value, (list, tuple, np.ndarray)):
+            if not np.all(np.isfinite(np.asarray(value, dtype=float))):
+                return False
+        elif not np.isfinite(float(value)):
+            return False
+    return True
 
 
 def _describe(sample: NDArray) -> dict[str, float | None]:
@@ -531,6 +800,7 @@ def _histogram_subset(
     spec: VariableSpec,
     sample: NDArray,
     atoms: Sequence[Atom],
+    options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bars, statistics, fit, distances and the pre-scaled curve for one subset."""
     values = np.asarray(sample, dtype=float)
@@ -557,16 +827,24 @@ def _histogram_subset(
     if spec.family is None or binned.n < 2:
         return payload
 
-    fitted = dist.fit_distribution(spec.family, values / spec.fit_scale)
-    if not all(np.isfinite(value) for value in fitted.params.values()):
+    # A family whose parameters are not estimable from the sample alone needs the
+    # covariate the caller derived (the extraterrestrial-irradiance mixture every
+    # induced radiation curve rides on). Declaring the requirement on the spec is
+    # what turns a missing option into a loud failure instead of a silent
+    # fallback to a curve fitted on the wrong thing.
+    if spec.fit_options and not options:
+        raise ValueError(
+            f"{spec.id}: family {spec.family!r} requires fit options "
+            f"{list(spec.fit_options)}, none supplied for this subset"
+        )
+    fitted = dist.fit_distribution(spec.family, values / spec.fit_scale, **(options or {}))
+    if not _finite_params(fitted.params):
         logger.warning("%s: %s fit did not converge on %d samples", spec.id, spec.family, binned.n)
         return payload
 
     payload["fit"] = {
         "family": fitted.family,
-        "params": {
-            name: _rounded(value, _PARAMETER_DECIMALS) for name, value in fitted.params.items()
-        },
+        "params": _rounded_params(fitted.params),
         "n": fitted.n,
     }
     quality = dist.goodness_of_fit(
@@ -725,6 +1003,7 @@ def build_variable_payload(
     *,
     version: str,
     atoms: Mapping[str, Sequence[Atom]] | None = None,
+    options: Mapping[str, Mapping[str, Any]] | None = None,
     mixture_components: int = 2,
 ) -> dict[str, Any]:
     """Assemble the published payload for one variable across every subset.
@@ -744,6 +1023,12 @@ def build_variable_payload(
         detectable from the browser.
     atoms:
         Subset id -> the point masses removed from that sample.
+    options:
+        Subset id -> the fit options that subset's family needs, for the induced
+        radiation curves. Per subset and not per variable because the inheritance
+        is subset-matched: each recorte's induced curve rides on the clearness
+        index fitted to that same recorte, exactly as every other variable on the
+        page is fitted per subset.
     mixture_components:
         Components of the von Mises mixture, for a ``rose`` variable. Fixed
         rather than chosen per subset: a component count that changes between
@@ -755,13 +1040,16 @@ def build_variable_payload(
         JSON-ready payload; every non-finite number is already ``None``.
     """
     per_subset = atoms or {}
+    per_subset_options = options or {}
     subsets: dict[str, Any] = {}
     for subset_id, sample in samples.items():
         subset_atoms = list(per_subset.get(subset_id, ()))
         if spec.chart == "rose":
             subsets[subset_id] = _rose_subset(sample, subset_atoms, components=mixture_components)
         else:
-            subsets[subset_id] = _histogram_subset(spec, sample, subset_atoms)
+            subsets[subset_id] = _histogram_subset(
+                spec, sample, subset_atoms, per_subset_options.get(subset_id)
+            )
 
     payload: dict[str, Any] = {
         "format": VARIABLE_FORMAT,
@@ -834,6 +1122,19 @@ def build_manifest(
         "selector": list(selector),
         "coverage": dict(coverage),
         "caveats": list(caveats),
+        # The bibliography, once, keyed by the [[key]] markers the labels and
+        # caveats carry. Published in the manifest rather than repeated in every
+        # variable file: sixteen records shared by sixteen variables would
+        # otherwise be sixteen copies, and the page loads the manifest first
+        # anyway. The page turns each marker into a link with the full record.
+        "references": {
+            key: {
+                "short": reference.short,
+                "citation": reference.citation,
+                "url": reference.url,
+            }
+            for key, reference in sorted(REFERENCES.items())
+        },
         "variables": [
             {
                 "id": spec.id,
@@ -847,6 +1148,9 @@ def build_manifest(
             for spec in variables
         ],
     }
+
+
+_assert_references()
 
 
 def write_json(output_path: str | Path, payload: Mapping[str, Any]) -> Path:

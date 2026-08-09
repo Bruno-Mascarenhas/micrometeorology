@@ -8,6 +8,8 @@ these tests is that the published parameters are right, not that they are
 unchanged.
 """
 
+import inspect
+
 import numpy as np
 import pytest
 from scipy import stats
@@ -27,6 +29,34 @@ from micrometeorology.stats.distributions import (
     sector_frequencies,
     von_mises_mixture_pdf,
 )
+
+
+def _flatten(values):
+    """Family parameters, with the list-valued ones spread out."""
+    for value in values:
+        if isinstance(value, (list, tuple, np.ndarray)):
+            yield from (float(item) for item in value)
+        else:
+            yield float(value)
+
+
+def _required_options(family):
+    """Keyword-only parameters of a family's estimator that carry no default."""
+    signature = inspect.signature(FAMILIES[family].fit)
+    return {
+        name
+        for name, parameter in signature.parameters.items()
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        and parameter.default is inspect.Parameter.empty
+    }
+
+
+# Families estimable from a sample alone, and families that need a covariate the
+# sample does not carry. Derived from the signatures rather than listed by hand,
+# so a new family lands in the right group without anyone remembering to say so.
+SAMPLE_ONLY_FAMILIES = sorted(family for family in FAMILIES if not _required_options(family))
+COVARIATE_FAMILIES = sorted(family for family in FAMILIES if _required_options(family))
+
 
 # Large enough that a maximum-likelihood estimate lands within a few parts in
 # 1e3 of the generating parameters, small enough that the whole module runs in
@@ -272,16 +302,29 @@ class TestFitDistribution:
         with pytest.raises(ValueError, match="does not accept option"):
             fit_distribution("normal", temperature, kt_max=0.8)
 
-    @pytest.mark.parametrize("family", sorted(FAMILIES))
+    @pytest.mark.parametrize("family", SAMPLE_ONLY_FAMILIES)
     def test_empty_sample_yields_nan_parameters_not_an_exception(self, family):
         fitted = fit_distribution(family, np.array([]))
         assert fitted.n == 0
-        assert all(np.isnan(value) for value in fitted.params.values())
+        assert all(np.isnan(value) for value in _flatten(fitted.params.values()))
 
-    @pytest.mark.parametrize("family", sorted(FAMILIES))
+    @pytest.mark.parametrize("family", SAMPLE_ONLY_FAMILIES)
     def test_n_counts_only_the_samples_actually_used(self, family):
         sample = np.concatenate([np.full(100, 0.5), np.full(7, np.nan)])
         assert fit_distribution(family, sample).n == 100
+
+    @pytest.mark.parametrize("family", COVARIATE_FAMILIES)
+    def test_a_family_that_needs_a_covariate_refuses_to_guess(self, family):
+        """The induced radiation densities cannot be estimated from the sample.
+
+        Their parameters are inherited from another fit and their mixture comes
+        from a covariate, so a default would mean silently publishing a curve
+        fitted on something other than what the caption claims. Failing loudly is
+        the contract; `VariableSpec.fit_options` is what makes the caller supply
+        them.
+        """
+        with pytest.raises(TypeError, match="required keyword"):
+            fit_distribution(family, np.array([1.0, 2.0]))
 
 
 class TestGoodnessOfFit:
