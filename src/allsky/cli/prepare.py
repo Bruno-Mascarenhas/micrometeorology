@@ -641,11 +641,20 @@ def _load_sensor_df(cfg: PrepareConfig) -> PandasDataFrame:
     """
     import pandas as pd
 
+    from micrometeorology.sensors.archive import mask_sentinels
     from micrometeorology.sensors.ingestion import read_campbell_dat
 
     frames = [read_campbell_dat(path) for path in cfg.sensor.paths]
     sensor_df = pd.concat(frames).sort_index()
     sensor_df = sensor_df.loc[~sensor_df.index.duplicated(keep="first")]
+    # read_campbell_dat's own -900 default "catches nothing in the LabMiM
+    # archive" (its docstring says so): the real sentinels are 1000 degC,
+    # 999 %RH, -273.1 degC and a windowed 0, all of them finite. The manifest
+    # builder filters on np.isfinite alone, so without this the rails walked
+    # straight into air_temp_c / dew_point_c / rel_humidity and the feature
+    # normaliser fitted its mean and std over them. This is the archive's own
+    # table rather than a second one, so the two cannot drift.
+    sensor_df, _removed = mask_sentinels(sensor_df)
     if cfg.sensor.column_map:
         sensor_df = sensor_df.rename(columns=cfg.sensor.column_map)
     return sensor_df
