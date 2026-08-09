@@ -59,6 +59,11 @@ from matplotlib.typing import ColorType
 
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.paths import ensure_dir
+
+# Imported, not re-typed: the ordered candidate tuple is the mechanism that makes
+# a variable arriving in the extraction "a data change, not a code change", and
+# two independent literals defeat it — this one had already lost `rain_total`.
+from micrometeorology.sensors.monitoring import _WRF_RAIN_CANDIDATES
 from micrometeorology.sensors.plotting import (
     BALANCE_COMPONENT_COLORS,
     add_labmim_watermark,
@@ -109,7 +114,12 @@ class GraphSpec:
 # Ordered exactly as the monitoring page lays the cards out.
 GRAPH_SPECS: tuple[GraphSpec, ...] = (
     GraphSpec("temperatura", "temperatura.png", "Temperatura do Ar (°C)", "line", (10, 40)),
-    GraphSpec("umidade", "umidade.png", "Umidade Relativa do Ar (%)", "line", (0, 100)),
+    # 105, not 100: the model's relative humidity is not capped at saturation and
+    # exceeds 100% in 314 of the 24,816 hours the extraction carries (max 101.6).
+    # A 0-100 frame makes matplotlib clip them with no mark — the invisible
+    # censorship the three-layer view exists to prevent, and the reason the
+    # interactive chart declares the same 105 in MONITORING_CHARTS.
+    GraphSpec("umidade", "umidade.png", "Umidade Relativa do Ar (%)", "line", (0, 105)),
     GraphSpec("pressao", "pressao.png", "Pressão Atmosférica (hPa)", "line"),
     GraphSpec("precipitacao", "precipitacao.png", "Precipitação (mm)", "bar"),
     GraphSpec("velocidade", "velocidade.png", "Velocidade do Vento (m/s)", "line", (0, 15)),
@@ -160,7 +170,7 @@ DEFAULT_WRF_COLUMNS: dict[str, tuple[str, ...]] = {
     "temperatura": ("T",),
     "umidade": ("ur", "RH"),
     "pressao": ("pressure",),
-    "precipitacao": ("precip", "Precip", "PRECIP", "rain", "Rain", "RAINNC", "RAINC"),
+    "precipitacao": _WRF_RAIN_CANDIDATES,
     "velocidade": ("WS",),
     "direcao": ("WD",),
     "radiacao_difusa": ("Swdf",),
@@ -459,7 +469,7 @@ def render_site_graphs(
     raw: pd.DataFrame | None = None,
     wrf: pd.DataFrame | None = None,
     wrf_columns: dict[str, tuple[str, ...]] | None = None,
-) -> tuple[list[Path], list[str]]:
+) -> tuple[list[Path], list[str], list[str]]:
     """Render every contract graph whose source column is present.
 
     Parameters
@@ -486,6 +496,7 @@ def render_site_graphs(
 
     written: list[Path] = []
     missing: list[str] = []
+    empty: list[str] = []
 
     for spec in GRAPH_SPECS:
         column = columns[spec.key]
@@ -520,8 +531,24 @@ def render_site_graphs(
                 )
 
             # Layer 2 — the hourly aggregate, the subject of the chart.
+            #
+            # A column that EXISTS but holds no finite value over the plotted
+            # window is skipped like an absent one. Plotting it draws nothing
+            # and still registers a legend entry, and a legend that names a
+            # series the reader cannot see is worse than an honest absence: it
+            # reads as a line off the scale, or as an instrument stuck flat.
+            # Both causes reach here — a column of the wrong instrument era, and
+            # a channel the station genuinely did not record that year.
             drawn_raw = raw is not None and column in raw.columns
-            if spec.kind == "line":
+            if not series.notna().any():
+                logger.warning(
+                    "Column %r has no value over the plotted window -- "
+                    "drawing %s without the station layer",
+                    column,
+                    spec.filename,
+                )
+                empty.append(spec.key)
+            elif spec.kind == "line":
                 _plot_line(ax, series, label=column, over_raw=drawn_raw)
             elif spec.kind == "scatter":
                 _plot_scatter(ax, series, label=column)
@@ -556,13 +583,21 @@ def render_site_graphs(
             if label_dt is not None:
                 add_timestamp_label(ax, label_dt)
             add_labmim_watermark(ax)
-            if ax.get_legend_handles_labels()[0]:
-                add_top_legend(ax, ncol=4)
+            handles = ax.get_legend_handles_labels()[0]
+            if not handles:
+                # Nothing drew at all — no station values, no raw record, no
+                # model. An empty framed axis published under a contract
+                # filename is indistinguishable from a working chart on a calm
+                # day, so the previous image is left in place instead.
+                logger.warning("%s: no layer had data -- not written", spec.filename)
+                empty.append(spec.key)
+                continue
+            add_top_legend(ax, ncol=4)
             written.append(save_figure(fig, out / spec.filename))
         finally:
             plt.close(fig)
 
-    return written, missing
+    return written, missing, empty
 
 
 def _load_layer(path: Path, hourly: pd.DataFrame) -> pd.DataFrame:
@@ -677,7 +712,7 @@ def site(
     raw = _load_layer(raw_path, df) if raw_path else None
     wrf = _load_wrf(wrf_path, df) if wrf_path else None
 
-    written, missing = render_site_graphs(
+    written, missing, empty = render_site_graphs(
         df,
         output_dir,
         columns,
@@ -690,9 +725,22 @@ def site(
     for path in written:
         typer.echo(f"  [ok] {path.name}")
     if missing:
-        typer.echo(f"[!] Skipped (missing column): {', '.join(missing)}")
+        typer.echo(f"[!] Skipped (no layer had data): {', '.join(missing)}")
+    if empty:
+        typer.echo(f"[!] Drawn without the station layer (column all-empty): {', '.join(empty)}")
     typer.echo(f"\n>> {len(written)} graph(s) saved to {output_dir}")
 
+    # `--strict` fails on a MISSING column and not on an empty one, and the
+    # distinction is the difference between a broken configuration and a broken
+    # instrument. A column the frame does not carry means this run was pointed
+    # at the wrong data or the logger was renamed — an operator has to act, and
+    # the flag exists to say so ("Exit non-zero if any contract column is
+    # missing"). A column that is present and holds no value is the station
+    # itself being down: the Gill thermohygrometer railed in December 2025, so
+    # temperature and humidity are empty in EVERY current window, and failing on
+    # that would make the hourly cron exit non-zero every run from now until the
+    # instrument is repaired — freezing the site on its last good artifacts for
+    # a condition the images are supposed to be reporting, not hiding.
     if strict and missing:
         raise typer.Exit(code=1)
 
