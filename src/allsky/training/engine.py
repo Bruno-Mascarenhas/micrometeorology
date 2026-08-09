@@ -264,6 +264,7 @@ def run_experiment(
             split_id=split.split_id,
             meta=meta,
             feature_columns=feature_columns,
+            cfg=cfg,
         )
         stored_monitor = (checkpoint.get("best_metric") or {}).get("name")
         monitor_changed = stored_monitor is not None and str(stored_monitor) != monitor_key
@@ -1081,6 +1082,7 @@ def _check_resume_provenance(
     split_id: str,
     meta: Mapping[str, Any],
     feature_columns: list[str],
+    cfg: Any,
 ) -> None:
     """Refuse a resume whose checkpoint was trained against a different dataset.
 
@@ -1093,11 +1095,28 @@ def _check_resume_provenance(
     ``_check_split_id``.  Unlike an evaluation, a resume has no legitimate reason
     to continue on a mismatch.
     """
+    # The alignment fields decide what every sample's embedding IS — the pooling
+    # window's width, and centre-frame against mean — and they leave no
+    # architectural trace: the attention pooler's (1, 1, D) query is
+    # sequence-length independent and centre-frame shares the mean pooler, so
+    # ``load_state_dict`` accepts the old weights and the run continues on
+    # differently-pooled inputs with best.ckpt selected across two regimes.
+    stored_cfg = checkpoint.get("config") or {}
+    stored_data = stored_cfg.get("data") or {}
+    stored_alignment = stored_data.get("alignment") or {}
+
     mismatches: list[str] = []
     for field, stored, current in (
         ("split_id", checkpoint.get("split_id"), split_id),
         ("manifest_sha256", checkpoint.get("manifest_sha256"), meta.get("manifest_sha256")),
         ("dataset_version", checkpoint.get("dataset_version"), _dataset_version(meta)),
+        ("input_mode", stored_data.get("input_mode"), cfg.data.input_mode),
+        ("alignment.strategy", stored_alignment.get("strategy"), cfg.data.alignment.strategy),
+        (
+            "alignment.window_minutes",
+            stored_alignment.get("window_minutes"),
+            cfg.data.alignment.window_minutes,
+        ),
     ):
         if stored is None:
             logger.info("resume: %s is not recorded in %s; skipping that check", field, path)
