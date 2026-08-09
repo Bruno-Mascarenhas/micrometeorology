@@ -105,6 +105,12 @@ def run(
     resolved_workers = workers or default_workers()
     if resolved_workers < 1:
         raise typer.BadParameter("--workers must be >= 1")
+    # Phase 3 encodes the PNGs Phase 1 rendered, so --no-figures leaves it
+    # nothing to do. The gate below is `also_video and png_paths`, which the
+    # combination makes unconditionally false: the run printed "Complete" and
+    # exited 0 having produced none of the videos it was asked for.
+    if also_video and no_figures:
+        raise typer.BadParameter("--also-video encodes the rendered figures; drop --no-figures")
 
     var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
     # An output file id (-v TSK) reaches the raw-NetCDF passthrough in BOTH

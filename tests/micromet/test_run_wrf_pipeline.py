@@ -165,3 +165,36 @@ def test_successful_figure_run_exits_zero(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert f"✓ {NT} figures generated" in result.output
+
+
+def test_also_video_with_no_figures_is_a_usage_error_not_a_silent_success(tmp_path, monkeypatch):
+    """Phase 3 encodes the PNGs Phase 1 renders, so the pair is unsatisfiable.
+
+    ``--no-figures`` empties ``png_paths``, which makes the video gate
+    ``also_video and png_paths`` unconditionally false: the run printed
+    "Complete" and exited 0 having produced none of the videos it was asked for.
+    """
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_novideo.nc"
+    _write_full_wrf_file(wrf, seed=5)
+    out = tmp_path / "out"
+
+    result = CliRunner().invoke(
+        run_wrf_pipeline.app,
+        [
+            "-d",
+            str(wrf),
+            "-o",
+            str(out),
+            "-v",
+            "temperature",
+            "-w",
+            "1",
+            "--no-figures",
+            "--also-video",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "--also-video" in result.output
+    assert not (out / "videos").exists()
