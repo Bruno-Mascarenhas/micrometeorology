@@ -204,8 +204,16 @@ def _build_tasks_for_domain(
         cmap = VARIABLE_COLORMAPS.get(var_name, "viridis")
         # Read once per variable, not once per step: the whole time axis of
         # PSFC is one eager read either way.
+        #
+        # Presence-checked, because this is the CONTOUR OVERLAY and not the field
+        # being mapped: a wrfout carrying T2 without PSFC still has a temperature
+        # figure to draw. Unguarded, `get_variable` is a bare dict lookup and the
+        # KeyError escaped as a traceback that took the remaining variables, the
+        # remaining domains and the video phase with it.
         surface_pressure_hpa = (
-            ds.get_variable("PSFC") / 100.0 if var_name == WRFVariable.TEMPERATURE else None
+            ds.get_variable("PSFC") / 100.0
+            if var_name == WRFVariable.TEMPERATURE and ds.has_variable("PSFC")
+            else None
         )
 
         for meta in time_meta:
@@ -289,8 +297,16 @@ def run(
     """Generate WRF map figures with parallel rendering."""
     setup_logging(log_level)
 
+    from micrometeorology.cli.export_wrf_geojson import _reject_output_id_variables
+
     var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
     var_list = _normalize_var_list(var_list)
+    # The guard the other two WRF CLIs already apply. Without it `-v TSK` falls
+    # through to the raw-NetCDF passthrough and renders unconverted KELVIN into
+    # TSK_D0X_nnn.png — the exact filenames skin_temperature publishes in °C —
+    # and, when both ids are listed, the output-path dedup silently keeps
+    # whichever came first, so flag order decided which PNGs shipped.
+    _reject_output_id_variables(var_list)
     paths = _resolve_wrfout_paths(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")

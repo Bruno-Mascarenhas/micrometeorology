@@ -329,3 +329,70 @@ def test_cli_exits_zero_when_every_figure_renders(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert f"✓ Generated {NT} figures" in result.output
+
+
+def test_an_output_file_id_is_refused_before_any_frame_is_rendered(tmp_path, monkeypatch):
+    """``-v TSK`` rendered raw KELVIN into the PNGs skin_temperature owns.
+
+    ``TSK`` is not an input variable, it is the output file id of
+    ``skin_temperature``. Reaching the raw-NetCDF passthrough with it produced
+    ``TSK_D0X_nnn.png`` titled "TSK" on a Kelvin colour bar, under the exact
+    names the °C product publishes; and with both ids listed the output-path
+    dedup kept whichever came first, so flag ORDER decided which frames shipped.
+    The other two WRF CLIs already refuse it — this one did not.
+    """
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_figures_tsk.nc"
+    _write_full_wrf_file(wrf, seed=5)
+    figures = tmp_path / "figs"
+
+    result = CliRunner().invoke(
+        render_wrf_maps.app,
+        ["-d", str(wrf), "-o", str(figures), "-v", "TSK", "-w", "1"],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "TSK is the output file id of skin_temperature" in result.output
+    assert not list(figures.glob("*.png")) if figures.exists() else True
+
+
+def test_a_wrfout_missing_a_bespoke_input_is_skipped_not_a_traceback(tmp_path):
+    """``build_value_frame_source`` documents ``None`` for an absent variable.
+
+    Eight of its ten branches reached ``get_variable``, a bare dict lookup that
+    raises ``KeyError``, so a wrfout without ``Q2`` killed the whole run — every
+    later variable, every later domain and the video phase — while a missing raw
+    field of the same kind was skipped with a warning.
+    """
+    wrf = tmp_path / "wrfout_d02_partial.nc"
+    _write_partial_wrf_file(wrf)
+
+    with reader.WRFDataset(str(wrf)) as dataset:
+        for variable in ("relative_humidity", "vapor", "rain", "wind", "skin_temperature"):
+            assert value_source.build_value_frame_source(dataset, variable) is None, variable
+        # The fields the file does carry still build normally.
+        assert value_source.build_value_frame_source(dataset, "temperature") is not None
+        assert value_source.build_value_frame_source(dataset, "pressure") is not None
+
+
+def _write_partial_wrf_file(path: Path) -> None:
+    """A wrfout carrying only Times/XLAT/XLONG/T2/PSFC."""
+    import netCDF4
+
+    with netCDF4.Dataset(str(path), "w") as ds:
+        ds.createDimension("Time", 1)
+        ds.createDimension("DateStrLen", 19)
+        ds.createDimension("south_north", 3)
+        ds.createDimension("west_east", 4)
+        ds.DX, ds.DY = 3000.0, 3000.0
+        times = ds.createVariable("Times", "S1", ("Time", "DateStrLen"))
+        times[:] = np.array([list("2026-05-03_00:00:00")], dtype="S1")
+        for name in ("XLAT", "XLONG"):
+            variable = ds.createVariable(name, "f4", ("Time", "south_north", "west_east"))
+            variable[:] = np.zeros((1, 3, 4), dtype="f4")
+        ds.createVariable("T2", "f4", ("Time", "south_north", "west_east"))[:] = np.full(
+            (1, 3, 4), 300.0, dtype="f4"
+        )
+        ds.createVariable("PSFC", "f4", ("Time", "south_north", "west_east"))[:] = np.full(
+            (1, 3, 4), 101325.0, dtype="f4"
+        )
