@@ -57,9 +57,18 @@ def aggregate_to_hourly(
     dir_cols = set(wind_dir_columns or [])
     speed_column_map = wind_speed_column_map or {}
 
-    # Identify standard-mean columns (everything not in sum or wind_dir)
+    # Identify standard-mean columns (everything not in sum or wind_dir).
+    # Non-numeric columns are excluded rather than attempted: the datalogger's
+    # per-row quality flag is text ("OK" / "Unknown Fault"), and pandas 3 raises
+    # on a mean over a string dtype instead of quietly producing NaN. Convert
+    # such a flag to a number before calling this (e.g. the fraction of samples
+    # reading OK) if you want it in the hourly frame.
+    numeric_columns = set(df.select_dtypes(include="number").columns)
     all_cols = set(df.columns)
-    mean_columns = all_cols - sum_cols - dir_cols
+    mean_columns = (all_cols & numeric_columns) - sum_cols - dir_cols
+    skipped = all_cols - numeric_columns - sum_cols - dir_cols
+    if skipped:
+        logger.debug("skipping %d non-numeric column(s): %s", len(skipped), sorted(skipped))
 
     results: dict[str, pd.Series] = {}
 

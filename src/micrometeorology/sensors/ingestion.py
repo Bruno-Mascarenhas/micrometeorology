@@ -28,7 +28,8 @@ def read_campbell_dat(
     skip_rows: list[int] | None = None,
     timestamp_column: str = "TIMESTAMP",
     drop_columns: list[str] | None = None,
-    sentinel_value: float = -900.0,
+    sentinel_value: float | None = -900.0,
+    text_columns: Sequence[str] | None = None,
 ) -> pd.DataFrame:
     """Read a single Campbell Scientific ``.dat`` file.
 
@@ -46,7 +47,18 @@ def read_campbell_dat(
         Columns to drop after reading.  Columns that do not exist in the
         file are silently ignored (handles dynamic headers).
     sentinel_value:
-        Values ≤ this threshold are replaced with ``NaN``.
+        Values ≤ this threshold are replaced with ``NaN``. Pass ``None`` to
+        disable the rule entirely: the -900 default catches nothing in the
+        LabMiM archive, whose sentinels are ``1000``, ``999``, ``-46.8``,
+        ``-273.1``, ``-7999``, ``-6673`` and a windowed ``0``, so leaving it on
+        only creates the impression that missing data has been handled.
+    text_columns:
+        Columns to leave as text instead of coercing to numeric. The datalogger's
+        per-row quality flag (``MetSENS1_Status``, values ``"OK"`` /
+        ``"Unknown Fault"``) is the only such column in the archive, and the
+        blanket coercion below turns it into an all-NaN column — destroying the
+        only status flag the record has, silently and while still looking
+        populated. Names absent from the file are ignored.
     """
     if skip_rows is None:
         skip_rows = [0, 2, 3]
@@ -60,6 +72,12 @@ def read_campbell_dat(
         skiprows=skip_rows,
         low_memory=False,
         parse_dates=False,
+        # The logger writes a bare NAN token for a missing sample. Declaring it
+        # explicitly means a column stays numeric on read instead of arriving as
+        # text and depending on the coercion below — which is what let a text
+        # quality flag and a NAN-bearing float column look identical.
+        na_values=["NAN"],
+        keep_default_na=True,
     )
 
     # Set timestamp index
@@ -76,17 +94,22 @@ def read_campbell_dat(
         if existing:
             df = df.drop(columns=existing)
 
-    # Coerce only text columns to numeric -- this is what turns the datalogger's
-    # literal ``NAN`` token into a real NaN. Both dtype names are needed: pandas 3
-    # reads text as ``str`` dtype, and ``include=["object"]`` matches it only
-    # through a shim that is scheduled for removal.
-    obj_cols = df.select_dtypes(include=["object", "str"]).columns
-    if len(obj_cols) > 0:
+    # Coerce the remaining text columns to numeric -- a belt-and-braces pass for
+    # tokens ``na_values`` above does not cover. Both dtype names are needed:
+    # pandas 3 reads text as ``str`` dtype, and ``include=["object"]`` matches it
+    # only through a shim that is scheduled for removal.
+    preserved = [c for c in (text_columns or ()) if c in df.columns]
+    obj_cols = [
+        c for c in df.select_dtypes(include=["object", "str"]).columns if c not in preserved
+    ]
+    if obj_cols:
         df[obj_cols] = df[obj_cols].apply(pd.to_numeric, errors="coerce")
 
-    # Sentinel value -> NaN
+    # Sentinel value -> NaN. Restricted to the numeric columns so a preserved
+    # text flag is not compared against a float (which raises in pandas 3).
     if sentinel_value is not None:
-        df = df.mask(df <= sentinel_value)
+        numeric = df.select_dtypes(include="number").columns
+        df[numeric] = df[numeric].mask(df[numeric] <= sentinel_value)
 
     logger.info("  -> %d rows, %d columns", len(df), len(df.columns))
     return df

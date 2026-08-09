@@ -91,9 +91,14 @@ class Settings(BaseSettings):
         default=6,
         description="Minimum valid samples required per hour for aggregation",
     )
-    sensor_sentinel_value: float = Field(
+    sensor_sentinel_value: float | None = Field(
         default=-900.0,
-        description="Sentinel value in Campbell Scientific data indicating missing data",
+        description=(
+            "Values at or below this are read as missing. `null` disables the rule: "
+            "the -900 default matches nothing in the LabMiM archive, whose sentinels "
+            "are 1000, 999, -46.8, -273.1, -7999, -6673 and a date-scoped 0, so an "
+            "operator needs a way to turn off a guard that only looks like one."
+        ),
     )
     sensor_limits: list[dict[str, Any]] = Field(
         default_factory=list,
@@ -106,6 +111,15 @@ class Settings(BaseSettings):
     sensor_wind_dir_columns: list[str] = Field(
         default_factory=list,
         description="Columns aggregated as vector wind direction",
+    )
+    sensor_wind_speed_column_map: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Direction column -> the speed column that weights its vector mean. "
+            "Without the pairing every sample carries unit weight, so a calm hour "
+            "counts as much as a squall and the hourly bearing lands more than 5 deg "
+            "off in about one hour in six."
+        ),
     )
 
     # Logging
