@@ -573,9 +573,10 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         fit_options=INDUCED,
         caveats=(
             "Restrito às horas com elevação solar acima de 10°. Sem esse corte metade do registro é noite e o histograma vira uma barra única em zero.",
+            "As distâncias impressas ao lado da curva são as DESTE recorte; os números citados nas ressalvas vêm da análise de referência sobre o registro inteiro, então podem diferir na terceira casa.",
             "A curva NÃO é um ajuste ao fluxo: é a densidade que a lei do índice de claridade, já publicada nesta página, INDUZ sobre o fluxo por G = Kt · I0h, marginalizada sobre a irradiância extraterrestre observada em 60 faixas de igual contagem. Nenhum parâmetro novo é estimado — lambda e Kt_máx são herdados literalmente do ajuste do índice de claridade deste mesmo recorte.",
             "Por que não ajustar direto: a irradiância em W/m² não tem densidade canônica, porque o forçamento extraterrestre varia ao longo do dia e do ano e a forma da distribuição é em boa parte geometria solar, não clima. Mudar de variável é o que permite citar uma lei em vez de escolher a família que melhor couber.",
-            "Uma beta de quatro parâmetros ajusta um pouco melhor (distância KS 0,0377 contra 0,0483), mas não tem respaldo na literatura para esta grandeza. A curva publicada é a que tem procedência, e a diferença fica registrada aqui.",
+            "Uma beta de quatro parâmetros ajusta um pouco melhor — na análise de referência sobre o registro inteiro, distância KS de 0,0377 contra 0,0483 —, mas não tem respaldo na literatura para esta grandeza. A curva publicada é a que tem procedência, e a diferença fica registrada aqui.",
         ),
     ),
     VariableSpec(
@@ -607,7 +608,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         caveats=(
             "Todas as horas: ao contrário da onda curta, a atmosfera emite dia e noite, então não há corte por elevação solar a fazer.",
             "É a única das sete radiações desta página com densidade publicada para o fluxo bruto em si: [[pashiardis2021]] afirmam que a onda longa incidente segue a normal, enquanto a emitida segue uma normal com cauda positiva longa. O registro daqui é compatível — assimetria de -0,05 e curtose em excesso de -0,46.",
-            "Uma mistura de duas gaussianas ajusta sete vezes melhor (distância KS 0,0051 contra 0,0352), mas é escolha estatística sem lei publicada por trás. A curva publicada é a citada, e a diferença fica registrada aqui.",
+            "Uma mistura de duas gaussianas ajusta cerca de sete vezes melhor — na análise de referência, distância KS de 0,0051 contra 0,0352 —, mas é escolha estatística sem lei publicada por trás. A curva publicada é a citada, e a diferença fica registrada aqui.",
             "Os limites 0,4·sigma·Ta⁴ e sigma·Ta⁴ + 25, usados como controle de qualidade, são COEFICIENTES AJUSTÁVEIS do QCRad calibrados por sítio ([[long2008]], dão 0,58 a 0,80 e 11 a 23 em estações reais) — não constantes físicas, ao contrário do que sugere a forma da expressão.",
         ),
     ),
@@ -640,7 +641,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
             "A curva compõe dois resultados: a densidade de [[hollands1983]] para o índice de claridade, já publicada nesta página, e a relação linear entre saldo e onda curta incidente de [[hu2012]], reajustada localmente. Rn = a·Kt·I0h + b + erro, com a = 0,775, b = -24,4 W/m² e erro gaussiano de 36,2 W/m², marginalizado sobre a irradiância extraterrestre observada.",
             "A convolução gaussiana é licenciada por medida, não suposta: o resíduo da regressão tem assimetria 0,010 e curtose em excesso 0,063, com R² de 0,975.",
             "Atenção ao comparar com [[hu2012]]: o trabalho original é em MJ/m² por dia, não em W/m² horários. Os coeficientes acima são os desta estação, não os deles.",
-            "Uma beta de quatro parâmetros ajusta duas vezes melhor (distância KS 0,0283 contra 0,0559) e não tem lei publicada por trás. A curva publicada é a que tem procedência, e a diferença fica registrada aqui.",
+            "Uma beta de quatro parâmetros ajusta cerca de duas vezes melhor — na análise de referência sobre o registro inteiro, distância KS de 0,0283 contra 0,0559 — e não tem lei publicada por trás. A curva publicada é a que tem procedência, e a diferença fica registrada aqui.",
         ),
     ),
     VariableSpec(

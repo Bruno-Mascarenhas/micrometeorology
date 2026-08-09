@@ -536,6 +536,54 @@ every model). Point masses that no continuous family can represent — wind calm
 dry hours, the humidity saturation clip — are removed from the fit and published
 beside it as their own probability.
 
+#### Induced densities: how the radiation variables got a citation
+
+Irradiance in W/m2 has no canonical density — half the record is night and the
+extraterrestrial forcing swings with the hour and the season, so the shape of a
+raw-flux histogram is mostly solar geometry. The quantity the literature models
+is the clearness index. Since the flux **is** that index times the
+extraterrestrial irradiance, the published kt law *induces* a density on the
+flux: an exact change of variable, marginalised over the observed covariate in
+60 equal-count bins, inheriting its parameters and introducing no new ones.
+
+Three families implement it (`stats/distributions.py`):
+
+| family | variables | what is estimated |
+|---|---|---|
+| `compound_hollands_huget` | shortwave down/up, both PAR eras | nothing, or one gain scalar |
+| `power_normal_mixture` | longwave up, via brightness temperature | the two-regime mixture |
+| `compound_hollands_gaussian` | daytime net radiation | the local Rn-vs-Rs line |
+
+Longwave down is the only one with a published density for the raw flux itself
+and uses the existing `normal`.
+
+**Inheritance is subset-matched**: each recorte's induced curve rides on the
+clearness index fitted to that same recorte, exactly as every other variable on
+the page is fitted per subset. `VariableSpec.fit_options` declares what the
+family cannot get from the sample, and a missing option is an error rather than
+a curve quietly fitted on the wrong covariate.
+
+The gain is a **named parameter**, not folded into the scales, because it is the
+scientific point for PAR: 0.4475 before the 2019 instrument change against
+0.2579 after, a ratio of 1.735 that quantifies the suspected scale error.
+
+**PAR gained the daylight gate it was missing.** It was the only shortwave
+variable exported over all hours, so 38% of the early era's published values
+were exactly zero — night. The published n falls from 14,450 to 6,412 and the
+curve becomes fittable (the same curve against the ungated sample scores a KS
+distance of 0.55).
+
+#### Bibliography
+
+`REFERENCES` carries sixteen records — authors, title, venue, resolvable link —
+and labels and caveats cite them with `[[key]]` markers instead of prose. The
+manifest publishes the registry once and the site turns each marker into a link
+with the full record in its tooltip. A `doi.org` link only where the identifier
+was verified; otherwise a Crossref title search, which cannot point at the wrong
+paper. Two guards run at import: a marker with no record, and a record
+containing a marker of its own — the second because a global rename of the prose
+citations produced exactly that during development.
+
 The output is **not** committed to the site repository: it derives from the
 laboratory's private sensor archive, so like the WRF data it is gitignored there
 and attached at deploy time.
