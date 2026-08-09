@@ -29,41 +29,118 @@ wrf_default_variables:
   - wind_power_density_10m
 
 # Sensor quality-control limits
-# Each entry: {column, lower, upper}
-# Values outside [lower, upper] are replaced with NaN.
+# Revisados em 2026-08-09 contra a distribuicao empirica de todo o acervo
+# (988.289 amostras de 5 min, 2016-2026), cruzando o limite fisicamente
+# impossivel dos padroes (WMO-No. 8; Zahumensky, WMO/TD-No. 1236) com o
+# limite empiricamente absurdo medido aqui. Onde os dois discordam vale o
+# MAIS LARGO: a instrucao era endurecer o controle sem perder dado real.
+#
+# Cada limite abaixo foi verificado amostra a amostra. O que eles removem sao
+# falhas de instrumento (trilhos do Gill, quedas de comunicacao isoladas com
+# vizinhos normais, picos que co-ocorrem com outro canal falhando), nao
+# extremos meteorologicos. Ex.: T [8,40] remove 39 amostras, todas trilho do
+# Gill; a faixa real medida (10,21 a 36,95 C) fica intacta.
+#
+# So nomes de coluna CRUS aparecem aqui. apply_physical_limits() roda ANTES de
+# unify_sensor_columns() no build_archive, entao um limite com nome canonico
+# (T, ur, pressure...) nunca dispararia — foi exatamente assim que a versao
+# anterior chegou a 19 de 21 entradas mortas.
 sensor_limits:
-  - { column: PSP1_Wm2, lower: 0, upper: 1370 }
-  - { column: PIR1_Wm2, lower: 340, upper: 460 }
-  - { column: NRLite_Wm2Cr, lower: -100, upper: 1000 }
-  - { column: PAR_Wm2, lower: 0, upper: 600 }
-  - { column: Temp1, lower: 15, upper: 35 }
-  - { column: RH1, lower: 20, upper: 100 }
-  - { column: WS_WVT, lower: 0, upper: 10 }
-  - { column: WindDir_WVT, lower: 0, upper: 360 }
-  - { column: CM3Up_Wm2, lower: 0, upper: 1400 }
-  - { column: CM3Dn_Wm2, lower: 0, upper: 500 }
-  - { column: CNR1TC, lower: 15, upper: 40 }
-  - { column: Temp_WXT, lower: 15, upper: 37 }
-  - { column: CG3Up_Wm2Cr, lower: 350, upper: 500 }
-  - { column: CG3Dn_Wm2Cr, lower: 350, upper: 580 }
-  - { column: Net_Wm2, lower: -100, upper: 1100 }
-  - { column: WS_WXT, lower: 0, upper: 10 }
-  - { column: WD_WXT, lower: 0, upper: 360 }
-  - { column: precip, lower: 0, upper: 15 }
-  - { column: RH_WXT, lower: 20, upper: 100 }
-  - { column: Pmb_WXT, lower: 1000, upper: 1020 }
-  - { column: CMP21_Wm2, lower: 0, upper: 700 }
-
+  - { column: Temp1_Avg, lower: 8, upper: 40 }
+  - { column: Temp_WXT_Avg, lower: 8, upper: 40 }
+  - { column: AirTemp_Avg, lower: 8, upper: 40 }
+  - { column: AirT_C_Avg, lower: 8, upper: 40 }
+  - { column: AirT1_C_Avg, lower: 8, upper: 40 }
+  - { column: AirT2_C_Avg, lower: 8, upper: 40 }
+  - { column: RH, lower: 10, upper: 100 }
+  - { column: RH1_Avg, lower: 10, upper: 100 }
+  - { column: RH_WXT_Avg, lower: 10, upper: 100 }
+  - { column: RelHumidity, lower: 10, upper: 100 }
+  - { column: RH1, lower: 10, upper: 100 }
+  - { column: RH2, lower: 10, upper: 100 }
+  - { column: DP_C_Avg, lower: 5, upper: 32 }
+  - { column: DP1_C_Avg, lower: 5, upper: 32 }
+  - { column: DP2_C_Avg, lower: 5, upper: 32 }
+  - { column: AirPressure, lower: 985, upper: 1030 }
+  - { column: Pmb_WXT_Avg, lower: 985, upper: 1030 }
+  - { column: Pmb_WXT, lower: 985, upper: 1030 }
+  - { column: BP_mbar_Avg, lower: 985, upper: 1030 }
+  - { column: BP1_mbar_Avg, lower: 985, upper: 1030 }
+  - { column: BP2_mbar_Avg, lower: 985, upper: 1030 }
+  - { column: WS_ms_S_WVT, lower: 0, upper: 25 }
+  - { column: Ws_Mean, lower: 0, upper: 25 }
+  - { column: WS_WXT_Avg, lower: 0, upper: 25 }
+  - { column: WS_ms, lower: 0, upper: 25 }
+  - { column: WS1_ms_Avg, lower: 0, upper: 25 }
+  - { column: WS_ms_GMX, lower: 0, upper: 25 }
+  - { column: WS1_ms_GMX, lower: 0, upper: 25 }
+  - { column: WS2_ms_GMX, lower: 0, upper: 25 }
+  - { column: WindDir_D1_WVT, lower: 0, upper: 360 }
+  - { column: Wd_MeanUnitVector, lower: 0, upper: 360 }
+  - { column: WD_WXT_Avg, lower: 0, upper: 360 }
+  - { column: WindDir, lower: 0, upper: 360 }
+  - { column: WindDir_GMX, lower: 0, upper: 360 }
+  - { column: WindDir1_GMX, lower: 0, upper: 360 }
+  - { column: WindDir2_GMX, lower: 0, upper: 360 }
+  - { column: WindDir_SD1_WVT, lower: 0, upper: 180 }
+  - { column: Wd_StdDev, lower: 0, upper: 180 }
+  - { column: WindDir_SD, lower: 0, upper: 180 }
+  - { column: PSP1_Wm2_Avg, lower: -20, upper: 1500 }
+  - { column: CM3Up_Wm2_Avg, lower: -20, upper: 1500 }
+  - { column: CM3Dn_Wm2_Avg, lower: -40, upper: 650 }
+  - { column: CMP21_Wm2_Avg, lower: -20, upper: 1200 }
+  - { column: PSP_Wm2_Avg, lower: -20, upper: 1200 }
+  - { column: CMP22_Wm2_Avg, lower: -20, upper: 1200 }
+  - { column: PIR1_Wm2_Avg, lower: 250, upper: 550 }
+  - { column: CG3Up_Wm2Cr_Avg, lower: 250, upper: 550 }
+  - { column: CG3Up_Wm2_cor_Avg, lower: 250, upper: 550 }
+  - { column: CG3Up_Wm2_Corr_Avg, lower: 250, upper: 550 }
+  - { column: CG3Dn_Wm2Cr_Avg, lower: 300, upper: 650 }
+  - { column: CG3Dn_Wm2_cor_Avg, lower: 300, upper: 650 }
+  - { column: CG3Dn_Wm2_Corr_Avg, lower: 300, upper: 650 }
+  - { column: CG3Up_Wm2_Avg, lower: -250, upper: 250 }
+  - { column: CG3Dn_Wm2_Avg, lower: -250, upper: 250 }
+  - { column: Net_Wm2_Avg, lower: -300, upper: 1400 }
+  - { column: NRLite_Wm2_Avg, lower: -300, upper: 1300 }
+  - { column: NRLite_Wm2Cr_Avg, lower: -300, upper: 1300 }
+  - { column: NRLite_Wm2_Corr_Avg, lower: -300, upper: 1300 }
+  - { column: NRLite_Wm2Corr_Avg, lower: -300, upper: 1300 }
+  - { column: PAR_Wm2_Avg, lower: -5, upper: 800 }
+  - { column: PAR_Den_Avg, lower: -0.2, upper: 23 }
+  - { column: CUV5_Wm2_Avg, lower: -2, upper: 110 }
+  - { column: CNR1TC_Avg, lower: 15, upper: 57 }
+  - { column: CNR1TK_Avg, lower: 288, upper: 330 }
+  - { column: T_C1_Avg, lower: 288, upper: 330 }
+  - { column: T_D1_Avg, lower: 288, upper: 330 }
+  - { column: PL01_mm_Tot, lower: 0, upper: 25.4 }
+  - { column: Rain_WXT_Tot, lower: 0, upper: 25.4 }
+  - { column: Ramount_Tot, lower: 0, upper: 25.4 }
+  - { column: Hamount_Tot, lower: 0, upper: 25.4 }
+  - { column: Hamount_WXT_Tot, lower: 0, upper: 25.4 }
 # Columns requiring special aggregation
 sensor_sum_columns:
-  - precip
   - PL01_mm_Tot
+  - Rain_WXT_Tot
+  - Ramount_Tot
+  - Hamount_Tot
+  - Hamount_WXT_Tot
+  - Precip
+  - precip
 
 sensor_wind_dir_columns:
-  - WD_WXT
-  - WindDir_WVT
+  - WindDir_D1_WVT
+  - Wd_MeanUnitVector
+  - WD_WXT_Avg
+  - WindDir
+  - WindDir_GMX
+  - WindDir1_GMX
+  - WindDir2_GMX
+  - WD
 
-# Minimum valid samples per aggregation window
+# Minimum valid samples per aggregation window.
+# Mantido em 6 de 12 (50%) por decisão do laboratório: é o valor com que o
+# pipeline de sensores já roda e com que os números publicados foram medidos.
+# A auditoria recomendava 9 (75%); subir exige recalcular a página inteira.
 sensor_min_samples_per_hour: 6
 sensor_sentinel_value: -900.0
 

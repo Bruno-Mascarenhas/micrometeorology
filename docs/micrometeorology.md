@@ -27,10 +27,13 @@ src/micrometeorology/
 │   ├── render_wrf_maps.py       # labmim-wrf-figures
 │   ├── run_wrf_pipeline.py      # Shared WRF batch driver
 │   ├── ingest_sensor_data.py    # labmim-sensor-process
+│   ├── build_archive.py         # labmim-archive (merges the .dat archive, verified)
+│   ├── export_climatology.py    # labmim-climatology (climatology-page producer)
+│   ├── export_monitoring.py     # labmim-monitoring (interactive monitoring payload)
 │   ├── compare_wrf_observations.py  # labmim-comparison
 │   ├── compute_metrics.py       # labmim-metrics
 │   ├── generate_station_graphs.py   # labmim-station-graphs
-│   └── plot_station_graphs.py   # labmim-site-graphs (monitoring-page PNGs)
+│   └── plot_station_graphs.py   # labmim-site-graphs (three-layer monitoring PNGs)
 ├── common/
 │   ├── config.py            # Centralised config (pydantic-settings + YAML, 4 layers)
 │   ├── logging.py           # Structured logging setup
@@ -41,12 +44,16 @@ src/micrometeorology/
 │   │                        # shared by the allsky and solrad provenance stamps
 │   └── types.py             # Enums (WRFVariable, GridLevel D01–D05), dataclasses, constants
 ├── sensors/
+│   ├── archive.py           # Explicit archive manifest, clock repairs, sentinel table
 │   ├── ingestion.py         # .dat reading with dynamic headers
 │   ├── calibration.py       # Date-precise calibration (immutable historical records)
 │   ├── aggregation.py       # Hourly aggregation with vector-mean wind direction
+│   ├── monitoring.py        # labmim-monitoring-v1 chart catalogue (3 layers, WRF candidates)
 │   ├── wind.py              # U/V decomposition and vector-mean direction
 │   └── export.py            # Formatted CSV export
 ├── stats/
+│   ├── distributions.py     # Histograms, MLE fits, goodness-of-fit distances
+│   ├── climatology_export.py # labmim-climatology-v1 site artifacts
 │   ├── metrics.py           # Model vs. observation metrics (RMSE, MAE, etc.)
 │   ├── comparison.py        # Alignment + pairing + metric tables (pure pandas)
 │   ├── comparison_plots.py  # Time-series/scatter figure for a paired frame
@@ -478,12 +485,151 @@ python -m micrometeorology.cli.run_wrf_pipeline \
 labmim-sensor-process --input data/raw/ --output data/hourly/sensor_data.csv
 ```
 
+### Station archive (`labmim-archive`)
+
+Turns `data/dados-labmim/` into one verified database. It does **not** glob: the
+file list is an explicit, ordered manifest in
+`micrometeorology.sensors.archive`, because a bare `*.dat` drops the `.backup`
+rotation files — three of which are the only source of an austral winter each —
+and sweeps in a second station, the calibration campaigns and the 1-minute solar
+tables. Three clock defects are repaired into a scratch directory; nothing under
+`data/` is ever written.
+
+```bash
+labmim-archive -d data -o output/archive --strict
+```
+
+`--strict` exits non-zero when the merge does not reproduce the audited counts
+(lenta 987,969 rows, rain 988,249, span 2016-09-29 13:40 to 2026-04-24 13:00,
+zero duplicates, monotonic). Treat it as the archive's regression test.
+
+Three artifacts plus a report:
+
+| file | what it is |
+|------|------------|
+| `station_5min_raw.parquet` | 988,289 x 93 — values as the logger wrote them, sentinels included |
+| `station_5min_qc.parquet` | 988,289 x 111 — after sentinel masking, physical gates, calibrations and era unification |
+| `station_hourly.parquet` | 83,857 x 107 — hourly means, sum for the tipping bucket, speed-weighted vector mean for direction |
+| `archive_report.json` | the verification, plus samples masked per column |
+
+The run prints how many physical limits actually **fired**. That number matters:
+a limit naming a column the frame does not carry is skipped in silence, which is
+how the shipped config once reached 19 dead entries out of 21.
+
+### Climatology page artifacts (`labmim-climatology`)
+
+Producer for the `labmim-climatology-v1` JSON the site's climatology page fetches
+at runtime, the same role `labmim-wrf-geojson` plays for the WebGIS. Consumes the
+hourly database above plus the WRF point extraction.
+
+```bash
+labmim-climatology -i output/archive/station_hourly.parquet \
+    -w data/series_operacional.dat \
+    -o ../site-labmim/site/Climatologia
+```
+
+Writes `manifest.json` plus one file per variable. Everything the browser draws
+is precomputed here — frozen bin edges, the maximum-likelihood fit, the
+theoretical density sampled at the bin centres, and goodness-of-fit **distances**
+(never p-values: at ~10^5 correlated hourly samples every classical test rejects
+every model). Point masses that no continuous family can represent — wind calms,
+dry hours, the humidity saturation clip — are removed from the fit and published
+beside it as their own probability.
+
+#### Induced densities: how the radiation variables got a citation
+
+Irradiance in W/m2 has no canonical density — half the record is night and the
+extraterrestrial forcing swings with the hour and the season, so the shape of a
+raw-flux histogram is mostly solar geometry. The quantity the literature models
+is the clearness index. Since the flux **is** that index times the
+extraterrestrial irradiance, the published kt law *induces* a density on the
+flux: an exact change of variable, marginalised over the observed covariate in
+60 equal-count bins, inheriting its parameters and introducing no new ones.
+
+Three families implement it (`stats/distributions.py`):
+
+| family | variables | what is estimated |
+|---|---|---|
+| `compound_hollands_huget` | shortwave down/up, both PAR eras | nothing, or one gain scalar |
+| `power_normal_mixture` | longwave up, via brightness temperature | the two-regime mixture |
+| `compound_hollands_gaussian` | daytime net radiation | the local Rn-vs-Rs line |
+
+Longwave down is the only one with a published density for the raw flux itself
+and uses the existing `normal`.
+
+**Inheritance is subset-matched**: each recorte's induced curve rides on the
+clearness index fitted to that same recorte, exactly as every other variable on
+the page is fitted per subset. `VariableSpec.fit_options` declares what the
+family cannot get from the sample, and a missing option is an error rather than
+a curve quietly fitted on the wrong covariate.
+
+The gain is a **named parameter**, not folded into the scales, because it is the
+scientific point for PAR: 0.4475 before the 2019 instrument change against
+0.2579 after, a ratio of 1.735 that quantifies the suspected scale error.
+
+**PAR gained the daylight gate it was missing.** It was the only shortwave
+variable exported over all hours, so 38% of the early era's published values
+were exactly zero — night. The published n falls from 14,450 to 6,412 and the
+curve becomes fittable (the same curve against the ungated sample scores a KS
+distance of 0.55).
+
+#### Bibliography
+
+`REFERENCES` carries sixteen records — authors, title, venue, resolvable link —
+and labels and caveats cite them with `[[key]]` markers instead of prose. The
+manifest publishes the registry once and the site turns each marker into a link
+with the full record in its tooltip. A `doi.org` link only where the identifier
+was verified; otherwise a Crossref title search, which cannot point at the wrong
+paper. Two guards run at import: a marker with no record, and a record
+containing a marker of its own — the second because a global rename of the prose
+citations produced exactly that during development.
+
+The output is **not** committed to the site repository: it derives from the
+laboratory's private sensor archive, so like the WRF data it is gitignored there
+and attached at deploy time.
+
+### Monitoring window artifacts (`labmim-monitoring`)
+
+Producer for the `labmim-monitoring-v1` document the site's **interactive**
+monitoring page fetches, the counterpart of `labmim-climatology` for the rolling
+window rather than the whole record.
+
+```bash
+labmim-monitoring -i output/archive -o ../site-labmim/site/Monitoramento \
+    -w data/series_operacional.dat
+```
+
+One JSON carries all nine charts in the three layers the researcher asked for —
+the raw 5-minute samples, the hourly means over them, and the WRF series where
+the model has that variable. About 160 kB for a fully instrumented week, against
+the ~380 kB of PNGs it replaces, and it arrives as numbers the reader can hover,
+toggle and download. The time axis is published as `start` + `step_minutes` +
+`count` instead of one stamp per sample; that alone is worth ~50 kB.
+
+The WRF column is resolved per series against an **ordered tuple of candidate
+names** (`sensors/monitoring.py`). `series_operacional.dat` gains variables over
+time — precipitation is expected but absent today — so the payload records which
+names were looked for and the page says the layer is missing instead of showing
+a legend that is silently one entry short. When the extraction starts writing
+rain, the chart picks it up with no code change here.
+
+Like the climatology artifacts, the output is **not** committed to the site
+repository: same private archive, same deploy-time attachment.
+
 ### Monitoring-page graphs (site)
+
+These are the **static** PNGs. They are not superseded by the interactive page:
+they stay because they are what goes into papers, and they draw the same three
+layers so the two products can be read the same way.
 
 ```bash
 # Nine fixed-name PNGs for the site's monitoring page, straight into a checkout
 labmim-site-graphs site -i data/hourly/sensor_data.csv \
     -o ../site-labmim/site/assets/graphs --last-days 7
+
+# The same nine in three layers: raw under the hourly mean, model on top
+labmim-site-graphs site -i data/hourly/sensor_data.csv -o out/ \
+    --raw output/archive/station_5min_qc.parquet --wrf data/series_operacional.dat
 
 # Retarget a renamed logger column without editing code
 labmim-site-graphs site -i data/hourly/sensor_data.csv -o out/ \

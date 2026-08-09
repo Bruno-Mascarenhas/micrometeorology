@@ -57,76 +57,307 @@ calibrations:
     factor: 1.0926892950 # 8.37 / 7.66
     description: "PSP1 post-2019 sensitivity: 8.37 / 7.66"
 
-  # ── Sensor switch dates (instrument unification) ───────────────────────
-  # These define which raw column maps to the unified variable by date range.
-  # Used by sensors/export.py for the final unified dataset.
-
+# ==============================================================================
+# Sensor switches — WHICH RAW COLUMN CARRIES EACH VARIABLE, AND WHEN
+# ==============================================================================
+# Reescrito em 2026-08-09 a partir de uma auditoria de todo o acervo (29 tabelas
+# lenta + 13 de chuva, 2016-09 a 2026-04). O bloco anterior usava nomes sem
+# sufixo (PSP1_Wm2, WS_WVT, WD_WXT, ...) que NÃO existem no frame que
+# merge_dat_files() produz, então unify_sensor_columns() não criava nada.
+#
+# ATENÇÃO: unify_sensor_columns() ainda não é chamada por labmim-sensor-process;
+# hoje só labmim-climatology consome este bloco.
 sensor_switches:
-  # Shortwave downwelling
-  - unified_name: Sw_dw
+  # ── Air temperature ──────────────────────────────────────────────────
+  # HMP45/155 Temp1_Avg is preferred over Temp_WXT_Avg for the whole WXT
+  # period: Temp1_Avg is continuous 2016-09-29 → 2025-03-12 across nine
+  # program versions, whereas Temp_WXT_Avg only exists 2019-03-18 → 2023-03-08.
+  - unified_name: T
     mappings:
-      - column: PSP1_Wm2
-        start_date: "2016-01-01"
-        end_date: "2018-10-31"
-      - column: CM3Up_Wm2
-        start_date: "2018-11-01"
-        end_date: null
-
-  # Shortwave diffuse
-  - unified_name: Sw_dif
-    mappings:
-      - column: PSP1_Wm2
-        start_date: "2018-09-01"
-        end_date: "2019-08-31"
-      - column: CMP21_Wm2
-        start_date: "2019-10-01"
-        end_date: null
-
-  # Wind components (u, v)
-  - unified_name: u
-    mappings:
-      - column: u_WVT
+      - column: Temp1_Avg
         start_date: null
-        end_date: "2019-03-21"
-      - column: u_WXT
-        start_date: "2019-03-22"
+        end_date: "2025-03-12 13:20:00"
+        description: "HMP air T, Deg C, Avg. v4→v20, LBM_lenta_2016.dat … LBM_lenta_2024.dat. NaN 2018-08-21 09:00→2018-10-16 13:40 (16124 rows); -100 sentinel 2024-11-27 05:55→2025-03-12 13:20 (30310 rows)"
+      - column: AirT_C_Avg
+        start_date: "2025-03-19 11:20:00"
+        end_date: "2025-03-28 10:30:00"
+        description: "Gill MetSENS air T, Deg C, Avg. v21 sig 29595/27963/49753, LBM_lenta_2025.dat.{1,2,3}.backup. No T column at all 2025-03-12 13:25→2025-03-19 11:15 (v21 sig 53159)"
+      - column: AirT1_C_Avg
+        start_date: "2025-03-28 10:35:00"
         end_date: null
+        description: "Gill MetSENS unit 1, Deg C, Avg. v21b LBM_lenta_2025.dat.4.backup + v22 data/LBM_lenta_2025.dat. Unit 2 (AirT2_C_Avg) runs in parallel 2025-03-28→2025-05-14 only; unit 1 chosen for continuity. 1000 sentinel from 2025-12-13 21:55 (13497 rows)"
 
-  - unified_name: v
+  # ── Relative humidity ────────────────────────────────────────────────
+  # RH1_Avg (HMP, %, Avg) preferred over RH_WXT_Avg for the same continuity
+  # reason as T. NOTE the aggregation token flips Avg → Smp at 2025-03-19
+  # and the modern GMX column is called RH1 — NOT the same sensor as RH1_Avg.
+  - unified_name: ur
     mappings:
-      - column: v_WVT
+      - column: RH1_Avg
         start_date: null
-        end_date: "2019-03-21"
-      - column: v_WXT
-        start_date: "2019-03-22"
+        end_date: "2025-03-12 13:20:00"
+        description: "HMP RH, %, Avg. v4→v20. Fake 0.0 (not NaN) 2018-08-27 11:20→2018-10-16 13:40 (14370 rows); -100 sentinel 2024-11-27 05:55→2025-03-12 13:20 (30310 rows)"
+      - column: RH
+        start_date: "2025-03-19 11:20:00"
+        end_date: "2025-03-28 10:30:00"
+        description: "Gill MetSENS RH, %, Smp — AGGREGATION CHANGE Avg→Smp. v21, LBM_lenta_2025.dat.{1,2,3}.backup"
+      - column: RH1
+        start_date: "2025-03-28 10:35:00"
         end_date: null
+        description: "Gill MetSENS unit 1 RH, %, Smp. v21b + v22. Distinct sensor from RH1_Avg despite the near-identical name. 999 sentinel from 2025-12-13 21:35 (14018 rows)"
 
-  # Wind speed
+  # ── Dew point ────────────────────────────────────────────────────────
+  # No dew-point instrument existed before the Gill MetSENS. T_C1_Avg /
+  # T_D1_Avg in the v4/v9 era are the Eppley PIR CASE and DOME thermistors
+  # in kelvin (294.7–309.0 K, corr 0.9955 with each other, T_C1 ≈ Temp1+273.15
+  # − 0.31 K) — NOT dew point. Verified in LBM_lenta_2016.dat.
+  - unified_name: Td
+    mappings:
+      - column: DP_C_Avg
+        start_date: "2025-03-19 11:20:00"
+        end_date: "2025-03-28 10:30:00"
+        description: "Gill MetSENS dew point, Deg C, Avg. v21. First dew point ever logged at this station"
+      - column: DP1_C_Avg
+        start_date: "2025-03-28 10:35:00"
+        end_date: null
+        description: "Gill MetSENS unit 1 dew point, Deg C, Avg. v21b + v22"
+
+  # ── Station pressure ─────────────────────────────────────────────────
+  # No pressure exists before 2019-03-15 11:20. Unit label goes
+  # hPa → hPa → mbar (numerically identical, 1 hPa == 1 mbar) and the
+  # aggregation token goes Smp → Avg → Smp → Avg.
+  - unified_name: pressure
+    mappings:
+      - column: AirPressure
+        start_date: "2019-03-15 11:20:00"
+        end_date: "2019-03-18 09:05:00"
+        description: "hPa, Smp. v11 sig 504+277, LBM_lenta_2019.dat.backup + .1.backup. First pressure in the archive"
+      - column: Pmb_WXT_Avg
+        start_date: "2019-03-18 12:55:00"
+        end_date: "2019-06-10 15:30:00"
+        description: "WXT520, hPa, Avg — AGGREGATION CHANGE Smp→Avg. v11 sig 28638/32568/56600 + v12 sig 7560: LBM_lenta_2019.dat.{2,3}.backup, _2019_0531.dat, _2019_0631.dat"
+      - column: Pmb_WXT
+        start_date: "2019-06-10 15:35:00"
+        end_date: "2023-03-10 06:10:00"
+        description: "WXT520, hPa, Smp — AGGREGATION CHANGE Avg→Smp and the column is renamed. v12 sig 15261 → v19 sig 50644. Ends at the WXT's last non-zero pressure; the column persists as literal 0.0 to 2024-07-19 and MUST NOT be mapped past this date"
+      - column: BP_mbar_Avg
+        start_date: "2025-03-19 11:20:00"
+        end_date: "2025-03-28 10:30:00"
+        description: "Gill MetSENS, mbar, Avg — UNIT LABEL CHANGE hPa→mbar (same scale) and AGGREGATION CHANGE Smp→Avg. v21. No pressure column at all 2024-07-19 15:15→2025-03-19 11:15 (v20 + v21 sig 53159)"
+      - column: BP1_mbar_Avg
+        start_date: "2025-03-28 10:35:00"
+        end_date: null
+        description: "Gill MetSENS unit 1, mbar, Avg. v21b + v22"
+
+  # ── Wind speed ───────────────────────────────────────────────────────
+  # WVc (vector) → Avg (scalar) → WVc. The WXT block is a scalar Avg; the
+  # propeller and the modern anemometer are proper vector averages.
   - unified_name: WS
     mappings:
-      - column: WS_WVT
+      - column: WS_ms_S_WVT
         start_date: null
-        end_date: "2019-04-20"
-      - column: WS_WXT
-        start_date: "2019-04-21"
+        end_date: "2019-05-31 08:30:00"
+        description: "05103 propeller, m/s, WVc. v4→v11 sig 56600. Runs in parallel with the WXT 2019-03-18→2019-05-31; preferred there because it is the continuous line back to 2016. 7999 sentinel on 2 rows in 2017 and 2 in 2018, -1000 min in LBM_lenta_2018_1.dat"
+      - column: WS_WXT_Avg
+        start_date: "2019-05-31 09:10:00"
+        end_date: "2023-02-20 13:30:00"
+        description: "Vaisala WXT520, m/s, Avg — AGGREGATION CHANGE WVc→Avg (scalar mean of speed). v12 sig 7560 → v19 sig 52638. Ends at the last non-zero sample; column persists as literal 0.0 to 2024-07-19"
+      - column: WS_ms
+        start_date: "2024-07-19 15:15:00"
         end_date: null
+        description: "Mechanical anemometer restored, m/s, WVc — AGGREGATION CHANGE Avg→WVc. v20 → v22. No wind at all 2023-02-20 13:35→2024-07-19 15:10. Preferred over WS_ms_GMX/WS1_ms_GMX (present from 2025-03-19) for continuity with the WVc line"
 
-  # Wind direction
+  # ── Wind direction ───────────────────────────────────────────────────
+  # ⚠ WD_WXT_Avg carries aggregation token Avg — a SCALAR arithmetic mean of
+  # a 0/360 circular variable. Samples straddling north average to ~180°.
+  # Every other era uses WVc (Campbell unit-vector mean), which is correct.
+  # The WXT era's direction must be re-derived from u/v or discarded.
   - unified_name: WD
     mappings:
-      - column: WindDir_WVT
+      - column: WindDir_D1_WVT
         start_date: null
-        end_date: "2019-04-20"
-      - column: WD_WXT
-        start_date: "2019-04-21"
+        end_date: "2019-05-31 08:30:00"
+        description: "05103 propeller vane, Deg, WVc (correct unit-vector mean). v4→v11 sig 56600"
+      - column: WD_WXT_Avg
+        start_date: "2019-05-31 09:10:00"
+        end_date: "2023-02-20 13:30:00"
+        description: "WXT520, Degrees, Avg — ⚠ SCALAR AVERAGE ACROSS THE 0/360 WRAP, statistically invalid. v12 sig 7560 → v19 sig 52638. Also stored as literal text NAN in 46951 rows of LBM_lenta_2022.dat"
+      - column: WindDir
+        start_date: "2024-07-19 15:15:00"
         end_date: null
+        description: "Mechanical vane, degrees, WVc — correct vector mean restored. v20 → v22. Preferred over WindDir_GMX/WindDir1_GMX for continuity with the WVc line"
 
-  # Longwave downwelling
+  # ── Precipitation ────────────────────────────────────────────────────
+  # PL01_mm_Tot lives in the SEPARATE LBM_rain table, never in LBM_lenta.
+  # It is the only usable precipitation column and never changes name across
+  # seven program versions. Bucket = 0.254 mm in every era.
+  # The in-lenta rain columns are NOT usable: Ramount_Tot has 1 non-zero
+  # value summing 199 mm over 56 rows; Rain_WXT_Tot has 9 non-zero values
+  # summing 16963 mm over 348 rows (measured).
+  - unified_name: precip
+    mappings:
+      - column: PL01_mm_Tot
+        start_date: null
+        end_date: null
+        description: "Tipping bucket, mm, Tot. LBM_rain_*.dat (v4, v11, v16, v18, v19, v21) + CR5000_LBM_rain_18-21082023.dat (spare logger sn 2727, PRG_LABMIM_TOTAL_v5). Drop the 1.090922E+009 value at 2018-06-10 09:10 in LBM_rain_2018_2019.dat; flag 2024-02-13→2024-04-30 as stuck-gauge"
+
+  # ── Global (downwelling) shortwave ───────────────────────────────────
+  - unified_name: Sw_dw
+    mappings:
+      - column: PSP1_Wm2_Avg
+        start_date: null
+        end_date: "2018-08-20 23:55:00"
+        description: "Eppley PSP as the GLOBAL sensor, W/m2 (unit row blank), Avg. v4, LBM_lenta_2016/2017/2018_1.dat. Fails 2018-08-21: daily plausible fraction drops 1.00→0.358 and the column reads -6673…+6350 until it is repaired 2018-10-14"
+      - column: CM3Up_Wm2_Avg
+        start_date: "2018-10-16 13:50:00"
+        end_date: null
+        description: "CNR1 upper pyranometer, W/meter^2, Avg. v9 → v22, LBM_lenta_2018-2019.dat onward. No valid global exists 2018-08-21→2018-10-16 13:40"
+
+  # ── Diffuse shortwave ────────────────────────────────────────────────
+  # Measured as the daytime median of candidate/CM3Up_Wm2_Avg on CM3Up>300
+  # W/m2. Diffuse-like ≈ 0.15–0.35; unshaded ≈ 0.85–1.05.
+  - unified_name: Sw_dif
+    mappings:
+      - column: PSP1_Wm2_Avg
+        start_date: "2018-11-13 00:00:00"
+        end_date: "2019-02-26 09:30:00"
+        description: "PSP moved under a shadow ring at the 2018-10-16 service visit. Daily PSP1/CM3Up: 0.90-0.91 on 2018-10-19..10-25, noisy 10-26..11-12, then 0.09-0.22 from 2018-11-13 onward. v9. NOT 2018-09-01 as the previous config claimed — the PSP was dead all September"
+      - column: PSP_Wm2_Avg
+        start_date: "2019-03-18 12:55:00"
+        end_date: "2019-08-31 23:55:00"
+        description: "Same instrument, renamed PSP1_*→PSP_* in v11. PSP/CM3Up = 0.88/0.86 on 2019-03-15..03-18 (still unshaded, excluded), then 0.179/0.167/0.246/0.179/0.243/0.240/0.227/0.207 through 2019-08. v11 sig 28638 → v12 sig 15261. Rises to 0.750 in 2019-09 (unshaded again) so the mapping stops at 2019-08-31"
+      - column: CMP21_Wm2_Avg
+        start_date: "2019-10-01 00:00:00"
+        end_date: "2020-03-06 10:55:00"
+        description: "CMP21 becomes the diffuse sensor in v13. Monthly medians 0.217/0.196/0.163/0.215/0.214/0.270 for 2019-10 … 2020-03. Includes the non-TOA5 re-export LBM_lenta_2020_03.dat, whose timestamps need a +1h correction applied BEFORE this stage"
+      - column: CMP21_Wm2_Avg
+        start_date: "2020-06-01 00:00:00"
+        end_date: "2025-03-12 13:20:00"
+        description: "CMP21 diffuse resumes. ⚠ GAP 2020-03-06 11:00→2020-05-31: at the v15 handover the shade came off — monthly medians of daily CMP21/CM3Up are 0.605 (2020-03), 0.944 (2020-04), 0.872 (2020-05) against 0.16-0.27 either side. v15 → v20"
+      - column: PSP_Wm2_Avg
+        start_date: "2025-05-14 15:25:00"
+        end_date: null
+        description: "Diffuse reverts to the PSP at the v22 program change. PSP/CM3Up = 0.281/0.287/0.287/0.180/0.237/0.201/0.254/0.239/0.218/0.273/0.198/0.202 for 2025-05 … 2026-04. ⚠ NO VALID DIFFUSE 2025-03-12 13:25→2025-05-14 15:20: CMP21/CM3Up = 1.013/1.526/2.348/1.244 (unshaded then broken) and PSP/CM3Up = 0.861/0.867/0.849/0.639 (unshaded). CMP21_Wm2_Avg is a hard 0.0 in every v22 row"
+
+  # ── Upwelling shortwave ──────────────────────────────────────────────
+  - unified_name: Sw_up
+    mappings:
+      - column: CM3Dn_Wm2_Avg
+        start_date: "2018-10-16 13:50:00"
+        end_date: null
+        description: "CNR1 lower pyranometer, W/meter^2, Avg. v9 → v22. No upwelling shortwave before the CNR1 was installed"
+
+  # ── Downwelling longwave ─────────────────────────────────────────────
+  # Three successive spellings of the same corrected CNR1 channel.
   - unified_name: Lw_dw
     mappings:
-      - column: PIR1_Wm2
+      - column: PIR1_Wm2_Avg
         start_date: null
-        end_date: "2018-07-31"
-      - column: CG3Up_Wm2Cr
-        start_date: "2018-08-01"
+        end_date: "2018-08-21 08:25:00"
+        description: "Eppley PIR, W/m2 (unit row blank), Avg, 347-465 W/m2. v4. Dies 2018-08-21 08:25 — a hard -7999 on every subsequent row, and its case thermistor T_C1_Avg jumps from ~299 K to ~1710"
+      - column: CG3Up_Wm2_cor_Avg
+        start_date: "2018-10-16 13:50:00"
+        end_date: "2019-02-26 09:30:00"
+        description: "CNR1 upper pyrgeometer, body-temperature corrected, W/meter^2, Avg, 362-486 W/m2. v9 spelling '_Wm2_cor_Avg'. No downwelling longwave 2018-08-21→2018-10-16 13:40 — the previous config's 2018-08-01 switch pointed at a column that did not yet exist"
+      - column: CG3Up_Wm2_Corr_Avg
+        start_date: "2019-03-15 11:20:00"
+        end_date: "2019-03-19 08:25:00"
+        description: "Same channel, v11 spelling '_Wm2_Corr_Avg'. LBM_lenta_2019.dat.backup, .1.backup, .2.backup (sig 504/277/28638)"
+      - column: CG3Up_Wm2Cr_Avg
+        start_date: "2019-03-19 10:05:00"
         end_date: null
+        description: "Same channel, final spelling '_Wm2Cr_Avg'. v11 sig 32568 → v22, unchanged to the end of the archive"
+
+  # ── Upwelling longwave ───────────────────────────────────────────────
+  - unified_name: Lw_up
+    mappings:
+      - column: CG3Dn_Wm2_cor_Avg
+        start_date: "2018-10-16 13:50:00"
+        end_date: "2019-02-26 09:30:00"
+        description: "CNR1 lower pyrgeometer, corrected, W/meter^2, Avg, 408-543 W/m2. v9 spelling"
+      - column: CG3Dn_Wm2_Corr_Avg
+        start_date: "2019-03-15 11:20:00"
+        end_date: "2019-03-19 08:25:00"
+        description: "v11 spelling. LBM_lenta_2019.dat.backup/.1.backup/.2.backup"
+      - column: CG3Dn_Wm2Cr_Avg
+        start_date: "2019-03-19 10:05:00"
+        end_date: null
+        description: "Final spelling. v11 sig 32568 → v22"
+
+  # ── PAR ──────────────────────────────────────────────────────────────
+  # ⚠ Use PAR_Wm2_Avg, NOT PAR_Den_Avg. The unit row labels PAR_Den_Avg
+  # 'umol/s/m^2' in all 28 files, but its measured range is 0-13 — it is the
+  # raw quantum-sensor millivolt signal. PAR_Wm2_Avg carries a BLANK unit and
+  # is the real W/m2 value (0.455 x global in 2016). Program multiplier
+  # PAR_Wm2/PAR_Den = 49.9125 for v4+v9, 43.7636 from v11 onward.
+  - unified_name: Sw_par
+    mappings:
+      - column: PAR_Wm2_Avg
+        start_date: null
+        end_date: null
+        description: "Quantum sensor in W/m2 despite the blank unit row. Present in all 28 lenta files, v4 → v22, no rename. ⚠ The program multiplier PAR_Wm2/PAR_Den steps 49.9125 → 43.7636 between 2019-02-26 09:30 (v9) and 2019-03-15 11:20 (v11), so the two halves of this series are on different scales (ratio 0.8768). Which half is the calibrated one cannot be decided from the archive; harmonise via a `calibrations` record once that is known, not here"
+
+  # ── Ultraviolet ──────────────────────────────────────────────────────
+  - unified_name: Sw_uv
+    mappings:
+      - column: CUV5_Wm2_Avg
+        start_date: "2025-03-19 14:00:00"
+        end_date: null
+        description: "Kipp & Zonen CUV5, W/m^2, Avg. v21 sig 49753 → v22. Measured at a flat 0.049-0.053 x global in every month, i.e. a genuine UV band fraction. CUV5_Avg (uV, Avg) exists from 2025-03-19 11:20 but has no engineering-unit twin until 14:00"
+
+  # ── Net radiation, CNR1 four-component ───────────────────────────────
+  - unified_name: Net_CNR1
+    mappings:
+      - column: Net_Wm2_Avg
+        start_date: "2019-03-19 10:05:00"
+        end_date: null
+        description: "CNR1 net, W/meter^2, Avg. First appears in v11 sig 32568 (LBM_lenta_2019.dat.3.backup) and runs to the end. Absent from v4, v9 and v11 sig 504/277/28638"
+
+  # ── Net radiation, NRLite ────────────────────────────────────────────
+  # The wind-corrected NRLite is the UNSTABLE one after v12 (it divides by
+  # the WXT wind speed, which goes to zero): NRLite_Wm2Cr_Avg spans
+  # -1117…+7060 in LBM_lenta_2021.dat while the uncorrected NRLite_Wm2_Avg
+  # stays at -281…+1108. Prefer the uncorrected column from v12 onward.
+  - unified_name: Net_NRLite
+    mappings:
+      - column: NRLite_Wm2_Corr_Avg
+        start_date: null
+        end_date: "2018-08-20 23:55:00"
+        description: "NRLite wind-corrected, W/m2, Avg. v4. Sane (-172…+783 in 2016). Goes to -7999/+4502 after the 2018-08-21 analog failure and is a constant ~4121 through the whole v9 era, so the mapping stops at the failure"
+      - column: NRLite_Wm2_Avg
+        start_date: "2019-03-15 11:20:00"
+        end_date: "2022-04-11 10:30:00"
+        description: "Uncorrected NRLite, W/m^2, Avg. v11 → v16. Chosen over NRLite_Wm2Cr_Avg because the corrected column is contaminated by the WXT wind. NRLite is dropped from the header entirely in v18 (2022-04-11 10:40)"
+
+  # ── Net-radiometer body temperature ──────────────────────────────────
+  # KELVIN throughout, deliberately. The v4 column is kelvin and the schema's
+  # `factor` is multiplicative only, so it cannot subtract 273.15 — mapping the
+  # Celsius twin CNR1TC_Avg here would make the unified series step from ~299
+  # to ~26 at 2018-10-16.
+  - unified_name: Tbody
+    mappings:
+      - column: T_C1_Avg
+        start_date: null
+        end_date: "2018-08-21 08:25:00"
+        description: "Eppley PIR CASE thermistor, kelvin (unit row blank), Avg, 294.7-307.6 K. v4. Its dome twin is T_D1_Avg (median T_D1 - T_C1 = +0.10 K). Neither is a dew point"
+      - column: CNR1TK_Avg
+        start_date: "2018-10-16 13:50:00"
+        end_date: null
+        description: "CNR1 body temperature, K, Avg. v9 → v22, present in all 27 files that carry a CNR1. Chosen over the Celsius twin CNR1TC_Avg (Deg C, Avg, present in 25 of them) to keep the unified variable in one unit; use CNR1TC_Avg directly if Celsius is wanted"
+
+  # ── Per-row instrument quality flag ──────────────────────────────────
+  # ⚠ TEXT column: values are 'OK' / 'Unknown Fault' / 'NAN'. In
+  # data/LBM_lenta_2025.dat: 83249 OK, 14063 Unknown Fault. read_campbell_dat
+  # coerces every object column with pd.to_numeric(errors='coerce'), which
+  # turns 100% of this column into NaN. It must be excluded from that coercion
+  # for this mapping to carry anything.
+  - unified_name: qc_flag
+    mappings:
+      - column: MetSENS_Status
+        start_date: "2025-03-19 11:20:00"
+        end_date: "2025-03-28 10:30:00"
+        description: "Gill MetSENS status text, Smp. v21. The only per-row quality flag anywhere in the LabMiM archive"
+      - column: MetSENS1_Status
+        start_date: "2025-03-28 10:35:00"
+        end_date: null
+        description: "Gill MetSENS unit 1 status text, Smp. v21b + v22. Its 'Unknown Fault' rows coincide with the AirT1_C_Avg==1000 / RH1==999 sentinel block from 2025-12-13"

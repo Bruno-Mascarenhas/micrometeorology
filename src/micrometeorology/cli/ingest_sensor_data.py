@@ -46,7 +46,18 @@ def run(
             help="Path to calibrations.yaml.", exists=True, file_okay=True, dir_okay=False
         ),
     ] = None,
-    pattern: Annotated[str, typer.Option(help="File glob pattern.")] = "*.dat",
+    pattern: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "File glob. The default now also matches the logger's `.backup` "
+                "rotation files: in the LabMiM archive three of them are the ONLY "
+                "source of a whole austral winter, and a bare `*.dat` dropped them "
+                "silently. Never point this at a directory holding more than one "
+                "station or sampling rate."
+            )
+        ),
+    ] = "*.dat*",
     freq: Annotated[str, typer.Option(help="Aggregation frequency.")] = "1h",
     min_samples: Annotated[
         int | None,
@@ -91,6 +102,10 @@ def run(
         ),
         sum_columns=settings.sensor_sum_columns,
         wind_dir_columns=settings.sensor_wind_dir_columns,
+        # aggregate_to_hourly has accepted this pairing since it was written, but
+        # nothing ever passed it: every direction was vector-averaged with unit
+        # weight, which puts about one hourly bearing in six more than 5 deg off.
+        wind_speed_column_map=settings.sensor_wind_speed_column_map,
         freq=freq,
     )
 

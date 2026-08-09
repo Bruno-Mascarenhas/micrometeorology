@@ -31,8 +31,14 @@ def test_get_settings_accepts_the_shipped_default_yaml() -> None:
     settings = get_settings()
 
     assert settings.sensor_limits, "shipped QC limits must survive validation"
-    assert settings.sensor_sum_columns == ["precip", "PL01_mm_Tot"]
-    assert settings.sensor_wind_dir_columns == ["WD_WXT", "WindDir_WVT"]
+    # Membership rather than an exact list: the rules are keyed to the RAW TOA5
+    # column names the archive actually carries across nine logger-program eras,
+    # and that set grows whenever an instrument is added. Pinning the whole list
+    # made the test fail on a config change that was correct — while the old
+    # pinned values (de-suffixed "WD_WXT", "precip") matched no column in the
+    # merged frame, so the rules they named had silently never fired.
+    assert {"PL01_mm_Tot", "Rain_WXT_Tot", "precip"} <= set(settings.sensor_sum_columns)
+    assert {"WD_WXT_Avg", "WindDir_D1_WVT", "WindDir1_GMX"} <= set(settings.sensor_wind_dir_columns)
 
 
 def test_shipped_limits_carry_the_keys_apply_physical_limits_reads() -> None:

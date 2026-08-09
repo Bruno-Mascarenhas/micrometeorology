@@ -263,9 +263,27 @@ Full documentation: [`docs/allsky.md`](docs/allsky.md); the internal design is i
 ```bash
 labmim-sensor-process --input data/raw/ --output data/hourly/sensor_data.csv
 
+# Merge the whole .dat archive into one verified database (explicit manifest,
+# clock repairs, sentinel masking); --strict fails if the row counts drift.
+labmim-archive -d data -o output/archive --strict
+
+# Publish the climatology page's distribution artifacts from that database
+labmim-climatology -i output/archive/station_hourly.parquet \
+    -w data/series_operacional.dat -o ../site-labmim/site/Climatologia
+
+# Publish the rolling 7-day window the interactive monitoring page draws
+labmim-monitoring -i output/archive -w data/series_operacional.dat \
+    -o ../site-labmim/site/Monitoramento
+
 # Nine fixed-name monitoring-page PNGs from the hourly CSV (site-labmim consumer)
-labmim-site-graphs site -i data/hourly/sensor_data.csv -o ../site-labmim/site/assets/graphs
+labmim-site-graphs site -i data/hourly/sensor_data.csv -o ../site-labmim/site/assets/graphs \
+    --raw output/archive/station_5min_qc.parquet --wrf data/series_operacional.dat
 ```
+
+Both monitoring producers draw the same three layers — the raw 5-minute samples,
+the hourly mean over them and the WRF series where one exists. `labmim-monitoring`
+feeds the interactive page; `labmim-site-graphs` keeps writing the static images,
+which are the ones that go into papers.
 
 `labmim-site-graphs` (module `micrometeorology/cli/plot_station_graphs.py`)
 produces the station graphs the public monitoring page embeds by exact name;

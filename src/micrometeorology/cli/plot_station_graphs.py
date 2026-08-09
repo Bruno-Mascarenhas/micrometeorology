@@ -55,6 +55,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import typer
 import yaml
+from matplotlib.typing import ColorType
 
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.paths import ensure_dir
@@ -146,6 +147,30 @@ DEFAULT_BALANCE_COMPONENTS: dict[str, str] = {
 # Fallback U/V component columns used to reconstruct wind direction when the
 # direct ``direcao`` column is absent (see ``sensors.wind``).
 DEFAULT_DIRECTION_COMPONENTS: tuple[str, str] = ("u", "v")
+
+# The model layer's colour. Validated against the site's chart palette so the
+# PNGs and the interactive page agree on what "WRF" looks like.
+_WRF_COLOR = "#e07a1f"
+
+# Candidate WRF column names per contract graph, in priority order. A TUPLE
+# rather than a single name because ``series_operacional.dat`` is produced by a
+# separate extraction that gains variables over time: precipitation is expected
+# but absent today, so the day it lands the overlay appears with no code change.
+DEFAULT_WRF_COLUMNS: dict[str, tuple[str, ...]] = {
+    "temperatura": ("T",),
+    "umidade": ("ur", "RH"),
+    "pressao": ("pressure",),
+    "precipitacao": ("precip", "Precip", "PRECIP", "rain", "Rain", "RAINNC", "RAINC"),
+    "velocidade": ("WS",),
+    "direcao": ("WD",),
+    "radiacao_difusa": ("Swdf",),
+    # The balance overlay is the incoming shortwave only. The model's upwelling
+    # and net terms derive from ALBD and EMISS, which the extraction writes as
+    # broken constants, so they are not plotted.
+    "balanco": ("Swdw",),
+    # No PAR in the point extraction.
+    "radiacao_par": (),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -246,9 +271,88 @@ def load_hourly_csv(input_path: Path, last_days: int) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def _plot_line(ax: plt.Axes, series: pd.Series, *, label: str) -> None:
-    """Draw an hourly line with small markers (temperature, humidity, ...)."""
-    ax.plot(series.index, series.to_numpy(), "o-", markersize=3, linewidth=1.0, label=label)
+def _plot_line(ax: plt.Axes, series: pd.Series, *, label: str, over_raw: bool = False) -> None:
+    """Draw the hourly line (temperature, humidity, ...).
+
+    The markers are dropped when a raw layer sits underneath: at 12 raw samples
+    per hour they cover exactly the points the raw layer exists to expose, and
+    the sampling cadence is already visible from the dots below.
+    """
+    style = "-" if over_raw else "o-"
+    ax.plot(
+        series.index,
+        series.to_numpy(),
+        style,
+        markersize=3,
+        linewidth=1.6 if over_raw else 1.0,
+        zorder=2,
+        label=label,
+    )
+
+
+def _plot_raw(ax: plt.Axes, series: pd.Series, *, label: str, dots: bool = True) -> None:
+    """Draw the raw logger samples as the recessive layer under the hourly line.
+
+    Deliberately low-contrast and unconnected: this layer is context, not the
+    subject. Drawing it as a line of equal weight would hide the hourly mean it
+    exists to be compared against.
+    """
+    style = "." if dots else "-"
+    ax.plot(
+        series.index,
+        series.to_numpy(),
+        style,
+        markersize=2.6,
+        linewidth=0.8,
+        color="0.52",
+        alpha=0.75,
+        zorder=1,
+        label=label,
+    )
+
+
+def _plot_wrf(
+    ax: plt.Axes,
+    series: pd.Series,
+    *,
+    label: str,
+    dots: bool = False,
+    color: ColorType | None = None,
+) -> None:
+    """Draw the model series, visually distinct from anything measured.
+
+    Three things have to be told apart on the balance chart — the physical
+    family, the direction of the flux, and whether a line is measured or
+    modelled — so each gets its own channel: HUE for the family, solid/dashed
+    for the direction, and DOTTED for the model. That is why the overlay takes
+    the colour of the series it mirrors (``color``) instead of a colour of its
+    own: same quantity, same hue; dotted says it came from WRF.
+
+    Direction is the exception and passes ``dots=True``: the model swings
+    through north, and a line joining 350 deg to 10 deg would sweep the whole
+    axis through a bearing that never occurred.
+    """
+    if dots:
+        ax.plot(
+            series.index,
+            series.to_numpy() % 360.0,
+            "s",
+            markersize=3,
+            markerfacecolor="none",
+            color=color or _WRF_COLOR,
+            zorder=3,
+            label=label,
+        )
+        return
+    ax.plot(
+        series.index,
+        series.to_numpy(),
+        linestyle=(0, (1.5, 1.5)),
+        linewidth=1.7,
+        color=color or _WRF_COLOR,
+        zorder=3,
+        label=label,
+    )
 
 
 def _plot_scatter(ax: plt.Axes, series: pd.Series, *, label: str) -> None:
@@ -333,12 +437,28 @@ def _resolve_direction_series(
     return None
 
 
+def _wrf_series(
+    wrf: pd.DataFrame | None, key: str, candidates: dict[str, tuple[str, ...]]
+) -> tuple[pd.Series | None, str | None]:
+    """First model column present for this graph, with the name that resolved."""
+    if wrf is None or wrf.empty:
+        return None, None
+    for candidate in candidates.get(key, ()):
+        if candidate in wrf.columns:
+            return wrf[candidate], candidate
+    return None, None
+
+
 def render_site_graphs(
     df: pd.DataFrame,
     output_dir: Path,
     columns: dict[str, str],
     balance_components: dict[str, str],
     direction_components: tuple[str, str],
+    *,
+    raw: pd.DataFrame | None = None,
+    wrf: pd.DataFrame | None = None,
+    wrf_columns: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Render every contract graph whose source column is present.
 
@@ -389,8 +509,20 @@ def render_site_graphs(
 
         fig, ax = create_figure()
         try:
+            # Layer 1 — the raw logger samples, underneath everything. Drawn
+            # first so the hourly mean and the model sit on top of it.
+            if raw is not None and column in raw.columns:
+                _plot_raw(
+                    ax,
+                    raw[column] % 360.0 if spec.kind == "scatter" else raw[column],
+                    label="bruto 5 min",
+                    dots=spec.kind != "bar",
+                )
+
+            # Layer 2 — the hourly aggregate, the subject of the chart.
+            drawn_raw = raw is not None and column in raw.columns
             if spec.kind == "line":
-                _plot_line(ax, series, label=column)
+                _plot_line(ax, series, label=column, over_raw=drawn_raw)
             elif spec.kind == "scatter":
                 _plot_scatter(ax, series, label=column)
             elif spec.kind == "bar":
@@ -402,6 +534,20 @@ def render_site_graphs(
                     if col in df.columns
                 }
                 _plot_balance(ax, series, present)
+
+            # Layer 3 — the model, on top and visually distinct so it is never
+            # read as a measurement.
+            model, resolved = _wrf_series(wrf, spec.key, wrf_columns or DEFAULT_WRF_COLUMNS)
+            if model is not None:
+                _plot_wrf(
+                    ax,
+                    model,
+                    label=f"WRF 1h ({resolved})",
+                    dots=spec.kind == "scatter",
+                    # On the balance chart the overlay mirrors the incoming
+                    # shortwave, so it borrows that component's hue.
+                    color=BALANCE_COMPONENT_COLORS["sw_down"] if spec.kind == "balance" else None,
+                )
 
             if spec.ylim is not None:
                 ax.set_ylim(*spec.ylim)
@@ -417,6 +563,30 @@ def render_site_graphs(
             plt.close(fig)
 
     return written, missing
+
+
+def _load_layer(path: Path, hourly: pd.DataFrame) -> pd.DataFrame:
+    """Load the raw record and clip it to the window the hourly frame covers."""
+    frame = (
+        pd.read_parquet(path)
+        if path.suffix == ".parquet"
+        else pd.read_csv(path, index_col=0, parse_dates=True)
+    )
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        frame.index = pd.to_datetime(frame.index)
+    clipped: pd.DataFrame = frame.sort_index().loc[hourly.index.min() : hourly.index.max()]
+    logger.info("raw layer: %d samples over the plotted window", len(clipped))
+    return clipped
+
+
+def _load_wrf(path: Path, hourly: pd.DataFrame) -> pd.DataFrame:
+    """Load the model series through the shared defensive reader and clip it."""
+    from micrometeorology.cli.export_climatology import read_wrf_series
+
+    frame = read_wrf_series(path)
+    clipped: pd.DataFrame = frame.loc[hourly.index.min() : hourly.index.max()]
+    logger.info("wrf layer: %d hours over the plotted window", len(clipped))
+    return clipped
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +623,31 @@ def site(
         list[str] | None,
         typer.Option("--col", help="Per-graph column override `KEY=COLUMN` (repeatable)."),
     ] = None,
+    raw_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--raw",
+            help=(
+                "Raw high-frequency record (parquet or CSV) drawn UNDER the hourly "
+                "line, so the aggregation can be judged against what it came from."
+            ),
+            exists=True,
+            dir_okay=False,
+        ),
+    ] = None,
+    wrf_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--wrf",
+            help=(
+                "series_operacional.dat; its column for each graph is drawn as a "
+                "dashed overlay. Resolved by candidate name, so a variable the "
+                "extraction gains later appears without a code change."
+            ),
+            exists=True,
+            dir_okay=False,
+        ),
+    ] = None,
     last_days: Annotated[
         int, typer.Option("--last-days", help="Days back from the newest timestamp.")
     ] = 7,
@@ -479,8 +674,17 @@ def site(
         typer.echo("[!] No rows in the requested window -- nothing to plot.")
         raise typer.Exit(code=1 if strict else 0)
 
+    raw = _load_layer(raw_path, df) if raw_path else None
+    wrf = _load_wrf(wrf_path, df) if wrf_path else None
+
     written, missing = render_site_graphs(
-        df, output_dir, columns, balance_components, direction_components
+        df,
+        output_dir,
+        columns,
+        balance_components,
+        direction_components,
+        raw=raw,
+        wrf=wrf,
     )
 
     for path in written:

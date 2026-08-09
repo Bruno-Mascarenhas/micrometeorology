@@ -1,0 +1,553 @@
+"""The LabMiM station archive: an explicit manifest, staged fixes, one merged frame.
+
+Turning ``data/dados-labmim/`` into a usable database is not a glob. An audit of
+every table in the archive (2016-09 to 2026-04) found four ways the obvious
+approach silently produces a wrong record:
+
+1. **``*.dat`` drops the rotation files.** Three ``.backup`` tables are the ONLY
+   source of an entire austral winter each — JJA 2020, JJA 2022 and June to
+   mid-July 2024. A glob that skips them deletes three winters from the record
+   without a warning.
+2. **The directory holds more than one station.** ``BTS_*`` is a different site
+   (CR1000X serial 9429), the ``celsolar`` / ``calibracao`` tables are
+   side-by-side instrument campaigns, and the ``solar`` / ``radiacao`` families
+   sample at one minute. Merged together they produce a frame that parses
+   cleanly and means nothing.
+3. **Names lie.** ``dados-labmim/LBM_lenta.dat`` is the RAIN table — TOA5 header
+   field 8 reads ``LBM_rain`` — and it is the unique source of February 2019.
+4. **Three clock defects cannot be expressed in configuration.** They need the
+   bytes fixed before the merge, which is what :func:`stage_archive` does, always
+   into a scratch directory: nothing here ever writes to ``data/``.
+
+So this module carries the manifest as data, in ingest order, with each file's
+disposition recorded next to it. :func:`verify_frame` then checks the merged
+result against the row counts, span and monotonicity the audit measured, so a
+future change that quietly drops a file fails loudly instead of publishing a
+shorter record.
+
+Relationship to the neighbouring modules
+----------------------------------------
+- :mod:`micrometeorology.sensors.ingestion` reads and merges individual tables;
+  this module decides *which* tables, in what order, and with what repairs.
+- :mod:`micrometeorology.sensors.calibration` applies the instrument factors and
+  the era-to-era column unification (``sensor_switches``) on top of the frame
+  built here.
+- :mod:`micrometeorology.sensors.aggregation` collapses it to hourly.
+"""
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+
+import pandas as pd
+
+from micrometeorology.common.paths import ensure_dir
+from micrometeorology.sensors.ingestion import merge_dat_files
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "ARCHIVE_END",
+    "ARCHIVE_START",
+    "EXPECTED_LENTA_ROWS",
+    "EXPECTED_RAIN_ROWS",
+    "LENTA_MANIFEST",
+    "RAIN_MANIFEST",
+    "STATUS_COLUMNS",
+    "ArchiveFile",
+    "ArchiveReport",
+    "build_five_minute_frame",
+    "mask_sentinels",
+    "stage_archive",
+    "verify_frame",
+]
+
+# Measured over the manifests below. A merge that does not reproduce these has
+# lost or gained a file; see verify_frame.
+EXPECTED_LENTA_ROWS = 987_969
+EXPECTED_RAIN_ROWS = 988_249
+ARCHIVE_START = pd.Timestamp("2016-09-29 13:40:00")
+ARCHIVE_END = pd.Timestamp("2026-04-24 13:00:00")
+
+# Per-row instrument quality flags. Text, and therefore destroyed by a numeric
+# coercion unless named explicitly (see ingestion.read_campbell_dat).
+STATUS_COLUMNS = ("MetSENS1_Status", "MetSENS2_Status", "MetSENS_Status")
+
+# Staging directives, resolved by _stage_file.
+_CLOCK_PLUS_ONE_HOUR = "clock+1h"
+_DROP_LATE_TAIL = "drop-late-tail"
+_KEEP_2023_BLOCK = "keep-2023-block"
+
+# The 2020 clock slip: every row stamped at or before this instant is one hour
+# early. Verified by RECORD-joining the lenta and rain tables across the window.
+_CLOCK_SLIP_LAST = pd.Timestamp("2020-02-28 11:50:00")
+# Rows at or after this instant in the 2019 tables are a mis-stamped tail whose
+# timestamps the clock-corrected 2020_03 table already carries, cell for cell.
+_LATE_TAIL_FIRST = pd.Timestamp("2020-01-07 01:05:00")
+
+
+@dataclass(frozen=True)
+class ArchiveFile:
+    """One table of the station record, with why it is in (or how it is repaired).
+
+    Attributes
+    ----------
+    path:
+        Location relative to the data root.
+    staging:
+        Repair to apply before reading, or ``None`` to read as found.
+    note:
+        Why this file is in the manifest — usually what would be lost without
+        it. Read this before removing an entry.
+    """
+
+    path: str
+    staging: str | None = None
+    note: str = ""
+
+
+# ---------------------------------------------------------------------------
+# The manifests, in ingest order (chronological by first timestamp)
+# ---------------------------------------------------------------------------
+
+_D = "dados-labmim"
+
+LENTA_MANIFEST: tuple[ArchiveFile, ...] = (
+    ArchiveFile(f"{_D}/LBM_lenta_2016.dat", note="start of record, 2016-09-29"),
+    ArchiveFile(f"{_D}/LBM_lenta_2017.dat", note="all of 2017, complete JJA"),
+    ArchiveFile(f"{_D}/LBM_lenta_2018_1.dat", note="2018-01..2018-10-16, JJA 2018"),
+    ArchiveFile(f"{_D}/LBM_lenta_2018-2019.dat", note="CNR1 commissioning era"),
+    ArchiveFile(f"{_D}/LBM_lenta_2019.dat.backup", note="sole source of 2019-03-15 afternoon"),
+    ArchiveFile(f"{_D}/LBM_lenta_2019.dat.1.backup", note="sole source of 2019-03-15..18"),
+    ArchiveFile(
+        f"{_D}/LBM_lenta_2019.dat.2.backup", note="sole source of 2019-03-18..19, WXT arrives"
+    ),
+    ArchiveFile(f"{_D}/LBM_lenta_2019.dat.3.backup", note="sole source of 2019-03-19..05-31"),
+    ArchiveFile(f"{_D}/LBM_lenta_2019_0531.dat", note="2019-05-31 onward"),
+    ArchiveFile(f"{_D}/LBM_lenta_2019_0631.dat", note="2019-06 onward"),
+    ArchiveFile(f"{_D}/LBM_lenta_2019_1011.dat", note="2019-10 onward, CMP21 diffuse begins"),
+    ArchiveFile(
+        f"{_D}/LBM_lenta_2019.dat",
+        staging=_DROP_LATE_TAIL,
+        note="110-row tail is mis-stamped; the clock-fixed 2020_03 table carries it correctly",
+    ),
+    ArchiveFile(
+        f"{_D}/LBM_lenta_2020_03.dat",
+        staging=_CLOCK_PLUS_ONE_HOUR,
+        note="headerless CSV, and 16855 rows are one hour early",
+    ),
+    ArchiveFile(f"{_D}/LBM_lenta_2020.dat.backup", note="SOLE SOURCE OF JJA 2020"),
+    ArchiveFile(f"{_D}/LBM_lenta_2020.dat", note="rest of 2020"),
+    ArchiveFile(f"{_D}/LBM_lenta_2021.dat", note="all of 2021"),
+    ArchiveFile(f"{_D}/LBM_lenta_2022.dat.backup", note="SOLE SOURCE OF JJA 2022"),
+    ArchiveFile(
+        f"{_D}/LBM_lenta_2022.dat", note="rest of 2022 (superset of data/LBM_lenta_2022.dat)"
+    ),
+    ArchiveFile(f"{_D}/CR5000_LBM_lenta_18-21082023.dat", note="2023-08 spare-logger block"),
+    ArchiveFile(f"{_D}/LBM_lenta_2023.dat", note="2023"),
+    ArchiveFile(f"{_D}/LBM_lenta_2023_14032024.dat", note="2024-03 handover"),
+    ArchiveFile(f"{_D}/LBM_lenta_2024.dat.backup", note="SOLE SOURCE OF JUNE AND 1-19 JULY 2024"),
+    ArchiveFile(f"{_D}/LBM_lenta_2024.dat", note="rest of 2024"),
+    ArchiveFile(f"{_D}/LBM_lenta_2025.dat.backup", note="2025-03 Gill MetSENS commissioning"),
+    ArchiveFile(f"{_D}/LBM_lenta_2025.dat.1.backup", note="2025-03 commissioning"),
+    ArchiveFile(f"{_D}/LBM_lenta_2025.dat.2.backup", note="2025-03 commissioning"),
+    ArchiveFile(f"{_D}/LBM_lenta_2025.dat.3.backup", note="2025-03 commissioning"),
+    ArchiveFile(f"{_D}/LBM_lenta_2025.dat.4.backup", note="2025-03-28..05-14, dual GMX units"),
+    ArchiveFile("LBM_lenta_2025.dat", note="v22 era to 2026-04-24; PSP takes over diffuse"),
+)
+
+RAIN_MANIFEST: tuple[ArchiveFile, ...] = (
+    ArchiveFile(f"{_D}/LBM_rain_2016.dat", note="start of rain record"),
+    ArchiveFile(f"{_D}/LBM_rain_2017.dat", note="2017"),
+    ArchiveFile(f"{_D}/LBM_rain_2018_2019.dat", note="2018 into 2019"),
+    ArchiveFile(
+        f"{_D}/LBM_lenta.dat",
+        note="MISNAMED: TOA5 field 8 is LBM_rain. Unique source of 2019-01-31..02-26",
+    ),
+    ArchiveFile(
+        f"{_D}/LBM_rain_2019.dat", staging=_DROP_LATE_TAIL, note="same 110-row mis-stamped tail"
+    ),
+    ArchiveFile(
+        f"{_D}/LBM_rain_2020.dat", note="2020 (clock slip is in the lenta table, not here)"
+    ),
+    ArchiveFile(f"{_D}/LBM_rain_2021.dat", note="2021"),
+    ArchiveFile(f"{_D}/LBM_rain_2022.dat", note="2022 (superset of data/LBM_rain_2022.dat)"),
+    ArchiveFile(
+        f"{_D}/CR5000_LBM_rain_18-21082023.dat",
+        staging=_KEEP_2023_BLOCK,
+        note="only the 804-row 2023-08 block; 892 scattered pre-2016 rows are a spare logger",
+    ),
+    ArchiveFile(f"{_D}/LBM_rain_2023.dat", note="2023"),
+    ArchiveFile(f"{_D}/LBM_rain2023_14032024.dat", note="2024-03 handover"),
+    ArchiveFile(f"{_D}/LBM_rain_2024.dat", note="2024"),
+    ArchiveFile("LBM_rain_2025.dat", note="2025 to 2026-04-24"),
+)
+
+
+@dataclass(frozen=True)
+class ArchiveReport:
+    """What a merged frame actually contains, against what the audit measured."""
+
+    kind: str
+    rows: int
+    expected_rows: int
+    columns: int
+    first: pd.Timestamp | None
+    last: pd.Timestamp | None
+    duplicated: int
+    monotonic: bool
+    problems: tuple[str, ...]
+
+    @property
+    def ok(self) -> bool:
+        return not self.problems
+
+
+# ---------------------------------------------------------------------------
+# Staging — repairs that cannot live in configuration
+# ---------------------------------------------------------------------------
+
+# A TOA5 file is four header lines then data. Staged copies are rewritten in that
+# shape so every consumer can keep using the same reader and the same skiprows.
+_TOA5_METADATA = '"TOA5","CR5000","CR5000","2754","CR5000.Std.06","STAGED","0","LBM_staged"'
+
+
+def _write_toa5(frame: pd.DataFrame, destination: Path, timestamp_column: str) -> None:
+    """Write a frame back out in TOA5 shape (metadata, names, units, aggregation)."""
+    columns = list(frame.columns)
+    with open(destination, "w", encoding="utf-8", newline="") as handle:
+        handle.write(f"{_TOA5_METADATA}\n")
+        handle.write(",".join(f'"{name}"' for name in columns) + "\n")
+        # Units and aggregation rows are placeholders: read_campbell_dat skips
+        # both, and no consumer in this package reads them back.
+        handle.write(",".join('""' for _ in columns) + "\n")
+        handle.write(",".join('""' for _ in columns) + "\n")
+    frame.to_csv(destination, mode="a", header=False, index=False, date_format="%Y-%m-%d %H:%M:%S")
+    logger.info("staged %s (%d rows)", destination.name, len(frame))
+    del timestamp_column
+
+
+def _read_raw_toa5(path: Path) -> pd.DataFrame:
+    """Read a TOA5 table keeping every value as written, timestamps as strings."""
+    return pd.read_csv(path, skiprows=[0, 2, 3], low_memory=False, dtype=str)
+
+
+def _stage_clock_shift(source: Path, destination: Path) -> None:
+    """Add one hour to the mis-stamped rows of the headerless 2020_03 table.
+
+    Two defects in one file. It is a plain CSV with a bare column-name line and
+    no TOA5 header, so the standard ``skiprows=[0, 2, 3]`` reader would consume
+    the names and the first two data rows; and every row up to 2020-02-28 11:50
+    is stamped one hour early, which a RECORD-join against the rain table pins
+    exactly (the offset is +1 h at RECORD 7901/11932/16539 and 0 by 20294).
+    """
+    frame = pd.read_csv(source, low_memory=False, dtype=str)
+    stamps = pd.to_datetime(frame["TIMESTAMP"], format="ISO8601")
+    shifted = stamps.where(stamps > _CLOCK_SLIP_LAST, stamps + pd.Timedelta(hours=1))
+    moved = int((shifted != stamps).sum())
+    frame["TIMESTAMP"] = shifted.dt.strftime("%Y-%m-%d %H:%M:%S")
+    _write_toa5(frame, destination, "TIMESTAMP")
+    logger.info("  clock: shifted %d rows by +1h", moved)
+
+
+def _stage_drop_late_tail(source: Path, destination: Path) -> None:
+    """Drop the mis-stamped 110-row tail the clock-corrected table already covers."""
+    frame = _read_raw_toa5(source)
+    stamps = pd.to_datetime(frame["TIMESTAMP"], format="ISO8601")
+    keep = stamps < _LATE_TAIL_FIRST
+    _write_toa5(frame.loc[keep], destination, "TIMESTAMP")
+    logger.info("  tail: dropped %d late rows", int((~keep).sum()))
+
+
+def _stage_keep_2023_block(source: Path, destination: Path) -> None:
+    """Keep only the August 2023 block of the spare-logger rain table.
+
+    The rest of the file is 892 rows scattered across 2014-2019 with RECORD
+    resets, written by a different logger (serial 2727) whose siting cannot be
+    verified. They are dropped rather than merged into a published record.
+    """
+    frame = _read_raw_toa5(source)
+    stamps = pd.to_datetime(frame["TIMESTAMP"], format="ISO8601")
+    keep = (stamps >= pd.Timestamp("2023-08-01")) & (stamps < pd.Timestamp("2023-09-01"))
+    _write_toa5(frame.loc[keep], destination, "TIMESTAMP")
+    logger.info(
+        "  spare logger: kept %d rows of 2023-08, dropped %d", int(keep.sum()), int((~keep).sum())
+    )
+
+
+_STAGERS = {
+    _CLOCK_PLUS_ONE_HOUR: _stage_clock_shift,
+    _DROP_LATE_TAIL: _stage_drop_late_tail,
+    _KEEP_2023_BLOCK: _stage_keep_2023_block,
+}
+
+
+def stage_archive(
+    manifest: tuple[ArchiveFile, ...],
+    data_dir: str | Path,
+    staging_dir: str | Path,
+) -> list[Path]:
+    """Resolve a manifest to readable paths, writing repaired copies as needed.
+
+    Parameters
+    ----------
+    manifest:
+        :data:`LENTA_MANIFEST` or :data:`RAIN_MANIFEST`.
+    data_dir:
+        Root of the archive. **Never written to.**
+    staging_dir:
+        Scratch directory for the repaired copies. Recreated on every run so a
+        stale staged file can never survive a change to the repair logic.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Paths in ingest order, ready for
+        :func:`~micrometeorology.sensors.ingestion.merge_dat_files`.
+
+    Raises
+    ------
+    FileNotFoundError
+        If a manifest entry is missing. A silently shorter record is the failure
+        this whole module exists to prevent, so an absent file is fatal rather
+        than skipped.
+    """
+    root = Path(data_dir)
+    staged_root = ensure_dir(Path(staging_dir))
+    resolved: list[Path] = []
+
+    for entry in manifest:
+        source = root / entry.path
+        if not source.is_file():
+            raise FileNotFoundError(
+                f"archive manifest entry missing: {source}\n  ({entry.note})\n"
+                "  Every entry is either unique coverage or a documented repair; "
+                "dropping one shortens the published record."
+            )
+        if entry.staging is None:
+            resolved.append(source)
+            continue
+        destination = staged_root / f"{source.name}.staged.dat"
+        _STAGERS[entry.staging](source, destination)
+        resolved.append(destination)
+
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# Merge and verification
+# ---------------------------------------------------------------------------
+
+
+def build_five_minute_frame(
+    manifest: tuple[ArchiveFile, ...],
+    data_dir: str | Path,
+    staging_dir: str | Path,
+    *,
+    sentinel_value: float | None = None,
+) -> pd.DataFrame:
+    """Merge one manifest into a single 5-minute frame, raw values preserved.
+
+    ``sentinel_value`` defaults to ``None`` here, unlike the reader's own -900:
+    that threshold matches nothing in this archive, and leaving it on would only
+    suggest that missing data had been handled. Sentinel masking is a separate,
+    era-scoped step applied after the merge.
+    """
+    paths = stage_archive(manifest, data_dir, staging_dir)
+    return merge_dat_files(
+        paths,
+        sentinel_value=sentinel_value,
+        text_columns=list(STATUS_COLUMNS),
+    )
+
+
+def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
+    """Check a merged frame against the row count, span and shape the audit measured.
+
+    This is the guard that turns "the merge still runs" into "the merge still
+    captures the whole archive". A file quietly removed from a manifest, a
+    staging repair that stops matching its file, or a reader change that eats a
+    header row all show up here as a row-count or span mismatch rather than as a
+    slightly shorter published distribution.
+
+    Parameters
+    ----------
+    frame:
+        The merged 5-minute frame.
+    kind:
+        ``"lenta"`` or ``"rain"``, selecting the expected row count.
+
+    Returns
+    -------
+    ArchiveReport
+        ``problems`` is empty when everything matches.
+    """
+    expected = EXPECTED_LENTA_ROWS if kind == "lenta" else EXPECTED_RAIN_ROWS
+    index = frame.index
+    first = pd.Timestamp(index.min()) if len(index) else None
+    last = pd.Timestamp(index.max()) if len(index) else None
+    duplicated = int(index.duplicated().sum())
+    monotonic = bool(index.is_monotonic_increasing)
+
+    problems: list[str] = []
+    if len(frame) != expected:
+        problems.append(
+            f"{kind}: {len(frame)} rows, audit measured {expected} ({len(frame) - expected:+d})"
+        )
+    if first is not None and first != ARCHIVE_START:
+        problems.append(f"{kind}: starts {first}, audit measured {ARCHIVE_START}")
+    if last is not None and last != ARCHIVE_END:
+        problems.append(f"{kind}: ends {last}, audit measured {ARCHIVE_END}")
+    if duplicated:
+        problems.append(f"{kind}: {duplicated} duplicated timestamps")
+    if not monotonic:
+        problems.append(f"{kind}: index is not monotonically increasing")
+
+    return ArchiveReport(
+        kind=kind,
+        rows=len(frame),
+        expected_rows=expected,
+        columns=len(frame.columns),
+        first=first,
+        last=last,
+        duplicated=duplicated,
+        monotonic=monotonic,
+        problems=tuple(problems),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sentinel masking — the values a logger writes instead of "missing"
+# ---------------------------------------------------------------------------
+#
+# read_campbell_dat's -900 threshold catches NONE of these. Each entry below was
+# found the same way: take the exact-value histogram of a column and look for a
+# single value repeating thousands of times. A physical sensor does not report
+# -46.8 degC ten thousand times in Salvador.
+#
+# The split matters. A VALUE rule holds for the whole record, because the value
+# is physically impossible. A WINDOW rule is date-scoped because the value is
+# legitimate elsewhere: zero is a real wind speed and a real rainfall, so a
+# global "mask 0" would delete every calm hour and every dry hour in the record.
+
+# column -> the impossible values it writes when the sensor is absent or faulted
+SENTINEL_VALUES: dict[str, tuple[float, ...]] = {
+    "PIR1_Wm2_Avg": (-7999.0,),
+    "PSP1_Wm2_Avg": (-6673.0,),
+    "NRLite_Wm2_Avg": (4268.0, 4320.0, 4367.0, 4420.0),
+    "WS_ms_S_WVT": (7999.0, -1000.0),
+    "Hamount_WXT_Tot": (7999.0,),
+    "Rain_WXT_Tot": (2052.0,),
+    "Temp1_Avg": (-100.0,),
+    "RH1_Avg": (-100.0,),
+    # -46.02 and 989.0 are the near-rail drift values the sensor passes through
+    # on its way to the exact rails; they are not temperatures either.
+    "AirT_C_Avg": (1000.0, 989.0, -46.8, -46.02),
+    "AirT1_C_Avg": (1000.0, 989.0, -46.8, -46.02),
+    "AirT2_C_Avg": (1000.0, 989.0, -46.8, -46.02),
+    "DP_C_Avg": (1000.0, -273.1),
+    "DP1_C_Avg": (1000.0, -273.1),
+    "DP2_C_Avg": (1000.0, -273.1),
+    "RH": (999.0,),
+    "RH1": (999.0,),
+    "RH2": (999.0,),
+}
+
+# The Eppley case/dome thermistors report kelvin; anything outside this is the
+# channel being unwired rather than a temperature.
+SENTINEL_RANGES: dict[str, tuple[float, float]] = {
+    "T_C1_Avg": (250.0, 330.0),
+    "T_D1_Avg": (250.0, 330.0),
+}
+
+# (column, value, first, last) — a value that is legitimate outside the window.
+SENTINEL_WINDOWS: tuple[tuple[str, float, str, str], ...] = (
+    # HMP humidity wrote a fake 0.0 (not NAN) while disconnected.
+    ("RH1_Avg", 0.0, "2018-08-27 11:20", "2018-10-16 13:40"),
+    # WXT block commissioning: everything reads 0 for two days.
+    ("WS_WXT_Avg", 0.0, "2019-03-18 12:55", "2019-03-19 08:25"),
+    ("RH_WXT_Avg", 0.0, "2019-03-18 12:55", "2019-03-19 08:25"),
+    ("Pmb_WXT", 0.0, "2019-03-18 12:55", "2019-03-19 08:25"),
+    # WXT dead but still logging zeros for sixteen months.
+    ("WS_WXT_Avg", 0.0, "2023-03-10 00:00", "2024-07-19 23:55"),
+    ("RH_WXT_Avg", 0.0, "2023-03-10 00:00", "2024-07-19 23:55"),
+    ("Pmb_WXT", 0.0, "2023-03-10 00:00", "2024-07-19 23:55"),
+    # v22 lost the CMP21 millivolt-to-flux multiplier; the column is a constant 0
+    # while the raw mV channel still varies. Diffuse moved to the PSP here.
+    ("CMP21_Wm2_Avg", 0.0, "2025-05-14 15:25", "2026-12-31 23:55"),
+    # GMX unit-1 humidity rails to 0 after the open-circuit failure.
+    ("RH1", 0.0, "2025-12-19 00:00", "2026-12-31 23:55"),
+    # The 2019-03 WXT commissioning zeros reach two more columns than the first
+    # pass caught. Verified leak: a raw 0.0 on Pmb_WXT_Avg at 2019-03-18 14:25
+    # survived masking and fed straight into the unified pressure series.
+    ("Pmb_WXT_Avg", 0.0, "2019-03-18 12:55", "2019-03-19 08:25"),
+    ("Temp_WXT_Avg", 0.0, "2019-03-18 12:55", "2019-03-19 08:25"),
+    # MetSENS unit 2 was decommissioned on 2025-05-14 and its channels park on
+    # two constants rather than going null.
+    ("WS2_ms_GMX", 0.08, "2025-05-14 00:00", "2026-12-31 23:55"),
+    ("AirT2_C_Avg", 265.0, "2025-05-14 00:00", "2026-12-31 23:55"),
+)
+
+# Periods where an instrument was physically present and reporting, but not
+# measuring what its column name claims. Masked wholesale.
+#
+# The diffuse windows are the highest-stakes entries in this module: an
+# unshaded pyranometer reads the GLOBAL flux, so leaving them in publishes
+# values up to 1368 W/m2 as "diffuse". They were identified by binning the
+# ratio to global BY GLOBAL LEVEL: a shaded diffuse sensor's ratio falls as the
+# sky clears (0.48 -> 0.13), an unshaded one stays flat or rises (0.81 -> 0.88).
+INVALID_WINDOWS: tuple[tuple[str, str, str, str], ...] = (
+    ("CMP21_Wm2_Avg", "2019-09-01 00:00", "2019-09-30 23:55", "PSP/CMP21 unshaded"),
+    ("CMP21_Wm2_Avg", "2020-03-06 00:00", "2020-05-31 23:55", "shade ring off for ~87 days"),
+    ("CMP21_Wm2_Avg", "2025-03-12 00:00", "2025-05-14 15:20", "reads 1.2-2.3x global"),
+    ("PSP_Wm2_Avg", "2019-09-01 00:00", "2019-09-30 23:55", "unshaded"),
+    ("PSP_Wm2_Avg", "2025-03-12 00:00", "2025-05-14 15:20", "unshaded before the handover"),
+    # Tipping bucket: 54 consecutive dry days at full instrumentation, inside the
+    # wettest months of the year, is a blocked funnel rather than a drought.
+    ("PL01_mm_Tot", "2024-02-13 00:00", "2024-04-30 23:55", "gauge suspected blocked"),
+)
+
+
+def mask_sentinels(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Replace every documented sentinel and invalid window with ``NaN``.
+
+    Masking is PER CHANNEL, never per row: when the Gill thermohygrometer railed
+    in December 2025 the pressure and wind channels on the same logger stayed
+    perfectly good, and dropping whole rows would have thrown them away too.
+
+    Returns
+    -------
+    tuple
+        The masked frame and a ``{column: samples removed}`` tally, which the
+        CLI prints so a rule that silently stops matching is visible.
+    """
+    removed: dict[str, int] = {}
+
+    def _drop(column: str, mask: pd.Series) -> None:
+        count = int(mask.sum())
+        if count:
+            frame.loc[mask, column] = float("nan")
+            removed[column] = removed.get(column, 0) + count
+
+    for column, values in SENTINEL_VALUES.items():
+        if column in frame.columns:
+            _drop(column, frame[column].isin(values))
+
+    for column, (low, high) in SENTINEL_RANGES.items():
+        if column in frame.columns:
+            series = frame[column]
+            _drop(column, series.notna() & ((series < low) | (series > high)))
+
+    for column, value, first, last in SENTINEL_WINDOWS:
+        if column not in frame.columns:
+            continue
+        window = (frame.index >= pd.Timestamp(first)) & (frame.index <= pd.Timestamp(last))
+        _drop(column, pd.Series(window, index=frame.index) & (frame[column] == value))
+
+    for column, first, last, _reason in INVALID_WINDOWS:
+        if column not in frame.columns:
+            continue
+        window = (frame.index >= pd.Timestamp(first)) & (frame.index <= pd.Timestamp(last))
+        _drop(column, pd.Series(window, index=frame.index) & frame[column].notna())
+
+    return frame, removed

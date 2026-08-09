@@ -29,6 +29,13 @@ dependencies = [
     "matplotlib>=3.11",
     "cartopy>=0.23",
     "scikit-learn>=1.5",
+    # Already in the graph through scikit-learn, declared explicitly because
+    # micrometeorology.stats.distributions imports scipy.special directly: the
+    # digamma/trigamma/Bessel-I0 kernels behind the gamma, beta and von Mises
+    # estimators are the numerics a published distribution fit rests on, and
+    # hand-rolling them would put the laboratory's public statistics on
+    # unreviewed special-function code. Weibull and Gaussian stay pure numpy.
+    "scipy>=1.14",
     "typer>=0.15",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
@@ -88,6 +95,9 @@ Issues = "https://github.com/Bruno-Mascarenhas/micrometeorology/issues"
 labmim-wrf-figures = "micrometeorology.cli.render_wrf_maps:main"
 labmim-wrf-geojson = "micrometeorology.cli.export_wrf_geojson:main"
 labmim-sensor-process = "micrometeorology.cli.ingest_sensor_data:main"
+labmim-archive = "micrometeorology.cli.build_archive:main"
+labmim-climatology = "micrometeorology.cli.export_climatology:main"
+labmim-monitoring = "micrometeorology.cli.export_monitoring:main"
 labmim-comparison = "micrometeorology.cli.compare_wrf_observations:main"
 labmim-metrics = "micrometeorology.cli.compute_metrics:main"
 labmim-station-graphs = "micrometeorology.cli.generate_station_graphs:main"
