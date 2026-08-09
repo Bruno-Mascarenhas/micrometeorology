@@ -410,6 +410,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pyyaml" },
     { name = "scikit-learn" },
+    { name = "scipy" },
     { name = "typer" },
     { name = "xarray" },
 ]
@@ -472,6 +473,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.1" },
     { name = "safetensors", marker = "extra == 'allsky'", specifier = ">=0.5" },
     { name = "scikit-learn", specifier = ">=1.5" },
+    { name = "scipy", specifier = ">=1.14" },
     { name = "tensorboard", marker = "extra == 'allsky'", specifier = ">=2.14" },
     { name = "tensorboard", marker = "extra == 'tcc'", specifier = ">=2.14" },
     { name = "tensorboard", marker = "extra == 'tcc-cuda'", specifier = ">=2.14" },

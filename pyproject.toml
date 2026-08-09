@@ -29,6 +29,13 @@ dependencies = [
     "matplotlib>=3.11",
     "cartopy>=0.23",
     "scikit-learn>=1.5",
+    # Already in the graph through scikit-learn, declared explicitly because
+    # micrometeorology.stats.distributions imports scipy.special directly: the
+    # digamma/trigamma/Bessel-I0 kernels behind the gamma, beta and von Mises
+    # estimators are the numerics a published distribution fit rests on, and
+    # hand-rolling them would put the laboratory's public statistics on
+    # unreviewed special-function code. Weibull and Gaussian stay pure numpy.
+    "scipy>=1.14",
     "typer>=0.15",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
