@@ -4,10 +4,9 @@ import platform
 import sys
 import time
 from importlib import metadata as importlib_metadata
-from pathlib import Path
 from typing import Any
 
-from micrometeorology.common.git import run_git
+from micrometeorology.common.git import run_git, source_root
 
 
 def collect_run_metadata(
@@ -84,7 +83,9 @@ def _device_metadata() -> dict[str, Any]:
 
 
 def _git_metadata() -> dict[str, Any]:
-    cwd = Path.cwd()
+    # Anchored on the source tree, not the working directory: launched from a
+    # sibling checkout this recorded that repository's HEAD and dirty flag.
+    cwd = source_root()
     commit = run_git(["rev-parse", "HEAD"], cwd=cwd)
     # `bool` of the porcelain output, so a clean tree ("") and an unavailable
     # git (None) both read as "not dirty" exactly as before.
