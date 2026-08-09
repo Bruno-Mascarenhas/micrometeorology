@@ -53,7 +53,6 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus
 
 import numpy as np
 from numpy.typing import NDArray
@@ -200,20 +199,23 @@ class Reference:
     citation:
         Authors, title, journal, volume, pages, year — the tooltip's contents.
     url:
-        Where to go. A ``doi.org`` link when the DOI was verified against the
-        primary or Crossref; otherwise a Crossref title search, which is an
-        honest "here is where to look" rather than a link that may 404.
+        Where to go: a ``doi.org`` link, one per record, each resolved against
+        Crossref and checked to land on the cited work.
+
+        Every entry earns one. The ten that used to carry a Crossref TITLE
+        SEARCH instead all had a findable DOI — the search was a fallback nobody
+        had revisited, and it had rotted: ``search.crossref.org/?q=`` answers
+        200, serves the real page, and the current interface ignores the query,
+        so the box opened empty and nothing was searched. Every link checker
+        passed it, status being all they inspect, and the failure showed only
+        once the page had rendered. A resolver link cannot fail that way: it
+        either redirects to the publisher or it does not exist.
     """
 
     key: str
     short: str
     citation: str
     url: str
-
-
-def _search(title: str) -> str:
-    """Crossref search link, for records whose DOI was not verified here."""
-    return "https://search.crossref.org/?q=" + quote_plus(title)
 
 
 # Every reference the page prints, in one place. The DOIs below carry a
@@ -229,21 +231,21 @@ REFERENCES: dict[str, Reference] = {
             "Justus, C. G., Hargraves, W. R., Mikhail, A. & Graber, D. (1978). "
             "Methods for estimating wind speed frequency distributions. "
             "Journal of Applied Meteorology 17(3), 350-353.",
-            _search("Methods for estimating wind speed frequency distributions"),
+            "https://doi.org/10.1175/1520-0450(1978)017%3C0350:MFEWSF%3E2.0.CO;2",
         ),
         Reference(
             "thom1958",
             "Thom, 1958",
             "Thom, H. C. S. (1958). A note on the gamma distribution. "
             "Monthly Weather Review 86(4), 117-122.",
-            _search("A note on the gamma distribution Thom"),
+            "https://doi.org/10.1175/1520-0493(1958)086%3C0117:ANOTGD%3E2.0.CO;2",
         ),
         Reference(
             "wilks2019",
             "Wilks, 2019",
             "Wilks, D. S. (2019). Statistical Methods in the Atmospheric Sciences, "
             "4th edition. Elsevier. Chapter 4 covers the parametric families used here.",
-            _search("Statistical Methods in the Atmospheric Sciences Wilks"),
+            "https://doi.org/10.1016/B978-0-12-815823-4.00004-3",
         ),
         Reference(
             "raschke2011",
@@ -251,7 +253,7 @@ REFERENCES: dict[str, Reference] = {
             "Raschke, M. (2011). Empirical behaviour of tests for the beta distribution "
             "and their application in environmental research. "
             "Stochastic Environmental Research and Risk Assessment 25, 79-89.",
-            _search("Empirical behaviour of tests for the beta distribution Raschke"),
+            "https://doi.org/10.1007/s00477-010-0410-3",
         ),
         Reference(
             "carta2008",
@@ -259,7 +261,7 @@ REFERENCES: dict[str, Reference] = {
             "Carta, J. A., Bueno, C. & Ramirez, P. (2008). Statistical modelling of "
             "directional wind speeds using mixtures of von Mises distributions: case study. "
             "Energy Conversion and Management 49(5), 897-907.",
-            _search("Statistical modelling of directional wind speeds mixtures von Mises"),
+            "https://doi.org/10.1016/j.enconman.2007.10.017",
         ),
         Reference(
             "hollands1983",
@@ -298,7 +300,7 @@ REFERENCES: dict[str, Reference] = {
             "Hu, B., Wang, Y. & Liu, G. (2012). Relationship between net radiation and broadband "
             "solar radiation in the Tibetan Plateau. Advances in Atmospheric Sciences 29(1), "
             "135-143. Note the original works in MJ/m2 per day, not hourly W/m2.",
-            _search("Relationship between net radiation and broadband solar radiation Tibetan"),
+            "https://doi.org/10.1007/s00376-011-0221-6",
         ),
         Reference(
             "yang2008",
@@ -314,7 +316,7 @@ REFERENCES: dict[str, Reference] = {
             "Briegleb, B. P. (1992). Delta-Eddington approximation for solar radiation in the NCAR "
             "Community Climate Model. Journal of Geophysical Research 97(D7), 7603-7612. "
             "Origin of the d = 0,4 prescription for grassland, as transcribed by Yang et al. (2008).",
-            _search("Delta-Eddington approximation solar radiation NCAR Community Climate Model"),
+            "https://doi.org/10.1029/92JD00291",
         ),
         Reference(
             "idso1975",
@@ -322,12 +324,12 @@ REFERENCES: dict[str, Reference] = {
             "Idso, S. B., Jackson, R. D., Reginato, R. J., Kimball, B. A. & Nakayama, F. S. (1975). "
             "The dependence of bare soil albedo on soil water content. "
             "Journal of Applied Meteorology 14(1), 109-113.",
-            _search("The dependence of bare soil albedo on soil water content"),
+            "https://doi.org/10.1175/1520-0450(1975)014%3C0109:TDOBSA%3E2.0.CO;2",
         ),
         Reference(
             "custodio2021",
-            "Custodio, Silva e Santos, 2021",
-            "Custodio, L. L. M., Silva, B. B. da & Santos, C. A. C. dos (2021). Relationship between "
+            "Custódio, Silva e Santos, 2021",
+            "Custódio, L. L. M., Silva, B. B. da & Santos, C. A. C. dos (2021). Relationship between "
             "photosynthetically active radiation and global radiation in Petrolina and Brasilia, "
             "Brazil. Revista Brasileira de Engenharia Agricola e Ambiental 25(9), 612-619. Open access.",
             "https://doi.org/10.1590/1807-1929/agriambi.v25n9p612-619",
@@ -338,7 +340,7 @@ REFERENCES: dict[str, Reference] = {
             "Long, C. N. & Shi, Y. (2008). An automated quality assessment and control algorithm for "
             "surface radiation measurements (QCRad). The Open Atmospheric Science Journal 2, 23-37. "
             "Source of the site-tuned coefficient ranges quoted here.",
-            _search("automated quality assessment and control algorithm surface radiation QCRad"),
+            "https://doi.org/10.2174/1874282300802010023",
         ),
         Reference(
             "takle1978",
@@ -346,7 +348,7 @@ REFERENCES: dict[str, Reference] = {
             "Takle, E. S. & Brown, J. M. (1978). Note on the use of Weibull statistics to characterize "
             "wind-speed data. Journal of Applied Meteorology 17(4), 556-559. "
             "The hybrid density this page reproduces by publishing point masses beside the curve.",
-            _search("Note on the use of Weibull statistics to characterize wind-speed data"),
+            "https://doi.org/10.1175/1520-0450(1978)017%3C0556:NOTUOW%3E2.0.CO;2",
         ),
     )
 }

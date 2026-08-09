@@ -5,6 +5,7 @@ change that breaks the page fails here rather than in a browser.
 """
 
 import json
+import re
 
 import numpy as np
 import pytest
@@ -13,6 +14,7 @@ from micrometeorology.stats.climatology_export import (
     CLIMATOLOGY_VARIABLES,
     MANIFEST_FORMAT,
     RAIN_BUCKET_MM,
+    REFERENCES,
     VARIABLE_FORMAT,
     Atom,
     VariableSpec,
@@ -202,3 +204,43 @@ class TestWriteJson:
         write_json(path, {"v": 2})
         assert json.loads(path.read_text(encoding="utf-8")) == {"v": 2}
         assert [item.name for item in tmp_path.iterdir()] == ["x.json"]
+
+
+class TestReferenceLinks:
+    """Every published citation has to LAND on the work it names.
+
+    The links are what turn a bracketed marker on the page into a source the
+    reader can check, so a dead one silently costs the page its provenance. Ten
+    of the sixteen used to carry a Crossref title search on a route that had
+    stopped searching: it answered 200, served the real page, and the interface
+    ignored the query. Status-only checkers cannot see that; a resolver link
+    cannot fail that way.
+    """
+
+    def test_every_reference_resolves_through_doi_org(self) -> None:
+        for ref in REFERENCES.values():
+            assert ref.url.startswith("https://doi.org/10."), ref.key
+
+    def test_no_reference_falls_back_to_a_crossref_search(self) -> None:
+        """Especially not the route that answers 200 and searches nothing."""
+        for ref in REFERENCES.values():
+            assert "search.crossref.org" not in ref.url, ref.key
+
+    def test_every_doi_is_syntactically_resolvable(self) -> None:
+        """A DOI is ``10.<registrant>/<suffix>``, and the reserved characters the
+        AMS suffixes carry must be percent-encoded or the URL is malformed."""
+        for ref in REFERENCES.values():
+            doi = ref.url.removeprefix("https://doi.org/")
+            assert re.fullmatch(r"10\.\d{4,9}/\S+", doi), ref.key
+            assert "<" not in doi, f"{ref.key}: percent-encode < in the URL"
+            assert ">" not in doi, f"{ref.key}: percent-encode > in the URL"
+            assert " " not in doi, ref.key
+
+    def test_reference_keys_and_markers_agree(self) -> None:
+        """A marker with no record renders as raw ``[[key]]`` to the reader."""
+        marker = re.compile(r"\[\[([a-z0-9]+)\]\]")
+        cited = set()
+        for spec in CLIMATOLOGY_VARIABLES:
+            for text in (*spec.caveats, spec.family_label):
+                cited.update(marker.findall(text))
+        assert cited <= set(REFERENCES), sorted(cited - set(REFERENCES))
