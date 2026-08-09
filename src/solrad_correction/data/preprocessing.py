@@ -174,8 +174,18 @@ class Preprocessor:
         df_clean = df.drop(columns=list(dropped), errors="ignore")
         output_columns = list(df_clean.columns)
         fill_values = _series_to_float_dict(df_clean.mean(numeric_only=True))
-        last_values = _series_to_float_dict(df_clean.ffill().iloc[-1]) if not df_clean.empty else {}
+        # Only the ``ffill`` strategy reads this, and it is the one statistic
+        # taken over the raw row rather than a numeric reduction — so computing
+        # it unconditionally made any non-numeric column kill ``fit`` with a
+        # bare "could not convert string to float" naming no column, under
+        # strategies that never use the value.
+        last_values = (
+            _series_to_float_dict(df_clean.ffill().iloc[-1])
+            if self.impute_strategy == "ffill" and not df_clean.empty
+            else {}
+        )
         scaling = self._fit_scaling(df_clean)
+        self._reject_unscalable_columns(scaling, output_columns)
         fit_output_rows = self._count_retained_rows(df_clean)
 
         self._state = PreprocessingState(
@@ -320,6 +330,30 @@ class Preprocessor:
                 "max": _series_to_float_dict(max_values),
             }
         return {}
+
+    def _reject_unscalable_columns(
+        self, scaling: dict[str, dict[str, float]], output_columns: list[str]
+    ) -> None:
+        """Refuse a fitted state that cannot scale a column it decided to keep.
+
+        ``_series_to_float_dict`` drops every entry whose statistic is NaN, and
+        the numeric reductions above skip non-numeric columns outright — so a
+        column with fewer than two observations, or a single ``inf`` (which no
+        NaN threshold and no ``dropna`` removes), silently lost its entry.
+        ``_scale`` then aligns on labels and returns that column as NaN for every
+        row of train, val AND test, after ``_impute`` has already run, so nothing
+        fills it back in: sklearn dies with an unexplained "Input contains NaN"
+        and the torch models train on NaN for every epoch, never improving, and
+        still exit 0 writing NaN metrics.
+        """
+        for statistic, values in scaling.items():
+            missing = [column for column in output_columns if column not in values]
+            if missing:
+                raise ValueError(
+                    f"cannot fit the {statistic!r} scaling for {missing}: the statistic is "
+                    "undefined (non-numeric dtype, fewer than two observations, or a "
+                    "non-finite value). Drop the column or fix the source data."
+                )
 
     def _impute(self, df: pd.DataFrame) -> pd.DataFrame:
         """Impute feature columns only; keep the target authoritative.

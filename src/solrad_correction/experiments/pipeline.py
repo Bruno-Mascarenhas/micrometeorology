@@ -147,6 +147,20 @@ def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame
     ``ExperimentConfig.validate``) is legitimate autoregression.
     """
     engineered_frame = loaded.frame
+    # Order first: every stage below is POSITIONAL (`shift`, `rolling`, `diff`),
+    # while the chronological sort happens later inside
+    # ``temporal_train_val_test_split``. On an out-of-order source — two
+    # concatenated per-period exports, say — `{col}_lag_1` therefore meant "one
+    # row earlier in the file", and after the sort those values were attached to
+    # rows that PRECEDE them in time: a future value inside a training row, with
+    # the disorder invisible downstream because the split had already hidden it.
+    index = engineered_frame.index
+    if isinstance(index, pd.DatetimeIndex) and not index.is_monotonic_increasing:
+        logger.warning(
+            "source rows are not in chronological order; sorting before building "
+            "lag/rolling/diff features, which are positional"
+        )
+        engineered_frame = engineered_frame.sort_index()
     source_columns = set(engineered_frame.columns)
     non_target_feature_columns = [
         column for column in config.data.feature_columns if column != config.data.target_column
