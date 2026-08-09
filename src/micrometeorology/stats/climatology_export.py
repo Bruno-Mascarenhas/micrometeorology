@@ -49,7 +49,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -500,7 +500,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         family_label="Weibull ([[justus1978]])",
         edges=_linear_edges(0.0, 20.0, 0.5),
         caveats=(
-            "A Weibull não representa massa em zero: as calmarias saem do ajuste e são informadas à parte. Barras e curva são densidades condicionais às horas com vento acima do limiar de partida — é a densidade híbrida de [[takle1978]], mostrada como as suas duas peças.",
+            "A Weibull não representa massa em zero: as calmarias saem do ajuste e são informadas à parte. Barras e curva são densidades condicionais às horas com vento acima do limiar de partida — é a densidade híbrida de [[takle1978]], mostrada como as suas duas peças. O limiar entra como calmaria: é o valor que o anemômetro reporta parado, não uma velocidade medida.",
         ),
     ),
     VariableSpec(
@@ -513,7 +513,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         edges=_linear_edges(0.0, 360.0, 360.0 / ROSE_SECTORS),
         caveats=(
             "Direção é uma grandeza circular: 0° e 360° são o mesmo rumo, então o gráfico é uma rosa dos ventos e as estatísticas são circulares. Média e desvio-padrão aritméticos de graus não têm significado aqui.",
-            "As calmarias ficam fora da rosa: abaixo do limiar de partida do anemômetro a direção é indefinida.",
+            "As calmarias ficam fora da rosa: no limiar de partida do anemômetro, ou abaixo dele, o rumo é o da concha parada e não o do vento. A fração removida é informada à parte.",
         ),
     ),
     VariableSpec(
@@ -557,8 +557,8 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         fit_options=INDUCED,
         caveats=(
             "Restrita às horas com elevação solar acima de 10°, como a era anterior. Sem o corte, 21% dos valores publicados eram zeros de noite.",
-            "Mesma densidade induzida da era anterior; a ÚNICA coisa que difere entre as duas curvas é a fração PAR média: 0,4475 antes contra 0,2579 aqui. A razão entre as duas, 1,735, quantifica em quatro dígitos o erro de escala suspeito.",
-            "[[custodio2021]] citam a faixa de 0,41 a 0,52 para a banda de 400 a 700 nm. Os 0,2579 desta era ficam bem abaixo, e nenhuma calibração documentada explica a diferença.",
+            "Mesma densidade induzida da era anterior; a ÚNICA coisa que difere entre as duas curvas é a fração PAR média: 0,4475 antes contra 0,2590 aqui. A razão entre as duas, 1,728, quantifica em quatro dígitos o erro de escala suspeito.",
+            "[[custodio2021]] citam a faixa de 0,41 a 0,52 para a banda de 400 a 700 nm. Os 0,2590 desta era ficam bem abaixo, e nenhuma calibração documentada explica a diferença.",
             "Os valores estão como medidos, sem correção: comparar as duas eras é o ponto. Após o corte diurno esta era não tem nenhum zero; 18 horas com PAR/global acima de 0,6 saem como massa pontual.",
         ),
     ),
@@ -591,7 +591,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         caveats=(
             "Restrito às horas com elevação solar acima de 10°, pelo mesmo motivo da onda curta incidente, e à era a partir de 15/03/2019.",
             "A era anterior está fora porque o albedo medido muda de patamar: a mediana mensal diurna é 0,345 / 0,353 / 0,370 em dez/2018, jan/2019 e fev/2019 e cai para 0,155 em mar/2019, ficando entre 0,120 e 0,160 em todos os meses seguintes. A quebra fica dentro de uma interrupção de 17 dias que termina em 15/03/2019 — a mesma data que já separa as eras da PAR.",
-            "Mesma densidade induzida da onda curta incidente, com todas as escalas multiplicadas pelo albedo médio da era (0,1317, razão de energias com o denominador acima de 50 W/m²). Um único escalar é estimado; lambda e Kt_máx seguem herdados.",
+            "Mesma densidade induzida da onda curta incidente, com todas as escalas multiplicadas pelo albedo médio da era (0,1323, razão de energias com o denominador acima de 50 W/m²). Um único escalar é estimado; lambda e Kt_máx seguem herdados.",
             "O albedo entra como constante porque foi medido como constante: ajustar a forma canônica com dependência do zênite dá d = 0,026 com R² de 0,003 neste sítio, contra o d = 0,4 que [[briegleb1992]] prescreve para pastagem, conforme transcrito por [[yang2008]]. A mediana por faixa de cosseno do zênite varia só de 0,122 a 0,133.",
             "Publicada em magnitude física (positiva). No gráfico de balanço da página de monitoramento os canais ascendentes aparecem negados, que é convenção de desenho para as parcelas somarem visualmente ao saldo — aqui o valor é o medido.",
             "A forma desta distribuição diz mais sobre o entorno da torre do que sobre o clima: o albedo de solo nu depende da umidade dos primeiros milímetros de superfície, que [[idso1975]] mediram variando de 0,00 a 0,18 num mesmo terreno conforme o teor de água.",
@@ -802,6 +802,8 @@ def _histogram_subset(
     sample: NDArray,
     atoms: Sequence[Atom],
     options: Mapping[str, Any] | None = None,
+    *,
+    curveless: bool = False,
 ) -> dict[str, Any]:
     """Bars, statistics, fit, distances and the pre-scaled curve for one subset."""
     values = np.asarray(sample, dtype=float)
@@ -834,10 +836,18 @@ def _histogram_subset(
     # what turns a missing option into a loud failure instead of a silent
     # fallback to a curve fitted on the wrong thing.
     if spec.fit_options and not options:
-        raise ValueError(
-            f"{spec.id}: family {spec.family!r} requires fit options "
-            f"{list(spec.fit_options)}, none supplied for this subset"
-        )
+        if not curveless:
+            raise ValueError(
+                f"{spec.id}: family {spec.family!r} requires fit options "
+                f"{list(spec.fit_options)}, none supplied for this subset"
+            )
+        # The caller could not build the covariate and said so. Bars, counts,
+        # statistics and atoms publish; only the curve is absent, which is a
+        # state the page already renders. Blanking the sample to reach the
+        # `binned.n < 2` early return instead would delete real measurements
+        # over a missing model input.
+        logger.warning("%s: no covariate for this subset, publishing bars without a curve", spec.id)
+        return payload
     fitted = dist.fit_distribution(spec.family, values / spec.fit_scale, **(options or {}))
     if not _finite_params(fitted.params):
         logger.warning("%s: %s fit did not converge on %d samples", spec.id, spec.family, binned.n)
@@ -1005,6 +1015,7 @@ def build_variable_payload(
     version: str,
     atoms: Mapping[str, Sequence[Atom]] | None = None,
     options: Mapping[str, Mapping[str, Any]] | None = None,
+    curveless: Collection[str] = (),
     mixture_components: int = 2,
 ) -> dict[str, Any]:
     """Assemble the published payload for one variable across every subset.
@@ -1030,6 +1041,11 @@ def build_variable_payload(
         is subset-matched: each recorte's induced curve rides on the clearness
         index fitted to that same recorte, exactly as every other variable on the
         page is fitted per subset.
+    curveless:
+        Subset ids for which the caller could not build the covariate. Those
+        subsets publish bars with ``fit``, ``quality`` and ``curve`` left
+        ``None`` instead of raising — an acknowledged absence, as distinct from
+        options a caller simply forgot to pass, which stays a loud failure.
     mixture_components:
         Components of the von Mises mixture, for a ``rose`` variable. Fixed
         rather than chosen per subset: a component count that changes between
@@ -1049,7 +1065,11 @@ def build_variable_payload(
             subsets[subset_id] = _rose_subset(sample, subset_atoms, components=mixture_components)
         else:
             subsets[subset_id] = _histogram_subset(
-                spec, sample, subset_atoms, per_subset_options.get(subset_id)
+                spec,
+                sample,
+                subset_atoms,
+                per_subset_options.get(subset_id),
+                curveless=subset_id in curveless,
             )
 
     payload: dict[str, Any] = {

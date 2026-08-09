@@ -36,7 +36,7 @@ import typer
 # solar geometry — so reusing it beats a second implementation of NOAA's formulas.
 from allsky.config import SiteConfig
 from allsky.solar import extraterrestrial_ghi, solar_elevation
-from micrometeorology.common.git import run_git
+from micrometeorology.common.git import run_git, source_root
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.stats import distributions as dist
 from micrometeorology.stats.climatology import seasonal_groups
@@ -266,12 +266,23 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
         first, last = INVALID_DIRECTION
         series = series.loc[(series.index < first) | (series.index > last)]
 
-    if spec_id == "wind_speed":
-        calm = float((series < CALM_THRESHOLD_MS).mean()) if len(series) else float("nan")
-        kept = series.loc[series >= CALM_THRESHOLD_MS]
-        label = f"Calmarias (abaixo de {CALM_THRESHOLD_MS:.3f} m/s, limiar de partida)".replace(
-            ".", ","
+    if spec_id in ("wind_speed", "wind_direction"):
+        # The gate is `<=`, not `<`: 0.281 m/s is not a threshold the wind falls
+        # below, it is the value the cup anemometer REPORTS while stalled. 2,794
+        # hourly means sit on it exactly (4.0% of the record) and 51.8% of them
+        # bear north against 5.3% for the record as a whole — the parked vane,
+        # not a wind. A strict `<` keeps every one of them, which is why the
+        # published rose carried a north petal nearly twice its true size.
+        speed = (
+            series
+            if spec_id == "wind_speed"
+            else frame[OBSERVED_COLUMN["wind_speed"]].reindex(series.index)
         )
+        calm = float((speed <= CALM_THRESHOLD_MS).mean()) if len(series) else float("nan")
+        kept = series.loc[speed > CALM_THRESHOLD_MS]
+        label = (
+            f"Calmarias (até {CALM_THRESHOLD_MS:.3f} m/s, o valor que o anemômetro reporta parado)"
+        ).replace(".", ",")
         return kept.to_numpy(), [Atom("calm", label, calm)]
 
     if spec_id in ("relative_humidity", "relative_humidity_wxt"):
@@ -305,6 +316,20 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
     return series.to_numpy(), []
 
 
+def _par_sample_mask(series: pd.Series, global_flux: pd.Series) -> pd.Series:
+    """Which PAR hours are measurements of the atmosphere rather than of the logger.
+
+    One definition, used by both the sample and the estimator of the curve's one
+    free parameter. Two literals of the same rule is how the published gain came
+    to be estimated over hours the fitted sample had already removed.
+    """
+    with np.errstate(invalid="ignore", divide="ignore"):
+        fraction = series / global_flux.where(global_flux > RATIO_DENOMINATOR_FLOOR)
+    zeros = series <= 0.0
+    impossible = (fraction > MAX_PAR_FRACTION).fillna(False)
+    return ~(zeros | impossible)
+
+
 def _par_sample(series: pd.Series, frame: pd.DataFrame) -> tuple[np.ndarray, list[Atom]]:
     """Strip the two point masses the PAR record carries after the daylight gate.
 
@@ -321,7 +346,7 @@ def _par_sample(series: pd.Series, frame: pd.DataFrame) -> tuple[np.ndarray, lis
         fraction = series / global_flux.where(global_flux > RATIO_DENOMINATOR_FLOOR)
     zeros = series <= 0.0
     impossible = fraction > MAX_PAR_FRACTION
-    kept = series.loc[~(zeros | impossible)]
+    kept = series.loc[_par_sample_mask(series, global_flux)]
     return kept.to_numpy(), [
         Atom("daytime_zero", "Zeros diurnos do registrador", float(zeros.mean())),
         Atom(
@@ -397,6 +422,40 @@ def _bulk_ratio(numerator: pd.Series, denominator: pd.Series) -> float:
     return float(paired.iloc[:, 0].sum() / paired.iloc[:, 1].sum())
 
 
+def _check_caveats_quote_the_published_scalar(spec: object, payload: dict) -> None:
+    """Warn when a caveat's printed number no longer matches the fitted one.
+
+    The induced curves carry one estimated scalar — the era's PAR fraction, the
+    albedo — and the caveats print it in prose, three lines from where the page
+    prints the parameter itself. Prose is a literal and the parameter is
+    computed, so the two drift apart the moment the archive changes: masking 52
+    timestamp-corrupted days moved the late-PAR fraction from 0,2579 to 0,2590
+    and left the sentence asserting the old value beside the new one.
+
+    A warning rather than a failure: which of the two is wrong is a judgement
+    for the laboratory, and refusing to publish the whole page over a fourth
+    decimal in a sentence would be the wrong trade. It is printed at generation
+    time, when someone is watching.
+    """
+    caveats = getattr(spec, "caveats", ())
+    fit = (payload.get("subsets", {}).get("observed_all") or {}).get("fit")
+    if not caveats or not fit:
+        return
+    gain = fit.get("params", {}).get("gain")
+    # 1.0 is the identity the families carry when no scalar is estimated at all
+    # (the incoming shortwave rides its own law), so there is no prose to check.
+    if gain is None or gain == 1.0:
+        return
+    quoted = f"{gain:.4f}".replace(".", ",")
+    if not any(quoted in caveat for caveat in caveats):
+        logger.warning(
+            "%s: the fitted scalar is %s but no caveat quotes it; the printed prose and "
+            "the published parameter disagree on the same screen",
+            getattr(spec, "id", "?"),
+            quoted,
+        )
+
+
 def _induced_options(spec_id: str, frame: pd.DataFrame, source: str) -> dict[str, object] | None:
     """The covariate-derived options one induced curve needs for one subset.
 
@@ -437,7 +496,18 @@ def _induced_options(spec_id: str, frame: pd.DataFrame, source: str) -> dict[str
     if spec_id == "shortwave_up":
         gain = _bulk_ratio(daylight[OBSERVED_COLUMN["shortwave_up"]], incoming)
     elif spec_id in ("par_early", "par_late"):
-        gain = _bulk_ratio(daylight[OBSERVED_COLUMN[spec_id]], incoming)
+        # Over the SAME population the curve is scored against. `_par_sample`
+        # removes two instrument states — the logger's daytime zeros and the
+        # hours where PAR exceeds 60% of the global flux it is a sub-band of —
+        # on the stated grounds that fitting over either drags the curve to a
+        # peak no atmosphere produced. Estimating the one free parameter over the
+        # unmasked block put those same hours back in through the denominator:
+        # the zeros contribute nothing to the numerator and a full global flux
+        # below, so they depressed the ratio. The caveat printed three lines
+        # away on the page was computed with the mask and the parameter without
+        # it, and the two disagreed in the fourth digit.
+        band = _par_sample_mask(daylight[OBSERVED_COLUMN[spec_id]], incoming)
+        gain = _bulk_ratio(daylight[OBSERVED_COLUMN[spec_id]].loc[band], incoming.loc[band])
     if not np.isfinite(gain) or gain <= 0.0:
         return None
 
@@ -602,6 +672,7 @@ def run(
         samples: dict[str, np.ndarray] = {}
         atoms: dict[str, list[Atom]] = {}
         options: dict[str, dict[str, object]] = {}
+        curveless: set[str] = set()
         for subset_id, (source, block) in blocks.items():
             if source == "observed":
                 sample, subset_atoms = _observed_sample(spec.id, block)
@@ -621,12 +692,13 @@ def run(
                         spec.id,
                         subset_id,
                     )
-                    samples[subset_id] = np.array([])
+                    curveless.add(subset_id)
                 else:
                     options[subset_id] = subset_options
         payload = build_variable_payload(
-            spec, samples, version=version, atoms=atoms, options=options
+            spec, samples, version=version, atoms=atoms, options=options, curveless=curveless
         )
+        _check_caveats_quote_the_published_scalar(spec, payload)
         path = write_json(output_dir / f"{spec.id}.json", payload)
         counts = " ".join(f"{key}={len(value):,}" for key, value in samples.items() if len(value))
         typer.echo(f"  [ok] {path.name:28s} {counts}")
@@ -642,7 +714,7 @@ def _subset_label(source: str, season: str) -> str:
 
 def _commit() -> str | None:
     """Short commit of the checkout that produced these bytes, for provenance."""
-    return run_git(["rev-parse", "--short", "HEAD"])
+    return run_git(["rev-parse", "--short", "HEAD"], cwd=source_root())
 
 
 def _package_version() -> str | None:
