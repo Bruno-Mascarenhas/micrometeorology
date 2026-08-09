@@ -20,7 +20,7 @@ from importlib import metadata as importlib_metadata
 
 import pandas as pd
 
-from micrometeorology.common.git import run_git
+from micrometeorology.common.git import run_git, source_root
 
 __all__ = ["code_version", "content_sha256", "git_commit"]
 
@@ -33,7 +33,7 @@ def git_commit() -> str | None:
     # `or None` because an empty stdout is no more useful than a failed call
     # here, even though run_git keeps the two distinguishable for callers that
     # do care (see solrad_correction.utils.metadata's dirty-tree probe).
-    return run_git(["rev-parse", "HEAD"]) or None
+    return run_git(["rev-parse", "HEAD"], cwd=source_root()) or None
 
 
 def code_version() -> dict[str, str | None]:
@@ -56,5 +56,10 @@ def content_sha256(manifest: pd.DataFrame) -> str:
     """
     digest = hashlib.sha256()
     digest.update(",".join(manifest.columns).encode("utf-8"))
-    digest.update(manifest.to_csv(index=False).encode("utf-8"))
+    # ``lineterminator`` pinned: pandas defaults it to ``os.linesep``, which
+    # made the digest platform-dependent — the same manifest hashed on Windows
+    # never matched itself re-hashed on Linux, so ``validate_bundle`` reported
+    # a byte-intact bundle as corrupt on exactly the cross-machine handoff it
+    # exists for. "\n" is what Linux already produced, so no recorded digest moves.
+    digest.update(manifest.to_csv(index=False, lineterminator="\n").encode("utf-8"))
     return digest.hexdigest()

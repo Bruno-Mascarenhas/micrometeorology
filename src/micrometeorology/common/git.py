@@ -20,11 +20,27 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
-__all__ = ["run_git"]
+__all__ = ["run_git", "source_root"]
 
 #: Seconds before a hung git invocation is abandoned. Provenance is optional;
 #: no metadata probe may stall a training run.
 _TIMEOUT_SECONDS = 5.0
+
+
+def source_root() -> Path:
+    """Directory to anchor a provenance probe on: where this code lives.
+
+    Git resolves its repository from the working directory, so a probe with no
+    ``cwd`` describes wherever the operator happened to launch the process. Both
+    repositories on this laboratory's workstation sit side by side, so running
+    a CLI from the website checkout stamped THAT repository's HEAD — and its
+    dirty flag — into artifacts produced by this code: not a missing stamp but a
+    confidently wrong one, which is worse, because it reads like a valid anchor.
+
+    Anchored here, the probe records the checkout the bytes actually came from,
+    and collapses to ``None`` for a wheel installed outside any checkout.
+    """
+    return Path(__file__).resolve().parent
 
 
 def run_git(args: Sequence[str], *, cwd: Path | None = None) -> str | None:
