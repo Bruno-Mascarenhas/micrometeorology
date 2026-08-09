@@ -121,12 +121,20 @@ class Atom:
     label:
         Portuguese caption, printed verbatim.
     fraction:
-        Share of the subset the mass holds, in ``[0, 1]``.
+        Share of the subset the mass holds, in ``[0, 1]``. The denominator is the
+        subset BEFORE the mass was removed, which is not the ``n`` published
+        beside it — that one counts what is left.
+    count:
+        The mass in samples. Published because the fraction alone is not
+        resolvable on screen: a reader who multiplies "5,2 % calmarias" by the
+        "66.345 observações" printed next to it gets 3.472, and the true figure
+        is 3.663. One is a share of 70.008, the other is what survived.
     """
 
     id: str
     label: str
     fraction: float
+    count: int = 0
 
 
 @dataclass(frozen=True)
@@ -829,6 +837,7 @@ def _histogram_subset(
                 "id": atom.id,
                 "label": atom.label,
                 "fraction": _rounded(atom.fraction, _FRACTION_DECIMALS),
+                "count": atom.count,
             }
             for atom in atoms
         ],
@@ -922,6 +931,7 @@ def _rose_subset(
                 "id": atom.id,
                 "label": atom.label,
                 "fraction": _rounded(atom.fraction, _FRACTION_DECIMALS),
+                "count": atom.count,
             }
             for atom in atoms
         ],

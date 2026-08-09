@@ -96,10 +96,10 @@ class TestVariablePayload:
         assert curve == pytest.approx(1.0, abs=0.02)
 
     def test_atoms_are_reported_verbatim(self, wind_spec, wind_samples):
-        atoms = {"observed_all": [Atom("calm", "Calmarias", 0.037)]}
+        atoms = {"observed_all": [Atom("calm", "Calmarias", 0.037, 740)]}
         payload = build_variable_payload(wind_spec, wind_samples, version="v1", atoms=atoms)
         assert payload["subsets"]["observed_all"]["atoms"] == [
-            {"id": "calm", "label": "Calmarias", "fraction": 0.037}
+            {"id": "calm", "label": "Calmarias", "fraction": 0.037, "count": 740}
         ]
 
     def test_empty_subset_is_present_and_empty_not_omitted(self, wind_spec, wind_samples):
@@ -274,3 +274,30 @@ class TestSubsetTotalsAgree:
 
         assert subset["n"] == 4
         assert subset["stats"]["max"] == 999.0
+
+    def test_an_atom_publishes_the_count_its_fraction_is_a_share_of(self, wind_spec) -> None:
+        """The fraction's denominator is the subset BEFORE the mass was removed,
+        and that number is not the ``n`` printed beside it.
+
+        Without the count the reader cannot resolve the two: multiplying
+        "5,2 % calmarias" by the "66.345 observações" on the same panel gives
+        3.472, and the mass is 3.663 — a share of 70.008.
+        """
+        samples = {"observed_all": np.array([1.0, 2.0, 3.0])}
+        atoms = {"observed_all": [Atom("calm", "Calmarias", 0.25, 1)]}
+        payload = build_variable_payload(wind_spec, samples, version="v1", atoms=atoms)
+        published = payload["subsets"]["observed_all"]["atoms"][0]
+
+        assert published["count"] == 1
+        total = payload["subsets"]["observed_all"]["n"] + published["count"]
+        assert published["fraction"] == pytest.approx(published["count"] / total)
+
+    def test_the_rose_publishes_atoms_the_same_way_as_a_histogram(self) -> None:
+        """Two serialisers for one field is how they drift; the rose had no count."""
+        spec = next(s for s in CLIMATOLOGY_VARIABLES if s.chart == "rose")
+        generator = np.random.default_rng(9)
+        samples = {"observed_all": generator.uniform(0, 360, 500)}
+        atoms = {"observed_all": [Atom("calm", "Calmarias", 0.1, 55)]}
+        payload = build_variable_payload(spec, samples, version="v1", atoms=atoms)
+
+        assert payload["subsets"]["observed_all"]["atoms"][0]["count"] == 55

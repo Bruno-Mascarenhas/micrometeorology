@@ -278,22 +278,25 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
             if spec_id == "wind_speed"
             else frame[OBSERVED_COLUMN["wind_speed"]].reindex(series.index)
         )
-        calm = float((speed <= CALM_THRESHOLD_MS).mean()) if len(series) else float("nan")
+        removed = int((speed <= CALM_THRESHOLD_MS).sum())
+        calm = removed / len(series) if len(series) else float("nan")
         kept = series.loc[speed > CALM_THRESHOLD_MS]
         label = (
             f"Calmarias (até {CALM_THRESHOLD_MS:.3f} m/s, o valor que o anemômetro reporta parado)"
         ).replace(".", ",")
-        return kept.to_numpy(), [Atom("calm", label, calm)]
+        return kept.to_numpy(), [Atom("calm", label, calm, removed)]
 
     if spec_id in ("relative_humidity", "relative_humidity_wxt"):
-        clipped = float((series >= SATURATION_RH).mean()) if len(series) else float("nan")
+        removed = int((series >= SATURATION_RH).sum())
+        clipped = removed / len(series) if len(series) else float("nan")
         kept = series.loc[series < SATURATION_RH]
-        return kept.to_numpy(), [Atom("saturation", "Saturação (UR ≥ 99,5%)", clipped)]
+        return kept.to_numpy(), [Atom("saturation", "Saturação (UR ≥ 99,5%)", clipped, removed)]
 
     if spec_id == "precipitation":
         wet = series.loc[series >= RAIN_BUCKET_MM]
-        dry = 1.0 - (len(wet) / len(series)) if len(series) else float("nan")
-        return wet.to_numpy(), [Atom("dry", "Horas sem chuva", dry)]
+        removed = len(series) - len(wet)
+        dry = removed / len(series) if len(series) else float("nan")
+        return wet.to_numpy(), [Atom("dry", "Horas sem chuva", dry, removed)]
 
     if spec_id == "shortwave_down":
         # A pyranometer's zero offset makes a few daytime hours slightly negative.
@@ -301,12 +304,14 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
         # rather than being clipped to zero, which would invent a spike at the
         # origin the instrument never measured.
         positive = series.loc[series > 0.0]
-        share = 1.0 - (len(positive) / len(series)) if len(series) else float("nan")
+        removed = len(series) - len(positive)
+        share = removed / len(series) if len(series) else float("nan")
         return positive.to_numpy(), [
             Atom(
                 "nonpositive",
                 "Horas com fluxo não positivo (deslocamento de zero do sensor)",
                 share,
+                removed,
             )
         ]
 
@@ -348,13 +353,14 @@ def _par_sample(series: pd.Series, frame: pd.DataFrame) -> tuple[np.ndarray, lis
     impossible = fraction > MAX_PAR_FRACTION
     kept = series.loc[_par_sample_mask(series, global_flux)]
     return kept.to_numpy(), [
-        Atom("daytime_zero", "Zeros diurnos do registrador", float(zeros.mean())),
+        Atom("daytime_zero", "Zeros diurnos do registrador", float(zeros.mean()), int(zeros.sum())),
         Atom(
             "par_over_global",
             f"Razão PAR/global acima de {MAX_PAR_FRACTION:.1f}, fisicamente impossível".replace(
                 ".", ","
             ),
             float(impossible.fillna(False).mean()),
+            int(impossible.fillna(False).sum()),
         ),
     ]
 
@@ -382,7 +388,7 @@ def _wrf_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Ato
         # The model never outputs exactly zero, so its calm atom is empty by
         # construction. Reporting it as 0 rather than omitting it keeps the two
         # sources structurally comparable on the page.
-        return series.to_numpy(), [Atom("calm", "Calmarias (modelo não produz zero exato)", 0.0)]
+        return series.to_numpy(), [Atom("calm", "Calmarias (modelo não produz zero exato)", 0.0, 0)]
     return series.to_numpy(), []
 
 
