@@ -509,7 +509,7 @@ Three artifacts plus a report:
 |------|------------|
 | `station_5min_raw.parquet` | 988,289 x 93 — values as the logger wrote them, sentinels included |
 | `station_5min_qc.parquet` | 988,289 x 111 — after sentinel masking, physical gates, calibrations and era unification |
-| `station_hourly.parquet` | 83,857 x 107 — hourly means, sum for the tipping bucket, speed-weighted vector mean for direction |
+| `station_hourly.parquet` | 83,857 x 111 — hourly means, sum for the tipping bucket, speed-weighted vector mean for direction, and the fraction of each hour's samples whose logger status read `OK` |
 | `archive_report.json` | the verification, plus samples masked per column |
 
 The run prints how many physical limits actually **fired**. That number matters:
@@ -601,7 +601,7 @@ labmim-monitoring -i output/archive -o ../site-labmim/site/Monitoramento \
 
 One JSON carries all nine charts in the three layers the researcher asked for —
 the raw 5-minute samples, the hourly means over them, and the WRF series where
-the model has that variable. About 160 kB for a fully instrumented week, against
+the model has that variable. About 133 kB for a fully instrumented week, against
 the ~380 kB of PNGs it replaces, and it arrives as numbers the reader can hover,
 toggle and download. The time axis is published as `start` + `step_minutes` +
 `count` instead of one stamp per sample; that alone is worth ~50 kB.
@@ -612,6 +612,33 @@ time — precipitation is expected but absent today — so the payload records w
 names were looked for and the page says the layer is missing instead of showing
 a legend that is silently one entry short. When the extraction starts writing
 rain, the chart picks it up with no code change here.
+
+The `window` object carries four fields, and two of them are easy to confuse:
+
+| field | meaning |
+|-------|---------|
+| `start` | first instant the document covers. **Authoritative** — do not re-derive it |
+| `end` | last instant the document CARRIES, which is not necessarily the newest observation |
+| `station_end` | newest station sample inside the window; the anchor for a "last N days" view |
+| `days` | the rolling length that was requested, i.e. the `--days` option |
+
+`end` reaches past `station_end` whenever the model runs ahead of the station,
+which is the normal state once the operational extraction accumulates forward: an
+hour with a WRF value and no observation is expected, not a fault, and clipping
+the window at the newest sample would cut exactly the part of the forecast worth
+looking at. A consumer that anchors a "last 7 days" view on `end` therefore
+pushes real observations out of view — anchor the **start** on `station_end` and
+the **axis maximum** on `end`. `days` is the requested length and reproduces
+`start` only on the default path; under an explicit `--end` the two are
+independent, so `start` is the field to trust.
+
+A series whose column is present but holds no value over the window is **omitted**
+from its layer rather than published as an array of `null`, and a layer left with
+no series at all is published as `null`. The page reads an absent key as "nothing
+to draw"; an all-null array instead builds a dataset and puts an entry in the
+legend for a line the reader cannot see. This is not hypothetical — the Gill
+thermohygrometer railed in December 2025, so air temperature and humidity are
+empty in every current window.
 
 Like the climatology artifacts, the output is **not** committed to the site
 repository: same private archive, same deploy-time attachment.
