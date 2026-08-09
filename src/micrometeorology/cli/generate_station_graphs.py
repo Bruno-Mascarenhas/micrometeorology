@@ -23,7 +23,6 @@ Usage::
 """
 
 import logging
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -742,8 +741,13 @@ def run(
     )
 
     if raw.empty:
+        # `--strict` is honoured here too, matching plot_station_graphs, the
+        # sibling producer of the same nine site images. An unconditional exit 0
+        # meant a stalled logger — the case where EVERY graph is skipped —
+        # reported success while rewriting none of the PNGs, so a cron chain saw
+        # a green run over week-old images.
         typer.echo("[!] No data in the requested date range -- nothing to plot.")
-        sys.exit(0)
+        raise typer.Exit(code=1 if strict else 0)
 
     # Filter WRF to same date range
     if wrf is not None:
