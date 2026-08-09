@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 from micrometeorology.cli import generate_station_graphs
 from micrometeorology.cli.plot_station_graphs import (
     DEFAULT_COLUMNS,
+    DEFAULT_WRF_COLUMNS,
     GRAPH_SPECS,
     _plot_balance,
     app,
@@ -275,6 +276,108 @@ class TestSiteCommand:
         )
         assert result.exit_code == 0, result.output
         assert (out / "direcao.png").stat().st_size > 0
+
+
+def _write_raw_parquet(path: Path, hourly: Path) -> Path:
+    """A 5-minute record spanning the same window as the hourly CSV."""
+    reference = pd.read_csv(hourly, index_col=0, parse_dates=True)
+    index = pd.date_range(reference.index.min(), reference.index.max(), freq="5min")
+    generator = np.random.default_rng(11)
+    frame = pd.DataFrame(
+        {
+            column: generator.normal(float(np.nanmean(reference[column])), 0.5, len(index))
+            for column in reference.columns
+        },
+        index=index,
+    )
+    frame.to_parquet(path)
+    return path
+
+
+def _write_wrf_dat(path: Path, hourly: Path) -> Path:
+    """A minimal series_operacional.dat over the same window."""
+    reference = pd.read_csv(hourly, index_col=0, parse_dates=True)
+    index = pd.date_range(reference.index.min(), reference.index.max(), freq="1h")
+    generator = np.random.default_rng(12)
+    frame = pd.DataFrame(
+        {
+            "year": index.year,
+            "month": index.month,
+            "day": index.day,
+            "hour": index.hour,
+            "T": generator.normal(25.0, 2.0, len(index)),
+            "Swdw": np.clip(generator.normal(300.0, 100.0, len(index)), 0, None),
+        }
+    )
+    frame.to_csv(path, index=False)
+    return path
+
+
+class TestThreeLayers:
+    """The researcher's requirement: raw under hourly, and WRF wherever it exists.
+
+    The static producer and the interactive page must show the same three
+    layers, so this is pinned here as well as in ``test_monitoring.py``.
+    """
+
+    def test_raw_and_wrf_layers_reach_every_graph_that_has_them(self, hourly_csv, tmp_path):
+        out = tmp_path / "three"
+        result = runner.invoke(
+            app,
+            [
+                "site",
+                "-i",
+                str(hourly_csv),
+                "-o",
+                str(out),
+                "--raw",
+                str(_write_raw_parquet(tmp_path / "raw.parquet", hourly_csv)),
+                "--wrf",
+                str(_write_wrf_dat(tmp_path / "wrf.dat", hourly_csv)),
+                "--log-level",
+                "WARNING",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert sorted(p.name for p in out.glob("*.png")) == sorted(CONTRACT_PNGS)
+
+    def test_without_the_optional_layers_the_output_is_unchanged(self, hourly_csv, tmp_path):
+        """The legacy single-layer invocation must keep working untouched."""
+        out = tmp_path / "one"
+        result = runner.invoke(
+            app, ["site", "-i", str(hourly_csv), "-o", str(out), "--log-level", "WARNING"]
+        )
+        assert result.exit_code == 0, result.output
+        assert sorted(p.name for p in out.glob("*.png")) == sorted(CONTRACT_PNGS)
+
+    def test_a_wrf_column_the_extraction_lacks_is_skipped_not_fatal(self, hourly_csv, tmp_path):
+        """`series_operacional.dat` has no PAR and no rain; that is normal."""
+        from micrometeorology.cli.plot_station_graphs import _wrf_series
+
+        wrf = pd.read_csv(_write_wrf_dat(tmp_path / "w.dat", hourly_csv))
+        series, resolved = _wrf_series(wrf, "radiacao_par", DEFAULT_WRF_COLUMNS)
+        assert series is None
+        assert resolved is None
+
+    def test_the_model_overlay_borrows_the_hue_of_the_series_it_mirrors(self):
+        """On the balance chart hue means the physical family, so the WRF
+        shortwave must not arrive as a sixth colour — it is dotted instead."""
+        from micrometeorology.cli.plot_station_graphs import _plot_wrf
+
+        index = pd.date_range("2026-06-01", periods=3, freq="1h")
+        fig, ax = create_figure()
+        try:
+            _plot_wrf(
+                ax,
+                pd.Series([1.0, 2.0, 3.0], index=index),
+                label="WRF",
+                color=BALANCE_COMPONENT_COLORS["sw_down"],
+            )
+            (line,) = ax.get_lines()
+            assert to_hex(line.get_color()) == to_hex(BALANCE_COMPONENT_COLORS["sw_down"])
+            assert line.get_linestyle() not in {"-", "solid"}
+        finally:
+            plt.close(fig)
 
 
 class TestColumnsCommand:
