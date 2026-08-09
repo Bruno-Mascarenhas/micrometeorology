@@ -129,8 +129,13 @@ packages = ["src/micrometeorology", "src/solrad_correction", "src/allsky"]
 [tool.hatch.build.targets.wheel.force-include]
 "configs/micromet" = "micrometeorology/configs/micromet"
 
-[tool.hatch.build.targets.sdist.force-include]
-"configs/micromet" = "micrometeorology/configs/micromet"
+# The sdist keeps the tree's own layout, deliberately: `uv build` produces the
+# wheel FROM the unpacked sdist, so the wheel's force-include above has to find
+# `configs/micromet` at the same path it has here. Relocating it in the sdist
+# instead made that second build fail with "Forced include not found" — a break
+# invisible to `uv build --wheel`, which reads the working tree.
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "configs/micromet", "README.md", "LICENSE", "pyproject.toml"]
 
 # Lock torch against the CPU wheel index on Linux/macOS so the resolver does not
 # pull the multi-GB CUDA dependency stack into uv.lock. Windows wheels on PyPI
