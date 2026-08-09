@@ -814,3 +814,61 @@ def test_serial_run_sweeps_its_own_failed_unit_debris(tmp_path):
 
     assert results[0].error is not None
     assert not debris.exists()
+
+
+def test_the_timeline_scanner_matches_the_names_the_writers_actually_produce():
+    """``{i:03d}`` is a MINIMUM width, so step 1000 is written ``_1000.json``.
+
+    Matching exactly three digits made the scanner silently disagree with the
+    writer past that point: those files joined neither the timeline nor
+    ``availability``, so ``index_max`` was published as 999 against a true step
+    count of 1007 and the site's slider hid the last frames.
+    """
+    for name, index in (
+        ("D01_TEMP_000.json", "000"),
+        ("D02_TEMP_999.json", "999"),
+        ("D02_TEMP_1000.json", "1000"),
+        ("D01_POT_EOLICO_50M_1007.json", "1007"),
+    ):
+        match = jobs._TIMESTEP_FILE_RE.match(name)
+        assert match is not None, name
+        assert match.group(3) == index
+
+    assert jobs._TIMESTEP_FILE_RE.match("D01_TEMP_00.json") is None
+    assert jobs._TIMESTEP_FILE_RE.match("D01_TEMP.summary.json") is None
+
+
+def test_a_step_with_no_finite_cell_is_not_published_at_all(tmp_path, monkeypatch):
+    """The daylight window is a clock rule; a value can still be undefined inside it.
+
+    The clearness index is null wherever cos(z) falls below its cutoff, so every
+    sunrise and sunset step used to be written with all cells null. That made the
+    run's two artifacts disagree about the same instant: ``write_run_manifest``
+    derives the timeline and ``availability`` from the files WRITTEN, while the
+    ``.summary.json`` the preview panel reads records only steps that carried a
+    finite cell. The site reads the first for its map slider and the second for
+    its panel, so the two halves of one page contradicted each other.
+    """
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_kt_sunrise.nc"
+    _write_full_wrf_file(wrf, seed=7)
+    with netCDF4.Dataset(str(wrf), "a") as ds:
+        cos_zenith = ds.createVariable("COSZEN", "f4", ("Time", "south_north", "west_east"))
+        values = np.full((NT, NY, NX), 0.6, dtype="f4")
+        values[0, :, :] = 0.05  # below MIN_COSZEN_FOR_CLEARNESS: every cell null
+        cos_zenith[:] = values
+
+    json_dir, geo_dir = str(tmp_path / "json"), str(tmp_path / "geo")
+    units = jobs.build_units([str(wrf)], ["clearness_index"], json_dir, geo_dir)
+    results = [jobs.process_unit(unit) for unit in units]
+    jobs.write_run_manifest(json_dir, results)
+
+    steps = sorted(p.name for p in Path(json_dir).glob("D02_KT_[0-9]*.json"))
+    assert "D02_KT_000.json" not in steps, "an all-null step must not be published"
+    assert steps == [f"D02_KT_{i:03d}.json" for i in range(1, NT)]
+
+    manifest = json.loads((Path(json_dir) / "manifest.json").read_text(encoding="utf-8"))
+    summary = json.loads((Path(json_dir) / "D02_KT.summary.json").read_text(encoding="utf-8"))
+    # The one invariant that was broken: the timeline and the panel agree.
+    assert manifest["index_min"] == min(summary["indices"])
+    assert manifest["index_max"] == max(summary["indices"])
