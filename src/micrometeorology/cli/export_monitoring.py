@@ -9,10 +9,11 @@ This is the **interactive** producer. The static PNGs stay: ``labmim-site-graphs
 fixed-name images in the same three-layer style, because those are what goes
 into papers.
 
-Sizing, measured on a fully instrumented week: the raw layer is ~105 kB, hourly
-~9 kB and WRF ~5 kB, so the whole document is ~117 kB — about a third of the
-~380 kB the nine PNGs cost the visitor today, and it arrives as numbers a reader
-can hover, toggle and download.
+Sizing, measured on the reference week: the raw layer is ~110 kB, hourly ~9 kB
+and WRF ~7 kB, so the whole document is ~133 kB — about a third of the ~380 kB
+the nine PNGs cost the visitor today, and it arrives as numbers a reader can
+hover, toggle and download. (It was ~164 kB until irradiance stopped carrying a
+decimal place the page never rendered.)
 
 Like the climatology artifacts, the output is **not** committed to the site
 repository: it derives from the laboratory's own sensor archive, so it is
@@ -41,7 +42,7 @@ import numpy as np
 import pandas as pd
 import typer
 
-from micrometeorology.common.git import run_git
+from micrometeorology.common.git import run_git, source_root
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.sensors.monitoring import MONITORING_CHARTS, resolve_wrf_column
 from micrometeorology.stats.climatology_export import write_json
@@ -57,6 +58,14 @@ PAYLOAD_FILENAME = "monitoring.json"
 # labmim-site-graphs, kept so the two products stay comparable.
 DEFAULT_DAYS = 7
 
+# Nominal cadence of each layer, declared rather than inferred. The axis is
+# published as an origin plus a step, so a layer has to sit on a complete grid
+# before it is serialised; these are the grids ``labmim-archive`` writes
+# (``station_5min_qc`` at five minutes, ``station_hourly`` and the WRF series
+# hourly).
+RAW_CADENCE = "5min"
+HOURLY_CADENCE = "h"
+
 # Decimals per unit. Pressure needs one to stay readable at ~1013 hPa;
 # precipitation needs three so the 0.254 mm tipping-bucket quantum survives the
 # round trip; irradiance is integer because a tenth of a W/m2 is noise.
@@ -67,22 +76,66 @@ _DECIMALS = {
     "m/s": 2,
     "°": 1,
     "mm": 3,
-    "W/m²": 1,
+    # Integer, as the comment above has always said and as the page has always
+    # rendered it (``unitDigits`` returns 0 for W/m²). The stray decimal reached
+    # nothing but the CSV export, where it made the download disagree with the
+    # chart the reader took it from, and it cost about a sixth of the document.
+    "W/m²": 0,
 }
 
 STATION_NAME = "Estação Micrometeorológica LabMiM"
 
 
-def _round(values: pd.Series, decimals: int) -> list[float | None]:
+def _round(values: pd.Series, decimals: int) -> list[float | int | None]:
     """Serialise a series, mapping every non-finite sample to ``null``.
 
     ``null`` is both correct and cheap here: the writer refuses NaN outright
     (it is not valid JSON), and a gap costs fewer bytes than a real value would.
+
+    A zero-decimal unit is emitted as an ``int``, not a rounded float: ``round(x,
+    0)`` returns ``489.0``, which JSON writes as ``"489.0"`` — LONGER than the
+    ``"489.5"`` it was meant to shorten, and it turns the pyranometer's small
+    negative night offsets into ``-0.0``. Both sides read the value as a number
+    either way, so the encoding is free to be the short one.
     """
+    if decimals <= 0:
+        return [
+            None if not np.isfinite(value) else round(float(value))
+            for value in values.to_numpy(dtype=float)
+        ]
     return [
         None if not np.isfinite(value) else round(float(value), decimals)
         for value in values.to_numpy(dtype=float)
     ]
+
+
+def _regular(
+    frame: pd.DataFrame, index: pd.DatetimeIndex, cadence: str
+) -> tuple[pd.DataFrame, pd.DatetimeIndex]:
+    """Put a layer back on its complete cadence grid before it is serialised.
+
+    The axis below is an origin plus a step, so the page rebuilds every abscissa
+    as ``start + i * step``. Neither frame that reaches it is gapless: the logger
+    stops (247 non-5-minute steps over the record, the longest 17 days) and
+    ``read_wrf_series`` drops the spin-up hour of every day. Serialising the rows
+    as they come would therefore slide every sample after a hole earlier than it
+    happened — one hour per day for the model layer, the whole outage length for
+    the raw one — under an hourly line that stays correctly placed.
+
+    Reindexing turns each hole into a row whose values are ``null``, which is
+    what both the encoding and the page already promise. It changes no field
+    name, no key and no encoding: only the arrays get longer.
+    """
+    if frame.empty:
+        return frame, index
+    grid = pd.date_range(index.min(), index.max(), freq=cadence, name=index.name)
+    off_grid = index.difference(grid)
+    if not off_grid.empty:
+        raise ValueError(
+            f"{len(off_grid)} sample(s) do not sit on the {cadence} grid "
+            f"(first: {off_grid[0]}); reindexing would silently drop them"
+        )
+    return frame.reindex(grid), grid
 
 
 def _axis(index: pd.DatetimeIndex) -> dict[str, object]:
@@ -90,24 +143,52 @@ def _axis(index: pd.DatetimeIndex) -> dict[str, object]:
 
     2,016 ISO-8601 strings cost about 50 kB on their own; a regular grid needs
     only its origin and its cadence. Gaps stay visible because the values carry
-    ``null`` at the missing positions.
+    ``null`` at the missing positions — which holds only while the index really
+    is a complete grid, so an irregular one raises here rather than being
+    re-encoded into a page that would draw it at the wrong times.
     """
-    step = round((index[1] - index[0]).total_seconds() / 60) if len(index) > 1 else 0
+    deltas = (index[1:] - index[:-1]).unique() if len(index) > 1 else pd.TimedeltaIndex([])
+    if len(deltas) > 1:
+        raise ValueError(
+            f"a monitoring axis needs one cadence, got {len(deltas)}: "
+            f"{', '.join(str(delta) for delta in sorted(deltas)[:4])}"
+        )
+    step = round(deltas[0].total_seconds() / 60) if len(deltas) else 0
     return {"start": index[0].isoformat(sep=" "), "step_minutes": step, "count": len(index)}
 
 
-def _layer(frame: pd.DataFrame, columns: dict[str, str], decimals: int) -> dict[str, object] | None:
-    """One layer of one chart: its time axis plus a value array per series."""
+def _layer(
+    frame: pd.DataFrame, columns: dict[str, str], decimals: int, cadence: str
+) -> dict[str, object] | None:
+    """One layer of one chart: its time axis plus a value array per series.
+
+    A series whose column is present but holds no value over the window is
+    OMITTED rather than published as an array of ``null``. The page reads
+    ``layer.series[id]`` and already treats an absent key as "this layer has
+    nothing for this series"; an all-null array instead passes that guard, builds
+    a dataset, and puts an entry in the legend for a line the reader cannot see.
+
+    This is not hypothetical. The Gill thermohygrometer railed in December 2025
+    and its readings are masked as sentinels, so the DEFAULT operational window
+    — the one the hourly deploy runs, with no ``--end`` — carries no air
+    temperature and no humidity at all. Both charts were publishing 168 nulls
+    per layer under a legend naming them.
+    """
     present = {sid: column for sid, column in columns.items() if column in frame.columns}
     if frame.empty or not present:
         return None
     index = frame.index
     if not isinstance(index, pd.DatetimeIndex):
         raise TypeError(f"a monitoring layer needs a time index, got {type(index).__name__}")
-    return {
-        "axis": _axis(index),
-        "series": {sid: _round(frame[column], decimals) for sid, column in present.items()},
+    gridded, grid = _regular(frame, index, cadence)
+    values = {
+        sid: _round(gridded[column], decimals)
+        for sid, column in present.items()
+        if gridded[column].notna().any()
     }
+    if not values:
+        return None
+    return {"axis": _axis(grid), "series": values}
 
 
 @app.command()
@@ -145,18 +226,55 @@ def run(
     raw = pd.read_parquet(Path(input_dir) / "station_5min_qc.parquet")
     hourly = pd.read_parquet(Path(input_dir) / "station_hourly.parquet")
 
-    last = pd.Timestamp(end) if end else pd.Timestamp(raw.index.max())
-    first = last - pd.Timedelta(days=days)
-    raw = raw.loc[first:last]
-    hourly = hourly.loc[first:last]
-    typer.echo(f"Janela: {first} .. {last}  ({len(raw):,} amostras brutas, {len(hourly)} horas)")
-
-    model = pd.DataFrame()
+    # The model is read BEFORE the window is fixed, because it is allowed to run
+    # ahead of the station. Under the accumulating extraction the operational
+    # `series_operacional.dat` grows forward day by day, so an hour with a WRF
+    # value and no observation is the normal state, not a fault — and anchoring
+    # the window's end on the newest SAMPLE would clip exactly the part of the
+    # model that is worth looking at.
+    model_full = pd.DataFrame()
     if wrf_path is not None:
         from micrometeorology.cli.export_climatology import read_wrf_series
 
-        model = read_wrf_series(wrf_path).loc[first:last]
-        typer.echo(f"WRF: {len(model)} horas na janela, {len(model.columns)} colunas disponiveis")
+        model_full = read_wrf_series(wrf_path)
+
+    # `first` still anchors on the station, so the reader keeps the same seven
+    # days of record behind them; only the END reaches forward. `--end` is an
+    # explicit instruction and overrides both.
+    station_last = pd.Timestamp(raw.index.max())
+    if end:
+        first = pd.Timestamp(end) - pd.Timedelta(days=days)
+        last = pd.Timestamp(end)
+    else:
+        first = station_last - pd.Timedelta(days=days)
+        last = station_last
+        if not model_full.empty:
+            last = max(last, pd.Timestamp(model_full.index.max()))
+    # The raw layer keeps both ends: a 5-minute sample stamped at `last` is an
+    # instantaneous observation that really happened inside the window, and on
+    # the default (no `--end`) path it is the newest one the station has.
+    #
+    # The aggregated layers are right-OPEN, because an hourly mean labelled at T
+    # covers [T, T+1h): the value stamped at `last` is data lying entirely PAST
+    # the window the payload declares and the page header prints, and it was
+    # drawn over a raw layer that has exactly one sample there. The last complete
+    # hour inside the window is the one that starts an hour before its end.
+    raw = raw.loc[first:last]
+    hourly = hourly.loc[first : last - pd.Timedelta(hours=1)]
+    # Measured on the SLICED frame, not on the archive: with an explicit `--end`
+    # the newest sample in the file can be years after the window, and an anchor
+    # outside the window is worse than none.
+    station_end = pd.Timestamp(raw.index.max()) if len(raw) else last
+    typer.echo(f"Janela: {first} .. {last}  ({len(raw):,} amostras brutas, {len(hourly)} horas)")
+
+    model = pd.DataFrame()
+    if not model_full.empty:
+        model = model_full.loc[first : last - pd.Timedelta(hours=1)]
+        ahead = pd.Timestamp(model_full.index.max()) - station_last
+        note = f", {ahead} à frente da estação" if ahead > pd.Timedelta(0) else ""
+        typer.echo(
+            f"WRF: {len(model)} horas na janela, {len(model.columns)} colunas disponiveis{note}"
+        )
 
     charts: list[dict[str, object]] = []
     for chart in MONITORING_CHARTS:
@@ -169,13 +287,19 @@ def run(
             column = resolve_wrf_column(series, model.columns) if not model.empty else None
             if column:
                 wrf_columns[series.id] = column
-            elif series.wrf:
+            # Only when a model was actually loaded. `wrf_pending` means "the
+            # extraction does not write this variable yet", and the page states
+            # exactly that to the reader — so populating it from a run that was
+            # given no model file at all turned a forgotten `-w` in a cron into a
+            # categorically false claim about the pipeline, published for every
+            # variable the extraction does write.
+            elif series.wrf and not model.empty:
                 missing.append(series.id)
 
         layers: dict[str, dict[str, object] | None] = {
-            "raw": _layer(raw, station_columns, decimals),
-            "hourly": _layer(hourly, station_columns, decimals),
-            "wrf": _layer(model, wrf_columns, decimals) if wrf_columns else None,
+            "raw": _layer(raw, station_columns, decimals, RAW_CADENCE),
+            "hourly": _layer(hourly, station_columns, decimals, HOURLY_CADENCE),
+            "wrf": _layer(model, wrf_columns, decimals, HOURLY_CADENCE) if wrf_columns else None,
         }
         payload_chart: dict[str, object] = {
             "id": chart.id,
@@ -198,15 +322,38 @@ def run(
 
         drawn = [name for name, value in layers.items() if value]
         note = f" (WRF ausente para {', '.join(missing)})" if missing else ""
-        typer.echo(f"  [ok] {chart.id:18s} camadas: {'+'.join(drawn)}{note}")
+        if drawn:
+            typer.echo(f"  [ok] {chart.id:18s} camadas: {'+'.join(drawn)}{note}")
+        else:
+            # Every layer empty is a real operational state, not a bug: the Gill
+            # thermohygrometer railed in December 2025 and its readings are
+            # masked, so temperature and humidity have no data in any recent
+            # window. It has to be visible to whoever runs the export.
+            typer.echo(f"  [--] {chart.id:18s} SEM DADO na janela — publicado vazio")
 
     payload = {
         "format": PAYLOAD_FORMAT,
         "version": version,
         "generated_utc": version,
-        "commit": run_git(["rev-parse", "--short", "HEAD"]),
+        "commit": run_git(["rev-parse", "--short", "HEAD"], cwd=source_root()),
         "station": {"name": STATION_NAME, "timezone": "America/Bahia"},
-        "window": {"start": str(first), "end": str(last), "days": days},
+        # `end` is the end of what this document CARRIES, which under the
+        # accumulating extraction can be later than the newest observation —
+        # otherwise the part of the model worth looking at is cropped off.
+        #
+        # `station_end` is published beside it because the page derives its
+        # visible window as `end - <selected days>`: anchored on `end` alone, a
+        # model running three days ahead silently pushes three days of real
+        # observations out of the default view. Anchor the START on this field
+        # and the MAXIMUM on `end`, and the reader gets the record behind them
+        # plus the forecast in front. Additive: a consumer that ignores it keeps
+        # exactly today's behaviour.
+        "window": {
+            "start": str(first),
+            "end": str(last),
+            "days": days,
+            "station_end": str(station_end),
+        },
         "charts": charts,
     }
     path = write_json(Path(output_dir) / PAYLOAD_FILENAME, payload)
