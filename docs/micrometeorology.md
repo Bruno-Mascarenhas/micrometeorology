@@ -27,6 +27,8 @@ src/micrometeorology/
 │   ├── render_wrf_maps.py       # labmim-wrf-figures
 │   ├── run_wrf_pipeline.py      # Shared WRF batch driver
 │   ├── ingest_sensor_data.py    # labmim-sensor-process
+│   ├── build_archive.py         # labmim-archive (merges the .dat archive, verified)
+│   ├── export_climatology.py    # labmim-climatology (climatology-page producer)
 │   ├── compare_wrf_observations.py  # labmim-comparison
 │   ├── compute_metrics.py       # labmim-metrics
 │   ├── generate_station_graphs.py   # labmim-station-graphs
@@ -41,12 +43,15 @@ src/micrometeorology/
 │   │                        # shared by the allsky and solrad provenance stamps
 │   └── types.py             # Enums (WRFVariable, GridLevel D01–D05), dataclasses, constants
 ├── sensors/
+│   ├── archive.py           # Explicit archive manifest, clock repairs, sentinel table
 │   ├── ingestion.py         # .dat reading with dynamic headers
 │   ├── calibration.py       # Date-precise calibration (immutable historical records)
 │   ├── aggregation.py       # Hourly aggregation with vector-mean wind direction
 │   ├── wind.py              # U/V decomposition and vector-mean direction
 │   └── export.py            # Formatted CSV export
 ├── stats/
+│   ├── distributions.py     # Histograms, MLE fits, goodness-of-fit distances
+│   ├── climatology_export.py # labmim-climatology-v1 site artifacts
 │   ├── metrics.py           # Model vs. observation metrics (RMSE, MAE, etc.)
 │   ├── comparison.py        # Alignment + pairing + metric tables (pure pandas)
 │   ├── comparison_plots.py  # Time-series/scatter figure for a paired frame
@@ -477,6 +482,61 @@ python -m micrometeorology.cli.run_wrf_pipeline \
 ```bash
 labmim-sensor-process --input data/raw/ --output data/hourly/sensor_data.csv
 ```
+
+### Station archive (`labmim-archive`)
+
+Turns `data/dados-labmim/` into one verified database. It does **not** glob: the
+file list is an explicit, ordered manifest in
+`micrometeorology.sensors.archive`, because a bare `*.dat` drops the `.backup`
+rotation files — three of which are the only source of an austral winter each —
+and sweeps in a second station, the calibration campaigns and the 1-minute solar
+tables. Three clock defects are repaired into a scratch directory; nothing under
+`data/` is ever written.
+
+```bash
+labmim-archive -d data -o output/archive --strict
+```
+
+`--strict` exits non-zero when the merge does not reproduce the audited counts
+(lenta 987,969 rows, rain 988,249, span 2016-09-29 13:40 to 2026-04-24 13:00,
+zero duplicates, monotonic). Treat it as the archive's regression test.
+
+Three artifacts plus a report:
+
+| file | what it is |
+|------|------------|
+| `station_5min_raw.parquet` | 988,289 x 93 — values as the logger wrote them, sentinels included |
+| `station_5min_qc.parquet` | 988,289 x 111 — after sentinel masking, physical gates, calibrations and era unification |
+| `station_hourly.parquet` | 83,857 x 107 — hourly means, sum for the tipping bucket, speed-weighted vector mean for direction |
+| `archive_report.json` | the verification, plus samples masked per column |
+
+The run prints how many physical limits actually **fired**. That number matters:
+a limit naming a column the frame does not carry is skipped in silence, which is
+how the shipped config once reached 19 dead entries out of 21.
+
+### Climatology page artifacts (`labmim-climatology`)
+
+Producer for the `labmim-climatology-v1` JSON the site's climatology page fetches
+at runtime, the same role `labmim-wrf-geojson` plays for the WebGIS. Consumes the
+hourly database above plus the WRF point extraction.
+
+```bash
+labmim-climatology -i output/archive/station_hourly.parquet \
+    -w data/series_operacional.dat \
+    -o ../site-labmim/site/Climatologia
+```
+
+Writes `manifest.json` plus one file per variable. Everything the browser draws
+is precomputed here — frozen bin edges, the maximum-likelihood fit, the
+theoretical density sampled at the bin centres, and goodness-of-fit **distances**
+(never p-values: at ~10^5 correlated hourly samples every classical test rejects
+every model). Point masses that no continuous family can represent — wind calms,
+dry hours, the humidity saturation clip — are removed from the fit and published
+beside it as their own probability.
+
+The output is **not** committed to the site repository: it derives from the
+laboratory's private sensor archive, so like the WRF data it is gitignored there
+and attached at deploy time.
 
 ### Monitoring-page graphs (site)
 

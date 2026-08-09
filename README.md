@@ -263,6 +263,14 @@ Full documentation: [`docs/allsky.md`](docs/allsky.md); the internal design is i
 ```bash
 labmim-sensor-process --input data/raw/ --output data/hourly/sensor_data.csv
 
+# Merge the whole .dat archive into one verified database (explicit manifest,
+# clock repairs, sentinel masking); --strict fails if the row counts drift.
+labmim-archive -d data -o output/archive --strict
+
+# Publish the climatology page's distribution artifacts from that database
+labmim-climatology -i output/archive/station_hourly.parquet \
+    -w data/series_operacional.dat -o ../site-labmim/site/Climatologia
+
 # Nine fixed-name monitoring-page PNGs from the hourly CSV (site-labmim consumer)
 labmim-site-graphs site -i data/hourly/sensor_data.csv -o ../site-labmim/site/assets/graphs
 ```
