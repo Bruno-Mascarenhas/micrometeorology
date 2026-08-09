@@ -17,12 +17,16 @@ from typer.testing import CliRunner
 
 from micrometeorology.cli import generate_station_graphs
 from micrometeorology.cli.plot_station_graphs import (
+    DEFAULT_BALANCE_COMPONENTS,
     DEFAULT_COLUMNS,
+    DEFAULT_DIRECTION_COMPONENTS,
     DEFAULT_WRF_COLUMNS,
     GRAPH_SPECS,
     _plot_balance,
     app,
+    render_site_graphs,
 )
+from micrometeorology.sensors.monitoring import MONITORING_CHARTS
 from micrometeorology.sensors.plotting import BALANCE_COMPONENT_COLORS, create_figure
 
 runner = CliRunner()
@@ -424,3 +428,150 @@ class TestColumnsCommand:
         assert result.exit_code == 0, result.output
         assert "not found" in result.output
         assert not (out / "NoSuchColumn_last_7d.png").exists()
+
+
+class TestTheTwoProducersAgree:
+    """The PNG and the interactive payload draw the same nine charts.
+
+    Both docstrings say they come "from the same archive" and must "be read the
+    same way", but each carried its own literals and they had already drifted in
+    two places: the PNG's rain candidates had lost ``rain_total``, and its
+    humidity frame clipped at 100 % while the payload declared 105 % with a
+    caveat explaining that the model exceeds saturation and those points must
+    stay visible.
+    """
+
+    @staticmethod
+    def _payload_limits() -> dict[str, tuple[float, float] | None]:
+        return {chart.id: chart.y_limits for chart in MONITORING_CHARTS}
+
+    def test_the_two_catalogues_cover_the_same_charts(self) -> None:
+        assert {spec.key for spec in GRAPH_SPECS} == {chart.id for chart in MONITORING_CHARTS}
+
+    def test_y_limits_agree_chart_by_chart(self) -> None:
+        payload = self._payload_limits()
+        for spec in GRAPH_SPECS:
+            expected = payload[spec.key]
+            actual = tuple(float(bound) for bound in spec.ylim) if spec.ylim else None
+            assert actual == expected, (
+                f"{spec.key}: PNG frames {actual} while the payload declares {expected}; "
+                "the same data must not be clipped in one product and shown in the other"
+            )
+
+    def test_the_rain_candidates_are_one_list_not_two(self) -> None:
+        """The ordered tuple is what makes a new spelling a data change."""
+        precipitation = next(chart for chart in MONITORING_CHARTS if chart.id == "precipitacao")
+        assert DEFAULT_WRF_COLUMNS["precipitacao"] == precipitation.series[0].wrf
+
+
+class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
+    """A column that exists but holds no value must not be announced.
+
+    Plotting an all-NaN series draws nothing and still registers a legend entry,
+    so the chart named a series the reader cannot see — which reads as a line off
+    the scale, or as an instrument stuck flat. Two independent causes reach this
+    state: a column belonging to a different instrument era, and a channel the
+    station genuinely did not record that year.
+    """
+
+    @staticmethod
+    def _frame() -> pd.DataFrame:
+        index = pd.date_range("2023-08-26", periods=48, freq="h")
+        return pd.DataFrame(
+            {
+                # Present and populated.
+                "PL01_mm_Tot": np.zeros(48),
+                # Present and entirely empty — the case under test.
+                "AirT1_C_Avg": np.full(48, np.nan),
+                "RH1": np.full(48, np.nan),
+                "BP1_mbar_Avg": np.full(48, np.nan),
+                "WS_ms": np.full(48, np.nan),
+                "WindDir": np.full(48, np.nan),
+                "Net_Wm2_Avg": np.full(48, np.nan),
+                "PSP_Wm2_Avg": np.full(48, np.nan),
+                "PAR_Wm2_Avg": np.full(48, np.nan),
+            },
+            index=index,
+        )
+
+    def test_the_empty_columns_are_reported_and_not_drawn(self, tmp_path: Path) -> None:
+        written, missing, empty = render_site_graphs(
+            self._frame(),
+            tmp_path,
+            DEFAULT_COLUMNS,
+            DEFAULT_BALANCE_COMPONENTS,
+            DEFAULT_DIRECTION_COMPONENTS,
+        )
+
+        # Only precipitation had data, so only it can be published; the eight
+        # empty ones drew no layer at all and must not overwrite a good image.
+        assert [p.name for p in written] == ["precipitacao.png"]
+        assert set(empty) >= {"temperatura", "umidade", "pressao", "velocidade", "direcao"}
+        # `missing` is reserved for a column the frame does not CARRY, which is a
+        # configuration error; every column here is present and simply has no
+        # value, which is the station being down. Only the first fails --strict.
+        assert missing == []
+
+    def test_a_model_layer_still_publishes_without_the_station(self, tmp_path: Path) -> None:
+        """The chart keeps whatever layer does have data — it just stops
+        claiming the one that does not."""
+        frame = self._frame()
+        model = pd.DataFrame({"pressure": np.linspace(1010, 1020, 48)}, index=frame.index)
+
+        written, _missing, empty = render_site_graphs(
+            frame,
+            tmp_path,
+            DEFAULT_COLUMNS,
+            DEFAULT_BALANCE_COMPONENTS,
+            DEFAULT_DIRECTION_COMPONENTS,
+            wrf=model,
+        )
+
+        assert "pressao.png" in [p.name for p in written]
+        assert "pressao" in empty
+
+    def test_strict_fails_on_a_missing_column_but_not_on_an_empty_one(self, tmp_path: Path) -> None:
+        """The distinction is a broken configuration against a broken instrument.
+
+        The Gill thermohygrometer railed in December 2025, so temperature and
+        humidity are empty in every current window. Failing `--strict` on that
+        would make the hourly cron exit non-zero every run until the instrument
+        is repaired, freezing the site on its last good artifacts — for a
+        condition these images exist to report, not to hide.
+        """
+        frame = self._frame()
+        csv = tmp_path / "empty.csv"
+        frame.to_csv(csv)
+
+        empty_run = runner.invoke(
+            app,
+            [
+                "site",
+                "-i",
+                str(csv),
+                "-o",
+                str(tmp_path / "a"),
+                "--strict",
+                "--log-level",
+                "WARNING",
+            ],
+        )
+        assert empty_run.exit_code == 0, empty_run.output
+        assert "without the station layer" in empty_run.output
+
+        # Drop a column outright: that IS a configuration error.
+        frame.drop(columns=[DEFAULT_COLUMNS["precipitacao"]]).to_csv(csv)
+        missing_run = runner.invoke(
+            app,
+            [
+                "site",
+                "-i",
+                str(csv),
+                "-o",
+                str(tmp_path / "b"),
+                "--strict",
+                "--log-level",
+                "WARNING",
+            ],
+        )
+        assert missing_run.exit_code == 1, missing_run.output
