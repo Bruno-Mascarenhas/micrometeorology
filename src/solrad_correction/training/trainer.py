@@ -380,7 +380,19 @@ class Trainer:
         if best.state_dict:
             logger.info("Restoring best model weights (loss=%.6f)", best.metric)
             best.restore(plain_model)
-        elif checkpoint_manager.enabled and checkpoint_manager.directory is not None:
+        elif (
+            self.best_metric is not None
+            and checkpoint_manager.enabled
+            and checkpoint_manager.directory is not None
+        ):
+            # `self.best_metric is not None` is what makes this the RESUME case
+            # the comment above describes. Without it the branch also fired on a
+            # fresh run of an experiment name whose checkpoint directory already
+            # existed: when no epoch produced a finite improving metric (a
+            # diverged run, an all-NaN feature column), the previous run's
+            # weights were loaded, persisted as this run's model and scored, so
+            # metrics.json reported the old run's performance beside the new
+            # run's config — and the log line claimed a resume that never was.
             best_path = checkpoint_manager.directory / "best.pt"
             if best_path.exists():
                 checkpoint = load_torch_checkpoint(best_path)
