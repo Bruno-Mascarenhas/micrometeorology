@@ -29,10 +29,11 @@ src/micrometeorology/
 │   ├── ingest_sensor_data.py    # labmim-sensor-process
 │   ├── build_archive.py         # labmim-archive (merges the .dat archive, verified)
 │   ├── export_climatology.py    # labmim-climatology (climatology-page producer)
+│   ├── export_monitoring.py     # labmim-monitoring (interactive monitoring payload)
 │   ├── compare_wrf_observations.py  # labmim-comparison
 │   ├── compute_metrics.py       # labmim-metrics
 │   ├── generate_station_graphs.py   # labmim-station-graphs
-│   └── plot_station_graphs.py   # labmim-site-graphs (monitoring-page PNGs)
+│   └── plot_station_graphs.py   # labmim-site-graphs (three-layer monitoring PNGs)
 ├── common/
 │   ├── config.py            # Centralised config (pydantic-settings + YAML, 4 layers)
 │   ├── logging.py           # Structured logging setup
@@ -47,6 +48,7 @@ src/micrometeorology/
 │   ├── ingestion.py         # .dat reading with dynamic headers
 │   ├── calibration.py       # Date-precise calibration (immutable historical records)
 │   ├── aggregation.py       # Hourly aggregation with vector-mean wind direction
+│   ├── monitoring.py        # labmim-monitoring-v1 chart catalogue (3 layers, WRF candidates)
 │   ├── wind.py              # U/V decomposition and vector-mean direction
 │   └── export.py            # Formatted CSV export
 ├── stats/
@@ -538,12 +540,48 @@ The output is **not** committed to the site repository: it derives from the
 laboratory's private sensor archive, so like the WRF data it is gitignored there
 and attached at deploy time.
 
+### Monitoring window artifacts (`labmim-monitoring`)
+
+Producer for the `labmim-monitoring-v1` document the site's **interactive**
+monitoring page fetches, the counterpart of `labmim-climatology` for the rolling
+window rather than the whole record.
+
+```bash
+labmim-monitoring -i output/archive -o ../site-labmim/site/Monitoramento \
+    -w data/series_operacional.dat
+```
+
+One JSON carries all nine charts in the three layers the researcher asked for —
+the raw 5-minute samples, the hourly means over them, and the WRF series where
+the model has that variable. About 160 kB for a fully instrumented week, against
+the ~380 kB of PNGs it replaces, and it arrives as numbers the reader can hover,
+toggle and download. The time axis is published as `start` + `step_minutes` +
+`count` instead of one stamp per sample; that alone is worth ~50 kB.
+
+The WRF column is resolved per series against an **ordered tuple of candidate
+names** (`sensors/monitoring.py`). `series_operacional.dat` gains variables over
+time — precipitation is expected but absent today — so the payload records which
+names were looked for and the page says the layer is missing instead of showing
+a legend that is silently one entry short. When the extraction starts writing
+rain, the chart picks it up with no code change here.
+
+Like the climatology artifacts, the output is **not** committed to the site
+repository: same private archive, same deploy-time attachment.
+
 ### Monitoring-page graphs (site)
+
+These are the **static** PNGs. They are not superseded by the interactive page:
+they stay because they are what goes into papers, and they draw the same three
+layers so the two products can be read the same way.
 
 ```bash
 # Nine fixed-name PNGs for the site's monitoring page, straight into a checkout
 labmim-site-graphs site -i data/hourly/sensor_data.csv \
     -o ../site-labmim/site/assets/graphs --last-days 7
+
+# The same nine in three layers: raw under the hourly mean, model on top
+labmim-site-graphs site -i data/hourly/sensor_data.csv -o out/ \
+    --raw output/archive/station_5min_qc.parquet --wrf data/series_operacional.dat
 
 # Retarget a renamed logger column without editing code
 labmim-site-graphs site -i data/hourly/sensor_data.csv -o out/ \
