@@ -81,12 +81,23 @@ def read_campbell_dat(
     )
 
     # Set timestamp index
-    if timestamp_column in df.columns:
-        df.index = pd.to_datetime(df[timestamp_column], format="ISO8601")
-        df.index.name = None
-        df = df.drop(columns=[timestamp_column])
-        # Drop duplicated timestamps keeping the first occurrence
-        df = df.loc[~df.index.duplicated(keep="first")]
+    if timestamp_column not in df.columns:
+        # Returning the frame with its RangeIndex looks harmless and is not: the
+        # column names come from the first surviving data row, and the caller's
+        # ``sort_index`` then dies on mixed int/Timestamp labels with a TypeError
+        # that names neither the file nor the cause. The archive really does hold
+        # one such table (a headerless CSV whose TOA5 metadata line is missing),
+        # which the manifest path stages and repairs; every other reader has to
+        # be told which file it is.
+        raise ValueError(
+            f"{path.name}: no {timestamp_column!r} column after skiprows={skip_rows}. "
+            "A non-TOA5 table needs staging before it can be read (see sensors.archive)."
+        )
+    df.index = pd.to_datetime(df[timestamp_column], format="ISO8601")
+    df.index.name = None
+    df = df.drop(columns=[timestamp_column])
+    # Drop duplicated timestamps keeping the first occurrence
+    df = df.loc[~df.index.duplicated(keep="first")]
 
     # Drop requested columns (only those that actually exist)
     if drop_columns:

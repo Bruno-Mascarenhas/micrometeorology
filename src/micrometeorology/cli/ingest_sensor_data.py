@@ -82,7 +82,10 @@ def run(
 
     typer.echo(f"Found {len(files)} files")
 
-    df = merge_dat_files(files)
+    # The threshold is configurable precisely so an operator can switch off a
+    # guard that catches nothing in this archive; reading the reader's own
+    # hard-coded default instead made `sensor_sentinel_value: null` a no-op.
+    df = merge_dat_files(files, sentinel_value=settings.sensor_sentinel_value)
 
     if settings.sensor_limits:
         df = apply_physical_limits(df, settings.sensor_limits)
