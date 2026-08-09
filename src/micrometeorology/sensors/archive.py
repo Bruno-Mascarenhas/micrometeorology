@@ -36,11 +36,20 @@ Relationship to the neighbouring modules
 """
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
+from itertools import pairwise
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
+# Solar geometry for the night-corruption detector below. The same
+# implementation the climatology exporter uses, so "deep night" means the same
+# angle in both places.
+from allsky.config import SiteConfig
+from allsky.solar import cos_zenith, solar_elevation
 from micrometeorology.common.paths import ensure_dir
 from micrometeorology.sensors.ingestion import merge_dat_files
 
@@ -49,16 +58,23 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ARCHIVE_END",
     "ARCHIVE_START",
+    "DIFFUSE_RATIO_LIMIT",
     "EXPECTED_LENTA_ROWS",
     "EXPECTED_RAIN_ROWS",
     "LENTA_MANIFEST",
+    "NIGHT_CORRUPTION_CHANNELS",
+    "NIGHT_CORRUPTION_FLUX_WM2",
     "RAIN_MANIFEST",
     "STATUS_COLUMNS",
     "ArchiveFile",
     "ArchiveReport",
     "build_five_minute_frame",
+    "mask_impossible_shortwave",
+    "mask_night_corrupted_days",
     "mask_sentinels",
+    "night_corrupted_days",
     "stage_archive",
+    "unshaded_diffuse_days",
     "verify_frame",
 ]
 
@@ -496,16 +512,265 @@ SENTINEL_WINDOWS: tuple[tuple[str, float, str, str], ...] = (
 # values up to 1368 W/m2 as "diffuse". They were identified by binning the
 # ratio to global BY GLOBAL LEVEL: a shaded diffuse sensor's ratio falls as the
 # sky clears (0.48 -> 0.13), an unshaded one stays flat or rises (0.81 -> 0.88).
+#
+# The list below was re-derived over the whole record with that same criterion
+# after the first three entries turned out to cover only part of it: nine
+# further multi-day episodes were publishing global irradiance as diffuse, at
+# times above the global reading of the same hour (2024-09-16 11:00 published
+# Sw_dif 1009.8 against Sw_dw 997.5). :func:`unshaded_diffuse_days` runs the
+# criterion at build time so the next episode surfaces as a report line rather
+# than waiting for someone to re-audit the ratio by hand.
 INVALID_WINDOWS: tuple[tuple[str, str, str, str], ...] = (
-    ("CMP21_Wm2_Avg", "2019-09-01 00:00", "2019-09-30 23:55", "PSP/CMP21 unshaded"),
+    ("CMP21_Wm2_Avg", "2019-09-01 00:00", "2019-10-07 23:55", "PSP/CMP21 unshaded"),
     ("CMP21_Wm2_Avg", "2020-03-06 00:00", "2020-05-31 23:55", "shade ring off for ~87 days"),
-    ("CMP21_Wm2_Avg", "2025-03-12 00:00", "2025-05-14 15:20", "reads 1.2-2.3x global"),
-    ("PSP_Wm2_Avg", "2019-09-01 00:00", "2019-09-30 23:55", "unshaded"),
+    ("CMP21_Wm2_Avg", "2020-08-17 00:00", "2020-08-20 23:55", "ring off: 0.87 -> 0.96 by level"),
+    ("CMP21_Wm2_Avg", "2020-09-04 00:00", "2020-09-09 23:55", "ring off: 0.83 -> 0.86 by level"),
+    ("CMP21_Wm2_Avg", "2020-09-13 00:00", "2020-09-13 23:55", "ring off again for one day"),
+    ("CMP21_Wm2_Avg", "2021-05-31 00:00", "2021-06-08 23:55", "ring off: 0.87 -> 0.97 by level"),
+    ("CMP21_Wm2_Avg", "2021-08-05 00:00", "2021-08-09 23:55", "ring off: 0.87 -> 0.96 by level"),
+    ("CMP21_Wm2_Avg", "2022-02-24 00:00", "2022-03-01 23:55", "ring off: 0.83 -> 0.98 by level"),
+    ("CMP21_Wm2_Avg", "2023-08-07 00:00", "2023-08-13 23:55", "ring off: 0.85 -> 0.94 by level"),
+    ("CMP21_Wm2_Avg", "2023-11-06 00:00", "2023-11-08 23:55", "ring off: 0.83 -> 0.77 by level"),
+    ("CMP21_Wm2_Avg", "2024-09-12 00:00", "2024-09-17 23:55", "ring off: 0.46 -> 1.01 by level"),
+    ("CMP21_Wm2_Avg", "2025-03-09 00:00", "2025-05-14 15:20", "reads 1.2-2.3x global"),
+    ("PSP_Wm2_Avg", "2019-09-01 00:00", "2019-10-07 23:55", "unshaded"),
     ("PSP_Wm2_Avg", "2025-03-12 00:00", "2025-05-14 15:20", "unshaded before the handover"),
     # Tipping bucket: 54 consecutive dry days at full instrumentation, inside the
     # wettest months of the year, is a blocked funnel rather than a drought.
     ("PL01_mm_Tot", "2024-02-13 00:00", "2024-04-30 23:55", "gauge suspected blocked"),
 )
+
+
+# Detection constants for the shade-ring check below. Restricted to a clear-sky
+# global flux, a properly shaded diffuse sensor reads 0.12-0.22 of the global
+# one; every ring-off episode in the record reads 0.83-1.01 at that same level.
+#
+# The candidate screen sits at 0.55, between the two, but a single day above it
+# is not evidence: bright broken cloud raises the diffuse fraction on its own,
+# and 46 such days survive across the record with no hardware fault. What
+# separates hardware from weather is PERSISTENCE — a ring that falls off stays
+# off for days — so a candidate only counts as an episode when it runs for
+# three days or reaches a ratio a shaded sensor cannot physically produce.
+DIFFUSE_GLOBAL_COLUMN = "CM3Up_Wm2_Avg"
+DIFFUSE_CLEAR_SKY_FLOOR = 600.0
+DIFFUSE_MIN_SAMPLES_PER_DAY = 20
+DIFFUSE_RATIO_LIMIT = 0.55
+DIFFUSE_RATIO_CERTAIN = 0.85
+DIFFUSE_MIN_EPISODE_DAYS = 3
+
+
+def unshaded_diffuse_days(
+    frame: pd.DataFrame, column: str = "CMP21_Wm2_Avg"
+) -> list[tuple[str, float]]:
+    """Days where the diffuse channel is still reading the global flux.
+
+    Run this on the frame **after** :func:`mask_sentinels`: an episode already
+    covered by :data:`INVALID_WINDOWS` is ``NaN`` by then and drops out on its
+    own, so whatever comes back is exactly what the hand-curated list misses.
+
+    A hand-written window table goes stale the moment the ring comes off again,
+    and the failure is silent — the column keeps its name and publishes global
+    irradiance as diffuse, at times above the global reading of the same hour.
+    This turns the next episode into a line in the build report.
+
+    Returns
+    -------
+    list
+        ``(iso date, median clear-sky ratio)`` per offending day, oldest first.
+        Empty for the archive as shipped: every episode it detects is masked.
+    """
+    if column not in frame.columns or DIFFUSE_GLOBAL_COLUMN not in frame.columns:
+        return []
+    paired = frame[[column, DIFFUSE_GLOBAL_COLUMN]].dropna()
+    clear = paired[paired[DIFFUSE_GLOBAL_COLUMN] > DIFFUSE_CLEAR_SKY_FLOOR]
+    if clear.empty:
+        return []
+    ratio = clear[column] / clear[DIFFUSE_GLOBAL_COLUMN]
+    daily = ratio.groupby(pd.DatetimeIndex(clear.index).date).agg(["median", "count"])
+    candidates = daily[
+        (daily["count"] >= DIFFUSE_MIN_SAMPLES_PER_DAY) & (daily["median"] > DIFFUSE_RATIO_LIMIT)
+    ]
+    if candidates.empty:
+        return []
+
+    medians: dict[date, float] = {
+        day: float(value) for day, value in zip(candidates.index, candidates["median"], strict=True)
+    }
+    days = sorted(medians)
+    runs: list[list[date]] = [[days[0]]]
+    for previous, current in pairwise(days):
+        # One clouded-out day inside an episode must not split it; two must.
+        if (current - previous).days <= 2:
+            runs[-1].append(current)
+        else:
+            runs.append([current])
+
+    return [
+        (str(day), medians[day])
+        for run in runs
+        for day in run
+        if len(run) >= DIFFUSE_MIN_EPISODE_DAYS or medians[day] > DIFFUSE_RATIO_CERTAIN
+    ]
+
+
+# Station coordinates, for the solar geometry the check below needs. Repeated
+# here rather than imported from the climatology exporter because a sensors
+# module must not depend on a CLI; they are the same numbers and both are the
+# station's own.
+STATION_SITE = SiteConfig(latitude=-13.0055, longitude=-38.5089)
+STATION_UTC_OFFSET_HOURS = -3.0
+
+# Detection constants for the timestamp-corruption check below, measured in
+# docs/arqueologia/qc/med-fault-detection.md over the whole record: days with at
+# least three DEEP-NIGHT samples of global irradiance above 50 W/m2 number 42
+# (1.22% of the record), and the worst of them carries 128 — over ten hours of
+# data written on the wrong side of midnight. Deep night is a zenith angle above
+# 100 deg, i.e. an elevation below -10: astronomical twilight is long past, so no
+# sky state whatsoever puts 50 W/m2 on a pyranometer there.
+#
+# Whole days, not samples: the audit measured that the DAYTIME half of the same
+# day carries the identical shift while wearing ordinary values, so a per-sample
+# rule can only ever see half of each episode.
+#
+# The test is run over EVERY shortwave channel, not just the global one. Keying
+# it on ``Sw_dw`` alone reproduces the audit's 42 days but misses ten more that
+# only the other pyranometers witness — 2018-08-21..23 and 2018-10-21..23 among
+# them, contiguous blocks carrying up to 118 deep-night PAR samples each. The
+# channels do not share an outage, so any one of them can be the only survivor
+# of a shifted day. Longwave is deliberately absent: a pyrgeometer reads
+# 300-400 W/m2 all night by design, so the same threshold there would flag the
+# entire record.
+NIGHT_CORRUPTION_COLUMNS = ("Sw_dw", "Sw_dif", "Sw_par", "Sw_up")
+NIGHT_CORRUPTION_ELEVATION_DEG = -10.0
+NIGHT_CORRUPTION_FLUX_WM2 = 50.0
+NIGHT_CORRUPTION_MIN_SAMPLES = 3
+
+# Channels the mask covers: every shortwave stream, whose meaning depends
+# entirely on the hour that is wrong, plus ``Net_CNR1``. The net is here because
+# it is NOT an independent measurement — over 729,225 samples its residual
+# against ``Sw_dw - Sw_up + Lw_dw - Lw_up`` never exceeds 8.95 W/m2, so the
+# logger computes it from the four components and masking only the shortwave
+# ones would leave the net radiation on disk still carrying the corrupted
+# contribution.
+NIGHT_CORRUPTION_CHANNELS = (*NIGHT_CORRUPTION_COLUMNS, "Net_CNR1")
+
+# BSRN "physically possible" ceiling for global horizontal irradiance
+# (Long & Shi 2008): Sa * 1.5 * mu0**1.2 + 100. It is the sun's own geometry as
+# the limit, which is what makes it catch what a flat gate cannot — the shipped
+# [-20, 1500] rule fires on 6 samples of the whole record while this one finds
+# 3,077, of which 2,477 carry full daylight irradiance with the sun below the
+# horizon. Deliberately generous where the sun is high (2,150 W/m2 at zenith),
+# so genuine cloud-edge enhancement survives; it only bites at low sun, which is
+# exactly where a shifted clock puts midday values.
+#
+# Applied AFTER the whole-day mask above, which removes the gross episodes. What
+# is left is the milder form of the same fault: an afternoon that declines
+# smoothly and plausibly, an hour or two away from where it happened.
+SOLAR_CONSTANT_WM2 = 1367.0
+IMPOSSIBLE_SHORTWAVE_CHANNELS = ("Sw_dw", "Net_CNR1")
+
+
+def mask_impossible_shortwave(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Blank global irradiance that the sun's position cannot produce.
+
+    Per SAMPLE, unlike :func:`mask_night_corrupted_days`, because this catches
+    the residue rather than the episode. ``Net_CNR1`` follows the same sample for
+    the same reason it follows the day: the logger derives it from the four
+    components, so leaving it would keep the impossible contribution on disk.
+
+    Returns
+    -------
+    tuple
+        The masked frame and a ``{column: samples removed}`` tally.
+    """
+    removed: dict[str, int] = {}
+    if "Sw_dw" not in frame.columns:
+        return frame, removed
+    index = pd.DatetimeIndex(frame.index)
+    mu0 = np.clip(cos_zenith(index, STATION_SITE, STATION_UTC_OFFSET_HOURS), 0.0, None)
+    ceiling = SOLAR_CONSTANT_WM2 * 1.5 * mu0**1.2 + 100.0
+    global_flux = frame["Sw_dw"]
+    impossible = (global_flux.notna() & (global_flux > ceiling)).to_numpy()
+    if not impossible.any():
+        return frame, removed
+    for column in IMPOSSIBLE_SHORTWAVE_CHANNELS:
+        if column not in frame.columns:
+            continue
+        hit = impossible & frame[column].notna().to_numpy()
+        count = int(hit.sum())
+        if count:
+            frame.loc[hit, column] = float("nan")
+            removed[column] = count
+    return frame, removed
+
+
+def night_corrupted_days(
+    frame: pd.DataFrame, columns: Sequence[str] = NIGHT_CORRUPTION_COLUMNS
+) -> list[tuple[str, int]]:
+    """Days whose timestamps are shifted, found by irradiance recorded at night.
+
+    Run this on the UNIFIED frame: the corruption spans instrument eras, so the
+    era-specific raw aliases each witness only part of it.
+
+    A criterion rather than a hand-written window table, for the same reason
+    :func:`unshaded_diffuse_days` is one: 52 dated windows go stale the next time
+    the logger's clock slips, and silently, because the values look ordinary.
+
+    Returns
+    -------
+    list
+        ``(iso date, deep-night samples above the flux floor)``, oldest first.
+        The count is over all channels, so it measures how much of the day is
+        misplaced rather than how one instrument fared.
+    """
+    present = [column for column in columns if column in frame.columns]
+    if not present:
+        return []
+    index = pd.DatetimeIndex(frame.index)
+    deep_night = solar_elevation(index, STATION_SITE, STATION_UTC_OFFSET_HOURS) < (
+        NIGHT_CORRUPTION_ELEVATION_DEG
+    )
+    offending = np.zeros(len(frame), dtype=bool)
+    for column in present:
+        values = frame[column]
+        offending |= (
+            values.notna().to_numpy() & deep_night & (values.to_numpy() > NIGHT_CORRUPTION_FLUX_WM2)
+        )
+    per_day = pd.Series(offending, index=index).groupby(index.date).sum()
+    corrupted = per_day[per_day >= NIGHT_CORRUPTION_MIN_SAMPLES]
+    return [(str(day), int(count)) for day, count in corrupted.items()]
+
+
+def mask_night_corrupted_days(
+    frame: pd.DataFrame, days: Sequence[tuple[str, int]]
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Blank :data:`NIGHT_CORRUPTION_CHANNELS` over every day in ``days``.
+
+    The whole day goes, not the samples the detector fired on: what is wrong is
+    the clock, so the values are real measurements of another hour and the half
+    of the day that still looks plausible is exactly as misplaced as the half
+    that does not.
+
+    Returns
+    -------
+    tuple
+        The masked frame and a ``{column: samples removed}`` tally, in the shape
+        :func:`mask_sentinels` reports.
+    """
+    removed: dict[str, int] = {}
+    if not days:
+        return frame, removed
+    corrupted = {pd.Timestamp(day).normalize() for day, _count in days}
+    within = pd.DatetimeIndex(frame.index).normalize().isin(corrupted)
+    for column in NIGHT_CORRUPTION_CHANNELS:
+        if column not in frame.columns:
+            continue
+        hit = within & frame[column].notna().to_numpy()
+        count = int(hit.sum())
+        if count:
+            frame.loc[hit, column] = float("nan")
+            removed[column] = count
+    return frame, removed
 
 
 def mask_sentinels(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:

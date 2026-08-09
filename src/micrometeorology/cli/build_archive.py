@@ -48,12 +48,18 @@ from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.paths import ensure_dir
 from micrometeorology.sensors.aggregation import aggregate_to_hourly
 from micrometeorology.sensors.archive import (
+    DIFFUSE_RATIO_LIMIT,
     LENTA_MANIFEST,
+    NIGHT_CORRUPTION_FLUX_WM2,
     RAIN_MANIFEST,
     STATUS_COLUMNS,
     ArchiveReport,
     build_five_minute_frame,
+    mask_impossible_shortwave,
+    mask_night_corrupted_days,
     mask_sentinels,
+    night_corrupted_days,
+    unshaded_diffuse_days,
     verify_frame,
 )
 from micrometeorology.sensors.calibration import (
@@ -169,6 +175,21 @@ def run(
     for column, count in sorted(removed.items(), key=lambda item: -item[1])[:8]:
         typer.echo(f"  {column:20s} {count:,}")
 
+    # The window table above is hand-curated, so it goes stale the moment the
+    # shade ring comes off again — and silently, because the column keeps its
+    # name while publishing global irradiance as diffuse. Re-running the
+    # detection criterion on the masked frame reports whatever the table misses.
+    unshaded = unshaded_diffuse_days(qc)
+    if unshaded:
+        typer.echo(
+            f"\n  ! {len(unshaded)} dia(s) com difusa/global de céu limpo acima de "
+            f"{DIFFUSE_RATIO_LIMIT:.2f} fora de INVALID_WINDOWS (anel de sombreamento suspeito):"
+        )
+        for day, ratio in unshaded[:8]:
+            typer.echo(f"    {day}  razao {ratio:.2f}")
+        if strict:
+            raise typer.Exit(code=1)
+
     if settings.sensor_limits:
         # Report which gates actually FIRED before applying them. A limit naming
         # a column the frame does not carry is skipped in silence by
@@ -208,16 +229,46 @@ def run(
             f"  ! sem calibracoes em {calibrations_path}: exportando sem correcao nem unificacao"
         )
 
+    # After the unification, because the 2017 episodes only exist in the unified
+    # column. Radiation recorded in deep night is a clock that slipped, not a
+    # sky: the day is removed whole from the two channels it invalidates, since
+    # the flat gates of default.yaml pass 1313 W/m2 at 04h without blinking and
+    # every statistic downstream then reports the fault as climate.
+    corrupted = night_corrupted_days(qc)
+    qc, shifted = mask_night_corrupted_days(qc, corrupted)
+    qc, impossible = mask_impossible_shortwave(qc)
+    typer.echo(
+        f"\nDias com carimbo de tempo corrompido: {len(corrupted)} "
+        f"({sum(shifted.values()):,} amostras mascaradas em {len(shifted)} colunas)"
+    )
+    if impossible:
+        typer.echo(
+            f"Irradiancia impossivel para a posicao do sol (limite BSRN): "
+            f"{sum(impossible.values()):,} amostras em {len(impossible)} colunas"
+        )
+    for day, count in sorted(corrupted, key=lambda item: -item[1])[:8]:
+        typer.echo(
+            f"  {day}  {count} amostra(s) acima de {NIGHT_CORRUPTION_FLUX_WM2:.0f} W/m2 de madrugada"
+        )
+
     _write(qc, out / "station_5min_qc", output_format)
 
     # The logger's quality flag is text, which no hourly mean can carry. Turning
     # it into the fraction of samples reading OK keeps the information in the
     # hourly frame instead of dropping the only per-row flag the record has.
+    # ``astype(float)`` is what makes the fraction survive: ``aggregate_to_hourly``
+    # keeps only ``select_dtypes(include="number")`` columns, which matches
+    # neither bool nor the object dtype ``.where`` produces once a null appears —
+    # so the derived columns were built and then dropped in silence, and the
+    # hourly frame carried no quality flag at all. ``qc_flag`` is the unified
+    # spelling of the same information and goes the same way.
     hourly_input = qc.copy()
-    for column in STATUS_COLUMNS:
+    for column in (*STATUS_COLUMNS, "qc_flag"):
         if column in hourly_input.columns:
             flag = hourly_input.pop(column)
-            hourly_input[f"{column}_ok_fraction"] = flag.eq("OK").where(flag.notna())
+            hourly_input[f"{column}_ok_fraction"] = (
+                flag.eq("OK").astype("float64").mask(flag.isna())
+            )
 
     hourly = aggregate_to_hourly(
         hourly_input,
@@ -247,6 +298,9 @@ def run(
             for report in reports
         ],
         "sentinels_removed": removed,
+        # Dated, so the episode stays auditable after the samples are gone.
+        "timestamp_corrupted_days": [day for day, _count in corrupted],
+        "timestamp_corruption_masked": shifted,
     }
     report_path = out / "archive_report.json"
     report_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
