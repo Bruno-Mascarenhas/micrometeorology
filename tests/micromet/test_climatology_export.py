@@ -244,3 +244,33 @@ class TestReferenceLinks:
             for text in (*spec.caveats, spec.family_label):
                 cited.update(marker.findall(text))
         assert cited <= set(REFERENCES), sorted(cited - set(REFERENCES))
+
+
+class TestSubsetTotalsAgree:
+    """One recorte, one total. The panel prints several numbers about the same
+    subset, and a reader who adds them up has to arrive where the page says."""
+
+    def test_n_decomposes_into_the_bars_plus_what_fell_outside(self, wind_spec) -> None:
+        """`n == sum(counts) + below + above`, checkable on screen.
+
+        It used to be the binned count alone while the statistics described the
+        whole sample, so the clearness index printed "34,934 observações" next to
+        a maximum of 1.7382 that belongs to no bar.
+        """
+        samples = {"observed_all": np.array([-3.0, 0.5, 1.0, 2.0, 3.0, 999.0])}
+        payload = build_variable_payload(wind_spec, samples, version="v1")
+        subset = payload["subsets"]["observed_all"]
+
+        assert subset["n"] == sum(subset["counts"]) + subset["below"] + subset["above"]
+        assert subset["below"] >= 1
+        assert subset["above"] >= 1
+
+    def test_the_statistics_describe_the_same_sample_n_counts(self, wind_spec) -> None:
+        """The maximum printed beside the bars may lie outside them — that is
+        what `above` is for — but it must belong to the sample `n` counts."""
+        samples = {"observed_all": np.array([0.5, 1.0, 2.0, 999.0])}
+        payload = build_variable_payload(wind_spec, samples, version="v1")
+        subset = payload["subsets"]["observed_all"]
+
+        assert subset["n"] == 4
+        assert subset["stats"]["max"] == 999.0

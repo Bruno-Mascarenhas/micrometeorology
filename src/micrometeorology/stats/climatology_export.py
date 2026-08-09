@@ -811,7 +811,14 @@ def _histogram_subset(
     values = np.asarray(sample, dtype=float)
     binned = dist.histogram(values, spec.edges)
     payload: dict[str, Any] = {
-        "n": binned.n,
+        # The WHOLE subset, so `n == sum(counts) + below + above` is an identity
+        # the reader can check on screen. It used to be the binned count alone
+        # while `stats` described the whole sample, which put three different
+        # totals for one recorte on one panel: the clearness index printed
+        # "34.934 observações" beside a maximum of 1,7382 that belongs to none of
+        # the bars, and beside a fit whose own n was a third number again (the
+        # family cuts at its fitted ceiling, which is legitimate and separate).
+        "n": binned.n + binned.below + binned.above,
         "counts": [int(count) for count in binned.counts],
         "density": _rounded_list(binned.density, _DENSITY_DECIMALS),
         "below": binned.below,
