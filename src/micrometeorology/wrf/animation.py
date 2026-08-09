@@ -62,7 +62,7 @@ def create_webm_from_images(
     """Create a WebM video directly from a list of PNG files.
 
     Uses ``moviepy`` — no GIF intermediary, no ffmpeg CLI dependency.
-    Requires ``pip install labmim-micrometeorology[video]``.
+    Requires the ``video`` optional dependency (``uv sync --extra video``).
 
     Parameters
     ----------
@@ -78,7 +78,9 @@ def create_webm_from_images(
     except ImportError as exc:
         raise ImportError(
             "moviepy is required for WebM creation.  "
-            "Install with: pip install labmim-micrometeorology[video]"
+            "Install with: uv sync --extra video (see the video extra in pyproject: "
+            "moviepy caps pillow below the CVE floor this project pins, so a bare "
+            "pip install of the extra cannot resolve)."
         ) from exc
 
     if not image_paths:
@@ -105,14 +107,16 @@ def gif_to_webm(
 ) -> Path:
     """Convert a GIF to WebM video using moviepy.
 
-    Requires the ``video`` optional dependency (``pip install labmim-micrometeorology[video]``).
+    Requires the ``video`` optional dependency (``uv sync --extra video``).
     """
     try:
         from moviepy import VideoFileClip
     except ImportError as exc:
         raise ImportError(
             "moviepy is required for video conversion.  "
-            "Install with: pip install labmim-micrometeorology[video]"
+            "Install with: uv sync --extra video (see the video extra in pyproject: "
+            "moviepy caps pillow below the CVE floor this project pins, so a bare "
+            "pip install of the extra cannot resolve)."
         ) from exc
 
     gif = Path(gif_path)
