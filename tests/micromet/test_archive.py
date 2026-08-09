@@ -271,3 +271,97 @@ class TestMaskSentinels:
         masked, removed = mask_sentinels(frame)
         assert removed == {}
         assert masked["only_this"].tolist() == [1.0]
+
+
+class TestNightCorruptedDays:
+    """Timestamp-shifted days, found by irradiance recorded in deep night.
+
+    42 such days are measured in docs/arqueologia/qc/med-fault-detection.md, and
+    their consequence was published: the nighttime net-radiation climatology
+    carried values up to 1313 W/m2 with the sun 20 deg below the horizon, which
+    more than doubled the summer standard deviation the page prints.
+    """
+
+    @staticmethod
+    def _frame(values: dict[str, list[float]], stamps: list[str]) -> pd.DataFrame:
+        return pd.DataFrame(values, index=pd.DatetimeIndex(stamps))
+
+    def test_a_clean_day_is_not_flagged(self) -> None:
+        # Local midday, so the sun is up and the flux is ordinary.
+        stamps = [f"2024-06-15 12:{minute:02d}" for minute in (0, 5, 10, 15)]
+        frame = self._frame({"Sw_dw": [800.0, 810.0, 790.0, 805.0]}, stamps)
+
+        assert archive.night_corrupted_days(frame) == []
+
+    def test_deep_night_irradiance_flags_the_day(self) -> None:
+        stamps = [f"2024-06-15 02:{minute:02d}" for minute in (0, 5, 10, 15)]
+        frame = self._frame({"Sw_dw": [600.0, 610.0, 590.0, 605.0]}, stamps)
+
+        flagged = archive.night_corrupted_days(frame)
+
+        assert [day for day, _count in flagged] == ["2024-06-15"]
+        assert flagged[0][1] == 4
+
+    def test_fewer_samples_than_the_floor_is_not_an_episode(self) -> None:
+        """One stray sample is noise; a shifted clock lasts."""
+        stamps = ["2024-06-15 02:00", "2024-06-15 02:05", "2024-06-15 12:00"]
+        frame = self._frame({"Sw_dw": [600.0, 610.0, 800.0]}, stamps)
+
+        assert archive.night_corrupted_days(frame) == []
+
+    def test_a_day_only_the_par_sensor_witnesses_is_still_found(self) -> None:
+        """Keying the detector on Sw_dw alone missed ten real days.
+
+        The shortwave channels do not share an outage, so any one of them can be
+        the only surviving witness of a shifted day — 2018-10-22 carries 118
+        deep-night PAR samples and no global ones at all.
+        """
+        stamps = [f"2018-10-22 02:{minute:02d}" for minute in (0, 5, 10)]
+        frame = self._frame({"Sw_dw": [float("nan")] * 3, "Sw_par": [300.0, 310.0, 290.0]}, stamps)
+
+        assert [day for day, _count in archive.night_corrupted_days(frame)] == ["2018-10-22"]
+
+    def test_longwave_at_night_is_not_corruption(self) -> None:
+        """A pyrgeometer reads 300-400 W/m2 all night by design.
+
+        Including longwave in the detector would flag the entire record.
+        """
+        stamps = [f"2024-06-15 02:{minute:02d}" for minute in (0, 5, 10, 15)]
+        frame = self._frame({"Lw_dw": [380.0] * 4, "Lw_up": [420.0] * 4}, stamps)
+
+        assert archive.night_corrupted_days(frame) == []
+
+    def test_the_mask_takes_the_whole_day_and_the_derived_net_with_it(self) -> None:
+        """The clock is what is wrong, so the plausible-looking half of the day is
+        exactly as misplaced as the half that is not. ``Net_CNR1`` goes too: the
+        logger computes it from the four components, so leaving it would keep the
+        corrupted contribution on disk."""
+        stamps = [
+            "2024-06-15 02:00",
+            "2024-06-15 02:05",
+            "2024-06-15 02:10",
+            "2024-06-15 12:00",  # looks ordinary, same broken clock
+            "2024-06-16 12:00",  # the next day is untouched
+        ]
+        frame = self._frame(
+            {
+                "Sw_dw": [600.0, 610.0, 590.0, 800.0, 850.0],
+                "Sw_par": [300.0, 305.0, 295.0, 400.0, 420.0],
+                "Net_CNR1": [500.0, 510.0, 490.0, 700.0, 720.0],
+                "T": [21.0, 21.1, 21.2, 28.0, 29.0],
+            },
+            stamps,
+        )
+
+        masked, removed = archive.mask_night_corrupted_days(
+            frame.copy(), archive.night_corrupted_days(frame)
+        )
+
+        assert masked["Sw_dw"].iloc[:4].isna().all()
+        assert masked["Sw_par"].iloc[:4].isna().all()
+        assert masked["Net_CNR1"].iloc[:4].isna().all()
+        assert masked["Sw_dw"].iloc[4] == 850.0, "the following day must survive"
+        # Non-radiation channels keep their values: the reading is real, only its
+        # timestamp is wrong, and dropping them would delete good measurements.
+        assert masked["T"].notna().all()
+        assert removed == {"Sw_dw": 4, "Sw_par": 4, "Net_CNR1": 4}
