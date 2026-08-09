@@ -184,8 +184,8 @@ class TestShippedConfigDrivesSpecialAggregation:
         df = pd.DataFrame(
             {
                 "precip": [0.5] * 12,
-                "WD_WXT": [350.0, 10.0] * 6,
-                "WS_WXT": [3.0] * 12,
+                "WD_WXT_Avg": [350.0, 10.0] * 6,
+                "WS_WXT_Avg": [3.0] * 12,
             },
             index=idx,
         )
@@ -199,7 +199,7 @@ class TestShippedConfigDrivesSpecialAggregation:
         )
 
         assert result["precip"].iloc[0] == pytest.approx(6.0), "rain was meaned, not summed"
-        direction = float(result["WD_WXT"].iloc[0])
+        direction = float(result["WD_WXT_Avg"].iloc[0])
         assert direction < 1.0 or direction > 359.0, f"scalar-meaned bearing {direction}"
 
     def test_the_resolved_configs_dir_agrees_with_the_settings_fields(
