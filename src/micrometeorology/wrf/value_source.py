@@ -65,6 +65,22 @@ DERIVED_RADIATION_SOURCES: dict[
     WRFVariable.CLEARNESS_INDEX: (variables.extract_clearness_index, ("SWDOWN", "COSZEN")),
 }
 
+# The wrfout fields each hand-written branch of build_value_frame_source reads.
+# Declared here for the same reason the tuples above are: the extractors call
+# ``get_variable``, which raises ``KeyError`` rather than returning ``None``, so
+# the presence check has to happen before the branch runs. Keep in step with the
+# ``ds.get_variable`` calls in :mod:`micrometeorology.wrf.variables`.
+BESPOKE_VARIABLE_INPUTS: dict[str, tuple[str, ...]] = {
+    WRFVariable.TEMPERATURE: ("T2",),
+    WRFVariable.SKIN_TEMPERATURE: ("TSK",),
+    WRFVariable.PRESSURE: ("PSFC",),
+    WRFVariable.VAPOR: ("Q2",),
+    WRFVariable.RELATIVE_HUMIDITY: ("Q2", "T2", "PSFC"),
+    WRFVariable.RAIN: ("RAINC", "RAINNC"),
+    WRFVariable.WIND: ("U10", "V10"),
+    WRFVariable.WIND_POWER_DENSITY_10M: ("U10", "V10", "T2", "PSFC", "Q2"),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ValueFrameSource:
@@ -110,6 +126,17 @@ def build_value_frame_source(
     Returns ``None`` when the variable is absent from the file, which every
     caller reports as a skipped variable rather than failing the run.
     """
+    # Honour that contract for the bespoke branches too. They reach
+    # ``WRFDataset.get_variable``, which is a bare ``variables[name]`` lookup and
+    # raises ``KeyError`` on an absent field — so a wrfout missing one input
+    # killed the whole CLI with a traceback (skipping every later variable,
+    # every later domain and the video phase) while a missing raw field of the
+    # same kind was skipped with a warning. The derived-radiation branch below
+    # already checks up front; these now do the same.
+    required = BESPOKE_VARIABLE_INPUTS.get(variable_name)
+    if required and not all(dataset.has_variable(field) for field in required):
+        return None
+
     if variable_name == WRFVariable.TEMPERATURE:
         temperature_kelvin, scale_min, scale_max = variables.extract_temperature(dataset)
         return ValueFrameSource(
