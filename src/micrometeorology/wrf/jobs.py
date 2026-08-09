@@ -285,6 +285,16 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
             continue
         time_step_index = step_metadata["index"]
         frame_values = frame_source.frame_for_step(time_step_index)
+        # A step whose whole domain is non-finite is not published at all. The
+        # daylight window is a clock rule, but a value can be undefined inside it
+        # — the clearness index is null wherever cos(z) is below its cutoff, so
+        # every sunrise and sunset step came out with every cell null. Writing it
+        # made the run's two artifacts disagree about the same instant: the
+        # manifest derives `availability` from the files WRITTEN, while the
+        # summary the preview panel reads records only steps with a finite cell.
+        # The site reads the first for its timeline and the second for its panel.
+        if not np.isfinite(np.asarray(frame_values, dtype=float)).any():
+            continue
         formatted_local_time = _format_datetime(step_metadata["datetime_local"])
         output_path = (
             Path(unit.json_dir) / f"{grid_level}_{output_variable_id}_{time_step_index:03d}.json"
@@ -394,7 +404,12 @@ def _run_time_metadata(ds: WRFDataset) -> tuple[str | None, int | None]:
         return None, None
 
 
-_TIMESTEP_FILE_RE = re.compile(r"^(D\d{2})_([A-Z0-9_]+)_(\d{3})\.json$")
+# `{i:03d}` is a MINIMUM width, so step 1000 is written as `_1000.json`. Matching
+# exactly three digits made the scanner disagree with the writer past that point:
+# those files contributed to neither the timeline nor `availability`, so
+# `index_max` was published as 999 while `features.cell_series.index_max` (taken
+# from the step count) reported the truth, and the site's slider hid the frames.
+_TIMESTEP_FILE_RE = re.compile(r"^(D\d{2})_([A-Z0-9_]+)_(\d{3,})\.json$")
 
 
 def _compress_index_ranges(indices: set[int]) -> list[list[int]]:
