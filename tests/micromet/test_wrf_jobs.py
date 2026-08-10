@@ -930,3 +930,25 @@ def test_availability_is_the_intersection_across_domains(tmp_path):
     assert manifest["availability"] == {"KT": [[1, 2], [4, 4]]}, (
         "index 3 is missing from D02 and must not be advertised for any domain"
     )
+
+
+def test_a_value_past_the_int32_series_range_fails_instead_of_clipping():
+    """Clipping gave an unrepresentable value a representation, silently.
+
+    The per-step JSON and the summary published the true number while the
+    series the site Range-requests for the same cell published the ceiling --
+    three artifacts of one run disagreeing, with nothing saying which was real.
+    """
+    accumulator = jobs._SiteArtifactAccumulator(n_steps=2)
+    beyond = (jobs._SERIES_INT_MAX / jobs.SERIES_SCALE) * 10
+
+    with pytest.raises(ValueError, match="int32 series"):
+        accumulator.add(0, np.array([1.0, beyond]), "01/01/2024 00:00:00")
+
+
+def test_an_ordinary_magnitude_still_encodes():
+    accumulator = jobs._SiteArtifactAccumulator(n_steps=1)
+
+    accumulator.add(0, np.array([1.5, -2.25]), "01/01/2024 00:00:00")
+
+    assert accumulator.means[0] == pytest.approx(-0.38, abs=0.01)

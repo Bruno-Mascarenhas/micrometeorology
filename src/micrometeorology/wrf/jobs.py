@@ -216,10 +216,20 @@ class _SiteArtifactAccumulator:
         if self._matrix is None:
             self._matrix = np.full((flat.size, self.n_steps), SERIES_MISSING, dtype="<i4")
         finite = np.isfinite(flat)
+        scaled = np.rint(flat[finite] * SERIES_SCALE)
+        # Refused rather than clipped. The matrix is int32 hundredths, so a value
+        # past +-21,474,836.47 has no representation — and clipping silently gave
+        # it one, leaving the per-step JSON and the summary publishing the true
+        # number while the series the site reads for the same cell published the
+        # ceiling. A magnitude that large is a broken field, not a measurement.
+        if scaled.size and (scaled.min() <= SERIES_MISSING or scaled.max() > _SERIES_INT_MAX):
+            extreme = flat[finite][np.argmax(np.abs(scaled))]
+            raise ValueError(
+                f"step {index}: {extreme:g} exceeds what the int32 series can carry "
+                f"(+-{_SERIES_INT_MAX / SERIES_SCALE:,.2f}); the field is broken, not extreme"
+            )
         column = np.full(flat.size, SERIES_MISSING, dtype="<i4")
-        column[finite] = np.clip(
-            np.rint(flat[finite] * SERIES_SCALE), SERIES_MISSING + 1, _SERIES_INT_MAX
-        ).astype("<i4")
+        column[finite] = scaled.astype("<i4")
         self._matrix[:, index] = column
         if finite.any():
             valid = flat[finite]
@@ -423,7 +433,12 @@ def _compress_index_ranges(indices: set[int]) -> list[list[int]]:
     return runs
 
 
-def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> Path | None:
+def write_run_manifest(
+    json_dir: str | Path,
+    results: Sequence[UnitResult],
+    requested_variables: Sequence[str] = (),
+    covers_every_variable: bool = True,
+) -> Path | None:
     """Write ``manifest.json`` into *json_dir* after a generation run.
 
     The site front-end fetches this tiny file with ``Cache-Control: no-cache``
@@ -520,6 +535,14 @@ def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> P
         per_variable: dict[str, list[set[int]]] = {}
         for (_domain, var), indices in var_indices.items():
             per_variable.setdefault(var, []).append(indices)
+        # A variable the caller asked for but that wrote nothing gets an empty
+        # set, so a narrower re-run publishes "no steps this run" instead of
+        # omitting the key. An omitted key reads as "full range" to the page,
+        # which then keeps serving the PREVIOUS run's frames under the freshly
+        # bumped version — the fixed output names are still on disk.
+        for requested in requested_variables:
+            output_id = VARIABLE_NETCDF_MAP.get(requested, requested.upper())
+            per_variable.setdefault(output_id, [set()])
         availability = {
             var: _compress_index_ranges(shared)
             for var, shared in sorted(
@@ -538,7 +561,13 @@ def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> P
         # read at the wrong byte offsets, not merely stale. Only vouch for the
         # artifacts when every unit both succeeded and found its variable (the
         # site falls back to the per-step JSONs otherwise).
-        run_clean = not any(r.error or r.missing_variables for r in results)
+        # ``covers_every_variable`` is the other half: the templates below are
+        # wildcards over EVERY variable of the directory, so a run restricted to
+        # a subset would vouch for the artifacts of the ones it did not touch —
+        # last run's matrices, under this run's freshly bumped version.
+        run_clean = covers_every_variable and not any(
+            r.error or r.missing_variables for r in results
+        )
         features: dict = {}
         if have_summary and run_clean:
             features["domain_summary"] = {

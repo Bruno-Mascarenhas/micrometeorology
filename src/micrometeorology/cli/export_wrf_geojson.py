@@ -271,7 +271,9 @@ def run(
     for result in results:
         for warning in result.warnings:
             typer.echo(f"  ⚠ {warning}")
-    manifest_path = jobs.write_run_manifest(output_dir, results)
+    manifest_path = jobs.write_run_manifest(
+        output_dir, results, var_list, covers_every_variable=set(var_list) >= set(DEFAULT_VARS)
+    )
     if manifest_path:
         typer.echo(f"✓ Manifest: {manifest_path}")
     step_count = 0
