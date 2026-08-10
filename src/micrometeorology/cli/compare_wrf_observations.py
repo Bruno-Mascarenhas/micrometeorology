@@ -64,10 +64,28 @@ def run(
                 param_hint=label,
             )
 
+    # Naming the two column sets, and exiting non-zero. The two real operational
+    # products share no column names at all, so the ordinary way to meet this is
+    # a rename — and a silent success with no artifact written reads, in a cron
+    # log, exactly like a comparison that ran.
+    shared = sorted(set(df_obs.columns) & set(df_model.columns))
+    if not shared:
+        raise typer.BadParameter(
+            f"no column name is common to the two files, so nothing can be compared.\n"
+            f"  {Path(obs).name}: {', '.join(map(str, df_obs.columns))}\n"
+            f"  {Path(model).name}: {', '.join(map(str, df_model.columns))}",
+            param_hint="--obs/--model",
+        )
+
     paired = pair_dataframes(df_obs, df_model, tolerance=tolerance)
     if paired.empty:
-        typer.echo("Warning: No overlapping data found")
-        return
+        raise typer.BadParameter(
+            f"the files share {len(shared)} column(s) ({', '.join(shared)}) but no timestamp "
+            f"pair falls within {tolerance}. Observations span "
+            f"{df_obs.index.min()} .. {df_obs.index.max()}; model spans "
+            f"{df_model.index.min()} .. {df_model.index.max()}.",
+            param_hint="--tolerance",
+        )
 
     # ``pair_dataframes`` merges LEFT, so the frame keeps one row per observation
     # whether or not a model row fell inside --tolerance. Printing only its length
