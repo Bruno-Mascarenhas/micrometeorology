@@ -101,8 +101,18 @@ def _find_overlapping_pair(
     Each range is ``(label, start, end)`` with inclusive ``[start, end]``.
     Sorting by ``start`` makes a single adjacent-pair scan sufficient: if any
     two ranges overlap, two consecutive ones (in start order) also overlap.
+
+    A range whose resolved start falls after its resolved end is EMPTY and is
+    dropped first. That is not a malformed record: an open-ended one inherits the
+    dataset's own first timestamp, so a record that closes before the data begins
+    resolves to ``[dataset-start, its own end]`` with the two inverted, and it
+    simply does not apply to this dataset. Counting it as an interval made every
+    later record "overlap" it and aborted the run — which is why
+    ``labmim-sensor-process`` could not read a file whose period starts after any
+    calibration's ``end_date``, the ordinary case for a recent logger table. The
+    application path already treats it correctly: its mask is empty.
     """
-    ordered = sorted(ranges, key=lambda item: item[1])
+    ordered = sorted((item for item in ranges if item[1] <= item[2]), key=lambda item: item[1])
     for earlier, later in itertools.pairwise(ordered):
         # earlier.start <= later.start by the sort; the ranges overlap iff
         # later.start falls on or before earlier's inclusive end.

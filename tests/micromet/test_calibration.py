@@ -1,5 +1,7 @@
 """Tests for calibration application."""
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -252,3 +254,83 @@ class TestOverlapGuard:
         ]
         with pytest.raises(ValueError, match="Overlapping sensor-switch mappings"):
             unify_sensor_columns(df, switches)
+
+
+class TestARecordThatClosesBeforeTheDataBegins:
+    """An open-ended record inherits the DATASET's first timestamp.
+
+    So a record that closes before the data starts resolves to
+    ``[dataset-start, its own end]`` with the two inverted. It covers nothing and
+    simply does not apply — but counting it as an interval made every later
+    record "overlap" it, and the guard aborted the run.
+
+    This is the ordinary case for a recent logger table, and it made
+    ``labmim-sensor-process`` unable to read ``data/LBM_lenta_2025.dat`` at all:
+    the shipped CMP21 record ends 2019-10-12 and that file begins 2025-05-14.
+    """
+
+    @staticmethod
+    def _frame() -> pd.DataFrame:
+        index = pd.date_range("2025-05-14", periods=48, freq="h")
+        return pd.DataFrame({"CMP21_Wm2_Avg": np.full(48, 100.0)}, index=index)
+
+    def test_the_empty_record_does_not_raise_a_spurious_overlap(self) -> None:
+        calibrations: list[dict[str, Any]] = [
+            # Closes six years before this frame starts: empty here.
+            {
+                "column": "CMP21_Wm2_Avg",
+                "end_date": "2019-10-12",
+                "factor": None,
+                "description": "not installed yet",
+            },
+            # The one that actually applies.
+            {
+                "column": "CMP21_Wm2_Avg",
+                "start_date": "2019-10-13",
+                "factor": 0.985,
+                "description": "sensitivity correction",
+            },
+        ]
+
+        result = apply_calibrations(self._frame().copy(), calibrations)
+
+        assert result["CMP21_Wm2_Avg"].notna().all()
+        assert result["CMP21_Wm2_Avg"].iloc[0] == pytest.approx(98.5)
+
+    def test_a_genuine_overlap_is_still_refused(self) -> None:
+        """The guard must not be weakened: two records that really do cover the
+        same day are still a configuration error."""
+        # Both inside the 48-hour frame, so both resolve to real intervals, and
+        # they share 2025-05-14: a genuine configuration error.
+        calibrations: list[dict[str, Any]] = [
+            {
+                "column": "CMP21_Wm2_Avg",
+                "start_date": "2025-05-14",
+                "end_date": "2025-05-14",
+                "factor": 1.0,
+                "description": "a",
+            },
+            {
+                "column": "CMP21_Wm2_Avg",
+                "start_date": "2025-05-14",
+                "factor": 2.0,
+                "description": "b",
+            },
+        ]
+
+        with pytest.raises(ValueError, match="Overlapping"):
+            apply_calibrations(self._frame().copy(), calibrations)
+
+    def test_the_shipped_calibrations_load_against_a_recent_file(self) -> None:
+        """The end-to-end shape of the bug: the real config against a 2025 frame."""
+        from micrometeorology.common.config import get_settings
+        from micrometeorology.sensors.calibration import load_calibrations
+
+        settings = get_settings()
+        path = settings.configs_dir / "calibrations.yaml"
+        if not path.is_file():  # pragma: no cover - only in a stripped checkout
+            pytest.skip("shipped calibrations not present")
+
+        result = apply_calibrations(self._frame().copy(), load_calibrations(path))
+
+        assert len(result) == 48
