@@ -409,6 +409,17 @@ class TestExporter:
         assert model_last > station_last, "the model's forward extent must publish"
         assert model_last <= pd.Timestamp(window["end"])
 
+        # The STATION's hourly layer still stops at its own last complete hour.
+        # Trimming against the window's end instead published the station's
+        # trailing PARTIAL hour as a full hourly mean -- an average over however
+        # many minutes the logger had written, drawn beside hours built from
+        # twelve samples, three days inside a span the station never reached.
+        hourly_layer = temperature["layers"]["hourly"]
+        hourly_last = pd.Timestamp(hourly_layer["axis"]["start"]) + pd.Timedelta(
+            minutes=hourly_layer["axis"]["step_minutes"] * (hourly_layer["axis"]["count"] - 1)
+        )
+        assert hourly_last <= station_last - pd.Timedelta(hours=1)
+
     def test_station_end_is_measured_inside_the_window_not_in_the_archive(
         self, archive: Path, tmp_path: Path
     ) -> None:

@@ -70,10 +70,13 @@ HOURLY_CADENCE = "h"
 # precipitation needs three so the 0.254 mm tipping-bucket quantum survives the
 # round trip; irradiance is integer because a tenth of a W/m2 is noise.
 _DECIMALS = {
-    "°C": 2,
+    # One decimal, which is what the page renders (``unitDigits``). Publishing
+    # two put a digit in the CSV download that the chart it came from does not
+    # show, so a reader comparing the two saw them disagree at the last place.
+    "°C": 1,
     "%": 1,
-    "hPa": 2,
-    "m/s": 2,
+    "hPa": 1,
+    "m/s": 1,
     "°": 1,
     "mm": 3,
     # Integer, as the comment above has always said and as the page has always
