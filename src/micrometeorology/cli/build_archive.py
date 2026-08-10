@@ -194,6 +194,15 @@ def run(
         if strict:
             raise typer.Exit(code=1)
 
+    # Declared before the branches that fill them: every one is conditional, and
+    # the report has to be able to say "this stage removed nothing" rather than
+    # omit the key.
+    fired: dict[str, int] = {}
+    absent: list[str] = []
+    gaps: list[tuple[str, str, pd.Timestamp, pd.Timestamp]] = []
+    net_gained = net_dropped = 0
+    invalidated: dict[str, int] = {}
+
     if settings.sensor_limits:
         # Report which gates actually FIRED before applying them. A limit naming
         # a column the frame does not carry is skipped in silence by
@@ -206,9 +215,7 @@ def run(
         ]
         qc = apply_physical_limits(qc, settings.sensor_limits)
         cut = before - qc.notna().sum()
-        fired: dict[str, int] = {
-            str(column): int(count) for column, count in cut.items() if int(count) > 0
-        }
+        fired = {str(column): int(count) for column, count in cut.items() if int(count) > 0}
         typer.echo(
             f"\nLimites fisicos: {len(settings.sensor_limits)} declarados, "
             f"{len(fired)} dispararam, {sum(fired.values()):,} amostras removidas"
@@ -224,7 +231,15 @@ def run(
     calibrations_path = settings.configs_dir / "calibrations.yaml"
     sources: dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]] = {}
     if calibrations_path.is_file():
+        before_calibration = qc.notna().sum()
         qc = apply_calibrations(qc, load_calibrations(calibrations_path))
+        # A `factor: null` record NaNs its whole window, which is a removal like
+        # any other and was the last stage missing from the tally.
+        invalidated = {
+            str(column): int(count)
+            for column, count in (before_calibration - qc.notna().sum()).items()
+            if int(count) > 0
+        }
         # This is the step the sensor pipeline never took: without it the
         # sensor_switches block parses and does nothing, and every era-spanning
         # variable has to be reassembled by hand downstream.
@@ -329,10 +344,24 @@ def run(
             }
             for report in reports
         ],
+        # Every stage that removes a sample reports here, so the four tallies
+        # sum to the raw-to-QC delta. They used to be printed and discarded:
+        # the report accounted for 974,103 of the 1,206,977 samples the QC step
+        # actually removed, and the difference was recoverable only from a
+        # console log nobody keeps.
         "sentinels_removed": removed,
+        "physical_limits_removed": fired,
+        "physical_limits_absent_columns": absent,
+        "calibration_invalidated": invalidated,
+        "impossible_shortwave_removed": impossible,
         # Dated, so the episode stays auditable after the samples are gone.
         "timestamp_corrupted_days": [day for day, _count in corrupted],
         "timestamp_corruption_masked": shifted,
+        "uncalibrated_mapping_windows": [
+            {"unified": unified, "column": column, "start": str(start), "end": str(end)}
+            for unified, column, start, end in gaps
+        ],
+        "net_radiation_recomposed": {"gained": net_gained, "dropped": net_dropped},
     }
     report_path = out / "archive_report.json"
     report_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
