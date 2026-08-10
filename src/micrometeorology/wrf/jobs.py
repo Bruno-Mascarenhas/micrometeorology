@@ -198,6 +198,7 @@ class _SiteArtifactAccumulator:
         self.n_steps = n_steps
         self._matrix: NDArray | None = None
         self.indices: list[int] = []
+        self.finite_cells: list[int] = []
         self.date_times: list[str] = []
         self.means: list[float] = []
         self.mins: list[float] = []
@@ -235,6 +236,7 @@ class _SiteArtifactAccumulator:
             valid = flat[finite]
             self.indices.append(index)
             self.date_times.append(date_str)
+            self.finite_cells.append(int(finite.sum()))
             self.means.append(round(float(valid.mean()), 2))
             self.mins.append(round(float(valid.min()), 2))
             self.maxs.append(round(float(valid.max()), 2))
@@ -261,6 +263,13 @@ class _SiteArtifactAccumulator:
             "mean": self.means,
             "min": self.mins,
             "max": self.maxs,
+            # The denominator of every mean above. It is not the cell count and
+            # it is not constant: the clearness index masks cells by solar
+            # geometry, so its domain mean at sunrise is taken over a fraction
+            # of the grid and at noon over all of it, and the series read like
+            # a physical trend when part of it is the shrinking sample.
+            "finite_cells": self.finite_cells,
+            "cells": self._matrix.shape[0] if self._matrix is not None else 0,
         }
         summary_path = _atomic_json_dump(Path(json_dir) / f"{stem}.summary.json", summary)
         return [str(series_path), summary_path]
