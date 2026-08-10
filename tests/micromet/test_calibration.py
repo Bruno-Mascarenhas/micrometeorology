@@ -334,3 +334,57 @@ class TestARecordThatClosesBeforeTheDataBegins:
         result = apply_calibrations(self._frame().copy(), load_calibrations(path))
 
         assert len(result) == 48
+
+
+class TestACalibrationSurvivesAColumnRename:
+    """A record keyed on a column name dies when the logger renames the channel.
+
+    The Eppley PSP's post-2019 sensitivity correction sat in the config for seven
+    years naming only the pre-v11 spelling ``PSP1_Wm2_Avg``. The logger renamed
+    the channel to ``PSP_Wm2_Avg`` on 2019-03-15 — a rename the sensor_switches
+    block in the same file documents — so the correction reached 2019-02-26 and
+    stopped. The PSP is the diffuse sensor of the current operational era, so the
+    published diffuse ran 8.5% low and nothing said a word: the record was
+    declared, it simply matched nothing.
+    """
+
+    def test_both_spellings_of_the_pyranometer_are_calibrated(self) -> None:
+        from micrometeorology.common.config import get_settings
+        from micrometeorology.sensors.calibration import load_calibrations
+
+        settings = get_settings()
+        path = settings.configs_dir / "calibrations.yaml"
+        if not path.is_file():  # pragma: no cover - only in a stripped checkout
+            pytest.skip("shipped calibrations not present")
+        records = load_calibrations(path)
+
+        factors = {
+            record["column"]: record["factor"]
+            for record in records
+            if record["column"] in {"PSP1_Wm2_Avg", "PSP_Wm2_Avg"}
+            and record.get("start_date", "") >= "2019"
+        }
+
+        assert "PSP_Wm2_Avg" in factors, "the renamed channel carries no calibration"
+        assert factors["PSP_Wm2_Avg"] == factors["PSP1_Wm2_Avg"], (
+            "same instrument, same programmed sensitivity: the correction must match"
+        )
+
+    def test_a_record_that_matches_nothing_is_reported(self, caplog) -> None:
+        """'Declared' and 'applied' must be distinguishable in the output."""
+        index = pd.date_range("2025-01-01", periods=4, freq="h")
+        frame = pd.DataFrame({"PSP_Wm2_Avg": [1.0, 2.0, 3.0, 4.0]}, index=index)
+        records: list[dict[str, Any]] = [
+            {
+                "column": "PSP_Wm2_Avg",
+                "start_date": "2019-01-01",
+                "end_date": "2019-12-31",
+                "factor": 2.0,
+                "description": "window with no data here",
+            }
+        ]
+
+        with caplog.at_level("WARNING"):
+            apply_calibrations(frame.copy(), records)
+
+        assert "matched no populated sample" in caplog.text

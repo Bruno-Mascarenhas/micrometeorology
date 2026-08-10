@@ -57,6 +57,22 @@ calibrations:
     factor: 1.0926892950 # 8.37 / 7.66
     description: "PSP1 post-2019 sensitivity: 8.37 / 7.66"
 
+  # MESMO INSTRUMENTO, outra grafia. O logger renomeou o canal PSP1_* -> PSP_*
+  # na troca de programa v11 (2019-03-15), como o bloco sensor_switches abaixo
+  # já documenta. A calibração acima só nomeia a grafia antiga, então valia até
+  # 2019-02-26 e nunca voltou a ser aplicada — em 344.430 amostras de
+  # PSP_Wm2_Avg a razão qc/bruto é exatamente 1,0, contra {0,938; 1,093} na
+  # grafia anterior. Que a renomeação é cosmética está no próprio dado: o
+  # multiplicador programado mV->W/m2 é 119,474 = 1000/8,37 nas DUAS grafias em
+  # todos os anos, ou seja o logger seguiu usando a sensibilidade 8,37 e a
+  # correção 8,37/7,66 continua devida. O PSP é o sensor de difusa da era
+  # operacional atual (v22), então a difusa publicada saía ~8,5% baixa.
+  - column: PSP_Wm2_Avg
+    start_date: "2019-03-15"
+    end_date: null
+    factor: 1.0926892950 # 8.37 / 7.66
+    description: "PSP post-2019 sensitivity: 8.37 / 7.66 (PSP1 renamed in v11)"
+
 # ==============================================================================
 # Sensor switches — WHICH RAW COLUMN CARRIES EACH VARIABLE, AND WHEN
 # ==============================================================================

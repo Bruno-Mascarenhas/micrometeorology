@@ -195,6 +195,21 @@ def apply_calibrations(
 
         mask = (df.index >= start) & (df.index <= end)
 
+        # "Declared" and "applied" have to be distinguishable. A record whose
+        # window selects no populated row corrects nothing, and until this
+        # warning existed that was indistinguishable from a record that worked:
+        # the Eppley PSP's post-2019 sensitivity correction sat in the config for
+        # seven years naming only the pre-rename column spelling, so the live
+        # diffuse sensor published ~8.5% low and no output said a word.
+        if not bool((mask & df[col].notna()).any()):
+            logger.warning(
+                "calibration for %r [%s -> %s] matched no populated sample (%s)",
+                col,
+                start.date(),
+                end.date(),
+                desc,
+            )
+
         if factor is None:
             # Null factor means the data is invalid for this period
             df.loc[mask, col] = np.nan
