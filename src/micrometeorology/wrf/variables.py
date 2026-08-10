@@ -48,6 +48,38 @@ def materialize_2d(value: NDArray) -> NDArray:
     return np.asarray(squeezed)
 
 
+def blank_uninitialised_radiation(values: NDArray, glw: NDArray) -> NDArray:
+    """NaN every step at which WRF had not yet called the radiation scheme.
+
+    On a cold start — the daily operational run — the first output step is
+    written before radiation runs, so ``GLW`` is identically zero over the whole
+    domain. Downwelling longwave is never zero over land, so that is an
+    unambiguous marker rather than a threshold. Every GLW-derived field at that
+    step is then physically impossible: net radiation reads about -416 W/m2
+    domain-mean, sky emissivity exactly 0.00, and upwelling longwave sits ~18
+    W/m2 low with the reflected ``(1 - eps) * GLW`` term missing.
+
+    Blanking here rather than at the writer is what makes the two populations
+    the same set: :func:`percentile_scale_bounds` already drops step 0 from the
+    colour-scale sample, while the publish gate rejects a frame only when every
+    cell is non-finite — so the frame shipped anyway, carrying a legend computed
+    without it, with 100% of its cells below the legend's own minimum. After
+    this, the gate drops the frame and the domain summary never records it.
+
+    A continuation run (one restarted from a previous forecast) already has its
+    radiation state and is untouched. The shortwave fields are NOT covered: a
+    zero ``SWDOWN`` is what night looks like, so the same test cannot tell
+    uninitialised from dark, and ``DAYLIGHT_ONLY_VARIABLES`` gates them instead.
+    """
+    steps = np.asarray(glw).reshape(np.shape(glw)[0], -1)
+    uninitialised = np.all(steps == 0.0, axis=1)
+    if not uninitialised.any():
+        return values
+    blanked = np.array(values, dtype=np.float64, copy=True)
+    blanked[uninitialised] = np.nan
+    return blanked
+
+
 def percentile_scale_bounds(variable: NDArray) -> tuple[float, float]:
     """Return color-scale bounds ``(low, high)`` for a 3-D variable, skipping the first step.
 
@@ -495,8 +527,9 @@ def compute_clearness_index(swdown: NDArray, coszen: NDArray, eccentricity: NDAr
 
 def extract_upwelling_longwave(ds: WRFDataset) -> tuple[NDArray, float, float]:
     """Extract derived upwelling longwave radiation (W/m2)."""
-    values = compute_upwelling_longwave(
-        ds.get_variable("EMISS"), ds.get_variable("TSK"), ds.get_variable("GLW")
+    glw = ds.get_variable("GLW")
+    values = blank_uninitialised_radiation(
+        compute_upwelling_longwave(ds.get_variable("EMISS"), ds.get_variable("TSK"), glw), glw
     )
     low, high = percentile_scale_bounds(values)
     return values, low, high
@@ -518,8 +551,9 @@ def extract_net_shortwave(ds: WRFDataset) -> tuple[NDArray, float, float]:
 
 def extract_net_longwave(ds: WRFDataset) -> tuple[NDArray, float, float]:
     """Extract derived net longwave radiation (W/m2, positive downward)."""
-    values = compute_net_longwave(
-        ds.get_variable("EMISS"), ds.get_variable("TSK"), ds.get_variable("GLW")
+    glw = ds.get_variable("GLW")
+    values = blank_uninitialised_radiation(
+        compute_net_longwave(ds.get_variable("EMISS"), ds.get_variable("TSK"), glw), glw
     )
     low, high = percentile_scale_bounds(values)
     return values, low, high
@@ -527,12 +561,16 @@ def extract_net_longwave(ds: WRFDataset) -> tuple[NDArray, float, float]:
 
 def extract_net_radiation(ds: WRFDataset) -> tuple[NDArray, float, float]:
     """Extract derived net all-wave radiation (W/m2, positive downward)."""
-    values = compute_net_radiation(
-        ds.get_variable("SWDOWN"),
-        ds.get_variable("ALBEDO"),
-        ds.get_variable("EMISS"),
-        ds.get_variable("TSK"),
-        ds.get_variable("GLW"),
+    glw = ds.get_variable("GLW")
+    values = blank_uninitialised_radiation(
+        compute_net_radiation(
+            ds.get_variable("SWDOWN"),
+            ds.get_variable("ALBEDO"),
+            ds.get_variable("EMISS"),
+            ds.get_variable("TSK"),
+            glw,
+        ),
+        glw,
     )
     low, high = percentile_scale_bounds(values)
     return values, low, high
@@ -540,7 +578,8 @@ def extract_net_radiation(ds: WRFDataset) -> tuple[NDArray, float, float]:
 
 def extract_sky_emissivity(ds: WRFDataset) -> tuple[NDArray, float, float]:
     """Extract derived effective sky emissivity (dimensionless)."""
-    values = compute_sky_emissivity(ds.get_variable("GLW"), ds.get_variable("T2"))
+    glw = ds.get_variable("GLW")
+    values = blank_uninitialised_radiation(compute_sky_emissivity(glw, ds.get_variable("T2")), glw)
     low, high = _finite_scale_bounds(values, (0.0, 1.0))
     return values, low, high
 

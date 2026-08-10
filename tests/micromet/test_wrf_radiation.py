@@ -1001,3 +1001,51 @@ def test_clearness_index_bounds_survive_an_all_night_file(tmp_path):
         assert np.isfinite(source.scale_min)
         assert np.isfinite(source.scale_max)
         assert np.isnan(source.frame_for_step(3)).all()
+
+
+def test_the_cold_start_step_is_not_published_at_all(tmp_path):
+    """WRF writes step 0 before it calls radiation, so GLW is identically zero.
+
+    Every GLW-derived field is then physically impossible there: net radiation
+    reads -416 W/m2 domain-mean against a -60..+604 range for every other step,
+    sky emissivity exactly 0.00 against a 0.72-0.99 legend, and upwelling
+    longwave sits ~18 W/m2 low with the reflected (1 - eps) * GLW term missing.
+    Measured on the real 2026-05-03 operational run, D02_RNET_000.json had
+    100% of its 9,801 cells below its own legend's minimum -- because the
+    colour-scale population already excluded step 0 while the publish gate did
+    not, so the two halves of the same artifact disagreed.
+    """
+    wrf = tmp_path / "wrfout_d02_cold_start.nc"
+    _write_radiation_wrf_file(wrf)
+    with netCDF4.Dataset(wrf, "a") as ds:
+        ds.variables["GLW"][0, :, :] = 0.0  # the uninitialised radiation state
+
+    with WRFDataset(wrf) as ds:
+        for variable in (
+            WRFVariable.LWUP,
+            WRFVariable.LWNET,
+            WRFVariable.RNET,
+            WRFVariable.SKY_EMISSIVITY,
+        ):
+            source = build_value_frame_source(ds, variable)
+            assert source is not None, variable
+            assert np.isnan(source.frame_for_step(0)).all(), (
+                f"{variable}: the cold-start frame must be entirely no-value so the "
+                "publish gate drops it and the domain summary never records it"
+            )
+            assert np.isfinite(source.frame_for_step(1)).any(), (
+                f"{variable}: only the uninitialised step goes"
+            )
+
+
+def test_a_continuation_run_keeps_its_first_step(tmp_path):
+    """A run restarted from a previous forecast already has its radiation state."""
+    wrf = tmp_path / "wrfout_d02_continuation.nc"
+    _write_radiation_wrf_file(wrf)
+
+    with WRFDataset(wrf) as ds:
+        assert ds.get_variable("GLW")[0].max() > 0.0, "the fixture must not be a cold start"
+        for variable in (WRFVariable.LWUP, WRFVariable.RNET, WRFVariable.SKY_EMISSIVITY):
+            source = build_value_frame_source(ds, variable)
+            assert source is not None, variable
+            assert np.isfinite(source.frame_for_step(0)).any(), variable
