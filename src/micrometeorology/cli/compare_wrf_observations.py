@@ -69,7 +69,16 @@ def run(
         typer.echo("Warning: No overlapping data found")
         return
 
-    typer.echo(f"Paired {len(paired)} time steps")
+    # ``pair_dataframes`` merges LEFT, so the frame keeps one row per observation
+    # whether or not a model row fell inside --tolerance. Printing only its length
+    # beside the metric table invited the reader to use it as the sample size,
+    # which it is not: each variable's own denominator is the ``n`` row below.
+    model_cols = [c for c in paired.columns if c.endswith("_model")]
+    matched = int(paired[model_cols].notna().any(axis=1).sum()) if model_cols else 0
+    typer.echo(
+        f"Paired {len(paired)} time steps, {matched} with a model value within {tolerance} "
+        "(per-variable sample sizes are the 'n' row of the table)"
+    )
 
     metrics_df = compare_all_variables(paired)
     metrics_path = out_dir / "metrics_summary.csv"

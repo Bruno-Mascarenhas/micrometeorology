@@ -135,7 +135,7 @@ class TestCompareAllVariables:
 
         table = compare_all_variables(paired)
 
-        assert list(table.index) == list(ALL_METRICS)
+        assert list(table.index) == ["n", *ALL_METRICS]
         assert list(table.columns) == ["RH", "T"]
         assert table.loc["RMSE", "T"] == pytest.approx(1.0)
         assert table.loc["MBE", "T"] == pytest.approx(1.0)
@@ -254,3 +254,43 @@ class TestWindDirectionIsScoredCircularly:
         for name in ("R²", "r", "d", "IOA", "NRMSE"):
             assert np.isnan(bearing[name]), name
             assert np.isfinite(speed[name]), name
+
+
+class TestTheSampleSizeIsPublished:
+    """The printed row count is not the denominator of any metric.
+
+    ``pair_dataframes`` merges LEFT, so the frame keeps one row per observation
+    even when no model row matched, and each column then loses its own gaps.
+    Measured on the real pair (station archive vs. the operational WRF run) the
+    frame has 83,857 rows while pressure is scored over 12,678 — a reader taking
+    the printed count as the sample size is out by 6.6x.
+    """
+
+    @staticmethod
+    def _paired() -> pd.DataFrame:
+        index = pd.date_range("2020-01-01", periods=6, freq="h")
+        return pd.DataFrame(
+            {
+                "T_obs": [1.0, 2.0, 3.0, 4.0, np.nan, np.nan],
+                "T_model": [1.5, 2.5, 3.5, 4.5, 5.5, np.nan],
+                "pressure_obs": [1010.0, 1011.0, 1012.0, 1013.0, 1014.0, 1015.0],
+                "pressure_model": [1010.5, 1011.5, np.nan, np.nan, np.nan, np.nan],
+            },
+            index=index,
+        )
+
+    def test_n_is_per_variable_not_the_row_count(self):
+        table = compare_all_variables(self._paired())
+        assert len(self._paired()) == 6
+        assert table.loc["n", "T"] == 4
+        assert table.loc["n", "pressure"] == 2
+
+    def test_n_is_the_population_the_metrics_used(self):
+        """Reconciliation: the published n must reproduce the published MBE."""
+        paired = self._paired()
+        table = compare_all_variables(paired)
+        finite = paired[["T_obs", "T_model"]].dropna()
+        assert table.loc["n", "T"] == len(finite)
+        assert table.loc["MBE", "T"] == pytest.approx(
+            float((finite["T_model"] - finite["T_obs"]).mean())
+        )

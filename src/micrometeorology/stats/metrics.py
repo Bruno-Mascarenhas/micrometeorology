@@ -36,6 +36,20 @@ def _clean_pairs(obs: NDArray, pred: NDArray) -> tuple[NDArray, NDArray]:
     return obs[mask], pred[mask]
 
 
+def valid_pairs(observed: NDArray, predicted: NDArray) -> int:
+    """Number of pairs that survive the non-finite filter.
+
+    This is the denominator every metric is actually computed over, and it
+    differs per variable — a frame paired by ``merge_asof`` keeps one row per
+    observation whether or not a model row matched, and each column then loses
+    its own gaps. Published beside the metrics so the sample size stays
+    recoverable from the artifact instead of only from a log line.
+    """
+    obs = np.asarray(observed, dtype=float)
+    pred = np.asarray(predicted, dtype=float)
+    return int(np.count_nonzero(np.isfinite(obs) & np.isfinite(pred)))
+
+
 def rmse(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
     """Root Mean Square Error."""
     obs, pred = _clean_pairs(observed, predicted) if clean else (observed, predicted)

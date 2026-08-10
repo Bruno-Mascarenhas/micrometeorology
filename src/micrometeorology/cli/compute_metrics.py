@@ -20,7 +20,7 @@ import typer
 from micrometeorology.common.cli_options import parse_csv
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.stats.comparison import read_dataset
-from micrometeorology.stats.metrics import compute_all, is_circular_column
+from micrometeorology.stats.metrics import compute_all, is_circular_column, valid_pairs
 
 
 class JoinMethod(StrEnum):
@@ -152,9 +152,14 @@ def run(
                     f"{col}: circular quantity — residuals wrapped to [-180, 180); "
                     "R2/r/d/IOA/NRMSE suppressed"
                 )
-            results[col] = compute_all(
-                aligned[a_col].to_numpy(), aligned[b_col].to_numpy(), circular=circular
-            )
+            a_values, b_values = aligned[a_col].to_numpy(), aligned[b_col].to_numpy()
+            # "Aligned N rows" above counts rows, not comparable pairs: every
+            # metric below is computed over the finite ones only, and that count
+            # differs per column. It belongs in the artifact, not just the log.
+            results[col] = {
+                "n": float(valid_pairs(a_values, b_values)),
+                **compute_all(a_values, b_values, circular=circular),
+            }
 
     metrics_df = pd.DataFrame(results)
 

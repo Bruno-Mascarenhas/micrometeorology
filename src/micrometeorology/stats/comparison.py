@@ -12,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
 
-from micrometeorology.stats.metrics import compute_all, is_circular_column
+from micrometeorology.stats.metrics import compute_all, is_circular_column, valid_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +148,9 @@ def compare_variables(
             "R2/r/d/IOA/NRMSE suppressed (an arithmetic mean of bearings is meaningless)",
             variable,
         )
-    return compute_all(obs, mod, circular=circular)
+    # ``n`` leads the record on purpose: it is the denominator of every number
+    # after it, and it is not the row count of *paired_df*.
+    return {"n": float(valid_pairs(obs, mod)), **compute_all(obs, mod, circular=circular)}
 
 
 def compare_all_variables(paired_df: pd.DataFrame) -> pd.DataFrame:
