@@ -34,16 +34,11 @@ def load_calibrations(config_path: str | Path) -> list[dict[str, Any]]:
 def _resolve_inclusive_end(value: Any, fallback: pd.Timestamp) -> pd.Timestamp:
     """Resolve an ``end_date`` config value to an *inclusive* upper bound.
 
-    A **date-only** boundary such as ``"2018-12-31"`` parses to midnight, and
-    ``df.index <= end`` would then drop every sample of the boundary day after
-    ``00:00`` (leaving ``factor: null`` records un-NaN'd there). ``end_date`` is
-    documented as the *last day* the record applies, so a midnight-resolution
-    timestamp is extended to the final nanosecond of that day
-    (``+ 1 day - 1 ns``).
-
-    A value carrying an explicit non-midnight time keeps exact ``<= end``
-    semantics. A falsy value (``None``/empty) returns ``fallback`` unchanged
-    ("until the end of the dataset").
+    ``end_date`` is the *last day* the record applies, but a date-only value such
+    as ``"2018-12-31"`` parses to midnight, so ``<= end`` would drop the boundary
+    day's post-``00:00`` samples. A midnight-resolution timestamp is therefore
+    extended by ``1 day - 1 ns``; an explicit non-midnight time keeps exact
+    ``<= end``, and a falsy value returns *fallback* ("end of the dataset").
     """
     if not value:
         return fallback
@@ -60,11 +55,7 @@ _ResolvedRange = tuple[str, pd.Timestamp, pd.Timestamp]
 
 
 def _describe_record(record: dict[str, Any]) -> str:
-    """Return a one-line identity for a calibration/mapping record.
-
-    Names the entry by column, its configured date range, and (when present)
-    its description, so overlap errors point at the exact offending config rows.
-    """
+    """Return a record's identity — column, date range, description — for error messages."""
     start = record.get("start_date") or "dataset-start"
     end = record.get("end_date") or "dataset-end"
     parts = [str(record["column"]), f"{start} -> {end}"]
@@ -79,9 +70,8 @@ def _resolve_record_range(
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
     """Resolve a record's inclusive ``[start, end]`` bounds against *df*'s index.
 
-    Mirrors the resolution used when the record is applied: an absent
-    ``start_date`` defaults to the first index timestamp and ``end_date`` is
-    resolved to an inclusive upper bound (see :func:`_resolve_inclusive_end`).
+    Must mirror the application path: an absent ``start_date`` defaults to the
+    first index timestamp, ``end_date`` goes through :func:`_resolve_inclusive_end`.
     """
     start = (
         pd.Timestamp(record["start_date"])
@@ -95,24 +85,20 @@ def _resolve_record_range(
 def _find_overlapping_pair(
     ranges: list[_ResolvedRange],
 ) -> tuple[_ResolvedRange, _ResolvedRange, pd.Timestamp, pd.Timestamp] | None:
-    """Return the first overlapping pair of inclusive ranges, or ``None``.
+    """Return the first overlapping pair of inclusive ``(label, start, end)`` ranges.
 
-    Each range is ``(label, start, end)`` with inclusive ``[start, end]``.
-    Sorting by ``start`` makes a single adjacent-pair scan sufficient: if any
-    two ranges overlap, two consecutive ones (in start order) also overlap.
+    Sorting by ``start`` makes a single adjacent-pair scan sufficient: if any two
+    ranges overlap, two consecutive ones do.
 
-    A range whose resolved start falls after its resolved end is EMPTY and is
-    dropped first. That is not a malformed record: an open-ended one inherits the
-    dataset's own first timestamp, so a record that closes before the data begins
-    resolves to ``[dataset-start, its own end]`` with the two inverted and simply
-    does not apply to this dataset — which is the ordinary case for a recent
-    logger table. Counting it as an interval would make every later record
-    "overlap" it. The application path already agrees: its mask is empty.
+    Ranges with ``start > end`` are EMPTY and dropped first. An open-ended record
+    inherits the dataset's own first timestamp, so one that closes before the data
+    begins inverts and simply does not apply here (the application path agrees —
+    its mask is empty); counting it would make every later record "overlap" it.
     """
     ordered = sorted((item for item in ranges if item[1] <= item[2]), key=lambda item: item[1])
     for earlier, later in itertools.pairwise(ordered):
-        # earlier.start <= later.start by the sort; the ranges overlap iff
-        # later.start falls on or before earlier's inclusive end.
+        # Sorted by start, so the pair overlaps iff later's start falls on or
+        # before earlier's inclusive end.
         if later[1] <= earlier[2]:
             overlap_start = later[1]
             overlap_end = min(earlier[2], later[2])
@@ -156,11 +142,9 @@ def apply_calibrations(
 
     Notes
     -----
-    Both ``start_date`` and ``end_date`` are **inclusive at day granularity**.
-    A date-only ``end_date`` (e.g. ``"2018-12-31"``) resolves to midnight but
-    is treated as the last nanosecond of that day, so every sub-daily sample of
-    the boundary day is calibrated (and, for ``factor: null`` records, NaN'd).
-    An ``end_date`` carrying an explicit time keeps exact ``<= end`` semantics.
+    Both dates are **inclusive at day granularity**: a date-only ``end_date``
+    covers every sub-daily sample of the boundary day, while one carrying an
+    explicit time keeps exact ``<= end`` (see :func:`_resolve_inclusive_end`).
 
     Returns
     -------
@@ -192,11 +176,10 @@ def apply_calibrations(
 
         mask = (df.index >= start) & (df.index <= end)
 
-        # "Declared" and "applied" have to be distinguishable: a record whose
-        # window selects no populated row corrects nothing and looks exactly
-        # like one that worked. Known live case — the Eppley PSP's post-2019
-        # sensitivity correction named only the pre-rename column spelling, so
-        # the diffuse sensor published ~8.5% low under an applied-looking record.
+        # "Declared" and "applied" must stay distinguishable: a record selecting
+        # no populated row corrects nothing yet looks like one that worked. Live
+        # case — the Eppley PSP's post-2019 sensitivity correction named only the
+        # pre-rename column spelling, publishing the diffuse sensor ~8.5% low.
         if not bool((mask & df[column].notna()).any()):
             logger.warning(
                 "calibration for %r [%s -> %s] matched no populated sample (%s)",
@@ -248,14 +231,12 @@ def resolve_mapping_windows(
 ) -> dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]]:
     """Which raw column fed each unified name, and over which inclusive window.
 
-    :func:`unify_sensor_columns` *copies* the source column into the alias
-    rather than renaming it, so both survive in the frame. Anything that judges
-    a unified channel unusable therefore has to be able to find the source the
-    value came from, or the same number stays published under the other name.
+    :func:`unify_sensor_columns` *copies* the source into the alias, so both
+    survive: anything that judges a unified channel unusable must reach its
+    source too, or the same number stays published under the other name.
 
-    Returns ``{unified_name: [(source column, start, end), ...]}``, restricted
-    to the mappings whose column is present in *df* and resolved against its
-    index exactly as :func:`unify_sensor_columns` resolves them.
+    Returns ``{unified_name: [(source column, start, end), ...]}`` for mappings
+    whose column is in *df*, resolved exactly as that copy resolves them.
     """
     wanted = set(unified_names)
     windows: dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]] = {}
@@ -279,27 +260,22 @@ def uncalibrated_mapping_windows(
 ) -> list[tuple[str, str, pd.Timestamp, pd.Timestamp]]:
     """Windows where a column feeds a unified series with no calibration covering it.
 
-    "Declared" and "applied" are not the same thing. Two live faults have this
-    shape:
+    "Declared" and "applied" are not the same thing. Two live faults:
 
     - The Eppley PSP's post-2019 sensitivity correction named only the pre-v11
-      column spelling, so the diffuse sensor published ~8.5% low while the
-      record sat in the config looking applied.
+      column spelling, so the diffuse sensor published ~8.5% low.
     - No ``PSP1_Wm2_Avg`` record covers 2016-09-29..2017-12-31, so the published
-      global shortwave takes a 6.2% step at 2018-01-01 — a discontinuity on a
-      date where nothing physical happened, only a file handover.
+      global shortwave steps 6.2% at 2018-01-01 — a file handover, not a physical
+      event.
 
-    Only columns that carry at least one calibration record are considered. A
-    column with none needs none — the logger's own programmed multiplier is its
-    calibration, which is the ordinary case for temperature, humidity and the
-    tipping bucket. What this reports is the other shape: a column calibrated
-    over PART of the window it feeds, which puts a step in the published series
-    at the boundary between the two halves and nowhere in the instrument record.
+    Only columns carrying at least one calibration record are considered: one
+    with none needs none, its calibration being the logger's own programmed
+    multiplier (temperature, humidity, tipping bucket). The reported shape is a
+    column calibrated over PART of the window it feeds, which puts a step in the
+    published series at the boundary and nowhere in the instrument record.
 
     Returns ``(unified name, source column, gap start, gap end)`` per uncovered
-    stretch, oldest first. An empty list means every mapped sample of a
-    calibrated column is either scaled or explicitly invalidated by a
-    ``factor: null`` record.
+    stretch, oldest first; a ``factor: null`` record counts as coverage.
     """
     covered: dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
     for record in calibrations:
@@ -349,11 +325,9 @@ def unify_sensor_columns(
 
     Notes
     -----
-    Mapping date ranges are **inclusive at day granularity**. A date-only
-    ``end_date`` covers the whole boundary day (extended to its last
-    nanosecond), so consecutive mappings that abut on a day boundary leave no
-    unfilled hole for that day; an explicit time keeps exact ``<= end``
-    semantics.
+    Mapping ranges are **inclusive at day granularity**: a date-only ``end_date``
+    covers the whole boundary day, so mappings abutting on a day boundary leave
+    no hole; an explicit time keeps exact ``<= end`` semantics.
     """
     for switch in switches:
         unified_name = switch["unified_name"]

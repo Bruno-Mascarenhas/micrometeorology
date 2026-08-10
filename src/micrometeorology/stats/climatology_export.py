@@ -1,37 +1,33 @@
 """Build and write the ``labmim-climatology-v1`` artifacts the public site reads.
 
-This module is the **producer** for the JSON the climatology page of the
-read-only sibling site repository (``site-labmim``) fetches at runtime, the same
-role :mod:`micrometeorology.wrf.jobs` plays for the WebGIS map data. The consumer
-is external (FTP deploy), so nothing in this repository imports it back.
+**Producer** for the JSON the climatology page of the sibling site repository
+(``site-labmim``) fetches at runtime, as :mod:`micrometeorology.wrf.jobs` is for
+the WebGIS map data. The consumer is external (FTP deploy), so nothing in this
+repository imports it back.
 
 The contract
 ------------
-One ``manifest.json`` plus one file per variable, all inside the directory the
+One ``manifest.json`` plus one file per variable, inside the directory the
 publication declares as ``dataset.paths.climatology`` (``site/Climatologia/``
-today). The page reads the manifest first, then the file for whichever variable
-the reader selects.
+today). The page reads the manifest first, then the selected variable's file.
 
-Everything the page draws is **precomputed here**, including the theoretical
-density curve, so the drawn line provably belongs to the printed parameters
-instead of to a second, divergent implementation of the same estimator in
-JavaScript.
+Everything the page draws is **precomputed here**, the density curve included,
+so the drawn line provably belongs to the printed parameters instead of to a
+second, divergent estimator in JavaScript.
 
-Both the bars and the curve are densities of the **continuous part alone**. A
-point mass — wind calms, dry hours, the humidity saturation clip — is removed
-from the sample by the caller, so the histogram already normalises over what is
-left; scaling the curve by ``1 - sum(atom fractions)`` on top of that would put
-the two on different normalisations and flatten the line against the axis. The
-mass itself is published beside them as a printed probability, which is exactly
-the hybrid density of [[takle1978]] shown as its two pieces.
+Bars and curve are both densities of the **continuous part alone**: the caller
+removes the point mass (wind calms, dry hours, the humidity saturation clip), so
+the histogram already normalises over what is left and scaling the curve by
+``1 - sum(atom fractions)`` on top would put the two on different
+normalisations. The mass is published beside them as a probability — the hybrid
+density of [[takle1978]] shown as its two pieces.
 
 Why the data is not committed
 -----------------------------
-These artifacts derive from the laboratory's own sensor archive, which is not
-public. Like the WRF output they are gitignored in the site repository and
-attached at deploy time; the page degrades to a "not published yet" state when
-the directory is empty, which is what every development checkout and CI run
-sees.
+These artifacts derive from the laboratory's non-public sensor archive. Like the
+WRF output they are gitignored in the site repository and attached at deploy
+time; on an empty directory — every development checkout and CI run — the page
+degrades to a "not published yet" state.
 
 Relationship to the neighbouring modules
 ----------------------------------------
@@ -39,9 +35,9 @@ Relationship to the neighbouring modules
   estimators, distances). This module owns only the *shape of the bytes*.
 - :mod:`micrometeorology.stats.climatology` owns the time groupings that select
   a subset before it reaches here.
-- Preparing the series themselves — merging the archive, masking sentinels,
-  harmonising sensor eras, aggregating to hourly — belongs to the caller
-  (``micrometeorology.cli.export_climatology``), not here.
+- Preparing the series — merging the archive, masking sentinels, harmonising
+  sensor eras, aggregating to hourly — belongs to the caller
+  (``micrometeorology.cli.export_climatology``).
 """
 
 import json
@@ -79,11 +75,10 @@ MANIFEST_FORMAT = "labmim-climatology-v1"
 VARIABLE_FORMAT = "labmim-climatology-variable-v1"
 MANIFEST_FILENAME = "manifest.json"
 
-# Angles on the precomputed wind-rose overlay, from 0 to 360 inclusive. Only the
-# rose needs a free grid: a histogram's curve is sampled at its own bin centres,
-# which is both exact and smaller. 201 samples draw a smooth ring at any width a
-# browser will render, and the production host serves uncompressed, so the count
-# is a byte budget.
+# Angles on the precomputed wind-rose overlay, 0 to 360 inclusive. Only the rose
+# needs a free grid (a histogram's curve is sampled at its own bin centres); 201
+# is smooth at any width a browser renders, and the host serves uncompressed, so
+# the count is a byte budget.
 CURVE_POINTS = 201
 
 # Decimal places per field group. Densities are small numbers whose visual
@@ -97,9 +92,8 @@ _PARAMETER_DECIMALS = 6
 # centred on the compass points).
 ROSE_SECTORS = 16
 
-# Share of the samples the plotted x-window may leave outside on EACH side. The
-# bins are unaffected; this only decides how far the axis is drawn. See
-# _display_range.
+# Share of the samples the plotted x-window may leave outside on EACH side. Only
+# decides how far the axis is drawn; the bins are unaffected. See _display_range.
 _DISPLAY_TAIL = 0.001
 
 
@@ -107,11 +101,10 @@ _DISPLAY_TAIL = 0.001
 class Atom:
     """A point mass reported beside a continuous fit instead of inside it.
 
-    Wind calms, dry hours and the relative-humidity saturation clip are all
-    spikes that no continuous family can represent. Fitting over them biases the
-    estimate (a Weibull shape pulled down by zeros is the classic case), so the
-    caller removes them and this module prints their probability next to the
-    conditional density that the bars and the curve both show.
+    Wind calms, dry hours and the relative-humidity saturation clip are spikes no
+    continuous family can represent, and fitting over them biases the estimate,
+    so the caller removes them and this module prints their probability beside
+    the conditional density the bars and the curve show.
 
     Attributes
     ----------
@@ -121,13 +114,11 @@ class Atom:
         Portuguese caption, printed verbatim.
     fraction:
         Share of the subset the mass holds, in ``[0, 1]``. The denominator is the
-        subset BEFORE the mass was removed, which is not the ``n`` published
-        beside it — that one counts what is left.
+        subset BEFORE removal, not the ``n`` published beside it, which counts
+        what is left.
     count:
-        The mass in samples. Published because the fraction alone cannot be
-        recovered from what else is on screen: multiplying the printed share by
-        the published ``n`` gives the wrong figure, the share being taken over
-        the subset before removal and ``n`` counting what survived.
+        The mass in samples. Those two denominators differ, so printed share
+        times published ``n`` is the wrong figure — hence publishing the count.
     """
 
     id: str
@@ -147,28 +138,25 @@ class VariableSpec:
     label, unit:
         Portuguese caption and unit, printed on the axis and in the tooltip.
     chart:
-        ``"histogram"`` or ``"rose"``. The rose is not a histogram with a
-        different skin: direction is circular, so it carries sector frequencies
-        and circular statistics instead of bins and quantiles.
+        ``"histogram"`` or ``"rose"``. Direction is circular, so a rose carries
+        sector frequencies and circular statistics instead of bins and quantiles.
     family:
         Key of :data:`micrometeorology.stats.distributions.FAMILIES`, or ``None``
-        for a variable the literature gives no canonical density (the payload
-        then carries bars and statistics with no curve).
+        where the literature gives no canonical density — the payload then
+        carries bars and statistics with no curve.
     family_label:
         Citation shown next to the curve, e.g. ``"Weibull ([[justus1978]])"``.
     edges:
-        Frozen bin edges. Identical for every subset by construction — a
-        per-subset width would make the summer and winter bars incomparable,
-        which is the one thing this page exists to allow.
+        Frozen bin edges, identical for every subset by construction: a
+        per-subset width would make the summer and winter bars incomparable.
     fit_scale:
         Divide the sample by this before fitting, for a family whose support is
         not the variable's own unit (relative humidity is fitted as a beta on
         ``[0, 1]`` but binned in percent). The curve is transformed back, so the
         published density is always per unit of ``unit``.
     caveats:
-        Portuguese sentences the page prints under the chart. These are the
-        scientific qualifications a reviewer would demand; they travel with the
-        data so the page cannot silently drop them.
+        Portuguese sentences the page prints under the chart; they travel with
+        the data so the page cannot silently drop them.
     """
 
     id: str
@@ -181,20 +169,14 @@ class VariableSpec:
     fit_scale: float = 1.0
     caveats: tuple[str, ...] = ()
     # Options the family cannot get from the sample, supplied per subset by the
-    # caller. Empty means the family is estimated from the sample alone, as every
-    # non-radiation variable is. Declaring them here makes a missing covariate a
-    # build failure instead of a curve quietly fitted on the wrong thing.
+    # caller; empty means estimated from the sample alone. Declaring them here
+    # makes a missing covariate a build failure instead of a wrongly fitted curve.
     fit_options: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class Reference:
     """One bibliographic record, published so the page can link to the source.
-
-    A caption that says only "(Justus et al., 1978)" tells a reader who already
-    knows the field nothing they did not know and tells everyone else nothing at
-    all. Carrying the full record plus a resolvable link is what turns a citation
-    into something a student can actually go and read.
 
     Attributes
     ----------
@@ -205,11 +187,9 @@ class Reference:
     citation:
         Authors, title, journal, volume, pages, year — the tooltip's contents.
     url:
-        Where to go: a ``doi.org`` link, one per record, each resolved against
-        Crossref and checked to land on the cited work. A resolver link is
-        required rather than a search URL, because it either redirects to the
-        publisher or does not exist — a search that silently returns nothing
-        still answers 200, so no link checker catches it.
+        A ``doi.org`` link, each resolved against Crossref and checked to land on
+        the cited work. Must be a resolver and never a search URL: a search that
+        silently returns nothing still answers 200, so no link checker catches it.
     """
 
     key: str
@@ -351,16 +331,14 @@ REFERENCES: dict[str, Reference] = {
     )
 }
 
-# Marker syntax inside labels and caveats: [[key]]. The page turns each one into
-# a link carrying the full record; Python only has to guarantee that every marker
-# resolves, which _assert_references does at import time.
+# Marker syntax inside labels and caveats: [[key]]. The page turns each into a
+# link with the full record; _assert_references checks they resolve at import.
 _REFERENCE_MARKER = re.compile(r"\[\[([a-z0-9_]+)\]\]")
 
 # Value syntax inside caveats: {{atom:<id>:count}}, {{atom:<id>:share}} and
 # {{param:<name>:<decimals>}}, resolved against the subset the page prints the
-# prose beside (``observed_all``). A number written into the prose as a literal
-# is a copy that stops being true the next time the fit moves; interpolating it
-# makes sentence and panel agree by construction rather than by vigilance.
+# prose beside (``observed_all``), so sentence and panel agree by construction
+# instead of drifting apart the next time the fit moves.
 _VALUE_MARKER = re.compile(r"\{\{(atom|param):([A-Za-z0-9_]+):([A-Za-z0-9_]+)\}\}")
 
 
@@ -377,8 +355,7 @@ def _format_decimal(value: float, decimals: int) -> str:
 def _resolve_values(text: str, subset: dict[str, Any], where: str) -> str:
     """Replace every ``{{...}}`` marker with the value the subset publishes.
 
-    Raises on anything unresolvable — an unknown atom id, a parameter the fit
-    does not carry, a malformed precision — so a caveat quoting a number nobody
+    Raises on anything unresolvable, so a caveat quoting a number nobody
     published stops the export instead of reaching a reader.
     """
 
@@ -413,9 +390,8 @@ def _resolve_values(text: str, subset: dict[str, Any], where: str) -> str:
 def _assert_references() -> None:
     """Fail at import if any published sentence cites a reference that is not declared.
 
-    A dangling ``[[key]]`` would reach the browser as literal brackets in the
-    middle of a caption. Checking here means the typo stops the build that writes
-    the artifacts, not the reader.
+    A dangling ``[[key]]`` reaches the browser as literal brackets in a caption,
+    so the typo must stop the build that writes the artifacts, not the reader.
     """
     unknown: set[str] = set()
     for spec in CLIMATOLOGY_VARIABLES:
@@ -425,9 +401,8 @@ def _assert_references() -> None:
         raise ValueError(
             f"undeclared reference marker(s) {sorted(unknown)}; add them to REFERENCES"
         )
-    # And the reverse: a record must never contain a marker itself. A registry
-    # entry whose `short` reads "[[hu2012]]" renders as literal brackets in the
-    # middle of a caption and resolves to nothing.
+    # And the reverse: a record must never carry a marker of its own, which would
+    # render as literal brackets inside a caption and resolve to nothing.
     self_referential = sorted(
         key
         for key, reference in REFERENCES.items()
@@ -442,9 +417,8 @@ def _assert_references() -> None:
 def _linear_edges(start: float, stop: float, step: float) -> tuple[float, ...]:
     """Inclusive edge set on a physical step, rounded away from float drift.
 
-    ``np.arange`` on a fractional step accumulates error and can emit
-    ``1024.9999999999998`` as the last edge, which then prints as a bin label
-    nobody can read.
+    ``np.arange`` on a fractional step accumulates error into unreadable bin
+    labels such as a last edge of ``1024.9999999999998``.
     """
     count = round((stop - start) / step)
     return tuple(round(start + index * step, 6) for index in range(count + 1))
@@ -461,17 +435,13 @@ def _rain_edges(
 ) -> tuple[float, ...]:
     """Bin edges for a tipping-bucket record: aligned to the instrument's lattice.
 
-    A tipping bucket can only report integer multiples of its volume, so hourly
-    intensities do not live on a continuum — they sit on the lattice
-    ``{bucket, 2*bucket, 3*bucket, ...}``. Plain logarithmic edges cut *between*
-    lattice points at the low end, where the bins are narrower than the quantum
-    itself: one bin swallows a lattice point and reports an enormous density
-    while its neighbour reports zero, producing a comb that looks like signal
-    and is entirely an artefact of the binning.
-
-    So the first ``unit_bins`` edges are placed at half-integer multiples of the
-    bucket, giving each low-intensity lattice point a bin of its own, and only
-    then do the bins widen geometrically — every later edge still snapped to a
+    A tipping bucket reports only integer multiples of its volume, so hourly
+    intensities sit on the lattice ``{bucket, 2*bucket, 3*bucket, ...}``. Plain
+    logarithmic edges cut *between* lattice points at the low end, where the bins
+    are narrower than the quantum: alternating enormous and zero densities, a
+    comb that is pure binning artefact. So the first ``unit_bins`` edges sit at
+    half-integer multiples of the bucket, one lattice point each, and only then
+    do the bins widen geometrically — every later edge still snapped to a
     half-integer multiple so no bin ever splits a lattice point.
     """
     edges = [round((index + 0.5) * bucket, 6) for index in range(unit_bins)]
@@ -731,10 +701,9 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
 def _finite(value: float | None) -> float | None:
     """Map a non-finite number to ``None`` so the strict JSON writer accepts it.
 
-    The writer uses ``allow_nan=False`` on purpose (a ``NaN`` token is invalid
-    JSON and every browser parser rejects the whole file), and an empty subset
-    legitimately produces NaN parameters. Converting at the boundary keeps that
-    guard while letting a genuinely absent number travel as ``null``.
+    ``NaN`` is invalid JSON and browser parsers reject the whole file, hence the
+    writer's ``allow_nan=False``; an empty subset legitimately produces NaN
+    parameters, which travel as ``null`` instead.
     """
     if value is None:
         return None
@@ -821,8 +790,7 @@ def _shape_moments(values: NDArray) -> tuple[float, float]:
 
     Formula
     -------
-    The Fisher-Pearson adjusted estimators — the convention pandas, Excel and
-    every descriptive table the laboratory already publishes use:
+    The Fisher-Pearson adjusted estimators, the convention pandas and Excel use:
 
     .. math::
         G_1 = \frac{\sqrt{n(n-1)}}{n-2}\, \frac{m_3}{m_2^{3/2}}, \qquad
@@ -861,9 +829,8 @@ def _histogram_subset(
     binned = dist.histogram(values, spec.edges)
     payload: dict[str, Any] = {
         # The WHOLE subset, so `n == sum(counts) + below + above` is an identity
-        # the reader can check on screen, and so `stats` — which describes the
-        # whole sample — is not printed beside a smaller total. The fit's own `n`
-        # is legitimately a third number: the family cuts at its fitted ceiling.
+        # on screen and `stats` is not printed beside a smaller total. The fit's
+        # own `n` is a legitimate third number: the family cuts at its ceiling.
         "n": binned.n + binned.below + binned.above,
         "counts": [int(count) for count in binned.counts],
         "density": _rounded_list(binned.density, _DENSITY_DECIMALS),
@@ -886,21 +853,19 @@ def _histogram_subset(
     if spec.family is None or binned.n < 2:
         return payload
 
-    # A family whose parameters are not estimable from the sample alone needs the
-    # covariate the caller derived (the extraterrestrial-irradiance mixture every
-    # induced radiation curve rides on). A missing option is a loud failure
-    # rather than a silent fallback to a curve fitted on the wrong thing.
+    # A family not estimable from the sample alone needs the caller's covariate
+    # (the extraterrestrial-irradiance mixture every induced curve rides on); a
+    # missing option fails loudly rather than fitting a curve on the wrong thing.
     if spec.fit_options and not options:
         if not curveless:
             raise ValueError(
                 f"{spec.id}: family {spec.family!r} requires fit options "
                 f"{list(spec.fit_options)}, none supplied for this subset"
             )
-        # The caller could not build the covariate and said so. Bars, counts,
-        # statistics and atoms still publish; only the curve is absent, which is
-        # a state the page already renders. Blanking the sample to reach the
-        # `binned.n < 2` early return instead would delete real measurements
-        # over a missing model input.
+        # The caller could not build the covariate and said so, so only the curve
+        # is absent — a state the page already renders. Blanking the sample to
+        # reach the `binned.n < 2` early return would instead delete real
+        # measurements over a missing model input.
         logger.warning("%s: no covariate for this subset, publishing bars without a curve", spec.id)
         return payload
     fitted = dist.fit_distribution(spec.family, values / spec.fit_scale, **(options or {}))
@@ -931,15 +896,12 @@ def _histogram_subset(
         "lag1_autocorrelation": _rounded(quality.lag1_autocorrelation, 4),
     }
 
-    # The curve is sampled at the BIN CENTRES, one value per bar, rather than on
-    # a free grid. That is what lets the page draw it as a second dataset on the
-    # same categorical axis as the bars: no interpolation in the browser, exact
-    # alignment with every bar, and it works unchanged for the logarithmic bins
-    # precipitation needs, where a linear abscissa would misplace the line.
-    #
-    # Two conversions here: /fit_scale puts the abscissa on the family's own
-    # support, and the matching /fit_scale on the density puts the ordinate back
-    # on a per-unit-of-`unit` basis so it overlays the histogram directly.
+    # Sampled at the BIN CENTRES, one value per bar, so the page draws it as a
+    # second dataset on the same categorical axis as the bars — no interpolation,
+    # and it holds for the logarithmic bins precipitation needs, where a linear
+    # abscissa would misplace the line. The /fit_scale on the abscissa puts it on
+    # the family's own support; the matching one on the density returns the
+    # ordinate to a per-unit-of-`unit` basis.
     density = dist.pdf(fitted, binned.centers / spec.fit_scale) / spec.fit_scale
     payload["curve"] = _rounded_list(density, _DENSITY_DECIMALS)
     return payload
@@ -993,12 +955,10 @@ def _rose_subset(
         "n": mixture.n,
     }
 
-    # The curve is expressed as "frequency an equally wide sector would hold", so
-    # it is directly comparable with the plotted petals instead of living on a
-    # per-radian scale the reader would have to convert. Unlike a histogram, the
-    # rose overlay is a smooth closed ring, so it is sampled on a regular grid of
-    # CURVE_POINTS angles from 0 to 360 inclusive — the page reconstructs the
-    # abscissa as ``index * 360 / (CURVE_POINTS - 1)``.
+    # Scaled to "frequency an equally wide sector would hold", directly
+    # comparable with the plotted petals. Being a smooth closed ring it is
+    # sampled on a regular grid of CURVE_POINTS angles from 0 to 360 inclusive;
+    # the page reconstructs the abscissa as ``index * 360 / (CURVE_POINTS - 1)``.
     grid = np.linspace(0.0, 360.0, CURVE_POINTS)
     modelled = dist.von_mises_mixture_pdf(mixture, grid) * (360.0 / ROSE_SECTORS)
     payload["curve"] = _rounded_list(modelled, _DENSITY_DECIMALS)
@@ -1016,19 +976,13 @@ def _rose_subset(
 def _display_range(spec: VariableSpec, subsets: Mapping[str, Any]) -> list[int]:
     """First and last bin index worth plotting, shared by every subset.
 
-    The bin edges cover the full physical range a variable could take, which is
-    much wider than the range it actually occupies: the wind-speed axis runs to
-    20 m/s so a gust is never silently dropped, while the station rarely exceeds
-    6 m/s. Drawn literally, four fifths of the plot is empty and the populated
-    bars are unreadably narrow.
-
-    So the window is computed from the UNION of the populated bins across every
-    subset and published once per variable. Two properties follow, and both
-    matter: the bins themselves are untouched (nothing is re-binned or dropped,
-    and the overflow tallies still describe the whole record), and summer,
-    winter and model still share one x-axis, which is the comparison the page
-    exists to make. A per-subset window would silently rescale the axis under
-    the reader between two clicks.
+    The edges cover the full physical range a variable could take (wind speed
+    runs to 20 m/s so a gust is never dropped, though the station rarely exceeds
+    6 m/s), which drawn literally leaves most of the plot empty. So the window is
+    the UNION of the populated bins across every subset, published once per
+    variable: the bins stay untouched (overflow tallies still describe the whole
+    record), and summer, winter and model keep one shared x-axis instead of
+    rescaling under the reader between clicks.
     """
     bin_count = len(spec.edges) - 1
     first, last = bin_count, -1
@@ -1037,10 +991,9 @@ def _display_range(spec: VariableSpec, subsets: Mapping[str, Any]) -> list[int]:
         total = sum(counts)
         if total <= 0:
             continue
-        # Trim by MASS, not by emptiness: a single gust three times the typical
-        # speed puts one sample in a far bin and, on a "non-empty" rule, would
-        # stretch the axis over a range that is blank for every other subset.
-        # The tail it hides is still in the table, the statistics and p99.
+        # Trim by MASS, not by emptiness: on a "non-empty" rule a single far gust
+        # stretches the axis over a range blank for every other subset. The tail
+        # it hides is still in the table, the statistics and p99.
         budget = total * _DISPLAY_TAIL
         running = 0.0
         low = 0
@@ -1081,11 +1034,10 @@ def build_variable_payload(
     spec:
         The variable being published.
     samples:
-        Subset id -> the prepared sample for that subset, already merged,
-        quality-controlled, aggregated to hourly and stripped of its point
-        masses. An empty array is legitimate and produces an empty subset rather
-        than an omitted one, so the page can say "no data" instead of silently
-        offering fewer options in one variable than in another.
+        Subset id -> the prepared sample, already merged, quality-controlled,
+        aggregated to hourly and stripped of its point masses. An empty array
+        produces an empty subset rather than an omitted one, so the page says
+        "no data" instead of quietly offering fewer options than elsewhere.
     version:
         Run stamp, repeated in every file so a half-updated directory is
         detectable from the browser.
@@ -1093,19 +1045,16 @@ def build_variable_payload(
         Subset id -> the point masses removed from that sample.
     options:
         Subset id -> the fit options that subset's family needs, for the induced
-        radiation curves. Per subset and not per variable because the inheritance
-        is subset-matched: each recorte's induced curve rides on the clearness
-        index fitted to that same recorte, exactly as every other variable on the
-        page is fitted per subset.
+        radiation curves. Per subset because the inheritance is subset-matched:
+        each induced curve rides on the clearness index fitted to that subset.
     curveless:
-        Subset ids for which the caller could not build the covariate. Those
-        subsets publish bars with ``fit``, ``quality`` and ``curve`` left
-        ``None`` instead of raising — an acknowledged absence, as distinct from
-        options a caller simply forgot to pass, which stays a loud failure.
+        Subset ids for which the caller could not build the covariate; they
+        publish bars with ``fit``, ``quality`` and ``curve`` ``None`` instead of
+        raising. Distinct from forgotten options, which stay a loud failure.
     mixture_components:
         Components of the von Mises mixture, for a ``rose`` variable. Fixed
-        rather than chosen per subset: a component count that changes between
-        summer and winter makes the two roses incomparable.
+        rather than chosen per subset: a count that changes between summer and
+        winter makes the two roses incomparable.
 
     Returns
     -------
@@ -1137,7 +1086,7 @@ def build_variable_payload(
         "chart": spec.chart,
         "family": spec.family,
         "family_label": spec.family_label,
-        # Resolved against the recorte the page prints the prose beside, so a
+        # Resolved against the subset the page prints the prose beside, so a
         # number in a sentence is the same object as the number in the panel.
         "caveats": [
             _resolve_values(caveat, subsets.get("observed_all") or {}, f"{spec.id} caveat {index}")
@@ -1174,9 +1123,8 @@ def build_manifest(
     """Assemble ``manifest.json``: what exists, over what period, with what caveats.
 
     ``selector`` is deliberately narrower than ``subsets``: every source-by-season
-    combination is precomputed (it costs one more pass over data already in
-    memory), while the page offers only the options it was designed around. A
-    later redesign can widen the selector without regenerating anything.
+    combination is precomputed while the page offers only the options it was
+    designed around, so a redesign can widen the selector without regenerating.
 
     Raises
     ------
@@ -1204,11 +1152,10 @@ def build_manifest(
         "selector": list(selector),
         "coverage": dict(coverage),
         "caveats": list(caveats),
-        # The bibliography, once, keyed by the [[key]] markers the labels and
-        # caveats carry. Published in the manifest rather than repeated in every
-        # variable file: sixteen records shared by sixteen variables would
-        # otherwise be sixteen copies, and the page loads the manifest first
-        # anyway. The page turns each marker into a link with the full record.
+        # The bibliography, once, keyed by the [[key]] markers labels and caveats
+        # carry. In the manifest rather than in every variable file: the page
+        # loads the manifest first anyway, so repeating it would be sixteen
+        # copies of sixteen shared records.
         "references": {
             key: {
                 "short": reference.short,
@@ -1240,10 +1187,9 @@ def write_json(output_path: str | Path, payload: Mapping[str, Any]) -> Path:
 
     Same contract as :mod:`micrometeorology.wrf.jobs`: serialise to a private
     ``.<name>.tmp-<pid>`` sibling and ``os.replace`` it into place, so a reader
-    fetching the directory mid-run sees either the old file or the new one and
-    never a truncated parse error. ``allow_nan=False`` is what makes that
-    guarantee meaningful — ``NaN`` is not valid JSON and would fail in the
-    browser instead of here.
+    fetching the directory mid-run sees the old file or the new one, never a
+    truncated parse error. ``allow_nan=False`` because ``NaN`` is not valid JSON
+    and would fail in the browser instead of here.
 
     Raises
     ------

@@ -1,29 +1,23 @@
 """The LabMiM station archive: an explicit manifest, staged fixes, one merged frame.
 
-Turning ``data/dados-labmim/`` into a usable database is not a glob. An audit of
-every table in the archive (2016-09 to 2026-04) found four ways the obvious
-approach silently produces a wrong record:
+Globbing ``data/dados-labmim/`` silently produces a wrong record four ways, per
+an audit of every table in the archive (2016-09 to 2026-04):
 
 1. **``*.dat`` drops the rotation files.** Three ``.backup`` tables are the ONLY
-   source of an entire austral winter each — JJA 2020, JJA 2022 and June to
-   mid-July 2024. A glob that skips them deletes three winters from the record
-   without a warning.
+   source of an austral winter each — JJA 2020, JJA 2022, June to mid-July 2024.
 2. **The directory holds more than one station.** ``BTS_*`` is a different site
    (CR1000X serial 9429), the ``celsolar`` / ``calibracao`` tables are
    side-by-side instrument campaigns, and the ``solar`` / ``radiacao`` families
-   sample at one minute. Merged together they produce a frame that parses
-   cleanly and means nothing.
+   sample at one minute.
 3. **Names lie.** ``dados-labmim/LBM_lenta.dat`` is the RAIN table — TOA5 header
    field 8 reads ``LBM_rain`` — and it is the unique source of February 2019.
 4. **Three clock defects cannot be expressed in configuration.** They need the
-   bytes fixed before the merge, which is what :func:`stage_archive` does, always
-   into a scratch directory: nothing here ever writes to ``data/``.
+   bytes fixed before the merge, which :func:`stage_archive` does into a scratch
+   directory: nothing here ever writes to ``data/``.
 
-So this module carries the manifest as data, in ingest order, with each file's
-disposition recorded next to it. :func:`verify_frame` then checks the merged
-result against the row counts, span and monotonicity the audit measured, so a
-future change that quietly drops a file fails loudly instead of publishing a
-shorter record.
+So the manifest lives here as data, in ingest order, each file's disposition next
+to it, and :func:`verify_frame` checks the merged result against the row counts,
+span and monotonicity the audit measured.
 
 Relationship to the neighbouring modules
 ----------------------------------------
@@ -95,11 +89,11 @@ _CLOCK_PLUS_ONE_HOUR = "clock+1h"
 _DROP_LATE_TAIL = "drop-late-tail"
 _KEEP_2023_BLOCK = "keep-2023-block"
 
-# The 2020 clock slip: every row stamped at or before this instant is one hour
-# early. Verified by RECORD-joining the lenta and rain tables across the window.
+# The 2020 clock slip: rows stamped at or before this instant are one hour early,
+# per a RECORD-join of the lenta and rain tables across the window.
 _CLOCK_SLIP_LAST = pd.Timestamp("2020-02-28 11:50:00")
-# Rows at or after this instant in the 2019 tables are a mis-stamped tail whose
-# timestamps the clock-corrected 2020_03 table already carries, cell for cell.
+# From here on the 2019 tables carry a mis-stamped tail that the clock-corrected
+# 2020_03 table already holds, cell for cell.
 _LATE_TAIL_FIRST = pd.Timestamp("2020-01-07 01:05:00")
 
 
@@ -114,8 +108,7 @@ class ArchiveFile:
     staging:
         Repair to apply before reading, or ``None`` to read as found.
     note:
-        Why this file is in the manifest — usually what would be lost without
-        it. Read this before removing an entry.
+        What would be lost without this file. Read it before removing an entry.
     """
 
     path: str
@@ -252,11 +245,10 @@ def _read_raw_toa5(path: Path) -> pd.DataFrame:
 def _stage_clock_shift(source: Path, destination: Path) -> None:
     """Add one hour to the mis-stamped rows of the headerless 2020_03 table.
 
-    Two defects in one file. It is a plain CSV with a bare column-name line and
-    no TOA5 header, so the standard ``skiprows=[0, 2, 3]`` reader would consume
-    the names and the first two data rows; and every row up to 2020-02-28 11:50
-    is stamped one hour early, which a RECORD-join against the rain table pins
-    exactly (the offset is +1 h at RECORD 7901/11932/16539 and 0 by 20294).
+    Two defects in one file: it is a plain CSV with a bare column-name line, so
+    the standard ``skiprows=[0, 2, 3]`` reader would eat the names and the first
+    two data rows; and every row up to 2020-02-28 11:50 is one hour early (a
+    RECORD-join against rain gives +1 h at RECORD 7901/11932/16539, 0 by 20294).
     """
     frame = pd.read_csv(source, low_memory=False, dtype=str)
     stamps = pd.to_datetime(frame["TIMESTAMP"], format="ISO8601")
@@ -279,9 +271,8 @@ def _stage_drop_late_tail(source: Path, destination: Path) -> None:
 def _stage_keep_2023_block(source: Path, destination: Path) -> None:
     """Keep only the August 2023 block of the spare-logger rain table.
 
-    The rest of the file is 892 rows scattered across 2014-2019 with RECORD
-    resets, written by a different logger (serial 2727) whose siting cannot be
-    verified. They are dropped rather than merged into a published record.
+    The rest is 892 rows scattered across 2014-2019 with RECORD resets, written
+    by a different logger (serial 2727) whose siting cannot be verified.
     """
     frame = _read_raw_toa5(source)
     stamps = pd.to_datetime(frame["TIMESTAMP"], format="ISO8601")
@@ -313,8 +304,8 @@ def stage_archive(
     data_dir:
         Root of the archive. **Never written to.**
     staging_dir:
-        Scratch directory for the repaired copies. Recreated on every run so a
-        stale staged file can never survive a change to the repair logic.
+        Scratch for the repaired copies, recreated every run so a stale staged
+        file cannot survive a change to the repair logic.
 
     Returns
     -------
@@ -325,9 +316,8 @@ def stage_archive(
     Raises
     ------
     FileNotFoundError
-        If a manifest entry is missing. A silently shorter record is the failure
-        this whole module exists to prevent, so an absent file is fatal rather
-        than skipped.
+        If a manifest entry is missing. Every entry is unique coverage or a
+        documented repair, so an absent file is fatal rather than skipped.
     """
     root = Path(data_dir)
     staged_root = ensure_dir(Path(staging_dir))
@@ -365,10 +355,9 @@ def build_five_minute_frame(
 ) -> pd.DataFrame:
     """Merge one manifest into a single 5-minute frame, raw values preserved.
 
-    ``sentinel_value`` defaults to ``None`` here, unlike the reader's own -900:
-    that threshold matches nothing in this archive, and leaving it on would only
-    suggest that missing data had been handled. Sentinel masking is a separate,
-    era-scoped step applied after the merge.
+    ``sentinel_value`` defaults to ``None``, unlike the reader's own -900, which
+    matches nothing in this archive. Sentinel masking is a separate, era-scoped
+    step applied after the merge.
     """
     paths = stage_archive(manifest, data_dir, staging_dir)
     return merge_dat_files(
@@ -381,10 +370,9 @@ def build_five_minute_frame(
 def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
     """Check a merged frame against the row count, span and shape the audit measured.
 
-    Turns "the merge still runs" into "the merge still captures the whole
-    archive": a file dropped from a manifest, a staging repair that stops
-    matching its file, or a reader change that eats a header row surfaces as a
-    row-count or span mismatch instead of a slightly shorter distribution.
+    A file dropped from a manifest, a staging repair that stops matching its
+    file, or a reader change that eats a header row surfaces as a row-count or
+    span mismatch instead of a slightly shorter distribution.
 
     Parameters
     ----------
@@ -436,15 +424,11 @@ def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
 # Sentinel masking — the values a logger writes instead of "missing"
 # ---------------------------------------------------------------------------
 #
-# read_campbell_dat's -900 threshold catches NONE of these. Each entry below was
-# found the same way: take the exact-value histogram of a column and look for a
-# single value repeating thousands of times. A physical sensor does not report
-# -46.8 degC ten thousand times in Salvador.
-#
-# The split matters. A VALUE rule holds for the whole record, because the value
-# is physically impossible. A WINDOW rule is date-scoped because the value is
-# legitimate elsewhere: zero is a real wind speed and a real rainfall, so a
-# global "mask 0" would delete every calm hour and every dry hour in the record.
+# read_campbell_dat's -900 threshold catches NONE of these; each entry came from
+# the exact-value histogram of a column, where a sentinel shows up as one value
+# repeating thousands of times. A VALUE rule holds for the whole record because
+# the value is physically impossible; a WINDOW rule is date-scoped because the
+# value is legitimate elsewhere — zero is a real wind speed and a real rainfall.
 
 # column -> the impossible values it writes when the sensor is absent or faulted
 SENTINEL_VALUES: dict[str, tuple[float, ...]] = {
@@ -456,8 +440,7 @@ SENTINEL_VALUES: dict[str, tuple[float, ...]] = {
     "Rain_WXT_Tot": (2052.0,),
     "Temp1_Avg": (-100.0,),
     "RH1_Avg": (-100.0,),
-    # -46.02 and 989.0 are the near-rail drift values the sensor passes through
-    # on its way to the exact rails; they are not temperatures either.
+    # -46.02 and 989.0 are near-rail drift on the way to the exact rails.
     "AirT_C_Avg": (1000.0, 989.0, -46.8, -46.02),
     "AirT1_C_Avg": (1000.0, 989.0, -46.8, -46.02),
     "AirT2_C_Avg": (1000.0, 989.0, -46.8, -46.02),
@@ -503,19 +486,15 @@ SENTINEL_WINDOWS: tuple[tuple[str, float, str, str], ...] = (
     ("AirT2_C_Avg", 265.0, "2025-05-14 00:00", "2026-12-31 23:55"),
 )
 
-# Periods where an instrument was physically present and reporting, but not
-# measuring what its column name claims. Masked wholesale.
+# Periods where an instrument was present and reporting, but not measuring what
+# its column name claims. Masked wholesale.
 #
-# The diffuse windows are the highest-stakes entries in this module: an
-# unshaded pyranometer reads the GLOBAL flux, so leaving them in publishes
-# values up to 1368 W/m2 as "diffuse", at times above the global reading of the
-# same hour (2024-09-16 11:00 published Sw_dif 1009.8 against Sw_dw 997.5).
-#
-# They are identified by binning the ratio to global BY GLOBAL LEVEL: a shaded
-# diffuse sensor's ratio falls as the sky clears (0.48 -> 0.13), an unshaded one
-# stays flat or rises (0.81 -> 0.88). :func:`unshaded_diffuse_days` runs that
-# same criterion at build time, so the next episode surfaces as a report line
-# rather than waiting for someone to re-audit the ratio by hand.
+# An unshaded pyranometer reads the GLOBAL flux, so leaving the diffuse windows
+# in publishes up to 1368 W/m2 as "diffuse", at times above the same hour's
+# global (2024-09-16 11:00: Sw_dif 1009.8 against Sw_dw 997.5). They come from
+# binning the ratio to global BY GLOBAL LEVEL — a shaded sensor's ratio falls as
+# the sky clears (0.48 -> 0.13), an unshaded one holds or rises (0.81 -> 0.88) —
+# the same criterion :func:`unshaded_diffuse_days` runs at build time.
 INVALID_WINDOWS: tuple[tuple[str, str, str, str], ...] = (
     ("CMP21_Wm2_Avg", "2019-09-01 00:00", "2019-10-07 23:55", "PSP/CMP21 unshaded"),
     ("CMP21_Wm2_Avg", "2020-03-06 00:00", "2020-05-31 23:55", "shade ring off for ~87 days"),
@@ -537,16 +516,12 @@ INVALID_WINDOWS: tuple[tuple[str, str, str, str], ...] = (
 )
 
 
-# Detection constants for the shade-ring check below. Restricted to a clear-sky
-# global flux, a properly shaded diffuse sensor reads 0.12-0.22 of the global
-# one; every ring-off episode in the record reads 0.83-1.01 at that same level.
-#
-# The candidate screen sits at 0.55, between the two, but a single day above it
-# is not evidence: bright broken cloud raises the diffuse fraction on its own,
-# and 46 such days survive across the record with no hardware fault. What
-# separates hardware from weather is PERSISTENCE — a ring that falls off stays
-# off for days — so a candidate only counts as an episode when it runs for
-# three days or reaches a ratio a shaded sensor cannot physically produce.
+# Detection constants for the shade-ring check below. At a clear-sky global flux
+# a properly shaded diffuse sensor reads 0.12-0.22 of the global one; every
+# ring-off episode in the record reads 0.83-1.01 at that same level. The 0.55
+# screen sits between them, but bright broken cloud clears it on 46 days with no
+# hardware fault, so a candidate only counts as an episode with PERSISTENCE:
+# three days, or a ratio a shaded sensor cannot physically produce.
 DIFFUSE_GLOBAL_COLUMN = "CM3Up_Wm2_Avg"
 DIFFUSE_CLEAR_SKY_FLOOR = 600.0
 DIFFUSE_MIN_SAMPLES_PER_DAY = 20
@@ -560,13 +535,10 @@ def unshaded_diffuse_days(
 ) -> list[tuple[str, float]]:
     """Days where the diffuse channel is still reading the global flux.
 
-    Run this on the frame **after** :func:`mask_sentinels`: an episode already
-    covered by :data:`INVALID_WINDOWS` is ``NaN`` by then and drops out on its
-    own, so whatever comes back is exactly what the hand-curated list misses.
-
-    A hand-written window table goes stale the moment the ring comes off again,
-    and the failure is silent: the column keeps its name and publishes global
-    irradiance as diffuse.
+    Run on the frame **after** :func:`mask_sentinels`: an episode already covered
+    by :data:`INVALID_WINDOWS` is ``NaN`` by then, so what comes back is exactly
+    what the hand-curated list misses — and that list goes stale, silently, the
+    next time the ring comes off, since the column keeps its name.
 
     Returns
     -------
@@ -608,56 +580,46 @@ def unshaded_diffuse_days(
     ]
 
 
-# Station coordinates, for the solar geometry the checks below need. Repeated
-# rather than imported from the climatology exporter because a sensors module
-# must not depend on a CLI; both are the station's own numbers.
+# Station coordinates for the solar geometry the checks below need, repeated
+# rather than imported from the climatology exporter: a sensors module must not
+# depend on a CLI. Both copies are the station's own numbers and must stay
+# equal — see SITE in cli/export_climatology.py.
 STATION_SITE = SiteConfig(latitude=-13.0055, longitude=-38.5089)
 STATION_UTC_OFFSET_HOURS = -3.0
 
 # Detection constants for the timestamp-corruption check below, measured in
-# docs/arqueologia/qc/med-fault-detection.md over the whole record: days with at
-# least three DEEP-NIGHT samples of global irradiance above 50 W/m2 number 42
-# (1.22% of the record), and the worst of them carries 128 — over ten hours of
-# data written on the wrong side of midnight. Deep night is a zenith angle above
-# 100 deg, i.e. an elevation below -10: astronomical twilight is long past, so no
-# sky state whatsoever puts 50 W/m2 on a pyranometer there.
+# docs/arqueologia/qc/med-fault-detection.md: 42 days (1.22% of the record) carry
+# at least three DEEP-NIGHT samples of global irradiance above 50 W/m2, the worst
+# of them 128. Deep night is a zenith above 100 deg, i.e. elevation below -10 —
+# astronomical twilight long past, so no sky state puts 50 W/m2 on a pyranometer.
 #
-# Whole days, not samples: the audit measured that the DAYTIME half of the same
-# day carries the identical shift while wearing ordinary values, so a per-sample
-# rule can only ever see half of each episode.
-#
-# Run over EVERY shortwave channel, not just the global one: keying it on
-# ``Sw_dw`` alone reproduces the audit's 42 days but misses ten more that only
-# the other pyranometers witness (2018-08-21..23 and 2018-10-21..23 carry up to
-# 118 deep-night PAR samples each). The channels do not share an outage, so any
-# one of them can be the only survivor of a shifted day. Longwave is
-# deliberately absent: a pyrgeometer reads 300-400 W/m2 all night by design, so
-# the same threshold there would flag the entire record.
+# Flagged per DAY, not per sample: the daytime half of the same day carries the
+# identical shift while wearing ordinary values. Over EVERY shortwave channel,
+# because ``Sw_dw`` alone reproduces the 42 days but misses ten that only the
+# other pyranometers witness (2018-08-21..23 and 2018-10-21..23, up to 118
+# deep-night PAR samples each). Longwave is deliberately absent: a pyrgeometer
+# reads 300-400 W/m2 all night by design, so the same threshold would flag the
+# entire record.
 NIGHT_CORRUPTION_COLUMNS = ("Sw_dw", "Sw_dif", "Sw_par", "Sw_up")
 NIGHT_CORRUPTION_ELEVATION_DEG = -10.0
 NIGHT_CORRUPTION_FLUX_WM2 = 50.0
 NIGHT_CORRUPTION_MIN_SAMPLES = 3
 
-# Channels the mask covers: every shortwave stream, whose meaning depends
-# entirely on the hour that is wrong, plus ``Net_CNR1``. The net is here because
-# it is NOT an independent measurement — over 729,225 samples its residual
-# against ``Sw_dw - Sw_up + Lw_dw - Lw_up`` never exceeds 8.95 W/m2, so masking
-# only the shortwave channels would leave the corrupted contribution on disk
-# inside the net.
+# Every shortwave stream plus ``Net_CNR1``. The net is NOT an independent
+# measurement — over 729,225 samples its residual against
+# ``Sw_dw - Sw_up + Lw_dw - Lw_up`` never exceeds 8.95 W/m2 — so masking only the
+# shortwave channels would leave the corrupted contribution inside the net.
 NIGHT_CORRUPTION_CHANNELS = (*NIGHT_CORRUPTION_COLUMNS, "Net_CNR1")
 
 # BSRN "physically possible" ceiling for global horizontal irradiance
-# (Long & Shi 2008): Sa * 1.5 * mu0**1.2 + 100. It is the sun's own geometry as
-# the limit, which is what makes it catch what a flat gate cannot — the shipped
-# [-20, 1500] rule fires on 6 samples of the whole record while this one finds
-# 3,077, of which 2,477 carry full daylight irradiance with the sun below the
-# horizon. Deliberately generous where the sun is high (2,150 W/m2 at zenith),
-# so genuine cloud-edge enhancement survives; it only bites at low sun, which is
-# exactly where a shifted clock puts midday values.
-#
-# Applied AFTER the whole-day mask above, which removes the gross episodes. What
-# is left is the milder form of the same fault: an afternoon that declines
-# smoothly and plausibly, an hour or two away from where it happened.
+# (Long & Shi 2008): Sa * 1.5 * mu0**1.2 + 100. Because the limit follows the
+# sun's own geometry it catches what a flat gate cannot — the shipped [-20, 1500]
+# rule fires on 6 samples of the record, this one on 3,077, of which 2,477 carry
+# full daylight irradiance with the sun below the horizon. It stays generous at
+# high sun (2,150 W/m2 at zenith) so genuine cloud-edge enhancement survives, and
+# bites only at low sun, where a shifted clock puts midday values. Applied AFTER
+# the whole-day mask above, so what reaches it is the milder residue of the same
+# fault: an afternoon that declines plausibly an hour or two out of place.
 SOLAR_CONSTANT_WM2 = 1367.0
 IMPOSSIBLE_SHORTWAVE_CHANNELS = ("Sw_dw", "Net_CNR1")
 
@@ -685,15 +647,14 @@ def mask_impossible_shortwave(
     """Blank global irradiance that the sun's position cannot produce.
 
     Per SAMPLE, unlike :func:`mask_night_corrupted_days`, because this catches
-    the residue rather than the episode. ``Net_CNR1`` follows the same sample for
-    the same reason it follows the day: the logger derives it from the four
-    components, so leaving it would keep the impossible contribution on disk.
+    the residue rather than the episode. ``Net_CNR1`` follows the same sample
+    because the logger derives it from the four components.
 
     Pass *sources* (from :func:`~micrometeorology.sensors.calibration.resolve_mapping_windows`)
-    so the raw column the unified channel was copied from is blanked on the same
-    samples. It is scoped to that column's own era window, because inside it the
-    two are the same measurement bit for bit, while outside it the raw column is
-    a different instrument that never failed this check.
+    to blank the raw column each unified channel was copied from on the same
+    samples, scoped to that column's own era window: inside it the two are the
+    same measurement bit for bit, outside it the raw column is a different
+    instrument that never failed this check.
 
     Returns
     -------
@@ -723,12 +684,10 @@ def night_corrupted_days(
 ) -> list[tuple[str, int]]:
     """Days whose timestamps are shifted, found by irradiance recorded at night.
 
-    Run this on the UNIFIED frame: the corruption spans instrument eras, so the
-    era-specific raw aliases each witness only part of it.
-
-    A criterion rather than a hand-written window table, for the same reason
-    :func:`unshaded_diffuse_days` is one: 52 dated windows go stale the next time
-    the logger's clock slips, and silently, because the values look ordinary.
+    Run on the UNIFIED frame: the corruption spans instrument eras, so the
+    era-specific raw aliases each witness only part of it. A criterion rather
+    than a table of the 52 dated windows it finds, which would go stale the next
+    time the logger's clock slips, and silently: the values look ordinary.
 
     Returns
     -------
@@ -760,17 +719,15 @@ def mask_night_corrupted_days(
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     """Blank :data:`NIGHT_CORRUPTION_CHANNELS` over every day in ``days``.
 
-    The whole day goes, not the samples the detector fired on: what is wrong is
-    the clock, so the values are real measurements of another hour and the half
-    of the day that still looks plausible is exactly as misplaced as the half
-    that does not.
+    The whole day goes, not the samples the detector fired on: the clock is what
+    is wrong, so the values are real measurements of another hour and the
+    plausible-looking half of the day is as misplaced as the rest.
 
     Pass *sources* (from :func:`~micrometeorology.sensors.calibration.resolve_mapping_windows`)
     to blank the raw columns those channels were copied from as well. Unlike the
-    per-sample BSRN mask, this one ignores the era windows and takes every
-    source column for the whole day: a slipped clock is a fault of the LOGGER,
-    so every solar-geometry-dependent channel it wrote that day is misplaced,
-    including the ones that were not the unified source at the time.
+    per-sample BSRN mask, this one ignores the era windows: a slipped clock is a
+    fault of the LOGGER, so every solar-geometry-dependent channel it wrote that
+    day is misplaced, including the ones that were not the unified source then.
 
     Returns
     -------
@@ -798,16 +755,15 @@ def close_net_radiation(frame: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
 
     The CNR1 net is not an independent measurement: the logger computes it from
     the same four channels, and over 719,002 samples of the uncalibrated record
-    the two agree to 8.95 W/m2. Calibrating the components without the logger's
-    precomputed sum turns that agreement into a systematic bias, so the
-    monitoring chart that invites a reader to add the four bars and land on the
-    net line stops adding up.
+    the two agree to 8.95 W/m2. Calibrating the components while keeping the
+    logger's precomputed sum turns that agreement into a systematic bias, and
+    the monitoring chart invites the reader to add the four bars and land on the
+    net line. Recomputing keeps the identity exact by construction, where
+    correcting the sum would be a second arithmetic free to drift again.
 
-    Recomputing rather than correcting the sum keeps the identity exact by
-    construction instead of by a second arithmetic that can drift again. It also
-    publishes 34,640 five-minute samples of 2018-10 to 2019-03, where the four
-    components were recorded but the logger had not yet begun writing a net, and
-    drops the 125 where a component is missing and no net is defined.
+    It also publishes 34,640 five-minute samples of 2018-10 to 2019-03, where the
+    components were recorded before the logger began writing a net, and drops the
+    125 where a component is missing and no net is defined.
 
     Returns the frame, the samples gained and the samples dropped.
     """
@@ -827,7 +783,7 @@ def mask_sentinels(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
 
     Masking is PER CHANNEL, never per row: when the Gill thermohygrometer railed
     in December 2025 the pressure and wind channels on the same logger stayed
-    perfectly good, and dropping whole rows would have thrown them away too.
+    good.
 
     Returns
     -------

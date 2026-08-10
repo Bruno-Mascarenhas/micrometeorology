@@ -28,12 +28,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 def _project_root() -> Path:
     """Walk upward from this file to find the project root (contains pyproject.toml).
 
-    An installed wheel has no ``pyproject.toml`` anywhere above it, so the walk
-    falls through. The fallback has to land somewhere that actually holds the
-    shipped YAML: ``configs/micromet`` is force-included into the wheel as
-    ``micrometeorology/configs/micromet`` for exactly this case. A fallback that
-    misses it leaves every sensor rule at its empty default, and the CLIs then
-    export unfiltered, uncalibrated data with exit code 0.
+    A wheel has no ``pyproject.toml`` above it, so the walk falls through to the
+    package directory, where ``configs/micromet`` is force-included as
+    ``micrometeorology/configs/micromet``. A fallback that misses that YAML leaves
+    every sensor rule at its empty default, and the CLIs then export unfiltered,
+    uncalibrated data with exit code 0.
     """
     current = Path(__file__).resolve().parent
     for parent in [current, *current.parents]:
@@ -56,10 +55,8 @@ def _load_named_yaml(path: Path, variable: str) -> dict[str, Any]:
     """Load a YAML file the operator named explicitly, failing when it is absent.
 
     A missing *shipped* default is optional, so :func:`_load_yaml` returning
-    ``{}`` is right for layer 1. A path the operator typed is not: a typo, a
-    wrong container mount or a relative path resolved against an unexpected
-    working directory would otherwise make the whole override layer vanish with
-    no exception, no log line and exit code 0.
+    ``{}`` is right for layer 1. A path the operator typed is not: a wrong one
+    would make the whole override layer vanish with no exception and exit code 0.
     """
     if not path.is_file():
         raise FileNotFoundError(f"{variable} points to {path}, which is not a file")
@@ -88,12 +85,11 @@ class Settings(BaseSettings):
         default=Path("configs/micromet"), description="Configuration directory"
     )
 
-    # No WRF settings live here: `get_settings()` has exactly two consumers,
-    # labmim-archive and labmim-sensor-process. Neither micrometeorology.wrf nor
-    # any WRF CLI imports this module, and each WRF CLI owns a DEFAULT_VARS list
-    # deliberately different from its siblings' (the GeoJSON exporter's matches
+    # No WRF settings here: `get_settings()` is imported only by labmim-archive
+    # and labmim-sensor-process, and each WRF CLI owns a DEFAULT_VARS list
+    # deliberately different from its siblings' — the GeoJSON exporter's matches
     # the front-end variable registry, the figure renderer's the variables that
-    # have a colormap), so no key here could be authoritative for all three.
+    # have a colormap — so no key here could be authoritative for all three.
 
     # Sensor defaults
     sensor_min_samples_per_hour: int = Field(
@@ -161,9 +157,8 @@ def get_settings() -> Settings:
     if not merged:
         merged = _load_yaml(root / "configs" / "default.yaml")
     if not merged:
-        # Every sensor rule — QC limits, the sum and direction columns, the
-        # calibration lookup — lives in that file, and Settings would otherwise
-        # build from bare defaults and export unfiltered data with exit code 0.
+        # Every sensor rule lives in that file; without it Settings builds from
+        # bare defaults and the CLIs export unfiltered data with exit code 0.
         raise FileNotFoundError(
             "no shipped configuration found; searched "
             f"{configs_dir / 'default.yaml'} and {root / 'configs' / 'default.yaml'}"

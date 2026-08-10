@@ -4,16 +4,14 @@ Produces three artifacts from one pass over the archive, and **verifies the
 merge against the audited row counts** before writing anything:
 
 ``station_5min_raw``
-    Every 5-minute sample the station ever recorded, merged from the explicit
-    manifest in :mod:`micrometeorology.sensors.archive`, with only the three
-    clock repairs applied. Values exactly as the logger wrote them, sentinels
-    included — this is the archive, not an interpretation of it.
+    Every 5-minute sample, merged from the explicit manifest in
+    :mod:`micrometeorology.sensors.archive` with only the three clock repairs
+    applied. Values as the logger wrote them, sentinels included.
 
 ``station_5min_qc``
     The same grid after sentinel masking, physical gates, instrument
-    calibrations and era-to-era column unification. This is the frame the
-    hourly means are computed from, written out so the chain from raw sample to
-    published statistic can be audited at its midpoint.
+    calibrations and era-to-era column unification — the frame the hourly means
+    are computed from, written out so the chain can be audited at its midpoint.
 
 ``station_hourly``
     Hourly aggregation of the QC frame: means, sums for the tipping bucket, and
@@ -84,10 +82,9 @@ logger = logging.getLogger(__name__)
 def _write(frame: pd.DataFrame, base: Path, output_format: str) -> Path:
     """Write one artifact, defaulting to Parquet.
 
-    The 5-minute frame is ~988k rows by 94 columns: as CSV that is roughly a
-    gigabyte of text whose dtypes have to be guessed back on read, while Parquet
-    keeps the dtypes and the index and is an order of magnitude smaller. CSV
-    stays available because a spreadsheet cannot open Parquet.
+    The 5-minute frame is ~988k rows by 94 columns: ~1 GB as CSV, with dtypes
+    guessed back on read. Parquet keeps the dtypes and the index; CSV stays
+    available because a spreadsheet cannot open Parquet.
     """
     if output_format == "csv":
         path = base.with_suffix(".csv")
@@ -163,9 +160,8 @@ def run(
     for report in reports:
         _echo_report(report)
 
-    # The rain logger is a separate table on the same 5-minute grid, so it is
-    # JOINED rather than concatenated: a concat would interleave rows whose
-    # column sets barely overlap and double the index.
+    # The rain logger is a separate table on the same 5-minute grid: JOINED, not
+    # concatenated, which would double the index.
     rain_columns = [column for column in rain.columns if column not in lenta.columns]
     raw = lenta.join(rain[rain_columns], how="outer")
     typer.echo(f"\nBase unificada de 5 min: {len(raw):,} linhas x {len(raw.columns)} colunas")
@@ -182,10 +178,9 @@ def run(
     for column, count in sorted(sentinels_removed.items(), key=lambda item: -item[1])[:8]:
         typer.echo(f"  {column:20s} {count:,}")
 
-    # INVALID_WINDOWS is hand-curated, so it goes stale the moment the shade ring
-    # comes off — and silently, because the column keeps its name while
-    # publishing global irradiance as diffuse. Re-running the detection criterion
-    # on the masked frame reports whatever the table misses.
+    # INVALID_WINDOWS is hand-curated and goes stale silently when the shade ring
+    # comes off: the column keeps its name while publishing global irradiance as
+    # diffuse. Re-running the criterion reports whatever the table misses.
     unshaded = unshaded_diffuse_days(qc)
     if unshaded:
         typer.echo(
@@ -197,9 +192,8 @@ def run(
         if strict:
             raise typer.Exit(code=1)
 
-    # Declared before the branches that fill them: every one is conditional, and
-    # the report has to be able to say "this stage removed nothing" rather than
-    # omit the key.
+    # Every stage below is conditional; pre-declared so the report can say "this
+    # stage removed nothing" rather than omit the key.
     limits_fired: dict[str, int] = {}
     limits_absent_columns: list[str] = []
     gaps: list[tuple[str, str, pd.Timestamp, pd.Timestamp]] = []
@@ -207,10 +201,8 @@ def run(
     invalidated: dict[str, int] = {}
 
     if settings.sensor_limits:
-        # Report which gates actually FIRED before applying them: a limit naming
-        # a column the frame does not carry is skipped in silence by
-        # apply_physical_limits, so counting here is what turns "the YAML parses"
-        # into "the rule ran".
+        # apply_physical_limits skips a limit naming an absent column in silence,
+        # so counting which gates actually FIRED is what proves the rule ran.
         before = qc.notna().sum()
         limits_absent_columns = [
             limit["column"] for limit in settings.sensor_limits if limit["column"] not in qc.columns
@@ -247,10 +239,9 @@ def run(
         # every era-spanning variable has to be reassembled by hand downstream.
         switches = load_sensor_switches(calibrations_path)
         qc = unify_sensor_columns(qc, switches)
-        # Unification COPIES, so each unified channel now has a raw twin holding
-        # the same values under the logger's own name. The masks below have to
-        # reach both, or the artifact publishes the rejected value under the
-        # other name and the two disagree inside one file.
+        # Unification COPIES: each unified channel keeps a raw twin under the
+        # logger's own name, and the masks below must reach both or the artifact
+        # publishes the rejected value under the other name.
         sources = resolve_mapping_windows(qc, switches, NIGHT_CORRUPTION_CHANNELS)
 
         qc, net_gained, net_dropped = close_net_radiation(qc)
@@ -260,9 +251,8 @@ def run(
                 f"(componentes sem saldo do registrador), -{net_dropped:,} (componente ausente)"
             )
 
-        # Reported, never fatal: which sensitivity applied is a laboratory
-        # decision, and refusing to build over it would trade a scaling error
-        # for no record.
+        # Reported, never fatal: the sensitivity is a laboratory decision, and
+        # failing the build would trade a scaling error for no record.
         gaps = uncalibrated_mapping_windows(qc, load_calibrations(calibrations_path), switches)
         if gaps:
             typer.echo(
@@ -276,11 +266,10 @@ def run(
             f"  ! sem calibracoes em {calibrations_path}: exportando sem correcao nem unificacao"
         )
 
-    # After the unification, because the 2017 episodes only exist in the unified
-    # column. Radiation recorded in deep night is a clock that slipped, not a
-    # sky: the day is removed whole from the two channels it invalidates, since
-    # the flat gates of default.yaml pass 1313 W/m2 at 04h without blinking and
-    # every statistic downstream then reports the fault as climate.
+    # After unification: the 2017 episodes exist only in the unified column.
+    # Radiation in deep night is a slipped clock, not a sky, and the flat gates
+    # of default.yaml pass 1313 W/m2 at 04h — so the day is removed whole from
+    # the two channels it invalidates.
     corrupted = night_corrupted_days(qc)
     qc, night_masked = mask_night_corrupted_days(qc, corrupted, sources)
     qc, impossible = mask_impossible_shortwave(qc, sources)
@@ -298,11 +287,10 @@ def run(
             f"  {day}  {count} amostra(s) acima de {NIGHT_CORRUPTION_FLUX_WM2:.0f} W/m2 de madrugada"
         )
 
-    # The gate runs twice. The first pass runs on the RAW signal, which is what
-    # protects the calibration from multiplying a value that was never physical;
-    # the second is what makes the published column obey its own declared range,
-    # because a value sitting AT the boundary crosses it once scaled — the
-    # Eppley PSP factor this same config declares does exactly that.
+    # The gate runs twice: the first pass on the RAW signal keeps the calibration
+    # from scaling a never-physical value, the second because a value sitting AT
+    # the boundary crosses it once scaled — as the Eppley PSP factor declared in
+    # this same config does.
     outside_after_calibration = values_outside_declared_limits(qc, settings.sensor_limits)
     if outside_after_calibration:
         qc = apply_physical_limits(qc, settings.sensor_limits)
@@ -318,14 +306,11 @@ def run(
 
     _write(qc, out / "station_5min_qc", output_format)
 
-    # The logger's quality flag is text, which no hourly mean can carry. Turning
-    # it into the fraction of samples reading OK keeps the information in the
-    # hourly frame instead of dropping the only per-row flag the record has.
-    # ``astype("float64")`` is what makes the fraction survive:
-    # ``aggregate_to_hourly`` keeps only ``select_dtypes(include="number")``
-    # columns, which matches neither bool nor the object dtype ``.where``
-    # produces once a null appears. ``qc_flag`` is the unified spelling of the
-    # same information and goes the same way.
+    # The logger's quality flag is text, which no hourly mean can carry; the
+    # fraction of samples reading OK keeps it in the hourly frame. It must be
+    # ``float64``: ``aggregate_to_hourly`` keeps only
+    # ``select_dtypes(include="number")`` columns, which matches neither bool nor
+    # the object dtype a null introduces. ``qc_flag`` is the unified spelling.
     hourly_input = qc.copy()
     for column in (*STATUS_COLUMNS, "qc_flag"):
         if column in hourly_input.columns:

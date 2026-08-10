@@ -23,11 +23,10 @@ class WRFVariable(StrEnum):
     GLW = "GLW"
     WEIBULL = "weibull"
 
-    # Derived surface radiation budget. wrfout carries the downwelling fluxes
-    # (SWDOWN, GLW) directly but the upwelling ones only when the RRTMG
-    # bottom-of-atmosphere diagnostics are enabled, so these are reconstructed
-    # from EMISS/TSK/ALBEDO/COSZEN — fields every run carries. See
-    # ``micrometeorology.wrf.variables`` for formulas and validation.
+    # Derived surface radiation budget: wrfout carries the upwelling fluxes only
+    # when the RRTMG bottom-of-atmosphere diagnostics are on, so these are
+    # reconstructed from EMISS/TSK/ALBEDO/COSZEN, which every run carries.
+    # Formulas and validation in ``micrometeorology.wrf.variables``.
     LWUP = "lwup"
     SWUP = "swup"
     LWNET = "lwnet"
@@ -66,13 +65,10 @@ VARIABLE_COLORMAPS: dict[WRFVariable | str, str] = {
     WRFVariable.WEIBULL: "jet",
     WRFVariable.WIND_POTENTIAL: "Blues",
     WRFVariable.WIND_POWER_DENSITY_10M: "YlOrRd",
-    # Upwelling/net fluxes share the family of their waveband — magma for
-    # longwave (matching GLW), hot_r for shortwave (matching SWDOWN). The two
-    # signed net fields get diverging maps so radiative gain and loss read as
-    # opposite directions rather than as two ends of one ramp. Note the neutral
-    # tone does NOT land on zero: the shared renderer normalizes linearly
-    # between the percentile scale bounds, so the midpoint is wherever
-    # (vmin + vmax) / 2 falls.
+    # Upwelling/net fluxes follow their waveband's family: magma for longwave
+    # (as GLW), hot_r for shortwave (as SWDOWN). The signed net fields get
+    # diverging maps, whose neutral tone lands on (vmin + vmax) / 2 and NOT on
+    # zero — the renderer normalizes linearly between the percentile bounds.
     WRFVariable.LWUP: "magma",
     WRFVariable.SWUP: "hot_r",
     WRFVariable.LWNET: "RdBu_r",
