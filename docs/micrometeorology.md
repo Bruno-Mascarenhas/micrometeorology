@@ -828,7 +828,7 @@ stays `0`); pass `--strict` to fail the run instead. Wind direction is scattered
 (not lined) because the series wraps at 360°; when the direct column is absent
 but U/V components are present it is reconstructed with
 `micrometeorology.sensors.wind`. The optional balance components
-(`CM3Up_Wm2_Avg`, `CM3Dn_Wm2_Avg`, `CG3Up_Wm2_Avg`, `CG3Dn_Wm2_Avg`) are drawn
+(`CM3Up_Wm2_Avg`, `CM3Dn_Wm2_Avg`, `CG3Up_Wm2Cr_Avg`, `CG3Dn_Wm2Cr_Avg`) are drawn
 only when present, with the upward channels negated per the legacy convention.
 
 Operational command sequence (ingest → hourly CSV → graphs → copy):

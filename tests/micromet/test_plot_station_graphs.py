@@ -575,3 +575,24 @@ class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
             ],
         )
         assert missing_run.exit_code == 1, missing_run.output
+
+    def test_both_producers_plot_the_same_physical_longwave(self) -> None:
+        """The two producers of ``balanco.png`` must read the same quantity.
+
+        ``CG3*_Wm2_Avg`` is the pyrgeometer's raw thermopile signal, missing the
+        sigma*T_body^4 case term; ``CG3*_Wm2Cr_Avg`` is the flux. Plotting the
+        first published a downwelling longwave of about -42 W/m2 — a value this
+        station cannot measure — under the same filename and title as the
+        interactive chart showing +406.
+
+        Nothing caught it because the correction adds the same term to both
+        channels: net longwave is identical either way, so the chart still summed
+        to Rn while both individual values were wrong by ~447 W/m2.
+        """
+        from micrometeorology.cli import generate_station_graphs as sibling
+
+        source = Path(sibling.__file__).read_text(encoding="utf-8")
+        for channel in ("lw_down", "lw_up"):
+            column = DEFAULT_BALANCE_COMPONENTS[channel]
+            assert column.endswith("Cr_Avg"), f"{channel} must be the corrected flux, got {column}"
+            assert f'"{column}"' in source, f"{column} disagrees with the sibling producer"

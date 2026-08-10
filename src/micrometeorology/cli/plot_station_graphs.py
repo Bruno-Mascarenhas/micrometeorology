@@ -150,8 +150,21 @@ DEFAULT_COLUMNS: dict[str, str] = {
 DEFAULT_BALANCE_COMPONENTS: dict[str, str] = {
     "sw_down": "CM3Up_Wm2_Avg",
     "sw_up": "CM3Dn_Wm2_Avg",
-    "lw_down": "CG3Up_Wm2_Avg",
-    "lw_up": "CG3Dn_Wm2_Avg",
+    # The ``Cr`` spellings, which are the FLUXES. The plain ``CG3*_Wm2_Avg``
+    # columns are the pyrgeometers' raw thermopile signal, missing the
+    # sigma*T_body^4 case term: over 2022-07-01..08 they average -41.7 and +0.9
+    # W/m2 where the fluxes are +405.7 and +448.2. A negative downwelling
+    # longwave is not a number this station can measure, and it was published
+    # under the same filename and title as the interactive chart showing +406.
+    #
+    # Nothing caught it because the correction adds the SAME term to both
+    # channels, so the NET longwave is identical either way (-42.55 W/m2) and the
+    # plot still visually sums to Rn — every relation on the chart held while
+    # both individual values were wrong by about 447 W/m2. The sibling producer
+    # (generate_station_graphs.py) and the unified Lw_dw/Lw_up the archive
+    # publishes both use these columns; this one was the outlier.
+    "lw_down": "CG3Up_Wm2Cr_Avg",
+    "lw_up": "CG3Dn_Wm2Cr_Avg",
 }
 
 # Fallback U/V component columns used to reconstruct wind direction when the
