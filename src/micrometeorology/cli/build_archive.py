@@ -50,6 +50,7 @@ from micrometeorology.sensors.aggregation import aggregate_to_hourly
 from micrometeorology.sensors.archive import (
     DIFFUSE_RATIO_LIMIT,
     LENTA_MANIFEST,
+    NIGHT_CORRUPTION_CHANNELS,
     NIGHT_CORRUPTION_FLUX_WM2,
     RAIN_MANIFEST,
     STATUS_COLUMNS,
@@ -66,6 +67,7 @@ from micrometeorology.sensors.calibration import (
     apply_calibrations,
     load_calibrations,
     load_sensor_switches,
+    resolve_mapping_windows,
     unify_sensor_columns,
 )
 from micrometeorology.sensors.ingestion import apply_physical_limits
@@ -218,12 +220,19 @@ def run(
             if strict:
                 raise typer.Exit(code=1)
     calibrations_path = settings.configs_dir / "calibrations.yaml"
+    sources: dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]] = {}
     if calibrations_path.is_file():
         qc = apply_calibrations(qc, load_calibrations(calibrations_path))
         # This is the step the sensor pipeline never took: without it the
         # sensor_switches block parses and does nothing, and every era-spanning
         # variable has to be reassembled by hand downstream.
-        qc = unify_sensor_columns(qc, load_sensor_switches(calibrations_path))
+        switches = load_sensor_switches(calibrations_path)
+        qc = unify_sensor_columns(qc, switches)
+        # Unification COPIES, so each unified channel now has a raw twin holding
+        # the same values under the logger's own name. The masks below have to
+        # reach both, or the artifact publishes the rejected value under the
+        # other name and the two disagree inside one file.
+        sources = resolve_mapping_windows(qc, switches, NIGHT_CORRUPTION_CHANNELS)
     else:
         typer.echo(
             f"  ! sem calibracoes em {calibrations_path}: exportando sem correcao nem unificacao"
@@ -235,8 +244,8 @@ def run(
     # the flat gates of default.yaml pass 1313 W/m2 at 04h without blinking and
     # every statistic downstream then reports the fault as climate.
     corrupted = night_corrupted_days(qc)
-    qc, shifted = mask_night_corrupted_days(qc, corrupted)
-    qc, impossible = mask_impossible_shortwave(qc)
+    qc, shifted = mask_night_corrupted_days(qc, corrupted, sources)
+    qc, impossible = mask_impossible_shortwave(qc, sources)
     typer.echo(
         f"\nDias com carimbo de tempo corrompido: {len(corrupted)} "
         f"({sum(shifted.values()):,} amostras mascaradas em {len(shifted)} colunas)"

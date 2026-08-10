@@ -10,6 +10,9 @@ loud failure when an entry is missing. The audited row counts are verified by
 reproduce.
 """
 
+from typing import Any
+
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -23,6 +26,7 @@ from micrometeorology.sensors.archive import (
     stage_archive,
     verify_frame,
 )
+from micrometeorology.sensors.calibration import resolve_mapping_windows, unify_sensor_columns
 
 TOA5_METADATA = '"TOA5","CR5000","CR5000","2754","CR5000.Std.06","TEST","1","LBM_test"'
 
@@ -365,3 +369,101 @@ class TestNightCorruptedDays:
         # timestamp is wrong, and dropping them would delete good measurements.
         assert masked["T"].notna().all()
         assert removed == {"Sw_dw": 4, "Sw_par": 4, "Net_CNR1": 4}
+
+
+class TestTheMasksReachTheRawTwin:
+    """``unify_sensor_columns`` COPIES, so masking the alias alone cleans half a frame.
+
+    Measured on a full build before this was fixed: 1,049 hourly stamps carried
+    ``Sw_dw`` NaN beside ``CM3Up_Wm2_Avg`` still holding the value that triggered
+    the mask, up to 1442.19 W/m2 of "global irradiance" at 05:00 local, plus
+    1,127 / 1,145 / 883 / 935 more for Sw_up, Sw_par, Net_CNR1 and Sw_dif. The
+    published QC artifact disagreed with itself, and the site's static graphs
+    read the raw names.
+    """
+
+    @staticmethod
+    def _switches() -> list[dict[str, Any]]:
+        return [
+            {
+                "unified_name": "Sw_dw",
+                "mappings": [
+                    {"column": "PSP1_Wm2_Avg", "start_date": None, "end_date": "2024-06-15"},
+                    {"column": "CM3Up_Wm2_Avg", "start_date": "2024-06-16", "end_date": None},
+                ],
+            }
+        ]
+
+    @staticmethod
+    def _frame() -> pd.DataFrame:
+        stamps = [
+            "2024-06-15 02:00",
+            "2024-06-15 02:05",
+            "2024-06-15 02:10",
+            "2024-06-16 02:00",
+            "2024-06-16 02:05",
+            "2024-06-16 02:10",
+        ]
+        return pd.DataFrame(
+            {
+                "PSP1_Wm2_Avg": [600.0, 610.0, 590.0, np.nan, np.nan, np.nan],
+                "CM3Up_Wm2_Avg": [np.nan, np.nan, np.nan, 700.0, 710.0, 690.0],
+            },
+            index=pd.DatetimeIndex(stamps),
+        )
+
+    def test_the_day_mask_blanks_the_source_the_alias_was_copied_from(self) -> None:
+        frame = unify_sensor_columns(self._frame(), self._switches())
+        sources = resolve_mapping_windows(frame, self._switches(), ("Sw_dw",))
+
+        masked, removed = archive.mask_night_corrupted_days(
+            frame.copy(), archive.night_corrupted_days(frame), sources
+        )
+
+        assert masked["Sw_dw"].isna().all()
+        assert masked["PSP1_Wm2_Avg"].isna().all(), "the rejected value must not survive by name"
+        assert masked["CM3Up_Wm2_Avg"].isna().all()
+        assert removed == {"Sw_dw": 6, "PSP1_Wm2_Avg": 3, "CM3Up_Wm2_Avg": 3}
+
+    def test_without_the_source_map_the_raw_twin_still_publishes_the_value(self) -> None:
+        """What the fix removes -- pinned so a silent regression is a failing test."""
+        frame = unify_sensor_columns(self._frame(), self._switches())
+
+        masked, _removed = archive.mask_night_corrupted_days(
+            frame.copy(), archive.night_corrupted_days(frame)
+        )
+
+        assert masked["Sw_dw"].isna().all()
+        assert masked["PSP1_Wm2_Avg"].notna().sum() == 3
+
+    def test_the_bsrn_mask_stays_inside_the_era_window(self) -> None:
+        """Per-sample, so it may only touch the column that IS that measurement.
+
+        Blanking an instrument outside its own mapping window would remove data
+        on a check it never failed -- the day mask is the one that is allowed to
+        take everything, because a slipped clock is a fault of the logger.
+        """
+        stamps = pd.DatetimeIndex(["2024-06-15 05:00", "2024-06-16 05:00"])
+        frame = pd.DataFrame(
+            {
+                "PSP1_Wm2_Avg": [1400.0, 1400.0],
+                "CM3Up_Wm2_Avg": [1400.0, 1400.0],
+                "Sw_dw": [1400.0, 1400.0],
+            },
+            index=stamps,
+        )
+        sources = resolve_mapping_windows(frame, self._switches(), ("Sw_dw",))
+
+        masked, removed = archive.mask_impossible_shortwave(frame.copy(), sources)
+
+        assert masked["Sw_dw"].isna().all(), "both samples exceed the BSRN ceiling"
+        # Each raw column loses only the sample inside its own era.
+        assert masked["PSP1_Wm2_Avg"].to_list() == [
+            pytest.approx(float("nan"), nan_ok=True),
+            1400.0,
+        ]
+        assert masked["CM3Up_Wm2_Avg"].to_list() == [
+            1400.0,
+            pytest.approx(float("nan"), nan_ok=True),
+        ]
+        assert removed == {"Sw_dw": 2, "PSP1_Wm2_Avg": 1, "CM3Up_Wm2_Avg": 1}

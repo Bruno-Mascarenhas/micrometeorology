@@ -8,6 +8,7 @@ appended, never overwriting existing entries.
 
 import itertools
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -236,6 +237,37 @@ def load_sensor_switches(config_path: str | Path) -> list[dict[str, Any]]:
         data = yaml.safe_load(fh)
     switches: list[dict[str, Any]] = data.get("sensor_switches", [])
     return switches
+
+
+def resolve_mapping_windows(
+    df: pd.DataFrame,
+    switches: list[dict[str, Any]],
+    unified_names: Sequence[str],
+) -> dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]]:
+    """Which raw column fed each unified name, and over which inclusive window.
+
+    :func:`unify_sensor_columns` *copies* the source column into the alias
+    rather than renaming it, so both survive in the frame. Anything that judges
+    a unified channel unusable therefore has to be able to find the source the
+    value came from, or the same number stays published under the other name.
+
+    Returns ``{unified_name: [(source column, start, end), ...]}``, restricted
+    to the mappings whose column is present in *df* and resolved against its
+    index exactly as :func:`unify_sensor_columns` resolves them.
+    """
+    wanted = set(unified_names)
+    windows: dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]] = {}
+    for switch in switches:
+        unified_name = switch["unified_name"]
+        if unified_name not in wanted:
+            continue
+        for mapping in switch["mappings"]:
+            column = mapping["column"]
+            if column not in df.columns:
+                continue
+            start, end = _resolve_record_range(mapping, df)
+            windows.setdefault(unified_name, []).append((column, start, end))
+    return windows
 
 
 def unify_sensor_columns(

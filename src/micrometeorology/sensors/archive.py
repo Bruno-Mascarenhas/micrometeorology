@@ -36,7 +36,7 @@ Relationship to the neighbouring modules
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from itertools import pairwise
@@ -44,6 +44,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 # Solar geometry for the night-corruption detector below. The same
 # implementation the climatology exporter uses, so "deep night" means the same
@@ -670,13 +671,38 @@ SOLAR_CONSTANT_WM2 = 1367.0
 IMPOSSIBLE_SHORTWAVE_CHANNELS = ("Sw_dw", "Net_CNR1")
 
 
-def mask_impossible_shortwave(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
+# ``{unified name: [(source column, inclusive start, inclusive end), ...]}``, as
+# ``sensors.calibration.resolve_mapping_windows`` returns it.
+SourceWindows = Mapping[str, Sequence[tuple[str, pd.Timestamp, pd.Timestamp]]]
+
+
+def _mask_column(frame: pd.DataFrame, column: str, hit: NDArray, removed: dict[str, int]) -> None:
+    """Blank *column* where *hit* selects a populated sample, tallying into *removed*."""
+    if column not in frame.columns:
+        return
+    selected = hit & frame[column].notna().to_numpy()
+    count = int(selected.sum())
+    if not count:
+        return
+    frame.loc[selected, column] = float("nan")
+    removed[column] = removed.get(column, 0) + count
+
+
+def mask_impossible_shortwave(
+    frame: pd.DataFrame, sources: SourceWindows | None = None
+) -> tuple[pd.DataFrame, dict[str, int]]:
     """Blank global irradiance that the sun's position cannot produce.
 
     Per SAMPLE, unlike :func:`mask_night_corrupted_days`, because this catches
     the residue rather than the episode. ``Net_CNR1`` follows the same sample for
     the same reason it follows the day: the logger derives it from the four
     components, so leaving it would keep the impossible contribution on disk.
+
+    Pass *sources* (from :func:`~micrometeorology.sensors.calibration.resolve_mapping_windows`)
+    so the raw column the unified channel was copied from is blanked on the same
+    samples. It is scoped to that column's own era window, because inside it the
+    two are the same measurement bit for bit, while outside it the raw column is
+    a different instrument that never failed this check.
 
     Returns
     -------
@@ -694,13 +720,10 @@ def mask_impossible_shortwave(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[s
     if not impossible.any():
         return frame, removed
     for column in IMPOSSIBLE_SHORTWAVE_CHANNELS:
-        if column not in frame.columns:
-            continue
-        hit = impossible & frame[column].notna().to_numpy()
-        count = int(hit.sum())
-        if count:
-            frame.loc[hit, column] = float("nan")
-            removed[column] = count
+        _mask_column(frame, column, impossible, removed)
+        for source, start, end in (sources or {}).get(column, ()):
+            within = (index >= start) & (index <= end)
+            _mask_column(frame, source, impossible & within, removed)
     return frame, removed
 
 
@@ -742,7 +765,7 @@ def night_corrupted_days(
 
 
 def mask_night_corrupted_days(
-    frame: pd.DataFrame, days: Sequence[tuple[str, int]]
+    frame: pd.DataFrame, days: Sequence[tuple[str, int]], sources: SourceWindows | None = None
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     """Blank :data:`NIGHT_CORRUPTION_CHANNELS` over every day in ``days``.
 
@@ -750,6 +773,13 @@ def mask_night_corrupted_days(
     the clock, so the values are real measurements of another hour and the half
     of the day that still looks plausible is exactly as misplaced as the half
     that does not.
+
+    Pass *sources* (from :func:`~micrometeorology.sensors.calibration.resolve_mapping_windows`)
+    to blank the raw columns those channels were copied from as well. Unlike the
+    per-sample BSRN mask, this one ignores the era windows and takes every
+    source column for the whole day: a slipped clock is a fault of the LOGGER,
+    so every solar-geometry-dependent channel it wrote that day is misplaced,
+    including the ones that were not the unified source at the time.
 
     Returns
     -------
@@ -763,13 +793,9 @@ def mask_night_corrupted_days(
     corrupted = {pd.Timestamp(day).normalize() for day, _count in days}
     within = pd.DatetimeIndex(frame.index).normalize().isin(corrupted)
     for column in NIGHT_CORRUPTION_CHANNELS:
-        if column not in frame.columns:
-            continue
-        hit = within & frame[column].notna().to_numpy()
-        count = int(hit.sum())
-        if count:
-            frame.loc[hit, column] = float("nan")
-            removed[column] = count
+        _mask_column(frame, column, within, removed)
+        for source, _start, _end in (sources or {}).get(column, ()):
+            _mask_column(frame, source, within, removed)
     return frame, removed
 
 
