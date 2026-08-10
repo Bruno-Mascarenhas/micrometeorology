@@ -467,3 +467,59 @@ class TestTheMasksReachTheRawTwin:
             pytest.approx(float("nan"), nan_ok=True),
         ]
         assert removed == {"Sw_dw": 2, "PSP1_Wm2_Avg": 1, "CM3Up_Wm2_Avg": 1}
+
+
+class TestNetRadiationClosesWithItsComponents:
+    """The monitoring chart tells the reader to add the four bars and land on Rn.
+
+    The logger derives its net from the same four channels, so calibrating one
+    component and not the logger's precomputed sum broke the identity by
+    construction: a systematic +1,28 W/m2 residual reaching 9,28, past the
+    8,95 W/m2 ceiling the module's own comment asserts for this quantity.
+    """
+
+    @staticmethod
+    def _frame() -> pd.DataFrame:
+        index = pd.date_range("2024-01-01", periods=3, freq="5min")
+        return pd.DataFrame(
+            {
+                "Sw_dw": [800.0, 900.0, np.nan],
+                "Sw_up": [100.0, 110.0, 120.0],
+                "Lw_dw": [400.0, 405.0, 410.0],
+                "Lw_up": [450.0, 455.0, 460.0],
+                "Net_CNR1": [1.0, 2.0, 3.0],
+            },
+            index=index,
+        )
+
+    def test_the_net_becomes_the_sum_of_the_published_components(self):
+        closed, _gained, _dropped = archive.close_net_radiation(self._frame())
+
+        residual = closed["Sw_dw"] - closed["Sw_up"] + closed["Lw_dw"] - closed["Lw_up"]
+        residual = residual - closed["Net_CNR1"]
+        assert float(np.nanmax(np.abs(residual))) == 0.0
+        assert closed["Net_CNR1"].iloc[0] == pytest.approx(650.0)
+
+    def test_a_missing_component_leaves_no_net(self):
+        """A net without all four terms is not a net, whatever the logger wrote."""
+        closed, _gained, dropped = archive.close_net_radiation(self._frame())
+
+        assert np.isnan(closed["Net_CNR1"].iloc[2])
+        assert dropped == 1
+
+    def test_components_without_a_logger_net_are_published(self):
+        frame = self._frame()
+        frame["Net_CNR1"] = [np.nan, np.nan, np.nan]
+
+        closed, gained, _dropped = archive.close_net_radiation(frame)
+
+        assert gained == 2
+        assert closed["Net_CNR1"].iloc[1] == pytest.approx(740.0)
+
+    def test_a_frame_without_the_components_is_untouched(self):
+        frame = pd.DataFrame({"Net_CNR1": [1.0, 2.0]}, index=pd.date_range("2024-01-01", periods=2))
+
+        closed, gained, dropped = archive.close_net_radiation(frame)
+
+        assert closed["Net_CNR1"].to_list() == [1.0, 2.0]
+        assert (gained, dropped) == (0, 0)

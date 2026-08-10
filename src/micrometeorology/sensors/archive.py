@@ -70,6 +70,7 @@ __all__ = [
     "ArchiveFile",
     "ArchiveReport",
     "build_five_minute_frame",
+    "close_net_radiation",
     "mask_impossible_shortwave",
     "mask_night_corrupted_days",
     "mask_sentinels",
@@ -797,6 +798,38 @@ def mask_night_corrupted_days(
         for source, _start, _end in (sources or {}).get(column, ()):
             _mask_column(frame, source, within, removed)
     return frame, removed
+
+
+NET_RADIATION_COMPONENTS = ("Sw_dw", "Sw_up", "Lw_dw", "Lw_up")
+
+
+def close_net_radiation(frame: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
+    """Rebuild ``Net_CNR1`` as the sum of the four published components.
+
+    The CNR1 net is not an independent measurement: the logger computes it from
+    the same four channels, and over 719,002 samples of the uncalibrated record
+    the two agree to 8.95 W/m2. Calibrating one component and not the logger's
+    precomputed sum broke that — the residual became a systematic +1.28 W/m2,
+    reaching 9.28, so the monitoring chart that invites a reader to add the four
+    bars and land on the net line no longer added up.
+
+    Recomputing rather than correcting the sum is what makes the identity exact
+    by construction instead of by a second arithmetic that can drift again. It
+    also publishes 34,640 five-minute samples of 2018-10 to 2019-03, where the
+    four components were recorded but the logger had not yet begun writing a
+    net, and drops the 125 where a component is missing and no net is defined.
+
+    Returns the frame, the samples gained and the samples dropped.
+    """
+    if not all(column in frame.columns for column in NET_RADIATION_COMPONENTS):
+        return frame, 0, 0
+    down, up, longwave_down, longwave_up = (frame[c] for c in NET_RADIATION_COMPONENTS)
+    closed = down - up + longwave_down - longwave_up
+    previous = frame["Net_CNR1"] if "Net_CNR1" in frame.columns else pd.Series(np.nan, frame.index)
+    gained = int((closed.notna() & previous.isna()).sum())
+    dropped = int((closed.isna() & previous.notna()).sum())
+    frame["Net_CNR1"] = closed
+    return frame, gained, dropped
 
 
 def mask_sentinels(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:

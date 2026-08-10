@@ -56,6 +56,7 @@ from micrometeorology.sensors.archive import (
     STATUS_COLUMNS,
     ArchiveReport,
     build_five_minute_frame,
+    close_net_radiation,
     mask_impossible_shortwave,
     mask_night_corrupted_days,
     mask_sentinels,
@@ -234,6 +235,13 @@ def run(
         # reach both, or the artifact publishes the rejected value under the
         # other name and the two disagree inside one file.
         sources = resolve_mapping_windows(qc, switches, NIGHT_CORRUPTION_CHANNELS)
+
+        qc, net_gained, net_dropped = close_net_radiation(qc)
+        if net_gained or net_dropped:
+            typer.echo(
+                f"\nSaldo recomposto dos quatro componentes: +{net_gained:,} amostras "
+                f"(componentes sem saldo do registrador), -{net_dropped:,} (componente ausente)"
+            )
 
         # Reported, never fatal: an uncovered window is a laboratory decision
         # (which sensitivity applied then), and refusing to build the archive
