@@ -26,8 +26,7 @@ logger = logging.getLogger(__name__)
 def _drop_spinup_step(value: NDArray) -> NDArray:
     """Drop the spin-up first time step.
 
-    When the time axis has <= 1 entries (single-timestep files) the full
-    array is returned instead, so reductions never see an empty tail.
+    A single-timestep input is returned whole, so reductions never see an empty tail.
     """
     if value.shape[0] <= 1:
         return value
@@ -51,24 +50,20 @@ def materialize_2d(value: NDArray) -> NDArray:
 def blank_uninitialised_radiation(values: NDArray, glw: NDArray) -> NDArray:
     """NaN every step at which WRF had not yet called the radiation scheme.
 
-    On a cold start — the daily operational run — the first output step is
-    written before radiation runs, so ``GLW`` is identically zero over the whole
-    domain. Downwelling longwave is never zero over land, so that is an
-    unambiguous marker rather than a threshold. Every GLW-derived field at that
-    step is then physically impossible: net radiation reads about -416 W/m2
-    domain-mean, sky emissivity exactly 0.00, and upwelling longwave sits ~18
-    W/m2 low with the reflected ``(1 - eps) * GLW`` term missing.
+    On a cold start the first output step precedes the first radiation call, so
+    ``GLW`` is identically zero domain-wide — an unambiguous marker, not a
+    threshold, because downwelling longwave is never zero over land. The
+    GLW-derived fields at that step are impossible: net radiation ~-416 W/m2
+    domain-mean, sky emissivity exactly 0.00, upwelling longwave ~18 W/m2 low
+    with the reflected ``(1 - eps) * GLW`` term missing.
 
-    Blanking here rather than at the writer is what keeps the colour-scale
-    sample and the published frame one population: :func:`percentile_scale_bounds`
-    already drops step 0 from the sample, while the publish gate rejects a frame
-    only when every cell is non-finite. With the step blanked the gate drops the
-    frame, so it can no longer ship carrying a legend computed without it.
-
-    A continuation run (one restarted from a previous forecast) already has its
-    radiation state and is untouched. The shortwave fields are NOT covered: a
-    zero ``SWDOWN`` is what night looks like, so the same test cannot tell
-    uninitialised from dark, and ``DAYLIGHT_ONLY_VARIABLES`` gates them instead.
+    Blanking here rather than at the writer keeps the colour-scale sample and the
+    published frame one population: :func:`percentile_scale_bounds` already skips
+    step 0, and the publish gate drops a frame only when every cell is non-finite
+    — so the blanked step is dropped instead of shipping under a legend computed
+    without it. Continuation runs keep their radiation state and are untouched;
+    shortwave is not covered, because a zero ``SWDOWN`` is also what night looks
+    like, and ``DAYLIGHT_ONLY_VARIABLES`` gates those instead.
     """
     steps = np.asarray(glw).reshape(np.shape(glw)[0], -1)
     uninitialised = np.all(steps == 0.0, axis=1)
@@ -83,31 +78,22 @@ def percentile_scale_bounds(variable: NDArray) -> tuple[float, float]:
     """Return color-scale bounds ``(low, high)`` for a 3-D variable, skipping the first step.
 
     The lower bound is the true minimum, but the **upper bound is the
-    98th-percentile saturation cap, not the maximum**: capping there keeps a
-    handful of extreme cells from blowing out the map color scale so the bulk of
-    the field stays legible. Callers use the pair as ``(vmin, vmax)`` for
-    rendering, not as the data's actual range.
-
-    Single-timestep inputs fall back to the full array (see :func:`_drop_spinup_step`).
+    98th-percentile saturation cap, not the maximum**, so a handful of extreme
+    cells cannot blow out the map colour scale. The pair is a rendering
+    ``(vmin, vmax)``, not the data's actual range.
     """
     flat = _drop_spinup_step(variable).ravel()
     return float(np.nanmin(flat)), float(np.nanpercentile(flat, 98))
 
 
 def get_low_high_wind(u: NDArray, v: NDArray) -> tuple[float, float]:
-    """Return ``(min, max)`` wind speed from U/V arrays (skip first step).
-
-    Single-timestep inputs fall back to the full arrays (see :func:`_drop_spinup_step`).
-    """
+    """Return ``(min, max)`` wind speed from U/V arrays, skipping the first step."""
     speed = np.hypot(_drop_spinup_step(u).ravel(), _drop_spinup_step(v).ravel())
     return float(np.nanmin(speed)), float(np.nanmax(speed))
 
 
 def get_low_high_rain(variable: NDArray) -> tuple[float, float]:
-    """Return ``(min, max)`` of incremental precipitation.
-
-    The input is *cumulative* rain; we compute the per-step increment first.
-    """
+    """Return ``(min, max)`` of incremental precipitation from *cumulative* rain."""
     arr = np.asarray(variable)
     if arr.ndim < 3:
         flat = arr.ravel()
@@ -127,10 +113,9 @@ def get_low_high_rain(variable: NDArray) -> tuple[float, float]:
 def extract_temperature(ds: WRFDataset) -> tuple[NDArray, float, float]:
     """Extract 2-m temperature (°C).
 
-    Returns ``(temperature_3d, temp_min, temp_max)`` with the raw Kelvin array
-    (converted per step by :func:`extract_temperature_step`) and °C bounds.
-    Callers that also need surface pressure read PSFC themselves, so a
-    temperature export never eagerly loads a variable it does not use.
+    Returns the raw Kelvin array — converted per step by
+    :func:`extract_temperature_step` — with bounds already in °C. Callers needing
+    surface pressure read PSFC themselves, so this never loads an unused variable.
     """
     t2 = ds.get_variable("T2")  # Kelvin
 
@@ -147,17 +132,11 @@ def extract_temperature_step(t2_step: NDArray) -> NDArray:
 
 
 def extract_skin_temperature(ds: WRFDataset) -> tuple[NDArray, float, float]:
-    """Extract WRF surface skin temperature.
+    """Extract WRF surface skin temperature, ``TSK_C = TSK_K - 273.15``.
 
-    Input variable
-        ``TSK`` in Kelvin.
-    Formula
-        ``TSK_C = TSK_K - 273.15``.
-    Output
-        Surface/skin temperature in degrees Celsius.
     Limitation
-        This is the model skin temperature, not a 2-m air temperature and not
-        an observed land-surface temperature product.
+        Model skin temperature: not a 2-m air temperature and not an observed
+        land-surface temperature product.
     """
     tsk = ds.get_variable("TSK")
     t_min, t_max = percentile_scale_bounds(tsk)
@@ -172,11 +151,9 @@ def extract_pressure(ds: WRFDataset) -> tuple[NDArray, float, float]:
 
 
 def extract_vapor(ds: WRFDataset) -> tuple[NDArray, float, float]:
-    """Extract 2-m water-vapor mixing ratio (g/kg).
+    """Extract 2-m water-vapor mixing ratio: ``Q2`` (``QV at 2 M``, kg/kg) scaled to g/kg.
 
-    WRF metadata describes ``Q2`` as ``QV at 2 M`` with units ``kg kg-1``.
-    The exported site variable keeps the legacy ``VAPOR`` id but values are
-    converted to g/kg.
+    The exported site variable keeps the legacy ``VAPOR`` id.
     """
     q2 = ds.get_variable("Q2")
     q_min, q_max = percentile_scale_bounds(q2)
@@ -184,23 +161,15 @@ def extract_vapor(ds: WRFDataset) -> tuple[NDArray, float, float]:
 
 
 def compute_relative_humidity(q2: NDArray, t2: NDArray, psfc: NDArray) -> NDArray:
-    """Compute 2-m relative humidity from WRF near-surface fields.
+    """Compute 2-m relative humidity from ``Q2`` (kg/kg), ``T2`` (K) and ``PSFC`` (Pa).
 
-    Input variables
-        ``Q2`` water-vapor mixing ratio (kg/kg), ``T2`` air temperature (K),
-        and ``PSFC`` surface pressure (Pa).
     Formula
-        Vapor pressure is estimated as ``e = q * p / (epsilon + q)`` using
-        ``epsilon = 0.622``. Saturation vapor pressure over water follows the
-        Bolton/Tetens form ``es = 611.2 * exp(17.67 * Tc / (Tc + 243.5))``.
-        Relative humidity is ``100 * e / es``.
+        ``100 * e / es`` with vapor pressure ``e = q * p / (epsilon + q)``,
+        ``epsilon = 0.622`` — that denominator assumes Q2 is a mixing ratio,
+        matching WRF's QV convention — over the Bolton/Tetens saturation
+        ``es = 611.2 * exp(17.67 * Tc / (Tc + 243.5))``.
     Output
-        Relative humidity in percent, clipped to the physical display range
-        0-100%.
-    Limitation
-        The calculation assumes Q2 is a mixing ratio, matching WRF's QV
-        convention. It is a near-surface diagnostic, not a vertically integrated
-        humidity field.
+        Percent, clipped to the physical display range 0-100%.
     """
     epsilon = 0.622
     temp_c = t2 - 273.15
@@ -225,16 +194,13 @@ def extract_relative_humidity(ds: WRFDataset) -> tuple[NDArray, float, float]:
 def rotate_to_earth_relative(ds: WRFDataset, u: NDArray, v: NDArray) -> tuple[NDArray, NDArray]:
     """Rotate grid-relative wind components onto true north.
 
-    ``U10``/``V10`` are grid-relative: on a Lambert or polar-stereographic
-    domain the grid's y axis is not north, and every bearing derived from them
-    is off by the local rotation angle — up to tens of degrees at the edges of a
-    wide domain, and the arrows would be drawn confidently wrong.
-
-    ``COSALPHA``/``SINALPHA`` carry that angle per cell, so the rotation is
-    exact rather than estimated. The operational domains are Mercator, where
+    ``U10``/``V10`` are grid-relative: on a Lambert or polar-stereographic domain
+    the grid's y axis is not north, so every bearing taken from them is off by the
+    local rotation angle — tens of degrees at the edges of a wide domain.
+    ``COSALPHA``/``SINALPHA`` carry that angle per cell, making the rotation exact
+    rather than estimated. The operational domains are Mercator, where
     ``SINALPHA`` is 0 everywhere and this is the identity; a file without the
-    fields keeps the components as they are, because there is nothing to rotate
-    them by.
+    fields is passed through unrotated.
     """
     if not (ds.has_variable("COSALPHA") and ds.has_variable("SINALPHA")):
         return u, v
@@ -262,11 +228,14 @@ def extract_rain(ds: WRFDataset) -> tuple[NDArray, float, float]:
 def extract_rain_step(total: NDArray, i: int) -> NDArray:
     """Compute incremental rain for step *i* from cumulative totals.
 
-    Step 0 has no computable increment at a file/restart boundary and
-    publishes zeros; every later step publishes ``total[i] - total[i - 1]``.
+    Step 0 has no increment to compute at a file or restart boundary, so it is
+    no-value rather than zero: a field of zeros is the statement that it rained
+    nowhere, which the model never made. The publish gate drops an all-NaN frame,
+    so the step leaves the manifest's ``availability`` like the radiation fields
+    the cold start has not initialised.
     """
     if i == 0:
-        return np.zeros_like(np.squeeze(total[i : i + 1, :, :]))
+        return np.full_like(np.squeeze(total[i : i + 1, :, :]), np.nan)
     current: NDArray = np.squeeze(total[i : i + 1, :, :])
     previous: NDArray = np.squeeze(total[i - 1 : i, :, :])
     increment: NDArray = current - previous
@@ -283,51 +252,46 @@ def extract_scalar(ds: WRFDataset, var_name: str) -> tuple[NDArray, float, float
 # ---------------------------------------------------------------------------
 # Derived surface radiation budget
 #
-# wrfout files carry the DOWNWELLING fluxes as diagnostics (SWDOWN, GLW) but
-# the upwelling ones only when the RRTMG bottom-of-atmosphere outputs are
-# switched on: LWUPB/SWUPB are present in the 2013 archive runs and absent
-# from the 2026 operational runs. Everything below is therefore reconstructed
-# from fields every wrfout generation carries — EMISS, TSK, GLW, SWDOWN,
-# ALBEDO, T2, COSZEN — so a budget term publishes identically across runs.
-#
-# The reconstruction is validated against WRF's own fluxes where those exist
-# (d02 2013, 9801 cells x 9 steps): LWUP reproduces LWUPB to MAE 0.82 W/m2
-# (0.11% of a ~420 W/m2 signal) and SWUP reproduces SWUPB exactly.
+# wrfout carries the DOWNWELLING fluxes (SWDOWN, GLW) always, the upwelling ones
+# only with RRTMG's bottom-of-atmosphere outputs on: LWUPB/SWUPB are in the 2013
+# archive runs and absent from the 2026 operational runs. Everything below is
+# therefore rebuilt from fields every wrfout generation carries — EMISS, TSK,
+# GLW, SWDOWN, ALBEDO, T2, COSZEN — so a budget term publishes identically
+# across runs. Validated where WRF's own fluxes exist (d02 2013, 9801 cells x 9
+# steps): LWUP reproduces LWUPB to MAE 0.82 W/m2 (0.11% of a ~420 W/m2 signal),
+# SWUP reproduces SWUPB exactly.
 # ---------------------------------------------------------------------------
 
 #: Stefan-Boltzmann constant, W m-2 K-4 (CODATA 2018).
 STEFAN_BOLTZMANN = 5.670374419e-8
 
-#: Total solar irradiance at 1 AU, W m-2. Kopp & Lean (2011) measured
-#: 1360.8 +- 0.5; matches ``allsky.solar.SOLAR_CONSTANT_WM2`` so the WRF and
-#: all-sky-camera clearness indices are on one scale. Older references
-#: (Duffie & Beckman, quoting the WRC) still carry 1367, which would shift kt
-#: by 0.4%.
+#: Total solar irradiance at 1 AU, W m-2: Kopp & Lean (2011) measured 1360.8 +- 0.5.
+#: Must match ``allsky.solar.SOLAR_CONSTANT_WM2`` so the WRF and all-sky-camera
+#: clearness indices stay on one scale; the older 1367 (Duffie & Beckman, quoting
+#: the WRC) would shift kt by 0.4%.
 SOLAR_CONSTANT = 1361.0
 
-#: Sun-elevation floor for the clearness index. Below it the extraterrestrial
-#: denominator is small enough that ``kt`` is dominated by the horizon
-#: singularity rather than by sky condition, so those cells publish "no value".
+#: Sun-elevation floor for the clearness index: below it the extraterrestrial
+#: denominator is small enough that ``kt`` tracks the horizon singularity rather
+#: than sky condition, so those cells publish "no value".
 #:
 #: cos(z) = 0.1736 is a solar zenith angle of 80 degrees (elevation 10), the
-#: daytime threshold used by the ARM best-estimate radiation VAP (Shi & Long,
-#: DOE/SC-ARM/TR-008); BSRN's component tests tighten further at SZA < 75.
-#: Those thresholds exist to bound pyranometer cosine-response error, which
-#: model output does not have — but the same grazing geometry is also where
-#: WRF's plane-parallel radiative transfer is least trustworthy, so the
-#: threshold carries over for a different reason. On a 76-step operational d04
-#: run this keeps 30 of the 39 daylight frames and ~77% of their cells.
+#: daytime threshold of the ARM best-estimate radiation VAP (Shi & Long,
+#: DOE/SC-ARM/TR-008); BSRN's component tests tighten to SZA < 75. Those bound
+#: pyranometer cosine-response error, which model output does not have, but the
+#: same grazing geometry is where WRF's plane-parallel radiative transfer is
+#: least trustworthy. On a 76-step operational d04 run this keeps 30 of the 39
+#: daylight frames and ~77% of their cells.
 MIN_COSZEN_FOR_CLEARNESS = 0.1736
 
 
 def _eccentricity_correction(times: list[datetime]) -> NDArray:
     """Sun-Earth distance correction ``E0 = (r0/r)^2`` per time step (Spencer 1971).
 
-    Same series as :func:`allsky.solar.eccentricity_correction`; duplicated
-    rather than imported because ``micrometeorology`` and ``allsky`` are
-    independent packages. E0 runs 0.9666 (aphelion, early July) to 1.0351
-    (perihelion, early January) — a +-3.4% swing that is not negligible for a
-    clearness index, which is why COSZEN alone is not the denominator.
+    Duplicates :func:`allsky.solar.eccentricity_correction` because
+    ``micrometeorology`` and ``allsky`` are independent packages. E0 runs 0.9666
+    (aphelion, early July) to 1.0351 (perihelion, early January), a +-3.4% swing
+    that keeps COSZEN alone from being the clearness denominator.
     """
     fractional_year = np.array(
         [
@@ -356,14 +320,13 @@ def _eccentricity_correction(times: list[datetime]) -> NDArray:
 def _finite_scale_bounds(values: NDArray, fallback: tuple[float, float]) -> tuple[float, float]:
     """Percentile scale bounds, falling back when the field is entirely no-value.
 
-    Only the clearness index can reach this: an all-night file leaves every
-    cell NaN, ``nanmin``/``nanpercentile`` return NaN, and the values writer
-    rejects non-finite bounds outright. Those steps are gated out and never
-    published, but the bounds are computed eagerly before the gate runs.
+    Only the clearness index reaches this: an all-night file leaves every cell
+    NaN and the values writer rejects non-finite bounds outright. Those steps are
+    gated out and never published, but the bounds are computed before the gate.
     """
     with warnings.catch_warnings():
-        # nanmin/nanpercentile warn (and return NaN) on an all-NaN input; the
-        # NaN is the signal we act on below, so the warning is noise.
+        # nanmin/nanpercentile warn on an all-NaN input; that NaN is the signal
+        # acted on below, so the warning is noise.
         warnings.simplefilter("ignore", RuntimeWarning)
         low, high = percentile_scale_bounds(values)
     if not (np.isfinite(low) and np.isfinite(high)):
@@ -372,58 +335,44 @@ def _finite_scale_bounds(values: NDArray, fallback: tuple[float, float]) -> tupl
 
 
 def compute_upwelling_longwave(emiss: NDArray, tsk: NDArray, glw: NDArray) -> NDArray:
-    """Upwelling longwave radiation at the surface.
+    """Upwelling longwave radiation at the surface, W/m2 positive upward.
 
-    Input variables
-        ``EMISS`` surface emissivity (0-1), ``TSK`` skin temperature (K), and
-        ``GLW`` downwelling longwave flux at the ground (W/m2).
     Formula
-        ``LWup = eps * sigma * TSK^4 + (1 - eps) * GLW``. The first term is the
-        surface's own graybody emission; the second is the fraction of the
-        incoming sky radiance a non-black surface reflects. Dropping the
-        reflected term is the common mistake and costs ~15 W/m2 here — nearly
-        20x the error of the full form.
+        ``LWup = eps * sigma * TSK^4 + (1 - eps) * GLW`` from ``EMISS`` (0-1),
+        ``TSK`` (K) and ``GLW`` (W/m2): graybody emission plus the sky radiance a
+        non-black surface reflects. Dropping the reflected term is the common
+        mistake and costs ~15 W/m2, nearly 20x the error of the full form.
 
-        This is not an approximation of what WRF does, it is what WRF does.
-        RRTMG's ``rtrnmc`` forms the upward radiance per band as
-        ``radlu = rad0 + reflect * radld`` with ``rad0 = semiss * B(Ts)`` and
-        ``reflect = 1 - semiss`` (``phys/module_ra_rrtmg_lw.F``, under
-        "Add in specular reflection of surface downward radiance"), and the
-        urban branch of Noah writes the same expression out longhand:
+        This is what WRF does, not an approximation of it. RRTMG's ``rtrnmc``
+        forms the upward radiance per band as ``radlu = rad0 + reflect * radld``
+        with ``rad0 = semiss * B(Ts)`` and ``reflect = 1 - semiss``
+        (``phys/module_ra_rrtmg_lw.F``, under "Add in specular reflection of
+        surface downward radiance"), and Noah's urban branch writes it longhand:
         ``rl_up_rural = -emiss*sigma*tsk**4 - (1.-emiss)*glw``
         (``phys/module_sf_noahdrv.F``). Noah's own net-longwave term
-        ``emiss*GLW - emiss*sigma*T1**4`` is the same identity with the
-        reflected part already cancelled, not a scheme that ignores it.
-    Output
-        Upwelling longwave flux in W/m2, positive upward.
+        ``emiss*GLW - emiss*sigma*T1**4`` is the same identity with the reflected
+        part already cancelled, not a scheme that ignores it.
     Limitation
-        Uses the grid-mean skin temperature. WRF's own LWUPB is computed by the
-        radiation scheme from the LSM's canopy-adjusted radiative temperature,
-        so over land the two differ by ~1.7 W/m2 (over water, ~0.03 W/m2).
-        A second, far smaller discrepancy is the constant itself: WRF carries
-        ``STBOLT = 5.67051e-8`` (``share/module_model_constants.F``) and Noah
-        rounds to ``5.67e-8``, against the exact CODATA value used here — worth
-        ~0.01 W/m2, i.e. 1% of the land bias above.
-        This is a model diagnostic, not an observed flux.
+        Uses the grid-mean skin temperature where WRF's own LWUPB uses the LSM's
+        canopy-adjusted radiative temperature: ~1.7 W/m2 apart over land, ~0.03
+        W/m2 over water. Far smaller, WRF's ``STBOLT = 5.67051e-8``
+        (``share/module_model_constants.F``; Noah rounds to ``5.67e-8``) against
+        the exact CODATA value used here is worth ~0.01 W/m2, 1% of that land
+        bias. A model diagnostic, not an observed flux.
     """
     upwelling: NDArray = emiss * STEFAN_BOLTZMANN * tsk**4 + (1.0 - emiss) * glw
     return upwelling
 
 
 def compute_upwelling_shortwave(albedo: NDArray, swdown: NDArray) -> NDArray:
-    """Upwelling (reflected) shortwave radiation at the surface.
+    """Upwelling (reflected) shortwave radiation at the surface, W/m2 positive upward.
 
-    Input variables
-        ``ALBEDO`` surface albedo (0-1) and ``SWDOWN`` downwelling shortwave
-        flux at the ground (W/m2).
     Formula
         ``SWup = ALBEDO * SWDOWN`` — exactly how WRF forms SWUPB internally,
         which is why this reproduces that field bit-for-bit where it exists.
-    Output
-        Reflected shortwave flux in W/m2, positive upward.
     Limitation
-        ``ALBEDO`` is the broadband all-sky surface albedo; no direct/diffuse
-        or spectral split is applied.
+        ``ALBEDO`` is the broadband all-sky surface albedo; no direct/diffuse or
+        spectral split is applied.
     """
     reflected: NDArray = albedo * swdown
     return reflected
@@ -432,11 +381,8 @@ def compute_upwelling_shortwave(albedo: NDArray, swdown: NDArray) -> NDArray:
 def compute_net_shortwave(albedo: NDArray, swdown: NDArray) -> NDArray:
     """Net (absorbed) shortwave radiation at the surface.
 
-    Formula
-        ``SWnet = SWDOWN * (1 - ALBEDO)``, the shortwave the surface keeps.
-    Output
-        Net shortwave flux in W/m2, positive downward (into the surface).
-        Zero at night.
+    ``SWnet = SWDOWN * (1 - ALBEDO)``, the shortwave the surface keeps, in W/m2
+    positive downward (into the surface). Zero at night.
     """
     return swdown * (1.0 - albedo)
 
@@ -445,17 +391,14 @@ def compute_net_longwave(emiss: NDArray, tsk: NDArray, glw: NDArray) -> NDArray:
     """Net longwave radiation at the surface.
 
     Formula
-        ``LWnet = GLW - LWup``, which reduces algebraically to
-        ``eps * (GLW - sigma * TSK^4)`` — the reflected ``(1 - eps) * GLW``
-        term cancels exactly against the same term in ``LWup``. Evaluated in
-        the reduced form: it is the identity a reader should see, and it does
-        half the arithmetic. Float rounding makes it agree with
-        ``GLW - compute_upwelling_longwave(...)`` to within an ulp or so
-        rather than bit-for-bit.
+        ``LWnet = GLW - LWup`` reduces to the ``eps * (GLW - sigma * TSK^4)``
+        evaluated here, the reflected ``(1 - eps) * GLW`` term cancelling exactly
+        against ``LWup``. Float rounding leaves it agreeing with
+        ``GLW - compute_upwelling_longwave(...)`` to within an ulp, not
+        bit-for-bit.
     Output
-        Net longwave flux in W/m2, positive downward. Almost always negative:
-        the surface is warmer than the effective sky and loses longwave both
-        day and night.
+        W/m2 positive downward, almost always negative: the surface is warmer
+        than the effective sky and loses longwave day and night.
     """
     return emiss * (glw - STEFAN_BOLTZMANN * tsk**4)
 
@@ -468,15 +411,13 @@ def compute_net_radiation(
     Formula
         ``Rn = SWnet + LWnet = SWDOWN * (1 - ALBEDO) + eps * (GLW - sigma * TSK^4)``.
     Output
-        Net radiation in W/m2, positive downward. This is the energy actually
-        available to drive the sensible (HFX), latent (LH) and ground (GRDFLX)
-        heat fluxes.
+        W/m2 positive downward: the energy available to drive the sensible
+        (HFX), latent (LH) and ground (GRDFLX) heat fluxes.
     Limitation
         Inherits the skin-temperature caveat of
-        :func:`compute_upwelling_longwave`. It is not reconcilable cell-by-cell
-        with ``NOAHRES``, which is Noah's internal per-tile residual computed
-        against the canopy temperature rather than against these grid-mean
-        fields.
+        :func:`compute_upwelling_longwave`, and is not reconcilable cell-by-cell
+        with ``NOAHRES`` — Noah's per-tile residual against the canopy
+        temperature, not against these grid-mean fields.
     """
     net: NDArray = compute_net_shortwave(albedo, swdown) + compute_net_longwave(emiss, tsk, glw)
     return net
@@ -485,23 +426,18 @@ def compute_net_radiation(
 def compute_sky_emissivity(glw: NDArray, t2: NDArray) -> NDArray:
     """Effective (bulk) emissivity of the sky hemisphere.
 
-    Input variables
-        ``GLW`` downwelling longwave flux (W/m2) and ``T2`` 2-m air
-        temperature (K).
     Formula
-        ``eps_sky = GLW / (sigma * T2^4)`` — the emissivity a blackbody at
-        screen-level air temperature would need to emit the observed
-        downwelling flux.
+        ``eps_sky = GLW / (sigma * T2^4)`` from ``GLW`` (W/m2) and ``T2`` (K):
+        the emissivity a blackbody at screen-level air temperature would need to
+        emit the observed downwelling flux.
     Output
-        Dimensionless effective emissivity, typically ~0.75 under a dry clear
-        sky and approaching 1 under a warm overcast, which makes it a
-        convenient cloudiness proxy.
+        Dimensionless, typically ~0.75 under a dry clear sky and approaching 1
+        under a warm overcast, which makes it a cloudiness proxy.
     Limitation
-        Uses 2-m air temperature as the radiating temperature of the whole
-        atmospheric column, so it absorbs any near-surface inversion into the
-        emissivity. Values are not clipped: the first output step of a run can
-        carry ``GLW = 0`` before radiation is first called, which shows up as
-        ``eps_sky = 0``.
+        Takes 2-m air temperature as the radiating temperature of the whole
+        column, absorbing any near-surface inversion into the emissivity. Not
+        clipped: a first output step carrying ``GLW = 0``, before radiation is
+        called, shows up as ``eps_sky = 0``.
     """
     with np.errstate(invalid="ignore", divide="ignore"):
         emissivity: NDArray = glw / (STEFAN_BOLTZMANN * t2**4)
@@ -511,30 +447,26 @@ def compute_sky_emissivity(glw: NDArray, t2: NDArray) -> NDArray:
 def compute_clearness_index(swdown: NDArray, coszen: NDArray, eccentricity: NDArray) -> NDArray:
     """Extraterrestrial clearness index ``kt`` at the surface.
 
-    Input variables
-        ``SWDOWN`` downwelling shortwave (W/m2), ``COSZEN`` cosine of the solar
-        zenith angle, and the per-step Sun-Earth distance correction.
     Formula
-        ``kt = SWDOWN / (S0 * E0 * cos(z))``, the extraterrestrial-normalized
-        index of Duffie & Beckman eq. (1.10.1). Same definition as
-        :func:`allsky.solar.clearness_index`, so WRF and the all-sky camera
-        pipeline can be compared on one axis. Lower case ``kt`` is deliberate:
-        Duffie & Beckman sect. 2.9 reserve it for the sub-daily index and
-        upper-case ``K_T`` for the daily one, and this field is instantaneous.
-        Do not compare these values against the "typical 0.25-0.75" figures
-        quoted for monthly-mean daily ``K_T`` — daily integration includes the
-        low-sun hours and sits systematically lower.
+        ``kt = SWDOWN / (S0 * E0 * cos(z))`` from ``SWDOWN`` (W/m2), ``COSZEN``
+        and the per-step Sun-Earth distance correction — Duffie & Beckman
+        eq. (1.10.1), the same definition as :func:`allsky.solar.clearness_index`
+        so WRF and the all-sky camera pipeline share one axis. Lower case ``kt``
+        is deliberate: Duffie & Beckman sect. 2.9 reserve it for the sub-daily
+        index and upper-case ``K_T`` for the daily one, and this field is
+        instantaneous. Do not compare it against the "typical 0.25-0.75" figures
+        quoted for monthly-mean daily ``K_T``, which include the low-sun hours
+        and sit systematically lower.
     Output
-        Dimensionless clearness index, ~0 under thick cloud and approaching
-        ~0.8 under a high clear sky. Cells where the sun is below
-        :data:`MIN_COSZEN_FOR_CLEARNESS` publish no value (``null`` in the
-        values JSON, ``MISSING`` in the cell-series matrix).
+        Dimensionless, ~0 under thick cloud and approaching ~0.8 under a high
+        clear sky. Cells below :data:`MIN_COSZEN_FOR_CLEARNESS` publish no value
+        (``null`` in the values JSON, ``MISSING`` in the cell-series matrix).
     Limitation
-        Not clipped at 1: cloud-edge enhancement genuinely produces ``kt > 1``.
-        Duffie & Beckman note there are very few observations above kt = 0.80
-        at all, so sustained field values well above it point at the inputs
-        rather than at an unusually clear sky. ``COSZEN`` is negative at night,
-        which the elevation floor screens out along with the singularity.
+        Not clipped at 1: cloud-edge enhancement genuinely produces ``kt > 1``,
+        but Duffie & Beckman note very few observations exceed kt = 0.80 at all,
+        so sustained values well above it point at the inputs rather than at an
+        unusually clear sky. ``COSZEN`` is negative at night, which the elevation
+        floor screens out along with the singularity.
     """
     denominator = SOLAR_CONSTANT * eccentricity * coszen
     clearness = np.full(swdown.shape, np.nan, dtype=np.float64)
@@ -629,17 +561,13 @@ def extract_clearness_index(ds: WRFDataset) -> tuple[NDArray, float, float]:
 def compute_air_density(t2: NDArray, psfc: NDArray, q2: NDArray) -> NDArray:
     """Estimate moist-air density at 2 m.
 
-    Input variables
-        ``T2`` air temperature (K), ``PSFC`` surface pressure (Pa), and ``Q2``
-        water-vapor mixing ratio (kg/kg).
     Formula
-        Virtual temperature ``Tv = T2 * (1 + 0.61 * q)`` and ideal gas law
-        ``rho = p / (Rd * Tv)``, with ``Rd = 287.05 J kg-1 K-1``.
-    Output
-        Air density in kg/m3.
+        Virtual temperature ``Tv = T2 * (1 + 0.61 * q)`` into the ideal gas law
+        ``rho = p / (Rd * Tv)`` with ``Rd = 287.05 J kg-1 K-1``, from ``T2`` (K),
+        ``PSFC`` (Pa) and ``Q2`` (kg/kg). Result in kg/m3.
     Limitation
-        This is a near-surface density estimate. It should not be treated as
-        density at turbine hub height without a vertical thermodynamic profile.
+        A near-surface estimate; not density at turbine hub height without a
+        vertical thermodynamic profile.
     """
     virtual_temperature = t2 * (1.0 + 0.61 * q2)
     return psfc / (287.05 * virtual_temperature)
@@ -648,18 +576,13 @@ def compute_air_density(t2: NDArray, psfc: NDArray, q2: NDArray) -> NDArray:
 def extract_wind_power_density_10m(ds: WRFDataset) -> tuple[NDArray, float, float]:
     """Compute wind power density at 10 m.
 
-    Input variables
-        ``U10`` and ``V10`` in m/s, plus ``T2`` (K), ``PSFC`` (Pa), and ``Q2``
-        (kg/kg) for moist-air density.
     Formula
-        ``speed = sqrt(U10^2 + V10^2)`` and
-        ``WPD = 0.5 * rho * speed^3``.
-    Output
-        Wind power density in W/m2 at 10 m.
+        ``WPD = 0.5 * rho * speed^3`` in W/m2, with
+        ``speed = sqrt(U10^2 + V10^2)`` (m/s) and moist-air density from ``T2``
+        (K), ``PSFC`` (Pa) and ``Q2`` (kg/kg).
     Limitation
-        This is available power density in the wind flow, not turbine output.
-        It does not include rotor area, power coefficient, cut-in/cut-out, or
-        hub-height extrapolation.
+        Available power density in the flow, not turbine output: no rotor area,
+        power coefficient, cut-in/cut-out or hub-height extrapolation.
     """
     u10 = ds.get_variable("U10")
     v10 = ds.get_variable("V10")
@@ -699,18 +622,15 @@ def _package_wind_vectors_step(
     """Package one timestep's wind vectors from the already-downsampled components.
 
     *u_subgrid*/*v_subgrid* carry only the cells the payload keeps and
-    *linear_index* their full-grid row-major cell ids; both are built once per
-    block by :func:`stream_wind_at_heights`, because computing the
-    transcendentals over the full grid would discard 15 of every 16 results at
-    the default stride.
+    *linear_index* their full-grid row-major cell ids; :func:`stream_wind_at_heights`
+    builds both once per block, because the transcendentals over the full grid
+    would discard 15 of every 16 results at the default stride.
 
-    Angles are the bearing the flow blows TOWARD, degrees clockwise from North
-    — the meteorological "comes FROM" bearing is ``(angle + 180) % 360``.
-    They are rounded to 1 decimal and magnitudes to 2 — the same convention
-    as the standalone overlay files (``geojson.create_wind_vectors_json``).
-    The front-end only draws arrows from these numbers; anything beyond
-    0.1°/0.01 m/s is float64 interpolation noise that only inflates the
-    POT_EOLICO values files.
+    Angles are the bearing the flow blows TOWARD, degrees clockwise from North —
+    the meteorological "comes FROM" bearing is ``(angle + 180) % 360``. Rounding
+    angles to 1 decimal and magnitudes to 2 is the convention of the standalone
+    overlay files (``geojson.create_wind_vectors_json``); anything finer is
+    float64 interpolation noise that only inflates the POT_EOLICO values files.
     """
     magnitude = np.hypot(u_subgrid, v_subgrid)
     flow_bearing_deg = np.arctan2(u_subgrid, v_subgrid) * 180.0 / np.pi
@@ -722,8 +642,7 @@ def _package_wind_vectors_step(
     valid = ~np.isnan(angles_flat)
 
     # float64 before rounding: rounding a float32 array snaps to the nearest
-    # float32 (320.6 -> 320.6000061...), which would defeat the compact
-    # serialization; the standalone overlay path casts the same way.
+    # float32 (320.6 -> 320.6000061...) and defeats the compact serialization.
     return {
         "downsampled_angles": np.round(angles_flat[valid].astype(np.float64), 1).tolist(),
         "downsampled_magnitudes": np.round(mags_flat[valid].astype(np.float64), 2).tolist(),
@@ -740,15 +659,13 @@ def stream_wind_at_heights(
 ) -> list[WindHeightSeries]:
     """Compute wind speed and wind vectors at *targets* heights, block-streamed.
 
-    Reads U/V/PH/PHB/HGT in ``block_steps``-sized time blocks so peak memory is
-    bounded by the block size instead of the file's full time dimension, and
-    interpolates speed (full grid) and u/v (the ``downsampling`` subgrid the
-    wind-vector payload keeps) for all target heights from one bracket pass per
-    block and grid. Arithmetic matches the eager whole-array path bit-for-bit
-    (float32 chain, same operand order), which the byte-diff gates pin.
-
-    Requires an eager :class:`~micrometeorology.wrf.reader.WRFDataset` (uses
-    ``get_variable_block``).
+    Reads U/V/PH/PHB/HGT in ``block_steps``-sized time blocks, so peak memory is
+    bounded by the block instead of the file's full time dimension, and takes one
+    bracket pass per block and grid: speed on the full grid, u/v on the
+    ``downsampling`` subgrid the wind-vector payload keeps. Arithmetic matches
+    the eager whole-array path bit-for-bit (float32 chain, same operand order),
+    which the byte-diff gates pin. Requires an eager
+    :class:`~micrometeorology.wrf.reader.WRFDataset` (uses ``get_variable_block``).
     """
     from micrometeorology.wrf.interpolation import VerticalInterpolator
 
@@ -762,9 +679,8 @@ def stream_wind_at_heights(
 
     for t0 in range(0, n_t, block_steps):
         t1 = min(t0 + block_steps, n_t)
-        # Each staggering step is an allocation plus an in-place second
-        # operation: the chained ``(a + b) / 2.0`` form would materialize a
-        # second full-size block per line.
+        # Staggering is an allocation plus an in-place second operation; the
+        # chained ``(a + b) / 2.0`` form would materialize a second full block.
         u_raw = ds.get_variable_block("U", t0, t1)
         u_c = u_raw[:, :, :, :-1] + u_raw[:, :, :, 1:]
         u_c /= 2.0
@@ -773,8 +689,7 @@ def stream_wind_at_heights(
         v_c = v_raw[:, :, :-1, :] + v_raw[:, :, 1:, :]
         v_c /= 2.0
         del v_raw
-        # Onto true north before any bearing is taken from them, for the same
-        # reason extract_wind does it at 10 m.
+        # Onto true north before any bearing is taken, as extract_wind does at 10 m.
         u_c, v_c = rotate_to_earth_relative(ds, u_c, v_c)
 
         ph = ds.get_variable_block("PH", t0, t1)
@@ -800,10 +715,9 @@ def stream_wind_at_heights(
         interpolator = VerticalInterpolator(height_agl, axis=1)
         speed_at_targets = interpolator.interpolate_many(speed_4d, target_heights)
 
-        # Only the wind-vector subgrid of u/v is ever serialized, and the
-        # bracket is per-column, so interpolating the strided components is
-        # bit-identical at 1/downsampling^2 of the cost. A contiguous copy of
-        # the subgrid beats handing the interpolator a strided view.
+        # Only the wind-vector subgrid of u/v is serialized and the bracket is
+        # per-column, so interpolating the strided components is bit-identical at
+        # 1/downsampling^2 of the cost; a contiguous copy beats a strided view.
         if downsampling > 1:
             subgrid_interpolator = VerticalInterpolator(
                 np.ascontiguousarray(height_agl[:, :, ::downsampling, ::downsampling]), axis=1

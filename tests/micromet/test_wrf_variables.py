@@ -32,12 +32,17 @@ _CUMULATIVE = np.array(
 # ---------------------------------------------------------------------------
 
 
-def test_extract_rain_step_zero_is_zeros_not_cumulative():
+def test_extract_rain_step_zero_is_no_value_not_zero():
+    """Zeros would state that it rained nowhere; the model never says that.
+
+    Step 0 sits at a file or restart boundary with no previous total to
+    difference, so the frame is entirely no-value and the publish gate drops it.
+    """
     step0 = extract_rain_step(_CUMULATIVE.copy(), 0)
 
     assert step0.shape == (2, 2)
     assert step0.dtype == np.float32
-    np.testing.assert_array_equal(step0, np.zeros((2, 2), dtype=np.float32))
+    assert np.isnan(step0).all()
 
 
 def test_extract_rain_step_later_steps_are_increments():

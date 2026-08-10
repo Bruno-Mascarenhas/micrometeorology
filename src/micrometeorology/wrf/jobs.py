@@ -2,13 +2,13 @@
 
 Each unit covers one (wrfout file, variable) pair — or the grid GeoJSON /
 standalone wind vectors for one file — and is executed by a worker process
-that opens the NetCDF itself, derives its variable eagerly, computes scale
-bounds, and writes every timestep JSON in-process. Unit payloads are plain
-strings and ints: no arrays, datasets, or handles ever cross the process
-boundary, and one persistent pool executes all units for a CLI run.
+that opens the NetCDF itself, derives its variable EAGERLY (a lazy dask graph
+crossing the pool costs ~180x) and writes every timestep JSON in-process. Unit
+payloads are plain strings and ints: no arrays, datasets or handles ever cross
+the process boundary, and one persistent pool executes all units of a CLI run.
 
-Output files are written to a temporary name and ``os.replace``d into place
-so a killed worker can never leave a truncated JSON visible to consumers.
+Outputs are written to a temporary name and ``os.replace``d into place, so a
+killed worker can never leave a truncated JSON visible to consumers.
 """
 
 import json
@@ -48,13 +48,20 @@ HDF5_LOCKING_ENV = "LABMIM_HDF5_FILE_LOCKING"
 
 POTEOLICO_ALL_HEIGHTS: tuple[int, ...] = (50, 100, 150)
 
+# Requested names that publish every step under a single ``{D}_{ID}_{NNN}.json``
+# id, so the manifest can advertise "no steps this run" for one that wrote
+# nothing. Everything outside this set and VARIABLE_NETCDF_MAP fans out to
+# several ids (wind potential per height, the vector overlay per stem).
+_SINGLE_ID_VARIABLES = frozenset(
+    variable.value for variable in WRFVariable if variable.value != "poteolico"
+)
+
 
 def parse_poteolico_heights(variable: str) -> tuple[int, ...]:
     """Parse a poteolico variable name into the target heights it requests.
 
-    ``"poteolico"`` requests all heights ``(50, 100, 150)``;
-    ``"poteolico<nn>"`` requests ``(<nn>,)`` for ``nn`` in ``{50, 100, 150}``.
-    Anything else raises ``ValueError`` with a CLI-friendly message.
+    ``"poteolico"`` means all of ``(50, 100, 150)``; ``"poteolico<nn>"`` means
+    ``(<nn>,)`` for those same heights. Anything else raises ``ValueError``.
     """
     if variable == "poteolico":
         return POTEOLICO_ALL_HEIGHTS
@@ -157,20 +164,18 @@ def _atomic_json_dump(output_path: Path, payload: dict) -> str:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = output_path.with_name(f".{output_path.name}.tmp-{os.getpid()}")
     with open(tmp, "w", encoding="utf-8") as f:
-        # allow_nan=False: a NaN that slips into a payload must fail the work
-        # unit here, not ship as an invalid-JSON token that only breaks in
-        # every visitor's browser. Encode with json.dumps and write once:
-        # json.dump(obj, fp) is the only spelling that never reaches the C
-        # encoder, and costs 3x for the same bytes on a wind-vector payload.
+        # allow_nan=False: a NaN must fail the unit here, not ship as an
+        # invalid-JSON token that only breaks in the browser. dumps-then-write,
+        # because json.dump(obj, fp) never reaches the C encoder and costs 3x
+        # for the same bytes on a wind-vector payload.
         f.write(json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False))
     os.replace(tmp, output_path)
     return str(output_path)
 
 
-# Fixed-point int32 encoding for the cell-series matrix: a rounded value is
-# stored as ``rint(value * SERIES_SCALE)``, so SERIES_SCALE=100 keeps two
-# decimals. SERIES_MISSING (int32 min) is the reserved no-value sentinel and
-# _SERIES_INT_MAX is the refusal bound past which encoding raises.
+# Fixed-point int32 encoding for the cell-series matrix: ``rint(value * 100)``
+# keeps two decimals, SERIES_MISSING (int32 min) is the reserved no-value
+# sentinel, and _SERIES_INT_MAX is the bound past which encoding raises.
 SERIES_MISSING = -(2**31)
 SERIES_SCALE = 100
 _SERIES_INT_MAX = 2**31 - 1
@@ -181,16 +186,14 @@ class _SiteArtifactAccumulator:
     consolidated artifacts the site front-end ingests.
 
     - ``{stem}.series.bin`` — row-major (cells x steps) little-endian int32
-      matrix: ``rint(round(value, 2) * 100)``, :data:`SERIES_MISSING` where a
-      step has no value (never written, masked, or NaN). Fixed-size records
-      let the front-end fetch ONE cell's full series with a single HTTP Range
-      request instead of downloading every per-step JSON of the domain.
-    - ``{stem}.summary.json`` — per-step domain mean/min/max over the same
-      rounded values, for the lightweight domain-preview panel (one request
-      instead of one per step).
+      matrix of ``rint(round(value, 2) * 100)``, :data:`SERIES_MISSING` where a
+      step has no value. Fixed-size records let the front-end pull ONE cell's
+      whole series with a single HTTP Range request.
+    - ``{stem}.summary.json`` — per-step domain mean/min/max, for the preview
+      panel (one request instead of one per step).
 
-    Values match the per-step JSONs (same round-to-2-decimals), so both views
-    of the data always agree.
+    Both round to two decimals exactly like the per-step JSONs, so the views of
+    the data always agree.
     """
 
     def __init__(self, n_steps: int) -> None:
@@ -208,10 +211,9 @@ class _SiteArtifactAccumulator:
     def add(self, index: int, values: NDArray, date_str: str) -> None:
         """Quantize one time step's frame into column ``index`` of the matrix.
 
-        Values are rounded to two decimals and stored as scaled int32; cells
-        that are non-finite (masked/NaN) become :data:`SERIES_MISSING`. Steps
-        with at least one finite cell also contribute a mean/min/max row to the
-        domain summary.
+        Values are rounded to two decimals and stored as scaled int32; masked
+        or NaN cells become :data:`SERIES_MISSING`. A step with at least one
+        finite cell also contributes a mean/min/max row to the summary.
         """
         arr = values.filled(np.nan) if isinstance(values, np.ma.MaskedArray) else values
         flat = np.round(np.ravel(np.asarray(arr)).astype(np.float64, copy=False), 2)
@@ -219,10 +221,9 @@ class _SiteArtifactAccumulator:
             self._matrix = np.full((flat.size, self.n_steps), SERIES_MISSING, dtype="<i4")
         finite = np.isfinite(flat)
         scaled = np.rint(flat[finite] * SERIES_SCALE)
-        # Refused rather than clipped. The matrix is int32 hundredths, so a value
-        # past +-21,474,836.47 has no representation; clipping it would publish
-        # the ceiling in the series while the per-step JSON and the summary
-        # publish the true number. That magnitude is a broken field, not a value.
+        # Refused, not clipped: int32 hundredths cannot represent past
+        # +-21,474,836.47, and clipping would publish the ceiling in the series
+        # while the per-step JSON and the summary publish the true number.
         if scaled.size and (scaled.min() <= SERIES_MISSING or scaled.max() > _SERIES_INT_MAX):
             extreme = flat[finite][np.argmax(np.abs(scaled))]
             raise ValueError(
@@ -244,8 +245,7 @@ class _SiteArtifactAccumulator:
     def write(self, json_dir: str, stem: str, domain: str, variable: str) -> list[str]:
         """Atomically flush the ``.series.bin`` and ``.summary.json`` artifacts.
 
-        Returns the paths written, or an empty list when no finite step was ever
-        accumulated (nothing to persist).
+        Returns the paths written, empty when no finite step was accumulated.
         """
         if self._matrix is None or not self.indices:
             return []
@@ -263,11 +263,10 @@ class _SiteArtifactAccumulator:
             "mean": self.means,
             "min": self.mins,
             "max": self.maxs,
-            # The denominator of every mean above. It is not the cell count and
-            # it is not constant: the clearness index masks cells by solar
-            # geometry, so its domain mean at sunrise is taken over a fraction
-            # of the grid and at noon over all of it, and the series read like
-            # a physical trend when part of it is the shrinking sample.
+            # The denominator of every mean above — not the cell count, and not
+            # constant: the clearness index masks cells by solar geometry, so a
+            # sunrise mean covers a fraction of the grid and reads like a
+            # physical trend when it is really the shrinking sample.
             "finite_cells": self.finite_cells,
             "cells": self._matrix.shape[0] if self._matrix is not None else 0,
         }
@@ -278,10 +277,10 @@ class _SiteArtifactAccumulator:
 def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str], list[str]]:
     """Write every timestep JSON of one values variable.
 
-    Returns the files written, the unit's warnings, and the output variable
-    ids this wrfout does not carry — the only case where "no files" means the
-    previous run's files are still the newest ones on disk, as opposed to the
-    legitimately empty ones (an all-night SWDOWN window, ``--skip-first``).
+    Returns the files written, the warnings, and the output variable ids this
+    wrfout does not carry — the only "no files" case that leaves the previous
+    run's files newest on disk, unlike the legitimately empty ones (an
+    all-night SWDOWN window, ``--skip-first``).
     """
     written_files: list[str] = []
     unit_warnings: list[str] = []
@@ -304,13 +303,11 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
             continue
         time_step_index = step_metadata["index"]
         frame_values = frame_source.frame_for_step(time_step_index)
-        # A step whose whole domain is non-finite is not published at all: the
-        # daylight window is a clock rule, but the clearness index is null
+        # An all-non-finite step is not published: the clearness index is null
         # wherever cos(z) is below its cutoff, so sunrise and sunset steps are
-        # all-null inside it. Writing them makes the run's two artifacts disagree
-        # about the same instant — the manifest derives `availability` from the
-        # files WRITTEN (the site's timeline), while the summary the preview
-        # panel reads records only steps with a finite cell.
+        # empty even inside the daylight window. Writing them would desync the
+        # run's two artifacts — `availability` derives from the files WRITTEN,
+        # while the summary records only steps with a finite cell.
         if not np.isfinite(np.asarray(frame_values, dtype=float)).any():
             continue
         formatted_local_time = _format_datetime(step_metadata["datetime_local"])
@@ -428,9 +425,9 @@ def _run_time_metadata(dataset: WRFDataset) -> tuple[str | None, int | None]:
         return None, None
 
 
-# `{i:03d}` is a MINIMUM width, so step 1000 is written as `_1000.json`: the
-# scanner must accept three OR MORE digits, or past that point it disagrees with
-# the writer and those frames reach neither the timeline nor `availability`.
+# `{i:03d}` is a MINIMUM width — step 1000 is written `_1000.json` — so the
+# scanner must accept three OR MORE digits, or those frames reach neither the
+# timeline nor `availability`.
 _TIMESTEP_FILE_RE = re.compile(r"^(D\d{2})_([A-Z0-9_]+)_(\d{3,})\.json$")
 
 
@@ -453,17 +450,16 @@ def write_run_manifest(
 ) -> Path | None:
     """Write ``manifest.json`` into *json_dir* after a generation run.
 
-    The site front-end fetches this tiny file with ``Cache-Control: no-cache``
-    and appends ``?v=<version>`` to every data URL, which lets the fixed-name
-    data files be cached long-term while staying fresh across runs. Absence of
-    the manifest simply keeps the front-end on unversioned URLs.
+    The site fetches it with ``Cache-Control: no-cache`` and appends
+    ``?v=<version>`` to every data URL, so the fixed-name data files stay
+    cacheable yet fresh; without the manifest the front-end uses unversioned
+    URLs.
 
-    The version is bumped whenever the run executed ANY unit — including
-    fully failed runs: a unit that crashed mid-way may already have atomically
-    replaced some files under unchanged filenames (its ``files`` manifest is
-    empty on error, so the file count cannot be trusted), and keeping the
-    previous version alive would let long-cached clients pin outdated data
-    under the old ``?v=`` URLs. An extra bump is only ever a cache miss.
+    The version bumps whenever the run executed ANY unit, failed runs included:
+    a crashed unit may already have replaced files under unchanged names
+    (``files`` is empty on error, so the count proves nothing), and a stale
+    version would pin long-cached clients to outdated data — an extra bump only
+    costs a cache miss.
     """
     if not results:
         return None
@@ -479,28 +475,22 @@ def write_run_manifest(
     }
 
     # v2 fields (additive; the site falls back to hardcoded defaults without
-    # them): timeline range and per-variable availability derived from the
-    # files ACTUALLY written this run — never re-derived arithmetic that could
-    # drift from the writers — plus feature descriptors for the consolidated
-    # summary/series artifacts.
-    # Keyed by (domain, variable), never by variable alone. `availability` has
-    # no domain axis and the site reads it for whichever domain is selected, so
-    # a per-variable union would advertise D01's steps to D03: the clearness
-    # index masks cells by cos(z) geographically, so a coarse domain reaching
-    # further west keeps sunrise frames a nested domain drops, and the published
-    # step sets genuinely differ for the same run and the same clock hour. The
-    # site would then request a file this run never wrote and — because the
-    # writers use fixed names and replace in place — be served the PREVIOUS
-    # run's frame under this run's version stamp.
+    # them), derived from the files ACTUALLY written this run, never from
+    # arithmetic that could drift from the writers. Keyed by (domain, variable),
+    # never by variable alone: `availability` has no domain axis, and domains do
+    # publish different step sets for the same hour (the clearness index masks by
+    # cos(z) geographically), so a union sends the site after a file this run
+    # never wrote — and fixed names replaced in place serve the PREVIOUS run's
+    # frame under this run's version stamp.
     var_indices: dict[tuple[str, str], set[int]] = {}
     domain_indices: dict[str, set[int]] = {}
     have_summary = False
     have_series = False
     for result in results:
-        # A variable the wrfout does not carry wrote no file, and its fixed
-        # output names still hold the previous run's data: seed it with an
-        # empty index set so availability publishes it as "no steps this run"
-        # instead of omitting it, which the front-end reads as "full range".
+        # A variable the wrfout does not carry wrote no file, yet its fixed
+        # output names still hold the previous run's data: seed an empty index
+        # set so availability says "no steps this run" instead of omitting the
+        # key, which the front-end reads as "full range".
         for missing_variable in result.missing_variables:
             if result.domain:
                 var_indices.setdefault((result.domain, missing_variable), set())
@@ -516,10 +506,9 @@ def write_run_manifest(
             elif name.endswith(".series.bin"):
                 have_series = True
 
-    # The site renders ONE timeline across all domains, so advertise the
-    # intersection of the per-domain ranges: never an index some domain
-    # lacks entirely (a mixed-length run would otherwise label missing
-    # frames as available).
+    # ONE timeline is rendered across all domains, so advertise the intersection
+    # of the per-domain ranges: a mixed-length run must never label a frame some
+    # domain lacks as available.
     if domain_indices:
         index_min = max(min(indices) for indices in domain_indices.values())
         index_max = min(max(indices) for indices in domain_indices.values())
@@ -530,31 +519,33 @@ def write_run_manifest(
         payload["timezone"] = str(product_timezone())
         payload["index_min"] = index_min
         payload["index_max"] = index_max
-        # The anchor pairs with index 0 (the file's first time step) — the
-        # client must anchor initialIndex=0 regardless of index_min. Results
-        # arrive in completion order, so only advertise the anchor when every
-        # unit that reported one agrees.
+        # The anchor pairs with index 0 (the file's first time step), NOT with
+        # index_min: the client must anchor `initialIndex=0` whatever index_min
+        # says. Results arrive in completion order, so advertise it only when
+        # every unit that reported one agrees.
         start_locals = {r.start_local for r in results if r.start_local}
         if len(start_locals) == 1:
             payload["start_local"] = start_locals.pop()
 
         full_range = set(range(index_min, index_max + 1))
-        # The INTERSECTION across domains, for the same reason index_min/max are
-        # one: an index is advertised only when every domain of the run actually
-        # wrote that variable's frame for it. Conservative by construction — a
-        # step only D01 holds is not advertised — which is the safe direction,
-        # because the alternative serves a stale frame as a current one.
+        # INTERSECTION across domains, for the same reason index_min/max are:
+        # advertise an index only when every domain wrote that variable's frame
+        # for it, since the other direction serves a stale frame as a current one.
         per_variable: dict[str, list[set[int]]] = {}
         for (_domain, var), indices in var_indices.items():
             per_variable.setdefault(var, []).append(indices)
-        # A variable the caller asked for but that wrote nothing gets an empty
-        # set, so a narrower re-run publishes "no steps this run" instead of
-        # omitting the key. An omitted key reads as "full range" to the page,
-        # which then keeps serving the PREVIOUS run's frames under the freshly
-        # bumped version — the fixed output names are still on disk.
+        # A requested variable that wrote nothing gets an empty set: an omitted
+        # key reads as "full range" to the page, which then serves the PREVIOUS
+        # run's frames (fixed names, still on disk) under the new version.
+        # Only names that publish under ONE output id. Wind potential writes a
+        # file per target height (POT_EOLICO_50M, ...) and the vector overlay
+        # writes its own stems, so no id derived from the requested name exists
+        # for them, and seeding a guess advertises a variable nothing ever wrote.
         for requested in requested_variables:
-            output_id = VARIABLE_NETCDF_MAP.get(requested, requested.upper())
-            per_variable.setdefault(output_id, [set()])
+            if requested in VARIABLE_NETCDF_MAP:
+                per_variable.setdefault(VARIABLE_NETCDF_MAP[requested], [set()])
+            elif requested in _SINGLE_ID_VARIABLES:
+                per_variable.setdefault(requested.upper(), [set()])
         availability = {
             var: _compress_index_ranges(shared)
             for var, shared in sorted(
@@ -566,17 +557,14 @@ def write_run_manifest(
         if availability:
             payload["availability"] = availability
 
-        # Consolidated-artifact descriptors are a byte-offset contract: a
-        # failed unit — or one whose variable the wrfout no longer carries —
-        # leaves LAST run's {D}_{VAR}.series.bin/.summary.json in place under
-        # this run's version, and a stale matrix of a different step count is
-        # read at the wrong byte offsets, not merely stale. Only vouch for the
-        # artifacts when every unit both succeeded and found its variable (the
-        # site falls back to the per-step JSONs otherwise).
-        # ``covers_every_variable`` is the other half: the templates below are
-        # wildcards over EVERY variable of the directory, so a run restricted to
-        # a subset would vouch for the artifacts of the ones it did not touch —
-        # last run's matrices, under this run's freshly bumped version.
+        # These descriptors are a byte-offset contract: a failed unit, or one
+        # whose variable the wrfout no longer carries, leaves LAST run's
+        # {D}_{VAR}.series.bin/.summary.json in place, and a stale matrix of a
+        # different step count is read at the WRONG offsets, not merely stale.
+        # So vouch only when every unit succeeded and found its variable, and
+        # only when the run covered every variable — the templates below are
+        # wildcards over the whole directory. (The site falls back to the
+        # per-step JSONs otherwise.)
         run_clean = covers_every_variable and not any(
             r.error or r.missing_variables for r in results
         )
@@ -586,10 +574,9 @@ def write_run_manifest(
                 "format": "domain-summary-v1",
                 "template": "JSON/{domain}_{variable}.summary.json",
             }
-        # The series matrices span columns 0..n_steps-1 regardless of which
-        # steps were written (skip-first / night gaps are MISSING columns), so
-        # the byte-offset contract needs the step count — advertised only when
-        # every file agrees on it (a mixed-length run would corrupt offsets).
+        # Matrices span columns 0..n_steps-1 whatever was written (skip-first
+        # and night gaps are MISSING columns), so the offset contract needs the
+        # step count, and a run whose files disagree on it would corrupt offsets.
         step_counts = {r.n_steps for r in results if r.n_steps}
         if have_series and run_clean and len(step_counts) == 1:
             n_steps = step_counts.pop()
@@ -617,14 +604,11 @@ def _sweep_stale_temp_files(
 ) -> int:
     """Remove orphaned ``.tmp-<pid>`` files whose owning process is dead.
 
-    A worker killed mid-write (OOM kill, broken pool teardown) can leave its
-    private temp file behind; the final outputs are never affected because of
-    the atomic rename, but the debris should not accumulate. Only files whose
-    embedded PID no longer exists are removed, so concurrent runs writing into
-    the same directories are never disturbed. ``sweep_pids`` marks pids whose
-    debris is known-orphaned even though the process is alive — the serial
-    path writes with the parent's own pid, so its failed-unit leftovers would
-    otherwise survive every end-of-run sweep.
+    Only files whose embedded PID no longer exists are removed, so concurrent
+    runs writing into the same directories are never disturbed. ``sweep_pids``
+    forces pids whose debris is known-orphaned although the process is alive —
+    the serial path writes with the parent's own pid, so its failed-unit
+    leftovers would otherwise survive every end-of-run sweep.
     """
     removed = 0
     for directory in dict.fromkeys(dirs):
@@ -701,15 +685,13 @@ _KIND_COST_RANK = {"poteolico": 0, "values_json": 1, "wind_vectors": 1, "grid_ge
 def _init_worker_logging(level: int) -> None:
     """Give a fresh worker the logging config forkserver children never inherit.
 
-    Without this, every worker-side record falls through to
-    ``logging.lastResort``: no timestamp, no logger name, no level, and no way
-    to tell which of 44 concurrent workers wrote it. Records go to stderr so
-    the CLI's progress lines keep stdout to themselves, and carry the pid so
-    interleaved streams stay attributable.
+    Without it every worker record falls through to ``logging.lastResort``,
+    unattributable across 44 concurrent workers. Records carry the pid and go
+    to stderr, leaving stdout to the CLI's progress lines.
 
-    Held at WARNING or above regardless of the parent's level: the streaming
-    writers log their ``.tmp-<pid>`` argument rather than the final path, so
-    worker INFO would name files that never exist.
+    Held at WARNING or above whatever the parent's level: the streaming writers
+    log their ``.tmp-<pid>`` argument rather than the final path, so worker INFO
+    would name files that never exist.
     """
     logging.basicConfig(
         level=max(level, logging.WARNING),
@@ -777,11 +759,11 @@ def execute_units(
 ) -> list[UnitResult]:
     """Execute all units on ONE persistent process pool, heaviest first.
 
-    Ordinary unit failures are isolated (reported in the unit's result). If
-    the pool itself breaks — e.g. a worker is OOM-killed — units that never
-    completed are retried one at a time in isolated single-worker pools, so a
-    unit that keeps killing its worker fails alone instead of dooming the
-    other pending units; it gets an error result so callers can exit non-zero.
+    Unit failures are isolated in the unit's result. If the pool itself breaks
+    (an OOM-killed worker), the incomplete units are retried one at a time in
+    single-worker pools, so a unit that keeps killing its worker fails alone —
+    with an error result, so callers can exit non-zero — instead of dooming the
+    rest.
     """
     if not units:
         return []
@@ -850,9 +832,9 @@ def execute_units(
         status = f"✗ {result.error}" if result.error else f"{len(result.files)} files"
         echo(f"  [{len(results)}/{len(ordered)}] {result.label}: {status}")
 
-    # Always sweep at the end: a unit that failed mid-write WITHOUT breaking the
-    # pool (the common case — process_unit catches everything) leaves its temp
-    # file behind, and the debris must not wait for a future failing run.
+    # Always sweep: a unit that failed mid-write WITHOUT breaking the pool (the
+    # common case, since process_unit catches everything) leaves its temp file
+    # behind, and the debris must not wait for a future failing run.
     swept = _sweep_stale_temp_files(output_dirs, sweep_pids=frozenset({os.getpid()}))
     if swept:
         echo(f"  swept {swept} stale temp file(s)")

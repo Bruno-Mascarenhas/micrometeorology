@@ -368,16 +368,15 @@ def test_single_timestep_file_processes_without_errors(tmp_path):
     value_files = sorted(
         os.path.basename(f) for r in results if r.kind == "values_json" for f in r.files
     )
+    # Rain publishes nothing at all: its only step is the boundary one, which has
+    # no previous total to difference. Zeros there would state that it rained
+    # nowhere, and the cumulative total would be a downpour that never fell.
     assert value_files == sorted(
-        [f"D02_{v}_000.json" for v in ("RAIN", "TEMP", "WIND")]
-        + [f"D02_{v}.series.bin" for v in ("RAIN", "TEMP", "WIND")]
-        + [f"D02_{v}.summary.json" for v in ("RAIN", "TEMP", "WIND")]
+        [f"D02_{v}_000.json" for v in ("TEMP", "WIND")]
+        + [f"D02_{v}.series.bin" for v in ("TEMP", "WIND")]
+        + [f"D02_{v}.summary.json" for v in ("TEMP", "WIND")]
     )
-
-    # The lone rain frame publishes zero increments, not the cumulative total.
-    with open(json_dir / "D02_RAIN_000.json", encoding="utf-8") as fh:
-        rain = json.load(fh)
-    assert all(v == 0.0 for v in rain["values"])
+    assert not (json_dir / "D02_RAIN_000.json").exists()
 
 
 def test_parse_poteolico_heights_maps_names_to_targets():
