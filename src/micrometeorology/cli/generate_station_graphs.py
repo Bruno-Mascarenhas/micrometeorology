@@ -778,8 +778,12 @@ def run(
     )
     typer.echo(f"  -> {len(hourly)} hourly rows")
 
-    # Use data-end timestamp for graph labels (not wall-clock if historical)
-    graph_dt = date_end.to_pydatetime()
+    # The newest sample actually drawn. Without `--start-date`, `date_end` is the
+    # wall clock, so a run over a record that stopped months ago stamped every
+    # graph with today — the sibling producer stamps the data end, and the two
+    # published the same week under different dates.
+    plotted = [frame.index.max() for frame in (raw, raw_rain) if not frame.empty]
+    graph_dt = (max(plotted) if plotted else date_end).to_pydatetime()
 
     # ------------------------------------------------------------------
     # 5. Generate all graphs
