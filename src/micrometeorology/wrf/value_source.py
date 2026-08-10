@@ -2,13 +2,10 @@
 
 Both published products — the values JSON written by
 :mod:`micrometeorology.wrf.jobs` and the map figures built by
-:mod:`micrometeorology.cli.render_wrf_maps` — need the same three things for a
+:mod:`micrometeorology.cli.render_wrf_maps` — need the same things for a
 variable: how to read one time step's 2-D frame, and the colour-scale bounds
-that frame is drawn against. They used to carry independent copies of the same
-eight extractor branches (including the SWDOWN daylight rule), so a variable
-added or a scale bound fixed on one side silently skipped the other.
-
-Adding a variable here reaches both products.
+that frame is drawn against. Declaring a variable here reaches both, so the two
+products cannot disagree about which frames exist or how they are scaled.
 """
 
 from collections.abc import Callable, Mapping
@@ -32,8 +29,7 @@ LAST_DAYLIGHT_HOUR = 18
 # night steps carry no information worth publishing. Longwave and net-radiation
 # terms are NOT in here: they stay meaningful all night, which is exactly when
 # the surface is losing energy. Membership is by variable id, and this is the
-# single definition both products gate on — the rule used to be an inline
-# ``== SWDOWN`` comparison duplicated in the JSON and figure paths.
+# single definition both products gate on.
 DAYLIGHT_ONLY_VARIABLES: frozenset[str] = frozenset(
     {
         WRFVariable.SWDOWN,
@@ -45,7 +41,7 @@ DAYLIGHT_ONLY_VARIABLES: frozenset[str] = frozenset(
 
 
 # The derived surface-radiation fields, each mapped to its extractor and the
-# wrfout fields that extractor reads. They all share one shape — an eager
+# wrfout fields that extractor reads. They share one shape — an eager
 # whole-file 3-D array plus percentile scale bounds, sliced per step — so they
 # need no bespoke branch beyond declaring their inputs. Formulas, validation
 # against WRF's own LWUPB/SWUPB, and limitations live on the extractors in
@@ -66,10 +62,10 @@ DERIVED_RADIATION_SOURCES: dict[
 }
 
 # The wrfout fields each hand-written branch of build_value_frame_source reads.
-# Declared here for the same reason the tuples above are: the extractors call
-# ``get_variable``, which raises ``KeyError`` rather than returning ``None``, so
-# the presence check has to happen before the branch runs. Keep in step with the
-# ``ds.get_variable`` calls in :mod:`micrometeorology.wrf.variables`.
+# Declared here because the extractors call ``get_variable``, which raises
+# ``KeyError`` rather than returning ``None``, so the presence check has to
+# happen before the branch runs. Keep in step with the ``ds.get_variable`` calls
+# in :mod:`micrometeorology.wrf.variables`.
 BESPOKE_VARIABLE_INPUTS: dict[str, tuple[str, ...]] = {
     WRFVariable.TEMPERATURE: ("T2",),
     WRFVariable.SKIN_TEMPERATURE: ("TSK",),
@@ -90,9 +86,8 @@ class ValueFrameSource:
     scale_min: float
     scale_max: float
     # Set only for variables whose frame is the magnitude of a vector field.
-    # The figure path draws the components as a quiver on top of that
-    # magnitude; re-deriving them from the dataset would materialize every
-    # step twice, so the components the magnitude was built from are exposed.
+    # The figure path draws the components as a quiver over that magnitude;
+    # re-deriving them from the dataset would materialize every step twice.
     vector_for_step: Callable[[int], tuple[NDArray, NDArray]] | None = None
 
 
@@ -126,13 +121,10 @@ def build_value_frame_source(
     Returns ``None`` when the variable is absent from the file, which every
     caller reports as a skipped variable rather than failing the run.
     """
-    # Honour that contract for the bespoke branches too. They reach
-    # ``WRFDataset.get_variable``, which is a bare ``variables[name]`` lookup and
-    # raises ``KeyError`` on an absent field — so a wrfout missing one input
-    # killed the whole CLI with a traceback (skipping every later variable,
-    # every later domain and the video phase) while a missing raw field of the
-    # same kind was skipped with a warning. The derived-radiation branch below
-    # already checks up front; these now do the same.
+    # The bespoke branches reach ``WRFDataset.get_variable``, a bare
+    # ``variables[name]`` lookup that raises ``KeyError`` on an absent field, so
+    # a wrfout missing one input would abort the whole run instead of skipping
+    # one variable. Check the declared inputs before dispatching.
     required = BESPOKE_VARIABLE_INPUTS.get(variable_name)
     if required and not all(dataset.has_variable(field) for field in required):
         return None
@@ -213,8 +205,8 @@ def build_value_frame_source(
     elif variable_name in DERIVED_RADIATION_SOURCES:
         extractor, required_fields = DERIVED_RADIATION_SOURCES[variable_name]
         # Checked up front so a wrfout missing one input is reported as the
-        # ordinary "variable not found — skipped" case, exactly like a missing
-        # raw field, instead of raising KeyError from inside the extractor.
+        # ordinary "variable not found — skipped" case instead of raising
+        # KeyError from inside the extractor.
         if not all(dataset.has_variable(field) for field in required_fields):
             return None
         scalar_values, scale_min, scale_max = extractor(dataset)

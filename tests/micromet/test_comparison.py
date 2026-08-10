@@ -83,7 +83,7 @@ class TestReadDataset:
 
 class TestPairDataframes:
     def test_a_three_hour_lag_is_not_reported_as_a_perfect_model(self, tmp_path: Path) -> None:
-        """Positional alignment made a 3 h-lagged copy score RMSE 0 / R2 1."""
+        """Pairing is by timestamp: positional alignment scores a lag as RMSE 0."""
         values = [20.0, 21.0, 22.0, 23.0, 24.0, 25.0]
         obs_path = _series_csv(tmp_path / "obs.csv", "2020-01-01 00:00", values)
         model_path = _series_csv(tmp_path / "mod.csv", "2020-01-01 03:00", values)
@@ -201,8 +201,8 @@ class TestTheTimeIndexIsReadOrRefusedClearly:
 
     def test_a_named_timestamp_column_is_recognised(self, tmp_path: Path) -> None:
         """``DataFrame.to_csv`` writes the index's NAME, so the most ordinary way
-        to produce one of these files left a RangeIndex and surfaced as a
-        TypeError from inside ``pair_dataframes``, naming neither file nor cause.
+        to produce one of these files yields a named time column, not an unnamed
+        one — and the reader has to consume it rather than leave a RangeIndex.
         """
         frame = read_dataset(str(self._named_index_csv(tmp_path / "named.csv")))
 

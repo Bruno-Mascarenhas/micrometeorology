@@ -11,16 +11,17 @@ def add_lag_features(
     """Add lagged versions of specified columns.
 
     Creates columns named ``{col}_lag_{n}`` for each column and lag value.
+    Columns absent from *df* are skipped.
     """
-    new_cols = {}
-    for col in columns:
-        if col not in df.columns:
+    derived = {}
+    for column in columns:
+        if column not in df.columns:
             continue
         for lag in lags:
-            new_cols[f"{col}_lag_{lag}"] = df[col].shift(lag)
+            derived[f"{column}_lag_{lag}"] = df[column].shift(lag)
 
-    if new_cols:
-        return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    if derived:
+        return pd.concat([df, pd.DataFrame(derived, index=df.index)], axis=1)
     return df.copy()
 
 
@@ -33,21 +34,22 @@ def add_rolling_features(
     """Add rolling statistics for specified columns.
 
     Creates columns named ``{col}_roll_{agg}_{window}`` for each combination.
+    Columns absent from *df* are skipped.
     """
     if aggs is None:
         aggs = ["mean", "std"]
 
-    new_cols = {}
-    for col in columns:
-        if col not in df.columns:
+    derived = {}
+    for column in columns:
+        if column not in df.columns:
             continue
         for window in windows:
-            roller = df[col].rolling(window, min_periods=1)
+            roller = df[column].rolling(window, min_periods=1)
             for agg in aggs:
-                new_cols[f"{col}_roll_{agg}_{window}"] = getattr(roller, agg)()
+                derived[f"{column}_roll_{agg}_{window}"] = getattr(roller, agg)()
 
-    if new_cols:
-        return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    if derived:
+        return pd.concat([df, pd.DataFrame(derived, index=df.index)], axis=1)
     return df.copy()
 
 
@@ -56,13 +58,17 @@ def add_diff_features(
     columns: list[str],
     periods: int = 1,
 ) -> pd.DataFrame:
-    """Add first-difference features."""
-    new_cols = {}
-    for col in columns:
-        if col not in df.columns:
-            continue
-        new_cols[f"{col}_diff_{periods}"] = df[col].diff(periods)
+    """Add first-difference features.
 
-    if new_cols:
-        return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    Creates columns named ``{col}_diff_{periods}``; columns absent from *df*
+    are skipped.
+    """
+    derived = {}
+    for column in columns:
+        if column not in df.columns:
+            continue
+        derived[f"{column}_diff_{periods}"] = df[column].diff(periods)
+
+    if derived:
+        return pd.concat([df, pd.DataFrame(derived, index=df.index)], axis=1)
     return df.copy()

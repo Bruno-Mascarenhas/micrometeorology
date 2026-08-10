@@ -13,8 +13,7 @@ merge against the audited row counts** before writing anything:
     The same grid after sentinel masking, physical gates, instrument
     calibrations and era-to-era column unification. This is the frame the
     hourly means are computed from, written out so the chain from raw sample to
-    published statistic can be audited at its midpoint rather than taken on
-    trust.
+    published statistic can be audited at its midpoint.
 
 ``station_hourly``
     Hourly aggregation of the QC frame: means, sums for the tipping bucket, and
@@ -85,10 +84,10 @@ logger = logging.getLogger(__name__)
 def _write(frame: pd.DataFrame, base: Path, output_format: str) -> Path:
     """Write one artifact, defaulting to Parquet.
 
-    The 5-minute frame is ~988k rows by 94 columns. As CSV that is roughly a
-    gigabyte of text whose dtypes have to be guessed back on read; Parquet keeps
-    the dtypes and the index and is an order of magnitude smaller. CSV stays
-    available because a spreadsheet cannot open Parquet.
+    The 5-minute frame is ~988k rows by 94 columns: as CSV that is roughly a
+    gigabyte of text whose dtypes have to be guessed back on read, while Parquet
+    keeps the dtypes and the index and is an order of magnitude smaller. CSV
+    stays available because a spreadsheet cannot open Parquet.
     """
     if output_format == "csv":
         path = base.with_suffix(".csv")
@@ -165,7 +164,7 @@ def run(
         _echo_report(report)
 
     # The rain logger is a separate table on the same 5-minute grid, so it is
-    # JOINED rather than concatenated: concatenating would interleave rows whose
+    # JOINED rather than concatenated: a concat would interleave rows whose
     # column sets barely overlap and double the index.
     rain_columns = [column for column in rain.columns if column not in lenta.columns]
     raw = lenta.join(rain[rain_columns], how="outer")
@@ -175,17 +174,18 @@ def run(
     _write(raw, out / "station_5min_raw", output_format)
 
     qc = raw.copy()
-    qc, removed = mask_sentinels(qc)
+    qc, sentinels_removed = mask_sentinels(qc)
     typer.echo(
-        f"\nSentinelas mascaradas: {sum(removed.values()):,} amostras em {len(removed)} colunas"
+        f"\nSentinelas mascaradas: {sum(sentinels_removed.values()):,} amostras "
+        f"em {len(sentinels_removed)} colunas"
     )
-    for column, count in sorted(removed.items(), key=lambda item: -item[1])[:8]:
+    for column, count in sorted(sentinels_removed.items(), key=lambda item: -item[1])[:8]:
         typer.echo(f"  {column:20s} {count:,}")
 
-    # The window table above is hand-curated, so it goes stale the moment the
-    # shade ring comes off again — and silently, because the column keeps its
-    # name while publishing global irradiance as diffuse. Re-running the
-    # detection criterion on the masked frame reports whatever the table misses.
+    # INVALID_WINDOWS is hand-curated, so it goes stale the moment the shade ring
+    # comes off — and silently, because the column keeps its name while
+    # publishing global irradiance as diffuse. Re-running the detection criterion
+    # on the masked frame reports whatever the table misses.
     unshaded = unshaded_diffuse_days(qc)
     if unshaded:
         typer.echo(
@@ -200,34 +200,34 @@ def run(
     # Declared before the branches that fill them: every one is conditional, and
     # the report has to be able to say "this stage removed nothing" rather than
     # omit the key.
-    fired: dict[str, int] = {}
-    absent: list[str] = []
+    limits_fired: dict[str, int] = {}
+    limits_absent_columns: list[str] = []
     gaps: list[tuple[str, str, pd.Timestamp, pd.Timestamp]] = []
     net_gained = net_dropped = 0
     invalidated: dict[str, int] = {}
 
     if settings.sensor_limits:
-        # Report which gates actually FIRED before applying them. A limit naming
+        # Report which gates actually FIRED before applying them: a limit naming
         # a column the frame does not carry is skipped in silence by
-        # apply_physical_limits, and that silence is how the shipped config
-        # reached 19 dead entries out of 21 without anyone noticing. Counting
-        # here turns "the YAML parses" into "the rule ran".
+        # apply_physical_limits, so counting here is what turns "the YAML parses"
+        # into "the rule ran".
         before = qc.notna().sum()
-        absent = [
+        limits_absent_columns = [
             limit["column"] for limit in settings.sensor_limits if limit["column"] not in qc.columns
         ]
         qc = apply_physical_limits(qc, settings.sensor_limits)
         cut = before - qc.notna().sum()
-        fired = {str(column): int(count) for column, count in cut.items() if int(count) > 0}
+        limits_fired = {str(column): int(count) for column, count in cut.items() if int(count) > 0}
         typer.echo(
             f"\nLimites fisicos: {len(settings.sensor_limits)} declarados, "
-            f"{len(fired)} dispararam, {sum(fired.values()):,} amostras removidas"
+            f"{len(limits_fired)} dispararam, {sum(limits_fired.values()):,} amostras removidas"
         )
-        for column, count in sorted(fired.items(), key=lambda item: -item[1])[:8]:
+        for column, count in sorted(limits_fired.items(), key=lambda item: -item[1])[:8]:
             typer.echo(f"  {column:20s} {count:,}")
-        if absent:
+        if limits_absent_columns:
             typer.echo(
-                f"  ! {len(absent)} limite(s) nomeiam coluna ausente: {', '.join(absent[:6])}"
+                f"  ! {len(limits_absent_columns)} limite(s) nomeiam coluna ausente: "
+                f"{', '.join(limits_absent_columns[:6])}"
             )
             if strict:
                 raise typer.Exit(code=1)
@@ -237,15 +237,14 @@ def run(
         before_calibration = qc.notna().sum()
         qc = apply_calibrations(qc, load_calibrations(calibrations_path))
         # A `factor: null` record NaNs its whole window, which is a removal like
-        # any other and was the last stage missing from the tally.
+        # any other and belongs in the tally.
         invalidated = {
             str(column): int(count)
             for column, count in (before_calibration - qc.notna().sum()).items()
             if int(count) > 0
         }
-        # This is the step the sensor pipeline never took: without it the
-        # sensor_switches block parses and does nothing, and every era-spanning
-        # variable has to be reassembled by hand downstream.
+        # Without this the sensor_switches block parses and does nothing, and
+        # every era-spanning variable has to be reassembled by hand downstream.
         switches = load_sensor_switches(calibrations_path)
         qc = unify_sensor_columns(qc, switches)
         # Unification COPIES, so each unified channel now has a raw twin holding
@@ -261,11 +260,9 @@ def run(
                 f"(componentes sem saldo do registrador), -{net_dropped:,} (componente ausente)"
             )
 
-        # Reported, never fatal: an uncovered window is a laboratory decision
-        # (which sensitivity applied then), and refusing to build the archive
-        # over it would trade a scaling error for no record at all. Silence is
-        # what made both known cases invisible for years, so it is silence that
-        # this removes.
+        # Reported, never fatal: which sensitivity applied is a laboratory
+        # decision, and refusing to build over it would trade a scaling error
+        # for no record.
         gaps = uncalibrated_mapping_windows(qc, load_calibrations(calibrations_path), switches)
         if gaps:
             typer.echo(
@@ -285,11 +282,11 @@ def run(
     # the flat gates of default.yaml pass 1313 W/m2 at 04h without blinking and
     # every statistic downstream then reports the fault as climate.
     corrupted = night_corrupted_days(qc)
-    qc, shifted = mask_night_corrupted_days(qc, corrupted, sources)
+    qc, night_masked = mask_night_corrupted_days(qc, corrupted, sources)
     qc, impossible = mask_impossible_shortwave(qc, sources)
     typer.echo(
         f"\nDias com carimbo de tempo corrompido: {len(corrupted)} "
-        f"({sum(shifted.values()):,} amostras mascaradas em {len(shifted)} colunas)"
+        f"({sum(night_masked.values()):,} amostras mascaradas em {len(night_masked)} colunas)"
     )
     if impossible:
         typer.echo(
@@ -301,20 +298,22 @@ def run(
             f"  {day}  {count} amostra(s) acima de {NIGHT_CORRUPTION_FLUX_WM2:.0f} W/m2 de madrugada"
         )
 
-    # The gate runs twice, and the second pass is the one that makes the
-    # published column obey its own declared range. The first runs on the RAW
-    # signal, which is what protects the calibration from multiplying a value
-    # that was never physical; a value sitting AT the boundary then crosses it
-    # once scaled, and 579 samples reached the artifact that way — 578 of them
-    # created by the Eppley PSP factor this same config declares.
-    outside = values_outside_declared_limits(qc, settings.sensor_limits)
-    if outside:
+    # The gate runs twice. The first pass runs on the RAW signal, which is what
+    # protects the calibration from multiplying a value that was never physical;
+    # the second is what makes the published column obey its own declared range,
+    # because a value sitting AT the boundary crosses it once scaled — the
+    # Eppley PSP factor this same config declares does exactly that.
+    outside_after_calibration = values_outside_declared_limits(qc, settings.sensor_limits)
+    if outside_after_calibration:
         qc = apply_physical_limits(qc, settings.sensor_limits)
         typer.echo(
-            f"\nLimites reaplicados apos calibracao: {sum(outside.values()):,} amostra(s) "
-            f"em {len(outside)} coluna(s) cruzaram o portao ao serem escaladas"
+            f"\nLimites reaplicados apos calibracao: "
+            f"{sum(outside_after_calibration.values()):,} amostra(s) "
+            f"em {len(outside_after_calibration)} coluna(s) cruzaram o portao ao serem escaladas"
         )
-        for column, count in sorted(outside.items(), key=lambda item: -item[1])[:8]:
+        for column, count in sorted(outside_after_calibration.items(), key=lambda item: -item[1])[
+            :8
+        ]:
             typer.echo(f"  {column:22s} {count:,}")
 
     _write(qc, out / "station_5min_qc", output_format)
@@ -322,12 +321,11 @@ def run(
     # The logger's quality flag is text, which no hourly mean can carry. Turning
     # it into the fraction of samples reading OK keeps the information in the
     # hourly frame instead of dropping the only per-row flag the record has.
-    # ``astype(float)`` is what makes the fraction survive: ``aggregate_to_hourly``
-    # keeps only ``select_dtypes(include="number")`` columns, which matches
-    # neither bool nor the object dtype ``.where`` produces once a null appears —
-    # so the derived columns were built and then dropped in silence, and the
-    # hourly frame carried no quality flag at all. ``qc_flag`` is the unified
-    # spelling of the same information and goes the same way.
+    # ``astype("float64")`` is what makes the fraction survive:
+    # ``aggregate_to_hourly`` keeps only ``select_dtypes(include="number")``
+    # columns, which matches neither bool nor the object dtype ``.where``
+    # produces once a null appears. ``qc_flag`` is the unified spelling of the
+    # same information and goes the same way.
     hourly_input = qc.copy()
     for column in (*STATUS_COLUMNS, "qc_flag"):
         if column in hourly_input.columns:
@@ -363,20 +361,17 @@ def run(
             }
             for report in reports
         ],
-        # Every stage that removes a sample reports here, so the four tallies
-        # sum to the raw-to-QC delta. They used to be printed and discarded:
-        # the report accounted for 974,103 of the 1,206,977 samples the QC step
-        # actually removed, and the difference was recoverable only from a
-        # console log nobody keeps.
-        "sentinels_removed": removed,
-        "physical_limits_removed": fired,
-        "physical_limits_absent_columns": absent,
-        "physical_limits_after_calibration": outside,
+        # Every stage that removes a sample reports here, so these tallies sum
+        # to the raw-to-QC delta rather than living only in a console log.
+        "sentinels_removed": sentinels_removed,
+        "physical_limits_removed": limits_fired,
+        "physical_limits_absent_columns": limits_absent_columns,
+        "physical_limits_after_calibration": outside_after_calibration,
         "calibration_invalidated": invalidated,
         "impossible_shortwave_removed": impossible,
         # Dated, so the episode stays auditable after the samples are gone.
         "timestamp_corrupted_days": [day for day, _count in corrupted],
-        "timestamp_corruption_masked": shifted,
+        "timestamp_corruption_masked": night_masked,
         "uncalibrated_mapping_windows": [
             {"unified": unified, "column": column, "start": str(start), "end": str(end)}
             for unified, column, start, end in gaps

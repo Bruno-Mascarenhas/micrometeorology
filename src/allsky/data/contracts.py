@@ -189,7 +189,7 @@ def manifest_column_dtypes(feature_columns: Sequence[str]) -> dict[str, str]:
     dtypes: dict[str, str] = dict(META_COLUMNS)
     dtypes.update(GEOMETRY_COLUMNS)
     for name in feature_columns:
-        if name not in GEOMETRY_COLUMNS:  # solar_elevation/solar_zenith already present
+        if name not in GEOMETRY_COLUMNS:
             dtypes[name] = FEATURE_DTYPE
     dtypes.update(TARGET_COLUMNS)
     dtypes.update(PROVENANCE_COLUMNS)

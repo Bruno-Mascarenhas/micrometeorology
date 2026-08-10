@@ -79,9 +79,9 @@ def _normalize_var_list(var_list: list[str]) -> list[str]:
 
     Case is folded to the canonical spelling first, because every downstream
     branch compares against ``WRFVariable`` values with ``==``: a mis-cased
-    ``-v swdown`` used to miss its own handling (including the daylight gate)
-    and fall through to the raw-NetCDF passthrough. Tokens that name no known
-    variable are left untouched — raw NetCDF fields such as ``T2`` are a
+    ``-v swdown`` would otherwise miss its own handling (including the daylight
+    gate) and fall through to the raw-NetCDF passthrough. Tokens that name no
+    known variable are left untouched — raw NetCDF fields such as ``T2`` are a
     supported passthrough.
     """
     var_list = [_CANONICAL_VARIABLES.get(v.casefold(), v) for v in var_list]
@@ -172,9 +172,8 @@ def _reject_output_id_variables(var_list: list[str]) -> None:
 def run(
     # The two output directories are the only required options. Typer marks an
     # option required by the *absence* of a default, and Python forbids a
-    # defaulted parameter before a non-defaulted one, so they lead the
-    # signature. Every flag (name, short name, type, required-ness) is
-    # unchanged; only the order they are listed in ``--help`` differs.
+    # defaulted parameter before a non-defaulted one, so they must lead the
+    # signature.
     output_dir: Annotated[
         Path, typer.Option("-o", "--output-dir", help="Output dir for value JSON files.")
     ],

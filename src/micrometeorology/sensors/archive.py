@@ -46,9 +46,8 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-# Solar geometry for the night-corruption detector below. The same
-# implementation the climatology exporter uses, so "deep night" means the same
-# angle in both places.
+# The same solar geometry the climatology exporter uses, so "deep night" means
+# the same angle in both places.
 from allsky.config import SiteConfig
 from allsky.solar import cos_zenith, solar_elevation
 from micrometeorology.common.paths import ensure_dir
@@ -128,76 +127,76 @@ class ArchiveFile:
 # The manifests, in ingest order (chronological by first timestamp)
 # ---------------------------------------------------------------------------
 
-_D = "dados-labmim"
+_DIR = "dados-labmim"
 
 LENTA_MANIFEST: tuple[ArchiveFile, ...] = (
-    ArchiveFile(f"{_D}/LBM_lenta_2016.dat", note="start of record, 2016-09-29"),
-    ArchiveFile(f"{_D}/LBM_lenta_2017.dat", note="all of 2017, complete JJA"),
-    ArchiveFile(f"{_D}/LBM_lenta_2018_1.dat", note="2018-01..2018-10-16, JJA 2018"),
-    ArchiveFile(f"{_D}/LBM_lenta_2018-2019.dat", note="CNR1 commissioning era"),
-    ArchiveFile(f"{_D}/LBM_lenta_2019.dat.backup", note="sole source of 2019-03-15 afternoon"),
-    ArchiveFile(f"{_D}/LBM_lenta_2019.dat.1.backup", note="sole source of 2019-03-15..18"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2016.dat", note="start of record, 2016-09-29"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2017.dat", note="all of 2017, complete JJA"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2018_1.dat", note="2018-01..2018-10-16, JJA 2018"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2018-2019.dat", note="CNR1 commissioning era"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2019.dat.backup", note="sole source of 2019-03-15 afternoon"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2019.dat.1.backup", note="sole source of 2019-03-15..18"),
     ArchiveFile(
-        f"{_D}/LBM_lenta_2019.dat.2.backup", note="sole source of 2019-03-18..19, WXT arrives"
+        f"{_DIR}/LBM_lenta_2019.dat.2.backup", note="sole source of 2019-03-18..19, WXT arrives"
     ),
-    ArchiveFile(f"{_D}/LBM_lenta_2019.dat.3.backup", note="sole source of 2019-03-19..05-31"),
-    ArchiveFile(f"{_D}/LBM_lenta_2019_0531.dat", note="2019-05-31 onward"),
-    ArchiveFile(f"{_D}/LBM_lenta_2019_0631.dat", note="2019-06 onward"),
-    ArchiveFile(f"{_D}/LBM_lenta_2019_1011.dat", note="2019-10 onward, CMP21 diffuse begins"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2019.dat.3.backup", note="sole source of 2019-03-19..05-31"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2019_0531.dat", note="2019-05-31 onward"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2019_0631.dat", note="2019-06 onward"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2019_1011.dat", note="2019-10 onward, CMP21 diffuse begins"),
     ArchiveFile(
-        f"{_D}/LBM_lenta_2019.dat",
+        f"{_DIR}/LBM_lenta_2019.dat",
         staging=_DROP_LATE_TAIL,
         note="110-row tail is mis-stamped; the clock-fixed 2020_03 table carries it correctly",
     ),
     ArchiveFile(
-        f"{_D}/LBM_lenta_2020_03.dat",
+        f"{_DIR}/LBM_lenta_2020_03.dat",
         staging=_CLOCK_PLUS_ONE_HOUR,
         note="headerless CSV, and 16855 rows are one hour early",
     ),
-    ArchiveFile(f"{_D}/LBM_lenta_2020.dat.backup", note="SOLE SOURCE OF JJA 2020"),
-    ArchiveFile(f"{_D}/LBM_lenta_2020.dat", note="rest of 2020"),
-    ArchiveFile(f"{_D}/LBM_lenta_2021.dat", note="all of 2021"),
-    ArchiveFile(f"{_D}/LBM_lenta_2022.dat.backup", note="SOLE SOURCE OF JJA 2022"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2020.dat.backup", note="SOLE SOURCE OF JJA 2020"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2020.dat", note="rest of 2020"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2021.dat", note="all of 2021"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2022.dat.backup", note="SOLE SOURCE OF JJA 2022"),
     ArchiveFile(
-        f"{_D}/LBM_lenta_2022.dat", note="rest of 2022 (superset of data/LBM_lenta_2022.dat)"
+        f"{_DIR}/LBM_lenta_2022.dat", note="rest of 2022 (superset of data/LBM_lenta_2022.dat)"
     ),
-    ArchiveFile(f"{_D}/CR5000_LBM_lenta_18-21082023.dat", note="2023-08 spare-logger block"),
-    ArchiveFile(f"{_D}/LBM_lenta_2023.dat", note="2023"),
-    ArchiveFile(f"{_D}/LBM_lenta_2023_14032024.dat", note="2024-03 handover"),
-    ArchiveFile(f"{_D}/LBM_lenta_2024.dat.backup", note="SOLE SOURCE OF JUNE AND 1-19 JULY 2024"),
-    ArchiveFile(f"{_D}/LBM_lenta_2024.dat", note="rest of 2024"),
-    ArchiveFile(f"{_D}/LBM_lenta_2025.dat.backup", note="2025-03 Gill MetSENS commissioning"),
-    ArchiveFile(f"{_D}/LBM_lenta_2025.dat.1.backup", note="2025-03 commissioning"),
-    ArchiveFile(f"{_D}/LBM_lenta_2025.dat.2.backup", note="2025-03 commissioning"),
-    ArchiveFile(f"{_D}/LBM_lenta_2025.dat.3.backup", note="2025-03 commissioning"),
-    ArchiveFile(f"{_D}/LBM_lenta_2025.dat.4.backup", note="2025-03-28..05-14, dual GMX units"),
+    ArchiveFile(f"{_DIR}/CR5000_LBM_lenta_18-21082023.dat", note="2023-08 spare-logger block"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2023.dat", note="2023"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2023_14032024.dat", note="2024-03 handover"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2024.dat.backup", note="SOLE SOURCE OF JUNE AND 1-19 JULY 2024"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2024.dat", note="rest of 2024"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2025.dat.backup", note="2025-03 Gill MetSENS commissioning"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2025.dat.1.backup", note="2025-03 commissioning"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2025.dat.2.backup", note="2025-03 commissioning"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2025.dat.3.backup", note="2025-03 commissioning"),
+    ArchiveFile(f"{_DIR}/LBM_lenta_2025.dat.4.backup", note="2025-03-28..05-14, dual GMX units"),
     ArchiveFile("LBM_lenta_2025.dat", note="v22 era to 2026-04-24; PSP takes over diffuse"),
 )
 
 RAIN_MANIFEST: tuple[ArchiveFile, ...] = (
-    ArchiveFile(f"{_D}/LBM_rain_2016.dat", note="start of rain record"),
-    ArchiveFile(f"{_D}/LBM_rain_2017.dat", note="2017"),
-    ArchiveFile(f"{_D}/LBM_rain_2018_2019.dat", note="2018 into 2019"),
+    ArchiveFile(f"{_DIR}/LBM_rain_2016.dat", note="start of rain record"),
+    ArchiveFile(f"{_DIR}/LBM_rain_2017.dat", note="2017"),
+    ArchiveFile(f"{_DIR}/LBM_rain_2018_2019.dat", note="2018 into 2019"),
     ArchiveFile(
-        f"{_D}/LBM_lenta.dat",
+        f"{_DIR}/LBM_lenta.dat",
         note="MISNAMED: TOA5 field 8 is LBM_rain. Unique source of 2019-01-31..02-26",
     ),
     ArchiveFile(
-        f"{_D}/LBM_rain_2019.dat", staging=_DROP_LATE_TAIL, note="same 110-row mis-stamped tail"
+        f"{_DIR}/LBM_rain_2019.dat", staging=_DROP_LATE_TAIL, note="same 110-row mis-stamped tail"
     ),
     ArchiveFile(
-        f"{_D}/LBM_rain_2020.dat", note="2020 (clock slip is in the lenta table, not here)"
+        f"{_DIR}/LBM_rain_2020.dat", note="2020 (clock slip is in the lenta table, not here)"
     ),
-    ArchiveFile(f"{_D}/LBM_rain_2021.dat", note="2021"),
-    ArchiveFile(f"{_D}/LBM_rain_2022.dat", note="2022 (superset of data/LBM_rain_2022.dat)"),
+    ArchiveFile(f"{_DIR}/LBM_rain_2021.dat", note="2021"),
+    ArchiveFile(f"{_DIR}/LBM_rain_2022.dat", note="2022 (superset of data/LBM_rain_2022.dat)"),
     ArchiveFile(
-        f"{_D}/CR5000_LBM_rain_18-21082023.dat",
+        f"{_DIR}/CR5000_LBM_rain_18-21082023.dat",
         staging=_KEEP_2023_BLOCK,
         note="only the 804-row 2023-08 block; 892 scattered pre-2016 rows are a spare logger",
     ),
-    ArchiveFile(f"{_D}/LBM_rain_2023.dat", note="2023"),
-    ArchiveFile(f"{_D}/LBM_rain2023_14032024.dat", note="2024-03 handover"),
-    ArchiveFile(f"{_D}/LBM_rain_2024.dat", note="2024"),
+    ArchiveFile(f"{_DIR}/LBM_rain_2023.dat", note="2023"),
+    ArchiveFile(f"{_DIR}/LBM_rain2023_14032024.dat", note="2024-03 handover"),
+    ArchiveFile(f"{_DIR}/LBM_rain_2024.dat", note="2024"),
     ArchiveFile("LBM_rain_2025.dat", note="2025 to 2026-04-24"),
 )
 
@@ -382,11 +381,10 @@ def build_five_minute_frame(
 def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
     """Check a merged frame against the row count, span and shape the audit measured.
 
-    This is the guard that turns "the merge still runs" into "the merge still
-    captures the whole archive". A file quietly removed from a manifest, a
-    staging repair that stops matching its file, or a reader change that eats a
-    header row all show up here as a row-count or span mismatch rather than as a
-    slightly shorter published distribution.
+    Turns "the merge still runs" into "the merge still captures the whole
+    archive": a file dropped from a manifest, a staging repair that stops
+    matching its file, or a reader change that eats a header row surfaces as a
+    row-count or span mismatch instead of a slightly shorter distribution.
 
     Parameters
     ----------
@@ -495,9 +493,8 @@ SENTINEL_WINDOWS: tuple[tuple[str, float, str, str], ...] = (
     ("CMP21_Wm2_Avg", 0.0, "2025-05-14 15:25", "2026-12-31 23:55"),
     # GMX unit-1 humidity rails to 0 after the open-circuit failure.
     ("RH1", 0.0, "2025-12-19 00:00", "2026-12-31 23:55"),
-    # The 2019-03 WXT commissioning zeros reach two more columns than the first
-    # pass caught. Verified leak: a raw 0.0 on Pmb_WXT_Avg at 2019-03-18 14:25
-    # survived masking and fed straight into the unified pressure series.
+    # The same 2019-03 WXT commissioning zeros on two more columns: an unmasked
+    # 0.0 on Pmb_WXT_Avg at 2019-03-18 14:25 feeds the unified pressure series.
     ("Pmb_WXT_Avg", 0.0, "2019-03-18 12:55", "2019-03-19 08:25"),
     ("Temp_WXT_Avg", 0.0, "2019-03-18 12:55", "2019-03-19 08:25"),
     # MetSENS unit 2 was decommissioned on 2025-05-14 and its channels park on
@@ -511,17 +508,14 @@ SENTINEL_WINDOWS: tuple[tuple[str, float, str, str], ...] = (
 #
 # The diffuse windows are the highest-stakes entries in this module: an
 # unshaded pyranometer reads the GLOBAL flux, so leaving them in publishes
-# values up to 1368 W/m2 as "diffuse". They were identified by binning the
-# ratio to global BY GLOBAL LEVEL: a shaded diffuse sensor's ratio falls as the
-# sky clears (0.48 -> 0.13), an unshaded one stays flat or rises (0.81 -> 0.88).
+# values up to 1368 W/m2 as "diffuse", at times above the global reading of the
+# same hour (2024-09-16 11:00 published Sw_dif 1009.8 against Sw_dw 997.5).
 #
-# The list below was re-derived over the whole record with that same criterion
-# after the first three entries turned out to cover only part of it: nine
-# further multi-day episodes were publishing global irradiance as diffuse, at
-# times above the global reading of the same hour (2024-09-16 11:00 published
-# Sw_dif 1009.8 against Sw_dw 997.5). :func:`unshaded_diffuse_days` runs the
-# criterion at build time so the next episode surfaces as a report line rather
-# than waiting for someone to re-audit the ratio by hand.
+# They are identified by binning the ratio to global BY GLOBAL LEVEL: a shaded
+# diffuse sensor's ratio falls as the sky clears (0.48 -> 0.13), an unshaded one
+# stays flat or rises (0.81 -> 0.88). :func:`unshaded_diffuse_days` runs that
+# same criterion at build time, so the next episode surfaces as a report line
+# rather than waiting for someone to re-audit the ratio by hand.
 INVALID_WINDOWS: tuple[tuple[str, str, str, str], ...] = (
     ("CMP21_Wm2_Avg", "2019-09-01 00:00", "2019-10-07 23:55", "PSP/CMP21 unshaded"),
     ("CMP21_Wm2_Avg", "2020-03-06 00:00", "2020-05-31 23:55", "shade ring off for ~87 days"),
@@ -571,9 +565,8 @@ def unshaded_diffuse_days(
     own, so whatever comes back is exactly what the hand-curated list misses.
 
     A hand-written window table goes stale the moment the ring comes off again,
-    and the failure is silent — the column keeps its name and publishes global
-    irradiance as diffuse, at times above the global reading of the same hour.
-    This turns the next episode into a line in the build report.
+    and the failure is silent: the column keeps its name and publishes global
+    irradiance as diffuse.
 
     Returns
     -------
@@ -615,10 +608,9 @@ def unshaded_diffuse_days(
     ]
 
 
-# Station coordinates, for the solar geometry the check below needs. Repeated
-# here rather than imported from the climatology exporter because a sensors
-# module must not depend on a CLI; they are the same numbers and both are the
-# station's own.
+# Station coordinates, for the solar geometry the checks below need. Repeated
+# rather than imported from the climatology exporter because a sensors module
+# must not depend on a CLI; both are the station's own numbers.
 STATION_SITE = SiteConfig(latitude=-13.0055, longitude=-38.5089)
 STATION_UTC_OFFSET_HOURS = -3.0
 
@@ -634,14 +626,13 @@ STATION_UTC_OFFSET_HOURS = -3.0
 # day carries the identical shift while wearing ordinary values, so a per-sample
 # rule can only ever see half of each episode.
 #
-# The test is run over EVERY shortwave channel, not just the global one. Keying
-# it on ``Sw_dw`` alone reproduces the audit's 42 days but misses ten more that
-# only the other pyranometers witness — 2018-08-21..23 and 2018-10-21..23 among
-# them, contiguous blocks carrying up to 118 deep-night PAR samples each. The
-# channels do not share an outage, so any one of them can be the only survivor
-# of a shifted day. Longwave is deliberately absent: a pyrgeometer reads
-# 300-400 W/m2 all night by design, so the same threshold there would flag the
-# entire record.
+# Run over EVERY shortwave channel, not just the global one: keying it on
+# ``Sw_dw`` alone reproduces the audit's 42 days but misses ten more that only
+# the other pyranometers witness (2018-08-21..23 and 2018-10-21..23 carry up to
+# 118 deep-night PAR samples each). The channels do not share an outage, so any
+# one of them can be the only survivor of a shifted day. Longwave is
+# deliberately absent: a pyrgeometer reads 300-400 W/m2 all night by design, so
+# the same threshold there would flag the entire record.
 NIGHT_CORRUPTION_COLUMNS = ("Sw_dw", "Sw_dif", "Sw_par", "Sw_up")
 NIGHT_CORRUPTION_ELEVATION_DEG = -10.0
 NIGHT_CORRUPTION_FLUX_WM2 = 50.0
@@ -650,10 +641,9 @@ NIGHT_CORRUPTION_MIN_SAMPLES = 3
 # Channels the mask covers: every shortwave stream, whose meaning depends
 # entirely on the hour that is wrong, plus ``Net_CNR1``. The net is here because
 # it is NOT an independent measurement — over 729,225 samples its residual
-# against ``Sw_dw - Sw_up + Lw_dw - Lw_up`` never exceeds 8.95 W/m2, so the
-# logger computes it from the four components and masking only the shortwave
-# ones would leave the net radiation on disk still carrying the corrupted
-# contribution.
+# against ``Sw_dw - Sw_up + Lw_dw - Lw_up`` never exceeds 8.95 W/m2, so masking
+# only the shortwave channels would leave the corrupted contribution on disk
+# inside the net.
 NIGHT_CORRUPTION_CHANNELS = (*NIGHT_CORRUPTION_COLUMNS, "Net_CNR1")
 
 # BSRN "physically possible" ceiling for global horizontal irradiance
@@ -677,11 +667,11 @@ IMPOSSIBLE_SHORTWAVE_CHANNELS = ("Sw_dw", "Net_CNR1")
 SourceWindows = Mapping[str, Sequence[tuple[str, pd.Timestamp, pd.Timestamp]]]
 
 
-def _mask_column(frame: pd.DataFrame, column: str, hit: NDArray, removed: dict[str, int]) -> None:
-    """Blank *column* where *hit* selects a populated sample, tallying into *removed*."""
+def _mask_column(frame: pd.DataFrame, column: str, mask: NDArray, removed: dict[str, int]) -> None:
+    """Blank *column* where *mask* selects a populated sample, tallying into *removed*."""
     if column not in frame.columns:
         return
-    selected = hit & frame[column].notna().to_numpy()
+    selected = mask & frame[column].notna().to_numpy()
     count = int(selected.sum())
     if not count:
         return
@@ -808,16 +798,16 @@ def close_net_radiation(frame: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
 
     The CNR1 net is not an independent measurement: the logger computes it from
     the same four channels, and over 719,002 samples of the uncalibrated record
-    the two agree to 8.95 W/m2. Calibrating one component and not the logger's
-    precomputed sum broke that — the residual became a systematic +1.28 W/m2,
-    reaching 9.28, so the monitoring chart that invites a reader to add the four
-    bars and land on the net line no longer added up.
+    the two agree to 8.95 W/m2. Calibrating the components without the logger's
+    precomputed sum turns that agreement into a systematic bias, so the
+    monitoring chart that invites a reader to add the four bars and land on the
+    net line stops adding up.
 
-    Recomputing rather than correcting the sum is what makes the identity exact
-    by construction instead of by a second arithmetic that can drift again. It
-    also publishes 34,640 five-minute samples of 2018-10 to 2019-03, where the
-    four components were recorded but the logger had not yet begun writing a
-    net, and drops the 125 where a component is missing and no net is defined.
+    Recomputing rather than correcting the sum keeps the identity exact by
+    construction instead of by a second arithmetic that can drift again. It also
+    publishes 34,640 five-minute samples of 2018-10 to 2019-03, where the four
+    components were recorded but the logger had not yet begun writing a net, and
+    drops the 125 where a component is missing and no net is defined.
 
     Returns the frame, the samples gained and the samples dropped.
     """

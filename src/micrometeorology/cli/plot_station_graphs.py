@@ -61,9 +61,9 @@ from matplotlib.typing import ColorType
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.paths import ensure_dir
 
-# Imported, not re-typed: the ordered candidate tuple is the mechanism that makes
-# a variable arriving in the extraction "a data change, not a code change", and
-# two independent literals defeat it — this one had already lost `rain_total`.
+# Imported, not re-typed: the ordered candidate tuple is what makes a variable
+# arriving in the extraction "a data change, not a code change", and a second
+# independent literal of the same list defeats that.
 from micrometeorology.sensors.monitoring import _WRF_RAIN_CANDIDATES
 from micrometeorology.sensors.plotting import (
     BALANCE_COMPONENT_COLORS,
@@ -117,9 +117,8 @@ GRAPH_SPECS: tuple[GraphSpec, ...] = (
     GraphSpec("temperatura", "temperatura.png", "Temperatura do Ar (°C)", "line", (10, 40)),
     # 105, not 100: the model's relative humidity is not capped at saturation and
     # exceeds 100% in 314 of the 24,816 hours the extraction carries (max 101.6).
-    # A 0-100 frame makes matplotlib clip them with no mark — the invisible
-    # censorship the three-layer view exists to prevent, and the reason the
-    # interactive chart declares the same 105 in MONITORING_CHARTS.
+    # A 0-100 frame would clip those with no mark. MONITORING_CHARTS declares the
+    # same 105 for the interactive chart.
     GraphSpec("umidade", "umidade.png", "Umidade Relativa do Ar (%)", "line", (0, 105)),
     GraphSpec("pressao", "pressao.png", "Pressão Atmosférica (hPa)", "line"),
     GraphSpec("precipitacao", "precipitacao.png", "Precipitação (mm)", "bar"),
@@ -133,22 +132,19 @@ GRAPH_SPECS: tuple[GraphSpec, ...] = (
 # Default column mapping: the candidates each contract graph reads, best first.
 #
 # The head of every chain is the UNIFIED name that ``sensor_switches`` builds
-# (``labmim-archive``), and the tail is the raw logger column that
-# ``labmim-sensor-process`` exports (``sensors.export.export_csv``). Which one a
-# run gets depends on its input, and the difference is not cosmetic: a single
-# fixed raw column is one instrument, while the quantity the graph is named
-# after changes instrument over the record. ``radiacao_difusa.png`` read
-# ``PSP_Wm2_Avg`` unconditionally, but the shade ring came off the PSP between
-# 2019-09 and 2025-05 (calibrations.yaml, Sw_dif era map) and the CMP21 carried
-# diffuse instead — so any window replayed inside those six years published
-# near-global irradiance under the title "Radiação Difusa": 100.3 W/m2 against
-# the true 67.6 for the 2022-07 reference week, 183.9 against 72.5 over 2024,
-# while the interactive page published ``Sw_dif`` for the same hours.
+# (``labmim-archive``); the tail is the raw logger column that
+# ``labmim-sensor-process`` exports (``sensors.export.export_csv``). The
+# difference is not cosmetic: a fixed raw column is ONE instrument, while the
+# quantity the graph is named after changes instrument over the record. The
+# shade ring was off the PSP between 2019-09 and 2025-05 (calibrations.yaml,
+# Sw_dif era map) and the CMP21 carried diffuse instead, so a window inside
+# those six years resolved through ``PSP_Wm2_Avg`` publishes near-global
+# irradiance under the title "Radiação Difusa".
 #
-# The residual, stated rather than hidden: a historical window replayed through
-# the non-unifying sensor-process path still resolves to the raw tail and still
-# gets the wrong instrument. Feed those from the archive's hourly frame.
-# Override per-logger via --config / --col, which replaces the whole chain.
+# Live residual: a historical window replayed through the non-unifying
+# sensor-process path still resolves to the raw tail and still gets the wrong
+# instrument. Feed those from the archive's hourly frame. Override per-logger
+# via --config / --col, which replaces the whole chain.
 DEFAULT_COLUMNS: dict[str, tuple[str, ...]] = {
     "temperatura": ("T", "AirT1_C_Avg"),
     "umidade": ("ur", "RH1"),
@@ -170,16 +166,11 @@ DEFAULT_BALANCE_COMPONENTS: dict[str, tuple[str, ...]] = {
     # The ``Cr`` spellings, which are the FLUXES. The plain ``CG3*_Wm2_Avg``
     # columns are the pyrgeometers' raw thermopile signal, missing the
     # sigma*T_body^4 case term: over 2022-07-01..08 they average -41.7 and +0.9
-    # W/m2 where the fluxes are +405.7 and +448.2. A negative downwelling
-    # longwave is not a number this station can measure, and it was published
-    # under the same filename and title as the interactive chart showing +406.
-    #
-    # Nothing caught it because the correction adds the SAME term to both
-    # channels, so the NET longwave is identical either way (-42.55 W/m2) and the
-    # plot still visually sums to Rn — every relation on the chart held while
-    # both individual values were wrong by about 447 W/m2. The sibling producer
-    # (generate_station_graphs.py) and the unified Lw_dw/Lw_up the archive
-    # publishes both use these columns; this one was the outlier.
+    # W/m2 where the fluxes are +405.7 and +448.2, and a negative downwelling
+    # longwave is not a number this station can measure. The case term cancels
+    # in the NET (-42.55 W/m2 either way), so a chart drawn from the raw
+    # thermopile still sums visually to Rn while both components are wrong by
+    # ~447 W/m2 — closure is no evidence the right columns were picked.
     "lw_down": ("Lw_dw", "CG3Up_Wm2Cr_Avg"),
     "lw_up": ("Lw_up", "CG3Dn_Wm2Cr_Avg"),
 }
@@ -311,11 +302,10 @@ def load_hourly_csv(input_path: Path, last_days: int) -> pd.DataFrame:
     input_path:
         CSV whose first column is the timestamp index — the default
         (``include_datetime_columns=False``) export of ``labmim-sensor-process``
-        — or ``station_hourly.parquet`` from ``labmim-archive``. The archive
-        frame is the one that carries the unified, era-mapped channel names, and
-        it is the only input from which the radiation graphs can name the right
-        instrument for a historical window; ``--raw`` already read Parquet, so
-        the station layer refusing it was the only thing keeping the two apart.
+        — or ``station_hourly.parquet`` from ``labmim-archive``. Only the
+        archive frame carries the unified, era-mapped channel names, so it is
+        the only input from which the radiation graphs can name the right
+        instrument for a historical window.
     last_days:
         Keep only rows within ``last_days`` of the newest timestamp. A value
         ``<= 0`` disables the clip and keeps the whole file.
@@ -553,8 +543,10 @@ def render_site_graphs(
     Returns
     -------
     tuple
-        ``(written_paths, missing_keys)`` — one entry in ``missing_keys`` per
-        contract graph whose primary column was absent (its PNG is skipped).
+        ``(written_paths, missing_keys, empty_keys)`` — ``missing_keys`` names
+        the contract graphs whose source column was absent (PNG skipped), and
+        ``empty_keys`` those whose station column carried no finite value over
+        the window (drawn from the remaining layers, or not written at all).
     """
     out = ensure_dir(output_dir)
     label_dt = df.index.max() if not df.empty else None
@@ -593,8 +585,8 @@ def render_site_graphs(
 
         fig, ax = create_figure()
         try:
-            # Layer 1 — the raw logger samples, underneath everything. Drawn
-            # first so the hourly mean and the model sit on top of it.
+            # Layer 1 — raw logger samples, drawn first so the hourly mean and
+            # the model sit on top of them.
             if raw is not None and column in raw.columns:
                 _plot_raw(
                     ax,
@@ -605,13 +597,10 @@ def render_site_graphs(
 
             # Layer 2 — the hourly aggregate, the subject of the chart.
             #
-            # A column that EXISTS but holds no finite value over the plotted
-            # window is skipped like an absent one. Plotting it draws nothing
-            # and still registers a legend entry, and a legend that names a
-            # series the reader cannot see is worse than an honest absence: it
-            # reads as a line off the scale, or as an instrument stuck flat.
-            # Both causes reach here — a column of the wrong instrument era, and
-            # a channel the station genuinely did not record that year.
+            # A column that EXISTS but holds no finite value over the window is
+            # skipped like an absent one: plotting it draws nothing yet still
+            # registers a legend entry, which reads as a line off the scale or
+            # an instrument stuck flat.
             drawn_raw = raw is not None and column in raw.columns
             if not series.notna().any():
                 logger.warning(
@@ -658,14 +647,12 @@ def render_site_graphs(
             add_labmim_watermark(ax)
             handles = ax.get_legend_handles_labels()[0]
             if not handles:
-                # Nothing drew at all — no station values, no raw record, no
-                # model. An empty framed axis published under a contract
+                # No layer drew. An empty framed axis published under a contract
                 # filename is indistinguishable from a working chart on a calm
                 # day, so the previous image is left in place instead.
                 logger.warning("%s: no layer had data -- not written", spec.filename)
                 if spec.key not in empty:
-                    # An empty station column already recorded it above; a chart
-                    # is one entry in this list, not one per reason it is bare.
+                    # One entry per bare chart, not one per reason it is bare.
                     empty.append(spec.key)
                 continue
             add_top_legend(ax, ncol=4)
@@ -676,7 +663,7 @@ def render_site_graphs(
     return written, missing, empty
 
 
-def _load_layer(path: Path, hourly: pd.DataFrame) -> pd.DataFrame:
+def _load_raw_layer(path: Path, hourly: pd.DataFrame) -> pd.DataFrame:
     """Load the raw record and clip it to the window the hourly frame covers."""
     frame = (
         pd.read_parquet(path)
@@ -785,7 +772,7 @@ def site(
         typer.echo("[!] No rows in the requested window -- nothing to plot.")
         raise typer.Exit(code=1 if strict else 0)
 
-    raw = _load_layer(raw_path, df) if raw_path else None
+    raw = _load_raw_layer(raw_path, df) if raw_path else None
     wrf = _load_wrf(wrf_path, df) if wrf_path else None
 
     written, missing, empty = render_site_graphs(
@@ -804,10 +791,9 @@ def site(
     if missing:
         typer.echo(f"[!] Skipped (missing column): {', '.join(missing)}")
     if empty:
-        # Two distinct states share this list: a chart drawn from its other
-        # layers because the station column was empty, and a chart not written
-        # at all because NO layer had data. Say which, so the operator can tell a
-        # dead sensor from a dead run.
+        # Two states share this list: a chart drawn from its other layers, and a
+        # chart not written at all. Reported separately so the operator can tell
+        # a dead sensor from a dead run.
         bare = [key for key in empty if key not in written_keys]
         partial = [key for key in empty if key in written_keys]
         if partial:
@@ -816,17 +802,14 @@ def site(
             typer.echo(f"[!] Not written, no layer had data: {', '.join(bare)}")
     typer.echo(f"\n>> {len(written)} graph(s) saved to {output_dir}")
 
-    # `--strict` fails on a MISSING column and not on an empty one, and the
-    # distinction is the difference between a broken configuration and a broken
-    # instrument. A column the frame does not carry means this run was pointed
-    # at the wrong data or the logger was renamed — an operator has to act, and
-    # the flag exists to say so ("Exit non-zero if any contract column is
-    # missing"). A column that is present and holds no value is the station
-    # itself being down: the Gill thermohygrometer railed in December 2025, so
-    # temperature and humidity are empty in EVERY current window, and failing on
-    # that would make the hourly cron exit non-zero every run from now until the
-    # instrument is repaired — freezing the site on its last good artifacts for
-    # a condition the images are supposed to be reporting, not hiding.
+    # `--strict` fails on a MISSING column and not on an empty one: broken
+    # configuration versus broken instrument. An absent column means this run
+    # was pointed at the wrong data or the logger was renamed, and an operator
+    # has to act. A present-but-empty column is the station being down — the
+    # Gill thermohygrometer railed in December 2025, so temperature and humidity
+    # are empty in EVERY current window, and failing on that would make the
+    # hourly cron exit non-zero until the instrument is repaired, freezing the
+    # site on its last good artifacts.
     if strict and missing:
         raise typer.Exit(code=1)
 

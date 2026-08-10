@@ -17,10 +17,9 @@ runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------
-# CLI surface (multimodal v2 command set)
+# CLI surface
 # ---------------------------------------------------------------------------
 
-#: The full command set registered on the ``allsky`` app after the v0 retirement.
 EXPECTED_COMMANDS = (
     "extract-frames",
     "validate-dataset",
@@ -31,7 +30,6 @@ EXPECTED_COMMANDS = (
     "evaluate",
 )
 
-#: Retired v0 commands that must NOT appear anymore.
 RETIRED_COMMANDS = ("info", "build-index")
 
 
@@ -50,15 +48,12 @@ def test_help_does_not_list_retired_commands():
 
 
 def test_extract_frames_help_is_torch_free():
-    # --help resolves without importing imageio/torch (imports are lazy).
     result = runner.invoke(app, ["extract-frames", "--help"])
     assert result.exit_code == 0
     assert "--out" in result.output
 
 
 def test_train_rejects_non_experiment_config(tmp_path):
-    # A config without 'experiment: true' is rejected with a clear pointer to
-    # the experiment configs — the legacy SkyFusionNet path is gone.
     config_path = tmp_path / "legacy.yaml"
     config_path.write_text("train:\n  epochs: 1\n", encoding="utf-8")
     result = runner.invoke(app, ["train", "--config", str(config_path)])

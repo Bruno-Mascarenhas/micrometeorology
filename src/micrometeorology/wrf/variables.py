@@ -1,7 +1,7 @@
-"""WRF variable extraction and unit conversion.
+"""WRF variable extraction, unit conversion and derived surface diagnostics.
 
-Consolidates the repeated per-variable extraction logic that was
-duplicated across the ``drawmap()`` functions in the legacy scripts.
+One extractor per published variable, each returning the field together with
+the ``(vmin, vmax)`` colour-scale bounds the map and JSON writers render from.
 """
 
 import logging
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Min / max helpers (preserved from legacy getLowHigh* functions)
+# Colour-scale bound helpers
 # ---------------------------------------------------------------------------
 
 
@@ -59,12 +59,11 @@ def blank_uninitialised_radiation(values: NDArray, glw: NDArray) -> NDArray:
     domain-mean, sky emissivity exactly 0.00, and upwelling longwave sits ~18
     W/m2 low with the reflected ``(1 - eps) * GLW`` term missing.
 
-    Blanking here rather than at the writer is what makes the two populations
-    the same set: :func:`percentile_scale_bounds` already drops step 0 from the
-    colour-scale sample, while the publish gate rejects a frame only when every
-    cell is non-finite — so the frame shipped anyway, carrying a legend computed
-    without it, with 100% of its cells below the legend's own minimum. After
-    this, the gate drops the frame and the domain summary never records it.
+    Blanking here rather than at the writer is what keeps the colour-scale
+    sample and the published frame one population: :func:`percentile_scale_bounds`
+    already drops step 0 from the sample, while the publish gate rejects a frame
+    only when every cell is non-finite. With the step blanked the gate drops the
+    frame, so it can no longer ship carrying a legend computed without it.
 
     A continuation run (one restarted from a previous forecast) already has its
     radiation state and is untouched. The shortwave fields are NOT covered: a
@@ -130,9 +129,8 @@ def extract_temperature(ds: WRFDataset) -> tuple[NDArray, float, float]:
 
     Returns ``(temperature_3d, temp_min, temp_max)`` with the raw Kelvin array
     (converted per step by :func:`extract_temperature_step`) and °C bounds.
-    Callers that also need surface pressure read PSFC themselves — bundling it
-    here forced every temperature export to eagerly load a variable it never
-    used.
+    Callers that also need surface pressure read PSFC themselves, so a
+    temperature export never eagerly loads a variable it does not use.
     """
     t2 = ds.get_variable("T2")  # Kelvin
 
@@ -234,9 +232,9 @@ def rotate_to_earth_relative(ds: WRFDataset, u: NDArray, v: NDArray) -> tuple[ND
 
     ``COSALPHA``/``SINALPHA`` carry that angle per cell, so the rotation is
     exact rather than estimated. The operational domains are Mercator, where
-    ``SINALPHA`` is 0 everywhere and this is the identity, which is why nothing
-    published today changes; a file without the fields keeps the components as
-    they are, because there is nothing to rotate them by.
+    ``SINALPHA`` is 0 everywhere and this is the identity; a file without the
+    fields keeps the components as they are, because there is nothing to rotate
+    them by.
     """
     if not (ds.has_variable("COSALPHA") and ds.has_variable("SINALPHA")):
         return u, v
@@ -711,8 +709,8 @@ def _package_wind_vectors_step(
     They are rounded to 1 decimal and magnitudes to 2 — the same convention
     as the standalone overlay files (``geojson.create_wind_vectors_json``).
     The front-end only draws arrows from these numbers; anything beyond
-    0.1°/0.01 m/s is float64 interpolation noise, and serializing it used to
-    inflate every POT_EOLICO values file by ~21%.
+    0.1°/0.01 m/s is float64 interpolation noise that only inflates the
+    POT_EOLICO values files.
     """
     magnitude = np.hypot(u_subgrid, v_subgrid)
     flow_bearing_deg = np.arctan2(u_subgrid, v_subgrid) * 180.0 / np.pi
@@ -764,9 +762,9 @@ def stream_wind_at_heights(
 
     for t0 in range(0, n_t, block_steps):
         t1 = min(t0 + block_steps, n_t)
-        # Each staggering step is split into an allocation plus an in-place
-        # second operation: the chained ``(a + b) / 2.0`` form materialized a
-        # second full-size block per line for nothing.
+        # Each staggering step is an allocation plus an in-place second
+        # operation: the chained ``(a + b) / 2.0`` form would materialize a
+        # second full-size block per line.
         u_raw = ds.get_variable_block("U", t0, t1)
         u_c = u_raw[:, :, :, :-1] + u_raw[:, :, :, 1:]
         u_c /= 2.0
@@ -842,8 +840,6 @@ def stream_wind_at_heights(
     series: list[WindHeightSeries] = []
     for target in targets:
         speed = speed_out[target]
-        # Scale bounds follow the site-wide convention (percentile_scale_bounds):
-        # skip the spin-up first step and cap the max at the 98th percentile.
         vmin, vmax = percentile_scale_bounds(speed)
         series.append(
             WindHeightSeries(

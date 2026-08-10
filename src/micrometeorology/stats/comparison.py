@@ -45,24 +45,18 @@ def read_dataset(
         df.index = pd.to_datetime(df["TIMESTAMP"])
         df = df.drop(columns=["TIMESTAMP"], errors="ignore")
     elif parse_dates:
-        # Try combining year/month/day/hour if present
-        dt_cols = [c for c in ("year", "month", "day", "hour") if c in df.columns]
-        if len(dt_cols) >= 3:
-            df.index = pd.to_datetime(df[dt_cols])
-            df = df.drop(columns=dt_cols, errors="ignore")
+        date_parts = [c for c in ("year", "month", "day", "hour") if c in df.columns]
+        if len(date_parts) >= 3:
+            df.index = pd.to_datetime(df[date_parts])
+            df = df.drop(columns=date_parts, errors="ignore")
         elif len(df.columns) > 0:
-            # The unnamed leading column that ``sensors.export.export_csv`` writes
-            # for the index. Numeric leading columns are excluded on purpose:
-            # ``pd.to_datetime`` reads an integer RECORD/year column as
-            # nanoseconds since the epoch and would fabricate a 1970 index.
+            # The leading index column ``sensors.export.export_csv`` writes, plus
+            # the named one ``DataFrame.to_csv`` writes for a ``timestamp`` index.
+            # Numeric leading columns are excluded on purpose: ``pd.to_datetime``
+            # reads an integer RECORD/year column as nanoseconds since the epoch
+            # and would fabricate a 1970 index.
             leading = df.columns[0]
             label = str(leading).strip().casefold()
-            # A NAMED leading column counts too when the name says what it is.
-            # ``DataFrame.to_csv`` writes the index's own name, so the most
-            # ordinary way to produce one of these files — take a frame with a
-            # ``timestamp`` index and save it — used to land here unrecognised
-            # and leave a RangeIndex, which then surfaced as a TypeError from
-            # inside ``pair_dataframes`` naming neither the file nor the cause.
             is_unnamed = str(leading).startswith("Unnamed:") or not str(leading).strip()
             named_like_a_stamp = label in {"timestamp", "datetime", "date", "time"}
             if (is_unnamed or named_like_a_stamp) and not is_numeric_dtype(df[leading]):
@@ -71,19 +65,17 @@ def read_dataset(
                     df.index = parsed
                     df = df.drop(columns=[leading])
 
-    # Deliberately NOT an error when no time index could be built: a frame with
-    # a RangeIndex is a supported state here, because ``labmim-metrics`` aligns
-    # such a pair by ROW ORDER and says so. The CLI that requires pairing by time
-    # is the one that refuses it — see ``compare_wrf_observations``, which can
-    # name the offending file.
+    # Deliberately NOT an error when no time index could be built: a RangeIndex
+    # is a supported state here, because ``labmim-metrics`` aligns such a pair by
+    # ROW ORDER and says so. Refusing it belongs to ``compare_wrf_observations``,
+    # which can name the offending file.
     df.index.name = None
 
-    # Coerce only text columns to numeric. Both dtype names are needed: pandas 3
-    # reads text as ``str`` dtype, and ``include=["object"]`` matches it only
-    # through a shim that is scheduled for removal.
-    obj_cols = df.select_dtypes(include=["object", "str"]).columns
-    if len(obj_cols) > 0:
-        df[obj_cols] = df[obj_cols].apply(pd.to_numeric, errors="coerce")
+    # Both dtype names are needed: pandas 3 reads text as ``str`` dtype, and
+    # ``include=["object"]`` matches it only through a shim due for removal.
+    text_columns = df.select_dtypes(include=["object", "str"]).columns
+    if len(text_columns) > 0:
+        df[text_columns] = df[text_columns].apply(pd.to_numeric, errors="coerce")
 
     return df
 
@@ -113,7 +105,6 @@ def pair_dataframes(
     obs_subset = obs[common_cols].sort_index()
     model_subset = model[common_cols].sort_index()
 
-    # Merge on nearest timestamp
     merged = pd.merge_asof(
         obs_subset.rename_axis("time").reset_index(),
         model_subset.rename_axis("time").reset_index(),
@@ -139,7 +130,7 @@ def compare_variables(
         return {}
 
     obs = paired_df[obs_col].to_numpy()
-    mod = paired_df[model_col].to_numpy()
+    model = paired_df[model_col].to_numpy()
     circular = is_circular_column(variable)
     if circular:
         # Name-based detection changes the published numbers, so it says so.
@@ -150,7 +141,7 @@ def compare_variables(
         )
     # ``n`` leads the record on purpose: it is the denominator of every number
     # after it, and it is not the row count of *paired_df*.
-    return {"n": float(valid_pairs(obs, mod)), **compute_all(obs, mod, circular=circular)}
+    return {"n": float(valid_pairs(obs, model)), **compute_all(obs, model, circular=circular)}
 
 
 def compare_all_variables(paired_df: pd.DataFrame) -> pd.DataFrame:
@@ -158,7 +149,6 @@ def compare_all_variables(paired_df: pd.DataFrame) -> pd.DataFrame:
 
     Returns a DataFrame with metrics as rows and variables as columns.
     """
-    # Find variable names from column suffixes
     variables = sorted(
         {
             c.replace("_obs", "")
@@ -168,7 +158,7 @@ def compare_all_variables(paired_df: pd.DataFrame) -> pd.DataFrame:
     )
 
     results: dict[str, dict[str, float]] = {}
-    for var in variables:
-        results[var] = compare_variables(paired_df, var)
+    for variable in variables:
+        results[variable] = compare_variables(paired_df, variable)
 
     return pd.DataFrame(results)

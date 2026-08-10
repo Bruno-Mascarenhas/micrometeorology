@@ -55,9 +55,8 @@ def read_campbell_dat(
     text_columns:
         Columns to leave as text instead of coercing to numeric. The datalogger's
         per-row quality flag (``MetSENS1_Status``, values ``"OK"`` /
-        ``"Unknown Fault"``) is the only such column in the archive, and the
-        blanket coercion below turns it into an all-NaN column — destroying the
-        only status flag the record has, silently and while still looking
+        ``"Unknown Fault"``) is the only such column in the archive; the blanket
+        coercion below would turn it into an all-NaN column that still looks
         populated. Names absent from the file are ignored.
     """
     if skip_rows is None:
@@ -73,22 +72,19 @@ def read_campbell_dat(
         low_memory=False,
         parse_dates=False,
         # The logger writes a bare NAN token for a missing sample. Declaring it
-        # explicitly means a column stays numeric on read instead of arriving as
-        # text and depending on the coercion below — which is what let a text
-        # quality flag and a NAN-bearing float column look identical.
+        # keeps such a column numeric on read instead of arriving as text and
+        # becoming indistinguishable from the text quality flag below.
         na_values=["NAN"],
         keep_default_na=True,
     )
 
-    # Set timestamp index
     if timestamp_column not in df.columns:
-        # Returning the frame with its RangeIndex looks harmless and is not: the
-        # column names come from the first surviving data row, and the caller's
-        # ``sort_index`` then dies on mixed int/Timestamp labels with a TypeError
-        # that names neither the file nor the cause. The archive really does hold
-        # one such table (a headerless CSV whose TOA5 metadata line is missing),
-        # which the manifest path stages and repairs; every other reader has to
-        # be told which file it is.
+        # Raised rather than returned with a RangeIndex: the column names would
+        # come from the first surviving data row, and the caller's ``sort_index``
+        # then dies on mixed int/Timestamp labels with a TypeError naming neither
+        # the file nor the cause. The archive holds one such table (a headerless
+        # CSV whose TOA5 metadata line is missing), which the manifest path
+        # stages and repairs.
         raise ValueError(
             f"{path.name}: no {timestamp_column!r} column after skiprows={skip_rows}. "
             "A non-TOA5 table needs staging before it can be read (see sensors.archive)."
@@ -96,28 +92,25 @@ def read_campbell_dat(
     df.index = pd.to_datetime(df[timestamp_column], format="ISO8601")
     df.index.name = None
     df = df.drop(columns=[timestamp_column])
-    # Drop duplicated timestamps keeping the first occurrence
     df = df.loc[~df.index.duplicated(keep="first")]
 
-    # Drop requested columns (only those that actually exist)
     if drop_columns:
         existing = [c for c in drop_columns if c in df.columns]
         if existing:
             df = df.drop(columns=existing)
 
-    # Coerce the remaining text columns to numeric -- a belt-and-braces pass for
-    # tokens ``na_values`` above does not cover. Both dtype names are needed:
-    # pandas 3 reads text as ``str`` dtype, and ``include=["object"]`` matches it
-    # only through a shim that is scheduled for removal.
+    # Catches tokens ``na_values`` above does not cover. Both dtype names are
+    # needed: pandas 3 reads text as ``str`` dtype, and ``include=["object"]``
+    # matches it only through a shim scheduled for removal.
     preserved = [c for c in (text_columns or ()) if c in df.columns]
-    obj_cols = [
+    text_to_coerce = [
         c for c in df.select_dtypes(include=["object", "str"]).columns if c not in preserved
     ]
-    if obj_cols:
-        df[obj_cols] = df[obj_cols].apply(pd.to_numeric, errors="coerce")
+    if text_to_coerce:
+        df[text_to_coerce] = df[text_to_coerce].apply(pd.to_numeric, errors="coerce")
 
-    # Sentinel value -> NaN. Restricted to the numeric columns so a preserved
-    # text flag is not compared against a float (which raises in pandas 3).
+    # Restricted to the numeric columns so a preserved text flag is not compared
+    # against a float, which raises in pandas 3.
     if sentinel_value is not None:
         numeric = df.select_dtypes(include="number").columns
         df[numeric] = df[numeric].mask(df[numeric] <= sentinel_value)
@@ -207,11 +200,11 @@ def values_outside_declared_limits(df: pd.DataFrame, limits: list[dict]) -> dict
 
     The gates run on the RAW signal, before the instrument factors, so a value
     at the boundary crosses it once calibrated: ``CM3Up_Wm2_Avg`` capped at
-    exactly 1500 W/m2 by its gate reached the published artifact at 1508.65,
-    which is 1500 x its post-2019 factor. Re-checking after calibration is what
-    makes "the published column obeys its declared range" a property that can be
-    verified instead of assumed — the gate itself stays where it is, because the
-    thresholds are written in the logger's units and several name millivolts.
+    exactly 1500 W/m2 by its gate reaches the published artifact at 1508.65,
+    which is 1500 x its post-2019 factor. Re-checking after calibration makes
+    "the published column obeys its declared range" verifiable instead of
+    assumed. The gate itself stays where it is: its thresholds are written in
+    the logger's units and several name millivolts.
     """
     outside: dict[str, int] = {}
     for lim in limits:

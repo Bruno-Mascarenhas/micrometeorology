@@ -1,6 +1,6 @@
 """Physics tests for the derived surface radiation budget.
 
-Three independent kinds of evidence that the published numbers are right:
+Four independent kinds of evidence that the published numbers are right:
 
 1. **Closed form** — analytic limits and hand-computed values, so the formulas
    are pinned against arithmetic rather than against themselves.
@@ -332,8 +332,7 @@ def test_upwelling_longwave_falls_in_the_published_terrestrial_band(surface_stat
     The bracket is deliberately loose — the fixture reaches 315 K skin
     temperature, and hot dry land at midday genuinely reaches 550-590 W/m2, so
     a tight ceiling would be a false constraint. What this actually guards is
-    the order of magnitude: the legacy exporter's Celsius-for-Kelvin bug landed
-    at ~1e-2 W/m2.
+    the order of magnitude: a Celsius-for-Kelvin slip lands at ~1e-2 W/m2.
     """
     lwup = compute_upwelling_longwave(
         surface_state["emiss"], surface_state["tsk"], surface_state["glw"]
@@ -574,8 +573,7 @@ def test_derived_lwup_reproduces_wrfs_own_lwupb():
 def test_derived_lwup_beats_the_emission_only_form_on_real_data():
     """The reflected term is not decoration: it is ~an order of magnitude of error.
 
-    This is the empirical counterpart of the analytic guard above, and the
-    regression test for the legacy exporter's formula.
+    The empirical counterpart of the analytic guard above.
     """
     with netCDF4.Dataset(_LWUPB_FILE) as ds:
         step = 30
@@ -662,8 +660,8 @@ def test_published_radiation_fields_stay_in_physical_range_on_a_real_run():
         for variable, (low, high) in bounds.items():
             source = build_value_frame_source(ds, variable)
             assert source is not None, variable
-            # Step 0 carries GLW = 0: radiation has not been called yet at the
-            # first output time, so it is spin-up, not a physical state.
+            # Step 0 carries GLW = 0: radiation has not been called yet, so it
+            # is spin-up rather than a physical state.
             checked = 0
             for step in [m["index"] for m in metadata if publishes_step(variable, m)][1:]:
                 frame = source.frame_for_step(step)
@@ -1010,11 +1008,10 @@ def test_the_cold_start_step_is_not_published_at_all(tmp_path):
     Every GLW-derived field is then physically impossible there: net radiation
     reads -416 W/m2 domain-mean against a -60..+604 range for every other step,
     sky emissivity exactly 0.00 against a 0.72-0.99 legend, and upwelling
-    longwave sits ~18 W/m2 low with the reflected (1 - eps) * GLW term missing.
-    Measured on the real 2026-05-03 operational run, D02_RNET_000.json had
-    100% of its 9,801 cells below its own legend's minimum -- because the
-    colour-scale population already excluded step 0 while the publish gate did
-    not, so the two halves of the same artifact disagreed.
+    longwave sits ~18 W/m2 low with the reflected (1 - eps) * GLW term missing
+    (measured on the 2026-05-03 operational run). The publish gate and the
+    colour-scale population must exclude the same steps, or the legend and the
+    cells of one artifact disagree.
     """
     wrf = tmp_path / "wrfout_d02_cold_start.nc"
     _write_radiation_wrf_file(wrf)
@@ -1063,9 +1060,8 @@ def test_wind_components_are_rotated_onto_true_north(tmp_path):
     """``U10``/``V10`` are GRID-relative; a bearing from them is off by alpha.
 
     The operational domains are Mercator, where SINALPHA is 0 everywhere and
-    the rotation is the identity -- which is exactly why nothing catches a
-    missing rotation until a Lambert or polar domain is added and every arrow
-    is drawn confidently wrong.
+    the rotation is the identity, so a missing rotation stays invisible until a
+    Lambert or polar domain is added and every arrow is drawn wrong.
     """
     wrf = tmp_path / "wrfout_d02_rotated.nc"
     _write_radiation_wrf_file(wrf)

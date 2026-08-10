@@ -1,8 +1,8 @@
 """Temporal aggregation of high-frequency sensor data.
 
-Replaces the manual ``while`` loop + ``timedelta(hours=1)`` pattern used
-in controle_old.py, graficos1_UFBA_v5.py, and graficos3_UFBA_v1.py with
-a clean ``pandas.resample()``-based approach.
+Each column is reduced by the rule its quantity demands: mean for state
+variables, sum for accumulations such as precipitation, and a vector mean for
+wind direction (which has no scalar average across the 0/360 wrap).
 """
 
 import logging
@@ -57,7 +57,6 @@ def aggregate_to_hourly(
     dir_cols = set(wind_dir_columns or [])
     speed_column_map = wind_speed_column_map or {}
 
-    # Identify standard-mean columns (everything not in sum or wind_dir).
     # Non-numeric columns are excluded rather than attempted: the datalogger's
     # per-row quality flag is text ("OK" / "Unknown Fault"), and pandas 3 raises
     # on a mean over a string dtype instead of quietly producing NaN. Convert
@@ -74,7 +73,6 @@ def aggregate_to_hourly(
 
     resampler = df.resample(freq)
 
-    # Mean columns — use vectorized .count() instead of apply(lambda)
     for col in sorted(mean_columns):
         if col not in df.columns:
             continue
@@ -84,7 +82,6 @@ def aggregate_to_hourly(
         means[counts < min_samples] = np.nan
         results[col] = means
 
-    # Sum columns (precipitation)
     for col in sorted(sum_cols):
         if col not in df.columns:
             continue
@@ -94,7 +91,9 @@ def aggregate_to_hourly(
         sums[counts < min_samples] = np.nan
         results[col] = sums
 
-    # Wind direction columns (vector mean) — vectorized resample on u/v
+    # Direction is averaged through its U/V components: the arithmetic mean of
+    # bearings straddling north lands due south. Weighting by speed makes it the
+    # true vector mean; unit speed gives the unweighted directional mean.
     for dir_col in sorted(dir_cols):
         if dir_col not in df.columns:
             continue
@@ -102,7 +101,6 @@ def aggregate_to_hourly(
         if speed_col and speed_col in df.columns:
             u, v = wind_components(df[speed_col].to_numpy(), df[dir_col].to_numpy())
         else:
-            # Use unit speed if no speed column available
             u, v = wind_components(np.ones(len(df)), df[dir_col].to_numpy())
 
         df_uv = pd.DataFrame({"u": u, "v": v}, index=df.index)
@@ -110,7 +108,6 @@ def aggregate_to_hourly(
         uv_counts = uv_resampled["u"].count()
         uv_means = uv_resampled.mean()
 
-        # Vectorized direction from mean components
         dirs = wind_direction_from_components(uv_means["u"].to_numpy(), uv_means["v"].to_numpy())
         dir_series = pd.Series(dirs, index=uv_means.index)
         dir_series[uv_counts < min_samples] = np.nan

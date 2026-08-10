@@ -34,18 +34,16 @@ def load_calibrations(config_path: str | Path) -> list[dict[str, Any]]:
 def _resolve_inclusive_end(value: Any, fallback: pd.Timestamp) -> pd.Timestamp:
     """Resolve an ``end_date`` config value to an *inclusive* upper bound.
 
-    A **date-only** boundary such as ``"2018-12-31"`` parses to midnight
-    (``2018-12-31 00:00:00``). Compared with ``df.index <= end`` that would
-    exclude every sample of the boundary day after ``00:00`` — the whole day
-    is silently dropped from the calibration (and, for ``factor: null``
-    records, left un-NaN'd). Because ``end_date`` is documented as the *last
-    day* the record applies (inclusive), a midnight-resolution timestamp is
-    extended to the final nanosecond of that day (``+ 1 day - 1 ns``) so the
-    entire day is covered.
+    A **date-only** boundary such as ``"2018-12-31"`` parses to midnight, and
+    ``df.index <= end`` would then drop every sample of the boundary day after
+    ``00:00`` (leaving ``factor: null`` records un-NaN'd there). ``end_date`` is
+    documented as the *last day* the record applies, so a midnight-resolution
+    timestamp is extended to the final nanosecond of that day
+    (``+ 1 day - 1 ns``).
 
-    A value that carries an explicit non-midnight time keeps exact
-    ``<= end`` semantics. A falsy value (``None``/empty) returns ``fallback``
-    unchanged (meaning "until the end of the dataset").
+    A value carrying an explicit non-midnight time keeps exact ``<= end``
+    semantics. A falsy value (``None``/empty) returns ``fallback`` unchanged
+    ("until the end of the dataset").
     """
     if not value:
         return fallback
@@ -106,12 +104,10 @@ def _find_overlapping_pair(
     A range whose resolved start falls after its resolved end is EMPTY and is
     dropped first. That is not a malformed record: an open-ended one inherits the
     dataset's own first timestamp, so a record that closes before the data begins
-    resolves to ``[dataset-start, its own end]`` with the two inverted, and it
-    simply does not apply to this dataset. Counting it as an interval made every
-    later record "overlap" it and aborted the run — which is why
-    ``labmim-sensor-process`` could not read a file whose period starts after any
-    calibration's ``end_date``, the ordinary case for a recent logger table. The
-    application path already treats it correctly: its mask is empty.
+    resolves to ``[dataset-start, its own end]`` with the two inverted and simply
+    does not apply to this dataset — which is the ordinary case for a recent
+    logger table. Counting it as an interval would make every later record
+    "overlap" it. The application path already agrees: its mask is empty.
     """
     ordered = sorted((item for item in ranges if item[1] <= item[2]), key=lambda item: item[1])
     for earlier, later in itertools.pairwise(ordered):
@@ -172,53 +168,59 @@ def apply_calibrations(
         The same DataFrame with corrections applied.
     """
     ranges_by_column: dict[str, list[_ResolvedRange]] = {}
-    for cal in calibrations:
-        column = cal["column"]
+    for record in calibrations:
+        column = record["column"]
         if column not in df.columns:
             continue
-        start, end = _resolve_record_range(cal, df)
-        ranges_by_column.setdefault(column, []).append((_describe_record(cal), start, end))
+        start, end = _resolve_record_range(record, df)
+        ranges_by_column.setdefault(column, []).append((_describe_record(record), start, end))
     for column, ranges in ranges_by_column.items():
         overlap = _find_overlapping_pair(ranges)
         if overlap is not None:
             raise _overlap_error("calibrations", column, *overlap)
 
-    for cal in calibrations:
-        col = cal["column"]
-        if col not in df.columns:
-            logger.debug("Skipping calibration for missing column: %s", col)
+    for record in calibrations:
+        column = record["column"]
+        if column not in df.columns:
+            logger.debug("Skipping calibration for missing column: %s", column)
             continue
 
-        start = pd.Timestamp(cal["start_date"]) if cal.get("start_date") else df.index.min()
-        end = _resolve_inclusive_end(cal.get("end_date"), df.index.max())
-        factor = cal.get("factor")
-        desc = cal.get("description", "")
+        start = pd.Timestamp(record["start_date"]) if record.get("start_date") else df.index.min()
+        end = _resolve_inclusive_end(record.get("end_date"), df.index.max())
+        factor = record.get("factor")
+        description = record.get("description", "")
 
         mask = (df.index >= start) & (df.index <= end)
 
-        # "Declared" and "applied" have to be distinguishable. A record whose
-        # window selects no populated row corrects nothing, and until this
-        # warning existed that was indistinguishable from a record that worked:
-        # the Eppley PSP's post-2019 sensitivity correction sat in the config for
-        # seven years naming only the pre-rename column spelling, so the live
-        # diffuse sensor published ~8.5% low and no output said a word.
-        if not bool((mask & df[col].notna()).any()):
+        # "Declared" and "applied" have to be distinguishable: a record whose
+        # window selects no populated row corrects nothing and looks exactly
+        # like one that worked. Known live case — the Eppley PSP's post-2019
+        # sensitivity correction named only the pre-rename column spelling, so
+        # the diffuse sensor published ~8.5% low under an applied-looking record.
+        if not bool((mask & df[column].notna()).any()):
             logger.warning(
                 "calibration for %r [%s -> %s] matched no populated sample (%s)",
-                col,
+                column,
                 start.date(),
                 end.date(),
-                desc,
+                description,
             )
 
         if factor is None:
-            # Null factor means the data is invalid for this period
-            df.loc[mask, col] = np.nan
-            logger.info("  %s [%s -> %s]: set to NaN (%s)", col, start.date(), end.date(), desc)
-        else:
-            df.loc[mask, col] *= factor
+            # A null factor declares the data invalid over this period.
+            df.loc[mask, column] = np.nan
             logger.info(
-                "  %s [%s -> %s]: x %.10f (%s)", col, start.date(), end.date(), factor, desc
+                "  %s [%s -> %s]: set to NaN (%s)", column, start.date(), end.date(), description
+            )
+        else:
+            df.loc[mask, column] *= factor
+            logger.info(
+                "  %s [%s -> %s]: x %.10f (%s)",
+                column,
+                start.date(),
+                end.date(),
+                factor,
+                description,
             )
 
     return df
@@ -277,13 +279,12 @@ def uncalibrated_mapping_windows(
 ) -> list[tuple[str, str, pd.Timestamp, pd.Timestamp]]:
     """Windows where a column feeds a unified series with no calibration covering it.
 
-    "Declared" and "applied" are not the same thing, and until this was reported
-    the difference was invisible in every artifact. Two live faults had exactly
-    this shape:
+    "Declared" and "applied" are not the same thing. Two live faults have this
+    shape:
 
     - The Eppley PSP's post-2019 sensitivity correction named only the pre-v11
-      column spelling, so the live diffuse sensor published ~8.5% low for seven
-      years while the record sat in the config looking applied.
+      column spelling, so the diffuse sensor published ~8.5% low while the
+      record sat in the config looking applied.
     - No ``PSP1_Wm2_Avg`` record covers 2016-09-29..2017-12-31, so the published
       global shortwave takes a 6.2% step at 2018-01-01 — a discontinuity on a
       date where nothing physical happened, only a file handover.
@@ -368,9 +369,9 @@ def unify_sensor_columns(
         series_parts: list[pd.Series] = []
 
         for mapping in switch["mappings"]:
-            col = mapping["column"]
-            if col not in df.columns:
-                logger.warning("Column %s not found for unified variable %s", col, unified_name)
+            column = mapping["column"]
+            if column not in df.columns:
+                logger.warning("Column %s not found for unified variable %s", column, unified_name)
                 continue
 
             start = (
@@ -379,7 +380,7 @@ def unify_sensor_columns(
             end = _resolve_inclusive_end(mapping.get("end_date"), df.index.max())
 
             mask = (df.index >= start) & (df.index <= end)
-            part = df.loc[mask, col].rename(unified_name)
+            part = df.loc[mask, column].rename(unified_name)
             series_parts.append(part)
 
         if series_parts:

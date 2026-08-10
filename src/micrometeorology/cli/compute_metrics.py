@@ -84,8 +84,7 @@ def run(
     col_list = parse_csv(columns)
     if columns is not None and not col_list:
         # Naming no column at all must not quietly widen to "every common
-        # column": -c " " used to fail the run, and silently comparing
-        # everything instead would be reported as a success.
+        # column": comparing everything would then be reported as a success.
         raise typer.BadParameter(f"--columns names no column (got {columns!r})")
     if col_list:
         cols = [c for c in col_list if c in df_a.columns and c in df_b.columns]
@@ -101,7 +100,6 @@ def run(
 
     typer.echo(f"Comparing {len(cols)} columns: {cols}")
 
-    # Align datasets
     if join == JoinMethod.by_index and not (
         isinstance(df_a.index, pd.DatetimeIndex) and isinstance(df_b.index, pd.DatetimeIndex)
     ):

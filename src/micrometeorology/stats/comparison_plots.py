@@ -21,8 +21,8 @@ def plot_comparison(
 ) -> Figure:
     """Create a comparison plot (time series + scatter) for a variable.
 
-    The figure is built off the pyplot state machine, so it is never registered
-    with the global figure manager and the caller owns its lifetime.
+    The figure is built without the pyplot state machine, so it is never
+    registered with the global figure manager and the caller owns its lifetime.
     """
     obs_col = f"{variable}_obs"
     model_col = f"{variable}_model"
@@ -30,30 +30,28 @@ def plot_comparison(
     fig = Figure(figsize=(14, 5))
     axes = fig.subplots(1, 2)
 
-    # Time series
-    ax1 = axes[0]
-    ax1.plot(paired_df.index, paired_df[obs_col], "b-", label="Observed", alpha=0.7)
-    ax1.plot(paired_df.index, paired_df[model_col], "r--", label="Model", alpha=0.7)
-    ax1.set_ylabel(variable)
-    ax1.legend()
-    ax1.set_title(f"{variable} — Time Series")
-    ax1.tick_params(axis="x", rotation=45)
+    series_ax = axes[0]
+    series_ax.plot(paired_df.index, paired_df[obs_col], "b-", label="Observed", alpha=0.7)
+    series_ax.plot(paired_df.index, paired_df[model_col], "r--", label="Model", alpha=0.7)
+    series_ax.set_ylabel(variable)
+    series_ax.legend()
+    series_ax.set_title(f"{variable} — Time Series")
+    series_ax.tick_params(axis="x", rotation=45)
 
-    # Scatter
-    ax2 = axes[1]
+    scatter_ax = axes[1]
     obs_vals = paired_df[obs_col].dropna()
     mod_vals = paired_df[model_col].reindex(obs_vals.index).dropna()
     common = obs_vals.index.intersection(mod_vals.index)
-    ax2.scatter(obs_vals[common], mod_vals[common], alpha=0.5, s=10)
+    scatter_ax.scatter(obs_vals[common], mod_vals[common], alpha=0.5, s=10)
     lims = [
         min(obs_vals[common].min(), mod_vals[common].min()),
         max(obs_vals[common].max(), mod_vals[common].max()),
     ]
-    ax2.plot(lims, lims, "k--", alpha=0.5)
-    ax2.set_xlabel("Observed")
-    ax2.set_ylabel("Model")
-    ax2.set_title(f"{variable} — Scatter")
-    ax2.set_aspect("equal", adjustable="box")
+    scatter_ax.plot(lims, lims, "k--", alpha=0.5)
+    scatter_ax.set_xlabel("Observed")
+    scatter_ax.set_ylabel("Model")
+    scatter_ax.set_title(f"{variable} — Scatter")
+    scatter_ax.set_aspect("equal", adjustable="box")
 
     fig.tight_layout()
 

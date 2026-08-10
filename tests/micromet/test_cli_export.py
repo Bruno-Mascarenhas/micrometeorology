@@ -158,8 +158,8 @@ def _invoke(tmp_path, *extra):
 
 
 def test_cli_batch_mode_restricts_to_requested_domains(tmp_path):
-    """`--wrf-dir` without `--date` used to ignore `--domains` and process the
-    whole directory, publishing domains nobody asked for."""
+    """`--wrf-dir` without `--date` must still honour `--domains`; scanning the
+    whole directory would publish domains nobody asked for."""
     wrf_dir = tmp_path / "wrf"
     wrf_dir.mkdir()
     for name in ("wrfout_d01_a", "wrfout_d02_b", "wrfout_d04_c"):
@@ -175,8 +175,8 @@ def test_cli_batch_mode_restricts_to_requested_domains(tmp_path):
 
 
 def test_cli_batch_mode_ignores_a_wrfout_subdirectory(tmp_path):
-    """A `wrfout*` directory used to be globbed as a file, failing its units
-    with a NetCDF open error and taking the whole run to exit 1."""
+    """A `wrfout*` directory must not be globbed as a file: opening it as NetCDF
+    fails its work units and takes the whole run to exit 1."""
     wrf_dir = tmp_path / "wrf"
     wrf_dir.mkdir()
     _write_full_wrf_file(wrf_dir / "wrfout_d02_ok", seed=42)
@@ -204,8 +204,8 @@ def test_cli_domain_filter_excludes_a_file_that_would_collide_on_d01(tmp_path):
 
 
 def test_cli_rejects_an_output_file_id_as_a_variable(tmp_path):
-    """`-v TSK` reached the raw passthrough and published Kelvin into the
-    files `skin_temperature` publishes in °C."""
+    """`-v TSK` must be refused: the raw passthrough would publish Kelvin into
+    the files `skin_temperature` publishes in °C."""
     wrf = tmp_path / "wrfout_d02_cli_tsk.nc"
     _write_full_wrf_file(wrf, seed=47)
 
@@ -233,7 +233,8 @@ def test_cli_rejects_an_output_file_id_as_a_variable(tmp_path):
 
 
 def test_cli_canonicalizes_variable_case(tmp_path):
-    """`-v TEMPERATURE` used to write nothing while the run reported success."""
+    """`-v TEMPERATURE` must write the same files as `-v temperature`, not
+    nothing alongside a success exit."""
     wrf = tmp_path / "wrfout_d02_cli_case.nc"
     _write_full_wrf_file(wrf, seed=48)
 
@@ -260,8 +261,8 @@ def test_cli_canonicalizes_variable_case(tmp_path):
 
 
 def test_cli_mis_cased_swdown_still_honours_the_daylight_gate(tmp_path):
-    """`-v swdown` used to miss the exact-match daylight gate and publish night
-    frames the site's availability metadata does not expect."""
+    """`-v swdown` must hit the exact-match daylight gate; night frames are not
+    in the site's availability metadata."""
     wrf = tmp_path / "wrfout_d02_cli_swdown.nc"
     _write_full_wrf_file(wrf, seed=51, nt=3, start_hour_utc=21)  # local 18, 19, 20 h
 

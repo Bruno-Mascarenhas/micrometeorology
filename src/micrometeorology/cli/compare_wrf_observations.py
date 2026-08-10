@@ -52,9 +52,8 @@ def run(
     df_model = read_dataset(str(model), separator=separator)
 
     # This command pairs by TIME (unlike labmim-metrics, which falls back to row
-    # order), so a file whose timestamps could not be read has to say which file
-    # and what shape was expected. Left to `pair_dataframes` it surfaced as a
-    # TypeError naming only the index types — no path, no remedy.
+    # order), so a file whose timestamps could not be read is unusable here and
+    # the error has to name the file and the accepted shapes.
     for label, path, frame in (("--obs", obs, df_obs), ("--model", model, df_model)):
         if not isinstance(frame.index, pd.DatetimeIndex):
             raise typer.BadParameter(
@@ -64,10 +63,10 @@ def run(
                 param_hint=label,
             )
 
-    # Naming the two column sets, and exiting non-zero. The two real operational
-    # products share no column names at all, so the ordinary way to meet this is
-    # a rename — and a silent success with no artifact written reads, in a cron
-    # log, exactly like a comparison that ran.
+    # The two real operational products share no column names at all, so the
+    # ordinary way to meet this is a rename: both column sets are named. Exiting
+    # non-zero matters because a silent success with no artifact written reads,
+    # in a cron log, exactly like a comparison that ran.
     shared = sorted(set(df_obs.columns) & set(df_model.columns))
     if not shared:
         raise typer.BadParameter(
@@ -88,13 +87,12 @@ def run(
         )
 
     # ``pair_dataframes`` merges LEFT, so the frame keeps one row per observation
-    # whether or not a model row fell inside --tolerance. Printing only its length
-    # beside the metric table invited the reader to use it as the sample size,
-    # which it is not: each variable's own denominator is the ``n`` row below.
+    # whether or not a model row fell inside --tolerance. ``len(paired)`` is
+    # therefore not the sample size: each variable's denominator is the ``n`` row.
     model_cols = [c for c in paired.columns if c.endswith("_model")]
-    matched = int(paired[model_cols].notna().any(axis=1).sum()) if model_cols else 0
+    steps_with_model = int(paired[model_cols].notna().any(axis=1).sum()) if model_cols else 0
     typer.echo(
-        f"Paired {len(paired)} time steps, {matched} with a model value within {tolerance} "
+        f"Paired {len(paired)} time steps, {steps_with_model} with a model value within {tolerance} "
         "(per-variable sample sizes are the 'n' row of the table)"
     )
 

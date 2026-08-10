@@ -217,12 +217,11 @@ class TestWriteJson:
 class TestReferenceLinks:
     """Every published citation has to LAND on the work it names.
 
-    The links are what turn a bracketed marker on the page into a source the
-    reader can check, so a dead one silently costs the page its provenance. Ten
-    of the sixteen used to carry a Crossref title search on a route that had
-    stopped searching: it answered 200, served the real page, and the interface
-    ignored the query. Status-only checkers cannot see that; a resolver link
-    cannot fail that way.
+    The links turn a bracketed marker on the page into a source the reader can
+    check, so a dead one costs the page its provenance with no visible symptom.
+    A Crossref title-search route can answer 200, serve a real page and ignore
+    the query entirely — status-only checking cannot see that, and a DOI
+    resolver link cannot fail that way.
     """
 
     def test_every_reference_resolves_through_doi_org(self) -> None:
@@ -255,15 +254,15 @@ class TestReferenceLinks:
 
 
 class TestSubsetTotalsAgree:
-    """One recorte, one total. The panel prints several numbers about the same
+    """One subset, one total. The panel prints several numbers about the same
     subset, and a reader who adds them up has to arrive where the page says."""
 
     def test_n_decomposes_into_the_bars_plus_what_fell_outside(self, wind_spec) -> None:
         """`n == sum(counts) + below + above`, checkable on screen.
 
-        It used to be the binned count alone while the statistics described the
-        whole sample, so the clearness index printed "34,934 observações" next to
-        a maximum of 1.7382 that belongs to no bar.
+        `n` is the whole sample, never the binned count alone: the statistics
+        printed beside the bars describe that same `n`, so a value outside every
+        bar has to be accounted for by `below`/`above` rather than dropped.
         """
         samples = {"observed_all": np.array([-3.0, 0.5, 1.0, 2.0, 3.0, 999.0])}
         payload = build_variable_payload(wind_spec, samples, version="v1")
@@ -323,12 +322,10 @@ class TestSubsetTotalsAgree:
 class TestCaveatsCarryThePublishedNumbers:
     """A number in prose is a copy, and a copy stops being true.
 
-    Three shipped wrong at once: the PAR caveats asserted 552, 24 and 18
-    point-mass hours beside published atoms of 538, 13 and 17, and the net
-    radiation caveat quoted a = 0,775 / b = -24,4 / 36,2 W/m2 while the fit
-    panel on the same screen printed 0,7730 / -23,59 / 35,61. Nothing was wrong
-    with the numbers -- masking 52 clock-corrupted days moved them and only the
-    sentences stayed behind.
+    Every count, share and fitted parameter a caveat quotes is interpolated from
+    the value the same payload publishes, so reprocessing that moves the numbers
+    moves the sentences with them and a caveat can never contradict the panel
+    printed beside it.
     """
 
     @staticmethod
@@ -387,8 +384,8 @@ class TestCaveatsCarryThePublishedNumbers:
 class TestTheShippedCaveatsQuoteNoLooseCount:
     """No caveat in the catalogue may hard-code a count the export computes.
 
-    The check is on the CATALOGUE, not on one export: a literal reintroduced by
-    a future edit is exactly how the three above got there.
+    The check is on the CATALOGUE, not on one export, so a literal reintroduced
+    by a future edit is caught before it can ship.
     """
 
     def test_no_shipped_caveat_states_a_bare_hour_count(self):

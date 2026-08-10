@@ -1,17 +1,15 @@
-"""Torch-gated regression tests for the allsky-training science findings.
-
-Each test fails against the pre-fix behaviour and pins the corrected semantics:
+"""Torch-gated regression tests pinning three allsky-training semantics:
 
 #. :class:`~allsky.modeling.visual_encoder.ImageEncoder` honours
    ``unfreeze_last_n`` regardless of ``backbone_frozen``, so the shipped V6
-   config finetunes the last 2 ViT blocks instead of the whole DINOv2; the
-   combinations that cannot be honoured now say so in the log.
+   config finetunes the last 2 ViT blocks of the DINOv2; combinations that
+   cannot be honoured say so in the log.
 #. The epoch loss metrics weight every loss component by its own valid-row count,
-   so the reported ``loss`` / ``loss_<head>`` no longer depend on
+   so the reported ``loss`` / ``loss_<head>`` do not depend on
    ``train.batch_size`` when targets are missing.
 #. :class:`~allsky.modeling.baselines.ImageOnlyModel` exposes ``param_groups``,
-   so ``train.backbone_lr`` reaches the image backbone instead of being silently
-   ignored, and a ``backbone_lr`` that reaches nothing is logged.
+   so ``train.backbone_lr`` reaches the image backbone, and a ``backbone_lr``
+   that reaches nothing is logged.
 
 All offline and CPU-only: tiny stub backbones, synthetic tensors, no downloads.
 """
@@ -71,14 +69,13 @@ def _param_ids(params: Any) -> set[int]:
 
 
 # --------------------------------------------------------------------------- #
-# Finding 1 — unfreeze_last_n is honoured independently of `frozen`.
+# 1 — unfreeze_last_n is honoured independently of `frozen`.
 # --------------------------------------------------------------------------- #
 
 
 def test_unfreeze_last_n_applies_without_backbone_frozen():
-    # Pre-fix: the unfreeze branch was nested inside `if frozen:`, so this
-    # combination (exactly what v6_film_finetune.yaml asks for) left the WHOLE
-    # backbone trainable.
+    # The combination v6_film_finetune.yaml asks for: not frozen, yet only the
+    # last blocks trainable.
     backbone = TinyViTBackbone(dim=16, n_blocks=12)
     encoder = ImageEncoder(backbone, frozen=False, unfreeze_last_n=2)
 
@@ -90,15 +87,13 @@ def test_unfreeze_last_n_applies_without_backbone_frozen():
 
 
 def test_frozen_backbone_still_unfreezes_last_blocks():
-    # The pre-existing (and only tested) combination keeps working unchanged.
     backbone = TinyViTBackbone(dim=16, n_blocks=12)
     ImageEncoder(backbone, frozen=True, unfreeze_last_n=2)
     assert _trainable_block_indices(backbone) == [10, 11]
 
 
 def test_v6_config_finetunes_only_the_last_two_vit_blocks():
-    # Pins the shipped config's intent, not just the encoder API: V6 is published
-    # as "FiLM + last-2-block finetune" and must build exactly that.
+    # V6 is published as "FiLM + last-2-block finetune" and must build that.
     cfg = load_experiment_config(_V6_CONFIG)
     backbone = TinyViTBackbone(dim=16, n_blocks=12)
     model = build_model(cfg, _N_FEATURES, image_backbone=backbone)
@@ -116,8 +111,8 @@ def test_v6_config_finetunes_only_the_last_two_vit_blocks():
 
 
 def test_unfreeze_last_n_on_a_block_less_backbone_warns_and_keeps_it_trainable(caplog):
-    # A backbone with no `blocks` cannot be partially finetuned; that stays a
-    # no-op (documented behaviour) but is no longer silent.
+    # A backbone with no `blocks` cannot be partially finetuned: a no-op, but a
+    # logged one.
     backbone = TinyConvBackbone(dim=12)
     with caplog.at_level(logging.WARNING, logger=_ENCODER_LOGGER):
         ImageEncoder(backbone, frozen=False, unfreeze_last_n=2)
@@ -157,7 +152,7 @@ def test_chunked_backbone_blocks_are_reported(caplog):
 
 
 # --------------------------------------------------------------------------- #
-# Finding 2 — epoch loss metrics are masked-count weighted, not batch weighted.
+# 2 — epoch loss metrics are masked-count weighted, not batch weighted.
 # --------------------------------------------------------------------------- #
 
 _IDENTITY_STATS = (0.0, 1.0, 0.0, 1.0)
@@ -208,10 +203,8 @@ def _half_missing_batch() -> tuple[dict[str, Tensor], dict[str, Tensor]]:
 
 @pytest.mark.parametrize("batch_size", [8, 4, 2, 1])
 def test_epoch_loss_is_batch_size_invariant_with_missing_targets(batch_size: int):
-    # Pre-fix each component was weighted by the full batch row count while the
-    # component itself averages only the non-missing rows, so the reported loss
-    # was the masked MSE times the valid fraction — 4.0 at batch_size 8 but 2.0
-    # at 4, 2 and 1.
+    # Each component averages only its non-missing rows, so the epoch weight has
+    # to be that same masked count and not the full batch row count.
     batch, outputs = _half_missing_batch()
     metrics = _epoch_metrics(_dhi_targets(), batch, outputs, batch_size=batch_size)
 
@@ -254,7 +247,7 @@ def test_head_without_a_single_label_reports_zero_and_warns(caplog):
     assert any("no valid target row" in record.getMessage() for record in caplog.records)
 
 
-def test_reported_val_loss_no_longer_depends_on_batch_size(tmp_path: Path):
+def test_reported_val_loss_does_not_depend_on_batch_size(tmp_path: Path):
     # End-to-end through run_experiment: the same climatology model (constant
     # predictions, no optimizer step) on the same val split must report one
     # val_loss, whatever `--batch-size` the cron passes.
@@ -291,7 +284,7 @@ def test_reported_val_loss_no_longer_depends_on_batch_size(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
-# Finding 3 — image_only honours train.backbone_lr.
+# 3 — image_only honours train.backbone_lr.
 # --------------------------------------------------------------------------- #
 
 
@@ -312,8 +305,8 @@ def _image_only_cfg(*, backbone_frozen: bool, unfreeze_last_n: int) -> Experimen
 
 
 def test_image_only_puts_the_unfrozen_blocks_on_the_backbone_lr():
-    # Pre-fix ImageOnlyModel had no param_groups, so _build_optimizer fell back to
-    # one group and the unfrozen ViT blocks trained at train.lr (30x too large).
+    # Without param_groups on the model, _build_optimizer falls back to a single
+    # group and the unfrozen ViT blocks train at train.lr — here 30x too large.
     cfg = _image_only_cfg(backbone_frozen=True, unfreeze_last_n=2)
     backbone = TinyViTBackbone(dim=16, n_blocks=12)
     model = build_model(cfg, _N_FEATURES, image_backbone=backbone)
@@ -327,8 +320,8 @@ def test_image_only_puts_the_unfrozen_blocks_on_the_backbone_lr():
 
 
 def test_fully_frozen_backbone_keeps_a_single_group_and_warns(caplog):
-    # A wholly frozen backbone has no trainable parameter to put on backbone_lr;
-    # the run must say so instead of silently training it at train.lr.
+    # No trainable parameter to put on backbone_lr, so the run must say so
+    # instead of silently applying train.lr.
     cfg = _image_only_cfg(backbone_frozen=True, unfreeze_last_n=0)
     model = build_model(cfg, _N_FEATURES, image_backbone=TinyConvBackbone(dim=12))
 

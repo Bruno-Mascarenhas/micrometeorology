@@ -1,10 +1,10 @@
 """Evaluation CLI: the ``allsky evaluate`` command.
 
-``evaluate`` runs a trained checkpoint over a split and writes a report
-directory (``metrics.json`` / ``stratified.csv`` / ``report.md`` and, unless
-``--no-predictions``, ``predictions.parquet``).  Heavy imports
-(:mod:`allsky.evaluation`, which pulls torch at call time) stay inside the
-command body so importing :mod:`allsky.cli` remains torch-free.
+Runs a trained checkpoint over a split and writes a report directory
+(``metrics.json`` / ``stratified.csv`` / ``report.md`` and, unless
+``--no-predictions``, ``predictions.parquet``).  :mod:`allsky.evaluation` pulls
+torch, so it is imported inside the command body to keep importing
+:mod:`allsky.cli` torch-free.
 """
 
 import logging
@@ -84,7 +84,6 @@ def evaluate_cmd(
     resolved_root = _resolve_data_root(data_root, config)
     out_dir = report_dir if report_dir is not None else checkpoint.parent / f"eval-{split}"
 
-    # Lazy: allsky.evaluation pulls torch at call time.
     from allsky.evaluation import evaluate_checkpoint, write_evaluation_report
 
     try:

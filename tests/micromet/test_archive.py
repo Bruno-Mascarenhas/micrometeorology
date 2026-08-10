@@ -280,10 +280,10 @@ class TestMaskSentinels:
 class TestNightCorruptedDays:
     """Timestamp-shifted days, found by irradiance recorded in deep night.
 
-    42 such days are measured in docs/arqueologia/qc/med-fault-detection.md, and
-    their consequence was published: the nighttime net-radiation climatology
-    carried values up to 1313 W/m2 with the sun 20 deg below the horizon, which
-    more than doubled the summer standard deviation the page prints.
+    42 such days are measured in docs/arqueologia/qc/med-fault-detection.md.
+    Unmasked they reach the nighttime net-radiation climatology as values up to
+    1313 W/m2 with the sun 20 deg below the horizon, more than doubling the
+    summer standard deviation the page prints.
     """
 
     @staticmethod
@@ -314,11 +314,12 @@ class TestNightCorruptedDays:
         assert archive.night_corrupted_days(frame) == []
 
     def test_a_day_only_the_par_sensor_witnesses_is_still_found(self) -> None:
-        """Keying the detector on Sw_dw alone missed ten real days.
+        """Every shortwave channel is a witness, not just Sw_dw.
 
         The shortwave channels do not share an outage, so any one of them can be
         the only surviving witness of a shifted day — 2018-10-22 carries 118
-        deep-night PAR samples and no global ones at all.
+        deep-night PAR samples and no global ones at all. Keying the detector on
+        Sw_dw alone misses ten such days.
         """
         stamps = [f"2018-10-22 02:{minute:02d}" for minute in (0, 5, 10)]
         frame = self._frame({"Sw_dw": [float("nan")] * 3, "Sw_par": [300.0, 310.0, 290.0]}, stamps)
@@ -374,12 +375,11 @@ class TestNightCorruptedDays:
 class TestTheMasksReachTheRawTwin:
     """``unify_sensor_columns`` COPIES, so masking the alias alone cleans half a frame.
 
-    Measured on a full build before this was fixed: 1,049 hourly stamps carried
-    ``Sw_dw`` NaN beside ``CM3Up_Wm2_Avg`` still holding the value that triggered
-    the mask, up to 1442.19 W/m2 of "global irradiance" at 05:00 local, plus
-    1,127 / 1,145 / 883 / 935 more for Sw_up, Sw_par, Net_CNR1 and Sw_dif. The
-    published QC artifact disagreed with itself, and the site's static graphs
-    read the raw names.
+    Measured on a full build with the alias masked alone: 1,049 hourly stamps
+    carried ``Sw_dw`` NaN beside ``CM3Up_Wm2_Avg`` still holding the value that
+    triggered the mask, up to 1442.19 W/m2 of "global irradiance" at 05:00
+    local, plus 1,127 / 1,145 / 883 / 935 more for Sw_up, Sw_par, Net_CNR1 and
+    Sw_dif. The site's static graphs read the raw names.
     """
 
     @staticmethod
@@ -426,7 +426,7 @@ class TestTheMasksReachTheRawTwin:
         assert removed == {"Sw_dw": 6, "PSP1_Wm2_Avg": 3, "CM3Up_Wm2_Avg": 3}
 
     def test_without_the_source_map_the_raw_twin_still_publishes_the_value(self) -> None:
-        """What the fix removes -- pinned so a silent regression is a failing test."""
+        """Pins what the source map buys: omit it and the raw twin survives."""
         frame = unify_sensor_columns(self._frame(), self._switches())
 
         masked, _removed = archive.mask_night_corrupted_days(
@@ -472,10 +472,10 @@ class TestTheMasksReachTheRawTwin:
 class TestNetRadiationClosesWithItsComponents:
     """The monitoring chart tells the reader to add the four bars and land on Rn.
 
-    The logger derives its net from the same four channels, so calibrating one
-    component and not the logger's precomputed sum broke the identity by
-    construction: a systematic +1,28 W/m2 residual reaching 9,28, past the
-    8,95 W/m2 ceiling the module's own comment asserts for this quantity.
+    The logger derives its net from the same four channels, so calibrating a
+    component without recomputing the logger's precomputed sum breaks the
+    identity: a systematic +1,28 W/m2 residual reaching 9,28, past the 8,95
+    W/m2 ceiling the module asserts for this quantity.
     """
 
     @staticmethod

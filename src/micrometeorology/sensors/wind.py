@@ -3,9 +3,6 @@
 Wind direction cannot be averaged arithmetically (e.g. 350° and 10° would
 give 180° instead of the correct 0°).  The correct approach is to decompose
 into U/V components, average those, then recompose.
-
-This module consolidates the logic that was duplicated in at least three
-legacy scripts (controle_old.py, graficos1_UFBA_v5.py, graficos3_UFBA_v1.py).
 """
 
 import numpy as np
@@ -46,8 +43,8 @@ def wind_direction_from_components(u: NDArray | float, v: NDArray | float) -> ND
     confident 270° (or 90°, depending on the operands' sign bits) for a calm
     window or a stalled anemometer.
     """
-    alpha = np.arctan2(v, u)
-    direction = np.fmod(3.0 * (np.pi / 2.0) - alpha, 2.0 * np.pi) * (180.0 / np.pi)
+    mathematical_angle = np.arctan2(v, u)
+    direction = np.fmod(3.0 * (np.pi / 2.0) - mathematical_angle, 2.0 * np.pi) * (180.0 / np.pi)
     resultant_magnitude = np.hypot(u, v)
     return np.where(resultant_magnitude == 0.0, np.nan, direction % 360.0)
 

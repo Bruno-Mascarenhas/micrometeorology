@@ -54,7 +54,7 @@ def load_table(
     Parameters
     ----------
     path:
-        Input table path. No paths under ``data/`` are touched by tests.
+        Input table path.
     source_format:
         ``auto``, ``csv``, or ``parquet``.
     columns:
@@ -79,15 +79,14 @@ def load_table(
     if limit_rows is not None and limit_rows <= 0:
         raise ValueError("limit_rows must be positive when set")
 
-    fmt = detect_table_format(path, source_format)
-    p = Path(path)
+    table_format = detect_table_format(path, source_format)
+    source = Path(path)
     dtype_map = dtype_map or {}
     projected = list(dict.fromkeys(columns or []))
 
-    # Try Parquet cache for CSV sources
-    if fmt == "csv" and cache_dir is not None:
-        cache_path = _resolve_cache_path(p, cache_dir)
-        if _is_cache_fresh(p, cache_path):
+    if table_format == "csv" and cache_dir is not None:
+        cache_path = _resolve_cache_path(source, cache_dir)
+        if _is_cache_fresh(source, cache_path):
             logger.info("Loading from Parquet cache: %s", cache_path)
             df = _read_parquet_table(
                 cache_path,
@@ -103,28 +102,27 @@ def load_table(
             logger.info("Loaded cached data: %d rows, %d cols", len(df), len(df.columns))
             return df
 
-    if fmt == "csv":
+    if table_format == "csv":
         df = _read_csv_table(
-            p,
+            source,
             columns=projected or None,
             datetime_column=datetime_column,
             datetime_index=datetime_index,
             dtype_map=dtype_map,
             limit_rows=limit_rows,
         )
-        # Write cache if requested (full CSV, no limit_rows / column projection)
         if cache_dir is not None and limit_rows is None and not projected:
-            cache_path = _resolve_cache_path(p, cache_dir)
+            cache_path = _resolve_cache_path(source, cache_dir)
             _write_cache(df, cache_path)
         elif cache_dir is not None:
             logger.info(
                 "No Parquet cache written for %s: the cache holds the whole table, so it is "
                 "populated only by a read with no column projection and no row limit",
-                p,
+                source,
             )
     else:
         df = _read_parquet_table(
-            p,
+            source,
             columns=projected or None,
             datetime_column=datetime_column,
             datetime_index=datetime_index,
@@ -135,7 +133,7 @@ def load_table(
             if applicable:
                 df = df.astype(applicable)
 
-    logger.info("Loaded %s data: %d rows, %d cols", fmt, len(df), len(df.columns))
+    logger.info("Loaded %s data: %d rows, %d cols", table_format, len(df), len(df.columns))
     return df
 
 
@@ -144,9 +142,8 @@ def _resolve_cache_path(source: Path, cache_dir: str | Path) -> Path:
 
     The digest of the resolved source path is part of the file name so two
     same-named sources in different directories can never share a cache entry
-    — a stem-only key silently served one archive's data for the other's.
-    Resolving first keeps every spelling (relative, symlinked) of one file on a
-    single entry.
+    and serve one archive's data for the other's.  Resolving first keeps every
+    spelling (relative, symlinked) of one file on a single entry.
     """
     digest = hashlib.sha256(str(source.resolve()).encode("utf-8")).hexdigest()[:16]
     return Path(cache_dir) / f"{source.stem}-{digest}.parquet"

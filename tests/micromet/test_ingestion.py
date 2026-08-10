@@ -92,11 +92,8 @@ class TestMergeDatFiles:
         assert merged.index.is_monotonic_increasing
         assert len(merged) == 3  # 12:00, 12:05, 12:10 (12:00 collapsed)
         overlap = merged.loc["2025-06-25 12:00:00"]
-        # The later file's exclusive column is preserved, not NaN'd out.
         assert overlap["only_late"] == pytest.approx(77.0)
         assert overlap["only_early"] == pytest.approx(11.0)
-        # A row unique to the later file keeps its columns; the other file's
-        # exclusive column is simply missing there.
         assert merged.loc["2025-06-25 12:05:00", "only_late"] == pytest.approx(78.0)
         assert pd.isna(merged.loc["2025-06-25 12:05:00", "only_early"])
 
@@ -115,7 +112,6 @@ class TestMergeDatFiles:
         merged = merge_dat_files([early, late])
 
         assert len(merged) == 1
-        # Chronological file order → the earlier file wins the conflict.
         assert merged.loc["2025-06-25 12:00:00", "shared"] == pytest.approx(400.0)
 
     def test_earlier_null_falls_through_to_later_non_null(self, tmp_path: Path) -> None:
@@ -144,8 +140,8 @@ class TestMergeDatFiles:
 
         ``common.paths.find_files`` hands over a ``list[Path]`` and the CLIs a
         ``list[str]``; an invariant ``list[str | Path]`` parameter rejects both
-        under mypy, so the parameter has to stay a covariant
-        ``Sequence[str | Path]``. This call is the mypy assertion.
+        under mypy, so the parameter stays a covariant ``Sequence[str | Path]``.
+        This call is the mypy assertion.
         """
         written = _write_toa5(
             tmp_path / "one.dat",
@@ -161,11 +157,11 @@ class TestMergeDatFiles:
 class TestTheGateAlsoHoldsAfterCalibration:
     """A value AT the boundary crosses it once an instrument factor scales it.
 
-    ``CM3Up_Wm2_Avg`` capped at exactly 1500 W/m2 by its own gate reached the
+    ``CM3Up_Wm2_Avg`` capped at exactly 1500 W/m2 by its own gate reaches the
     published artifact at 1508.65 -- 1500 x its post-2019 factor -- and the
-    Eppley PSP factor pushed 578 more over. The gate runs on the raw signal,
+    Eppley PSP factor pushes 578 more over. The gate runs on the raw signal,
     which is what protects the calibration from multiplying a non-physical
-    value; nothing was re-checking the number that actually gets written.
+    value, so the number that actually gets written must be re-checked too.
     """
 
     LIMITS: ClassVar[list[dict]] = [{"column": "CM3Up_Wm2_Avg", "lower": -20.0, "upper": 1500.0}]

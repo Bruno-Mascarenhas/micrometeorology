@@ -3,11 +3,11 @@
 Offline: synthetic frames only. These pin what the interactive page reads, so a
 change that would break the browser fails here instead.
 
-The tests that matter most are the ones around the WRF resolution. The model
-file gains columns over time (precipitation is expected but absent today), and
-the whole design is that such an addition is a *data* change: the chart starts
-drawing it with no edit here. Two tests hold that promise from both sides — the
-absent case must be reported, and the present case must be picked up.
+The tests around the WRF resolution carry the most weight. The model file gains
+columns over time (precipitation is expected but absent today), and the design
+is that such an addition is a *data* change: the chart starts drawing it with no
+edit here. Two tests hold that promise from both sides — the absent case must be
+reported, and the present case must be picked up.
 """
 
 import json
@@ -172,7 +172,7 @@ class TestExporter:
         which spellings would be picked up when the extraction grows one.
 
         A model file is loaded on purpose: ``wrf_pending`` is a statement about
-        what the extraction writes, so it is only meaningful once there is an
+        what the extraction writes, so it is meaningful only once there is an
         extraction to compare against.
         """
         payload = self._payload(archive, tmp_path, "-w", str(self._wrf_dat(tmp_path)))
@@ -200,10 +200,10 @@ class TestExporter:
     def test_a_missing_row_lands_at_its_true_position(self, archive: Path, tmp_path: Path) -> None:
         """A logger outage is an absent row, not a NaN one.
 
-        The axis is an origin plus a step, so the page rebuilds every abscissa
-        as ``start + i * step``. Serialising only the rows that exist would draw
-        every later sample early by the length of the gap — this pins that the
-        exporter puts the frame back on its grid first.
+        The axis is an origin plus a step, so the page rebuilds every abscissa as
+        ``start + i * step``. Serialising only the rows that exist would draw
+        every later sample early by the length of the gap; the exporter must put
+        the frame back on its grid first.
         """
         frame = pd.read_parquet(archive / "station_5min_qc.parquet")
         marker = 12.5
@@ -262,8 +262,8 @@ class TestExporter:
         assert wrf["series"]["t"][22] == 22.0
 
     def test_an_irregular_axis_is_refused(self) -> None:
-        """The encoding cannot express two cadences; publishing one anyway is
-        what drew the model layer hours out of phase."""
+        """The encoding cannot express two cadences; publishing one anyway draws
+        the layer out of phase."""
         irregular = pd.DatetimeIndex(["2022-07-01 00:00", "2022-07-01 01:00", "2022-07-01 03:00"])
         with pytest.raises(ValueError, match="one cadence"):
             _axis(irregular)
@@ -293,9 +293,9 @@ class TestExporter:
         """`wrf_pending` means "the extraction does not write this yet".
 
         The page states exactly that to the reader, so a run given no model file
-        must not populate it: a forgotten `-w` in a cron otherwise published a
-        categorically false claim about the pipeline for eight of the nine
-        charts, including every variable the extraction demonstrably does write.
+        must not populate it: a forgotten `-w` in a cron would otherwise publish
+        a false claim about the pipeline for every variable the extraction
+        demonstrably does write.
         """
         for chart in self._payload(archive, tmp_path)["charts"]:
             assert chart["layers"]["wrf"] is None
@@ -304,8 +304,8 @@ class TestExporter:
     def test_a_model_that_lacks_a_variable_still_reports_it(
         self, archive: Path, tmp_path: Path
     ) -> None:
-        """The signal itself must survive the fix above: with a model present,
-        a variable it does not carry is still named."""
+        """The other side of the rule above: with a model present, a variable it
+        does not carry is still named."""
         charts = {
             chart["id"]: chart
             for chart in self._payload(archive, tmp_path, "-w", str(self._wrf_dat(tmp_path)))[
@@ -324,7 +324,7 @@ class TestExporter:
 
         `layerPoints` returns null only when `layer.series[id]` is MISSING; an
         array of nulls passes that guard, builds a dataset and puts an entry in
-        the legend for a line the reader cannot see. This is live today: the Gill
+        the legend for a line the reader cannot see. Live case: the Gill
         thermohygrometer railed in December 2025 and its readings are masked, so
         the default operational window carries no air temperature at all.
         """
@@ -368,9 +368,10 @@ class TestExporter:
         """The operational extraction grows forward, so an hour with a WRF value
         and no observation is the normal state, not a fault.
 
-        Anchoring the window's end on the newest SAMPLE clipped exactly the part
-        of the model worth looking at. The start still anchors on the station, so
-        the reader keeps the same record behind them and gains the forecast ahead.
+        Anchoring the window's end on the newest SAMPLE would clip exactly the
+        part of the model worth looking at. The start still anchors on the
+        station, so the reader keeps the record behind them and gains the
+        forecast ahead.
         """
         hourly = pd.read_parquet(archive / "station_hourly.parquet")
         # The anchor is the newest RAW sample, which is what the window's end
@@ -410,10 +411,10 @@ class TestExporter:
         assert model_last <= pd.Timestamp(window["end"])
 
         # The STATION's hourly layer still stops at its own last complete hour.
-        # Trimming against the window's end instead published the station's
+        # Trimming against the window's end instead publishes the station's
         # trailing PARTIAL hour as a full hourly mean -- an average over however
         # many minutes the logger had written, drawn beside hours built from
-        # twelve samples, three days inside a span the station never reached.
+        # twelve samples.
         hourly_layer = temperature["layers"]["hourly"]
         hourly_last = pd.Timestamp(hourly_layer["axis"]["start"]) + pd.Timedelta(
             minutes=hourly_layer["axis"]["step_minutes"] * (hourly_layer["axis"]["count"] - 1)

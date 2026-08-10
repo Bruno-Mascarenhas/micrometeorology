@@ -68,9 +68,8 @@ def test_failed_figures_still_produce_json_but_exit_non_zero(tmp_path, monkeypat
 def test_an_output_file_id_is_refused_before_anything_is_written(tmp_path, monkeypatch):
     """``-v TSK`` would publish raw Kelvin into the files skin_temperature owns.
 
-    The reject list lives with the export CLI; this pipeline used to reach for
-    only half of it, so the same token was refused by ``labmim-wrf-geojson``
-    and quietly honoured here.
+    The reject list lives with the export CLI, and this pipeline must apply all
+    of it: a token refused by ``labmim-wrf-geojson`` is refused here too.
     """
     monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_pipeline_tsk.nc"
@@ -171,8 +170,8 @@ def test_also_video_with_no_figures_is_a_usage_error_not_a_silent_success(tmp_pa
     """Phase 3 encodes the PNGs Phase 1 renders, so the pair is unsatisfiable.
 
     ``--no-figures`` empties ``png_paths``, which makes the video gate
-    ``also_video and png_paths`` unconditionally false: the run printed
-    "Complete" and exited 0 having produced none of the videos it was asked for.
+    ``also_video and png_paths`` unconditionally false. Without this guard the
+    run exits 0 having produced none of the videos it was asked for.
     """
     monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_novideo.nc"

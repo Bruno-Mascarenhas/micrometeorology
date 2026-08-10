@@ -3,8 +3,7 @@
 This module is the **producer** for the JSON the climatology page of the
 read-only sibling site repository (``site-labmim``) fetches at runtime, the same
 role :mod:`micrometeorology.wrf.jobs` plays for the WebGIS map data. The consumer
-is external (FTP deploy), so nothing in this repository imports it back and no
-reverse-import analysis will find the dependency.
+is external (FTP deploy), so nothing in this repository imports it back.
 
 The contract
 ------------
@@ -28,8 +27,8 @@ the hybrid density of [[takle1978]] shown as its two pieces.
 
 Why the data is not committed
 -----------------------------
-These artifacts are derived from the laboratory's own sensor archive, which is
-not public. Like the WRF output they are gitignored in the site repository and
+These artifacts derive from the laboratory's own sensor archive, which is not
+public. Like the WRF output they are gitignored in the site repository and
 attached at deploy time; the page degrades to a "not published yet" state when
 the directory is empty, which is what every development checkout and CI run
 sees.
@@ -84,7 +83,7 @@ MANIFEST_FILENAME = "manifest.json"
 # rose needs a free grid: a histogram's curve is sampled at its own bin centres,
 # which is both exact and smaller. 201 samples draw a smooth ring at any width a
 # browser will render, and the production host serves uncompressed, so the count
-# is a deliberate byte budget rather than a default.
+# is a byte budget.
 CURVE_POINTS = 201
 
 # Decimal places per field group. Densities are small numbers whose visual
@@ -125,10 +124,10 @@ class Atom:
         subset BEFORE the mass was removed, which is not the ``n`` published
         beside it — that one counts what is left.
     count:
-        The mass in samples. Published because the fraction alone is not
-        resolvable on screen: a reader who multiplies "5,2 % calmarias" by the
-        "66.345 observações" printed next to it gets 3.472, and the true figure
-        is 3.663. One is a share of 70.008, the other is what survived.
+        The mass in samples. Published because the fraction alone cannot be
+        recovered from what else is on screen: multiplying the printed share by
+        the published ``n`` gives the wrong figure, the share being taken over
+        the subset before removal and ``n`` counting what survived.
     """
 
     id: str
@@ -181,11 +180,10 @@ class VariableSpec:
     edges: tuple[float, ...]
     fit_scale: float = 1.0
     caveats: tuple[str, ...] = ()
-    # Options the family cannot get from the sample, which the caller must supply
-    # per subset. Empty means the family is estimated from the sample alone, as
-    # every non-radiation variable is. Declaring it here is what makes a missing
-    # covariate a build failure instead of a curve quietly fitted on the wrong
-    # thing.
+    # Options the family cannot get from the sample, supplied per subset by the
+    # caller. Empty means the family is estimated from the sample alone, as every
+    # non-radiation variable is. Declaring them here makes a missing covariate a
+    # build failure instead of a curve quietly fitted on the wrong thing.
     fit_options: tuple[str, ...] = ()
 
 
@@ -208,16 +206,10 @@ class Reference:
         Authors, title, journal, volume, pages, year — the tooltip's contents.
     url:
         Where to go: a ``doi.org`` link, one per record, each resolved against
-        Crossref and checked to land on the cited work.
-
-        Every entry earns one. The ten that used to carry a Crossref TITLE
-        SEARCH instead all had a findable DOI — the search was a fallback nobody
-        had revisited, and it had rotted: ``search.crossref.org/?q=`` answers
-        200, serves the real page, and the current interface ignores the query,
-        so the box opened empty and nothing was searched. Every link checker
-        passed it, status being all they inspect, and the failure showed only
-        once the page had rendered. A resolver link cannot fail that way: it
-        either redirects to the publisher or it does not exist.
+        Crossref and checked to land on the cited work. A resolver link is
+        required rather than a search URL, because it either redirects to the
+        publisher or does not exist — a search that silently returns nothing
+        still answers 200, so no link checker catches it.
     """
 
     key: str
@@ -226,10 +218,8 @@ class Reference:
     url: str
 
 
-# Every reference the page prints, in one place. The DOIs below carry a
-# doi.org link only where the identifier was checked against the primary text or
-# Crossref during the review that produced these curves; the rest resolve to a
-# title search, so no link on this page can rot into a wrong paper.
+# Every reference the page prints, in one place. Each DOI was checked against the
+# primary text or Crossref, so no link on this page can rot into a wrong paper.
 REFERENCES: dict[str, Reference] = {
     reference.key: reference
     for reference in (
@@ -368,16 +358,9 @@ _REFERENCE_MARKER = re.compile(r"\[\[([a-z0-9_]+)\]\]")
 
 # Value syntax inside caveats: {{atom:<id>:count}}, {{atom:<id>:share}} and
 # {{param:<name>:<decimals>}}, resolved against the subset the page prints the
-# prose beside (``observed_all``).
-#
-# Prose used to carry these as literals, and a literal is a copy that stops
-# being true. Three shipped wrong at once: the PAR caveats asserted 552, 24 and
-# 18 point-mass hours beside published atoms of 538, 13 and 17, and the net
-# radiation caveat quoted a = 0,775 / b = -24,4 / 36,2 W/m2 while the fit panel
-# on the same screen printed 0,7730 / -23,59 / 35,61. Nothing was wrong with the
-# numbers — masking 52 clock-corrupted days moved them, and only the sentence
-# stayed behind. Interpolating makes the two agree by construction instead of by
-# vigilance.
+# prose beside (``observed_all``). A number written into the prose as a literal
+# is a copy that stops being true the next time the fit moves; interpolating it
+# makes sentence and panel agree by construction rather than by vigilance.
 _VALUE_MARKER = re.compile(r"\{\{(atom|param):([A-Za-z0-9_]+):([A-Za-z0-9_]+)\}\}")
 
 
@@ -395,9 +378,8 @@ def _resolve_values(text: str, subset: dict[str, Any], where: str) -> str:
     """Replace every ``{{...}}`` marker with the value the subset publishes.
 
     Raises on anything unresolvable — an unknown atom id, a parameter the fit
-    does not carry, a malformed precision. A caveat that quotes a number nobody
-    published is the defect this exists to remove, so it stops the export that
-    writes the artifacts rather than reaching a reader.
+    does not carry, a malformed precision — so a caveat quoting a number nobody
+    published stops the export instead of reaching a reader.
     """
 
     def replace(match: re.Match[str]) -> str:
@@ -445,8 +427,7 @@ def _assert_references() -> None:
         )
     # And the reverse: a record must never contain a marker itself. A registry
     # entry whose `short` reads "[[hu2012]]" renders as literal brackets in the
-    # middle of a caption and resolves to nothing, which is exactly what a
-    # careless global rename of the prose citations once produced here.
+    # middle of a caption and resolves to nothing.
     self_referential = sorted(
         key
         for key, reference in REFERENCES.items()
@@ -775,9 +756,7 @@ def _rounded_params(params: Mapping[str, Any]) -> dict[str, Any]:
 
     The induced radiation families carry the scale mixture in their parameters —
     sixty scales and sixty weights, and for net radiation nearly six thousand
-    mixture means — so a scalar-only rounding raises on the first list. The rose
-    already serialises list-valued parameters, so this is the existing shape
-    rather than a new one.
+    mixture means — so a scalar-only rounding raises on the first list.
     """
     rounded: dict[str, Any] = {}
     for name, value in params.items():
@@ -849,10 +828,9 @@ def _shape_moments(values: NDArray) -> tuple[float, float]:
         G_1 = \frac{\sqrt{n(n-1)}}{n-2}\, \frac{m_3}{m_2^{3/2}}, \qquad
         G_2 = \frac{n-1}{(n-2)(n-3)}\,\big[(n+1)g_2 + 6\big]
 
-    with :math:`g_2 = m_4/m_2^2 - 3`. Written out here rather than delegated to
-    ``pandas.Series.skew`` so this module needs no pandas import and the
-    convention is legible next to the numbers it produces. Samples below four
-    values, or with zero spread, yield NaN — the corrections divide by
+    with :math:`g_2 = m_4/m_2^2 - 3`. Written out rather than delegated to
+    ``pandas.Series.skew`` so this module needs no pandas import. Samples below
+    four values, or with zero spread, yield NaN — the corrections divide by
     ``n - 3`` and by the variance.
     """
     n = int(values.size)
@@ -883,12 +861,9 @@ def _histogram_subset(
     binned = dist.histogram(values, spec.edges)
     payload: dict[str, Any] = {
         # The WHOLE subset, so `n == sum(counts) + below + above` is an identity
-        # the reader can check on screen. It used to be the binned count alone
-        # while `stats` described the whole sample, which put three different
-        # totals for one recorte on one panel: the clearness index printed
-        # "34.934 observações" beside a maximum of 1,7382 that belongs to none of
-        # the bars, and beside a fit whose own n was a third number again (the
-        # family cuts at its fitted ceiling, which is legitimate and separate).
+        # the reader can check on screen, and so `stats` — which describes the
+        # whole sample — is not printed beside a smaller total. The fit's own `n`
+        # is legitimately a third number: the family cuts at its fitted ceiling.
         "n": binned.n + binned.below + binned.above,
         "counts": [int(count) for count in binned.counts],
         "density": _rounded_list(binned.density, _DENSITY_DECIMALS),
@@ -913,9 +888,8 @@ def _histogram_subset(
 
     # A family whose parameters are not estimable from the sample alone needs the
     # covariate the caller derived (the extraterrestrial-irradiance mixture every
-    # induced radiation curve rides on). Declaring the requirement on the spec is
-    # what turns a missing option into a loud failure instead of a silent
-    # fallback to a curve fitted on the wrong thing.
+    # induced radiation curve rides on). A missing option is a loud failure
+    # rather than a silent fallback to a curve fitted on the wrong thing.
     if spec.fit_options and not options:
         if not curveless:
             raise ValueError(
@@ -923,8 +897,8 @@ def _histogram_subset(
                 f"{list(spec.fit_options)}, none supplied for this subset"
             )
         # The caller could not build the covariate and said so. Bars, counts,
-        # statistics and atoms publish; only the curve is absent, which is a
-        # state the page already renders. Blanking the sample to reach the
+        # statistics and atoms still publish; only the curve is absent, which is
+        # a state the page already renders. Blanking the sample to reach the
         # `binned.n < 2` early return instead would delete real measurements
         # over a missing model input.
         logger.warning("%s: no covariate for this subset, publishing bars without a curve", spec.id)

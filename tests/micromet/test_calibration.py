@@ -43,8 +43,8 @@ class TestApplyCalibrations:
         apply_calibrations(sample_data, cals)
 
         # A date-only end_date is inclusive of the WHOLE boundary day: every
-        # sub-daily sample of 2018-12-31 is calibrated, and the correction stops
-        # cleanly at the day boundary (2019-01-01 00:00 onward is untouched).
+        # sub-daily sample of 2018-12-31 is calibrated, and 2019-01-01 00:00
+        # onward is untouched.
         mask_before = sample_data.index <= pd.Timestamp("2018-12-31 23:59:59")
         mask_after = sample_data.index >= pd.Timestamp("2019-01-01")
 
@@ -52,7 +52,6 @@ class TestApplyCalibrations:
             sample_data.loc[mask_before, "CM3Up_Wm2_Avg"],
             original[mask_before] * 0.5,
         )
-        # Data from the next day on should be unchanged.
         np.testing.assert_array_almost_equal(
             sample_data.loc[mask_after, "CM3Up_Wm2_Avg"],
             original[mask_after],
@@ -69,8 +68,7 @@ class TestApplyCalibrations:
             }
         ]
         apply_calibrations(sample_data, cals)
-        # The whole boundary day (2019-01-01) is NaN'd, not just its midnight
-        # sample; the day after is left intact.
+        # The whole boundary day (2019-01-01) is NaN'd, not just its midnight sample.
         assert sample_data.loc["2019-01-01", "CMP21_Wm2_Avg"].isna().all()
         assert sample_data.loc["2019-01-02", "CMP21_Wm2_Avg"].notna().all()
 
@@ -114,7 +112,6 @@ class TestBoundaryDayCalibration:
         end_day = five_min_data.loc["2018-12-31", "CM3Up_Wm2_Avg"]
         assert len(end_day) == 288  # all 5-min samples of the day
         assert (end_day == 50.0).all()
-        # Correction stops exactly at the day boundary.
         assert (five_min_data.loc["2019-01-01", "CM3Up_Wm2_Avg"] == 100.0).all()
 
     def test_null_factor_nans_whole_end_day(self, five_min_data):
@@ -146,7 +143,6 @@ class TestBoundaryDayCalibration:
                 }
             ],
         )
-        # Inclusive up to exactly 12:00; the very next sample is untouched.
         assert five_min_data.loc["2018-12-31 12:00", "CM3Up_Wm2_Avg"] == 50.0
         assert five_min_data.loc["2018-12-31 12:05", "CM3Up_Wm2_Avg"] == 100.0
         assert (five_min_data.loc["2018-12-31 00:00":"2018-12-31 12:00"] == 50.0).all().all()
@@ -166,7 +162,6 @@ class TestBoundaryDayCalibration:
                 }
             ],
         )
-        # The abutting mappings leave no unfilled hole on the boundary day.
         assert five_min_data.loc["2018-12-31", "U"].notna().all()
         assert (five_min_data.loc["2018-12-31", "U"] == 100.0).all()
         assert (five_min_data.loc["2019-01-01", "U"] == 20.0).all()
@@ -263,14 +258,12 @@ class TestOverlapGuard:
 class TestARecordThatClosesBeforeTheDataBegins:
     """An open-ended record inherits the DATASET's first timestamp.
 
-    So a record that closes before the data starts resolves to
-    ``[dataset-start, its own end]`` with the two inverted. It covers nothing and
-    simply does not apply — but counting it as an interval made every later
-    record "overlap" it, and the guard aborted the run.
+    A record that closes before the data starts therefore resolves to
+    ``[dataset-start, its own end]`` with the two inverted: it covers nothing,
+    so it must not count as an interval for the overlap guard.
 
-    This is the ordinary case for a recent logger table, and it made
-    ``labmim-sensor-process`` unable to read ``data/LBM_lenta_2025.dat`` at all:
-    the shipped CMP21 record ends 2019-10-12 and that file begins 2025-05-14.
+    This is the ordinary case for a recent logger table — the shipped CMP21
+    record ends 2019-10-12 and ``data/LBM_lenta_2025.dat`` begins 2025-05-14.
     """
 
     @staticmethod
@@ -304,8 +297,7 @@ class TestARecordThatClosesBeforeTheDataBegins:
     def test_a_genuine_overlap_is_still_refused(self) -> None:
         """The guard must not be weakened: two records that really do cover the
         same day are still a configuration error."""
-        # Both inside the 48-hour frame, so both resolve to real intervals, and
-        # they share 2025-05-14: a genuine configuration error.
+        # Both resolve to real intervals inside the 48-hour frame, sharing 2025-05-14.
         calibrations: list[dict[str, Any]] = [
             {
                 "column": "CMP21_Wm2_Avg",
@@ -326,7 +318,7 @@ class TestARecordThatClosesBeforeTheDataBegins:
             apply_calibrations(self._frame().copy(), calibrations)
 
     def test_the_shipped_calibrations_load_against_a_recent_file(self) -> None:
-        """The end-to-end shape of the bug: the real config against a 2025 frame."""
+        """The shipped config must apply end to end against a 2025 frame."""
         from micrometeorology.common.config import get_settings
         from micrometeorology.sensors.calibration import load_calibrations
 
@@ -343,13 +335,12 @@ class TestARecordThatClosesBeforeTheDataBegins:
 class TestACalibrationSurvivesAColumnRename:
     """A record keyed on a column name dies when the logger renames the channel.
 
-    The Eppley PSP's post-2019 sensitivity correction sat in the config for seven
-    years naming only the pre-v11 spelling ``PSP1_Wm2_Avg``. The logger renamed
-    the channel to ``PSP_Wm2_Avg`` on 2019-03-15 — a rename the sensor_switches
-    block in the same file documents — so the correction reached 2019-02-26 and
-    stopped. The PSP is the diffuse sensor of the current operational era, so the
-    published diffuse ran 8.5% low and nothing said a word: the record was
-    declared, it simply matched nothing.
+    The logger renamed the Eppley PSP channel from the pre-v11 ``PSP1_Wm2_Avg``
+    to ``PSP_Wm2_Avg`` on 2019-03-15, a rename the sensor_switches block of the
+    same config documents. The PSP is the diffuse sensor of the current
+    operational era, so a post-2019 sensitivity correction naming only the old
+    spelling stops at 2019-02-26 and leaves the published diffuse 8.5% low while
+    still reading as declared.
     """
 
     def test_both_spellings_of_the_pyranometer_are_calibrated(self) -> None:
@@ -439,8 +430,8 @@ class TestUncalibratedMappingWindows:
     def test_a_column_with_no_record_at_all_is_not_a_gap(self):
         """The logger's own multiplier is the calibration for most channels.
 
-        Reporting those too buries the one real finding under 37 non-findings,
-        which is how a warning stops being read.
+        Reporting those too would bury the one real finding under 37
+        non-findings.
         """
         calibrations = [
             {"column": "PSP1_Wm2_Avg", "start_date": None, "end_date": None, "factor": 0.94}

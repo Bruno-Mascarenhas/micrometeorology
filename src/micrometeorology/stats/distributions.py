@@ -411,15 +411,11 @@ def _fit_weibull(values: NDArray) -> dict[str, float]:
     start = (std / mean) ** -1.086 if mean > 0.0 and std > 0.0 else 2.0
     log_sample = np.log(sample)
     shape = _weibull_shape(log_sample, start)
-    # The scale is evaluated in LOG SPACE, like the shape solver above and for
-    # the same reason: `mean(x**k) ** (1/k)` computes `x**k` directly, and a
-    # near-constant sample drives k to the _MAX_SHAPE clamp, where the power
-    # overflows to +inf for values above 1 and underflows to 0 below it. Both
-    # were reachable: +inf made goodness_of_fit report ks_distance=1.0 for a
-    # sample the model describes exactly, and 0.0 passed the finite-parameter
-    # check and then divided by zero inside the density. This form is
-    # algebraically identical wherever the direct one does not overflow, so no
-    # existing fit moves.
+    # Evaluated in LOG SPACE, like the shape solver above and for the same
+    # reason: `mean(x**k) ** (1/k)` computes `x**k` directly, and a near-constant
+    # sample drives k to the _MAX_SHAPE clamp, where the power overflows to +inf
+    # above 1 and underflows to 0 below it. This form is algebraically identical
+    # wherever the direct one does not overflow.
     scale = float(np.exp((special.logsumexp(shape * log_sample) - np.log(sample.size)) / shape))
     return {"shape": shape, "scale": scale}
 

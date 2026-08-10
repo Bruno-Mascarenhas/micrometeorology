@@ -30,10 +30,8 @@ import numpy as np
 import pandas as pd
 import typer
 
-# allsky.solar is pure numpy/pandas (no torch) and ships in the same wheel. It is
-# also what stats/radiation.py's docstring explicitly points at for the case here
-# — a GHI series plus timestamps, needing the extraterrestrial term derived from
-# solar geometry — so reusing it beats a second implementation of NOAA's formulas.
+# allsky.solar is pure numpy/pandas (no torch) and ships in the same wheel, so
+# this CLI reuses NOAA's formulas without pulling a training dependency in.
 from allsky.config import SiteConfig
 from allsky.solar import extraterrestrial_ghi, solar_elevation
 from micrometeorology.common.git import run_git, source_root
@@ -73,9 +71,8 @@ STATION = {
 # stats.climatology.seasonal_groups.
 SEASONS = ("all", "DJF", "JJA")
 
-# The literal four options the page shows. Every source-by-season pair is
-# computed anyway (it is one more pass over data already in memory), so the
-# selector can widen later without regenerating anything.
+# The four options the page shows. Every source-by-season pair is computed
+# anyway, so the selector can widen later without regenerating anything.
 SELECTOR = ("observed_all", "observed_djf", "observed_jja", "wrf_all")
 
 # Unified column in the hourly database for each published variable. The unified
@@ -111,10 +108,9 @@ WRF_COLUMN = {
     "shortwave_down": "Swdw",
     # Only the two DOWNWELLING streams are trustworthy in the point extraction.
     # Swup_calc and Lwup_calc are derived from ALBD and EMISS, which the writer
-    # emits as the broken constants -273.01 and -272.27 (a Kelvin-to-Celsius
-    # conversion applied to a fill value), so the upwelling columns and any net
-    # radiation built from them are physically meaningless. Publishing them
-    # beside real measurements would invite a comparison that means nothing.
+    # emits as the constants -273.01 and -272.27 (a Kelvin-to-Celsius conversion
+    # applied to a fill value), so the upwelling columns and any net radiation
+    # built from them are physically meaningless and are not published.
     "longwave_down": "Lwdw_glw",
 }
 
@@ -140,11 +136,9 @@ INVALID_DIRECTION = (pd.Timestamp("2019-05-31"), pd.Timestamp("2023-02-20 13:30"
 MIN_SOLAR_ELEVATION_DEG = 10.0
 
 # Variables restricted to daylight. Without the gate, night fills half the record
-# with zeros and the histogram collapses to a single bar nobody can read.
-# PAR is here and was not before: it is a shortwave band, so over all hours 38%
-# of the early era's published values were exactly zero because they were night.
-# No density survives that — the same curve scored against the ungated sample
-# gives a KS distance of 0.55 — and the gate is what makes the variable fittable.
+# with zeros and the histogram collapses to a single bar nobody can read. PAR is a
+# shortwave band too: ungated, 38% of the early era's values are exactly zero
+# because they are night, and no density survives that (KS distance 0.55).
 DAYTIME_ONLY = (
     "shortwave_down",
     "shortwave_up",
@@ -234,10 +228,10 @@ def _clearness(frame: pd.DataFrame, column: str) -> pd.Series:
     if column not in frame.columns:
         return pd.Series(dtype=float)
     elevation = _elevation(frame)
-    top = extraterrestrial_ghi(_times(frame), SITE, UTC_OFFSET_HOURS)
-    daylight = (elevation > MIN_SOLAR_ELEVATION_DEG) & (top > 0)
+    extraterrestrial = extraterrestrial_ghi(_times(frame), SITE, UTC_OFFSET_HOURS)
+    daylight = (elevation > MIN_SOLAR_ELEVATION_DEG) & (extraterrestrial > 0)
     with np.errstate(invalid="ignore", divide="ignore"):
-        kt = frame[column].to_numpy() / top
+        kt = frame[column].to_numpy() / extraterrestrial
     return pd.Series(np.where(daylight, kt, np.nan), index=frame.index).dropna()
 
 
@@ -246,14 +240,9 @@ def _strip_atoms(
 ) -> tuple[np.ndarray, list[Atom]]:
     """Remove the point masses and report them, for EITHER source.
 
-    Shared between the observed and the model branch on purpose. The page exists
+    Shared between the observed and the model branch on purpose: the page exists
     to let the two histograms be compared, and a comparison is only meaningful
-    when both are conditional on the same event. They were not: the model's
-    relative humidity kept its saturation mass while the observed one removed
-    it, the model's wind direction got no calm removal at all, and the model's
-    wind-speed atom was published as a hard-coded 0,0 % / 0 h while 98 model
-    hours sat at or below the calm threshold, inside the bars and inside the
-    Weibull fit.
+    when both are conditional on the same event.
 
     On the physics of applying the calm cut to a model: 0,281 m/s is what a
     stalled cup anemometer reports, and a model has no stall. Using it on both
@@ -265,8 +254,7 @@ def _strip_atoms(
         # below, it is the value the cup anemometer REPORTS while stalled. 2,794
         # hourly means sit on it exactly (4.0% of the record) and 51.8% of them
         # bear north against 5.3% for the record as a whole — the parked vane,
-        # not a wind. A strict `<` keeps every one of them, which is why the
-        # published rose carried a north petal nearly twice its true size.
+        # not a wind. A strict `<` would keep every one of them.
         removed = int((speed <= CALM_THRESHOLD_MS).sum())
         calm = removed / len(series) if len(series) else float("nan")
         kept = series.loc[speed > CALM_THRESHOLD_MS]
@@ -348,11 +336,10 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
     if spec_id == "wind_direction":
         first, last = INVALID_DIRECTION
         retained = series.loc[(series.index < first) | (series.index > last)]
-        # Published rather than applied in silence. The cut removes 46.5% of the
-        # record, and every number on the rose is a share of what is left — so
-        # the calm fraction it prints (7,4%) disagreed with the one the
-        # wind-speed panel prints (5,2%) for the same anemometer over the same
-        # declared period, with nothing on the page able to explain the gap.
+        # Published rather than applied in silence: the cut removes 46.5% of the
+        # record and every number on the rose is a share of what is left, so a
+        # reader comparing the rose's calm fraction with the wind-speed panel's
+        # needs the denominator stated.
         #
         # Published even when it removes nothing — a window entirely after the
         # bad era reports 0 h rather than dropping the entry, the same way the
@@ -375,8 +362,8 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
         return _par_sample(series, frame)
 
     # Only the two wind variables need the paired speed, and only they may
-    # require the column to be present: reading it for every variable made a
-    # frame without an anemometer fail on the rain gauge.
+    # require the column to be present: a frame with no anemometer must still
+    # publish its rain gauge.
     sample, atoms = _strip_atoms(spec_id, series, _paired_speed(spec_id, frame, series))
     return sample, [*era_atoms, *atoms]
 
@@ -384,9 +371,8 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
 def _par_sample_mask(series: pd.Series, global_flux: pd.Series) -> pd.Series:
     """Which PAR hours are measurements of the atmosphere rather than of the logger.
 
-    One definition, used by both the sample and the estimator of the curve's one
-    free parameter. Two literals of the same rule is how the published gain came
-    to be estimated over hours the fitted sample had already removed.
+    One definition, used by both the fitted sample and the estimator of the
+    curve's one free parameter, so the two can never disagree on the population.
     """
     with np.errstate(invalid="ignore", divide="ignore"):
         fraction = series / global_flux.where(global_flux > RATIO_DENOMINATOR_FLOOR)
@@ -435,24 +421,20 @@ def _wrf_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Ato
     if column not in frame.columns:
         return np.array([]), []
     series = frame[column]
-    # The SAME solar gate as the observed side. Without it the model subset would
-    # carry its night zeros while the observed one does not, and the two
-    # histograms — whose whole purpose is to be compared — would sit on
-    # different populations.
+    # The SAME solar gate and the SAME de-atomisation as the observed side.
+    # Conditioning the model histogram on a different event than the observed one
+    # it is drawn beside makes the comparison the page exists for meaningless.
     if spec_id in DAYTIME_ONLY:
         series = series.loc[_elevation(frame) > MIN_SOLAR_ELEVATION_DEG]
     elif spec_id in NIGHTTIME_ONLY:
         series = series.loc[_elevation(frame) < 0.0]
     series = series.dropna()
-    # The SAME de-atomisation the observed branch applies. Publishing a model
-    # histogram conditional on a different event than the observed one it is
-    # drawn beside makes the comparison the page exists for meaningless.
     return _strip_atoms(
         spec_id, series, _paired_speed(spec_id, frame, series, WRF_COLUMN["wind_speed"])
     )
 
 
-def _scale_mixture(top: np.ndarray) -> tuple[list[float], list[float]]:
+def _scale_mixture(extraterrestrial: np.ndarray) -> tuple[list[float], list[float]]:
     """Equal-count bins of the extraterrestrial irradiance, as scales and weights.
 
     Marginalising the induced density over the covariate exactly would mean one
@@ -461,7 +443,7 @@ def _scale_mixture(top: np.ndarray) -> tuple[list[float], list[float]]:
     fixed-width bin would hold three hours and still count as a component — do
     not get to speak louder than they should.
     """
-    finite = np.sort(top[np.isfinite(top) & (top > 0.0)])
+    finite = np.sort(extraterrestrial[np.isfinite(extraterrestrial) & (extraterrestrial > 0.0)])
     if finite.size == 0:
         return [], []
     groups = np.array_split(finite, min(INDUCED_BINS, finite.size))
@@ -494,9 +476,7 @@ def _check_caveats_quote_the_published_scalar(spec: object, payload: dict) -> No
     The induced curves carry one estimated scalar — the era's PAR fraction, the
     albedo — and the caveats print it in prose, three lines from where the page
     prints the parameter itself. Prose is a literal and the parameter is
-    computed, so the two drift apart the moment the archive changes: masking 52
-    timestamp-corrupted days moved the late-PAR fraction from 0,2579 to 0,2590
-    and left the sentence asserting the old value beside the new one.
+    computed, so the two drift apart whenever the archive changes.
 
     A warning rather than a failure: which of the two is wrong is a judgement
     for the laboratory, and refusing to publish the whole page over a fourth
@@ -556,8 +536,8 @@ def _induced_options(spec_id: str, frame: pd.DataFrame, source: str) -> dict[str
     if daylight.empty:
         return None
 
-    top = extraterrestrial_ghi(_times(daylight), SITE, UTC_OFFSET_HOURS)
-    scales, weights = _scale_mixture(np.asarray(top, dtype=float))
+    extraterrestrial = extraterrestrial_ghi(_times(daylight), SITE, UTC_OFFSET_HOURS)
+    scales, weights = _scale_mixture(np.asarray(extraterrestrial, dtype=float))
     if not scales:
         return None
 
@@ -566,16 +546,10 @@ def _induced_options(spec_id: str, frame: pd.DataFrame, source: str) -> dict[str
     if spec_id == "shortwave_up":
         gain = _bulk_ratio(daylight[OBSERVED_COLUMN["shortwave_up"]], incoming)
     elif spec_id in ("par_early", "par_late"):
-        # Over the SAME population the curve is scored against. `_par_sample`
-        # removes two instrument states — the logger's daytime zeros and the
-        # hours where PAR exceeds 60% of the global flux it is a sub-band of —
-        # on the stated grounds that fitting over either drags the curve to a
-        # peak no atmosphere produced. Estimating the one free parameter over the
-        # unmasked block put those same hours back in through the denominator:
-        # the zeros contribute nothing to the numerator and a full global flux
-        # below, so they depressed the ratio. The caveat printed three lines
-        # away on the page was computed with the mask and the parameter without
-        # it, and the two disagreed in the fourth digit.
+        # Estimated over the SAME population the curve is scored against. Over
+        # the unmasked block the logger's daytime zeros re-enter through the
+        # denominator — nothing in the numerator against a full global flux
+        # below — and depress the ratio.
         band = _par_sample_mask(daylight[OBSERVED_COLUMN[spec_id]], incoming)
         gain = _bulk_ratio(daylight[OBSERVED_COLUMN[spec_id]].loc[band], incoming.loc[band])
     if not np.isfinite(gain) or gain <= 0.0:
@@ -628,12 +602,8 @@ def _available_hours(spec_id: str, block: pd.DataFrame) -> int:
     """Hours the sensor delivered, which is NOT the hours that survive the fit.
 
     The panel is labelled "horas válidas" and read as sensor availability, so it
-    has to count before the point masses leave. Counting after made the rain
-    gauge report 6.980 valid hours where 80.518 exist — 91,3% of them dry, which
-    is weather and not an outage — and a reader comparing that strip with the
-    temperature strip would conclude the gauge was down for most of the record.
-    Wind speed read 66.345 against 70.008, relative humidity 75.551 against
-    75.770, shortwave 34.955 against 35.111.
+    has to count before the point masses leave: 91,3% of the rain gauge's hours
+    are dry, which is weather and not an outage.
 
     Published as ``n + sum(atom counts)``, which is also the identity the
     variable payload makes checkable from the bytes alone.
@@ -769,10 +739,10 @@ def run(
             if spec.fit_options and len(sample):
                 subset_options = _induced_options(spec.id, block, source)
                 if subset_options is None:
-                    # No covariate for this recorte means no curve for this
-                    # recorte, and the bars still publish. Dropping the sample
-                    # instead would delete measurements over a missing model
-                    # input, which is the wrong direction to fail in.
+                    # No covariate for this subset means no curve for it, but the
+                    # bars still publish: dropping the sample instead would
+                    # delete measurements over a missing model input, which is
+                    # the wrong direction to fail in.
                     logger.warning(
                         "%s/%s: no covariate available, publishing bars without a curve",
                         spec.id,

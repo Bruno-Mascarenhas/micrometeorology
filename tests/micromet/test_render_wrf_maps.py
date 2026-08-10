@@ -2,7 +2,7 @@
 
 ``_build_tasks_for_domain`` decides the filename, title, colour scale and
 overlay of every published PNG/WebM frame, so the snapshot below pins that
-whole surface. Nothing else in the suite covers it.
+whole surface.
 """
 
 from pathlib import Path
@@ -84,7 +84,7 @@ def test_default_variable_set_builds_the_pinned_figure_task_surface(tmp_path, mo
     tasks = _build_tasks(wrf, list(render_wrf_maps.DEFAULT_VARS), tmp_path / "figs")
 
     # LH and GLW are absent from the synthetic file and are skipped with a
-    # warning; the other ten variables each emit one task per time step.
+    # warning; the other ten variables emit one task per time step.
     by_variable: dict[str, list[str]] = {}
     for task in tasks:
         by_variable.setdefault(Path(task.output_path).name.split("_D02_")[0], []).append(
@@ -113,8 +113,8 @@ def test_default_variable_set_builds_the_pinned_figure_task_surface(tmp_path, mo
     }
     # Titles, colormaps and scale bounds are baked into the published PNGs, so
     # every one of them is pinned. The generic-scalar arm (HFX/PRES/VAPOR)
-    # titles from the NetCDF suffix rather than a per-variable phrase, and only
-    # temperature carries the pressure-contour overlay.
+    # titles from the NetCDF suffix, and only temperature carries the
+    # pressure-contour overlay.
     assert first_frames == {
         "TEMP": _expected(
             f"Temperature (°C){label}", 16.863793945312523, 31.418969726562523, "hot_r"
@@ -194,8 +194,7 @@ def test_figure_values_come_from_the_shared_value_frame_source(tmp_path, monkeyp
 
     Values and scale bounds are read from the same dispatcher the values-JSON
     work units use, so replacing that dispatcher changes what every PNG is
-    drawn from. A second copy in this module would ignore it and keep
-    publishing its own numbers.
+    drawn from.
     """
     monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_shared.nc"
@@ -229,8 +228,8 @@ def _written_step_names(result: jobs.UnitResult) -> list[str]:
 def test_the_swdown_daylight_window_has_one_owner_for_figures_and_json(tmp_path, monkeypatch):
     """Widening or narrowing the daylight window must move both products.
 
-    The rule used to be spelled out twice — once per product — so a change to
-    one silently left the other publishing the old window.
+    Figures and values-JSON read the window from a single owner, so patching
+    ``FIRST_DAYLIGHT_HOUR`` has to move the two together.
     """
     monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     monkeypatch.setattr(value_source, "FIRST_DAYLIGHT_HOUR", 9)
@@ -332,14 +331,13 @@ def test_cli_exits_zero_when_every_figure_renders(tmp_path, monkeypatch):
 
 
 def test_an_output_file_id_is_refused_before_any_frame_is_rendered(tmp_path, monkeypatch):
-    """``-v TSK`` rendered raw KELVIN into the PNGs skin_temperature owns.
+    """``-v TSK`` must not render raw KELVIN into the PNGs skin_temperature owns.
 
     ``TSK`` is not an input variable, it is the output file id of
-    ``skin_temperature``. Reaching the raw-NetCDF passthrough with it produced
+    ``skin_temperature``. Reaching the raw-NetCDF passthrough with it publishes
     ``TSK_D0X_nnn.png`` titled "TSK" on a Kelvin colour bar, under the exact
-    names the °C product publishes; and with both ids listed the output-path
-    dedup kept whichever came first, so flag ORDER decided which frames shipped.
-    The other two WRF CLIs already refuse it — this one did not.
+    names the °C product uses; and with both ids listed the output-path dedup
+    keeps whichever came first, so flag ORDER decides which frames ship.
     """
     monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_figures_tsk.nc"
@@ -357,12 +355,11 @@ def test_an_output_file_id_is_refused_before_any_frame_is_rendered(tmp_path, mon
 
 
 def test_a_wrfout_missing_a_bespoke_input_is_skipped_not_a_traceback(tmp_path):
-    """``build_value_frame_source`` documents ``None`` for an absent variable.
+    """``build_value_frame_source`` returns ``None`` for an absent variable.
 
-    Eight of its ten branches reached ``get_variable``, a bare dict lookup that
-    raises ``KeyError``, so a wrfout without ``Q2`` killed the whole run — every
-    later variable, every later domain and the video phase — while a missing raw
-    field of the same kind was skipped with a warning.
+    ``get_variable`` is a bare dict lookup that raises ``KeyError``, so a
+    wrfout without ``Q2`` would otherwise kill the whole run: every later
+    variable, every later domain and the video phase.
     """
     wrf = tmp_path / "wrfout_d02_partial.nc"
     _write_partial_wrf_file(wrf)
@@ -370,7 +367,6 @@ def test_a_wrfout_missing_a_bespoke_input_is_skipped_not_a_traceback(tmp_path):
     with reader.WRFDataset(str(wrf)) as dataset:
         for variable in ("relative_humidity", "vapor", "rain", "wind", "skin_temperature"):
             assert value_source.build_value_frame_source(dataset, variable) is None, variable
-        # The fields the file does carry still build normally.
         assert value_source.build_value_frame_source(dataset, "temperature") is not None
         assert value_source.build_value_frame_source(dataset, "pressure") is not None
 

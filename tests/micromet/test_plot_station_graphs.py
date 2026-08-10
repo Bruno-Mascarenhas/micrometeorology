@@ -176,12 +176,10 @@ class TestSiteCommand:
         assert result.exit_code == 0, result.output
         produced = sorted(p.name for p in out.glob("*.png"))
         assert produced == sorted(CONTRACT_PNGS)
-        # Every image is a real, non-empty PNG.
         for name in produced:
             assert (out / name).stat().st_size > 0
 
     def test_last_days_clips_the_window(self, tmp_path):
-        # 10 days of data, ask for 3; graphs still emit, no crash on the clip.
         csv = _write_hourly_csv(tmp_path / "long.csv", days=10)
         out = tmp_path / "g"
         result = runner.invoke(
@@ -192,7 +190,6 @@ class TestSiteCommand:
         assert len(list(out.glob("*.png"))) == len(CONTRACT_PNGS)
 
     def test_missing_column_warns_and_skips_but_exits_zero(self, tmp_path):
-        # Drop the temperature source column only.
         df = pd.read_csv(_write_hourly_csv(tmp_path / "src.csv"), index_col=0, parse_dates=True)
         df = df.drop(columns=[_logger_name("temperatura")])
         csv = tmp_path / "no_temp.csv"
@@ -224,8 +221,8 @@ class TestSiteCommand:
         assert result.exit_code != 0
 
     def test_col_override_retargets_a_renamed_logger_column(self, tmp_path):
-        # Logger renamed the temperature column; --col points the graph at it
-        # without any code change.
+        # A logger that renames its temperature column must be reachable by
+        # --col alone, with no code change.
         renamed = {key: _logger_name(key) for key in DEFAULT_COLUMNS}
         renamed["temperatura"] = "AirT2_C_Avg"
         csv = _write_hourly_csv(tmp_path / "renamed.csv", columns=renamed)
@@ -450,12 +447,11 @@ class TestColumnsCommand:
 class TestTheTwoProducersAgree:
     """The PNG and the interactive payload draw the same nine charts.
 
-    Both docstrings say they come "from the same archive" and must "be read the
-    same way", but each carried its own literals and they had already drifted in
-    two places: the PNG's rain candidates had lost ``rain_total``, and its
-    humidity frame clipped at 100 % while the payload declared 105 % with a
-    caveat explaining that the model exceeds saturation and those points must
-    stay visible.
+    Both are documented as coming "from the same archive" and as being read the
+    same way, so their literals must not drift apart. The humidity frame is the
+    sharp case: the payload declares 105 % because the model exceeds saturation
+    and those points have to stay visible, so a PNG clipped at 100 % would hide
+    in one product what the other publishes.
     """
 
     @staticmethod
@@ -598,13 +594,13 @@ class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
 
         ``CG3*_Wm2_Avg`` is the pyrgeometer's raw thermopile signal, missing the
         sigma*T_body^4 case term; ``CG3*_Wm2Cr_Avg`` is the flux. Plotting the
-        first published a downwelling longwave of about -42 W/m2 — a value this
+        first gives a downwelling longwave of about -42 W/m2 — a value this
         station cannot measure — under the same filename and title as the
         interactive chart showing +406.
 
-        Nothing caught it because the correction adds the same term to both
-        channels: net longwave is identical either way, so the chart still summed
-        to Rn while both individual values were wrong by ~447 W/m2.
+        The correction adds the same term to both channels, so net longwave is
+        identical either way: a chart that still sums to Rn is no evidence that
+        the two individual values are right, and here both are off by ~447 W/m2.
         """
         from micrometeorology.cli import generate_station_graphs as sibling
 
@@ -618,12 +614,12 @@ class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
 class TestTheUnifiedChannelWinsWhenTheFrameHasIt:
     """Which instrument carries a quantity changes over the record.
 
-    ``radiacao_difusa.png`` read ``PSP_Wm2_Avg`` unconditionally, but the shade
-    ring was off the PSP from 2019-09 to 2025-05 and the CMP21 carried diffuse
-    instead. Any window replayed inside those six years published near-global
-    irradiance under the title "Radiação Difusa" -- 100.3 W/m2 for the 2022-07
-    reference week against the 67.6 the interactive page published for the very
-    same hours from ``Sw_dif``.
+    The shade ring was off the PSP from 2019-09 to 2025-05 and the CMP21 carried
+    diffuse instead, so reading ``PSP_Wm2_Avg`` unconditionally publishes
+    near-global irradiance for any window replayed inside those six years, under
+    the title "Radiação Difusa" -- 100.3 W/m2 for the 2022-07 reference week
+    against the 67.6 the interactive page publishes for the very same hours from
+    ``Sw_dif``.
     """
 
     @staticmethod
@@ -685,8 +681,7 @@ class TestTheDateAxisSurvivesALongWindow:
     """A fixed ``DayLocator`` does not thin -- past 1000 ticks matplotlib drops them.
 
     The archive's own hourly frame spans 2016-2026, which asks for 3,844 daily
-    ticks; the axis then renders as an unreadable black band under a chart that
-    otherwise looks finished.
+    ticks; the axis then renders as an unreadable black band.
     """
 
     @staticmethod

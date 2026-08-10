@@ -30,12 +30,11 @@ def sample_5min_data() -> pd.DataFrame:
 class TestAggregateToHourly:
     def test_output_length(self, sample_5min_data):
         result = aggregate_to_hourly(sample_5min_data)
-        assert len(result) == 2  # 2 hours
+        assert len(result) == 2
 
     def test_mean_columns(self, sample_5min_data):
         result = aggregate_to_hourly(sample_5min_data)
         assert "Temp" in result.columns
-        # Mean of 12 samples should be close to 25
         assert abs(result["Temp"].iloc[0] - 25.0) < 3.0
 
     def test_sum_columns(self, sample_5min_data):
@@ -44,7 +43,6 @@ class TestAggregateToHourly:
             sum_columns=["precip"],
         )
         assert "precip" in result.columns
-        # Sum of the first hour's 12 samples
         raw_sum = sample_5min_data["precip"][:12].sum()
         assert result["precip"].iloc[0] == pytest.approx(raw_sum, abs=0.001)
 
@@ -79,16 +77,14 @@ class TestAggregateToHourly:
             wind_dir_columns=["WD_WXT"],
         )
         assert "WD_WXT" in result.columns
-        # Direction should be between 0 and 360
         for val in result["WD_WXT"].dropna():
             assert 0 <= val < 360
 
-        # Ensure hours are distinct (no global mean flattening bug)
+        # The vector mean is taken per hour, not once over the whole frame.
         dir1 = result["WD_WXT"].iloc[0]
         dir2 = result["WD_WXT"].iloc[1]
         assert abs(dir1 - dir2) > 1.0, f"Hours 1 and 2 identical: {dir1} == {dir2}"
 
-        # The vector mean must not coincide with the arithmetic mean
         arithmetic = sample_5min_data["WD_WXT"][:12].mean()
         assert dir1 != pytest.approx(arithmetic, abs=1.0)
 
@@ -150,11 +146,10 @@ class TestShippedConfigDrivesSpecialAggregation:
 
     ``configs_dir`` is the directory the sensor pipeline resolves its
     configuration from, and every reader of it is guarded by an
-    ``if ...exists()``.  When it names a directory without ``default.yaml``
-    those guards fall through silently and both rule lists come back empty, so
-    every column is arithmetically meaned: an hour of rain tips is reported as
-    its per-sample average, and a bearing straddling north is reported as the
-    opposite bearing.
+    ``if ...exists()``. When it names a directory without ``default.yaml`` those
+    guards fall through silently and both rule lists come back empty, so every
+    column is arithmetically meaned: an hour of rain tips is reported as its
+    per-sample average, and a bearing straddling north as the opposite bearing.
     """
 
     def _rules_from_the_resolved_configs_dir(
@@ -222,12 +217,9 @@ class TestShippedConfigDrivesSpecialAggregation:
     def test_every_shipped_direction_column_declares_the_speed_that_weights_it(
         self, settings_without_ambient_overrides: Settings
     ) -> None:
-        """A direction with no pairing is silently vector-averaged with unit weight.
-
-        That is what shipped for the whole record: the field existed, both CLIs
-        passed it, and no YAML ever populated it, so a calm sample counted as
-        much as a squall in every published bearing.
-        """
+        """A direction with no pairing is silently vector-averaged with unit
+        weight, so a calm sample counts as much as a squall in the published
+        bearing."""
         settings = settings_without_ambient_overrides
         unpaired = set(settings.sensor_wind_dir_columns) - set(
             settings.sensor_wind_speed_column_map

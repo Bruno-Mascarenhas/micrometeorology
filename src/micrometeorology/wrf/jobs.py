@@ -123,9 +123,10 @@ def apply_hdf5_locking_policy() -> None:
 
 
 def _format_datetime(timestamp: datetime | None) -> str:
-    """Format a datetime for JSON output (identical to the legacy CLI helper).
+    """Format a datetime for the JSON ``date_time`` field the site parses.
 
-    ``None`` yields ``"N/A"``, matching the legacy helper's defensive contract.
+    ``None`` yields ``"N/A"``; a timestamp object that cannot be formatted falls
+    back to ``str()`` rather than failing the work unit.
     """
     if timestamp is None:
         return "N/A"
@@ -133,7 +134,7 @@ def _format_datetime(timestamp: datetime | None) -> str:
         formatted: str = timestamp.replace(minute=0, second=0, microsecond=0, tzinfo=None).strftime(
             "%d/%m/%Y %H:%M:%S"
         )
-    except Exception:  # noqa: BLE001 - the legacy helper never raised on odd timestamp objects
+    except Exception:  # noqa: BLE001 - formatting must never fail the work unit
         return str(timestamp)
     return formatted
 
@@ -169,7 +170,7 @@ def _atomic_json_dump(output_path: Path, payload: dict) -> str:
 # Fixed-point int32 encoding for the cell-series matrix: a rounded value is
 # stored as ``rint(value * SERIES_SCALE)``, so SERIES_SCALE=100 keeps two
 # decimals. SERIES_MISSING (int32 min) is the reserved no-value sentinel and
-# _SERIES_INT_MAX is the clamp ceiling that keeps encoded values in range.
+# _SERIES_INT_MAX is the refusal bound past which encoding raises.
 SERIES_MISSING = -(2**31)
 SERIES_SCALE = 100
 _SERIES_INT_MAX = 2**31 - 1
@@ -219,10 +220,9 @@ class _SiteArtifactAccumulator:
         finite = np.isfinite(flat)
         scaled = np.rint(flat[finite] * SERIES_SCALE)
         # Refused rather than clipped. The matrix is int32 hundredths, so a value
-        # past +-21,474,836.47 has no representation — and clipping silently gave
-        # it one, leaving the per-step JSON and the summary publishing the true
-        # number while the series the site reads for the same cell published the
-        # ceiling. A magnitude that large is a broken field, not a measurement.
+        # past +-21,474,836.47 has no representation; clipping it would publish
+        # the ceiling in the series while the per-step JSON and the summary
+        # publish the true number. That magnitude is a broken field, not a value.
         if scaled.size and (scaled.min() <= SERIES_MISSING or scaled.max() > _SERIES_INT_MAX):
             extreme = flat[finite][np.argmax(np.abs(scaled))]
             raise ValueError(
@@ -304,14 +304,13 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
             continue
         time_step_index = step_metadata["index"]
         frame_values = frame_source.frame_for_step(time_step_index)
-        # A step whose whole domain is non-finite is not published at all. The
-        # daylight window is a clock rule, but a value can be undefined inside it
-        # — the clearness index is null wherever cos(z) is below its cutoff, so
-        # every sunrise and sunset step came out with every cell null. Writing it
-        # made the run's two artifacts disagree about the same instant: the
-        # manifest derives `availability` from the files WRITTEN, while the
-        # summary the preview panel reads records only steps with a finite cell.
-        # The site reads the first for its timeline and the second for its panel.
+        # A step whose whole domain is non-finite is not published at all: the
+        # daylight window is a clock rule, but the clearness index is null
+        # wherever cos(z) is below its cutoff, so sunrise and sunset steps are
+        # all-null inside it. Writing them makes the run's two artifacts disagree
+        # about the same instant — the manifest derives `availability` from the
+        # files WRITTEN (the site's timeline), while the summary the preview
+        # panel reads records only steps with a finite cell.
         if not np.isfinite(np.asarray(frame_values, dtype=float)).any():
             continue
         formatted_local_time = _format_datetime(step_metadata["datetime_local"])
@@ -342,80 +341,86 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
     return written_files, unit_warnings, []
 
 
-def _run_poteolico_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list[str]]:
+def _run_poteolico_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str]]:
     files: list[str] = []
-    grid = ds.grid_level.value
-    time_meta = ds.build_date_metadata(skip_first_n=unit.skip_first)
+    grid_level = dataset.grid_level.value
+    time_step_metadata = dataset.build_date_metadata(skip_first_n=unit.skip_first)
     targets = parse_poteolico_heights(unit.variable)
-    series = variables.stream_wind_at_heights(ds, targets)
+    series = variables.stream_wind_at_heights(dataset, targets)
 
     for height_series in series:
         suffix = f"POT_EOLICO_{height_series.target}M"
-        acc = _SiteArtifactAccumulator(ds.n_time_steps) if unit.site_artifacts else None
-        for meta in time_meta:
-            if meta.get("skip"):
+        accumulator = (
+            _SiteArtifactAccumulator(dataset.n_time_steps) if unit.site_artifacts else None
+        )
+        for step_metadata in time_step_metadata:
+            if step_metadata.get("skip"):
                 continue
-            i = meta["index"]
-            date_str = _format_datetime(meta["datetime_local"])
-            out = Path(unit.json_dir) / f"{grid}_{suffix}_{i:03d}.json"
+            step_index = step_metadata["index"]
+            date_str = _format_datetime(step_metadata["datetime_local"])
+            output_path = Path(unit.json_dir) / f"{grid_level}_{suffix}_{step_index:03d}.json"
             files.append(
                 _atomic_values_json(
-                    out,
-                    height_series.speed_steps[i],
+                    output_path,
+                    height_series.speed_steps[step_index],
                     height_series.vmin,
                     height_series.vmax,
                     date_str,
-                    height_series.wind_vectors[i],
+                    height_series.wind_vectors[step_index],
                 )
             )
-            if acc is not None:
-                acc.add(i, height_series.speed_steps[i], date_str)
-        if acc is not None:
-            files.extend(acc.write(unit.json_dir, f"{grid}_{suffix}", grid, suffix))
+            if accumulator is not None:
+                accumulator.add(step_index, height_series.speed_steps[step_index], date_str)
+        if accumulator is not None:
+            files.extend(
+                accumulator.write(unit.json_dir, f"{grid_level}_{suffix}", grid_level, suffix)
+            )
     return files, []
 
 
-def _run_wind_vectors_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list[str]]:
+def _run_wind_vectors_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str]]:
     files: list[str] = []
-    grid = ds.grid_level.value
-    time_meta = ds.build_date_metadata(skip_first_n=unit.skip_first)
-    u10, v10, _vmin, _vmax = variables.extract_wind(ds)
+    grid_level = dataset.grid_level.value
+    time_step_metadata = dataset.build_date_metadata(skip_first_n=unit.skip_first)
+    u10, v10, _vmin, _vmax = variables.extract_wind(dataset)
 
-    for meta in time_meta:
-        if meta.get("skip"):
+    for step_metadata in time_step_metadata:
+        if step_metadata.get("skip"):
             continue
-        i = meta["index"]
-        u = variables.materialize_2d(u10[i : i + 1])
-        v = variables.materialize_2d(v10[i : i + 1])
-        payload = create_wind_vectors_json(u, v, date_time=meta["datetime_local"], downsampling=4)
-        out = Path(unit.json_dir) / f"{grid}_WIND_VECTORS_{i:03d}.json"
-        files.append(_atomic_json_dump(out, payload))
+        step_index = step_metadata["index"]
+        u = variables.materialize_2d(u10[step_index : step_index + 1])
+        v = variables.materialize_2d(v10[step_index : step_index + 1])
+        payload = create_wind_vectors_json(
+            u, v, date_time=step_metadata["datetime_local"], downsampling=4
+        )
+        output_path = Path(unit.json_dir) / f"{grid_level}_WIND_VECTORS_{step_index:03d}.json"
+        files.append(_atomic_json_dump(output_path, payload))
     return files, []
 
 
-def _run_grid_geojson_unit(unit: WorkUnit, ds: WRFDataset) -> tuple[list[str], list[str]]:
-    lon, lat = ds.read_grid()
-    grid = ds.grid_level.value
-    out = Path(unit.geojson_dir) / f"{grid}.geojson"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(f".{out.name}.tmp-{os.getpid()}")
-    geojson.write_grid_geojson_stream(tmp, lon, lat, ds.dx, ds.dy)
-    os.replace(tmp, out)
-    logger.info("Saved GeoJSON: %s", out)
+def _run_grid_geojson_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str]]:
+    lon, lat = dataset.read_grid()
+    grid_level = dataset.grid_level.value
+    output_path = Path(unit.geojson_dir) / f"{grid_level}.geojson"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = output_path.with_name(f".{output_path.name}.tmp-{os.getpid()}")
+    geojson.write_grid_geojson_stream(tmp, lon, lat, dataset.dx, dataset.dy)
+    os.replace(tmp, output_path)
+    logger.info("Saved GeoJSON: %s", output_path)
 
     # Compact companion preferred by the site front-end (which falls back to
     # the legacy .geojson above); a fraction of the size on the wire.
-    compact = Path(unit.geojson_dir) / f"{grid}.grid.json"
+    compact = Path(unit.geojson_dir) / f"{grid_level}.grid.json"
     compact_tmp = compact.with_name(f".{compact.name}.tmp-{os.getpid()}")
-    geojson.write_grid_compact_json_stream(compact_tmp, lon, lat, ds.dx, ds.dy)
+    geojson.write_grid_compact_json_stream(compact_tmp, lon, lat, dataset.dx, dataset.dy)
     os.replace(compact_tmp, compact)
-    return [str(out), str(compact)], []
+    return [str(output_path), str(compact)], []
 
 
-def _run_time_metadata(ds: WRFDataset) -> tuple[str | None, int | None]:
+def _run_time_metadata(dataset: WRFDataset) -> tuple[str | None, int | None]:
     """The run's first local datetime (JSON date_time format) and step count."""
     try:
-        times = ds.parse_times()
+        times = dataset.parse_times()
         if not times:
             return None, None
         return _format_datetime(times[0].astimezone(product_timezone())), len(times)
@@ -423,11 +428,9 @@ def _run_time_metadata(ds: WRFDataset) -> tuple[str | None, int | None]:
         return None, None
 
 
-# `{i:03d}` is a MINIMUM width, so step 1000 is written as `_1000.json`. Matching
-# exactly three digits made the scanner disagree with the writer past that point:
-# those files contributed to neither the timeline nor `availability`, so
-# `index_max` was published as 999 while `features.cell_series.index_max` (taken
-# from the step count) reported the truth, and the site's slider hid the frames.
+# `{i:03d}` is a MINIMUM width, so step 1000 is written as `_1000.json`: the
+# scanner must accept three OR MORE digits, or past that point it disagrees with
+# the writer and those frames reach neither the timeline nor `availability`.
 _TIMESTEP_FILE_RE = re.compile(r"^(D\d{2})_([A-Z0-9_]+)_(\d{3,})\.json$")
 
 
@@ -482,13 +485,13 @@ def write_run_manifest(
     # summary/series artifacts.
     # Keyed by (domain, variable), never by variable alone. `availability` has
     # no domain axis and the site reads it for whichever domain is selected, so
-    # a per-variable union advertises D01's steps to D03: the clearness index
-    # masks cells by cos(z) geographically, so a coarse domain reaching further
-    # west keeps sunrise frames a nested domain drops, and the published step
-    # sets genuinely differ for the same run and the same clock hour. The site
-    # then requests a file this run never wrote and — because the writers use
-    # fixed names and replace in place — is served the PREVIOUS run's frame
-    # under this run's version stamp, with nothing anywhere saying so.
+    # a per-variable union would advertise D01's steps to D03: the clearness
+    # index masks cells by cos(z) geographically, so a coarse domain reaching
+    # further west keeps sunrise frames a nested domain drops, and the published
+    # step sets genuinely differ for the same run and the same clock hour. The
+    # site would then request a file this run never wrote and — because the
+    # writers use fixed names and replace in place — be served the PREVIOUS
+    # run's frame under this run's version stamp.
     var_indices: dict[tuple[str, str], set[int]] = {}
     domain_indices: dict[str, set[int]] = {}
     have_summary = False
@@ -658,18 +661,18 @@ def process_unit(unit: WorkUnit) -> UnitResult:
     t0 = time.perf_counter()
     missing_variables: list[str] = []
     try:
-        with WRFDataset(unit.wrf_path) as ds:
+        with WRFDataset(unit.wrf_path) as dataset:
             if unit.kind == "values_json":
-                files, warnings, missing_variables = _run_values_unit(unit, ds)
+                files, warnings, missing_variables = _run_values_unit(unit, dataset)
             elif unit.kind == "poteolico":
-                files, warnings = _run_poteolico_unit(unit, ds)
+                files, warnings = _run_poteolico_unit(unit, dataset)
             elif unit.kind == "wind_vectors":
-                files, warnings = _run_wind_vectors_unit(unit, ds)
+                files, warnings = _run_wind_vectors_unit(unit, dataset)
             elif unit.kind == "grid_geojson":
-                files, warnings = _run_grid_geojson_unit(unit, ds)
+                files, warnings = _run_grid_geojson_unit(unit, dataset)
             else:
                 raise ValueError(f"Unknown work unit kind: {unit.kind}")
-            start_local, n_steps = _run_time_metadata(ds)
+            start_local, n_steps = _run_time_metadata(dataset)
         return UnitResult(
             label=unit.label,
             kind=unit.kind,
@@ -847,10 +850,9 @@ def execute_units(
         status = f"✗ {result.error}" if result.error else f"{len(result.files)} files"
         echo(f"  [{len(results)}/{len(ordered)}] {result.label}: {status}")
 
-    # Always sweep at the end: a unit that failed mid-write WITHOUT breaking
-    # the pool (the common case — process_unit catches everything) leaves its
-    # dead-pid temp file behind, and debris must not wait for a future run
-    # that happens to crash before being cleaned up.
+    # Always sweep at the end: a unit that failed mid-write WITHOUT breaking the
+    # pool (the common case — process_unit catches everything) leaves its temp
+    # file behind, and the debris must not wait for a future failing run.
     swept = _sweep_stale_temp_files(output_dirs, sweep_pids=frozenset({os.getpid()}))
     if swept:
         echo(f"  swept {swept} stale temp file(s)")

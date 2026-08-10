@@ -66,7 +66,7 @@ class MapConfig:
 class FigureTask(NamedTuple):
     """Lightweight, picklable description of a single frame to render."""
 
-    # Data (pre-sliced 2D arrays → small, picklable)
+    # Pre-sliced 2D arrays: small enough to pickle across the pool boundary.
     lon: NDArray
     lat: NDArray
     data: NDArray
@@ -82,14 +82,9 @@ class FigureTask(NamedTuple):
     u: NDArray | None
     v: NDArray | None
 
-    # Labels
     title: str
     output_path: str
-
-    # Map config
     map_config: MapConfig
-
-    # Rendering options
     dpi: int
     saturation: float
 
@@ -157,7 +152,6 @@ def _render_figure(task: FigureTask) -> str:
             crs=ccrs.PlateCarree(),
         )
 
-        # Map features
         ax.coastlines(resolution="10m", linewidth=map_config.coast_width)
         ax.add_feature(
             cfeature.NaturalEarthFeature("cultural", "admin_1_states_provinces_lines", "10m"),
@@ -166,7 +160,6 @@ def _render_figure(task: FigureTask) -> str:
             facecolor="none",
         )
 
-        # Municipality outlines (inner domains only, from --shapes-dir)
         if map_config.draw_municipalities and map_config.shapes_dir:
             geometries = _municipality_geometries(
                 str(Path(map_config.shapes_dir) / "BRMUE250GC_SIR.shp")
@@ -180,7 +173,6 @@ def _render_figure(task: FigureTask) -> str:
                     linewidth=0.5,
                 )
 
-        # Gridlines
         gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="gray", alpha=0.5)
         gl.top_labels = False
         gl.right_labels = False
@@ -189,7 +181,6 @@ def _render_figure(task: FigureTask) -> str:
         cmap = saturated_cmap(task.cmap_name, task.saturation)
 
         if task.u is not None and task.v is not None:
-            # Wind field
             speed = task.data
             mesh = ax.pcolormesh(
                 task.lon,
@@ -205,7 +196,7 @@ def _render_figure(task: FigureTask) -> str:
             cb = plt.colorbar(mesh, ax=ax, shrink=0.5, pad=0.04)
             cb.ax.tick_params(labelsize=10)
 
-            # Quiver (sub-sampled)
+            # Sub-sampled so the arrows stay readable at each domain's grid pitch.
             stride_map = {"D01": 6, "D02": 3, "D03": 4, "D04": 4, "D05": 4}
             stride = stride_map.get(map_config.grid_level, 4)
             ax.quiver(
@@ -218,7 +209,6 @@ def _render_figure(task: FigureTask) -> str:
                 width=0.003,
             )
         else:
-            # Scalar field — single pcolormesh (no double contourf+pcolor)
             mesh = ax.pcolormesh(
                 task.lon,
                 task.lat,
@@ -233,7 +223,6 @@ def _render_figure(task: FigureTask) -> str:
             cb = plt.colorbar(mesh, ax=ax, shrink=0.5, pad=0.04)
             cb.ax.tick_params(labelsize=10)
 
-        # Pressure contour overlay
         if task.overlay_data is not None:
             levels = task.overlay_levels or [880, 900, 950, 1000, 1013]
             cs = ax.contour(
@@ -346,6 +335,13 @@ def run_figure_tasks(
         List of ``FigureTask`` to render.
     workers:
         Number of parallel workers. Defaults to ``cpu_count - 4``.
+    backend:
+        ``"serial"`` renders in-process; ``"memmap"`` spills each task's arrays
+        to ``.npy`` files and passes them by path; ``"auto"`` picks serial only
+        when a single worker was resolved.
+    tmp_dir:
+        Parent directory for the memmap spill directory. ``None`` uses a
+        self-cleaning :class:`tempfile.TemporaryDirectory`.
     executor:
         Optional caller-owned process pool. When provided and the resolved
         backend is ``"memmap"`` with more than one worker, tasks are

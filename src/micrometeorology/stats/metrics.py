@@ -7,8 +7,6 @@ All metrics follow a uniform signature::
 Non-finite values (NaN and ±inf) are stripped pairwise before computation, so
 one diverged prediction costs its own pair instead of the whole record.  If
 fewer than 2 valid pairs remain, the metric returns ``NaN``.
-
-Ported from ``wrf/metrics.py`` with added type hints and non-finite safety.
 """
 
 import logging
@@ -42,8 +40,8 @@ def valid_pairs(observed: NDArray, predicted: NDArray) -> int:
     This is the denominator every metric is actually computed over, and it
     differs per variable — a frame paired by ``merge_asof`` keeps one row per
     observation whether or not a model row matched, and each column then loses
-    its own gaps. Published beside the metrics so the sample size stays
-    recoverable from the artifact instead of only from a log line.
+    its own gaps. Published beside the metrics so the sample size is recoverable
+    from the artifact itself.
     """
     obs = np.asarray(observed, dtype=float)
     pred = np.asarray(predicted, dtype=float)
@@ -149,10 +147,6 @@ def nrmse(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
     return rmse(obs, pred, clean=False) / obs_range
 
 
-# ---------------------------------------------------------------------------
-# Convenience: compute all metrics at once
-# ---------------------------------------------------------------------------
-
 ALL_METRICS = {
     "RMSE": rmse,
     "MAE": mae,
@@ -167,7 +161,7 @@ ALL_METRICS = {
 # Metrics that stay meaningful once an angular residual is wrapped: each is a
 # reduction of ``pred - obs`` alone. The rest — R², r, d, IOA, NRMSE — normalise
 # by the observed mean or variance, and the arithmetic mean of a bearing has no
-# meaning (the mean of 350° and 10° is 180°, the exact opposite rumo), so they
+# meaning (the mean of 350° and 10° is 180°, the exact opposite heading), so they
 # are reported as NaN rather than as a plausible-looking wrong number.
 CIRCULAR_METRICS = frozenset({"RMSE", "MAE", "MBE"})
 
@@ -185,7 +179,7 @@ _LINEAR_DISPERSION_MARKERS = ("sd", "std")
 def is_circular_column(name: str) -> bool:
     """Whether *name* denotes a wind direction, i.e. a bearing in degrees.
 
-    Direction is circular: 0° and 360° are the same rumo. Scored on the line,
+    Direction is circular: 0° and 360° are the same heading. Scored on the line,
     a model at 10° against an observation at 350° reads as a 340° error instead
     of 20°, which inflates RMSE and can flip the sign of the bias. Detection is
     by name because that is all a generic ``obs``/``model`` CSV carries.

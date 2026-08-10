@@ -3,8 +3,7 @@
 The QC limits, the sum-aggregated columns, the vector-averaged wind-direction
 columns and the default sample floor all come from ``get_settings()``, so the
 full ``default.yaml`` -> ``LABMIM_ENV`` -> ``LABMIM_CONFIG_PATH`` -> ``LABMIM_*``
-layering applies. Earlier revisions re-parsed ``configs_dir/default.yaml`` here
-and therefore ignored every layer above the shipped defaults.
+layering applies.
 
 Examples
 --------
@@ -82,9 +81,8 @@ def run(
 
     typer.echo(f"Found {len(files)} files")
 
-    # The threshold is configurable precisely so an operator can switch off a
-    # guard that catches nothing in this archive; reading the reader's own
-    # hard-coded default instead made `sensor_sentinel_value: null` a no-op.
+    # Passed explicitly so `sensor_sentinel_value: null` really switches the
+    # guard off, rather than falling back to the reader's hard-coded default.
     df = merge_dat_files(files, sentinel_value=settings.sensor_sentinel_value)
 
     if settings.sensor_limits:
@@ -105,9 +103,8 @@ def run(
         ),
         sum_columns=settings.sensor_sum_columns,
         wind_dir_columns=settings.sensor_wind_dir_columns,
-        # aggregate_to_hourly has accepted this pairing since it was written, but
-        # nothing ever passed it: every direction was vector-averaged with unit
-        # weight, which puts about one hourly bearing in six more than 5 deg off.
+        # Weights each direction by its own speed: under unit weight instead,
+        # about one hourly bearing in six lands more than 5 deg off.
         wind_speed_column_map=settings.sensor_wind_speed_column_map,
         freq=freq,
     )

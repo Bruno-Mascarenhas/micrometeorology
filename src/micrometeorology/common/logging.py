@@ -1,7 +1,6 @@
-"""Structured logging configuration.
+"""One logging setup shared by every entry point.
 
-Provides a consistent logging setup across all modules.  Import and call
-``setup_logging()`` once at application startup (e.g. in a CLI script).
+Call ``setup_logging()`` once at application startup (e.g. in a CLI script).
 Individual modules obtain their loggers via::
 
     import logging
@@ -20,7 +19,7 @@ def setup_logging(level: str = "INFO", *, log_file: str | None = None) -> None:
     level:
         Logging level name (``DEBUG``, ``INFO``, ``WARNING``, …).
     log_file:
-        Optional path to a log file.  If given, a ``FileHandler`` is added
+        Optional path to a log file. If given, a ``FileHandler`` is added
         alongside the stream handler.
     """
     fmt = "%(asctime)s | %(name)-40s | %(levelname)-7s | %(message)s"
@@ -36,9 +35,11 @@ def setup_logging(level: str = "INFO", *, log_file: str | None = None) -> None:
         format=fmt,
         datefmt=datefmt,
         handlers=handlers,
-        force=True,  # override any prior basicConfig calls
+        # An imported library may already have configured the root logger; this
+        # entry point's format and level are the ones that must win.
+        force=True,
     )
 
-    # Quieten noisy third-party loggers
+    # Third-party loggers that are chatty at INFO.
     for name in ("matplotlib", "PIL", "fiona", "rasterio"):
         logging.getLogger(name).setLevel(logging.WARNING)

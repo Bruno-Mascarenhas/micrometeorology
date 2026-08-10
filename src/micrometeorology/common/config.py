@@ -31,11 +31,9 @@ def _project_root() -> Path:
     An installed wheel has no ``pyproject.toml`` anywhere above it, so the walk
     falls through. The fallback has to land somewhere that actually holds the
     shipped YAML: ``configs/micromet`` is force-included into the wheel as
-    ``micrometeorology/configs/micromet`` for exactly this case. The previous
-    fallback of "three levels up" resolved to ``<prefix>/lib/pythonX.Y``, where
-    no ``configs/`` exists — so on a non-editable install every sensor rule
-    silently became its empty default and the CLIs exported unfiltered,
-    uncalibrated data with exit code 0.
+    ``micrometeorology/configs/micromet`` for exactly this case. A fallback that
+    misses it leaves every sensor rule at its empty default, and the CLIs then
+    export unfiltered, uncalibrated data with exit code 0.
     """
     current = Path(__file__).resolve().parent
     for parent in [current, *current.parents]:
@@ -90,15 +88,12 @@ class Settings(BaseSettings):
         default=Path("configs/micromet"), description="Configuration directory"
     )
 
-    # No WRF settings live here. Neither micrometeorology.wrf nor any of the
-    # three WRF CLIs imports this module — `get_settings()` has exactly two
-    # consumers, labmim-archive and labmim-sensor-process — and each WRF CLI owns
-    # a DEFAULT_VARS list deliberately different from its siblings' (the GeoJSON
-    # exporter's is matched to the front-end variable registry, the figure
-    # renderer's to the variables that have a colormap). A `wrf_default_variables`
-    # key here read like the authoritative list and could not take effect through
-    # any of LABMIM_ENV, LABMIM_CONFIG_PATH or LABMIM_*, so it was removed rather
-    # than wired into one of the three.
+    # No WRF settings live here: `get_settings()` has exactly two consumers,
+    # labmim-archive and labmim-sensor-process. Neither micrometeorology.wrf nor
+    # any WRF CLI imports this module, and each WRF CLI owns a DEFAULT_VARS list
+    # deliberately different from its siblings' (the GeoJSON exporter's matches
+    # the front-end variable registry, the figure renderer's the variables that
+    # have a colormap), so no key here could be authoritative for all three.
 
     # Sensor defaults
     sensor_min_samples_per_hour: int = Field(
@@ -167,9 +162,8 @@ def get_settings() -> Settings:
         merged = _load_yaml(root / "configs" / "default.yaml")
     if not merged:
         # Every sensor rule — QC limits, the sum and direction columns, the
-        # calibration lookup — lives in that file. Settings would still build
-        # from bare defaults, and the CLIs would export unfiltered data and exit
-        # 0, so this fails instead of degrading silently.
+        # calibration lookup — lives in that file, and Settings would otherwise
+        # build from bare defaults and export unfiltered data with exit code 0.
         raise FileNotFoundError(
             "no shipped configuration found; searched "
             f"{configs_dir / 'default.yaml'} and {root / 'configs' / 'default.yaml'}"

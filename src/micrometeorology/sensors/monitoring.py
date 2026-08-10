@@ -1,8 +1,7 @@
 """The monitoring-window contract: which series each chart draws, from which source.
 
 The monitoring page shows a rolling window of the station record in THREE
-LAYERS, which is the researcher's requirement and the thing that makes the page
-worth reading:
+LAYERS:
 
 1. the **raw** samples at the logger's own cadence, so the data can be inspected
    rather than only its summary;
@@ -108,8 +107,7 @@ class MonitoringChart:
 
 # Candidate spellings for a WRF precipitation column. None of them exists in
 # series_operacional.dat today — the extraction never sampled RAINC/RAINNC — but
-# the laboratory intends to add one. Listing the plausible names now is what
-# makes that a data change rather than a code change.
+# the laboratory intends to add one.
 _WRF_RAIN_CANDIDATES = (
     "precip",
     "Precip",
@@ -138,8 +136,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         series=(MonitoringSeries("ur", "Umidade relativa", "ur", ("ur", "RH")),),
         # 0-105, not 0-100: the WRF humidity is not clipped at saturation and
         # reaches 101,6% over the record. A 0-100 frame would push those points
-        # off the axis without a trace, which is the kind of invisible censoring
-        # the three-layer view exists to prevent.
+        # off the axis without a trace.
         y_limits=(0.0, 105.0),
         caveats=(
             "A umidade do WRF não é limitada na saturação e passa de 100% em algumas horas; o eixo vai a 105% para que esses pontos apareçam em vez de sumirem.",

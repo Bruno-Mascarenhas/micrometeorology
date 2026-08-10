@@ -181,7 +181,6 @@ def test_values_json_matches_reference_payload_with_int_formatting(tmp_path):
     expected_metadata = json.dumps(expected["metadata"], separators=(",", ":"), ensure_ascii=False)
     assert text.startswith('{"metadata":' + expected_metadata)
     assert text.endswith(',"values":[1.23,null,5.68,-3.21,0,2.5]}')
-    # The reference payload embeds the wind dict and null for the NaN cell.
     assert expected["metadata"]["wind"] == wind_data
     assert expected["values"][1] is None
 
@@ -299,10 +298,9 @@ units = jobs.build_units([{str(wrf)!r}], ["temperature", "pressure", "wind"], {s
 results = jobs.execute_units(units, workers=2, echo=lambda _msg: None)
 print(json.dumps([[r.label, r.error is not None, len(r.files)] for r in results]))
 """
-    # One retry: under a fully saturated CPU (e.g. first cold run of the whole
-    # suite) the helper interpreter can fail to fork worker processes, failing
-    # innocent units. That is environment noise, not the crash-recovery
-    # behavior under test — only the deliberately crashed unit may fail.
+    # One retry: under a fully saturated CPU the helper interpreter can fail to
+    # fork worker processes, failing innocent units. That is environment noise,
+    # not the crash recovery under test — only the crashed unit may fail.
     for _attempt in range(2):
         proc = subprocess.run(
             [sys.executable, "-c", script],
@@ -327,7 +325,6 @@ print(json.dumps([[r.label, r.error is not None, len(r.files)] for r in results]
     assert rows[f"{wrf.name}:pressure"][0] is True
     assert rows[f"{wrf.name}:temperature"] == (False, NT + 2)
     assert rows[f"{wrf.name}:wind"] == (False, NT + 2)
-    # No truncated/temp files are visible.
     leftovers = [p for p in out.rglob("*") if ".tmp-" in p.name]
     assert leftovers == []
     for p in (out / "json").glob("*.json"):
@@ -358,7 +355,7 @@ def test_units_run_capped_serial_when_single_worker(tmp_path, monkeypatch):
 
 
 def test_single_timestep_file_processes_without_errors(tmp_path):
-    """Time=1 wrfout files must not crash the squeeze/bounds logic (Fix 3)."""
+    """Time=1 wrfout files must not crash the squeeze/bounds logic."""
     wrf = tmp_path / "wrfout_d02_jobs_single.nc"
     _write_full_wrf_file(wrf, seed=21, nt=1)
     json_dir = tmp_path / "json"
@@ -672,8 +669,8 @@ def test_untokenized_filename_fails_the_unit_instead_of_publishing_as_d01(tmp_pa
 
 
 def test_manifest_domains_follow_the_same_rule_as_the_published_filenames(tmp_path):
-    """``wrfout_d03.nc`` has no trailing token underscore: the manifest used to
-    advertise no domain at all while publishing a full set of D03_* files."""
+    """``wrfout_d03.nc`` has no trailing token underscore, so the manifest and
+    the published filenames must agree on D03 from the same detection rule."""
     wrf = tmp_path / "wrfout_d03.nc"
     _write_full_wrf_file(wrf, seed=53)
     json_dir = tmp_path / "json"
@@ -715,8 +712,7 @@ def test_manifest_publishes_a_variable_the_wrfout_does_not_carry_as_empty(tmp_pa
 
 
 def test_atomic_json_dump_writes_exactly_the_compact_encoder_bytes(tmp_path):
-    """Encoding through ``json.dumps`` must be byte-identical to the
-    ``json.dump(obj, fp)`` spelling it replaced — only 3x cheaper."""
+    """The atomic writer must emit exactly the compact-encoder bytes."""
     payload = {
         "format": "domain-summary-v1",
         "variable": "POT_EOLICO_150M",
@@ -742,9 +738,9 @@ def test_atomic_json_dump_still_refuses_non_finite_payloads(tmp_path):
 
 
 def test_worker_logging_is_configured_with_pid_and_level_on_stderr(tmp_path):
-    """Forkserver children inherit no handlers, so worker records used to fall
-    through to ``logging.lastResort``: bare text, no timestamp, no pid, from 44
-    interleaved streams at once."""
+    """Forkserver children inherit no handlers, so without explicit worker
+    configuration their records fall through to ``logging.lastResort``: bare
+    text, no timestamp and no pid, from every worker stream at once."""
     script = f"""
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.wrf import jobs
@@ -819,10 +815,10 @@ def test_serial_run_sweeps_its_own_failed_unit_debris(tmp_path):
 def test_the_timeline_scanner_matches_the_names_the_writers_actually_produce():
     """``{i:03d}`` is a MINIMUM width, so step 1000 is written ``_1000.json``.
 
-    Matching exactly three digits made the scanner silently disagree with the
-    writer past that point: those files joined neither the timeline nor
-    ``availability``, so ``index_max`` was published as 999 against a true step
-    count of 1007 and the site's slider hid the last frames.
+    A scanner matching exactly three digits disagrees with the writer past that
+    point: those files join neither the timeline nor ``availability``, so
+    ``index_max`` is published as 999 against a true step count of 1007 and the
+    site's slider hides the last frames.
     """
     for name, index in (
         ("D01_TEMP_000.json", "000"),
@@ -842,12 +838,12 @@ def test_a_step_with_no_finite_cell_is_not_published_at_all(tmp_path, monkeypatc
     """The daylight window is a clock rule; a value can still be undefined inside it.
 
     The clearness index is null wherever cos(z) falls below its cutoff, so every
-    sunrise and sunset step used to be written with all cells null. That made the
-    run's two artifacts disagree about the same instant: ``write_run_manifest``
-    derives the timeline and ``availability`` from the files WRITTEN, while the
+    sunrise and sunset step is all-null. Writing it would make the run's two
+    artifacts disagree about the same instant: ``write_run_manifest`` derives
+    the timeline and ``availability`` from the files WRITTEN, while the
     ``.summary.json`` the preview panel reads records only steps that carried a
     finite cell. The site reads the first for its map slider and the second for
-    its panel, so the two halves of one page contradicted each other.
+    its panel.
     """
     monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_kt_sunrise.nc"
@@ -879,13 +875,13 @@ def test_availability_is_the_intersection_across_domains(tmp_path):
 
     ``availability`` carries no domain axis and the site reads it for whichever
     domain is selected, so a per-variable union advertises D01's steps to D03.
-    The clearness index diverges by construction: its cos(z) mask is
-    geographic, so a coarse domain reaching further west keeps sunrise frames a
-    nested domain drops. Measured on the real four-domain run of 2026-05-03, KT
-    was advertised over 36 indices while D03 and D04 had written 30 and D02 32 —
-    and because the writers use fixed names and replace in place, requesting one
-    of the six absent frames serves the PREVIOUS run's field under this run's
-    version stamp.
+    The clearness index diverges by construction: its cos(z) mask is geographic,
+    so a coarse domain reaching further west keeps sunrise frames a nested
+    domain drops. On the four-domain run of 2026-05-03 a union advertises KT
+    over 36 indices while D03 and D04 wrote 30 and D02 wrote 32 — and because
+    the writers use fixed names and replace in place, requesting one of the six
+    absent frames serves the PREVIOUS run's field under this run's version
+    stamp.
     """
     json_dir = tmp_path / "json"
     json_dir.mkdir()
@@ -933,11 +929,11 @@ def test_availability_is_the_intersection_across_domains(tmp_path):
 
 
 def test_a_value_past_the_int32_series_range_fails_instead_of_clipping():
-    """Clipping gave an unrepresentable value a representation, silently.
+    """Clipping would give an unrepresentable value a representation, silently.
 
-    The per-step JSON and the summary published the true number while the
-    series the site Range-requests for the same cell published the ceiling --
-    three artifacts of one run disagreeing, with nothing saying which was real.
+    The per-step JSON and the summary carry the true number while the series the
+    site Range-requests for the same cell would carry the int32 ceiling — three
+    artifacts of one run disagreeing, with nothing saying which is real.
     """
     accumulator = jobs._SiteArtifactAccumulator(n_steps=2)
     beyond = (jobs._SERIES_INT_MAX / jobs.SERIES_SCALE) * 10

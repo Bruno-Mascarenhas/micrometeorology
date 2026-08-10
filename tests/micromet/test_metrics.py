@@ -168,8 +168,8 @@ class TestComputeAll:
         """Pin every ALL_METRICS entry to a value, not just its key.
 
         Key-presence plus the all-NaN case below is satisfied by a ``compute_all``
-        that returns NaN unconditionally; these exact values are what rule that out
-        and what pins each name to the right function.
+        returning NaN unconditionally; these exact values rule that out and bind
+        each name to the right function.
         """
         obs = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         pred = obs + 1.0
@@ -193,7 +193,7 @@ class TestComputeAll:
 class TestNonFinitePairsAreDropped:
     """One diverged prediction must not destroy the whole metrics record.
 
-    ``np.isnan`` lets +-inf through, so a single infinite value used to make
+    ``np.isnan`` lets +-inf through, so a single infinite value would make
     RMSE/MAE/MBE/NRMSE inf, R2 -inf, r and d NaN, and IOA a plausible-looking
     but wrong -1.0.
     """

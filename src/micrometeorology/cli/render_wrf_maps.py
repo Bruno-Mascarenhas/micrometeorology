@@ -49,7 +49,6 @@ from micrometeorology.wrf.value_source import build_value_frame_source, publishe
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
-# Default variables when none specified
 DEFAULT_VARS = [
     "temperature",
     "pressure",
@@ -72,9 +71,7 @@ DEFAULT_VARS = [
     "wind_power_density_10m",
 ]
 
-# Variables that exist in the pipeline but don't have figure renderers yet.
-# We skip these silently rather than showing confusing "not found" warnings.
-_SKIP_FOR_FIGURES = {"poteolico", "weibull"}
+_VARIABLES_WITHOUT_FIGURE_RENDERER = {"poteolico", "weibull"}
 
 
 def _normalize_var_list(var_list: list[str]) -> list[str]:
@@ -85,12 +82,12 @@ def _normalize_var_list(var_list: list[str]) -> list[str]:
     """
     normalized: list[str] = []
     seen: set[str] = set()
-    for v in var_list:
-        if v.startswith("poteolico") and v != "poteolico":
-            v = "poteolico"
-        if v not in seen:
-            normalized.append(v)
-            seen.add(v)
+    for name in var_list:
+        if name.startswith("poteolico") and name != "poteolico":
+            name = "poteolico"
+        if name not in seen:
+            normalized.append(name)
+            seen.add(name)
     return normalized
 
 
@@ -121,9 +118,9 @@ def _resolve_wrfout_paths(
     return paths
 
 
-# The phrase each variable's figure title opens with. Everything absent from
+# The phrase each variable's figure title opens with. A variable absent from
 # this table titles from its NetCDF output suffix (HFX, PRES, VAPOR, GLW, LH),
-# which is what the published PNGs already carry.
+# which is what the published PNGs carry.
 _FIGURE_TITLES: dict[str, str] = {
     WRFVariable.TEMPERATURE: "Temperature (°C)",
     WRFVariable.SKIN_TEMPERATURE: "Skin Temperature (°C)",
@@ -161,8 +158,7 @@ def _build_tasks_for_domain(
     :func:`~micrometeorology.wrf.value_source.build_value_frame_source`, the
     same dispatcher the values-JSON work units use, so a variable is renderable
     here exactly when it is exportable there. Only the figure decoration —
-    title phrase, colormap, the temperature pressure contours and the wind
-    quiver — is decided in this module.
+    title phrase, colormap, pressure contours and wind quiver — is decided here.
     """
     lon, lat = ds.read_grid()
     bounds = (
@@ -191,7 +187,7 @@ def _build_tasks_for_domain(
                 task_sink(tasks, label)
                 tasks.clear()
 
-        if var_name in _SKIP_FOR_FIGURES:
+        if var_name in _VARIABLES_WITHOUT_FIGURE_RENDERER:
             typer.echo(f"  ⚠ Skipping {var_name} (no figure renderer)")
             continue
         frame_source = build_value_frame_source(ds, var_name)
@@ -202,14 +198,11 @@ def _build_tasks_for_domain(
         nc_suffix = VARIABLE_NETCDF_MAP.get(var_name, var_name.upper())
         title_prefix = _FIGURE_TITLES.get(var_name, nc_suffix)
         cmap = VARIABLE_COLORMAPS.get(var_name, "viridis")
-        # Read once per variable, not once per step: the whole time axis of
-        # PSFC is one eager read either way.
-        #
-        # Presence-checked, because this is the CONTOUR OVERLAY and not the field
-        # being mapped: a wrfout carrying T2 without PSFC still has a temperature
-        # figure to draw. Unguarded, `get_variable` is a bare dict lookup and the
-        # KeyError escaped as a traceback that took the remaining variables, the
-        # remaining domains and the video phase with it.
+        # Hoisted out of the step loop: the whole PSFC time axis is one eager
+        # read either way. Presence-checked because this is the contour OVERLAY
+        # and not the mapped field — a wrfout carrying T2 without PSFC still has
+        # a temperature figure to draw, and `get_variable` is a bare dict lookup
+        # whose KeyError would take every later variable and domain with it.
         surface_pressure_hpa = (
             ds.get_variable("PSFC") / 100.0
             if var_name == WRFVariable.TEMPERATURE and ds.has_variable("PSFC")
@@ -221,17 +214,17 @@ def _build_tasks_for_domain(
                 continue
             if not publishes_step(var_name, meta):
                 continue
-            i = meta["index"]
+            step = meta["index"]
             u: NDArray | None
             v: NDArray | None
             if frame_source.vector_for_step is not None:
-                u, v = frame_source.vector_for_step(i)
+                u, v = frame_source.vector_for_step(step)
                 data = np.hypot(u, v)
             else:
                 u = v = None
-                data = frame_source.frame_for_step(i)
+                data = frame_source.frame_for_step(step)
             overlay_data = (
-                vmod.materialize_2d(surface_pressure_hpa[i : i + 1, :, :])
+                vmod.materialize_2d(surface_pressure_hpa[step : step + 1, :, :])
                 if surface_pressure_hpa is not None
                 else None
             )
@@ -301,11 +294,9 @@ def run(
 
     var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
     var_list = _normalize_var_list(var_list)
-    # The guard the other two WRF CLIs already apply. Without it `-v TSK` falls
-    # through to the raw-NetCDF passthrough and renders unconverted KELVIN into
-    # TSK_D0X_nnn.png — the exact filenames skin_temperature publishes in °C —
-    # and, when both ids are listed, the output-path dedup silently keeps
-    # whichever came first, so flag order decided which PNGs shipped.
+    # Output file ids are not input variables: `-v TSK` would reach the raw-NetCDF
+    # passthrough and publish unconverted KELVIN into TSK_D0X_nnn.png, the exact
+    # filenames skin_temperature publishes in °C.
     _reject_output_id_variables(var_list)
     paths = _resolve_wrfout_paths(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
@@ -321,9 +312,9 @@ def run(
     typer.echo(f"Output: {output}")
     typer.echo(f"Workers: {resolved_workers}")
 
-    # Build and render tasks per domain/variable to avoid retaining all frames in RAM.
-    # One process pool is hoisted over the whole run so each 16-task batch reuses
-    # warm workers instead of paying pool spawn overhead per flush.
+    # Tasks are built and rendered per domain/variable so the run never retains
+    # every frame in RAM, and one process pool is hoisted over the whole run so
+    # each batch reuses warm workers instead of paying pool spawn per flush.
     png_paths: list[str] = []
     failed_figures = 0
     pool_ctx: ProcessPoolExecutor | nullcontext[None] = (
@@ -364,30 +355,29 @@ def run(
 
     typer.echo(f"\n✓ Generated {len(png_paths)} figures")
 
-    # Phase 3: WebM (optional)
     failed_videos = 0
     if also_video and png_paths:
         typer.echo("\nGenerating WebM videos...")
         from micrometeorology.wrf.animation import batch_create_webm
 
-        # Group PNGs by variable+domain prefix (e.g. "TEMP_D03")
-        grouped: dict[str, list[str]] = defaultdict(list)
-        for p in sorted(png_paths):
-            stem = Path(p).stem  # e.g. "TEMP_D03_001"
+        # One WebM per variable+domain: frames are named "<VAR>_<DOMAIN>_<step>.png".
+        frames_by_video: dict[str, list[str]] = defaultdict(list)
+        for png_path in sorted(png_paths):
+            stem = Path(png_path).stem
             parts = stem.rsplit("_", 1)
             if len(parts) == 2:
-                grouped[parts[0]].append(p)
+                frames_by_video[parts[0]].append(png_path)
             else:
-                grouped[stem].append(p)
+                frames_by_video[stem].append(png_path)
 
-        webm_paths = batch_create_webm(grouped, output, fps=2, workers=resolved_workers)
-        failed_videos = len(grouped) - len(webm_paths)
+        webm_paths = batch_create_webm(frames_by_video, output, fps=2, workers=resolved_workers)
+        failed_videos = len(frames_by_video) - len(webm_paths)
         typer.echo(f"✓ Generated {len(webm_paths)} videos")
 
     typer.echo("\n✓ Done")
 
-    # Cron chains on the exit status: a run that dropped frames is not a success,
-    # matching labmim-wrf-geojson. Videos and successful PNGs are already final.
+    # Cron chains on the exit status: a run that dropped frames is not a success.
+    # The videos and PNGs that did render are already final.
     if failed_figures or failed_videos:
         typer.echo(f"✗ {failed_figures} figures and {failed_videos} videos failed (see log)")
         raise typer.Exit(code=1)

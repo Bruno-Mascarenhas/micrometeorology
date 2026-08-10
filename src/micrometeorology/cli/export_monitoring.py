@@ -11,9 +11,8 @@ into papers.
 
 Sizing, measured on the reference week: the raw layer is ~110 kB, hourly ~9 kB
 and WRF ~7 kB, so the whole document is ~133 kB — about a third of the ~380 kB
-the nine PNGs cost the visitor today, and it arrives as numbers a reader can
-hover, toggle and download. (It was ~164 kB until irradiance stopped carrying a
-decimal place the page never rendered.)
+the nine PNGs cost the visitor, and it arrives as numbers a reader can hover,
+toggle and download.
 
 Like the climatology artifacts, the output is **not** committed to the site
 repository: it derives from the laboratory's own sensor archive, so it is
@@ -66,23 +65,18 @@ DEFAULT_DAYS = 7
 RAW_CADENCE = "5min"
 HOURLY_CADENCE = "h"
 
-# Decimals per unit. Pressure needs one to stay readable at ~1013 hPa;
-# precipitation needs three so the 0.254 mm tipping-bucket quantum survives the
-# round trip; irradiance is integer because a tenth of a W/m2 is noise.
+# Decimals per unit, matching what the page renders (``unitDigits``) so the CSV
+# download never carries a digit the chart it came from does not show. Pressure
+# needs one to stay readable at ~1013 hPa; precipitation needs three so the
+# 0.254 mm tipping-bucket quantum survives the round trip; irradiance is integer
+# because a tenth of a W/m2 is noise.
 _DECIMALS = {
-    # One decimal, which is what the page renders (``unitDigits``). Publishing
-    # two put a digit in the CSV download that the chart it came from does not
-    # show, so a reader comparing the two saw them disagree at the last place.
     "°C": 1,
     "%": 1,
     "hPa": 1,
     "m/s": 1,
     "°": 1,
     "mm": 3,
-    # Integer, as the comment above has always said and as the page has always
-    # rendered it (``unitDigits`` returns 0 for W/m²). The stray decimal reached
-    # nothing but the CSV export, where it made the download disagree with the
-    # chart the reader took it from, and it cost about a sixth of the document.
     "W/m²": 0,
 }
 
@@ -126,8 +120,7 @@ def _regular(
     the raw one — under an hourly line that stays correctly placed.
 
     Reindexing turns each hole into a row whose values are ``null``, which is
-    what both the encoding and the page already promise. It changes no field
-    name, no key and no encoding: only the arrays get longer.
+    what both the encoding and the page already promise.
     """
     if frame.empty:
         return frame, index
@@ -167,15 +160,14 @@ def _layer(
 
     A series whose column is present but holds no value over the window is
     OMITTED rather than published as an array of ``null``. The page reads
-    ``layer.series[id]`` and already treats an absent key as "this layer has
-    nothing for this series"; an all-null array instead passes that guard, builds
-    a dataset, and puts an entry in the legend for a line the reader cannot see.
+    ``layer.series[id]`` and treats an absent key as "this layer has nothing for
+    this series"; an all-null array passes that guard, builds a dataset, and puts
+    an entry in the legend for a line the reader cannot see.
 
-    This is not hypothetical. The Gill thermohygrometer railed in December 2025
-    and its readings are masked as sentinels, so the DEFAULT operational window
-    — the one the hourly deploy runs, with no ``--end`` — carries no air
-    temperature and no humidity at all. Both charts were publishing 168 nulls
-    per layer under a legend naming them.
+    Live case: the Gill thermohygrometer railed in December 2025 and its readings
+    are masked as sentinels, so the DEFAULT operational window — the one the
+    hourly deploy runs, with no ``--end`` — carries no air temperature and no
+    humidity at all.
     """
     present = {sid: column for sid, column in columns.items() if column in frame.columns}
     if frame.empty or not present:
@@ -230,11 +222,10 @@ def run(
     hourly = pd.read_parquet(Path(input_dir) / "station_hourly.parquet")
 
     # The model is read BEFORE the window is fixed, because it is allowed to run
-    # ahead of the station. Under the accumulating extraction the operational
-    # `series_operacional.dat` grows forward day by day, so an hour with a WRF
-    # value and no observation is the normal state, not a fault — and anchoring
-    # the window's end on the newest SAMPLE would clip exactly the part of the
-    # model that is worth looking at.
+    # ahead of the station: the operational `series_operacional.dat` grows
+    # forward day by day, so an hour with a WRF value and no observation is the
+    # normal state, and anchoring the window's end on the newest SAMPLE would
+    # clip exactly the part of the model worth looking at.
     model_full = pd.DataFrame()
     if wrf_path is not None:
         from micrometeorology.cli.export_climatology import read_wrf_series
@@ -254,20 +245,18 @@ def run(
         if not model_full.empty:
             last = max(last, pd.Timestamp(model_full.index.max()))
     # The raw layer keeps both ends: a 5-minute sample stamped at `last` is an
-    # instantaneous observation that really happened inside the window, and on
-    # the default (no `--end`) path it is the newest one the station has.
+    # instantaneous observation that really happened inside the window.
     #
     # The aggregated layers are right-OPEN, because an hourly mean labelled at T
-    # covers [T, T+1h): the value stamped at `last` is data lying entirely PAST
-    # the window the payload declares and the page header prints, and it was
-    # drawn over a raw layer that has exactly one sample there. The last complete
-    # hour inside the window is the one that starts an hour before its end.
+    # covers [T, T+1h): a value stamped at `last` describes data lying entirely
+    # PAST the window the payload declares. The last complete hour inside the
+    # window is the one that starts an hour before its end.
     #
-    # The bound is measured against the STATION's own last sample, not against
-    # `last`: when the model runs ahead, `last` is the model's end, and trimming
-    # against it left the station's trailing PARTIAL hour published as a
-    # complete hourly mean — an average of however many minutes the logger had
-    # written, drawn beside hours built from twelve samples.
+    # That bound is measured against the STATION's own last sample, not against
+    # `last`: when the model runs ahead `last` is the model's end, and trimming
+    # against it publishes the station's trailing PARTIAL hour as a complete
+    # hourly mean — an average of however many minutes the logger had written,
+    # drawn beside hours built from twelve samples.
     raw = raw.loc[first:last]
     hourly = hourly.loc[first : min(last, station_last) - pd.Timedelta(hours=1)]
     # Measured on the SLICED frame, not on the archive: with an explicit `--end`
@@ -280,9 +269,10 @@ def run(
     if not model_full.empty:
         model = model_full.loc[first : last - pd.Timedelta(hours=1)]
         ahead = pd.Timestamp(model_full.index.max()) - station_last
-        note = f", {ahead} à frente da estação" if ahead > pd.Timedelta(0) else ""
+        ahead_note = f", {ahead} à frente da estação" if ahead > pd.Timedelta(0) else ""
         typer.echo(
-            f"WRF: {len(model)} horas na janela, {len(model.columns)} colunas disponiveis{note}"
+            f"WRF: {len(model)} horas na janela, "
+            f"{len(model.columns)} colunas disponiveis{ahead_note}"
         )
 
     charts: list[dict[str, object]] = []
@@ -298,10 +288,10 @@ def run(
                 wrf_columns[series.id] = column
             # Only when a model was actually loaded. `wrf_pending` means "the
             # extraction does not write this variable yet", and the page states
-            # exactly that to the reader — so populating it from a run that was
-            # given no model file at all turned a forgotten `-w` in a cron into a
-            # categorically false claim about the pipeline, published for every
-            # variable the extraction does write.
+            # exactly that to the reader, so a run given no model file at all
+            # must not populate it: a forgotten `-w` in a cron would otherwise
+            # publish a false claim about the pipeline for every variable the
+            # extraction does write.
             elif series.wrf and not model.empty:
                 missing.append(series.id)
 
@@ -330,14 +320,14 @@ def run(
         charts.append(payload_chart)
 
         drawn = [name for name, value in layers.items() if value]
-        note = f" (WRF ausente para {', '.join(missing)})" if missing else ""
+        pending_note = f" (WRF ausente para {', '.join(missing)})" if missing else ""
         if drawn:
-            typer.echo(f"  [ok] {chart.id:18s} camadas: {'+'.join(drawn)}{note}")
+            typer.echo(f"  [ok] {chart.id:18s} camadas: {'+'.join(drawn)}{pending_note}")
         else:
             # Every layer empty is a real operational state, not a bug: the Gill
             # thermohygrometer railed in December 2025 and its readings are
             # masked, so temperature and humidity have no data in any recent
-            # window. It has to be visible to whoever runs the export.
+            # window. Whoever runs the export has to see it.
             typer.echo(f"  [--] {chart.id:18s} SEM DADO na janela — publicado vazio")
 
     payload = {
@@ -347,16 +337,14 @@ def run(
         "commit": run_git(["rev-parse", "--short", "HEAD"], cwd=source_root()),
         "station": {"name": STATION_NAME, "timezone": "America/Bahia"},
         # `end` is the end of what this document CARRIES, which under the
-        # accumulating extraction can be later than the newest observation —
-        # otherwise the part of the model worth looking at is cropped off.
+        # accumulating extraction can be later than the newest observation.
         #
         # `station_end` is published beside it because the page derives its
         # visible window as `end - <selected days>`: anchored on `end` alone, a
         # model running three days ahead silently pushes three days of real
         # observations out of the default view. Anchor the START on this field
         # and the MAXIMUM on `end`, and the reader gets the record behind them
-        # plus the forecast in front. Additive: a consumer that ignores it keeps
-        # exactly today's behaviour.
+        # plus the forecast in front.
         "window": {
             "start": str(first),
             "end": str(last),

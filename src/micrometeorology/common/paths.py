@@ -1,17 +1,17 @@
 """Cross-platform path utilities.
 
-All path handling uses ``pathlib.Path`` so that the same code runs on
-Windows and Linux without modification.
+Every helper here returns ``pathlib.Path`` so the same code runs unmodified on
+Windows and Linux.
 """
 
 from pathlib import Path
 
 
 def ensure_dir(path: str | Path) -> Path:
-    """Create a directory (and parents) if it does not exist.  Returns the Path."""
-    p = Path(path)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    """Create a directory and its parents if absent, and return it as a ``Path``."""
+    directory = Path(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 
 def find_files(directory: str | Path, pattern: str = "*.dat") -> list[Path]:

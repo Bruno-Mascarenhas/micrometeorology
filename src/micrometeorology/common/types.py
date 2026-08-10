@@ -1,14 +1,10 @@
-"""Shared type definitions, enums, and data classes.
+"""Shared enums and the lookup tables keyed by them.
 
-Centralizes all domain-specific types used across the package so that
-modules depend on stable, well-documented interfaces rather than raw strings.
+Centralizes the domain vocabulary so modules depend on stable, documented
+interfaces rather than raw strings.
 """
 
 from enum import StrEnum
-
-# ---------------------------------------------------------------------------
-# WRF variable definitions
-# ---------------------------------------------------------------------------
 
 
 class WRFVariable(StrEnum):
@@ -55,10 +51,6 @@ class GridLevel(StrEnum):
     D05 = "D05"
 
 
-# ---------------------------------------------------------------------------
-# Default colormaps per WRF variable
-# ---------------------------------------------------------------------------
-
 VARIABLE_COLORMAPS: dict[WRFVariable | str, str] = {
     WRFVariable.TEMPERATURE: "hot_r",
     WRFVariable.WIND: "PuBu",
@@ -90,7 +82,7 @@ VARIABLE_COLORMAPS: dict[WRFVariable | str, str] = {
     WRFVariable.CLEARNESS_INDEX: "cividis",
 }
 
-# Map from our enum to the NetCDF variable / output file suffix
+# Enum value -> NetCDF variable name / published output-file suffix.
 VARIABLE_NETCDF_MAP: dict[WRFVariable | str, str] = {
     WRFVariable.TEMPERATURE: "TEMP",
     WRFVariable.PRESSURE: "PRES",

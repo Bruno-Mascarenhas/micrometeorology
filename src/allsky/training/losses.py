@@ -24,9 +24,9 @@ A regression head only counts rows whose target is finite
 an exact, grad-safe zero (never a NaN) so the total stays finite and
 differentiable.
 
-``torch`` is a hard runtime dependency here (the loss is an ``nn.Module``), so it
-is imported eagerly — this module is only ever imported lazily from the
-training engine / CLIs, keeping ``import allsky`` torch-free.
+``torch`` is imported eagerly here (the loss is an ``nn.Module``), so this module
+must only ever be imported lazily from the training engine / CLIs, which is what
+keeps ``import allsky`` torch-free.
 """
 
 from collections.abc import Mapping
@@ -102,8 +102,8 @@ class MultitaskLoss(nn.Module):
         self._sky_weight = float(targets.sky.weight)
         self._cloud_enabled = bool(targets.cloud_fraction.enabled)
         self._cloud_weight = float(targets.cloud_fraction.weight)
-        # cloud_fraction has no configurable loss kind in the current config;
-        # default to MSE but honour a `loss` attribute if a future config adds it.
+        # cloud_fraction carries no configurable loss kind yet; honour one if a
+        # future config grows the attribute.
         self._cloud_kind = str(getattr(targets.cloud_fraction, "loss", "mse"))
 
         self._dhi_mean, self._dhi_std = _norm_stats(target_normalizers, "dhi")
@@ -174,11 +174,11 @@ class MultitaskLoss(nn.Module):
             return (pred * 0.0).sum() + (log_var * 0.0).sum()
         normalized = (target[mask] - self._dhi_mean) / self._dhi_std
         residual = pred[mask] - normalized
-        lv = log_var[mask]
+        masked_log_var = log_var[mask]
         # Gaussian NLL (dropping the 0.5*log(2*pi) constant): larger log-variance
         # trades a linear penalty for a shrunk squared-error term, so it lowers
         # the loss for large residuals and raises it for small ones.
-        nll = 0.5 * (torch.exp(-lv) * residual.pow(2) + lv)
+        nll = 0.5 * (torch.exp(-masked_log_var) * residual.pow(2) + masked_log_var)
         return nll.mean()
 
     def _regression_loss(
