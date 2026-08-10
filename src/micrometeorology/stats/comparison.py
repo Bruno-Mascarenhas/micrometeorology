@@ -12,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
 
-from micrometeorology.stats.metrics import compute_all
+from micrometeorology.stats.metrics import compute_all, is_circular_column
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,15 @@ def compare_variables(
 
     obs = paired_df[obs_col].to_numpy()
     mod = paired_df[model_col].to_numpy()
-    return compute_all(obs, mod)
+    circular = is_circular_column(variable)
+    if circular:
+        # Name-based detection changes the published numbers, so it says so.
+        logger.info(
+            "%s: circular quantity — residuals wrapped to [-180, 180); "
+            "R2/r/d/IOA/NRMSE suppressed (an arithmetic mean of bearings is meaningless)",
+            variable,
+        )
+    return compute_all(obs, mod, circular=circular)
 
 
 def compare_all_variables(paired_df: pd.DataFrame) -> pd.DataFrame:

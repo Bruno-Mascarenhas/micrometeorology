@@ -20,7 +20,7 @@ import typer
 from micrometeorology.common.cli_options import parse_csv
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.stats.comparison import read_dataset
-from micrometeorology.stats.metrics import compute_all
+from micrometeorology.stats.metrics import compute_all, is_circular_column
 
 
 class JoinMethod(StrEnum):
@@ -146,7 +146,15 @@ def run(
     for col in cols:
         a_col, b_col = f"{col}_a", f"{col}_b"
         if a_col in aligned.columns and b_col in aligned.columns:
-            results[col] = compute_all(aligned[a_col].to_numpy(), aligned[b_col].to_numpy())
+            circular = is_circular_column(col)
+            if circular:
+                typer.echo(
+                    f"{col}: circular quantity — residuals wrapped to [-180, 180); "
+                    "R2/r/d/IOA/NRMSE suppressed"
+                )
+            results[col] = compute_all(
+                aligned[a_col].to_numpy(), aligned[b_col].to_numpy(), circular=circular
+            )
 
     metrics_df = pd.DataFrame(results)
 

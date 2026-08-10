@@ -219,3 +219,38 @@ class TestTheTimeIndexIsReadOrRefusedClearly:
 
         assert not isinstance(frame.index, pd.DatetimeIndex)
         assert len(frame) == 2
+
+
+class TestWindDirectionIsScoredCircularly:
+    """``compare_all_variables`` has to reach the circular path by column name.
+
+    The unit is covered in ``test_metrics``; what this pins is the wiring —
+    ``compare_variables`` deciding, from the variable name alone, that a
+    published RMSE must not be the linear one.
+    """
+
+    @staticmethod
+    def _paired() -> pd.DataFrame:
+        index = pd.date_range("2024-01-01", periods=4, freq="h")
+        return pd.DataFrame(
+            {
+                "WD_obs": [350.0, 350.0, 10.0, 10.0],
+                "WD_model": [10.0, 10.0, 350.0, 350.0],
+                "WS_obs": [1.0, 2.0, 3.0, 4.0],
+                "WS_model": [1.5, 2.5, 2.5, 4.5],
+            },
+            index=index,
+        )
+
+    def test_the_published_error_is_the_short_way_round(self):
+        metrics = compare_all_variables(self._paired())
+        assert metrics.loc["MAE", "WD"] == pytest.approx(20.0)
+        assert metrics.loc["RMSE", "WD"] == pytest.approx(20.0)
+
+    def test_mean_normalised_metrics_are_blank_for_the_bearing_only(self):
+        metrics = compare_all_variables(self._paired())
+        bearing = metrics["WD"].astype(float).to_dict()
+        speed = metrics["WS"].astype(float).to_dict()
+        for name in ("R²", "r", "d", "IOA", "NRMSE"):
+            assert np.isnan(bearing[name]), name
+            assert np.isfinite(speed[name]), name
