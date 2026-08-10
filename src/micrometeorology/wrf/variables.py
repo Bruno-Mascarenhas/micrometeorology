@@ -191,7 +191,9 @@ def extract_relative_humidity(ds: WRFDataset) -> tuple[NDArray, float, float]:
     return rh, rh_min, rh_max
 
 
-def rotate_to_earth_relative(ds: WRFDataset, u: NDArray, v: NDArray) -> tuple[NDArray, NDArray]:
+def rotate_to_earth_relative(
+    ds: WRFDataset, u: NDArray, v: NDArray, t0: int | None = None, t1: int | None = None
+) -> tuple[NDArray, NDArray]:
     """Rotate grid-relative wind components onto true north.
 
     ``U10``/``V10`` are grid-relative: on a Lambert or polar-stereographic domain
@@ -201,11 +203,23 @@ def rotate_to_earth_relative(ds: WRFDataset, u: NDArray, v: NDArray) -> tuple[ND
     rather than estimated. The operational domains are Mercator, where
     ``SINALPHA`` is 0 everywhere and this is the identity; a file without the
     fields is passed through unrotated.
+
+    ``t0``/``t1`` rotate one time block, reading the angle for the same block —
+    without them a 64-step block would meet the file's full 76-step field. A
+    ``u``/``v`` carrying a vertical axis gets one broadcast into the angle, which
+    has none.
     """
     if not (ds.has_variable("COSALPHA") and ds.has_variable("SINALPHA")):
         return u, v
-    cos_alpha = ds.get_variable("COSALPHA")
-    sin_alpha = ds.get_variable("SINALPHA")
+    if t0 is None or t1 is None:
+        cos_alpha = ds.get_variable("COSALPHA")
+        sin_alpha = ds.get_variable("SINALPHA")
+    else:
+        cos_alpha = ds.get_variable_block("COSALPHA", t0, t1)
+        sin_alpha = ds.get_variable_block("SINALPHA", t0, t1)
+    if u.ndim == cos_alpha.ndim + 1:
+        cos_alpha = cos_alpha[:, np.newaxis, :, :]
+        sin_alpha = sin_alpha[:, np.newaxis, :, :]
     return u * cos_alpha + v * sin_alpha, v * cos_alpha - u * sin_alpha
 
 
@@ -690,7 +704,7 @@ def stream_wind_at_heights(
         v_c /= 2.0
         del v_raw
         # Onto true north before any bearing is taken, as extract_wind does at 10 m.
-        u_c, v_c = rotate_to_earth_relative(ds, u_c, v_c)
+        u_c, v_c = rotate_to_earth_relative(ds, u_c, v_c, t0, t1)
 
         ph = ds.get_variable_block("PH", t0, t1)
         phb = ds.get_variable_block("PHB", t0, t1)

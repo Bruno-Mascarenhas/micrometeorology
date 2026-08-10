@@ -48,6 +48,15 @@ def _write_wind_wrf_file(path: Path, *, seed: int = 11) -> None:
         phb[:] = (base * 9.0).astype(np.float32)
         hgt[:] = rng.uniform(0, 80, size=(NT, NY, NX)).astype(np.float32)
 
+        # The map rotation, which every real wrfout carries. Without it here the
+        # block path could cross a 3-step block with the file's full time axis
+        # and nothing would notice until the operational run: real files are
+        # Mercator, so the values are the identity but the SHAPES are not.
+        cos_alpha = ds.createVariable("COSALPHA", "f4", ("Time", "south_north", "west_east"))
+        sin_alpha = ds.createVariable("SINALPHA", "f4", ("Time", "south_north", "west_east"))
+        cos_alpha[:] = np.ones((NT, NY, NX), dtype=np.float32)
+        sin_alpha[:] = np.zeros((NT, NY, NX), dtype=np.float32)
+
 
 def _eager_reference(ds: WRFDataset, targets: tuple[int, ...]) -> dict[int, dict]:
     """Frozen oracle: the eager CLI WIND_POTENTIAL branch, step for step."""
