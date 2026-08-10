@@ -43,6 +43,7 @@ Ad-hoc per-variable graphs (secondary generic command, legacy filenames)::
 """
 
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -129,27 +130,43 @@ GRAPH_SPECS: tuple[GraphSpec, ...] = (
     GraphSpec("radiacao_par", "radiacao_par.png", "Radiação PAR (W/m²)", "line"),
 )
 
-# Default column mapping: the processed-CSV column each contract graph reads.
-# These are the hourly-export column names of ``labmim-sensor-process``
-# (``sensors.export.export_csv``); override per-logger via --config / --col.
-DEFAULT_COLUMNS: dict[str, str] = {
-    "temperatura": "AirT1_C_Avg",
-    "umidade": "RH1",
-    "pressao": "BP1_mbar_Avg",
-    "precipitacao": "PL01_mm_Tot",
-    "velocidade": "WS_ms",
-    "direcao": "WindDir",
-    "balanco": "Net_Wm2_Avg",
-    "radiacao_difusa": "PSP_Wm2_Avg",
-    "radiacao_par": "PAR_Wm2_Avg",
+# Default column mapping: the candidates each contract graph reads, best first.
+#
+# The head of every chain is the UNIFIED name that ``sensor_switches`` builds
+# (``labmim-archive``), and the tail is the raw logger column that
+# ``labmim-sensor-process`` exports (``sensors.export.export_csv``). Which one a
+# run gets depends on its input, and the difference is not cosmetic: a single
+# fixed raw column is one instrument, while the quantity the graph is named
+# after changes instrument over the record. ``radiacao_difusa.png`` read
+# ``PSP_Wm2_Avg`` unconditionally, but the shade ring came off the PSP between
+# 2019-09 and 2025-05 (calibrations.yaml, Sw_dif era map) and the CMP21 carried
+# diffuse instead — so any window replayed inside those six years published
+# near-global irradiance under the title "Radiação Difusa": 100.3 W/m2 against
+# the true 67.6 for the 2022-07 reference week, 183.9 against 72.5 over 2024,
+# while the interactive page published ``Sw_dif`` for the same hours.
+#
+# The residual, stated rather than hidden: a historical window replayed through
+# the non-unifying sensor-process path still resolves to the raw tail and still
+# gets the wrong instrument. Feed those from the archive's hourly frame.
+# Override per-logger via --config / --col, which replaces the whole chain.
+DEFAULT_COLUMNS: dict[str, tuple[str, ...]] = {
+    "temperatura": ("T", "AirT1_C_Avg"),
+    "umidade": ("ur", "RH1"),
+    "pressao": ("pressure", "BP1_mbar_Avg"),
+    "precipitacao": ("precip", "PL01_mm_Tot"),
+    "velocidade": ("WS", "WS_ms"),
+    "direcao": ("WD", "WindDir"),
+    "balanco": ("Net_CNR1", "Net_Wm2_Avg"),
+    "radiacao_difusa": ("Sw_dif", "PSP_Wm2_Avg"),
+    "radiacao_par": ("Sw_par", "PAR_Wm2_Avg"),
 }
 
 # Optional radiation-balance components (CNR1 four-stream), plotted on the
 # ``balanco`` graph when present.  The upward (``*_up``) channels are drawn
 # negated, matching the legacy ``graficos1_UFBA_v5.py`` sign convention.
-DEFAULT_BALANCE_COMPONENTS: dict[str, str] = {
-    "sw_down": "CM3Up_Wm2_Avg",
-    "sw_up": "CM3Dn_Wm2_Avg",
+DEFAULT_BALANCE_COMPONENTS: dict[str, tuple[str, ...]] = {
+    "sw_down": ("Sw_dw", "CM3Up_Wm2_Avg"),
+    "sw_up": ("Sw_up", "CM3Dn_Wm2_Avg"),
     # The ``Cr`` spellings, which are the FLUXES. The plain ``CG3*_Wm2_Avg``
     # columns are the pyrgeometers' raw thermopile signal, missing the
     # sigma*T_body^4 case term: over 2022-07-01..08 they average -41.7 and +0.9
@@ -163,8 +180,8 @@ DEFAULT_BALANCE_COMPONENTS: dict[str, str] = {
     # both individual values were wrong by about 447 W/m2. The sibling producer
     # (generate_station_graphs.py) and the unified Lw_dw/Lw_up the archive
     # publishes both use these columns; this one was the outlier.
-    "lw_down": "CG3Up_Wm2Cr_Avg",
-    "lw_up": "CG3Dn_Wm2Cr_Avg",
+    "lw_down": ("Lw_dw", "CG3Up_Wm2Cr_Avg"),
+    "lw_up": ("Lw_up", "CG3Dn_Wm2Cr_Avg"),
 }
 
 # Fallback U/V component columns used to reconstruct wind direction when the
@@ -201,10 +218,29 @@ DEFAULT_WRF_COLUMNS: dict[str, tuple[str, ...]] = {
 # ---------------------------------------------------------------------------
 
 
+def _as_chain(value: object) -> tuple[str, ...]:
+    """Normalise one configured mapping to a candidate chain, best first.
+
+    A YAML scalar or a ``--col`` value names ONE column and replaces the whole
+    default chain: an operator retargeting a renamed logger means that column,
+    not that column with the shipped alternatives still ahead of it.
+    """
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list | tuple):
+        return tuple(str(item) for item in value)
+    raise ValueError(f"Column mapping must be a name or a list of names, got {value!r}")
+
+
+def resolve_column(frame: pd.DataFrame, candidates: Sequence[str]) -> str | None:
+    """First candidate the frame carries, or ``None`` if it carries none."""
+    return next((name for name in candidates if name in frame.columns), None)
+
+
 def load_graph_config(
     config_path: Path | None,
     overrides: list[str] | None = None,
-) -> tuple[dict[str, str], dict[str, str], tuple[str, str]]:
+) -> tuple[dict[str, tuple[str, ...]], dict[str, tuple[str, ...]], tuple[str, str]]:
     """Resolve the column mapping from defaults, a YAML file, and CLI overrides.
 
     Precedence (lowest to highest): :data:`DEFAULT_COLUMNS` →
@@ -235,8 +271,15 @@ def load_graph_config(
 
     if config_path is not None:
         data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        columns.update(data.get("columns", {}) or {})
-        balance.update(data.get("balance_components", {}) or {})
+        columns.update(
+            {key: _as_chain(value) for key, value in (data.get("columns", {}) or {}).items()}
+        )
+        balance.update(
+            {
+                key: _as_chain(value)
+                for key, value in (data.get("balance_components", {}) or {}).items()
+            }
+        )
         raw_dir = data.get("direction_components")
         if raw_dir:
             if len(raw_dir) != 2:
@@ -250,7 +293,7 @@ def load_graph_config(
             raise ValueError(f"Invalid --col override {item!r}; expected KEY=COLUMN")
         if key not in DEFAULT_COLUMNS:
             raise ValueError(f"Unknown --col key {key!r}; valid keys: {', '.join(DEFAULT_COLUMNS)}")
-        columns[key] = value
+        columns[key] = _as_chain(value)
 
     return columns, balance, direction_components
 
@@ -261,13 +304,18 @@ def load_graph_config(
 
 
 def load_hourly_csv(input_path: Path, last_days: int) -> pd.DataFrame:
-    """Load a processed hourly CSV and clip it to the most recent window.
+    """Load a processed hourly frame and clip it to the most recent window.
 
     Parameters
     ----------
     input_path:
         CSV whose first column is the timestamp index — the default
-        (``include_datetime_columns=False``) export of ``labmim-sensor-process``.
+        (``include_datetime_columns=False``) export of ``labmim-sensor-process``
+        — or ``station_hourly.parquet`` from ``labmim-archive``. The archive
+        frame is the one that carries the unified, era-mapped channel names, and
+        it is the only input from which the radiation graphs can name the right
+        instrument for a historical window; ``--raw`` already read Parquet, so
+        the station layer refusing it was the only thing keeping the two apart.
     last_days:
         Keep only rows within ``last_days`` of the newest timestamp. A value
         ``<= 0`` disables the clip and keeps the whole file.
@@ -277,7 +325,11 @@ def load_hourly_csv(input_path: Path, last_days: int) -> pd.DataFrame:
     pandas.DataFrame
         The (optionally clipped) frame with a sorted ``DatetimeIndex``.
     """
-    df = pd.read_csv(input_path, index_col=0, parse_dates=True)
+    df = (
+        pd.read_parquet(input_path)
+        if input_path.suffix == ".parquet"
+        else pd.read_csv(input_path, index_col=0, parse_dates=True)
+    )
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index)
     df = df.sort_index()
@@ -475,8 +527,8 @@ def _wrf_series(
 def render_site_graphs(
     df: pd.DataFrame,
     output_dir: Path,
-    columns: dict[str, str],
-    balance_components: dict[str, str],
+    columns: Mapping[str, Sequence[str]],
+    balance_components: Mapping[str, Sequence[str]],
     direction_components: tuple[str, str],
     *,
     raw: pd.DataFrame | None = None,
@@ -512,20 +564,28 @@ def render_site_graphs(
     empty: list[str] = []
 
     for spec in GRAPH_SPECS:
-        column = columns[spec.key]
+        candidates = columns[spec.key]
+        # Resolved against the HOURLY frame and then reused for the raw and model
+        # layers, so one chart is one quantity. Picking per layer would draw the
+        # archive's era-correct ``Sw_dif`` under an hourly line of raw PSP.
+        column = resolve_column(df, candidates) or candidates[0]
 
         if spec.kind == "scatter":
             series = _resolve_direction_series(df, column, direction_components)
             if series is None:
                 logger.warning(
-                    "Column %r (and U/V fallback) not found -- skipping %s",
-                    column,
+                    "Columns %s (and U/V fallback) not found -- skipping %s",
+                    ", ".join(repr(name) for name in candidates),
                     spec.filename,
                 )
                 missing.append(spec.key)
                 continue
         elif column not in df.columns:
-            logger.warning("Column %r not found -- skipping %s", column, spec.filename)
+            logger.warning(
+                "Columns %s not found -- skipping %s",
+                ", ".join(repr(name) for name in candidates),
+                spec.filename,
+            )
             missing.append(spec.key)
             continue
         else:
@@ -569,9 +629,9 @@ def render_site_graphs(
                 _plot_bar(ax, series, label=column)
             elif spec.kind == "balance":
                 present = {
-                    channel: df[col]
-                    for channel, col in balance_components.items()
-                    if col in df.columns
+                    channel: df[resolved_component]
+                    for channel, chain in balance_components.items()
+                    if (resolved_component := resolve_column(df, chain)) is not None
                 }
                 _plot_balance(ax, series, present)
 

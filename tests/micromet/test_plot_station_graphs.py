@@ -24,10 +24,15 @@ from micrometeorology.cli.plot_station_graphs import (
     GRAPH_SPECS,
     _plot_balance,
     app,
+    load_graph_config,
     render_site_graphs,
+    resolve_column,
 )
 from micrometeorology.sensors.monitoring import MONITORING_CHARTS
-from micrometeorology.sensors.plotting import BALANCE_COMPONENT_COLORS, create_figure
+from micrometeorology.sensors.plotting import (
+    BALANCE_COMPONENT_COLORS,
+    create_figure,
+)
 
 runner = CliRunner()
 
@@ -115,13 +120,23 @@ def test_legacy_balance_uses_shared_palette_and_negates_upward_channels(monkeypa
         plt.close(fig)
 
 
+def _logger_name(key: str) -> str:
+    """The column ``labmim-sensor-process`` exports for a contract graph.
+
+    The TAIL of the candidate chain. The head is the unified name that only
+    ``labmim-archive`` builds, and a processed hourly CSV never carries it.
+    """
+    return DEFAULT_COLUMNS[key][-1]
+
+
 def _write_hourly_csv(path: Path, *, columns: dict[str, str] | None = None, days: int = 10) -> Path:
     """Write a synthetic hourly processed-sensor CSV with all contract columns.
 
     ``columns`` overrides the default logical→CSV column names so tests can
-    exercise renamed loggers; ``None`` uses :data:`DEFAULT_COLUMNS`.
+    exercise renamed loggers; ``None`` uses the logger spellings of
+    :data:`DEFAULT_COLUMNS`.
     """
-    mapping = columns if columns is not None else DEFAULT_COLUMNS
+    mapping = columns if columns is not None else {k: _logger_name(k) for k in DEFAULT_COLUMNS}
     idx = pd.date_range("2026-06-01", periods=days * 24, freq="1h")
     n = len(idx)
     rng = np.random.default_rng(7)
@@ -177,7 +192,7 @@ class TestSiteCommand:
     def test_missing_column_warns_and_skips_but_exits_zero(self, tmp_path):
         # Drop the temperature source column only.
         df = pd.read_csv(_write_hourly_csv(tmp_path / "src.csv"), index_col=0, parse_dates=True)
-        df = df.drop(columns=[DEFAULT_COLUMNS["temperatura"]])
+        df = df.drop(columns=[_logger_name("temperatura")])
         csv = tmp_path / "no_temp.csv"
         df.to_csv(csv)
 
@@ -194,7 +209,7 @@ class TestSiteCommand:
 
     def test_strict_makes_a_missing_column_fail(self, tmp_path):
         df = pd.read_csv(_write_hourly_csv(tmp_path / "src.csv"), index_col=0, parse_dates=True)
-        df = df.drop(columns=[DEFAULT_COLUMNS["radiacao_par"]])
+        df = df.drop(columns=[_logger_name("radiacao_par")])
         csv = tmp_path / "no_par.csv"
         df.to_csv(csv)
 
@@ -209,7 +224,7 @@ class TestSiteCommand:
     def test_col_override_retargets_a_renamed_logger_column(self, tmp_path):
         # Logger renamed the temperature column; --col points the graph at it
         # without any code change.
-        renamed = dict(DEFAULT_COLUMNS)
+        renamed = {key: _logger_name(key) for key in DEFAULT_COLUMNS}
         renamed["temperatura"] = "AirT2_C_Avg"
         csv = _write_hourly_csv(tmp_path / "renamed.csv", columns=renamed)
 
@@ -240,7 +255,7 @@ class TestSiteCommand:
         assert (out2 / "temperatura.png").stat().st_size > 0
 
     def test_config_yaml_overrides_columns(self, tmp_path):
-        renamed = dict(DEFAULT_COLUMNS)
+        renamed = {key: _logger_name(key) for key in DEFAULT_COLUMNS}
         renamed["umidade"] = "RH_probe2"
         csv = _write_hourly_csv(tmp_path / "cfg.csv", columns=renamed)
 
@@ -268,7 +283,7 @@ class TestSiteCommand:
     def test_direction_reconstructed_from_uv_components(self, tmp_path):
         # No direct WindDir column, but U/V present -> direction graph still made.
         df = pd.read_csv(_write_hourly_csv(tmp_path / "src.csv"), index_col=0, parse_dates=True)
-        df = df.drop(columns=[DEFAULT_COLUMNS["direcao"]])
+        df = df.drop(columns=[_logger_name("direcao")])
         df["u"] = -np.sin(np.radians(45.0))
         df["v"] = -np.cos(np.radians(45.0))
         csv = tmp_path / "uv.csv"
@@ -560,7 +575,7 @@ class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
         assert "without the station layer" in empty_run.output
 
         # Drop a column outright: that IS a configuration error.
-        frame.drop(columns=[DEFAULT_COLUMNS["precipitacao"]]).to_csv(csv)
+        frame.drop(columns=[_logger_name("precipitacao")]).to_csv(csv)
         missing_run = runner.invoke(
             app,
             [
@@ -593,6 +608,72 @@ class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
 
         source = Path(sibling.__file__).read_text(encoding="utf-8")
         for channel in ("lw_down", "lw_up"):
-            column = DEFAULT_BALANCE_COMPONENTS[channel]
+            column = DEFAULT_BALANCE_COMPONENTS[channel][-1]
             assert column.endswith("Cr_Avg"), f"{channel} must be the corrected flux, got {column}"
             assert f'"{column}"' in source, f"{column} disagrees with the sibling producer"
+
+
+class TestTheUnifiedChannelWinsWhenTheFrameHasIt:
+    """Which instrument carries a quantity changes over the record.
+
+    ``radiacao_difusa.png`` read ``PSP_Wm2_Avg`` unconditionally, but the shade
+    ring was off the PSP from 2019-09 to 2025-05 and the CMP21 carried diffuse
+    instead. Any window replayed inside those six years published near-global
+    irradiance under the title "Radiação Difusa" -- 100.3 W/m2 for the 2022-07
+    reference week against the 67.6 the interactive page published for the very
+    same hours from ``Sw_dif``.
+    """
+
+    @staticmethod
+    def _both_names() -> pd.DataFrame:
+        """A frame as ``labmim-archive`` writes it: unified name beside its source."""
+        idx = pd.date_range("2022-07-01", periods=48, freq="1h")
+        step = np.arange(len(idx))
+        return pd.DataFrame(
+            {
+                # The unshaded PSP reads essentially global irradiance here.
+                "PSP_Wm2_Avg": np.clip(400.0 * np.sin(step / 12.0), 0, None),
+                # The era-correct diffuse channel is the CMP21 behind the ring.
+                "Sw_dif": np.clip(150.0 * np.sin(step / 12.0), 0, None),
+            },
+            index=idx,
+        )
+
+    def test_the_era_mapped_channel_is_what_gets_plotted(self, tmp_path):
+        frame = self._both_names()
+
+        written, missing, _empty = render_site_graphs(
+            frame,
+            tmp_path / "g",
+            DEFAULT_COLUMNS,
+            {},
+            DEFAULT_DIRECTION_COMPONENTS,
+        )
+
+        assert "radiacao_difusa" not in missing
+        assert any(path.name == "radiacao_difusa.png" for path in written)
+        assert resolve_column(frame, DEFAULT_COLUMNS["radiacao_difusa"]) == "Sw_dif"
+
+    def test_the_logger_column_still_works_when_it_is_all_there_is(self, tmp_path):
+        """The processed-CSV path has no unified names and must keep working."""
+        frame = self._both_names().drop(columns=["Sw_dif"])
+
+        assert resolve_column(frame, DEFAULT_COLUMNS["radiacao_difusa"]) == "PSP_Wm2_Avg"
+
+        written, missing, _empty = render_site_graphs(
+            frame,
+            tmp_path / "g",
+            DEFAULT_COLUMNS,
+            {},
+            DEFAULT_DIRECTION_COMPONENTS,
+        )
+
+        assert "radiacao_difusa" not in missing
+        assert any(path.name == "radiacao_difusa.png" for path in written)
+
+    def test_an_override_replaces_the_whole_chain(self):
+        """`--col` names ONE column; the shipped alternatives must not outrank it."""
+        columns, _balance, _direction = load_graph_config(None, ["radiacao_difusa=PSP_Wm2_Avg"])
+
+        assert columns["radiacao_difusa"] == ("PSP_Wm2_Avg",)
+        assert resolve_column(self._both_names(), columns["radiacao_difusa"]) == "PSP_Wm2_Avg"
