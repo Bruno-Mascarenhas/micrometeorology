@@ -71,11 +71,28 @@ def add_labmim_watermark(
     )
 
 
+# Longest span that still gets one tick per day. The contract graphs plot a
+# week, so the legacy look is preserved wherever it was ever seen; beyond this a
+# fixed DayLocator is not a denser axis but a BLANK one -- matplotlib refuses
+# above 1000 ticks (a decade asks for 3,844) and drops the labels entirely,
+# leaving an unreadable band of overlapping text under a chart that otherwise
+# looks finished. Reachable from `--last-days 0` and from the archive's own
+# hourly frame, which spans 2016-2026.
+DAILY_TICK_MAX_DAYS = 21
+
+
 def setup_date_axis(ax) -> None:
-    """Configure day-major / 6 h-minor date axis matching legacy graphs."""
-    ax.xaxis.set_major_locator(mdates.DayLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d - %b"))
-    ax.xaxis.set_minor_locator(mdates.HourLocator(np.arange(0, 25, 6)))
+    """Configure the date axis: day-major / 6 h-minor, thinning on long spans."""
+    lo, hi = ax.get_xlim()
+    if hi - lo <= DAILY_TICK_MAX_DAYS:
+        ax.xaxis.set_major_locator(mdates.DayLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d - %b"))
+        ax.xaxis.set_minor_locator(mdates.HourLocator(np.arange(0, 25, 6)))
+    else:
+        locator = mdates.AutoDateLocator(minticks=4, maxticks=10)
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        ax.xaxis.set_minor_locator(mdates.AutoDateLocator(minticks=8, maxticks=40))
     ax.xaxis.grid(True, linestyle="-", which="major", color="grey", alpha=0.5)
 
 

@@ -11,6 +11,7 @@ import matplotlib
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib import dates as mdates
 from matplotlib import pyplot as plt
 from matplotlib.colors import to_hex
 from typer.testing import CliRunner
@@ -32,6 +33,7 @@ from micrometeorology.sensors.monitoring import MONITORING_CHARTS
 from micrometeorology.sensors.plotting import (
     BALANCE_COMPONENT_COLORS,
     create_figure,
+    setup_date_axis,
 )
 
 runner = CliRunner()
@@ -677,3 +679,39 @@ class TestTheUnifiedChannelWinsWhenTheFrameHasIt:
 
         assert columns["radiacao_difusa"] == ("PSP_Wm2_Avg",)
         assert resolve_column(self._both_names(), columns["radiacao_difusa"]) == "PSP_Wm2_Avg"
+
+
+class TestTheDateAxisSurvivesALongWindow:
+    """A fixed ``DayLocator`` does not thin -- past 1000 ticks matplotlib drops them.
+
+    The archive's own hourly frame spans 2016-2026, which asks for 3,844 daily
+    ticks; the axis then renders as an unreadable black band under a chart that
+    otherwise looks finished.
+    """
+
+    @staticmethod
+    def _axis(days: int):
+        fig, ax = create_figure()
+        index = pd.date_range("2020-01-01", periods=days * 24, freq="1h")
+        ax.plot(index, np.arange(len(index), dtype=float))
+        setup_date_axis(ax)
+        return fig, ax
+
+    def test_a_week_keeps_one_tick_per_day(self):
+        """The contract graphs plot a week; that look must not change."""
+        fig, ax = self._axis(7)
+        try:
+            assert isinstance(ax.xaxis.get_major_locator(), mdates.DayLocator)
+            labels = [t for t in ax.xaxis.get_majorticklabels() if t.get_text()]
+            assert 6 <= len(labels) <= 9, [t.get_text() for t in labels]
+        finally:
+            plt.close(fig)
+
+    def test_a_decade_stays_readable(self):
+        fig, ax = self._axis(365 * 10)
+        try:
+            ticks = ax.xaxis.get_major_locator()()
+            assert len(ticks) <= 12, len(ticks)
+            assert len(ticks) >= 3, len(ticks)
+        finally:
+            plt.close(fig)
