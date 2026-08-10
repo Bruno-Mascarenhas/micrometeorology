@@ -456,7 +456,16 @@ def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> P
     # files ACTUALLY written this run — never re-derived arithmetic that could
     # drift from the writers — plus feature descriptors for the consolidated
     # summary/series artifacts.
-    var_indices: dict[str, set[int]] = {}
+    # Keyed by (domain, variable), never by variable alone. `availability` has
+    # no domain axis and the site reads it for whichever domain is selected, so
+    # a per-variable union advertises D01's steps to D03: the clearness index
+    # masks cells by cos(z) geographically, so a coarse domain reaching further
+    # west keeps sunrise frames a nested domain drops, and the published step
+    # sets genuinely differ for the same run and the same clock hour. The site
+    # then requests a file this run never wrote and — because the writers use
+    # fixed names and replace in place — is served the PREVIOUS run's frame
+    # under this run's version stamp, with nothing anywhere saying so.
+    var_indices: dict[tuple[str, str], set[int]] = {}
     domain_indices: dict[str, set[int]] = {}
     have_summary = False
     have_series = False
@@ -466,13 +475,14 @@ def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> P
         # empty index set so availability publishes it as "no steps this run"
         # instead of omitting it, which the front-end reads as "full range".
         for missing_variable in result.missing_variables:
-            var_indices.setdefault(missing_variable, set())
+            if result.domain:
+                var_indices.setdefault((result.domain, missing_variable), set())
         for file_path in result.files:
             name = Path(file_path).name
             match = _TIMESTEP_FILE_RE.match(name)
             if match:
                 index = int(match.group(3))
-                var_indices.setdefault(match.group(2), set()).add(index)
+                var_indices.setdefault((match.group(1), match.group(2)), set()).add(index)
                 domain_indices.setdefault(match.group(1), set()).add(index)
             elif name.endswith(".summary.json"):
                 have_summary = True
@@ -502,10 +512,21 @@ def write_run_manifest(json_dir: str | Path, results: Sequence[UnitResult]) -> P
             payload["start_local"] = start_locals.pop()
 
         full_range = set(range(index_min, index_max + 1))
+        # The INTERSECTION across domains, for the same reason index_min/max are
+        # one: an index is advertised only when every domain of the run actually
+        # wrote that variable's frame for it. Conservative by construction — a
+        # step only D01 holds is not advertised — which is the safe direction,
+        # because the alternative serves a stale frame as a current one.
+        per_variable: dict[str, list[set[int]]] = {}
+        for (_domain, var), indices in var_indices.items():
+            per_variable.setdefault(var, []).append(indices)
         availability = {
-            var: _compress_index_ranges(indices & full_range)
-            for var, indices in sorted(var_indices.items())
-            if not full_range <= indices
+            var: _compress_index_ranges(shared)
+            for var, shared in sorted(
+                (var, set.intersection(*per_domain) & full_range)
+                for var, per_domain in per_variable.items()
+            )
+            if not full_range <= shared
         }
         if availability:
             payload["availability"] = availability

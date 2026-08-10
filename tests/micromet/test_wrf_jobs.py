@@ -872,3 +872,61 @@ def test_a_step_with_no_finite_cell_is_not_published_at_all(tmp_path, monkeypatc
     # The one invariant that was broken: the timeline and the panel agree.
     assert manifest["index_min"] == min(summary["indices"])
     assert manifest["index_max"] == max(summary["indices"])
+
+
+def test_availability_is_the_intersection_across_domains(tmp_path):
+    """A step is advertised only when EVERY domain wrote that variable's frame.
+
+    ``availability`` carries no domain axis and the site reads it for whichever
+    domain is selected, so a per-variable union advertises D01's steps to D03.
+    The clearness index diverges by construction: its cos(z) mask is
+    geographic, so a coarse domain reaching further west keeps sunrise frames a
+    nested domain drops. Measured on the real four-domain run of 2026-05-03, KT
+    was advertised over 36 indices while D03 and D04 had written 30 and D02 32 —
+    and because the writers use fixed names and replace in place, requesting one
+    of the six absent frames serves the PREVIOUS run's field under this run's
+    version stamp.
+    """
+    json_dir = tmp_path / "json"
+    json_dir.mkdir()
+
+    def unit(domain: str, indices: range) -> jobs.UnitResult:
+        return jobs.UnitResult(
+            label=f"{domain} KT",
+            kind="values_json",
+            files=tuple(str(json_dir / f"{domain}_KT_{i:03d}.json") for i in indices),
+            domain=domain,
+            n_steps=6,
+        )
+
+    results = [
+        unit("D01", range(6)),  # the superset
+        unit("D02", range(1, 6)),
+        unit("D03", range(1, 5)),  # the narrowest
+    ]
+
+    manifest_path = jobs.write_run_manifest(json_dir, results)
+    assert manifest_path is not None
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+
+    # index_min/index_max already intersect; availability must agree with them.
+    assert (manifest["index_min"], manifest["index_max"]) == (1, 4)
+    # An empty restriction is omitted: 1..4 is the full shared range.
+    assert "availability" not in manifest
+
+    # Now make one domain skip a step INSIDE the shared range.
+    holed = [unit("D01", range(6)), unit("D02", range(1, 6)), unit("D03", range(1, 5))]
+    holed[1] = jobs.UnitResult(
+        label="D02 KT",
+        kind="values_json",
+        files=tuple(str(json_dir / f"D02_KT_{i:03d}.json") for i in (1, 2, 4, 5)),
+        domain="D02",
+        n_steps=6,
+    )
+    holed_path = jobs.write_run_manifest(json_dir, holed)
+    assert holed_path is not None
+    manifest = json.loads(Path(holed_path).read_text(encoding="utf-8"))
+
+    assert manifest["availability"] == {"KT": [[1, 2], [4, 4]]}, (
+        "index 3 is missing from D02 and must not be advertised for any domain"
+    )
