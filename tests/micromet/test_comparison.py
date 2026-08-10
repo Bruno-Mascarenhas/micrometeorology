@@ -187,3 +187,35 @@ class TestPlotComparison:
         assert isinstance(fig, Figure)
         assert out.stat().st_size > 0
         assert set(plt.get_fignums()) == before
+
+
+class TestTheTimeIndexIsReadOrRefusedClearly:
+    """``labmim-comparison`` pairs by TIME; ``labmim-metrics`` may fall back to
+    row order. The two must not share one failure mode."""
+
+    @staticmethod
+    def _named_index_csv(path: Path) -> Path:
+        index = pd.date_range("2022-07-01", periods=6, freq="h", name="timestamp")
+        pd.DataFrame({"T": range(6)}, index=index).to_csv(path)
+        return path
+
+    def test_a_named_timestamp_column_is_recognised(self, tmp_path: Path) -> None:
+        """``DataFrame.to_csv`` writes the index's NAME, so the most ordinary way
+        to produce one of these files left a RangeIndex and surfaced as a
+        TypeError from inside ``pair_dataframes``, naming neither file nor cause.
+        """
+        frame = read_dataset(str(self._named_index_csv(tmp_path / "named.csv")))
+
+        assert isinstance(frame.index, pd.DatetimeIndex)
+        assert "timestamp" not in frame.columns
+
+    def test_a_frame_with_no_time_index_is_still_returned(self, tmp_path: Path) -> None:
+        """Positional alignment is a supported mode of labmim-metrics; the reader
+        must not refuse it on that CLI's behalf."""
+        path = tmp_path / "plain.csv"
+        path.write_text("T\n1.0\n2.0\n", encoding="utf-8")
+
+        frame = read_dataset(str(path))
+
+        assert not isinstance(frame.index, pd.DatetimeIndex)
+        assert len(frame) == 2

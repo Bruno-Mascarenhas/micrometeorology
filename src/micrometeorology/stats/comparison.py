@@ -56,13 +56,26 @@ def read_dataset(
             # ``pd.to_datetime`` reads an integer RECORD/year column as
             # nanoseconds since the epoch and would fabricate a 1970 index.
             leading = df.columns[0]
+            label = str(leading).strip().casefold()
+            # A NAMED leading column counts too when the name says what it is.
+            # ``DataFrame.to_csv`` writes the index's own name, so the most
+            # ordinary way to produce one of these files — take a frame with a
+            # ``timestamp`` index and save it — used to land here unrecognised
+            # and leave a RangeIndex, which then surfaced as a TypeError from
+            # inside ``pair_dataframes`` naming neither the file nor the cause.
             is_unnamed = str(leading).startswith("Unnamed:") or not str(leading).strip()
-            if is_unnamed and not is_numeric_dtype(df[leading]):
+            named_like_a_stamp = label in {"timestamp", "datetime", "date", "time"}
+            if (is_unnamed or named_like_a_stamp) and not is_numeric_dtype(df[leading]):
                 parsed = pd.to_datetime(df[leading], errors="coerce")
                 if parsed.notna().all():
                     df.index = parsed
                     df = df.drop(columns=[leading])
 
+    # Deliberately NOT an error when no time index could be built: a frame with
+    # a RangeIndex is a supported state here, because ``labmim-metrics`` aligns
+    # such a pair by ROW ORDER and says so. The CLI that requires pairing by time
+    # is the one that refuses it — see ``compare_wrf_observations``, which can
+    # name the offending file.
     df.index.name = None
 
     # Coerce only text columns to numeric. Both dtype names are needed: pandas 3

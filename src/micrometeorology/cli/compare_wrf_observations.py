@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Annotated
 
 import matplotlib
+import pandas as pd
 import typer
 
 matplotlib.use("Agg")
@@ -49,6 +50,19 @@ def run(
 
     df_obs = read_dataset(str(obs), separator=separator)
     df_model = read_dataset(str(model), separator=separator)
+
+    # This command pairs by TIME (unlike labmim-metrics, which falls back to row
+    # order), so a file whose timestamps could not be read has to say which file
+    # and what shape was expected. Left to `pair_dataframes` it surfaced as a
+    # TypeError naming only the index types — no path, no remedy.
+    for label, path, frame in (("--obs", obs, df_obs), ("--model", model, df_model)):
+        if not isinstance(frame.index, pd.DatetimeIndex):
+            raise typer.BadParameter(
+                f"{Path(path).name}: no time index could be read, so it cannot be paired by time. "
+                "Provide a TIMESTAMP column, year/month/day/hour columns, or a leading index "
+                "column named timestamp/datetime/date/time (or left unnamed).",
+                param_hint=label,
+            )
 
     paired = pair_dataframes(df_obs, df_model, tolerance=tolerance)
     if paired.empty:
