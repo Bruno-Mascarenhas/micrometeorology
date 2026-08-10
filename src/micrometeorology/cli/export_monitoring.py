@@ -259,8 +259,14 @@ def run(
     # the window the payload declares and the page header prints, and it was
     # drawn over a raw layer that has exactly one sample there. The last complete
     # hour inside the window is the one that starts an hour before its end.
+    #
+    # The bound is measured against the STATION's own last sample, not against
+    # `last`: when the model runs ahead, `last` is the model's end, and trimming
+    # against it left the station's trailing PARTIAL hour published as a
+    # complete hourly mean — an average of however many minutes the logger had
+    # written, drawn beside hours built from twelve samples.
     raw = raw.loc[first:last]
-    hourly = hourly.loc[first : last - pd.Timedelta(hours=1)]
+    hourly = hourly.loc[first : min(last, station_last) - pd.Timedelta(hours=1)]
     # Measured on the SLICED frame, not on the archive: with an explicit `--end`
     # the newest sample in the file can be years after the window, and an anchor
     # outside the window is worse than none.
