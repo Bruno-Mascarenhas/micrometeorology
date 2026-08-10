@@ -1,11 +1,17 @@
 """Tests for Campbell `.dat` ingestion and multi-file merging."""
 
 from pathlib import Path
+from typing import ClassVar
 
 import pandas as pd
 import pytest
 
-from micrometeorology.sensors.ingestion import merge_dat_files, read_campbell_dat
+from micrometeorology.sensors.ingestion import (
+    apply_physical_limits,
+    merge_dat_files,
+    read_campbell_dat,
+    values_outside_declared_limits,
+)
 
 
 def _write_toa5(path: Path, columns: list[str], rows: list[tuple[str, list[float | str]]]) -> str:
@@ -150,3 +156,37 @@ class TestMergeDatFiles:
         as_paths: list[Path] = [Path(written)]
 
         assert merge_dat_files(as_strings).equals(merge_dat_files(as_paths))
+
+
+class TestTheGateAlsoHoldsAfterCalibration:
+    """A value AT the boundary crosses it once an instrument factor scales it.
+
+    ``CM3Up_Wm2_Avg`` capped at exactly 1500 W/m2 by its own gate reached the
+    published artifact at 1508.65 -- 1500 x its post-2019 factor -- and the
+    Eppley PSP factor pushed 578 more over. The gate runs on the raw signal,
+    which is what protects the calibration from multiplying a non-physical
+    value; nothing was re-checking the number that actually gets written.
+    """
+
+    LIMITS: ClassVar[list[dict]] = [{"column": "CM3Up_Wm2_Avg", "lower": -20.0, "upper": 1500.0}]
+
+    def test_a_calibrated_boundary_value_is_reported(self):
+        frame = pd.DataFrame({"CM3Up_Wm2_Avg": [1000.0, 1500.0 * 1.0058, 1490.0]})
+
+        assert values_outside_declared_limits(frame, self.LIMITS) == {"CM3Up_Wm2_Avg": 1}
+
+    def test_a_frame_inside_its_gates_reports_nothing(self):
+        frame = pd.DataFrame({"CM3Up_Wm2_Avg": [0.0, 1000.0, 1500.0, -20.0]})
+
+        assert values_outside_declared_limits(frame, self.LIMITS) == {}
+
+    def test_reapplying_the_gate_clears_the_report(self):
+        frame = pd.DataFrame({"CM3Up_Wm2_Avg": [1000.0, 1508.65]})
+
+        gated = apply_physical_limits(frame.copy(), self.LIMITS)
+
+        assert values_outside_declared_limits(gated, self.LIMITS) == {}
+        assert gated["CM3Up_Wm2_Avg"].notna().sum() == 1
+
+    def test_a_column_the_frame_lacks_is_not_a_violation(self):
+        assert values_outside_declared_limits(pd.DataFrame({"other": [1.0]}), self.LIMITS) == {}

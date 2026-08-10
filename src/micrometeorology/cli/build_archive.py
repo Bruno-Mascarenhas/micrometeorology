@@ -72,7 +72,10 @@ from micrometeorology.sensors.calibration import (
     uncalibrated_mapping_windows,
     unify_sensor_columns,
 )
-from micrometeorology.sensors.ingestion import apply_physical_limits
+from micrometeorology.sensors.ingestion import (
+    apply_physical_limits,
+    values_outside_declared_limits,
+)
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -298,6 +301,22 @@ def run(
             f"  {day}  {count} amostra(s) acima de {NIGHT_CORRUPTION_FLUX_WM2:.0f} W/m2 de madrugada"
         )
 
+    # The gate runs twice, and the second pass is the one that makes the
+    # published column obey its own declared range. The first runs on the RAW
+    # signal, which is what protects the calibration from multiplying a value
+    # that was never physical; a value sitting AT the boundary then crosses it
+    # once scaled, and 579 samples reached the artifact that way — 578 of them
+    # created by the Eppley PSP factor this same config declares.
+    outside = values_outside_declared_limits(qc, settings.sensor_limits)
+    if outside:
+        qc = apply_physical_limits(qc, settings.sensor_limits)
+        typer.echo(
+            f"\nLimites reaplicados apos calibracao: {sum(outside.values()):,} amostra(s) "
+            f"em {len(outside)} coluna(s) cruzaram o portao ao serem escaladas"
+        )
+        for column, count in sorted(outside.items(), key=lambda item: -item[1])[:8]:
+            typer.echo(f"  {column:22s} {count:,}")
+
     _write(qc, out / "station_5min_qc", output_format)
 
     # The logger's quality flag is text, which no hourly mean can carry. Turning
@@ -352,6 +371,7 @@ def run(
         "sentinels_removed": removed,
         "physical_limits_removed": fired,
         "physical_limits_absent_columns": absent,
+        "physical_limits_after_calibration": outside,
         "calibration_invalidated": invalidated,
         "impossible_shortwave_removed": impossible,
         # Dated, so the episode stays auditable after the samples are gone.

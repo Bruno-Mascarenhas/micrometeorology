@@ -200,3 +200,26 @@ def apply_physical_limits(
             logger.debug("  %s: %d values outside [%.1f, %.1f] -> NaN", col, n_bad, lower, upper)
             df.loc[mask, col] = np.nan
     return df
+
+
+def values_outside_declared_limits(df: pd.DataFrame, limits: list[dict]) -> dict[str, int]:
+    """Columns still holding values their own declared gate rejects.
+
+    The gates run on the RAW signal, before the instrument factors, so a value
+    at the boundary crosses it once calibrated: ``CM3Up_Wm2_Avg`` capped at
+    exactly 1500 W/m2 by its gate reached the published artifact at 1508.65,
+    which is 1500 x its post-2019 factor. Re-checking after calibration is what
+    makes "the published column obeys its declared range" a property that can be
+    verified instead of assumed — the gate itself stays where it is, because the
+    thresholds are written in the logger's units and several name millivolts.
+    """
+    outside: dict[str, int] = {}
+    for lim in limits:
+        col = lim["column"]
+        if col not in df.columns:
+            continue
+        values = df[col]
+        count = int(((values < lim["lower"]) | (values > lim["upper"])).sum())
+        if count:
+            outside[str(col)] = count
+    return outside
