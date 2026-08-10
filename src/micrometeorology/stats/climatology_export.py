@@ -572,6 +572,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         edges=_linear_edges(0.0, 20.0, 0.5),
         caveats=(
             "A Weibull não representa massa em zero: as calmarias saem do ajuste e são informadas à parte. Barras e curva são densidades condicionais às horas com vento acima do limiar de partida — é a densidade híbrida de [[takle1978]], mostrada como as suas duas peças. O limiar entra como calmaria: é o valor que o anemômetro reporta parado, não uma velocidade medida.",
+            "O mesmo corte é aplicado ao recorte do modelo, e essa é uma escolha declarada: um modelo não tem velocidade de partida, então o limiar ali não é um estado de instrumento e sim a condição que torna as duas densidades comparáveis. Sem ele o modelo publicaria a sua massa dentro das barras e do ajuste enquanto o observado a publica fora — dois histogramas condicionados a eventos diferentes, lado a lado, que é justamente a comparação que esta página existe para permitir.",
         ),
     ),
     VariableSpec(

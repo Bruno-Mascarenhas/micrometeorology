@@ -241,43 +241,32 @@ def _clearness(frame: pd.DataFrame, column: str) -> pd.Series:
     return pd.Series(np.where(daylight, kt, np.nan), index=frame.index).dropna()
 
 
-def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Atom]]:
-    """Select, gate and de-atomise one variable from the observed hourly frame."""
-    if spec_id == "clearness_index":
-        values = _clearness(frame, OBSERVED_COLUMN[spec_id])
-        return values.to_numpy(), []
+def _strip_atoms(
+    spec_id: str, series: pd.Series, speed: pd.Series | None
+) -> tuple[np.ndarray, list[Atom]]:
+    """Remove the point masses and report them, for EITHER source.
 
-    column = OBSERVED_COLUMN[spec_id]
-    if column not in frame.columns:
-        return np.array([]), []
-    series = frame[column]
+    Shared between the observed and the model branch on purpose. The page exists
+    to let the two histograms be compared, and a comparison is only meaningful
+    when both are conditional on the same event. They were not: the model's
+    relative humidity kept its saturation mass while the observed one removed
+    it, the model's wind direction got no calm removal at all, and the model's
+    wind-speed atom was published as a hard-coded 0,0 % / 0 h while 98 model
+    hours sat at or below the calm threshold, inside the bars and inside the
+    Weibull fit.
 
-    if spec_id in DAYTIME_ONLY:
-        series = series.loc[_elevation(frame) > MIN_SOLAR_ELEVATION_DEG]
-    elif spec_id in NIGHTTIME_ONLY:
-        series = series.loc[_elevation(frame) < 0.0]
-    series = series.dropna()
-
-    if spec_id == "par_early":
-        series = series.loc[series.index < ERA_SPLIT]
-    elif spec_id in ("par_late", "shortwave_up"):
-        series = series.loc[series.index >= ERA_SPLIT]
-    elif spec_id == "wind_direction":
-        first, last = INVALID_DIRECTION
-        series = series.loc[(series.index < first) | (series.index > last)]
-
-    if spec_id in ("wind_speed", "wind_direction"):
+    On the physics of applying the calm cut to a model: 0,281 m/s is what a
+    stalled cup anemometer reports, and a model has no stall. Using it on both
+    sides is a choice for comparability over instrumental literalism, and the
+    variable's caveats say so rather than leaving it implied.
+    """
+    if spec_id in ("wind_speed", "wind_direction") and speed is not None:
         # The gate is `<=`, not `<`: 0.281 m/s is not a threshold the wind falls
         # below, it is the value the cup anemometer REPORTS while stalled. 2,794
         # hourly means sit on it exactly (4.0% of the record) and 51.8% of them
         # bear north against 5.3% for the record as a whole — the parked vane,
         # not a wind. A strict `<` keeps every one of them, which is why the
         # published rose carried a north petal nearly twice its true size.
-        speed = (
-            series
-            if spec_id == "wind_speed"
-            else frame[OBSERVED_COLUMN["wind_speed"]].reindex(series.index)
-        )
         removed = int((speed <= CALM_THRESHOLD_MS).sum())
         calm = removed / len(series) if len(series) else float("nan")
         kept = series.loc[speed > CALM_THRESHOLD_MS]
@@ -315,10 +304,43 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
             )
         ]
 
+    return series.to_numpy(), []
+
+
+def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Atom]]:
+    """Select, gate and de-atomise one variable from the observed hourly frame."""
+    if spec_id == "clearness_index":
+        values = _clearness(frame, OBSERVED_COLUMN[spec_id])
+        return values.to_numpy(), []
+
+    column = OBSERVED_COLUMN[spec_id]
+    if column not in frame.columns:
+        return np.array([]), []
+    series = frame[column]
+
+    if spec_id in DAYTIME_ONLY:
+        series = series.loc[_elevation(frame) > MIN_SOLAR_ELEVATION_DEG]
+    elif spec_id in NIGHTTIME_ONLY:
+        series = series.loc[_elevation(frame) < 0.0]
+    series = series.dropna()
+
+    if spec_id == "par_early":
+        series = series.loc[series.index < ERA_SPLIT]
+    elif spec_id in ("par_late", "shortwave_up"):
+        series = series.loc[series.index >= ERA_SPLIT]
+    elif spec_id == "wind_direction":
+        first, last = INVALID_DIRECTION
+        series = series.loc[(series.index < first) | (series.index > last)]
+
     if spec_id in ("par_early", "par_late"):
         return _par_sample(series, frame)
 
-    return series.to_numpy(), []
+    speed = (
+        series
+        if spec_id == "wind_speed"
+        else frame[OBSERVED_COLUMN["wind_speed"]].reindex(series.index)
+    )
+    return _strip_atoms(spec_id, series, speed)
 
 
 def _par_sample_mask(series: pd.Series, global_flux: pd.Series) -> pd.Series:
@@ -384,12 +406,17 @@ def _wrf_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Ato
     elif spec_id in NIGHTTIME_ONLY:
         series = series.loc[_elevation(frame) < 0.0]
     series = series.dropna()
-    if spec_id == "wind_speed":
-        # The model never outputs exactly zero, so its calm atom is empty by
-        # construction. Reporting it as 0 rather than omitting it keeps the two
-        # sources structurally comparable on the page.
-        return series.to_numpy(), [Atom("calm", "Calmarias (modelo não produz zero exato)", 0.0, 0)]
-    return series.to_numpy(), []
+    # The SAME de-atomisation the observed branch applies. Publishing a model
+    # histogram conditional on a different event than the observed one it is
+    # drawn beside makes the comparison the page exists for meaningless.
+    speed = (
+        series
+        if spec_id == "wind_speed"
+        else frame[WRF_COLUMN["wind_speed"]].reindex(series.index)
+        if WRF_COLUMN["wind_speed"] in frame.columns
+        else None
+    )
+    return _strip_atoms(spec_id, series, speed)
 
 
 def _scale_mixture(top: np.ndarray) -> tuple[list[float], list[float]]:
