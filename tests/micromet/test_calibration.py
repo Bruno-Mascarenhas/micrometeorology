@@ -6,7 +6,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from micrometeorology.sensors.calibration import apply_calibrations, unify_sensor_columns
+from micrometeorology.sensors.calibration import (
+    apply_calibrations,
+    uncalibrated_mapping_windows,
+    unify_sensor_columns,
+)
 
 
 @pytest.fixture
@@ -388,3 +392,100 @@ class TestACalibrationSurvivesAColumnRename:
             apply_calibrations(frame.copy(), records)
 
         assert "matched no populated sample" in caplog.text
+
+
+class TestUncalibratedMappingWindows:
+    """A column calibrated over PART of the window it feeds puts a step in the data.
+
+    Measured on the real archive: no ``PSP1_Wm2_Avg`` record covers
+    2016-09-29..2017-12-31 while 2018-01-01 onward is scaled by 0.9383408072, so
+    the published global shortwave drops 6.2% at a date on which nothing
+    physical happened -- only a file handover. The raw instrument record is
+    continuous across it (monthly p95 clearness 0.7600 -> 0.7612); the published
+    series reads 0.7600 -> 0.7143.
+    """
+
+    @staticmethod
+    def _frame() -> pd.DataFrame:
+        index = pd.date_range("2016-01-01", "2019-12-31", freq="D")
+        return pd.DataFrame({"PSP1_Wm2_Avg": 1.0, "Temp1_Avg": 25.0}, index=index)
+
+    @staticmethod
+    def _switches() -> list[dict[str, Any]]:
+        return [
+            {
+                "unified_name": "Sw_dw",
+                "mappings": [{"column": "PSP1_Wm2_Avg", "start_date": None, "end_date": None}],
+            },
+            {
+                "unified_name": "T",
+                "mappings": [{"column": "Temp1_Avg", "start_date": None, "end_date": None}],
+            },
+        ]
+
+    def test_the_half_covered_window_is_reported(self):
+        calibrations = [
+            {"column": "PSP1_Wm2_Avg", "start_date": "2018-01-01", "end_date": None, "factor": 0.94}
+        ]
+
+        gaps = uncalibrated_mapping_windows(self._frame(), calibrations, self._switches())
+
+        assert len(gaps) == 1
+        unified, column, start, end = gaps[0]
+        assert (unified, column) == ("Sw_dw", "PSP1_Wm2_Avg")
+        assert start == pd.Timestamp("2016-01-01")
+        assert end.date() == pd.Timestamp("2017-12-31").date()
+
+    def test_a_column_with_no_record_at_all_is_not_a_gap(self):
+        """The logger's own multiplier is the calibration for most channels.
+
+        Reporting those too buries the one real finding under 37 non-findings,
+        which is how a warning stops being read.
+        """
+        calibrations = [
+            {"column": "PSP1_Wm2_Avg", "start_date": None, "end_date": None, "factor": 0.94}
+        ]
+
+        assert uncalibrated_mapping_windows(self._frame(), calibrations, self._switches()) == []
+
+    def test_a_hole_between_two_records_is_reported(self):
+        calibrations = [
+            {
+                "column": "PSP1_Wm2_Avg",
+                "start_date": None,
+                "end_date": "2016-12-31",
+                "factor": 0.94,
+            },
+            {
+                "column": "PSP1_Wm2_Avg",
+                "start_date": "2018-01-01",
+                "end_date": None,
+                "factor": 1.09,
+            },
+        ]
+
+        gaps = uncalibrated_mapping_windows(self._frame(), calibrations, self._switches())
+
+        assert len(gaps) == 1
+        _unified, _column, start, end = gaps[0]
+        assert start.date() == pd.Timestamp("2017-01-01").date()
+        assert end.date() == pd.Timestamp("2017-12-31").date()
+
+    def test_a_null_factor_record_counts_as_covered(self):
+        """`factor: null` is a decision about the window, not an absence of one."""
+        calibrations: list[dict[str, Any]] = [
+            {
+                "column": "PSP1_Wm2_Avg",
+                "start_date": None,
+                "end_date": "2017-12-31",
+                "factor": None,
+            },
+            {
+                "column": "PSP1_Wm2_Avg",
+                "start_date": "2018-01-01",
+                "end_date": None,
+                "factor": 0.94,
+            },
+        ]
+
+        assert uncalibrated_mapping_windows(self._frame(), calibrations, self._switches()) == []

@@ -270,6 +270,73 @@ def resolve_mapping_windows(
     return windows
 
 
+def uncalibrated_mapping_windows(
+    df: pd.DataFrame,
+    calibrations: list[dict[str, Any]],
+    switches: list[dict[str, Any]],
+) -> list[tuple[str, str, pd.Timestamp, pd.Timestamp]]:
+    """Windows where a column feeds a unified series with no calibration covering it.
+
+    "Declared" and "applied" are not the same thing, and until this was reported
+    the difference was invisible in every artifact. Two live faults had exactly
+    this shape:
+
+    - The Eppley PSP's post-2019 sensitivity correction named only the pre-v11
+      column spelling, so the live diffuse sensor published ~8.5% low for seven
+      years while the record sat in the config looking applied.
+    - No ``PSP1_Wm2_Avg`` record covers 2016-09-29..2017-12-31, so the published
+      global shortwave takes a 6.2% step at 2018-01-01 — a discontinuity on a
+      date where nothing physical happened, only a file handover.
+
+    Only columns that carry at least one calibration record are considered. A
+    column with none needs none — the logger's own programmed multiplier is its
+    calibration, which is the ordinary case for temperature, humidity and the
+    tipping bucket. What this reports is the other shape: a column calibrated
+    over PART of the window it feeds, which puts a step in the published series
+    at the boundary between the two halves and nowhere in the instrument record.
+
+    Returns ``(unified name, source column, gap start, gap end)`` per uncovered
+    stretch, oldest first. An empty list means every mapped sample of a
+    calibrated column is either scaled or explicitly invalidated by a
+    ``factor: null`` record.
+    """
+    covered: dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
+    for record in calibrations:
+        column = record["column"]
+        if column not in df.columns:
+            continue
+        start, end = _resolve_record_range(record, df)
+        if start <= end:
+            covered.setdefault(column, []).append((start, end))
+
+    gaps: list[tuple[str, str, pd.Timestamp, pd.Timestamp]] = []
+    for switch in switches:
+        unified_name = switch["unified_name"]
+        for mapping in switch["mappings"]:
+            column = mapping["column"]
+            if column not in df.columns or column not in covered:
+                continue
+            start, end = _resolve_record_range(mapping, df)
+            if start > end:
+                continue
+            # Walk the mapping window, consuming the calibrated stretches in
+            # date order; whatever the cursor skips over is uncovered.
+            cursor = start
+            for cal_start, cal_end in sorted(covered.get(column, [])):
+                if cal_end < cursor:
+                    continue
+                if cal_start > cursor:
+                    gaps.append(
+                        (unified_name, column, cursor, min(end, cal_start - pd.Timedelta(1, "ns")))
+                    )
+                cursor = max(cursor, cal_end + pd.Timedelta(1, "ns"))
+                if cursor > end:
+                    break
+            if cursor <= end:
+                gaps.append((unified_name, column, cursor, end))
+    return sorted(gaps, key=lambda item: item[2])
+
+
 def unify_sensor_columns(
     df: pd.DataFrame,
     switches: list[dict[str, Any]],

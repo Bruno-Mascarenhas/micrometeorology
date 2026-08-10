@@ -68,6 +68,7 @@ from micrometeorology.sensors.calibration import (
     load_calibrations,
     load_sensor_switches,
     resolve_mapping_windows,
+    uncalibrated_mapping_windows,
     unify_sensor_columns,
 )
 from micrometeorology.sensors.ingestion import apply_physical_limits
@@ -233,6 +234,20 @@ def run(
         # reach both, or the artifact publishes the rejected value under the
         # other name and the two disagree inside one file.
         sources = resolve_mapping_windows(qc, switches, NIGHT_CORRUPTION_CHANNELS)
+
+        # Reported, never fatal: an uncovered window is a laboratory decision
+        # (which sensitivity applied then), and refusing to build the archive
+        # over it would trade a scaling error for no record at all. Silence is
+        # what made both known cases invisible for years, so it is silence that
+        # this removes.
+        gaps = uncalibrated_mapping_windows(qc, load_calibrations(calibrations_path), switches)
+        if gaps:
+            typer.echo(
+                f"\n  ! {len(gaps)} janela(s) alimentam uma serie unificada sem nenhuma "
+                "calibracao declarada (degrau artificial na fronteira):"
+            )
+            for unified_name, column, start, end in gaps[:8]:
+                typer.echo(f"    {unified_name:9s} <- {column:16s} {start.date()} .. {end.date()}")
     else:
         typer.echo(
             f"  ! sem calibracoes em {calibrations_path}: exportando sem correcao nem unificacao"
