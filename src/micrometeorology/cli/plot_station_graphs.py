@@ -590,7 +590,10 @@ def render_site_graphs(
                 # filename is indistinguishable from a working chart on a calm
                 # day, so the previous image is left in place instead.
                 logger.warning("%s: no layer had data -- not written", spec.filename)
-                empty.append(spec.key)
+                if spec.key not in empty:
+                    # An empty station column already recorded it above; a chart
+                    # is one entry in this list, not one per reason it is bare.
+                    empty.append(spec.key)
                 continue
             add_top_legend(ax, ncol=4)
             written.append(save_figure(fig, out / spec.filename))
@@ -722,12 +725,22 @@ def site(
         wrf=wrf,
     )
 
+    written_keys = {path.stem for path in written}
     for path in written:
         typer.echo(f"  [ok] {path.name}")
     if missing:
-        typer.echo(f"[!] Skipped (no layer had data): {', '.join(missing)}")
+        typer.echo(f"[!] Skipped (missing column): {', '.join(missing)}")
     if empty:
-        typer.echo(f"[!] Drawn without the station layer (column all-empty): {', '.join(empty)}")
+        # Two distinct states share this list: a chart drawn from its other
+        # layers because the station column was empty, and a chart not written
+        # at all because NO layer had data. Say which, so the operator can tell a
+        # dead sensor from a dead run.
+        bare = [key for key in empty if key not in written_keys]
+        partial = [key for key in empty if key in written_keys]
+        if partial:
+            typer.echo(f"[!] Drawn without the station layer: {', '.join(partial)}")
+        if bare:
+            typer.echo(f"[!] Not written, no layer had data: {', '.join(bare)}")
     typer.echo(f"\n>> {len(written)} graph(s) saved to {output_dir}")
 
     # `--strict` fails on a MISSING column and not on an empty one, and the
