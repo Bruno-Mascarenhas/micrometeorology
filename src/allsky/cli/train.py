@@ -1,10 +1,9 @@
 """``train`` CLI command — multimodal experiment training.
 
 ``allsky train`` runs a multimodal experiment declared by an
-``experiment: true`` config (see ``configs/allsky/experiments/``). The legacy
-SkyFusionNet pipeline has been retired: a config that is not an experiment
-config (or no config at all) is rejected with a clear pointer to the experiment
-configs.
+``experiment: true`` config (see ``configs/allsky/experiments/``); anything
+else — a config that is not an experiment config, or no config at all — is
+rejected with a pointer to those configs.
 
 torch is imported lazily inside the run helper so ``allsky --help`` stays light
 and torch-free; :func:`micrometeorology.common.optional.require` guards that

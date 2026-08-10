@@ -57,16 +57,28 @@ calibrations:
     factor: 1.0926892950 # 8.37 / 7.66
     description: "PSP1 post-2019 sensitivity: 8.37 / 7.66"
 
+  # SAME INSTRUMENT, second spelling: the logger renamed PSP1_* -> PSP_* at the
+  # v11 program change (2019-03-15), as the sensor_switches block below records.
+  # The rename is cosmetic, and the data says so: the programmed mV->W/m2
+  # multiplier is 119.474 = 1000/8.37 under BOTH spellings in every year, so the
+  # logger kept sensitivity 8.37 and the 8.37/7.66 correction is still owed.
+  # The PSP is the diffuse sensor of the current operational era (v22).
+  - column: PSP_Wm2_Avg
+    start_date: "2019-03-15"
+    end_date: null
+    factor: 1.0926892950 # 8.37 / 7.66
+    description: "PSP post-2019 sensitivity: 8.37 / 7.66 (PSP1 renamed in v11)"
+
 # ==============================================================================
 # Sensor switches — WHICH RAW COLUMN CARRIES EACH VARIABLE, AND WHEN
 # ==============================================================================
-# Reescrito em 2026-08-09 a partir de uma auditoria de todo o acervo (29 tabelas
-# lenta + 13 de chuva, 2016-09 a 2026-04). O bloco anterior usava nomes sem
-# sufixo (PSP1_Wm2, WS_WVT, WD_WXT, ...) que NÃO existem no frame que
-# merge_dat_files() produz, então unify_sensor_columns() não criava nada.
+# Column names carry the logger's exact suffixes, as merge_dat_files() produces
+# them: a name without the suffix (PSP1_Wm2, WS_WVT, ...) matches nothing and
+# unify_sensor_columns() then silently builds no unified column at all.
 #
-# ATENÇÃO: unify_sensor_columns() ainda não é chamada por labmim-sensor-process;
-# hoje só labmim-climatology consome este bloco.
+# Derived from an audit of the whole archive (29 lenta tables + 13 rain,
+# 2016-09 to 2026-04). Only labmim-archive and labmim-climatology consume this
+# block; labmim-sensor-process does not call unify_sensor_columns().
 sensor_switches:
   # ── Air temperature ──────────────────────────────────────────────────
   # HMP45/155 Temp1_Avg is preferred over Temp_WXT_Avg for the whole WXT

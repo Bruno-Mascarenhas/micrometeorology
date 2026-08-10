@@ -97,8 +97,8 @@ class TestDailyTotals:
         """A 24 h sensor outage is a gap, not 0 mm of rain.
 
         ``Resampler.sum()`` reports an all-NaN group as 0.0, which makes an
-        outage day indistinguishable from a genuinely dry one; ``mean`` already
-        yielded NaN, so this also pins the symmetry between the two branches.
+        outage day indistinguishable from a genuinely dry one; ``mean`` yields
+        NaN, and both aggregations must agree.
         """
         outage = hourly_year.copy()
         outage.loc["2025-01-02", "rain"] = np.nan
@@ -109,7 +109,7 @@ class TestDailyTotals:
         assert result["rain"].loc["2025-01-03"] == expected_neighbour
 
     def test_dry_day_is_still_zero(self, hourly_year):
-        """The fix must not turn a real all-zero day into a gap."""
+        """A day of genuine zeros is a dry day, not a gap."""
         dry = hourly_year.copy()
         dry.loc["2025-01-02", "rain"] = 0.0
         result = daily_totals(dry, columns=["rain"], agg="sum")

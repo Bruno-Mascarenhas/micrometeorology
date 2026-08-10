@@ -4,11 +4,13 @@ import numpy as np
 import pytest
 
 from micrometeorology.stats.metrics import (
+    ALL_METRICS,
     compute_all,
     correlation,
     d_index,
     ia,
     ioa,
+    is_circular_column,
     mae,
     mbe,
     nrmse,
@@ -166,8 +168,8 @@ class TestComputeAll:
         """Pin every ALL_METRICS entry to a value, not just its key.
 
         Key-presence plus the all-NaN case below is satisfied by a ``compute_all``
-        that returns NaN unconditionally; these exact values are what rule that out
-        and what pins each name to the right function.
+        returning NaN unconditionally; these exact values rule that out and bind
+        each name to the right function.
         """
         obs = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         pred = obs + 1.0
@@ -191,7 +193,7 @@ class TestComputeAll:
 class TestNonFinitePairsAreDropped:
     """One diverged prediction must not destroy the whole metrics record.
 
-    ``np.isnan`` lets +-inf through, so a single infinite value used to make
+    ``np.isnan`` lets +-inf through, so a single infinite value would make
     RMSE/MAE/MBE/NRMSE inf, R2 -inf, r and d NaN, and IOA a plausible-looking
     but wrong -1.0.
     """
@@ -246,3 +248,104 @@ class TestNonFinitePairsAreDropped:
         assert result["RMSE"] == pytest.approx(
             float(np.sqrt(np.mean(np.square(obs - pred)))), rel=0, abs=0
         )
+
+
+class TestCircularColumnDetection:
+    """Pinned to the column names the real station archive actually carries.
+
+    A false negative publishes a bearing scored on the line; a false positive
+    throws away five valid metrics of an ordinary linear column.
+    """
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "WD",
+            "WindDir",
+            "WD_WXT_Avg",
+            "WindDir_GMX",
+            "WindDir1_GMX",
+            "WindDir2_GMX",
+            "WindDir_D1_WVT",
+            "Wd_MeanUnitVector",
+            "wind_direction",
+            "dir_10m",
+        ],
+    )
+    def test_bearings_are_circular(self, name):
+        assert is_circular_column(name)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # Dispersions of direction are ordinary scalar spreads, not bearings.
+            "WindDir_SD",
+            "Wd_StdDev",
+            "WindDir_SD1_WVT",
+            "WS",
+            "WS_ms_S_WVT",
+            "T",
+            "AirT_C_Avg",
+            "pressure",
+            "precip",
+            "Sw_dw",
+            # The separator in the "dir_" prefix is what keeps this one linear.
+            "Direct_Wm2",
+        ],
+    )
+    def test_linear_columns_are_not_circular(self, name):
+        assert not is_circular_column(name)
+
+
+class TestCircularMetrics:
+    """A bearing scored on the line inflates RMSE and can flip the bias sign.
+
+    Reproduced on the real paired series (station archive vs. the operational
+    WRF run, n=15803 hours): linear RMSE 104.5 / MBE +4.6 against circular
+    RMSE 64.5 / MBE -19.5, with 1888 pairs separated by more than 180 deg.
+    """
+
+    def test_the_short_way_round_is_taken(self):
+        obs = np.array([350.0, 350.0, 10.0, 10.0])
+        pred = np.array([10.0, 10.0, 350.0, 350.0])
+        result = compute_all(obs, pred, circular=True)
+        assert result["MAE"] == pytest.approx(20.0)
+        assert result["RMSE"] == pytest.approx(20.0)
+        # Two pairs +20 deg and two -20 deg: the bias cancels, it is not -340.
+        assert result["MBE"] == pytest.approx(0.0)
+
+    def test_the_bias_keeps_its_sign_convention(self):
+        """Positive MBE = model clockwise of the observation, across 0 deg too."""
+        obs = np.array([350.0, 350.0, 180.0])
+        pred = np.array([10.0, 10.0, 200.0])
+        assert compute_all(obs, pred, circular=True)["MBE"] == pytest.approx(20.0)
+
+    def test_the_linear_reading_is_what_it_replaces(self):
+        obs = np.array([350.0, 350.0, 180.0])
+        pred = np.array([10.0, 10.0, 200.0])
+        assert compute_all(obs, pred, circular=False)["MBE"] == pytest.approx(-220.0)
+
+    def test_mean_normalised_metrics_are_suppressed(self):
+        obs = np.array([350.0, 10.0, 180.0, 90.0])
+        pred = np.array([10.0, 350.0, 200.0, 80.0])
+        result = compute_all(obs, pred, circular=True)
+        assert set(result) == set(ALL_METRICS), "the key set is parsed downstream"
+        for name in ("RMSE", "MAE", "MBE"):
+            assert np.isfinite(result[name]), name
+        for name in ("R²", "r", "d", "IOA", "NRMSE"):
+            assert np.isnan(result[name]), name
+
+    def test_a_linear_column_is_untouched_by_the_flag_default(self):
+        obs = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        pred = obs + 1.0
+        assert compute_all(obs, pred) == compute_all(obs, pred, circular=False)
+        assert np.isfinite(compute_all(obs, pred)["R²"])
+
+    def test_wrapping_never_changes_a_within_range_residual(self):
+        """Below 180 deg of separation the wrap is a no-op, so nothing shifts."""
+        obs = np.array([90.0, 100.0, 110.0, 120.0])
+        pred = np.array([95.0, 90.0, 130.0, 115.0])
+        circular = compute_all(obs, pred, circular=True)
+        linear = compute_all(obs, pred, circular=False)
+        for name in ("RMSE", "MAE", "MBE"):
+            assert circular[name] == pytest.approx(linear[name]), name

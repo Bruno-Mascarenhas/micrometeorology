@@ -36,7 +36,6 @@ __all__ = [
     "save_split_artifact",
 ]
 
-#: Canonical split names.
 SPLIT_NAMES = ("train", "val", "test")
 
 

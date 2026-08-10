@@ -3,9 +3,8 @@
 Offline and fast: synthetic samples from a seeded generator, no I/O.
 
 Where a reference exists, the estimators are checked against SciPy's own
-maximum-likelihood fit rather than against a recorded constant — the point of
-these tests is that the published parameters are right, not that they are
-unchanged.
+maximum-likelihood fit rather than against a recorded constant: what is pinned
+is that the published parameters are right, not that they are unchanged.
 """
 
 import inspect
@@ -318,10 +317,9 @@ class TestFitDistribution:
         """The induced radiation densities cannot be estimated from the sample.
 
         Their parameters are inherited from another fit and their mixture comes
-        from a covariate, so a default would mean silently publishing a curve
-        fitted on something other than what the caption claims. Failing loudly is
-        the contract; `VariableSpec.fit_options` is what makes the caller supply
-        them.
+        from a covariate, so a default would silently publish a curve fitted on
+        something other than what the caption claims. Failing loudly is the
+        contract; `VariableSpec.fit_options` makes the caller supply them.
         """
         with pytest.raises(TypeError, match="required keyword"):
             fit_distribution(family, np.array([1.0, 2.0]))

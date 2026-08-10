@@ -12,11 +12,11 @@ def estimate_array_nbytes(shape: tuple[int, ...] | list[int], dtype: Any = np.fl
     """Estimate ndarray bytes from shape and dtype without allocating."""
     itemsize = np.dtype(dtype).itemsize
     elements = 1
-    for size in shape:
-        size_int = int(size)
-        if size_int < 0:
+    for dimension in shape:
+        length = int(dimension)
+        if length < 0:
             raise ValueError(f"Invalid negative dimension size: {shape!r}")
-        elements *= size_int
+        elements *= length
     return int(elements * itemsize)
 
 
@@ -28,7 +28,11 @@ def assert_reasonable_array_size(
     context: str = "array operation",
     multiplier: float = 1.0,
 ) -> None:
-    """Fail before an operation would allocate an unreasonable array."""
+    """Fail before an operation would allocate an unreasonable array.
+
+    ``multiplier`` is how many copies of the base array the operation holds at
+    peak, so a caller that materializes intermediates passes more than 1.0.
+    """
     base_bytes = estimate_array_nbytes(shape, dtype)
     estimated_bytes = int(base_bytes * multiplier)
     limit_bytes = int(max_gb * 1024**3)

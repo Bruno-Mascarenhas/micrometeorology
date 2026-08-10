@@ -1,8 +1,7 @@
 """Local WRF processing — figures + GeoJSON + WebM in a single command.
 
-This script is designed for local testing and development. It combines
-the figure generation, GeoJSON/JSON export, and WebM video creation
-pipelines into one convenient command.
+Intended for local testing and development: it runs the figure, GeoJSON/JSON
+and WebM stages of the operational pipeline back to back over the same files.
 
 Usage::
 
@@ -105,18 +104,24 @@ def run(
     resolved_workers = workers or default_workers()
     if resolved_workers < 1:
         raise typer.BadParameter("--workers must be >= 1")
+    # Phase 3 encodes the PNGs Phase 1 rendered, so --no-figures leaves it
+    # nothing to do: its `also_video and png_paths` gate would be unconditionally
+    # false and the run would exit 0 having produced none of the requested
+    # videos.
+    if also_video and no_figures:
+        raise typer.BadParameter("--also-video encodes the rendered figures; drop --no-figures")
 
     var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
     # An output file id (-v TSK) reaches the raw-NetCDF passthrough in BOTH
     # phases and publishes unconverted Kelvin into the PNGs and JSONs that
-    # skin_temperature owns. Refuse before a single frame is rendered.
+    # skin_temperature owns, so it is refused before a frame is rendered.
     _reject_output_id_variables(var_list)
     paths = _resolve_wrfout_paths(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")
         return
 
-    t0 = time.perf_counter()
+    started_at = time.perf_counter()
 
     typer.echo("=" * 70)
     typer.echo("  WRF Local Processing Pipeline")
@@ -124,7 +129,6 @@ def run(
     typer.echo(f"  Files: {[p.name for p in paths]}")
     typer.echo(f"  Workers: {resolved_workers}")
 
-    # Phase 1: Figures
     failed_figures = 0
     if not no_figures:
         typer.echo("\n── Phase 1: Figure Generation ──")
@@ -180,7 +184,6 @@ def run(
     else:
         png_paths = []
 
-    # Phase 2: GeoJSON / JSON
     if not no_geojson:
         typer.echo("\n── Phase 2: GeoJSON & JSON Generation ──")
         from micrometeorology.cli.export_wrf_geojson import _normalize_var_list
@@ -198,7 +201,12 @@ def run(
         for result in results:
             for warning in result.warnings:
                 typer.echo(f"  ⚠ {warning}")
-        manifest_path = jobs.write_run_manifest(json_dir, results)
+        manifest_path = jobs.write_run_manifest(
+            json_dir,
+            results,
+            json_var_list,
+            covers_every_variable=set(json_var_list) >= set(DEFAULT_VARS),
+        )
         if manifest_path:
             typer.echo(f"  ✓ Manifest: {manifest_path}")
         generated_json_count = sum(
@@ -212,26 +220,25 @@ def run(
                 typer.echo(f"    - {result.label}: {result.error}")
             raise typer.Exit(code=1)
 
-    # Phase 3: WebM Videos
     failed_videos = 0
     if also_video and png_paths:
         typer.echo("\n── Phase 3: WebM Video Generation ──")
         from micrometeorology.wrf.animation import batch_create_webm
 
         grouped: dict[str, list[str]] = defaultdict(list)
-        for p in sorted(png_paths):
-            stem = Path(p).stem
+        for png_path in sorted(png_paths):
+            stem = Path(png_path).stem
             parts = stem.rsplit("_", 1)
             if len(parts) == 2:
-                grouped[parts[0]].append(p)
+                grouped[parts[0]].append(png_path)
             else:
-                grouped[stem].append(p)
+                grouped[stem].append(png_path)
 
         webm_paths = batch_create_webm(grouped, str(video_dir), fps=2, workers=resolved_workers)
         failed_videos = len(grouped) - len(webm_paths)
         typer.echo(f"  ✓ {len(webm_paths)} videos generated")
 
-    elapsed = time.perf_counter() - t0
+    elapsed = time.perf_counter() - started_at
     typer.echo("\n" + "=" * 70)
     typer.echo(f"  ✓ Complete in {elapsed:.1f}s")
     typer.echo(f"  Output: {base_out.resolve()}")

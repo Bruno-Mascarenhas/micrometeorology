@@ -5,6 +5,7 @@ change that breaks the page fails here rather than in a browser.
 """
 
 import json
+import re
 
 import numpy as np
 import pytest
@@ -13,6 +14,7 @@ from micrometeorology.stats.climatology_export import (
     CLIMATOLOGY_VARIABLES,
     MANIFEST_FORMAT,
     RAIN_BUCKET_MM,
+    REFERENCES,
     VARIABLE_FORMAT,
     Atom,
     VariableSpec,
@@ -94,10 +96,10 @@ class TestVariablePayload:
         assert curve == pytest.approx(1.0, abs=0.02)
 
     def test_atoms_are_reported_verbatim(self, wind_spec, wind_samples):
-        atoms = {"observed_all": [Atom("calm", "Calmarias", 0.037)]}
+        atoms = {"observed_all": [Atom("calm", "Calmarias", 0.037, 740)]}
         payload = build_variable_payload(wind_spec, wind_samples, version="v1", atoms=atoms)
         assert payload["subsets"]["observed_all"]["atoms"] == [
-            {"id": "calm", "label": "Calmarias", "fraction": 0.037}
+            {"id": "calm", "label": "Calmarias", "fraction": 0.037, "count": 740}
         ]
 
     def test_empty_subset_is_present_and_empty_not_omitted(self, wind_spec, wind_samples):
@@ -133,7 +135,15 @@ class TestVariablePayload:
         spec = next(s for s in CLIMATOLOGY_VARIABLES if s.chart == "rose")
         generator = np.random.default_rng(6)
         samples = {"observed_all": generator.uniform(0, 360, 5_000)}
-        payload = build_variable_payload(spec, samples, version="v1")
+        # The rose's caveats cite both of its atoms by id, and a citation that
+        # resolves to nothing is refused rather than published half-written.
+        atoms = {
+            "observed_all": [
+                Atom("arithmetic_mean_era", "Era de média aritmética", 0.465, 32588),
+                Atom("calm", "Calmarias", 0.052, 2785),
+            ]
+        }
+        payload = build_variable_payload(spec, samples, version="v1", atoms=atoms)
         assert "sectors" in payload
         assert "edges" not in payload
         assert sum(payload["subsets"]["observed_all"]["frequencies"]) == pytest.approx(
@@ -202,3 +212,192 @@ class TestWriteJson:
         write_json(path, {"v": 2})
         assert json.loads(path.read_text(encoding="utf-8")) == {"v": 2}
         assert [item.name for item in tmp_path.iterdir()] == ["x.json"]
+
+
+class TestReferenceLinks:
+    """Every published citation has to LAND on the work it names.
+
+    The links turn a bracketed marker on the page into a source the reader can
+    check, so a dead one costs the page its provenance with no visible symptom.
+    A Crossref title-search route can answer 200, serve a real page and ignore
+    the query entirely — status-only checking cannot see that, and a DOI
+    resolver link cannot fail that way.
+    """
+
+    def test_every_reference_resolves_through_doi_org(self) -> None:
+        for ref in REFERENCES.values():
+            assert ref.url.startswith("https://doi.org/10."), ref.key
+
+    def test_no_reference_falls_back_to_a_crossref_search(self) -> None:
+        """Especially not the route that answers 200 and searches nothing."""
+        for ref in REFERENCES.values():
+            assert "search.crossref.org" not in ref.url, ref.key
+
+    def test_every_doi_is_syntactically_resolvable(self) -> None:
+        """A DOI is ``10.<registrant>/<suffix>``, and the reserved characters the
+        AMS suffixes carry must be percent-encoded or the URL is malformed."""
+        for ref in REFERENCES.values():
+            doi = ref.url.removeprefix("https://doi.org/")
+            assert re.fullmatch(r"10\.\d{4,9}/\S+", doi), ref.key
+            assert "<" not in doi, f"{ref.key}: percent-encode < in the URL"
+            assert ">" not in doi, f"{ref.key}: percent-encode > in the URL"
+            assert " " not in doi, ref.key
+
+    def test_reference_keys_and_markers_agree(self) -> None:
+        """A marker with no record renders as raw ``[[key]]`` to the reader."""
+        marker = re.compile(r"\[\[([a-z0-9]+)\]\]")
+        cited = set()
+        for spec in CLIMATOLOGY_VARIABLES:
+            for text in (*spec.caveats, spec.family_label):
+                cited.update(marker.findall(text))
+        assert cited <= set(REFERENCES), sorted(cited - set(REFERENCES))
+
+
+class TestSubsetTotalsAgree:
+    """One subset, one total. The panel prints several numbers about the same
+    subset, and a reader who adds them up has to arrive where the page says."""
+
+    def test_n_decomposes_into_the_bars_plus_what_fell_outside(self, wind_spec) -> None:
+        """`n == sum(counts) + below + above`, checkable on screen.
+
+        `n` is the whole sample, never the binned count alone: the statistics
+        printed beside the bars describe that same `n`, so a value outside every
+        bar has to be accounted for by `below`/`above` rather than dropped.
+        """
+        samples = {"observed_all": np.array([-3.0, 0.5, 1.0, 2.0, 3.0, 999.0])}
+        payload = build_variable_payload(wind_spec, samples, version="v1")
+        subset = payload["subsets"]["observed_all"]
+
+        assert subset["n"] == sum(subset["counts"]) + subset["below"] + subset["above"]
+        assert subset["below"] >= 1
+        assert subset["above"] >= 1
+
+    def test_the_statistics_describe_the_same_sample_n_counts(self, wind_spec) -> None:
+        """The maximum printed beside the bars may lie outside them — that is
+        what `above` is for — but it must belong to the sample `n` counts."""
+        samples = {"observed_all": np.array([0.5, 1.0, 2.0, 999.0])}
+        payload = build_variable_payload(wind_spec, samples, version="v1")
+        subset = payload["subsets"]["observed_all"]
+
+        assert subset["n"] == 4
+        assert subset["stats"]["max"] == 999.0
+
+    def test_an_atom_publishes_the_count_its_fraction_is_a_share_of(self, wind_spec) -> None:
+        """The fraction's denominator is the subset BEFORE the mass was removed,
+        and that number is not the ``n`` printed beside it.
+
+        Without the count the reader cannot resolve the two: multiplying
+        "5,2 % calmarias" by the "66.345 observações" on the same panel gives
+        3.472, and the mass is 3.663 — a share of 70.008.
+        """
+        samples = {"observed_all": np.array([1.0, 2.0, 3.0])}
+        atoms = {"observed_all": [Atom("calm", "Calmarias", 0.25, 1)]}
+        payload = build_variable_payload(wind_spec, samples, version="v1", atoms=atoms)
+        published = payload["subsets"]["observed_all"]["atoms"][0]
+
+        assert published["count"] == 1
+        total = payload["subsets"]["observed_all"]["n"] + published["count"]
+        assert published["fraction"] == pytest.approx(published["count"] / total)
+
+    def test_the_rose_publishes_atoms_the_same_way_as_a_histogram(self) -> None:
+        """Two serialisers for one field is how they drift; the rose had no count."""
+        spec = next(s for s in CLIMATOLOGY_VARIABLES if s.chart == "rose")
+        generator = np.random.default_rng(9)
+        samples = {"observed_all": generator.uniform(0, 360, 500)}
+        # Both atoms, because the shipped wind_direction caveats cite both and an
+        # unresolvable citation is a hard failure by design.
+        atoms = {
+            "observed_all": [
+                Atom("arithmetic_mean_era", "Era de média aritmética", 0.465, 32588),
+                Atom("calm", "Calmarias", 0.1, 55),
+            ]
+        }
+        payload = build_variable_payload(spec, samples, version="v1", atoms=atoms)
+
+        published = {atom["id"]: atom for atom in payload["subsets"]["observed_all"]["atoms"]}
+        assert published["calm"]["count"] == 55
+        assert published["arithmetic_mean_era"]["count"] == 32588
+
+
+class TestCaveatsCarryThePublishedNumbers:
+    """A number in prose is a copy, and a copy stops being true.
+
+    Every count, share and fitted parameter a caveat quotes is interpolated from
+    the value the same payload publishes, so reprocessing that moves the numbers
+    moves the sentences with them and a caveat can never contradict the panel
+    printed beside it.
+    """
+
+    @staticmethod
+    def _spec(caveat: str) -> VariableSpec:
+        return VariableSpec(
+            id="probe",
+            label="Sonda",
+            unit="m/s",
+            chart="histogram",
+            family="weibull",
+            family_label="Weibull",
+            edges=tuple(float(v) for v in range(21)),
+            caveats=(caveat,),
+        )
+
+    def test_an_atom_count_comes_from_the_atom(self, wind_samples):
+        spec = self._spec("Saem do ajuste {{atom:calm:count}} horas de calmaria.")
+        atoms = {"observed_all": [Atom("calm", "Calmarias", 0.037, 3663)]}
+
+        payload = build_variable_payload(spec, wind_samples, version="v1", atoms=atoms)
+
+        assert payload["caveats"][0] == "Saem do ajuste 3.663 horas de calmaria."
+        assert payload["subsets"]["observed_all"]["atoms"][0]["count"] == 3663
+
+    def test_an_atom_share_comes_from_the_atom(self, wind_samples):
+        spec = self._spec("Calmarias: {{atom:calm:share}} % do registro.")
+        atoms = {"observed_all": [Atom("calm", "Calmarias", 0.0523, 3663)]}
+
+        payload = build_variable_payload(spec, wind_samples, version="v1", atoms=atoms)
+
+        assert payload["caveats"][0] == "Calmarias: 5,2 % do registro."
+
+    def test_a_fitted_parameter_comes_from_the_fit(self, wind_samples):
+        spec = self._spec("Forma estimada: {{param:shape:3}}.")
+
+        payload = build_variable_payload(spec, wind_samples, version="v1")
+
+        shape = payload["subsets"]["observed_all"]["fit"]["params"]["shape"]
+        printed = f"{shape:.3f}".replace(".", ",")
+        assert payload["caveats"][0] == f"Forma estimada: {printed}."
+
+    def test_an_unpublished_atom_stops_the_export(self, wind_samples):
+        """A sentence quoting a number nobody published must not reach a reader."""
+        spec = self._spec("Saem {{atom:ausente:count}} horas.")
+
+        with pytest.raises(ValueError, match="ausente"):
+            build_variable_payload(spec, wind_samples, version="v1")
+
+    def test_an_unpublished_parameter_stops_the_export(self, wind_samples):
+        spec = self._spec("Coeficiente {{param:inexistente:2}}.")
+
+        with pytest.raises(ValueError, match="inexistente"):
+            build_variable_payload(spec, wind_samples, version="v1")
+
+
+class TestTheShippedCaveatsQuoteNoLooseCount:
+    """No caveat in the catalogue may hard-code a count the export computes.
+
+    The check is on the CATALOGUE, not on one export, so a literal reintroduced
+    by a future edit is caught before it can ship.
+    """
+
+    def test_no_shipped_caveat_states_a_bare_hour_count(self):
+        # Counts are what go stale; a threshold ("acima de 10°") or a cited
+        # range does not, so only "<digits> horas" is refused.
+        offenders = [
+            f"{spec.id}: {match.group(0)}"
+            for spec in CLIMATOLOGY_VARIABLES
+            for caveat in spec.caveats
+            for match in re.finditer(r"(\d[\d.]*)\s+horas", caveat)
+        ]
+        assert offenders == [], (
+            "hard-coded hour counts in caveat prose; interpolate with "
+            "{{atom:<id>:count}} so the sentence and the panel cannot disagree"
+        )

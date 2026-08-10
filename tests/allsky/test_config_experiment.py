@@ -1,4 +1,4 @@
-"""Tests for the Wave C1b experiment/prepare configs and ``extends:`` composition.
+"""Tests for the experiment/prepare configs and ``extends:`` composition.
 
 Torch-free: only pydantic + YAML on disk (``tmp_path``), strictly offline.
 """
@@ -86,8 +86,7 @@ def test_extends_two_level_chain(tmp_path):
     (tmp_path / "base.yaml").write_text("extends: [grandbase.yaml]\nseed: 2\n", encoding="utf-8")
     (tmp_path / "top.yaml").write_text("extends: [base.yaml]\nexperiment: true\n", encoding="utf-8")
     cfg = load_experiment_config(tmp_path / "top.yaml")
-    # name propagates from the grandparent, seed overridden by the parent
-    assert cfg.name == "base"
+    assert cfg.name == "base"  # from the grandparent
     assert cfg.seed == 2
     assert cfg.experiment is True
     assert cfg.train.epochs == 3

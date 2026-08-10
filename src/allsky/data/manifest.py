@@ -170,8 +170,6 @@ def build_manifest(
         raise ValueError(f"kindex_kind must be 'kstar' or 'kt', got {kindex_kind!r}")
 
     if max_kindex is None:
-        # k* over the Haurwitz clear-sky reference sees genuine cloud enhancement
-        # beyond 1.2, so it gets a looser artifact ceiling than the clearness k_t.
         max_kindex = 1.5 if kindex_kind == "kstar" else 1.2
 
     strategy = alignment if alignment is not None else CenterFrame()
@@ -543,11 +541,11 @@ def _check_sample_id_unique(sample_ids: list[str]) -> None:
 def _reject_dead_channel(values: np.ndarray, column: str, remedy: str) -> None:
     """Refuse a radiometry channel that is identically zero over every paired row.
 
-    An all-zero irradiance channel is the CR5000 dead-input signature (the
-    CMP21 diffuse channel logs exactly this).  Accepted as a target it trains a
-    model to predict 0 and then reports a near-perfect MAE against it, labelled
-    ``target_source="measured"`` — indistinguishable in ``metrics.json`` from a
-    real run — so the build refuses it here, at the only place that knows which
+    An all-zero irradiance channel is the CR5000 dead-input signature (the CMP21
+    diffuse channel logs exactly this).  Accepted as a target it trains a model
+    to predict 0 and then reports a near-perfect MAE against it, labelled
+    ``target_source="measured"`` and indistinguishable in ``metrics.json`` from
+    a real run — so the build refuses it here, the only place that knows which
     logger column was configured.
 
     Only an *identically zero* channel is refused: an all-NaN channel is a

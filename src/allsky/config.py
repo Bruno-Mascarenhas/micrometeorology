@@ -29,14 +29,12 @@ class SiteConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Multimodal experiment / prepare configs (the all-sky v2 stack).
-#
-# These models describe the pipeline (portable manifest, embeddings, model zoo,
-# experiment engine). They are strict (``extra="forbid"``) so a typo in a YAML
-# key fails loudly rather than being silently ignored. The permissive
-# :class:`VideoConfig` / :class:`SiteConfig` sections above are reused verbatim
-# by :class:`PrepareConfig`. YAML files compose via an ``extends:`` list
-# resolved by :func:`load_experiment_config` / :func:`load_prepare_config`.
+# Multimodal experiment / prepare configs (the all-sky v2 stack): portable
+# manifest, embeddings, model zoo, experiment engine. They are strict
+# (``extra="forbid"``) so a typo in a YAML key fails loudly instead of being
+# ignored; the permissive :class:`VideoConfig` / :class:`SiteConfig` sections
+# above are reused verbatim by :class:`PrepareConfig`. YAML files compose via an
+# ``extends:`` list resolved by the loaders at the bottom of this module.
 # ---------------------------------------------------------------------------
 
 
@@ -191,10 +189,9 @@ class ExperimentModelConfig(BaseModel):
     """Model architecture selector.
 
     ``name`` keys into the model registry (``climatology``, ``sensor_only``,
-    ``image_only``, ``concat``, ``film``, ``cross_attention``). Architecture
-    hyper-parameters are architecture-specific and passed through verbatim, so
-    this model is permissive (``extra="allow"``); unknown keys are kept and
-    consumed by the model builder in a later wave.
+    ``image_only``, ``concat``, ``film``, ``cross_attention``). Hyper-parameters
+    are architecture-specific and passed through verbatim, so this model is
+    permissive (``extra="allow"``): unknown keys are kept for the model builder.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -271,11 +268,11 @@ class ExperimentTrainConfig(BaseModel):
 
 
 class ExperimentConfig(BaseModel):
-    """Root config for a multimodal training experiment (new stack).
+    """Root config for a multimodal training experiment.
 
     The optional top-level ``experiment: true`` marker (see
-    :func:`is_experiment_config`) routes the ``train`` CLI to the new engine in
-    a later wave; it is accepted here so strict validation does not reject it.
+    :func:`is_experiment_config`) routes the ``train`` CLI to the experiment
+    engine; it is accepted here so strict validation does not reject it.
     """
 
     model_config = ConfigDict(extra="forbid")

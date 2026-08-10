@@ -52,7 +52,7 @@ class _TrunkBlock(nn.Module):
         self.residual = in_dim == out_dim
 
     def forward(self, x: Tensor) -> Tensor:
-        """Apply the block, adding a residual when in/out widths match."""
+        """Map ``(B, in_dim)`` to ``(B, out_dim)``."""
         y = self.drop(self.act(self.norm(self.linear(x))))
         out: Tensor = x + y if self.residual else y
         return out
@@ -66,7 +66,7 @@ class Trunk(nn.Module):
     in_dim:
         Fused-vector width (the fusion block's ``out_dim``).
     hidden_dim:
-        Width of each trunk block (``256`` per the spec).
+        Width of each trunk block, and of the embedding it emits.
     n_layers:
         Number of trunk blocks.
     dropout:

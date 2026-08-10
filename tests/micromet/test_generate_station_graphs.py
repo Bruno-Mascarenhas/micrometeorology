@@ -184,3 +184,25 @@ def test_an_unparseable_start_date_fails_instead_of_writing_nothing(full_station
 
     assert result.exit_code != 0, f"--start-date {bad!r} exited 0: {result.output}"
     assert not out.exists() or not list(out.glob("*.png"))
+
+
+def test_an_empty_window_honours_strict_instead_of_reporting_success(full_station, tmp_path):
+    """A stalled logger is the case where EVERY graph is skipped.
+
+    That path bailed with an unconditional ``sys.exit(0)`` which never consulted
+    ``--strict``, so the run that rewrote none of the ten PNGs was the one run
+    that could not fail — a cron chain saw green over week-old images. The
+    sibling producer of the same nine site images already exits 1 here.
+    """
+    lenta, rain = full_station
+    out = tmp_path / "graphs"
+
+    # A window that predates the file: the date filter selects zero rows.
+    strict = _invoke(lenta, rain, out, "--strict", "--start-date", "2001-01-01")
+    assert strict.exit_code == 1, strict.output
+    assert "nothing to plot" in strict.output
+    assert not list(out.glob("*.png")) if out.exists() else True
+
+    # Without --strict the historical behaviour is unchanged.
+    lenient = _invoke(lenta, rain, out, "--start-date", "2001-01-01")
+    assert lenient.exit_code == 0, lenient.output

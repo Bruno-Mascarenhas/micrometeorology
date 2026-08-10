@@ -4,7 +4,7 @@ These are descriptive-statistics helpers over a :class:`pandas.DataFrame` whose
 index is a :class:`pandas.DatetimeIndex` (typically the hourly export of
 ``labmim-sensor-process``). They collapse a long record into the average day,
 the average year, or per-season subsets — the summaries the site and reports
-reuse. All functions preserve the public names operational consumers import.
+reuse.
 """
 
 import pandas as pd
@@ -30,8 +30,7 @@ def _datetime_index(df: pd.DataFrame) -> pd.DatetimeIndex:
     """Return ``df``'s index narrowed to a :class:`~pandas.DatetimeIndex`.
 
     Narrowing at the boundary lets the grouping helpers use the calendar
-    accessors (``.hour``, ``.month``) with a statically known type instead of
-    silencing the checker.
+    accessors (``.hour``, ``.month``) on a statically known type.
 
     Raises
     ------
@@ -60,8 +59,7 @@ def diurnal_cycle(
 ) -> pd.DataFrame:
     """Mean diurnal cycle: the average value at each hour of day.
 
-    Groups rows by ``index.hour`` and averages, giving the "average day" of the
-    record — every 00:00 sample averaged together, every 01:00 together, etc.
+    Groups rows by ``index.hour``, giving the "average day" of the record.
 
     Parameters
     ----------

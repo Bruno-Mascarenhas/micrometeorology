@@ -1,8 +1,8 @@
 """Plotting utilities for LabMiM station meteorological graphs.
 
-Provides helpers that preserve the layout of the legacy
-``graficos1_UFBA_v5.py`` / ``graficos3_UFBA_v1.py`` scripts while sharing
-accessible color, watermark, date-axis, and legend conventions.
+Helpers shared by both station-graph producers: they preserve the layout of the
+``graficos1_UFBA_v5.py`` / ``graficos3_UFBA_v1.py`` scripts the site was built
+around, behind one set of color, watermark, date-axis and legend conventions.
 """
 
 import logging
@@ -15,21 +15,17 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Watermark defaults
-# ---------------------------------------------------------------------------
-
 WATERMARK_LINE1 = "LabMiM & LaPO (IF)"
 WATERMARK_LINE2 = "UFBA"
 WATERMARK_COLOR = "#CFCFCF"
 WATERMARK_FONTSIZE = 16
 
-# Default figure size matching legacy graficos3 (8x4)
+# The figure size graficos3 published; the site's image slots assume it.
 DEFAULT_FIGSIZE: tuple[float, float] = (8, 4)
 
-# Matplotlib 3.11 exposes the color-vision-deficiency-friendly Okabe-Ito
-# sequence through the public registry. Keep radiation-channel semantics
-# consistent across both station-graph producers without changing global
+# Okabe-Ito: the color-vision-deficiency-friendly sequence matplotlib 3.11
+# exposes through the public registry. Fixing the radiation channels to it keeps
+# the two station-graph producers in agreement without touching the global
 # scientific colormaps.
 _OKABE_ITO = matplotlib.color_sequences["okabe_ito"]
 BALANCE_COMPONENT_COLORS = {
@@ -38,11 +34,6 @@ BALANCE_COMPONENT_COLORS = {
     "lw_down": _OKABE_ITO[3],  # bluish green
     "lw_up": _OKABE_ITO[7],  # reddish purple
 }
-
-
-# ---------------------------------------------------------------------------
-# Reusable helpers
-# ---------------------------------------------------------------------------
 
 
 def add_labmim_watermark(
@@ -71,11 +62,27 @@ def add_labmim_watermark(
     )
 
 
+# Longest span that still gets one tick per day. The site graphs plot a week, so
+# the legacy look survives wherever it was ever seen; beyond this a fixed
+# DayLocator gives not a denser axis but a BLANK one -- matplotlib refuses above
+# 1000 ticks (a decade asks for 3,844) and drops the labels entirely. Reachable
+# from `--last-days 0` and from the archive's hourly frame, which spans
+# 2016-2026.
+DAILY_TICK_MAX_DAYS = 21
+
+
 def setup_date_axis(ax) -> None:
-    """Configure day-major / 6 h-minor date axis matching legacy graphs."""
-    ax.xaxis.set_major_locator(mdates.DayLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d - %b"))
-    ax.xaxis.set_minor_locator(mdates.HourLocator(np.arange(0, 25, 6)))
+    """Configure the date axis: day-major / 6 h-minor, thinning on long spans."""
+    lo, hi = ax.get_xlim()
+    if hi - lo <= DAILY_TICK_MAX_DAYS:
+        ax.xaxis.set_major_locator(mdates.DayLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d - %b"))
+        ax.xaxis.set_minor_locator(mdates.HourLocator(np.arange(0, 25, 6)))
+    else:
+        locator = mdates.AutoDateLocator(minticks=4, maxticks=10)
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        ax.xaxis.set_minor_locator(mdates.AutoDateLocator(minticks=8, maxticks=40))
     ax.xaxis.grid(True, linestyle="-", which="major", color="grey", alpha=0.5)
 
 

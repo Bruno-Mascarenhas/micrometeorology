@@ -20,11 +20,26 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
-__all__ = ["run_git"]
+__all__ = ["run_git", "source_root"]
 
 #: Seconds before a hung git invocation is abandoned. Provenance is optional;
 #: no metadata probe may stall a training run.
 _TIMEOUT_SECONDS = 5.0
+
+
+def source_root() -> Path:
+    """Directory to anchor a provenance probe on: where this code lives.
+
+    Git resolves its repository from the working directory, so a probe with no
+    ``cwd`` describes wherever the operator happened to launch the process. Run
+    from a neighbouring checkout -- this laboratory keeps both side by side --
+    it stamps THAT repository's HEAD and dirty flag into artifacts produced by
+    this code: worse than a missing stamp, because it reads like a valid anchor.
+
+    Anchored here, the probe records the checkout the bytes actually came from,
+    and collapses to ``None`` for a wheel installed outside any checkout.
+    """
+    return Path(__file__).resolve().parent
 
 
 def run_git(args: Sequence[str], *, cwd: Path | None = None) -> str | None:
@@ -43,9 +58,8 @@ def run_git(args: Sequence[str], *, cwd: Path | None = None) -> str | None:
     cwd:
         Directory to run in. ``None`` inherits the process working directory.
     """
-    # Resolved up front: an absent git is the common case (a source tarball, a
-    # container without the client) and means "no commit info" -- the same
-    # answer the exec failure below would produce, just without the exception.
+    # An absent git (source tarball, container without the client) is the common
+    # case, and yields the same "no commit info" as the exec failure below.
     git_executable = shutil.which("git")
     if git_executable is None:
         return None
@@ -61,9 +75,9 @@ def run_git(args: Sequence[str], *, cwd: Path | None = None) -> str | None:
             text=True,
             timeout=_TIMEOUT_SECONDS,
         )
-    # A vanished or unexecutable binary (OSError), a hung call (TimeoutExpired,
-    # a SubprocessError) and output that is not valid text (UnicodeDecodeError,
-    # raised while decoding under ``text=True``) all mean "no commit info".
+    # All three mean "no commit info": a vanished or unexecutable binary, a hung
+    # call, and output that is not valid text -- the last raised while decoding
+    # under ``text=True``, so it never surfaces as a SubprocessError.
     except OSError, subprocess.SubprocessError, UnicodeDecodeError:
         return None
     if result.returncode != 0:

@@ -20,7 +20,7 @@ import typer
 from micrometeorology.common.cli_options import parse_csv
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.stats.comparison import read_dataset
-from micrometeorology.stats.metrics import compute_all
+from micrometeorology.stats.metrics import compute_all, is_circular_column, valid_pairs
 
 
 class JoinMethod(StrEnum):
@@ -84,8 +84,7 @@ def run(
     col_list = parse_csv(columns)
     if columns is not None and not col_list:
         # Naming no column at all must not quietly widen to "every common
-        # column": -c " " used to fail the run, and silently comparing
-        # everything instead would be reported as a success.
+        # column": comparing everything would then be reported as a success.
         raise typer.BadParameter(f"--columns names no column (got {columns!r})")
     if col_list:
         cols = [c for c in col_list if c in df_a.columns and c in df_b.columns]
@@ -101,7 +100,6 @@ def run(
 
     typer.echo(f"Comparing {len(cols)} columns: {cols}")
 
-    # Align datasets
     if join == JoinMethod.by_index and not (
         isinstance(df_a.index, pd.DatetimeIndex) and isinstance(df_b.index, pd.DatetimeIndex)
     ):
@@ -146,7 +144,20 @@ def run(
     for col in cols:
         a_col, b_col = f"{col}_a", f"{col}_b"
         if a_col in aligned.columns and b_col in aligned.columns:
-            results[col] = compute_all(aligned[a_col].to_numpy(), aligned[b_col].to_numpy())
+            circular = is_circular_column(col)
+            if circular:
+                typer.echo(
+                    f"{col}: circular quantity — residuals wrapped to [-180, 180); "
+                    "R2/r/d/IOA/NRMSE suppressed"
+                )
+            a_values, b_values = aligned[a_col].to_numpy(), aligned[b_col].to_numpy()
+            # "Aligned N rows" above counts rows, not comparable pairs: every
+            # metric below is computed over the finite ones only, and that count
+            # differs per column. It belongs in the artifact, not just the log.
+            results[col] = {
+                "n": float(valid_pairs(a_values, b_values)),
+                **compute_all(a_values, b_values, circular=circular),
+            }
 
     metrics_df = pd.DataFrame(results)
 

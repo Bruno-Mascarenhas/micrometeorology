@@ -13,10 +13,11 @@ from typer.testing import CliRunner
 from micrometeorology.cli import compute_metrics
 
 
-def _hourly_csv(path: Path, offset: float) -> Path:
+def _hourly_csv(path: Path, t2_offset: float) -> Path:
+    """Six hourly rows with a TIMESTAMP index; only T2 is shifted by *t2_offset*."""
     index = pd.date_range("2020-01-01", periods=6, freq="1h", name="TIMESTAMP")
     values = [20.0, 21.0, 22.0, 23.0, 24.0, 25.0]
-    pd.DataFrame({"T2": [v + offset for v in values], "RH": values}, index=index).to_csv(path)
+    pd.DataFrame({"T2": [v + t2_offset for v in values], "RH": values}, index=index).to_csv(path)
     return path
 
 

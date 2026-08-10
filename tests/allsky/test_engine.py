@@ -161,7 +161,6 @@ class TestBasicRun:
         assert (run_dir / "last.ckpt").exists()
         assert (run_dir / "best.ckpt").exists()
         assert (run_dir / "runs").is_dir()  # TensorBoard event dir
-        # Physical-unit quick metrics were computed.
         assert "val_dhi_mae" in rows.columns
         assert "final_val_metrics" in summary
         assert "loss" in summary["final_val_metrics"]
@@ -172,7 +171,6 @@ class TestResumeEquivalence:
         root, manifest, _ = _make_dataset(tmp_path)
         reader = _reader(manifest)
 
-        # Run A: 3 epochs uninterrupted.
         summary_a = run_experiment(
             _cfg(root, epochs=3),
             data_root=root,
@@ -180,7 +178,6 @@ class TestResumeEquivalence:
             embedding_reader=reader,
         )
 
-        # Run B: 2 epochs, then resume 'auto' targeting 3 epochs (+1 more).
         run_experiment(
             _cfg(root, epochs=2),
             data_root=root,
@@ -206,16 +203,16 @@ class TestResumeEquivalence:
 
 class TestResumeEquivalenceMultiWorker:
     def test_resume_matches_uninterrupted_with_workers(self, tmp_path: Path):
-        # The original divergence mode (Wave D finding 1): num_workers > 0 with
-        # persistent_workers, where a global-RNG-dependent shuffle made the resumed
-        # epoch order drift from the uninterrupted one. The dedicated per-epoch
-        # generator makes the order a pure function of (seed, epoch), so 2+resume+1
-        # must equal 3 uninterrupted, byte-for-byte in the final val metrics.
+        # With num_workers > 0 and persistent_workers, a global-RNG-dependent
+        # shuffle lets the resumed epoch order drift from the uninterrupted one.
+        # A dedicated per-epoch generator makes the order a pure function of
+        # (seed, epoch), so 2+resume+1 must equal 3 uninterrupted in the final
+        # val metrics.
         #
-        # Kept deliberately tiny (60 rows, 8-dim fake embeddings, a small MLP) so it
-        # runs in a few seconds even paying the worker-process startup cost. There
-        # is no pytest-timeout plugin in the locked env, so no @pytest.mark.timeout
-        # marker is applied; the tiny fixture is the runtime guard instead.
+        # Deliberately tiny (60 rows, 8-dim fake embeddings, a small MLP) so it
+        # runs in a few seconds even paying the worker-process startup cost. The
+        # locked env has no pytest-timeout plugin, so the fixture size is the
+        # only runtime guard.
         root, manifest, _ = _make_dataset(tmp_path)
         reader = _reader(manifest)
 
@@ -249,9 +246,9 @@ class TestResumeEquivalenceMultiWorker:
 
 class TestMetricsResumeTruncation:
     def test_stale_row_past_checkpoint_is_dropped_on_resume(self, tmp_path: Path):
-        # Reproduce the crash-window: metrics.csv/json are flushed before last.ckpt
-        # each epoch, so a crash in that gap can leave a row for an epoch the
-        # checkpoint never completed. Resume must drop it, not duplicate it.
+        # metrics.csv/json are flushed before last.ckpt each epoch, so a crash in
+        # that gap leaves a row for an epoch the checkpoint never completed.
+        # Resume must drop it, not duplicate it.
         root, manifest, _ = _make_dataset(tmp_path)
         reader = _reader(manifest)
         run_dir = tmp_path / "run"
@@ -289,8 +286,8 @@ class TestMetricsResumeTruncation:
 class TestWindowStrategies:
     @pytest.mark.parametrize("strategy", ["mean_embedding", "attention_pooling"])
     def test_windowed_run_trains_checkpoints_evaluates(self, tmp_path: Path, strategy: str):
-        # End-to-end wiring of the dataset-level windowed strategies (finding 4):
-        # the engine builds the embedding dataset with window=strategy and, for
+        # End-to-end wiring of the dataset-level windowed strategies: the engine
+        # builds the embedding dataset with window=strategy and, for
         # attention_pooling, builds/evaluates the model with the learned attention
         # temporal pooler. window_minutes=70 spans the 30-min frame cadence so each
         # interior row's window actually contains co-frames (not just itself). Uses
@@ -329,7 +326,8 @@ class TestResumeProvenance:
         # run_experiment re-fits the feature/target normalizers on whatever is on
         # disk *before* restoring, so a resume into a rebuilt manifest would
         # reinterpret converged weights in a re-scaled target space and compare
-        # best.ckpt across two different validation day sets — with no error.
+        # best.ckpt across two different validation day sets. Nothing downstream
+        # can detect that, so the resume is refused up front.
         root, manifest, _ = _make_dataset(tmp_path, n_days=3)
         run_dir = tmp_path / "run"
         run_experiment(
@@ -355,7 +353,7 @@ class TestResumeProvenance:
 
     def test_pre_provenance_checkpoint_still_resumes(self, tmp_path: Path):
         # save_checkpoint allows split_id / manifest_sha256 to be None, so a
-        # checkpoint written before the provenance fields existed must still resume.
+        # checkpoint carrying no provenance at all must still resume.
         root, manifest, _ = _make_dataset(tmp_path)
         reader = _reader(manifest)
         run_dir = tmp_path / "run"
@@ -436,9 +434,9 @@ class TestEarlyStopping:
         assert summary["best_metric"]["epoch"] == 1
 
     def test_resume_into_an_already_stopped_run_trains_nothing(self, tmp_path: Path):
-        # The stopping rule is only re-tested at the END of an epoch, so a cron
-        # re-running `--resume auto` used to burn one epoch per invocation, past the
-        # declared stop, up to the whole budget.
+        # The stopping rule is re-tested only at the END of an epoch, so without an
+        # up-front check a cron re-running `--resume auto` burns one epoch per
+        # invocation past the declared stop, up to the whole budget.
         root, manifest, _ = _make_dataset(tmp_path)
         reader = _reader(manifest)
         cfg = _cfg(
@@ -465,8 +463,9 @@ class TestEarlyStopping:
 class TestResumeMonitorChange:
     def test_changed_monitor_discards_the_stored_best(self, tmp_path: Path):
         # A best seeded from val_dhi_mae (W/m2, minimized) can never be beaten by a
-        # sky accuracy in [0, 1], so the run used to stop after `patience` epochs
-        # with best.ckpt still holding the pre-resume weights.
+        # sky accuracy in [0, 1]: carried across the monitor change it would stop
+        # the run after `patience` epochs with best.ckpt still holding the
+        # pre-resume weights.
         root, manifest, _ = _make_dataset(tmp_path)
         reader = _reader(manifest)
         run_dir = tmp_path / "run"
@@ -531,8 +530,8 @@ class TestResumeMonitorChange:
 
 class TestLearningRateLogging:
     def test_first_epoch_logs_the_rate_that_trained_it(self, tmp_path: Path):
-        # The lr column used to be read AFTER scheduler.step(), so epoch 1 reported
-        # epoch 2's rate and the rate that actually trained epoch 1 appeared nowhere.
+        # The lr column must be read BEFORE scheduler.step(): read after, epoch 1
+        # reports epoch 2's rate and the rate that trained epoch 1 appears nowhere.
         root, manifest, _ = _make_dataset(tmp_path)
         cfg = _cfg(root, epochs=2, scheduler="cosine")
         run_dir = tmp_path / "run"

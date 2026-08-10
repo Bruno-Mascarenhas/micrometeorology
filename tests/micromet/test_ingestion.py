@@ -1,11 +1,17 @@
 """Tests for Campbell `.dat` ingestion and multi-file merging."""
 
 from pathlib import Path
+from typing import ClassVar
 
 import pandas as pd
 import pytest
 
-from micrometeorology.sensors.ingestion import merge_dat_files, read_campbell_dat
+from micrometeorology.sensors.ingestion import (
+    apply_physical_limits,
+    merge_dat_files,
+    read_campbell_dat,
+    values_outside_declared_limits,
+)
 
 
 def _write_toa5(path: Path, columns: list[str], rows: list[tuple[str, list[float | str]]]) -> str:
@@ -86,11 +92,8 @@ class TestMergeDatFiles:
         assert merged.index.is_monotonic_increasing
         assert len(merged) == 3  # 12:00, 12:05, 12:10 (12:00 collapsed)
         overlap = merged.loc["2025-06-25 12:00:00"]
-        # The later file's exclusive column is preserved, not NaN'd out.
         assert overlap["only_late"] == pytest.approx(77.0)
         assert overlap["only_early"] == pytest.approx(11.0)
-        # A row unique to the later file keeps its columns; the other file's
-        # exclusive column is simply missing there.
         assert merged.loc["2025-06-25 12:05:00", "only_late"] == pytest.approx(78.0)
         assert pd.isna(merged.loc["2025-06-25 12:05:00", "only_early"])
 
@@ -109,7 +112,6 @@ class TestMergeDatFiles:
         merged = merge_dat_files([early, late])
 
         assert len(merged) == 1
-        # Chronological file order → the earlier file wins the conflict.
         assert merged.loc["2025-06-25 12:00:00", "shared"] == pytest.approx(400.0)
 
     def test_earlier_null_falls_through_to_later_non_null(self, tmp_path: Path) -> None:
@@ -138,8 +140,8 @@ class TestMergeDatFiles:
 
         ``common.paths.find_files`` hands over a ``list[Path]`` and the CLIs a
         ``list[str]``; an invariant ``list[str | Path]`` parameter rejects both
-        under mypy, so the parameter has to stay a covariant
-        ``Sequence[str | Path]``. This call is the mypy assertion.
+        under mypy, so the parameter stays a covariant ``Sequence[str | Path]``.
+        This call is the mypy assertion.
         """
         written = _write_toa5(
             tmp_path / "one.dat",
@@ -150,3 +152,37 @@ class TestMergeDatFiles:
         as_paths: list[Path] = [Path(written)]
 
         assert merge_dat_files(as_strings).equals(merge_dat_files(as_paths))
+
+
+class TestTheGateAlsoHoldsAfterCalibration:
+    """A value AT the boundary crosses it once an instrument factor scales it.
+
+    ``CM3Up_Wm2_Avg`` capped at exactly 1500 W/m2 by its own gate reaches the
+    published artifact at 1508.65 -- 1500 x its post-2019 factor -- and the
+    Eppley PSP factor pushes 578 more over. The gate runs on the raw signal,
+    which is what protects the calibration from multiplying a non-physical
+    value, so the number that actually gets written must be re-checked too.
+    """
+
+    LIMITS: ClassVar[list[dict]] = [{"column": "CM3Up_Wm2_Avg", "lower": -20.0, "upper": 1500.0}]
+
+    def test_a_calibrated_boundary_value_is_reported(self):
+        frame = pd.DataFrame({"CM3Up_Wm2_Avg": [1000.0, 1500.0 * 1.0058, 1490.0]})
+
+        assert values_outside_declared_limits(frame, self.LIMITS) == {"CM3Up_Wm2_Avg": 1}
+
+    def test_a_frame_inside_its_gates_reports_nothing(self):
+        frame = pd.DataFrame({"CM3Up_Wm2_Avg": [0.0, 1000.0, 1500.0, -20.0]})
+
+        assert values_outside_declared_limits(frame, self.LIMITS) == {}
+
+    def test_reapplying_the_gate_clears_the_report(self):
+        frame = pd.DataFrame({"CM3Up_Wm2_Avg": [1000.0, 1508.65]})
+
+        gated = apply_physical_limits(frame.copy(), self.LIMITS)
+
+        assert values_outside_declared_limits(gated, self.LIMITS) == {}
+        assert gated["CM3Up_Wm2_Avg"].notna().sum() == 1
+
+    def test_a_column_the_frame_lacks_is_not_a_violation(self):
+        assert values_outside_declared_limits(pd.DataFrame({"other": [1.0]}), self.LIMITS) == {}

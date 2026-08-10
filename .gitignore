@@ -51,6 +51,11 @@ scratch/
 requirements-audit.txt
 # Ad-hoc tool output dumps (mypy_output.txt and friends) never belong in git
 *_output.txt
+# Frame dumps written at the repo root while verifying a pipeline by hand. A
+# 60 MB CSV of the hourly archive reached a commit this way; the artifacts have
+# a home under /output/, and nothing generically named belongs at the root.
+/full.csv
+/*.parquet
 
 # ==============================================================================
 # IDE / Editor (Local only)

@@ -96,6 +96,12 @@ _TOLERANCE = 1e-10
 _MIN_SHAPE = 1e-3
 _MAX_SHAPE = 1e4
 
+# log of the largest finite double. Exponents are capped here before being fed
+# to ``np.exp`` so a clamped shape cannot overflow a power term: past this point
+# the quantity it feeds is already zero (or one) to well under machine
+# precision, so the cap is not an approximation of anything representable.
+_LOG_MAX_DOUBLE = float(np.log(np.finfo(float).max))
+
 # Bracket for the Hollands-Huget lambda. The density is monotone in lambda and
 # the physically meaningful range is roughly [-20, 20]; the wider bracket costs
 # a few bisection steps and never binds on real data.
@@ -403,24 +409,41 @@ def _fit_weibull(values: NDArray) -> dict[str, float]:
     mean = float(sample.mean())
     std = float(sample.std(ddof=1))
     start = (std / mean) ** -1.086 if mean > 0.0 and std > 0.0 else 2.0
-    shape = _weibull_shape(np.log(sample), start)
-    scale = float(np.mean(sample**shape) ** (1.0 / shape))
+    log_sample = np.log(sample)
+    shape = _weibull_shape(log_sample, start)
+    # Evaluated in LOG SPACE, like the shape solver above and for the same
+    # reason: `mean(x**k) ** (1/k)` computes `x**k` directly, and a near-constant
+    # sample drives k to the _MAX_SHAPE clamp, where the power overflows to +inf
+    # above 1 and underflows to 0 below it. This form is algebraically identical
+    # wherever the direct one does not overflow.
+    scale = float(np.exp((special.logsumexp(shape * log_sample) - np.log(sample.size)) / shape))
     return {"shape": shape, "scale": scale}
 
 
 def _weibull_pdf(x: NDArray, params: Mapping[str, float]) -> NDArray:
+    # Evaluated through the log-density, like the gamma below and for the same
+    # reason: `reduced ** shape` overflows once the shape reaches the degenerate
+    # clamp (1e4), and a near-constant sample fits exactly there. The exponent is
+    # capped at the largest representable double's log — past it the density is
+    # zero far below machine precision anyway, so the cap changes no value that
+    # can be represented.
     shape, scale = params["shape"], params["scale"]
     values = np.asarray(x, dtype=float)
-    reduced = np.where(values > 0.0, values / scale, np.nan)
-    density: NDArray = (shape / scale) * reduced ** (shape - 1.0) * np.exp(-(reduced**shape))
-    return np.where(values > 0.0, density, 0.0)
+    positive = values > 0.0
+    log_reduced = np.log(np.where(positive, values / scale, 1.0))
+    log_density = (
+        np.log(shape / scale)
+        + (shape - 1.0) * log_reduced
+        - np.exp(np.minimum(shape * log_reduced, _LOG_MAX_DOUBLE))
+    )
+    return np.where(positive, np.exp(log_density), 0.0)
 
 
 def _weibull_cdf(x: NDArray, params: Mapping[str, float]) -> NDArray:
     shape, scale = params["shape"], params["scale"]
     values = np.asarray(x, dtype=float)
-    reduced = np.where(values > 0.0, values / scale, 0.0)
-    cumulative: NDArray = -np.expm1(-(reduced**shape))
+    log_reduced = np.log(np.where(values > 0.0, values / scale, 1.0))
+    cumulative: NDArray = -np.expm1(-np.exp(np.minimum(shape * log_reduced, _LOG_MAX_DOUBLE)))
     return np.where(values > 0.0, cumulative, 0.0)
 
 

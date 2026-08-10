@@ -92,7 +92,7 @@ def test_preprocessing_uses_train_only_state_and_strict_schema() -> None:
 
 @pytest.mark.parametrize("strategy", ["ffill", "mean", "interpolate"])
 def test_target_column_is_authoritative_and_never_imputed(strategy: str) -> None:
-    """Regression: the target is ground truth — imputation must not fabricate it.
+    """The target is ground truth — imputation must not fabricate it.
 
     Under any non-``drop`` strategy the feature columns are filled but rows with
     a missing observed target are dropped, so metrics/val-loss are never scored
@@ -183,7 +183,7 @@ def test_transform_ffill_imputation_is_causal() -> None:
 
 
 def test_interpolate_fills_internal_gaps_time_linearly() -> None:
-    """Regression for finding 14: 'interpolate' must interpolate, not alias ffill."""
+    """'interpolate' must interpolate, not alias ffill."""
     index = pd.DatetimeIndex(
         ["2024-01-01 00:00", "2024-01-01 01:00", "2024-01-01 02:00", "2024-01-01 04:00"]
     )
@@ -247,7 +247,7 @@ def test_sequence_dataset_short_input_and_custom_target_offset_contracts() -> No
 
 
 def test_windowed_dataset_drops_windows_spanning_temporal_gaps() -> None:
-    """Regression for finding 8: windows must not mix discontinuous history."""
+    """Windows must not mix discontinuous history."""
     full_index = pd.date_range("2024-01-01", periods=12, freq="1h")
     # Simulate NaN rows removed by impute_strategy=drop: rows 5 and 6 missing.
     keep = np.array([0, 1, 2, 3, 4, 7, 8, 9, 10, 11])
@@ -271,7 +271,6 @@ def test_windowed_dataset_drops_windows_spanning_temporal_gaps() -> None:
     np.testing.assert_array_equal(gapped.target_values(), [20.0, 30.0, 40.0, 90.0, 100.0, 110.0])
     assert pred_index.equals(index[np.array([2, 3, 4, 7, 8, 9])])
 
-    # An explicit max_gap override can re-allow spanning the gap.
     relaxed = WindowedSequenceDataset(
         features, target, sequence_length=3, index=index, max_gap="3h"
     )
@@ -289,7 +288,7 @@ def test_tabular_dataset_preserves_full_prediction_index() -> None:
 
 
 def test_model_native_policy_preserves_model_rows_and_returns_aligned_index() -> None:
-    """Regression for finding 15: model_native must return timestamps, not None."""
+    """``model_native`` must return timestamps, not None."""
     index = pd.date_range("2024-01-01", periods=8, freq="1h")
     test_df = pd.DataFrame({"feature": np.arange(8), "target": np.arange(8)}, index=index)
 
@@ -504,9 +503,9 @@ class TestMapeDropsNonFinitePairs:
     """``mape`` must drop ±inf, not just NaN, like every sibling metric does.
 
     An ``isnan``-only mask lets a single overflowed prediction through, and the
-    mean of a set containing ``inf`` is ``inf`` — so one diverged row used to
-    destroy the MAPE of an otherwise usable run while RMSE and R² (which route
-    through the shared ``_clean_pairs``) stayed reportable.
+    mean of a set containing ``inf`` is ``inf`` — one diverged row would destroy
+    the MAPE of an otherwise usable run while RMSE and R² (which route through
+    the shared ``_clean_pairs``) stayed reportable.
     """
 
     observed = np.array([100.0, 200.0, 300.0, 400.0])

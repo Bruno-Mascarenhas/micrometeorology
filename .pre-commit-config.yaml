@@ -5,8 +5,15 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+      # --enforce-all because CI is the only place pre-commit runs here, via
+      # `pre-commit run --all-files` on a fresh checkout. Without it the hook
+      # intersects its file list with the STAGED ADDITIONS, which are empty
+      # there, so it inspected nothing and always passed — the 500 kB budget was
+      # enforced in neither direction. `legacy/` is excluded because its two
+      # notebooks (600 kB and 516 kB) predate the rule and are off-limits.
       - id: check-added-large-files
-        args: ["--maxkb=500"]
+        args: ["--maxkb=500", "--enforce-all"]
+        exclude: ^legacy/
       - id: check-merge-conflict
 
   - repo: https://github.com/astral-sh/ruff-pre-commit

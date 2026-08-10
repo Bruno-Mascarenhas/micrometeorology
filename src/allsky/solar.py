@@ -261,13 +261,13 @@ def solar_azimuth(
     sinz = np.sin(np.arccos(cosz))
     ha = hour_angle(times, site.longitude, utc_offset_hours)
 
-    denom = np.cos(lat) * sinz
-    safe = np.abs(denom) > 1e-12
+    denominator = np.cos(lat) * sinz
+    off_zenith = np.abs(denominator) > 1e-12
     ratio = np.divide(
         np.sin(lat) * cosz - np.sin(decl),
-        denom,
+        denominator,
         out=np.zeros_like(cosz),
-        where=safe,
+        where=off_zenith,
     )
     acos_deg = np.rad2deg(np.arccos(np.clip(ratio, -1.0, 1.0)))
     azimuth = np.where(ha > 0.0, acos_deg + 180.0, 540.0 - acos_deg)

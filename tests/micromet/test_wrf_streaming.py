@@ -48,9 +48,18 @@ def _write_wind_wrf_file(path: Path, *, seed: int = 11) -> None:
         phb[:] = (base * 9.0).astype(np.float32)
         hgt[:] = rng.uniform(0, 80, size=(NT, NY, NX)).astype(np.float32)
 
+        # The map rotation, which every real wrfout carries. Without it here the
+        # block path could cross a 3-step block with the file's full time axis
+        # and nothing would notice until the operational run: real files are
+        # Mercator, so the values are the identity but the SHAPES are not.
+        cos_alpha = ds.createVariable("COSALPHA", "f4", ("Time", "south_north", "west_east"))
+        sin_alpha = ds.createVariable("SINALPHA", "f4", ("Time", "south_north", "west_east"))
+        cos_alpha[:] = np.ones((NT, NY, NX), dtype=np.float32)
+        sin_alpha[:] = np.zeros((NT, NY, NX), dtype=np.float32)
+
 
 def _eager_reference(ds: WRFDataset, targets: tuple[int, ...]) -> dict[int, dict]:
-    """Reproduce the pre-deletion CLI WIND_POTENTIAL branch exactly (frozen oracles)."""
+    """Frozen oracle: the eager CLI WIND_POTENTIAL branch, step for step."""
     u_central, v_central, height_adjusted, speed_4d = compute_adjusted_heights(ds)
     out: dict[int, dict] = {}
     for target in targets:
@@ -93,15 +102,13 @@ def test_stream_wind_at_heights_matches_eager_path_bitwise(tmp_path, block_steps
         ref = reference[s.target]
         assert s.vmin == ref["vmin"]
         assert s.vmax == ref["vmax"]
-        # Bounds pin the site-wide convention: skip step 0, 98th-pct max.
         assert s.vmin == float(np.nanmin(s.speed_steps[1:]))
         assert s.vmax == float(np.nanpercentile(s.speed_steps[1:].ravel(), 98))
         assert s.speed_steps.dtype == ref["steps"][0].dtype
         for i, ref_step in enumerate(ref["steps"]):
             assert np.array_equal(s.speed_steps[i], ref_step, equal_nan=True)
-        # Wind vector payloads embed floats rounded to the standalone-overlay
-        # convention (angles 1dp, magnitudes 2dp) — exact equality against the
-        # rounded reference, not approx.
+        # The overlay payload rounds angles to 1dp and magnitudes to 2dp, so the
+        # comparison against the rounded reference is exact, not approximate.
         for i, ref_vec in enumerate(ref["vectors"]):
             got = s.wind_vectors[i]
             assert got is not None, f"wind vector packaging failed for step {i}"
@@ -156,8 +163,8 @@ def _write_offsubgrid_defects_wrf_file(path: Path, *, seed: int = 41) -> None:
 def _full_grid_wind_reference(
     ds: WRFDataset, targets: tuple[int, ...], downsampling: int = 4
 ) -> dict[int, dict]:
-    """Pre-optimization path verbatim: chained staggering, full-grid u/v
-    interpolation, then ``np.mgrid`` sampling of the trigonometry."""
+    """Reference path: chained staggering, full-grid u/v interpolation, then
+    ``np.mgrid`` sampling of the trigonometry."""
     from micrometeorology.wrf.interpolation import VerticalInterpolator
 
     n_t = ds.n_time_steps

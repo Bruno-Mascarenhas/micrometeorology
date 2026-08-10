@@ -25,7 +25,6 @@ class TestSolarPosition:
         cosz = solar.cos_zenith(times, site)
         zenith = np.rad2deg(np.arccos(cosz))
         assert zenith[1] < zenith[0]
-        # Both daytime for Salvador.
         elevation = solar.solar_elevation(times, site)
         assert (elevation > 0).all()
 
@@ -116,7 +115,6 @@ class TestSolarAzimuth:
         # Equinox: sunrise ~due east, sunset ~due west (declination ~0).
         times = pd.DatetimeIndex(["2025-03-21 08:00:00", "2025-03-21 16:00:00"])
         az = solar.solar_azimuth(times, site)
-        # Both timestamps are well above the horizon at Salvador.
         assert (solar.solar_elevation(times, site) > 0).all()
         assert 45.0 < az[0] < 135.0  # morning: eastern sky (~90)
         assert 225.0 < az[1] < 315.0  # afternoon: western sky (~270)

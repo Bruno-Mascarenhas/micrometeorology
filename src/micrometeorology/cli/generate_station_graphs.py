@@ -1,11 +1,9 @@
 """CLI: Generate LabMiM station graphs from raw Campbell Scientific .dat files.
 
-Drop-in replacement for the legacy ``graficos3_UFBA_v1.py`` script.
-Reads the same ``.dat`` files produced by the datalogger and outputs
-layout-compatible PNG graphs for the website.
-
-Optionally overlays WRF model output (``series_operacional.dat``) on
-applicable graphs as dashed black lines.
+Reads the ``.dat`` files the datalogger writes and emits the PNG graphs the
+website expects, keeping the layout of the ``graficos3_UFBA_v1.py`` script the
+site was built around. WRF model output (``series_operacional.dat``) is
+optionally overlaid on the applicable graphs as dashed black lines.
 
 Usage::
 
@@ -23,7 +21,6 @@ Usage::
 """
 
 import logging
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -74,7 +71,6 @@ LENTA_DROP_COLUMNS = [
     "PAR_Den_Avg",
 ]
 
-# Columns to drop from the rain file
 RAIN_DROP_COLUMNS = [
     "RECORD",
     "rtime(9)",
@@ -83,17 +79,12 @@ RAIN_DROP_COLUMNS = [
     "rtime(5)",
 ]
 
-# Precipitation column
 RAIN_COLUMN = "PL01_mm_Tot"
 
-# RH_WXT sensor bias offset (legacy: +10.339 in graficos3_v1)
+# Additive bias correction for the RH_WXT sensor, inherited from graficos3_v1.
 RH_WXT_OFFSET = 10.339
 
-# ---------------------------------------------------------------------------
-# WRF series_operacional.dat column mapping
-# ---------------------------------------------------------------------------
-# Maps graph -> WRF column name.  The WRF file has the first 4 columns as
-# year, month, day, hour for datetime construction, then variable columns.
+# Graph name -> column of series_operacional.dat carrying the model series.
 WRF_COLUMNS = {
     "radiacao_difusa": "Swdw",
     "temperatura": "T",
@@ -104,27 +95,21 @@ WRF_COLUMNS = {
 }
 
 
-# ---------------------------------------------------------------------------
-# WRF file reader
-# ---------------------------------------------------------------------------
-
-
 def read_wrf_series(path: str | Path) -> pd.DataFrame:
     """Read a WRF ``series_operacional.dat`` file.
 
-    The file is a CSV where the first 4 columns contain year, month, day,
-    hour used to build a DatetimeIndex.  Remaining columns are hourly
-    model variables (Sw_dw, T, ur, pressure, WS, WD, etc.).
+    The file is a CSV whose first four columns are year, month, day and hour;
+    they become the DatetimeIndex. The remaining columns are hourly model
+    variables (Sw_dw, T, ur, pressure, WS, WD, etc.).
     """
-    p = Path(path)
-    logger.info("Reading WRF series: %s", p.name)
+    source = Path(path)
+    logger.info("Reading WRF series: %s", source.name)
 
-    wrf = pd.read_csv(p, sep=",")
+    wrf = pd.read_csv(source, sep=",")
 
-    # Build datetime index from the first 4 columns
-    dt_cols = wrf.iloc[:, :4]
-    dt_cols.columns = ["year", "month", "day", "hour"]
-    wrf.index = pd.to_datetime(dt_cols)
+    datetime_parts = wrf.iloc[:, :4]
+    datetime_parts.columns = ["year", "month", "day", "hour"]
+    wrf.index = pd.to_datetime(datetime_parts)
     wrf.index.name = None
 
     logger.info("  -> %d rows, columns: %s", len(wrf), list(wrf.columns[4:]))
@@ -204,7 +189,6 @@ def _plot_balanco(
     lw_up = "CG3Dn_Wm2Cr_Avg"
     sw_up = "CM3Dn_Wm2_Avg"
 
-    # Raw dots
     if lw_dw in raw.columns:
         ax.plot(
             raw.index,
@@ -242,7 +226,6 @@ def _plot_balanco(
             alpha=0.35,
         )
 
-    # Hourly means
     if lw_dw in hourly.columns:
         ax.plot(
             hourly.index,
@@ -439,7 +422,7 @@ def _plot_umidade(
         horizontalalignment="center",
         verticalalignment="center",
     )
-    # v3 legacy: humidity timestamp at bottom-right (0.88, 0.05)
+    # Not add_timestamp_label: graficos3_v1 puts the humidity stamp bottom-right.
     ax.text(
         0.88,
         0.05,
@@ -462,21 +445,23 @@ def _plot_pressao(
     wrf: pd.DataFrame | None = None,
 ) -> Path | None:
     """Graph 7 -- Atmospheric Pressure."""
-    col = "Pmb_WXT"
-    col2 = "BP1_mbar_Avg"
-    if col not in raw.columns and col2 not in raw.columns:
+    col_wxt = "Pmb_WXT"
+    col_bp1 = "BP1_mbar_Avg"
+    if col_wxt not in raw.columns and col_bp1 not in raw.columns:
         logger.warning("No pressure columns found -- skipping pressao.png")
         return None
 
     fig, ax = create_figure()
-    if col in raw.columns:
-        ax.plot(raw.index, raw[col], "o", color="silver", markersize=6, label="Media 5 min")
-    if col2 in raw.columns:
-        ax.plot(raw.index, raw[col2], "o", color="silver", markersize=6, label="Media 5 min (BP1)")
-    if col in hourly.columns:
-        ax.plot(hourly.index, hourly[col], "s-b", label="Media 1h")
-    if col2 in hourly.columns:
-        ax.plot(hourly.index, hourly[col2], "s-c", label="Media 1h (BP1)")
+    if col_wxt in raw.columns:
+        ax.plot(raw.index, raw[col_wxt], "o", color="silver", markersize=6, label="Media 5 min")
+    if col_bp1 in raw.columns:
+        ax.plot(
+            raw.index, raw[col_bp1], "o", color="silver", markersize=6, label="Media 5 min (BP1)"
+        )
+    if col_wxt in hourly.columns:
+        ax.plot(hourly.index, hourly[col_wxt], "s-b", label="Media 1h")
+    if col_bp1 in hourly.columns:
+        ax.plot(hourly.index, hourly[col_bp1], "s-c", label="Media 1h (BP1)")
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["pressao"])
 
@@ -680,9 +665,6 @@ def run(
     # naive to match it -- an aware Timestamp raises TypeError on comparison.
     now = pd.Timestamp.now()
 
-    # ------------------------------------------------------------------
-    # 1. Ingest -- read raw .dat files
-    # ------------------------------------------------------------------
     typer.echo("Reading sensor data...")
 
     df_lenta = read_campbell_dat(
@@ -697,28 +679,20 @@ def run(
     typer.echo(f"  lenta: {len(df_lenta)} rows, {len(df_lenta.columns)} columns")
     typer.echo(f"  rain:  {len(df_rain)} rows, {len(df_rain.columns)} columns")
 
-    # ------------------------------------------------------------------
-    # 1b. Optional WRF series
-    # ------------------------------------------------------------------
     wrf: pd.DataFrame | None = None
     if wrf_path:
         wrf = read_wrf_series(wrf_path)
         typer.echo(f"  wrf:   {len(wrf)} rows")
 
-    # ------------------------------------------------------------------
-    # 2. Merge rain into the main DataFrame for unified aggregation
-    # ------------------------------------------------------------------
+    # Rain rides along in the lenta frame so one aggregation pass covers both.
     if RAIN_COLUMN in df_rain.columns:
         df_lenta[RAIN_COLUMN] = df_rain[RAIN_COLUMN].reindex(df_lenta.index)
 
-    # ------------------------------------------------------------------
-    # 3. Filter by date range
-    # ------------------------------------------------------------------
     if start_date is not None:
         # Naive for the same reason as `now` above: this bound is compared
         # against the datalogger's naive station-local index. Parsed strictly —
-        # an unset `--start-date "$VAR"` in a cron wrapper must fail loudly, not
-        # silently filter every row away and exit 0.
+        # an unset `--start-date "$VAR"` in a cron wrapper must fail loudly
+        # rather than filter every row away and exit 0.
         try:
             date_start = parse_naive_timestamp(start_date, "%Y-%m-%d")
         except ValueError as exc:
@@ -727,7 +701,6 @@ def run(
             ) from exc
         date_end = date_start + pd.Timedelta(days=days)
     else:
-        # Always plot from today - days to today if no start_date is given
         date_end = pd.Timestamp(now)
         date_start = date_end - pd.Timedelta(days=days)
 
@@ -742,25 +715,24 @@ def run(
     )
 
     if raw.empty:
+        # `--strict` is honoured here too, matching plot_station_graphs, the
+        # sibling producer of the same site images: an empty range skips EVERY
+        # graph and leaves the previous PNGs in place, so a cron chain must be
+        # able to see it instead of reading an exit 0 as a fresh publication.
         typer.echo("[!] No data in the requested date range -- nothing to plot.")
-        sys.exit(0)
+        raise typer.Exit(code=1 if strict else 0)
 
-    # Filter WRF to same date range
     if wrf is not None:
         mask_wrf = (wrf.index >= date_start) & (wrf.index <= date_end)
         wrf = wrf.loc[mask_wrf].copy()
         typer.echo(f"  wrf filtered: {len(wrf)} rows")
 
-    # ------------------------------------------------------------------
-    # 4. Aggregate to hourly means
-    # ------------------------------------------------------------------
     typer.echo("Computing hourly aggregates...")
 
     wind_dir_cols = ["WD_WXT_Avg", "WindDir1_GMX", "WindDir"]
     wind_speed_map = {"WD_WXT_Avg": "WS_WXT_Avg", "WindDir1_GMX": "WS1_ms_GMX", "WindDir": "WS_ms"}
     sum_cols = [RAIN_COLUMN]
 
-    # Filter to only columns that actually exist
     wind_dir_cols = [c for c in wind_dir_cols if c in raw.columns]
     sum_cols = [c for c in sum_cols if c in raw.columns]
     wind_speed_map = {k: v for k, v in wind_speed_map.items() if k in raw.columns}
@@ -774,12 +746,13 @@ def run(
     )
     typer.echo(f"  -> {len(hourly)} hourly rows")
 
-    # Use data-end timestamp for graph labels (not wall-clock if historical)
-    graph_dt = date_end.to_pydatetime()
+    # Stamp the newest sample actually drawn, not the wall clock: without
+    # `--start-date`, `date_end` is today, so a record that stopped months ago
+    # would be published under today's date. plot_station_graphs, the sibling
+    # producer of the same images, stamps the data end for the same reason.
+    plotted = [frame.index.max() for frame in (raw, raw_rain) if not frame.empty]
+    graph_dt = (max(plotted) if plotted else date_end).to_pydatetime()
 
-    # ------------------------------------------------------------------
-    # 5. Generate all graphs
-    # ------------------------------------------------------------------
     typer.echo("Generating graphs...")
 
     written: list[str] = []

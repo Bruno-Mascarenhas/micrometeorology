@@ -24,10 +24,10 @@ def _random_values(shape, seed, dtype=np.float32):
 def _install_fallback_spy(monkeypatch):
     """Record calls routed through the module-level ``vertical_interpolate``.
 
-    ``VerticalInterpolator`` resolves ``vertical_interpolate`` through the
-    module global, so patching the module attribute observes only the
-    fallback route.  The direct import in this test module keeps pointing at
-    the original function for computing references.
+    ``VerticalInterpolator`` resolves ``vertical_interpolate`` through the module
+    global, so patching the module attribute observes the fallback route alone.
+    This module's direct import still points at the original function, which is
+    what the references are computed with.
     """
     calls: list[tuple] = []
     original = interpolation.vertical_interpolate
@@ -266,8 +266,8 @@ def test_interpolate_many_falls_back_once_per_target(monkeypatch):
 
 
 def test_interpolate_many_keeps_the_block_memory_guard(monkeypatch):
-    """The >16 GiB guard must survive being hoisted out of the target loop:
-    once per field, with the block context and multiplier unchanged."""
+    """The >16 GiB guard runs once per field rather than once per target, with
+    the block context and multiplier unchanged."""
     shape = (2, 6, 4, 4)
     heights = _monotonic_heights(shape, axis=1, seed=32)
     values = _random_values(shape, seed=33)
@@ -286,7 +286,8 @@ def test_interpolate_many_keeps_the_block_memory_guard(monkeypatch):
     assert guard_calls == [(shape, {"context": "vertical interpolation block", "multiplier": 6.0})]
 
 
-def test_vertical_interpolator_perf_sanity_large_block():
+def test_vertical_interpolator_large_block_matches_reference():
+    """The fast path must still agree with the reference on a realistic block."""
     shape = (8, 30, 40, 40)
     heights = _monotonic_heights(shape, axis=1, seed=23)
     u = _random_values(shape, seed=24)

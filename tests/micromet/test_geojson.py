@@ -62,14 +62,13 @@ def sample_wind_2d() -> tuple[np.ndarray, np.ndarray]:
 
 
 # ---------------------------------------------------------------------------
-# _reference.create_grid_geojson (frozen oracle sanity)
+# create_values_json / write_values_json_stream
 # ---------------------------------------------------------------------------
 
 
 class TestCreateValuesJson:
     def test_nan_becomes_none(self, sample_values_2d):
         result = create_values_json(sample_values_2d, 0.0, 20.0, None)
-        # Index (0,0) = flat index 0 was set to NaN
         assert result["values"][0] is None
         # Index (2,3) = flat index 2*5+3 = 13
         assert result["values"][13] is None
@@ -123,8 +122,8 @@ class TestCreateValuesJson:
 
     @pytest.mark.parametrize("boundary_value", [0.0, -0.0, 7.0, 1.25, np.nan, -1e17, 1e-3], ids=str)
     def test_whole_float_stripping_survives_chunk_boundaries(self, tmp_path, boundary_value):
-        """The last element of a chunk is the case the old lookahead regex
-        anchored with ``$``; every token type must round-trip there."""
+        """The last element of a chunk is the boundary case: every token type
+        must round-trip there, not only mid-chunk."""
         arr = np.array([[3.0, boundary_value, 0.0, -0.0, 2.5]], dtype=np.float64)
         out = tmp_path / "vals.json"
         write_values_json_stream(out, arr, 0.0, 5.0, "N/A", chunk_size=2)
@@ -135,8 +134,8 @@ class TestCreateValuesJson:
         assert parsed["values"] == expected
 
     def test_values_text_matches_whole_float_regex_reference(self, tmp_path):
-        """The compact ``.0``-stripping must stay identical to the lookahead
-        regex it replaced, including adjacent whole floats and nulls."""
+        """The compact ``.0``-stripping must match the lookahead-regex oracle
+        built below exactly, including adjacent whole floats and nulls."""
         whole_float_re = re.compile(r"(-?\d+)\.0(?=,|$)")
         rng = np.random.default_rng(3)
         fields = [
@@ -359,7 +358,8 @@ def _non_uniform_float32_grid(ny: int, nx: int, seed: int) -> tuple[np.ndarray, 
 
 
 class TestGridGeoJsonStreamByteIdentity:
-    """The vectorized writer must produce byte-identical files to the old loop.
+    """The vectorized writer must produce byte-identical files to the frozen
+    per-feature loop in ``tests.micromet._reference``.
 
     Performance note (no timing assertion, CI-robust): the vectorized writer
     renders a 99x99 grid in ~10-20 ms vs ~780 ms for the per-feature
@@ -414,9 +414,9 @@ class TestGridGeoJsonStreamByteIdentity:
     def test_bytes_identical_masked_array_float32(self, tmp_path):
         """WRF readers return float32 MaskedArrays (mask all False).
 
-        Regression: np.ma arithmetic promotes ``/ 2`` to float64, unlike the
-        per-element float32 scalar path — corner math must not run on the
-        MaskedArray or edge cells drift in the 6th decimal.
+        np.ma arithmetic promotes ``/ 2`` to float64, unlike the per-element
+        float32 scalar path, so the corner math must not run on the MaskedArray
+        or edge cells drift in the 6th decimal.
         """
         lon, lat = _non_uniform_float32_grid(6, 4, seed=3)
         lon_ma = np.ma.MaskedArray(lon, mask=False)
@@ -433,7 +433,7 @@ class TestGridGeoJsonStreamByteIdentity:
         """
         tie_lat = -14.000000000050001
         tie_lon = -38.000000000050001
-        # The trap must be real: old path (builtin round) differs from np.round.
+        # The trap must be real: builtin round and np.round have to disagree here.
         assert round(tie_lat, 10) != float(np.round(tie_lat, 10))
         assert round(tie_lon, 10) != float(np.round(tie_lon, 10))
 

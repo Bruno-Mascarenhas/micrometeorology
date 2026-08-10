@@ -4,17 +4,14 @@ Produces three artifacts from one pass over the archive, and **verifies the
 merge against the audited row counts** before writing anything:
 
 ``station_5min_raw``
-    Every 5-minute sample the station ever recorded, merged from the explicit
-    manifest in :mod:`micrometeorology.sensors.archive`, with only the three
-    clock repairs applied. Values exactly as the logger wrote them, sentinels
-    included — this is the archive, not an interpretation of it.
+    Every 5-minute sample, merged from the explicit manifest in
+    :mod:`micrometeorology.sensors.archive` with only the three clock repairs
+    applied. Values as the logger wrote them, sentinels included.
 
 ``station_5min_qc``
     The same grid after sentinel masking, physical gates, instrument
-    calibrations and era-to-era column unification. This is the frame the
-    hourly means are computed from, written out so the chain from raw sample to
-    published statistic can be audited at its midpoint rather than taken on
-    trust.
+    calibrations and era-to-era column unification — the frame the hourly means
+    are computed from, written out so the chain can be audited at its midpoint.
 
 ``station_hourly``
     Hourly aggregation of the QC frame: means, sums for the tipping bucket, and
@@ -48,21 +45,34 @@ from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.paths import ensure_dir
 from micrometeorology.sensors.aggregation import aggregate_to_hourly
 from micrometeorology.sensors.archive import (
+    DIFFUSE_RATIO_LIMIT,
     LENTA_MANIFEST,
+    NIGHT_CORRUPTION_CHANNELS,
+    NIGHT_CORRUPTION_FLUX_WM2,
     RAIN_MANIFEST,
     STATUS_COLUMNS,
     ArchiveReport,
     build_five_minute_frame,
+    close_net_radiation,
+    mask_impossible_shortwave,
+    mask_night_corrupted_days,
     mask_sentinels,
+    night_corrupted_days,
+    unshaded_diffuse_days,
     verify_frame,
 )
 from micrometeorology.sensors.calibration import (
     apply_calibrations,
     load_calibrations,
     load_sensor_switches,
+    resolve_mapping_windows,
+    uncalibrated_mapping_windows,
     unify_sensor_columns,
 )
-from micrometeorology.sensors.ingestion import apply_physical_limits
+from micrometeorology.sensors.ingestion import (
+    apply_physical_limits,
+    values_outside_declared_limits,
+)
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -72,9 +82,8 @@ logger = logging.getLogger(__name__)
 def _write(frame: pd.DataFrame, base: Path, output_format: str) -> Path:
     """Write one artifact, defaulting to Parquet.
 
-    The 5-minute frame is ~988k rows by 94 columns. As CSV that is roughly a
-    gigabyte of text whose dtypes have to be guessed back on read; Parquet keeps
-    the dtypes and the index and is an order of magnitude smaller. CSV stays
+    The 5-minute frame is ~988k rows by 94 columns: ~1 GB as CSV, with dtypes
+    guessed back on read. Parquet keeps the dtypes and the index; CSV stays
     available because a spreadsheet cannot open Parquet.
     """
     if output_format == "csv":
@@ -151,9 +160,8 @@ def run(
     for report in reports:
         _echo_report(report)
 
-    # The rain logger is a separate table on the same 5-minute grid, so it is
-    # JOINED rather than concatenated: concatenating would interleave rows whose
-    # column sets barely overlap and double the index.
+    # The rain logger is a separate table on the same 5-minute grid: JOINED, not
+    # concatenated, which would double the index.
     rain_columns = [column for column in rain.columns if column not in lenta.columns]
     raw = lenta.join(rain[rain_columns], how="outer")
     typer.echo(f"\nBase unificada de 5 min: {len(raw):,} linhas x {len(raw.columns)} colunas")
@@ -162,62 +170,154 @@ def run(
     _write(raw, out / "station_5min_raw", output_format)
 
     qc = raw.copy()
-    qc, removed = mask_sentinels(qc)
+    qc, sentinels_removed = mask_sentinels(qc)
     typer.echo(
-        f"\nSentinelas mascaradas: {sum(removed.values()):,} amostras em {len(removed)} colunas"
+        f"\nSentinelas mascaradas: {sum(sentinels_removed.values()):,} amostras "
+        f"em {len(sentinels_removed)} colunas"
     )
-    for column, count in sorted(removed.items(), key=lambda item: -item[1])[:8]:
+    for column, count in sorted(sentinels_removed.items(), key=lambda item: -item[1])[:8]:
         typer.echo(f"  {column:20s} {count:,}")
 
+    # INVALID_WINDOWS is hand-curated and goes stale silently when the shade ring
+    # comes off: the column keeps its name while publishing global irradiance as
+    # diffuse. Re-running the criterion reports whatever the table misses.
+    unshaded = unshaded_diffuse_days(qc)
+    if unshaded:
+        typer.echo(
+            f"\n  ! {len(unshaded)} dia(s) com difusa/global de céu limpo acima de "
+            f"{DIFFUSE_RATIO_LIMIT:.2f} fora de INVALID_WINDOWS (anel de sombreamento suspeito):"
+        )
+        for day, ratio in unshaded[:8]:
+            typer.echo(f"    {day}  razao {ratio:.2f}")
+        if strict:
+            raise typer.Exit(code=1)
+
+    # Every stage below is conditional; pre-declared so the report can say "this
+    # stage removed nothing" rather than omit the key.
+    limits_fired: dict[str, int] = {}
+    limits_absent_columns: list[str] = []
+    gaps: list[tuple[str, str, pd.Timestamp, pd.Timestamp]] = []
+    net_gained = net_dropped = 0
+    invalidated: dict[str, int] = {}
+
     if settings.sensor_limits:
-        # Report which gates actually FIRED before applying them. A limit naming
-        # a column the frame does not carry is skipped in silence by
-        # apply_physical_limits, and that silence is how the shipped config
-        # reached 19 dead entries out of 21 without anyone noticing. Counting
-        # here turns "the YAML parses" into "the rule ran".
+        # apply_physical_limits skips a limit naming an absent column in silence,
+        # so counting which gates actually FIRED is what proves the rule ran.
         before = qc.notna().sum()
-        absent = [
+        limits_absent_columns = [
             limit["column"] for limit in settings.sensor_limits if limit["column"] not in qc.columns
         ]
         qc = apply_physical_limits(qc, settings.sensor_limits)
         cut = before - qc.notna().sum()
-        fired: dict[str, int] = {
-            str(column): int(count) for column, count in cut.items() if int(count) > 0
-        }
+        limits_fired = {str(column): int(count) for column, count in cut.items() if int(count) > 0}
         typer.echo(
             f"\nLimites fisicos: {len(settings.sensor_limits)} declarados, "
-            f"{len(fired)} dispararam, {sum(fired.values()):,} amostras removidas"
+            f"{len(limits_fired)} dispararam, {sum(limits_fired.values()):,} amostras removidas"
         )
-        for column, count in sorted(fired.items(), key=lambda item: -item[1])[:8]:
+        for column, count in sorted(limits_fired.items(), key=lambda item: -item[1])[:8]:
             typer.echo(f"  {column:20s} {count:,}")
-        if absent:
+        if limits_absent_columns:
             typer.echo(
-                f"  ! {len(absent)} limite(s) nomeiam coluna ausente: {', '.join(absent[:6])}"
+                f"  ! {len(limits_absent_columns)} limite(s) nomeiam coluna ausente: "
+                f"{', '.join(limits_absent_columns[:6])}"
             )
             if strict:
                 raise typer.Exit(code=1)
     calibrations_path = settings.configs_dir / "calibrations.yaml"
+    sources: dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]] = {}
     if calibrations_path.is_file():
+        before_calibration = qc.notna().sum()
         qc = apply_calibrations(qc, load_calibrations(calibrations_path))
-        # This is the step the sensor pipeline never took: without it the
-        # sensor_switches block parses and does nothing, and every era-spanning
-        # variable has to be reassembled by hand downstream.
-        qc = unify_sensor_columns(qc, load_sensor_switches(calibrations_path))
+        # A `factor: null` record NaNs its whole window, which is a removal like
+        # any other and belongs in the tally.
+        invalidated = {
+            str(column): int(count)
+            for column, count in (before_calibration - qc.notna().sum()).items()
+            if int(count) > 0
+        }
+        # Without this the sensor_switches block parses and does nothing, and
+        # every era-spanning variable has to be reassembled by hand downstream.
+        switches = load_sensor_switches(calibrations_path)
+        qc = unify_sensor_columns(qc, switches)
+        # Unification COPIES: each unified channel keeps a raw twin under the
+        # logger's own name, and the masks below must reach both or the artifact
+        # publishes the rejected value under the other name.
+        sources = resolve_mapping_windows(qc, switches, NIGHT_CORRUPTION_CHANNELS)
+
+        qc, net_gained, net_dropped = close_net_radiation(qc)
+        if net_gained or net_dropped:
+            typer.echo(
+                f"\nSaldo recomposto dos quatro componentes: +{net_gained:,} amostras "
+                f"(componentes sem saldo do registrador), -{net_dropped:,} (componente ausente)"
+            )
+
+        # Reported, never fatal: the sensitivity is a laboratory decision, and
+        # failing the build would trade a scaling error for no record.
+        gaps = uncalibrated_mapping_windows(qc, load_calibrations(calibrations_path), switches)
+        if gaps:
+            typer.echo(
+                f"\n  ! {len(gaps)} janela(s) alimentam uma serie unificada sem nenhuma "
+                "calibracao declarada (degrau artificial na fronteira):"
+            )
+            for unified_name, column, start, end in gaps[:8]:
+                typer.echo(f"    {unified_name:9s} <- {column:16s} {start.date()} .. {end.date()}")
     else:
         typer.echo(
             f"  ! sem calibracoes em {calibrations_path}: exportando sem correcao nem unificacao"
         )
 
+    # After unification: the 2017 episodes exist only in the unified column.
+    # Radiation in deep night is a slipped clock, not a sky, and the flat gates
+    # of default.yaml pass 1313 W/m2 at 04h — so the day is removed whole from
+    # the two channels it invalidates.
+    corrupted = night_corrupted_days(qc)
+    qc, night_masked = mask_night_corrupted_days(qc, corrupted, sources)
+    qc, impossible = mask_impossible_shortwave(qc, sources)
+    typer.echo(
+        f"\nDias com carimbo de tempo corrompido: {len(corrupted)} "
+        f"({sum(night_masked.values()):,} amostras mascaradas em {len(night_masked)} colunas)"
+    )
+    if impossible:
+        typer.echo(
+            f"Irradiancia impossivel para a posicao do sol (limite BSRN): "
+            f"{sum(impossible.values()):,} amostras em {len(impossible)} colunas"
+        )
+    for day, count in sorted(corrupted, key=lambda item: -item[1])[:8]:
+        typer.echo(
+            f"  {day}  {count} amostra(s) acima de {NIGHT_CORRUPTION_FLUX_WM2:.0f} W/m2 de madrugada"
+        )
+
+    # The gate runs twice: the first pass on the RAW signal keeps the calibration
+    # from scaling a never-physical value, the second because a value sitting AT
+    # the boundary crosses it once scaled — as the Eppley PSP factor declared in
+    # this same config does.
+    outside_after_calibration = values_outside_declared_limits(qc, settings.sensor_limits)
+    if outside_after_calibration:
+        qc = apply_physical_limits(qc, settings.sensor_limits)
+        typer.echo(
+            f"\nLimites reaplicados apos calibracao: "
+            f"{sum(outside_after_calibration.values()):,} amostra(s) "
+            f"em {len(outside_after_calibration)} coluna(s) cruzaram o portao ao serem escaladas"
+        )
+        for column, count in sorted(outside_after_calibration.items(), key=lambda item: -item[1])[
+            :8
+        ]:
+            typer.echo(f"  {column:22s} {count:,}")
+
     _write(qc, out / "station_5min_qc", output_format)
 
-    # The logger's quality flag is text, which no hourly mean can carry. Turning
-    # it into the fraction of samples reading OK keeps the information in the
-    # hourly frame instead of dropping the only per-row flag the record has.
+    # The logger's quality flag is text, which no hourly mean can carry; the
+    # fraction of samples reading OK keeps it in the hourly frame. It must be
+    # ``float64``: ``aggregate_to_hourly`` keeps only
+    # ``select_dtypes(include="number")`` columns, which matches neither bool nor
+    # the object dtype a null introduces. ``qc_flag`` is the unified spelling.
     hourly_input = qc.copy()
-    for column in STATUS_COLUMNS:
+    for column in (*STATUS_COLUMNS, "qc_flag"):
         if column in hourly_input.columns:
             flag = hourly_input.pop(column)
-            hourly_input[f"{column}_ok_fraction"] = flag.eq("OK").where(flag.notna())
+            hourly_input[f"{column}_ok_fraction"] = (
+                flag.eq("OK").astype("float64").mask(flag.isna())
+            )
 
     hourly = aggregate_to_hourly(
         hourly_input,
@@ -246,7 +346,22 @@ def run(
             }
             for report in reports
         ],
-        "sentinels_removed": removed,
+        # Every stage that removes a sample reports here, so these tallies sum
+        # to the raw-to-QC delta rather than living only in a console log.
+        "sentinels_removed": sentinels_removed,
+        "physical_limits_removed": limits_fired,
+        "physical_limits_absent_columns": limits_absent_columns,
+        "physical_limits_after_calibration": outside_after_calibration,
+        "calibration_invalidated": invalidated,
+        "impossible_shortwave_removed": impossible,
+        # Dated, so the episode stays auditable after the samples are gone.
+        "timestamp_corrupted_days": [day for day, _count in corrupted],
+        "timestamp_corruption_masked": night_masked,
+        "uncalibrated_mapping_windows": [
+            {"unified": unified, "column": column, "start": str(start), "end": str(end)}
+            for unified, column, start, end in gaps
+        ],
+        "net_radiation_recomposed": {"gained": net_gained, "dropped": net_dropped},
     }
     report_path = out / "archive_report.json"
     report_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Annotated
 
 import matplotlib
+import pandas as pd
 import typer
 
 matplotlib.use("Agg")
@@ -50,12 +51,50 @@ def run(
     df_obs = read_dataset(str(obs), separator=separator)
     df_model = read_dataset(str(model), separator=separator)
 
+    # This command pairs by TIME (unlike labmim-metrics, which falls back to row
+    # order), so a file whose timestamps could not be read is unusable here and
+    # the error has to name the file and the accepted shapes.
+    for label, path, frame in (("--obs", obs, df_obs), ("--model", model, df_model)):
+        if not isinstance(frame.index, pd.DatetimeIndex):
+            raise typer.BadParameter(
+                f"{Path(path).name}: no time index could be read, so it cannot be paired by time. "
+                "Provide a TIMESTAMP column, year/month/day/hour columns, or a leading index "
+                "column named timestamp/datetime/date/time (or left unnamed).",
+                param_hint=label,
+            )
+
+    # The two real operational products share no column names at all, so the
+    # ordinary way to meet this is a rename: both column sets are named. Exiting
+    # non-zero matters because a silent success with no artifact written reads,
+    # in a cron log, exactly like a comparison that ran.
+    shared = sorted(set(df_obs.columns) & set(df_model.columns))
+    if not shared:
+        raise typer.BadParameter(
+            f"no column name is common to the two files, so nothing can be compared.\n"
+            f"  {Path(obs).name}: {', '.join(map(str, df_obs.columns))}\n"
+            f"  {Path(model).name}: {', '.join(map(str, df_model.columns))}",
+            param_hint="--obs/--model",
+        )
+
     paired = pair_dataframes(df_obs, df_model, tolerance=tolerance)
     if paired.empty:
-        typer.echo("Warning: No overlapping data found")
-        return
+        raise typer.BadParameter(
+            f"the files share {len(shared)} column(s) ({', '.join(shared)}) but no timestamp "
+            f"pair falls within {tolerance}. Observations span "
+            f"{df_obs.index.min()} .. {df_obs.index.max()}; model spans "
+            f"{df_model.index.min()} .. {df_model.index.max()}.",
+            param_hint="--tolerance",
+        )
 
-    typer.echo(f"Paired {len(paired)} time steps")
+    # ``pair_dataframes`` merges LEFT, so the frame keeps one row per observation
+    # whether or not a model row fell inside --tolerance. ``len(paired)`` is
+    # therefore not the sample size: each variable's denominator is the ``n`` row.
+    model_cols = [c for c in paired.columns if c.endswith("_model")]
+    steps_with_model = int(paired[model_cols].notna().any(axis=1).sum()) if model_cols else 0
+    typer.echo(
+        f"Paired {len(paired)} time steps, {steps_with_model} with a model value within {tolerance} "
+        "(per-variable sample sizes are the 'n' row of the table)"
+    )
 
     metrics_df = compare_all_variables(paired)
     metrics_path = out_dir / "metrics_summary.csv"

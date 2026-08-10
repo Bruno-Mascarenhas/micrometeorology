@@ -3,7 +3,7 @@
 The shipped ``configs/micromet/default.yaml`` is part of the contract here:
 every key it declares must be a real field on ``Settings``, otherwise
 ``extra="forbid"`` rejects the repository's own configuration and every
-consumer of ``get_settings()`` dies at import-time of its first statement.
+consumer of ``get_settings()`` fails on its first call.
 """
 
 from collections.abc import Iterator
@@ -32,11 +32,9 @@ def test_get_settings_accepts_the_shipped_default_yaml() -> None:
 
     assert settings.sensor_limits, "shipped QC limits must survive validation"
     # Membership rather than an exact list: the rules are keyed to the RAW TOA5
-    # column names the archive actually carries across nine logger-program eras,
-    # and that set grows whenever an instrument is added. Pinning the whole list
-    # made the test fail on a config change that was correct — while the old
-    # pinned values (de-suffixed "WD_WXT", "precip") matched no column in the
-    # merged frame, so the rules they named had silently never fired.
+    # column names the archive carries across nine logger-program eras, and that
+    # set grows whenever an instrument is added. The names below must match a
+    # column of the merged frame, or the rule they name never fires.
     assert {"PL01_mm_Tot", "Rain_WXT_Tot", "precip"} <= set(settings.sensor_sum_columns)
     assert {"WD_WXT_Avg", "WindDir_D1_WVT", "WindDir1_GMX"} <= set(settings.sensor_wind_dir_columns)
 

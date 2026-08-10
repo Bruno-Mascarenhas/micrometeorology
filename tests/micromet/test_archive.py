@@ -10,6 +10,9 @@ loud failure when an entry is missing. The audited row counts are verified by
 reproduce.
 """
 
+from typing import Any
+
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -23,6 +26,7 @@ from micrometeorology.sensors.archive import (
     stage_archive,
     verify_frame,
 )
+from micrometeorology.sensors.calibration import resolve_mapping_windows, unify_sensor_columns
 
 TOA5_METADATA = '"TOA5","CR5000","CR5000","2754","CR5000.Std.06","TEST","1","LBM_test"'
 
@@ -271,3 +275,251 @@ class TestMaskSentinels:
         masked, removed = mask_sentinels(frame)
         assert removed == {}
         assert masked["only_this"].tolist() == [1.0]
+
+
+class TestNightCorruptedDays:
+    """Timestamp-shifted days, found by irradiance recorded in deep night.
+
+    42 such days are measured in docs/arqueologia/qc/med-fault-detection.md.
+    Unmasked they reach the nighttime net-radiation climatology as values up to
+    1313 W/m2 with the sun 20 deg below the horizon, more than doubling the
+    summer standard deviation the page prints.
+    """
+
+    @staticmethod
+    def _frame(values: dict[str, list[float]], stamps: list[str]) -> pd.DataFrame:
+        return pd.DataFrame(values, index=pd.DatetimeIndex(stamps))
+
+    def test_a_clean_day_is_not_flagged(self) -> None:
+        # Local midday, so the sun is up and the flux is ordinary.
+        stamps = [f"2024-06-15 12:{minute:02d}" for minute in (0, 5, 10, 15)]
+        frame = self._frame({"Sw_dw": [800.0, 810.0, 790.0, 805.0]}, stamps)
+
+        assert archive.night_corrupted_days(frame) == []
+
+    def test_deep_night_irradiance_flags_the_day(self) -> None:
+        stamps = [f"2024-06-15 02:{minute:02d}" for minute in (0, 5, 10, 15)]
+        frame = self._frame({"Sw_dw": [600.0, 610.0, 590.0, 605.0]}, stamps)
+
+        flagged = archive.night_corrupted_days(frame)
+
+        assert [day for day, _count in flagged] == ["2024-06-15"]
+        assert flagged[0][1] == 4
+
+    def test_fewer_samples_than_the_floor_is_not_an_episode(self) -> None:
+        """One stray sample is noise; a shifted clock lasts."""
+        stamps = ["2024-06-15 02:00", "2024-06-15 02:05", "2024-06-15 12:00"]
+        frame = self._frame({"Sw_dw": [600.0, 610.0, 800.0]}, stamps)
+
+        assert archive.night_corrupted_days(frame) == []
+
+    def test_a_day_only_the_par_sensor_witnesses_is_still_found(self) -> None:
+        """Every shortwave channel is a witness, not just Sw_dw.
+
+        The shortwave channels do not share an outage, so any one of them can be
+        the only surviving witness of a shifted day — 2018-10-22 carries 118
+        deep-night PAR samples and no global ones at all. Keying the detector on
+        Sw_dw alone misses ten such days.
+        """
+        stamps = [f"2018-10-22 02:{minute:02d}" for minute in (0, 5, 10)]
+        frame = self._frame({"Sw_dw": [float("nan")] * 3, "Sw_par": [300.0, 310.0, 290.0]}, stamps)
+
+        assert [day for day, _count in archive.night_corrupted_days(frame)] == ["2018-10-22"]
+
+    def test_longwave_at_night_is_not_corruption(self) -> None:
+        """A pyrgeometer reads 300-400 W/m2 all night by design.
+
+        Including longwave in the detector would flag the entire record.
+        """
+        stamps = [f"2024-06-15 02:{minute:02d}" for minute in (0, 5, 10, 15)]
+        frame = self._frame({"Lw_dw": [380.0] * 4, "Lw_up": [420.0] * 4}, stamps)
+
+        assert archive.night_corrupted_days(frame) == []
+
+    def test_the_mask_takes_the_whole_day_and_the_derived_net_with_it(self) -> None:
+        """The clock is what is wrong, so the plausible-looking half of the day is
+        exactly as misplaced as the half that is not. ``Net_CNR1`` goes too: the
+        logger computes it from the four components, so leaving it would keep the
+        corrupted contribution on disk."""
+        stamps = [
+            "2024-06-15 02:00",
+            "2024-06-15 02:05",
+            "2024-06-15 02:10",
+            "2024-06-15 12:00",  # looks ordinary, same broken clock
+            "2024-06-16 12:00",  # the next day is untouched
+        ]
+        frame = self._frame(
+            {
+                "Sw_dw": [600.0, 610.0, 590.0, 800.0, 850.0],
+                "Sw_par": [300.0, 305.0, 295.0, 400.0, 420.0],
+                "Net_CNR1": [500.0, 510.0, 490.0, 700.0, 720.0],
+                "T": [21.0, 21.1, 21.2, 28.0, 29.0],
+            },
+            stamps,
+        )
+
+        masked, removed = archive.mask_night_corrupted_days(
+            frame.copy(), archive.night_corrupted_days(frame)
+        )
+
+        assert masked["Sw_dw"].iloc[:4].isna().all()
+        assert masked["Sw_par"].iloc[:4].isna().all()
+        assert masked["Net_CNR1"].iloc[:4].isna().all()
+        assert masked["Sw_dw"].iloc[4] == 850.0, "the following day must survive"
+        # Non-radiation channels keep their values: the reading is real, only its
+        # timestamp is wrong, and dropping them would delete good measurements.
+        assert masked["T"].notna().all()
+        assert removed == {"Sw_dw": 4, "Sw_par": 4, "Net_CNR1": 4}
+
+
+class TestTheMasksReachTheRawTwin:
+    """``unify_sensor_columns`` COPIES, so masking the alias alone cleans half a frame.
+
+    Measured on a full build with the alias masked alone: 1,049 hourly stamps
+    carried ``Sw_dw`` NaN beside ``CM3Up_Wm2_Avg`` still holding the value that
+    triggered the mask, up to 1442.19 W/m2 of "global irradiance" at 05:00
+    local, plus 1,127 / 1,145 / 883 / 935 more for Sw_up, Sw_par, Net_CNR1 and
+    Sw_dif. The site's static graphs read the raw names.
+    """
+
+    @staticmethod
+    def _switches() -> list[dict[str, Any]]:
+        return [
+            {
+                "unified_name": "Sw_dw",
+                "mappings": [
+                    {"column": "PSP1_Wm2_Avg", "start_date": None, "end_date": "2024-06-15"},
+                    {"column": "CM3Up_Wm2_Avg", "start_date": "2024-06-16", "end_date": None},
+                ],
+            }
+        ]
+
+    @staticmethod
+    def _frame() -> pd.DataFrame:
+        stamps = [
+            "2024-06-15 02:00",
+            "2024-06-15 02:05",
+            "2024-06-15 02:10",
+            "2024-06-16 02:00",
+            "2024-06-16 02:05",
+            "2024-06-16 02:10",
+        ]
+        return pd.DataFrame(
+            {
+                "PSP1_Wm2_Avg": [600.0, 610.0, 590.0, np.nan, np.nan, np.nan],
+                "CM3Up_Wm2_Avg": [np.nan, np.nan, np.nan, 700.0, 710.0, 690.0],
+            },
+            index=pd.DatetimeIndex(stamps),
+        )
+
+    def test_the_day_mask_blanks_the_source_the_alias_was_copied_from(self) -> None:
+        frame = unify_sensor_columns(self._frame(), self._switches())
+        sources = resolve_mapping_windows(frame, self._switches(), ("Sw_dw",))
+
+        masked, removed = archive.mask_night_corrupted_days(
+            frame.copy(), archive.night_corrupted_days(frame), sources
+        )
+
+        assert masked["Sw_dw"].isna().all()
+        assert masked["PSP1_Wm2_Avg"].isna().all(), "the rejected value must not survive by name"
+        assert masked["CM3Up_Wm2_Avg"].isna().all()
+        assert removed == {"Sw_dw": 6, "PSP1_Wm2_Avg": 3, "CM3Up_Wm2_Avg": 3}
+
+    def test_without_the_source_map_the_raw_twin_still_publishes_the_value(self) -> None:
+        """Pins what the source map buys: omit it and the raw twin survives."""
+        frame = unify_sensor_columns(self._frame(), self._switches())
+
+        masked, _removed = archive.mask_night_corrupted_days(
+            frame.copy(), archive.night_corrupted_days(frame)
+        )
+
+        assert masked["Sw_dw"].isna().all()
+        assert masked["PSP1_Wm2_Avg"].notna().sum() == 3
+
+    def test_the_bsrn_mask_stays_inside_the_era_window(self) -> None:
+        """Per-sample, so it may only touch the column that IS that measurement.
+
+        Blanking an instrument outside its own mapping window would remove data
+        on a check it never failed -- the day mask is the one that is allowed to
+        take everything, because a slipped clock is a fault of the logger.
+        """
+        stamps = pd.DatetimeIndex(["2024-06-15 05:00", "2024-06-16 05:00"])
+        frame = pd.DataFrame(
+            {
+                "PSP1_Wm2_Avg": [1400.0, 1400.0],
+                "CM3Up_Wm2_Avg": [1400.0, 1400.0],
+                "Sw_dw": [1400.0, 1400.0],
+            },
+            index=stamps,
+        )
+        sources = resolve_mapping_windows(frame, self._switches(), ("Sw_dw",))
+
+        masked, removed = archive.mask_impossible_shortwave(frame.copy(), sources)
+
+        assert masked["Sw_dw"].isna().all(), "both samples exceed the BSRN ceiling"
+        # Each raw column loses only the sample inside its own era.
+        assert masked["PSP1_Wm2_Avg"].to_list() == [
+            pytest.approx(float("nan"), nan_ok=True),
+            1400.0,
+        ]
+        assert masked["CM3Up_Wm2_Avg"].to_list() == [
+            1400.0,
+            pytest.approx(float("nan"), nan_ok=True),
+        ]
+        assert removed == {"Sw_dw": 2, "PSP1_Wm2_Avg": 1, "CM3Up_Wm2_Avg": 1}
+
+
+class TestNetRadiationClosesWithItsComponents:
+    """The monitoring chart tells the reader to add the four bars and land on Rn.
+
+    The logger derives its net from the same four channels, so calibrating a
+    component without recomputing the logger's precomputed sum breaks the
+    identity: a systematic +1,28 W/m2 residual reaching 9,28, past the 8,95
+    W/m2 ceiling the module asserts for this quantity.
+    """
+
+    @staticmethod
+    def _frame() -> pd.DataFrame:
+        index = pd.date_range("2024-01-01", periods=3, freq="5min")
+        return pd.DataFrame(
+            {
+                "Sw_dw": [800.0, 900.0, np.nan],
+                "Sw_up": [100.0, 110.0, 120.0],
+                "Lw_dw": [400.0, 405.0, 410.0],
+                "Lw_up": [450.0, 455.0, 460.0],
+                "Net_CNR1": [1.0, 2.0, 3.0],
+            },
+            index=index,
+        )
+
+    def test_the_net_becomes_the_sum_of_the_published_components(self):
+        closed, _gained, _dropped = archive.close_net_radiation(self._frame())
+
+        residual = closed["Sw_dw"] - closed["Sw_up"] + closed["Lw_dw"] - closed["Lw_up"]
+        residual = residual - closed["Net_CNR1"]
+        assert float(np.nanmax(np.abs(residual))) == 0.0
+        assert closed["Net_CNR1"].iloc[0] == pytest.approx(650.0)
+
+    def test_a_missing_component_leaves_no_net(self):
+        """A net without all four terms is not a net, whatever the logger wrote."""
+        closed, _gained, dropped = archive.close_net_radiation(self._frame())
+
+        assert np.isnan(closed["Net_CNR1"].iloc[2])
+        assert dropped == 1
+
+    def test_components_without_a_logger_net_are_published(self):
+        frame = self._frame()
+        frame["Net_CNR1"] = [np.nan, np.nan, np.nan]
+
+        closed, gained, _dropped = archive.close_net_radiation(frame)
+
+        assert gained == 2
+        assert closed["Net_CNR1"].iloc[1] == pytest.approx(740.0)
+
+    def test_a_frame_without_the_components_is_untouched(self):
+        frame = pd.DataFrame({"Net_CNR1": [1.0, 2.0]}, index=pd.date_range("2024-01-01", periods=2))
+
+        closed, gained, dropped = archive.close_net_radiation(frame)
+
+        assert closed["Net_CNR1"].to_list() == [1.0, 2.0]
+        assert (gained, dropped) == (0, 0)

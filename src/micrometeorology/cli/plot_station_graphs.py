@@ -1,11 +1,10 @@
 """CLI: Produce the LabMiM monitoring-page graphs from a processed sensor CSV.
 
-This module is the **producer** for the nine fixed-name PNGs consumed by the
-LabMiM public monitoring page (``https://labmim.if.ufba.br/monitoring.html``)
-in the read-only sibling site repository (``site-labmim``).  The page hard-codes
-the image names under ``assets/graphs/``; this CLI writes exactly those names so
-a run overwrites them in place.  The consumer is **external** (cron/manual copy)
-and therefore invisible to any reverse-import analysis of this repository.
+Producer for the nine fixed-name PNGs the LabMiM monitoring page
+(``https://labmim.if.ufba.br/monitoring.html``, read-only sibling repository
+``site-labmim``) hard-codes under ``assets/graphs/``; a run overwrites them in
+place. The consumer is external (cron/manual copy), so no reverse-import
+analysis of this repository can see it.
 
 The nine-image contract (``site`` command)::
 
@@ -25,8 +24,8 @@ YAML passed with ``--config`` (keys ``columns`` and ``balance_components``).
 
 Examples
 --------
-Generate all nine monitoring-page PNGs for the last 7 days straight into a
-checkout of the site (operational default target is ``site/assets/graphs/``)::
+All nine PNGs for the last 7 days, straight into a site checkout (the
+operational target is ``site/assets/graphs/``)::
 
     labmim-site-graphs site -i data/hourly/sensor_data.csv \
         -o ../site-labmim/site/assets/graphs
@@ -43,6 +42,7 @@ Ad-hoc per-variable graphs (secondary generic command, legacy filenames)::
 """
 
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -59,6 +59,10 @@ from matplotlib.typing import ColorType
 
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.paths import ensure_dir
+
+# Imported, not re-typed: a second literal of the same ordered tuple defeats
+# what makes a new extraction variable a data change rather than a code change.
+from micrometeorology.sensors.monitoring import _WRF_RAIN_CANDIDATES
 from micrometeorology.sensors.plotting import (
     BALANCE_COMPONENT_COLORS,
     add_labmim_watermark,
@@ -109,7 +113,10 @@ class GraphSpec:
 # Ordered exactly as the monitoring page lays the cards out.
 GRAPH_SPECS: tuple[GraphSpec, ...] = (
     GraphSpec("temperatura", "temperatura.png", "Temperatura do Ar (°C)", "line", (10, 40)),
-    GraphSpec("umidade", "umidade.png", "Umidade Relativa do Ar (%)", "line", (0, 100)),
+    # 105, not 100: the model's RH is uncapped and exceeds 100% in 314 of the
+    # 24,816 hours the extraction carries (max 101.6), which a 0-100 frame would
+    # clip unmarked. MONITORING_CHARTS declares the same 105.
+    GraphSpec("umidade", "umidade.png", "Umidade Relativa do Ar (%)", "line", (0, 105)),
     GraphSpec("pressao", "pressao.png", "Pressão Atmosférica (hPa)", "line"),
     GraphSpec("precipitacao", "precipitacao.png", "Precipitação (mm)", "bar"),
     GraphSpec("velocidade", "velocidade.png", "Velocidade do Vento (m/s)", "line", (0, 15)),
@@ -119,29 +126,42 @@ GRAPH_SPECS: tuple[GraphSpec, ...] = (
     GraphSpec("radiacao_par", "radiacao_par.png", "Radiação PAR (W/m²)", "line"),
 )
 
-# Default column mapping: the processed-CSV column each contract graph reads.
-# These are the hourly-export column names of ``labmim-sensor-process``
-# (``sensors.export.export_csv``); override per-logger via --config / --col.
-DEFAULT_COLUMNS: dict[str, str] = {
-    "temperatura": "AirT1_C_Avg",
-    "umidade": "RH1",
-    "pressao": "BP1_mbar_Avg",
-    "precipitacao": "PL01_mm_Tot",
-    "velocidade": "WS_ms",
-    "direcao": "WindDir",
-    "balanco": "Net_Wm2_Avg",
-    "radiacao_difusa": "PSP_Wm2_Avg",
-    "radiacao_par": "PAR_Wm2_Avg",
+# Candidates each contract graph reads, best first: the chain head is the
+# UNIFIED name ``sensor_switches`` builds (``labmim-archive``), the tail the raw
+# logger column ``labmim-sensor-process`` exports. A raw column is ONE
+# instrument while the graph's quantity changes instrument over the record — the
+# shade ring was off the PSP from 2019-09 to 2025-05 (calibrations.yaml, Sw_dif
+# era map) with the CMP21 carrying diffuse, so a window inside those six years
+# resolved through ``PSP_Wm2_Avg`` publishes near-global irradiance under
+# "Radiação Difusa". A historical window replayed through the non-unifying
+# sensor-process path still hits that raw tail; feed it from the archive's
+# hourly frame, or override the chain with --config / --col.
+DEFAULT_COLUMNS: dict[str, tuple[str, ...]] = {
+    "temperatura": ("T", "AirT1_C_Avg"),
+    "umidade": ("ur", "RH1"),
+    "pressao": ("pressure", "BP1_mbar_Avg"),
+    "precipitacao": ("precip", "PL01_mm_Tot"),
+    "velocidade": ("WS", "WS_ms"),
+    "direcao": ("WD", "WindDir"),
+    "balanco": ("Net_CNR1", "Net_Wm2_Avg"),
+    "radiacao_difusa": ("Sw_dif", "PSP_Wm2_Avg"),
+    "radiacao_par": ("Sw_par", "PAR_Wm2_Avg"),
 }
 
 # Optional radiation-balance components (CNR1 four-stream), plotted on the
 # ``balanco`` graph when present.  The upward (``*_up``) channels are drawn
 # negated, matching the legacy ``graficos1_UFBA_v5.py`` sign convention.
-DEFAULT_BALANCE_COMPONENTS: dict[str, str] = {
-    "sw_down": "CM3Up_Wm2_Avg",
-    "sw_up": "CM3Dn_Wm2_Avg",
-    "lw_down": "CG3Up_Wm2_Avg",
-    "lw_up": "CG3Dn_Wm2_Avg",
+DEFAULT_BALANCE_COMPONENTS: dict[str, tuple[str, ...]] = {
+    "sw_down": ("Sw_dw", "CM3Up_Wm2_Avg"),
+    "sw_up": ("Sw_up", "CM3Dn_Wm2_Avg"),
+    # The ``Cr`` spellings are the FLUXES; plain ``CG3*_Wm2_Avg`` is the
+    # pyrgeometers' raw thermopile signal, missing the sigma*T_body^4 case term:
+    # over 2022-07-01..08 it averages -41.7 and +0.9 W/m2 against fluxes of
+    # +405.7 and +448.2. The case term cancels in the NET (-42.55 W/m2 either
+    # way), so the raw columns still sum visually to Rn while both are wrong by
+    # ~447 W/m2 — closure is no evidence the right columns were picked.
+    "lw_down": ("Lw_dw", "CG3Up_Wm2Cr_Avg"),
+    "lw_up": ("Lw_up", "CG3Dn_Wm2Cr_Avg"),
 }
 
 # Fallback U/V component columns used to reconstruct wind direction when the
@@ -152,21 +172,19 @@ DEFAULT_DIRECTION_COMPONENTS: tuple[str, str] = ("u", "v")
 # PNGs and the interactive page agree on what "WRF" looks like.
 _WRF_COLOR = "#e07a1f"
 
-# Candidate WRF column names per contract graph, in priority order. A TUPLE
-# rather than a single name because ``series_operacional.dat`` is produced by a
-# separate extraction that gains variables over time: precipitation is expected
-# but absent today, so the day it lands the overlay appears with no code change.
+# Candidate WRF column names per contract graph, in priority order. A tuple, not
+# a single name, because ``series_operacional.dat`` gains variables over time:
+# precipitation is absent today; the overlay appears the day it lands, no edit.
 DEFAULT_WRF_COLUMNS: dict[str, tuple[str, ...]] = {
     "temperatura": ("T",),
     "umidade": ("ur", "RH"),
     "pressao": ("pressure",),
-    "precipitacao": ("precip", "Precip", "PRECIP", "rain", "Rain", "RAINNC", "RAINC"),
+    "precipitacao": _WRF_RAIN_CANDIDATES,
     "velocidade": ("WS",),
     "direcao": ("WD",),
     "radiacao_difusa": ("Swdf",),
-    # The balance overlay is the incoming shortwave only. The model's upwelling
-    # and net terms derive from ALBD and EMISS, which the extraction writes as
-    # broken constants, so they are not plotted.
+    # Incoming shortwave only: the model's upwelling and net terms derive from
+    # ALBD and EMISS, which the extraction writes as broken constants.
     "balanco": ("Swdw",),
     # No PAR in the point extraction.
     "radiacao_par": (),
@@ -178,10 +196,28 @@ DEFAULT_WRF_COLUMNS: dict[str, tuple[str, ...]] = {
 # ---------------------------------------------------------------------------
 
 
+def _as_chain(value: object) -> tuple[str, ...]:
+    """Normalise one configured mapping to a candidate chain, best first.
+
+    A scalar replaces the whole default chain: an operator retargeting a renamed
+    logger means that column, not that column behind the shipped alternatives.
+    """
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list | tuple):
+        return tuple(str(item) for item in value)
+    raise ValueError(f"Column mapping must be a name or a list of names, got {value!r}")
+
+
+def resolve_column(frame: pd.DataFrame, candidates: Sequence[str]) -> str | None:
+    """First candidate the frame carries, or ``None`` if it carries none."""
+    return next((name for name in candidates if name in frame.columns), None)
+
+
 def load_graph_config(
     config_path: Path | None,
     overrides: list[str] | None = None,
-) -> tuple[dict[str, str], dict[str, str], tuple[str, str]]:
+) -> tuple[dict[str, tuple[str, ...]], dict[str, tuple[str, ...]], tuple[str, str]]:
     """Resolve the column mapping from defaults, a YAML file, and CLI overrides.
 
     Precedence (lowest to highest): :data:`DEFAULT_COLUMNS` →
@@ -212,8 +248,15 @@ def load_graph_config(
 
     if config_path is not None:
         data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        columns.update(data.get("columns", {}) or {})
-        balance.update(data.get("balance_components", {}) or {})
+        columns.update(
+            {key: _as_chain(value) for key, value in (data.get("columns", {}) or {}).items()}
+        )
+        balance.update(
+            {
+                key: _as_chain(value)
+                for key, value in (data.get("balance_components", {}) or {}).items()
+            }
+        )
         raw_dir = data.get("direction_components")
         if raw_dir:
             if len(raw_dir) != 2:
@@ -227,7 +270,7 @@ def load_graph_config(
             raise ValueError(f"Invalid --col override {item!r}; expected KEY=COLUMN")
         if key not in DEFAULT_COLUMNS:
             raise ValueError(f"Unknown --col key {key!r}; valid keys: {', '.join(DEFAULT_COLUMNS)}")
-        columns[key] = value
+        columns[key] = _as_chain(value)
 
     return columns, balance, direction_components
 
@@ -238,13 +281,16 @@ def load_graph_config(
 
 
 def load_hourly_csv(input_path: Path, last_days: int) -> pd.DataFrame:
-    """Load a processed hourly CSV and clip it to the most recent window.
+    """Load a processed hourly frame and clip it to the most recent window.
 
     Parameters
     ----------
     input_path:
-        CSV whose first column is the timestamp index — the default
-        (``include_datetime_columns=False``) export of ``labmim-sensor-process``.
+        CSV whose first column is the timestamp index (the default
+        ``include_datetime_columns=False`` export of ``labmim-sensor-process``)
+        or ``station_hourly.parquet`` from ``labmim-archive``. Only the archive
+        frame carries the unified, era-mapped names, so only it names the right
+        instrument for a historical radiation window.
     last_days:
         Keep only rows within ``last_days`` of the newest timestamp. A value
         ``<= 0`` disables the clip and keeps the whole file.
@@ -254,7 +300,11 @@ def load_hourly_csv(input_path: Path, last_days: int) -> pd.DataFrame:
     pandas.DataFrame
         The (optionally clipped) frame with a sorted ``DatetimeIndex``.
     """
-    df = pd.read_csv(input_path, index_col=0, parse_dates=True)
+    df = (
+        pd.read_parquet(input_path)
+        if input_path.suffix == ".parquet"
+        else pd.read_csv(input_path, index_col=0, parse_dates=True)
+    )
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index)
     df = df.sort_index()
@@ -274,9 +324,8 @@ def load_hourly_csv(input_path: Path, last_days: int) -> pd.DataFrame:
 def _plot_line(ax: plt.Axes, series: pd.Series, *, label: str, over_raw: bool = False) -> None:
     """Draw the hourly line (temperature, humidity, ...).
 
-    The markers are dropped when a raw layer sits underneath: at 12 raw samples
-    per hour they cover exactly the points the raw layer exists to expose, and
-    the sampling cadence is already visible from the dots below.
+    Markers are dropped when a raw layer sits underneath: at 12 raw samples per
+    hour they cover exactly the points that layer exists to expose.
     """
     style = "-" if over_raw else "o-"
     ax.plot(
@@ -293,9 +342,8 @@ def _plot_line(ax: plt.Axes, series: pd.Series, *, label: str, over_raw: bool = 
 def _plot_raw(ax: plt.Axes, series: pd.Series, *, label: str, dots: bool = True) -> None:
     """Draw the raw logger samples as the recessive layer under the hourly line.
 
-    Deliberately low-contrast and unconnected: this layer is context, not the
-    subject. Drawing it as a line of equal weight would hide the hourly mean it
-    exists to be compared against.
+    Low-contrast and unconnected on purpose: at equal weight this context layer
+    would hide the hourly mean it exists to be compared against.
     """
     style = "." if dots else "-"
     ax.plot(
@@ -321,15 +369,11 @@ def _plot_wrf(
 ) -> None:
     """Draw the model series, visually distinct from anything measured.
 
-    Three things have to be told apart on the balance chart — the physical
-    family, the direction of the flux, and whether a line is measured or
-    modelled — so each gets its own channel: HUE for the family, solid/dashed
-    for the direction, and DOTTED for the model. That is why the overlay takes
-    the colour of the series it mirrors (``color``) instead of a colour of its
-    own: same quantity, same hue; dotted says it came from WRF.
+    The balance chart separates three things onto three channels: HUE for the
+    physical family, solid/dashed for the flux direction, DOTTED for the model —
+    hence the overlay borrows the hue of the series it mirrors (``color``).
 
-    Direction is the exception and passes ``dots=True``: the model swings
-    through north, and a line joining 350 deg to 10 deg would sweep the whole
+    Direction passes ``dots=True``: joining 350 deg to 10 deg would sweep the
     axis through a bearing that never occurred.
     """
     if dots:
@@ -358,10 +402,8 @@ def _plot_wrf(
 def _plot_scatter(ax: plt.Axes, series: pd.Series, *, label: str) -> None:
     """Scatter wind direction as dots on a fixed 0-360 axis.
 
-    Limitation
-    ----------
-    Direction is circular (359° and 1° are adjacent); a connecting line
-    would draw a spurious full-range sweep across the wrap. Dots avoid that.
+    Direction is circular (359° and 1° are adjacent), so a connecting line would
+    draw a spurious full-range sweep across the wrap.
     """
     ax.plot(series.index, series.to_numpy() % 360.0, "o", markersize=4, color="black", label=label)
     ax.set_yticks([0, 90, 180, 270, 360])
@@ -380,11 +422,9 @@ def _plot_balance(
 ) -> None:
     """Draw net radiation plus any available four-stream components.
 
-    Formula
-    -------
-    Net radiation ``Rn = (SW_down - SW_up) + (LW_down - LW_up)``. Upward
-    channels are plotted negated so the stacked lines visually sum toward
-    ``Rn``, following the legacy ``graficos1_UFBA_v5.py`` convention.
+    ``Rn = (SW_down - SW_up) + (LW_down - LW_up)``: the upward channels are
+    plotted negated so the lines visually sum toward ``Rn``, following the
+    legacy ``graficos1_UFBA_v5.py`` convention.
     """
     ax.plot(net.index, net.to_numpy(), "p-", color="black", label="Rn")
     styling = {
@@ -417,10 +457,9 @@ def _resolve_direction_series(
 ) -> pd.Series | None:
     """Return the wind-direction series, reconstructing it from U/V if needed.
 
-    Uses the direct ``direction_column`` when present; otherwise, if both U/V
-    component columns exist, reconstructs direction via
-    :func:`micrometeorology.sensors.wind.wind_direction_from_components`.
-    Returns ``None`` when neither source is available.
+    Falls back to
+    :func:`micrometeorology.sensors.wind.wind_direction_from_components` when
+    the direct column is absent; ``None`` when neither source exists.
     """
     if direction_column in df.columns:
         return df[direction_column]
@@ -452,14 +491,14 @@ def _wrf_series(
 def render_site_graphs(
     df: pd.DataFrame,
     output_dir: Path,
-    columns: dict[str, str],
-    balance_components: dict[str, str],
+    columns: Mapping[str, Sequence[str]],
+    balance_components: Mapping[str, Sequence[str]],
     direction_components: tuple[str, str],
     *,
     raw: pd.DataFrame | None = None,
     wrf: pd.DataFrame | None = None,
     wrf_columns: dict[str, tuple[str, ...]] | None = None,
-) -> tuple[list[Path], list[str]]:
+) -> tuple[list[Path], list[str], list[str]]:
     """Render every contract graph whose source column is present.
 
     Parameters
@@ -478,30 +517,40 @@ def render_site_graphs(
     Returns
     -------
     tuple
-        ``(written_paths, missing_keys)`` — one entry in ``missing_keys`` per
-        contract graph whose primary column was absent (its PNG is skipped).
+        ``(written_paths, missing_keys, empty_keys)`` — ``missing_keys`` names
+        the contract graphs whose source column was absent (PNG skipped), and
+        ``empty_keys`` those whose station column carried no finite value over
+        the window (drawn from the remaining layers, or not written at all).
     """
     out = ensure_dir(output_dir)
     label_dt = df.index.max() if not df.empty else None
 
     written: list[Path] = []
     missing: list[str] = []
+    empty: list[str] = []
 
     for spec in GRAPH_SPECS:
-        column = columns[spec.key]
+        candidates = columns[spec.key]
+        # Resolved on the HOURLY frame and reused for the other layers, so one
+        # chart is one quantity — not the archive's ``Sw_dif`` under raw PSP.
+        column = resolve_column(df, candidates) or candidates[0]
 
         if spec.kind == "scatter":
             series = _resolve_direction_series(df, column, direction_components)
             if series is None:
                 logger.warning(
-                    "Column %r (and U/V fallback) not found -- skipping %s",
-                    column,
+                    "Columns %s (and U/V fallback) not found -- skipping %s",
+                    ", ".join(repr(name) for name in candidates),
                     spec.filename,
                 )
                 missing.append(spec.key)
                 continue
         elif column not in df.columns:
-            logger.warning("Column %r not found -- skipping %s", column, spec.filename)
+            logger.warning(
+                "Columns %s not found -- skipping %s",
+                ", ".join(repr(name) for name in candidates),
+                spec.filename,
+            )
             missing.append(spec.key)
             continue
         else:
@@ -509,8 +558,7 @@ def render_site_graphs(
 
         fig, ax = create_figure()
         try:
-            # Layer 1 — the raw logger samples, underneath everything. Drawn
-            # first so the hourly mean and the model sit on top of it.
+            # Layer 1 — raw samples, drawn first so the others sit on top.
             if raw is not None and column in raw.columns:
                 _plot_raw(
                     ax,
@@ -519,9 +567,20 @@ def render_site_graphs(
                     dots=spec.kind != "bar",
                 )
 
-            # Layer 2 — the hourly aggregate, the subject of the chart.
+            # Layer 2 — the hourly aggregate, the subject of the chart. A column
+            # that EXISTS but holds no finite value over the window is skipped
+            # like an absent one: it draws nothing yet still registers a legend
+            # entry, which reads as a line off the scale.
             drawn_raw = raw is not None and column in raw.columns
-            if spec.kind == "line":
+            if not series.notna().any():
+                logger.warning(
+                    "Column %r has no value over the plotted window -- "
+                    "drawing %s without the station layer",
+                    column,
+                    spec.filename,
+                )
+                empty.append(spec.key)
+            elif spec.kind == "line":
                 _plot_line(ax, series, label=column, over_raw=drawn_raw)
             elif spec.kind == "scatter":
                 _plot_scatter(ax, series, label=column)
@@ -529,14 +588,13 @@ def render_site_graphs(
                 _plot_bar(ax, series, label=column)
             elif spec.kind == "balance":
                 present = {
-                    channel: df[col]
-                    for channel, col in balance_components.items()
-                    if col in df.columns
+                    channel: df[resolved_component]
+                    for channel, chain in balance_components.items()
+                    if (resolved_component := resolve_column(df, chain)) is not None
                 }
                 _plot_balance(ax, series, present)
 
-            # Layer 3 — the model, on top and visually distinct so it is never
-            # read as a measurement.
+            # Layer 3 — the model, on top and visually distinct from measurement.
             model, resolved = _wrf_series(wrf, spec.key, wrf_columns or DEFAULT_WRF_COLUMNS)
             if model is not None:
                 _plot_wrf(
@@ -544,8 +602,7 @@ def render_site_graphs(
                     model,
                     label=f"WRF 1h ({resolved})",
                     dots=spec.kind == "scatter",
-                    # On the balance chart the overlay mirrors the incoming
-                    # shortwave, so it borrows that component's hue.
+                    # On balance the overlay mirrors incoming shortwave: same hue.
                     color=BALANCE_COMPONENT_COLORS["sw_down"] if spec.kind == "balance" else None,
                 )
 
@@ -556,16 +613,24 @@ def render_site_graphs(
             if label_dt is not None:
                 add_timestamp_label(ax, label_dt)
             add_labmim_watermark(ax)
-            if ax.get_legend_handles_labels()[0]:
-                add_top_legend(ax, ncol=4)
+            handles = ax.get_legend_handles_labels()[0]
+            if not handles:
+                # An empty framed axis under a contract filename is
+                # indistinguishable from a calm day, so the old image stays.
+                logger.warning("%s: no layer had data -- not written", spec.filename)
+                if spec.key not in empty:
+                    # One entry per bare chart, not one per reason it is bare.
+                    empty.append(spec.key)
+                continue
+            add_top_legend(ax, ncol=4)
             written.append(save_figure(fig, out / spec.filename))
         finally:
             plt.close(fig)
 
-    return written, missing
+    return written, missing, empty
 
 
-def _load_layer(path: Path, hourly: pd.DataFrame) -> pd.DataFrame:
+def _load_raw_layer(path: Path, hourly: pd.DataFrame) -> pd.DataFrame:
     """Load the raw record and clip it to the window the hourly frame covers."""
     frame = (
         pd.read_parquet(path)
@@ -674,10 +739,10 @@ def site(
         typer.echo("[!] No rows in the requested window -- nothing to plot.")
         raise typer.Exit(code=1 if strict else 0)
 
-    raw = _load_layer(raw_path, df) if raw_path else None
+    raw = _load_raw_layer(raw_path, df) if raw_path else None
     wrf = _load_wrf(wrf_path, df) if wrf_path else None
 
-    written, missing = render_site_graphs(
+    written, missing, empty = render_site_graphs(
         df,
         output_dir,
         columns,
@@ -687,12 +752,26 @@ def site(
         wrf=wrf,
     )
 
+    written_keys = {path.stem for path in written}
     for path in written:
         typer.echo(f"  [ok] {path.name}")
     if missing:
         typer.echo(f"[!] Skipped (missing column): {', '.join(missing)}")
+    if empty:
+        # Two states share this list: drawn from the other layers, or not
+        # written at all. Split so a dead sensor reads apart from a dead run.
+        bare = [key for key in empty if key not in written_keys]
+        partial = [key for key in empty if key in written_keys]
+        if partial:
+            typer.echo(f"[!] Drawn without the station layer: {', '.join(partial)}")
+        if bare:
+            typer.echo(f"[!] Not written, no layer had data: {', '.join(bare)}")
     typer.echo(f"\n>> {len(written)} graph(s) saved to {output_dir}")
 
+    # MISSING fails, empty does not: broken configuration versus broken
+    # instrument. The Gill thermohygrometer railed in December 2025, so
+    # temperature and humidity are empty in EVERY current window; failing on
+    # that would hold the hourly cron non-zero and freeze the site until repair.
     if strict and missing:
         raise typer.Exit(code=1)
 

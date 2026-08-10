@@ -60,16 +60,15 @@ def vertical_interpolate(
 
     levels = values.shape[axis]
 
-    # Move the interpolation axis to the front
     v_moved = np.moveaxis(values, axis, 0)
     h_moved = np.moveaxis(heights, axis, 0)
 
-    # Flatten the rest of the dimensions
     n_cols = int(np.prod(v_moved.shape[1:]))
     h = h_moved.reshape(levels, n_cols)
     s = v_moved.reshape(levels, n_cols)
 
-    # Sort by height (NaNs pushed to end)
+    # ``argsort`` places NaNs last, which is what lets the valid-count logic
+    # below treat the leading rows of each column as its usable levels.
     order = np.argsort(h, axis=0)
     h_sorted = np.take_along_axis(h, order, axis=0)
     s_sorted = np.take_along_axis(s, order, axis=0)
@@ -79,14 +78,12 @@ def vertical_interpolate(
 
     result = np.full(n_cols, np.nan, dtype=dtype)
 
-    # Single valid level → use that value
     single_mask = valid_count == 1
     if np.any(single_mask):
         idx_single = np.argmax(valid, axis=0)
         cols = np.where(single_mask)[0]
         result[cols] = s_sorted[idx_single[cols], cols]
 
-    # Two or more → linear interpolation
     multi_mask = valid_count >= 2
     if np.any(multi_mask):
         cols = np.where(multi_mask)[0]
@@ -121,18 +118,14 @@ def vertical_interpolate(
 class VerticalInterpolator:
     """Reusable vertical interpolator that prepares the height stack once.
 
-    The pipeline calls :func:`vertical_interpolate` once per (target height x
-    field) against the *same* height stack, re-sorting the heights every time.
-    This class validates the heights once and, when every column is NaN-free
-    and strictly increasing along the vertical axis, interpolates via a
-    monotonic bracket search that is bitwise-identical to
-    :func:`vertical_interpolate` while skipping the per-call ``argsort``.
-    Per-target brackets are cached so interpolating several fields to the same
-    height reuses them, and :meth:`interpolate_many` amortizes the per-field
-    validation over several targets.  Whenever the fast-path preconditions do
-    not hold (NaN heights, non-monotonic columns, NaN values, <2 levels),
-    the call falls back to :func:`vertical_interpolate`, so results are always
-    identical to the eager reference.
+    The heights are validated once.  When every column is NaN-free and strictly
+    increasing along the vertical axis, interpolation uses a monotonic bracket
+    search that is bitwise-identical to :func:`vertical_interpolate` while
+    skipping the per-call ``argsort``, and per-target brackets are cached so
+    several fields interpolated to the same height reuse them.  Whenever the
+    fast-path preconditions do not hold (NaN heights, non-monotonic columns,
+    NaN values, <2 levels) the call falls back to :func:`vertical_interpolate`,
+    so results are always identical to the eager reference.
 
     Parameters
     ----------
@@ -162,9 +155,9 @@ class VerticalInterpolator:
             and not np.isnan(heights_arr).any()
             and bool((heights_arr[tuple(above)] > heights_arr[tuple(below)]).all())
         )
-        # target height -> (lower_idx, upper_idx, frac, dtype) for the bracket
-        # fast path. Both index arrays are cached: recomputing ``lower_idx + 1``
-        # per gather reallocates a full-size int64 array for nothing.
+        # target height -> (lower_idx, upper_idx, frac, dtype). Both index
+        # arrays are cached: recomputing ``lower_idx + 1`` per gather
+        # reallocates a full-size int64 array for nothing.
         self._bracket_cache: dict[float, tuple[NDArray, NDArray, NDArray, np.dtype]] = {}
 
     def _bracket(self, target_height: float, dtype: np.dtype) -> tuple[NDArray, NDArray, NDArray]:

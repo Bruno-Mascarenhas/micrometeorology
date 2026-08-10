@@ -22,15 +22,13 @@ from micrometeorology.wrf.safety import assert_reasonable_array_size
 
 logger = logging.getLogger(__name__)
 
-# The forecast's "local" times (file names never change, but every date_time
-# string in the exported JSONs does) must not depend on the TZ configuration
-# of whatever host happens to run the daily job — a UTC-configured container
-# would silently shift the whole forecast by 3 hours while the site keeps
-# labelling values as UTC-03:00. Pin the product timezone, overridable for
-# other deployments via LABMIM_TIMEZONE. Prefer fixed-offset zones: the site
-# renders timeline labels with flat one-hour-per-index arithmetic from the
-# run anchor, so a DST transition inside a run would make labels disagree
-# with the per-file date_time strings (America/Bahia observes no DST).
+# Every date_time string in the exported JSONs is local, so the product timezone
+# is pinned here rather than taken from the host's TZ: a UTC-configured container
+# would shift the whole forecast by 3 hours while the site keeps labelling values
+# as UTC-03:00. Prefer fixed-offset zones — the site renders timeline labels with
+# flat one-hour-per-index arithmetic from the run anchor, so a DST transition
+# inside a run would make labels disagree with the per-file date_time strings
+# (America/Bahia observes no DST).
 LABMIM_TIMEZONE_ENV = "LABMIM_TIMEZONE"
 DEFAULT_TIMEZONE = "America/Bahia"
 
@@ -76,9 +74,9 @@ def assert_one_file_per_domain(paths: Sequence[str | Path]) -> None:
     ``{D}.geojson``, ``{D}.grid.json`` — so a run covering two files of the same
     domain can only overwrite, and because the units run concurrently on one
     pool the surviving mix of per-step JSONs, series matrix and summary is
-    whichever unit happened to finish last. Names with no recognizable domain
-    are left out: :class:`WRFDataset` fails those units individually rather
-    than letting them publish under a guessed domain.
+    whichever unit finished last. Names with no recognizable domain are left
+    out: :class:`WRFDataset` fails those units individually rather than letting
+    them publish under a guessed domain.
     """
     names_by_domain: dict[GridLevel, list[str]] = {}
     for path in paths:
@@ -176,8 +174,7 @@ class WRFDataset:
             return self._time_cache
         times_var = self._ds.variables["Times"]
         time_strings = _decode_wrf_time_strings(times_var[:])
-        # WRF writes ``Times`` without an offset; the values are UTC by
-        # definition, so the tz is attached in the same expression.
+        # WRF writes ``Times`` without an offset; the values are UTC by definition.
         result: list[datetime] = [
             datetime.strptime(ts, "%Y-%m-%d_%H:%M:%S").replace(tzinfo=UTC) for ts in time_strings
         ]
@@ -355,8 +352,8 @@ def resolve_wrfout_paths(
 
     paths: list[Path] = []
     base = Path(wrf_dir)
-    for d in selected:
-        pattern = f"wrfout_d{d:02d}_{year}-{month}-{day}*"
+    for domain in selected:
+        pattern = f"wrfout_d{domain:02d}_{year}-{month}-{day}*"
         matches = sorted(base.glob(pattern))
         if matches:
             paths.extend(matches)

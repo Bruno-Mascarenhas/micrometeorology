@@ -3,11 +3,11 @@
 Offline: synthetic frames only. These pin what the interactive page reads, so a
 change that would break the browser fails here instead.
 
-The tests that matter most are the ones around the WRF resolution. The model
-file gains columns over time (precipitation is expected but absent today), and
-the whole design is that such an addition is a *data* change: the chart starts
-drawing it with no edit here. Two tests hold that promise from both sides — the
-absent case must be reported, and the present case must be picked up.
+The tests around the WRF resolution carry the most weight. The model file gains
+columns over time (precipitation is expected but absent today), and the design
+is that such an addition is a *data* change: the chart starts drawing it with no
+edit here. Two tests hold that promise from both sides — the absent case must be
+reported, and the present case must be picked up.
 """
 
 import json
@@ -18,7 +18,12 @@ import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
-from micrometeorology.cli.export_monitoring import PAYLOAD_FILENAME, PAYLOAD_FORMAT
+from micrometeorology.cli.export_monitoring import (
+    PAYLOAD_FILENAME,
+    PAYLOAD_FORMAT,
+    _axis,
+    _regular,
+)
 from micrometeorology.cli.export_monitoring import app as monitoring_app
 from micrometeorology.sensors.monitoring import (
     MONITORING_CHARTS,
@@ -144,12 +149,34 @@ class TestExporter:
             pending = set(chart["wrf_pending"])
             assert pending <= declared
 
+    @staticmethod
+    def _wrf_dat(tmp_path: Path) -> Path:
+        """A model file carrying temperature and nothing else."""
+        index = pd.date_range("2022-07-01", periods=169, freq="h")
+        dat = tmp_path / "series_operacional.dat"
+        pd.DataFrame(
+            {
+                "year": index.year,
+                "month": index.month,
+                "day": index.day,
+                "hour": index.hour,
+                "T": np.arange(len(index), dtype=float),
+            }
+        ).to_csv(dat, index=False)
+        return dat
+
     def test_precipitation_records_the_names_it_looked_for(
         self, archive: Path, tmp_path: Path
     ) -> None:
         """Today there is no WRF rain column; the payload must say so, and say
-        which spellings would be picked up when the extraction grows one."""
-        charts = {chart["id"]: chart for chart in self._payload(archive, tmp_path)["charts"]}
+        which spellings would be picked up when the extraction grows one.
+
+        A model file is loaded on purpose: ``wrf_pending`` is a statement about
+        what the extraction writes, so it is meaningful only once there is an
+        extraction to compare against.
+        """
+        payload = self._payload(archive, tmp_path, "-w", str(self._wrf_dat(tmp_path)))
+        charts = {chart["id"]: chart for chart in payload["charts"]}
         candidates = charts["precipitacao"]["wrf_pending"]["precip"]
         assert "RAINNC" in candidates
         assert "precip" in candidates
@@ -165,7 +192,89 @@ class TestExporter:
         payload = self._payload(archive, tmp_path, "--days", "2", "--end", "2022-07-05")
         hourly = payload["charts"][0]["layers"]["hourly"]
         assert hourly["axis"]["start"].startswith("2022-07-03")
-        assert hourly["axis"]["count"] == 49  # inclusive of both endpoints
+        # Right-open: an hourly mean labelled at T covers [T, T+1h), so the last
+        # one INSIDE a window ending at 2022-07-05 00:00 starts at 07-04 23:00.
+        # A 49th point would have been the mean of the hour after the window.
+        assert hourly["axis"]["count"] == 48
+
+    def test_a_missing_row_lands_at_its_true_position(self, archive: Path, tmp_path: Path) -> None:
+        """A logger outage is an absent row, not a NaN one.
+
+        The axis is an origin plus a step, so the page rebuilds every abscissa as
+        ``start + i * step``. Serialising only the rows that exist would draw
+        every later sample early by the length of the gap; the exporter must put
+        the frame back on its grid first.
+        """
+        frame = pd.read_parquet(archive / "station_5min_qc.parquet")
+        marker = 12.5
+        frame["T"] = marker
+        # A two-hour outage: 24 five-minute rows simply are not there.
+        gapped = frame.drop(frame.index[100:124])
+        gapped.to_parquet(archive / "station_5min_qc.parquet")
+
+        charts = {chart["id"]: chart for chart in self._payload(archive, tmp_path)["charts"]}
+        raw = charts["temperatura"]["layers"]["raw"]
+        values = raw["series"]["t"]
+
+        assert raw["axis"]["step_minutes"] == 5
+        assert raw["axis"]["count"] == len(frame)  # the grid, not the surviving rows
+        assert values[100:124] == [None] * 24
+        assert values[99] == marker
+        assert values[124] == marker
+
+    def test_the_wrf_layer_survives_the_spin_up_hour_drop(
+        self, archive: Path, tmp_path: Path
+    ) -> None:
+        """``read_wrf_series`` drops hour 21 of every day, so the model index has
+        a hole per day by construction. The published axis must still land the
+        last sample on its real timestamp."""
+        index = pd.date_range("2022-07-01", periods=169, freq="h")
+        dat = tmp_path / "series_operacional.dat"
+        pd.DataFrame(
+            {
+                "year": index.year,
+                "month": index.month,
+                "day": index.day,
+                "hour": index.hour,
+                "T": np.arange(len(index), dtype=float),
+            }
+        ).to_csv(dat, index=False)
+
+        charts = {
+            chart["id"]: chart
+            for chart in self._payload(archive, tmp_path, "-w", str(dat))["charts"]
+        }
+        wrf = charts["temperatura"]["layers"]["wrf"]
+        axis = wrf["axis"]
+        last = pd.Timestamp(axis["start"]) + (axis["count"] - 1) * pd.Timedelta(
+            minutes=axis["step_minutes"]
+        )
+
+        # This model file runs to 2022-07-08 00:00, an hour past the newest raw
+        # sample (23:55), so the window reaches forward to cover it. The
+        # aggregated layers are right-open, which puts the last model hour at
+        # 23:00 — seven of these slots are the dropped spin-up hour.
+        assert axis["step_minutes"] == 60
+        assert axis["count"] == 168
+        assert last == pd.Timestamp("2022-07-07 23:00")
+        # Every dropped spin-up hour is published as a hole at its own slot.
+        assert wrf["series"]["t"][21] is None
+        assert wrf["series"]["t"][22] == 22.0
+
+    def test_an_irregular_axis_is_refused(self) -> None:
+        """The encoding cannot express two cadences; publishing one anyway draws
+        the layer out of phase."""
+        irregular = pd.DatetimeIndex(["2022-07-01 00:00", "2022-07-01 01:00", "2022-07-01 03:00"])
+        with pytest.raises(ValueError, match="one cadence"):
+            _axis(irregular)
+
+    def test_an_off_grid_sample_is_refused_rather_than_dropped(self) -> None:
+        """Reindexing a frame whose stamps are not on the cadence would delete
+        them silently, trading one wrong axis for missing data."""
+        index = pd.DatetimeIndex(["2022-07-01 00:00", "2022-07-01 00:02", "2022-07-01 00:05"])
+        frame = pd.DataFrame({"T": [1.0, 2.0, 3.0]}, index=index)
+        with pytest.raises(ValueError, match="do not sit on the 5min grid"):
+            _regular(frame, index, "5min")
 
     def test_precipitation_keeps_the_tipping_bucket_quantum(
         self, archive: Path, tmp_path: Path
@@ -177,3 +286,148 @@ class TestExporter:
         frame.to_parquet(archive / "station_5min_qc.parquet")
         charts = {chart["id"]: chart for chart in self._payload(archive, tmp_path)["charts"]}
         assert charts["precipitacao"]["layers"]["raw"]["series"]["precip"][10] == 0.254
+
+    def test_no_model_file_does_not_accuse_the_extraction(
+        self, archive: Path, tmp_path: Path
+    ) -> None:
+        """`wrf_pending` means "the extraction does not write this yet".
+
+        The page states exactly that to the reader, so a run given no model file
+        must not populate it: a forgotten `-w` in a cron would otherwise publish
+        a false claim about the pipeline for every variable the extraction
+        demonstrably does write.
+        """
+        for chart in self._payload(archive, tmp_path)["charts"]:
+            assert chart["layers"]["wrf"] is None
+            assert chart["wrf_pending"] == {}, chart["id"]
+
+    def test_a_model_that_lacks_a_variable_still_reports_it(
+        self, archive: Path, tmp_path: Path
+    ) -> None:
+        """The other side of the rule above: with a model present, a variable it
+        does not carry is still named."""
+        charts = {
+            chart["id"]: chart
+            for chart in self._payload(archive, tmp_path, "-w", str(self._wrf_dat(tmp_path)))[
+                "charts"
+            ]
+        }
+
+        assert charts["temperatura"]["wrf_pending"] == {}
+        # This model carries no rain column, which is the case the field exists for.
+        assert "precip" in charts["precipitacao"]["wrf_pending"]
+
+    def test_a_series_with_no_value_is_omitted_not_published_as_nulls(
+        self, archive: Path, tmp_path: Path
+    ) -> None:
+        """An all-null array is not the same as an absent key to the page.
+
+        `layerPoints` returns null only when `layer.series[id]` is MISSING; an
+        array of nulls passes that guard, builds a dataset and puts an entry in
+        the legend for a line the reader cannot see. Live case: the Gill
+        thermohygrometer railed in December 2025 and its readings are masked, so
+        the default operational window carries no air temperature at all.
+        """
+        frame = pd.read_parquet(archive / "station_hourly.parquet")
+        frame["T"] = np.nan
+        frame.to_parquet(archive / "station_hourly.parquet")
+        raw = pd.read_parquet(archive / "station_5min_qc.parquet")
+        raw["T"] = np.nan
+        raw.to_parquet(archive / "station_5min_qc.parquet")
+
+        charts = {chart["id"]: chart for chart in self._payload(archive, tmp_path)["charts"]}
+        temperature = charts["temperatura"]
+
+        assert temperature["layers"]["raw"] is None
+        assert temperature["layers"]["hourly"] is None
+        # The declaration stays: the page still knows the chart HAS a temperature
+        # series, it just has nothing to draw for it in this window.
+        assert [s["id"] for s in temperature["series"]] == ["t"]
+        # A chart whose other columns still have data is untouched.
+        assert charts["pressao"]["layers"]["hourly"] is not None
+
+    def test_one_empty_series_does_not_remove_its_healthy_neighbours(
+        self, archive: Path, tmp_path: Path
+    ) -> None:
+        """The balance chart has five series; one dead channel must not blank it."""
+        for name in ("station_hourly.parquet", "station_5min_qc.parquet"):
+            frame = pd.read_parquet(archive / name)
+            frame["Sw_up"] = np.nan
+            frame.to_parquet(archive / name)
+
+        charts = {chart["id"]: chart for chart in self._payload(archive, tmp_path)["charts"]}
+        hourly = charts["balanco"]["layers"]["hourly"]
+
+        assert hourly is not None
+        assert "sw_up" not in hourly["series"]
+        assert {"net", "sw_down", "lw_down", "lw_up"} <= set(hourly["series"])
+
+    def test_the_window_reaches_forward_to_cover_an_accumulating_model(
+        self, archive: Path, tmp_path: Path
+    ) -> None:
+        """The operational extraction grows forward, so an hour with a WRF value
+        and no observation is the normal state, not a fault.
+
+        Anchoring the window's end on the newest SAMPLE would clip exactly the
+        part of the model worth looking at. The start still anchors on the
+        station, so the reader keeps the record behind them and gains the
+        forecast ahead.
+        """
+        hourly = pd.read_parquet(archive / "station_hourly.parquet")
+        # The anchor is the newest RAW sample, which is what the window's end
+        # tracks on the default path.
+        station_last = pd.read_parquet(archive / "station_5min_qc.parquet").index.max()
+        # Three days of model beyond the newest observation.
+        index = pd.date_range(hourly.index.min(), station_last + pd.Timedelta(days=3), freq="h")
+        dat = tmp_path / "accumulating.dat"
+        pd.DataFrame(
+            {
+                "year": index.year,
+                "month": index.month,
+                "day": index.day,
+                "hour": index.hour,
+                "T": np.arange(len(index), dtype=float),
+            }
+        ).to_csv(dat, index=False)
+
+        payload = self._payload(archive, tmp_path, "-w", str(dat))
+        window = payload["window"]
+
+        # The end tracks what the document CARRIES — here the model's own last
+        # hour, three days past the newest observation.
+        assert pd.Timestamp(window["end"]) == index.max()
+        assert pd.Timestamp(window["end"]) > station_last
+        # Published beside it so the page can anchor its visible span on the
+        # record instead of on the forecast — without it, a model three days
+        # ahead pushes three days of real observations out of the default view.
+        assert pd.Timestamp(window["station_end"]) == station_last
+
+        temperature = next(c for c in payload["charts"] if c["id"] == "temperatura")
+        model = temperature["layers"]["wrf"]
+        model_last = pd.Timestamp(model["axis"]["start"]) + pd.Timedelta(
+            minutes=model["axis"]["step_minutes"] * (model["axis"]["count"] - 1)
+        )
+        assert model_last > station_last, "the model's forward extent must publish"
+        assert model_last <= pd.Timestamp(window["end"])
+
+        # The STATION's hourly layer still stops at its own last complete hour.
+        # Trimming against the window's end instead publishes the station's
+        # trailing PARTIAL hour as a full hourly mean -- an average over however
+        # many minutes the logger had written, drawn beside hours built from
+        # twelve samples.
+        hourly_layer = temperature["layers"]["hourly"]
+        hourly_last = pd.Timestamp(hourly_layer["axis"]["start"]) + pd.Timedelta(
+            minutes=hourly_layer["axis"]["step_minutes"] * (hourly_layer["axis"]["count"] - 1)
+        )
+        assert hourly_last <= station_last - pd.Timedelta(hours=1)
+
+    def test_station_end_is_measured_inside_the_window_not_in_the_archive(
+        self, archive: Path, tmp_path: Path
+    ) -> None:
+        """With an explicit --end the newest sample in the file can be far past
+        the window, and an anchor outside the window is worse than none."""
+        payload = self._payload(archive, tmp_path, "--days", "2", "--end", "2022-07-05")
+        window = payload["window"]
+
+        assert pd.Timestamp(window["station_end"]) <= pd.Timestamp(window["end"])
+        assert pd.Timestamp(window["station_end"]) >= pd.Timestamp(window["start"])

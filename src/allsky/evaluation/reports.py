@@ -64,8 +64,8 @@ def write_evaluation_report(
     dict[str, str]
         ``artifact name -> written path`` for every file produced.
     """
-    out = Path(report_dir)
-    out.mkdir(parents=True, exist_ok=True)
+    report_root = Path(report_dir)
+    report_root.mkdir(parents=True, exist_ok=True)
     written: dict[str, str] = {}
 
     metrics_payload = {
@@ -76,23 +76,23 @@ def write_evaluation_report(
         "meta": result.meta,
         "global": result.global_metrics,
     }
-    written["metrics"] = str(_atomic_json(out / "metrics.json", metrics_payload))
-    written["stratified"] = str(_atomic_csv(out / "stratified.csv", result.stratified))
+    written["metrics"] = str(_atomic_json(report_root / "metrics.json", metrics_payload))
+    written["stratified"] = str(_atomic_csv(report_root / "stratified.csv", result.stratified))
 
     if result.confusion is not None:
         written["confusion"] = str(
-            _atomic_csv(out / "confusion.csv", _confusion_frame(result.confusion))
+            _atomic_csv(report_root / "confusion.csv", _confusion_frame(result.confusion))
         )
 
     if predictions and not result.predictions.empty:
         written["predictions"] = str(
             _atomic(
-                out / "predictions.parquet",
+                report_root / "predictions.parquet",
                 lambda tmp: result.predictions.to_parquet(tmp, index=False),
             )
         )
 
-    written["report"] = str(_atomic_text(out / "report.md", _render_markdown(result)))
+    written["report"] = str(_atomic_text(report_root / "report.md", _render_markdown(result)))
     return written
 
 
@@ -145,9 +145,9 @@ def compare_experiments(
 def _confusion_frame(confusion: Mapping[str, Any]) -> pd.DataFrame:
     """Confusion matrix as a labelled DataFrame (rows = true, cols = predicted).
 
-    Takes the ``{"labels": [...], "matrix": [[...]]}`` payload rather than the whole
-    result, so the caller's ``result.confusion is not None`` guard is what makes the
-    payload present — there is no second, unprovable presence check in here.
+    Takes the ``{"labels": [...], "matrix": [[...]]}`` payload rather than the
+    whole result: the caller's ``result.confusion is not None`` guard is the
+    presence check, so there is no second one here.
     """
     labels = confusion["labels"]
     frame = pd.DataFrame(
@@ -258,7 +258,6 @@ def _fmt(value: Any) -> str:
 
 
 def _atomic(path: Path, write: Callable[[Path], Any]) -> Path:
-    """Delegate to the shared :func:`allsky.atomic.atomic_write` helper."""
     return atomic_write(path, write)
 
 

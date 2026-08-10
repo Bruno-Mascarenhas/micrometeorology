@@ -83,7 +83,7 @@ class TestReadDataset:
 
 class TestPairDataframes:
     def test_a_three_hour_lag_is_not_reported_as_a_perfect_model(self, tmp_path: Path) -> None:
-        """Positional alignment made a 3 h-lagged copy score RMSE 0 / R2 1."""
+        """Pairing is by timestamp: positional alignment scores a lag as RMSE 0."""
         values = [20.0, 21.0, 22.0, 23.0, 24.0, 25.0]
         obs_path = _series_csv(tmp_path / "obs.csv", "2020-01-01 00:00", values)
         model_path = _series_csv(tmp_path / "mod.csv", "2020-01-01 03:00", values)
@@ -135,7 +135,7 @@ class TestCompareAllVariables:
 
         table = compare_all_variables(paired)
 
-        assert list(table.index) == list(ALL_METRICS)
+        assert list(table.index) == ["n", *ALL_METRICS]
         assert list(table.columns) == ["RH", "T"]
         assert table.loc["RMSE", "T"] == pytest.approx(1.0)
         assert table.loc["MBE", "T"] == pytest.approx(1.0)
@@ -187,3 +187,110 @@ class TestPlotComparison:
         assert isinstance(fig, Figure)
         assert out.stat().st_size > 0
         assert set(plt.get_fignums()) == before
+
+
+class TestTheTimeIndexIsReadOrRefusedClearly:
+    """``labmim-comparison`` pairs by TIME; ``labmim-metrics`` may fall back to
+    row order. The two must not share one failure mode."""
+
+    @staticmethod
+    def _named_index_csv(path: Path) -> Path:
+        index = pd.date_range("2022-07-01", periods=6, freq="h", name="timestamp")
+        pd.DataFrame({"T": range(6)}, index=index).to_csv(path)
+        return path
+
+    def test_a_named_timestamp_column_is_recognised(self, tmp_path: Path) -> None:
+        """``DataFrame.to_csv`` writes the index's NAME, so the most ordinary way
+        to produce one of these files yields a named time column, not an unnamed
+        one — and the reader has to consume it rather than leave a RangeIndex.
+        """
+        frame = read_dataset(str(self._named_index_csv(tmp_path / "named.csv")))
+
+        assert isinstance(frame.index, pd.DatetimeIndex)
+        assert "timestamp" not in frame.columns
+
+    def test_a_frame_with_no_time_index_is_still_returned(self, tmp_path: Path) -> None:
+        """Positional alignment is a supported mode of labmim-metrics; the reader
+        must not refuse it on that CLI's behalf."""
+        path = tmp_path / "plain.csv"
+        path.write_text("T\n1.0\n2.0\n", encoding="utf-8")
+
+        frame = read_dataset(str(path))
+
+        assert not isinstance(frame.index, pd.DatetimeIndex)
+        assert len(frame) == 2
+
+
+class TestWindDirectionIsScoredCircularly:
+    """``compare_all_variables`` has to reach the circular path by column name.
+
+    The unit is covered in ``test_metrics``; what this pins is the wiring —
+    ``compare_variables`` deciding, from the variable name alone, that a
+    published RMSE must not be the linear one.
+    """
+
+    @staticmethod
+    def _paired() -> pd.DataFrame:
+        index = pd.date_range("2024-01-01", periods=4, freq="h")
+        return pd.DataFrame(
+            {
+                "WD_obs": [350.0, 350.0, 10.0, 10.0],
+                "WD_model": [10.0, 10.0, 350.0, 350.0],
+                "WS_obs": [1.0, 2.0, 3.0, 4.0],
+                "WS_model": [1.5, 2.5, 2.5, 4.5],
+            },
+            index=index,
+        )
+
+    def test_the_published_error_is_the_short_way_round(self):
+        metrics = compare_all_variables(self._paired())
+        assert metrics.loc["MAE", "WD"] == pytest.approx(20.0)
+        assert metrics.loc["RMSE", "WD"] == pytest.approx(20.0)
+
+    def test_mean_normalised_metrics_are_blank_for_the_bearing_only(self):
+        metrics = compare_all_variables(self._paired())
+        bearing = metrics["WD"].astype(float).to_dict()
+        speed = metrics["WS"].astype(float).to_dict()
+        for name in ("R²", "r", "d", "IOA", "NRMSE"):
+            assert np.isnan(bearing[name]), name
+            assert np.isfinite(speed[name]), name
+
+
+class TestTheSampleSizeIsPublished:
+    """The printed row count is not the denominator of any metric.
+
+    ``pair_dataframes`` merges LEFT, so the frame keeps one row per observation
+    even when no model row matched, and each column then loses its own gaps.
+    Measured on the real pair (station archive vs. the operational WRF run) the
+    frame has 83,857 rows while pressure is scored over 12,678 — a reader taking
+    the printed count as the sample size is out by 6.6x.
+    """
+
+    @staticmethod
+    def _paired() -> pd.DataFrame:
+        index = pd.date_range("2020-01-01", periods=6, freq="h")
+        return pd.DataFrame(
+            {
+                "T_obs": [1.0, 2.0, 3.0, 4.0, np.nan, np.nan],
+                "T_model": [1.5, 2.5, 3.5, 4.5, 5.5, np.nan],
+                "pressure_obs": [1010.0, 1011.0, 1012.0, 1013.0, 1014.0, 1015.0],
+                "pressure_model": [1010.5, 1011.5, np.nan, np.nan, np.nan, np.nan],
+            },
+            index=index,
+        )
+
+    def test_n_is_per_variable_not_the_row_count(self):
+        table = compare_all_variables(self._paired())
+        assert len(self._paired()) == 6
+        assert table.loc["n", "T"] == 4
+        assert table.loc["n", "pressure"] == 2
+
+    def test_n_is_the_population_the_metrics_used(self):
+        """Reconciliation: the published n must reproduce the published MBE."""
+        paired = self._paired()
+        table = compare_all_variables(paired)
+        finite = paired[["T_obs", "T_model"]].dropna()
+        assert table.loc["n", "T"] == len(finite)
+        assert table.loc["MBE", "T"] == pytest.approx(
+            float((finite["T_model"] - finite["T_obs"]).mean())
+        )

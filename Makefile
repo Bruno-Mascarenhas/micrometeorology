@@ -4,6 +4,17 @@
 PYTHON ?= python
 UV ?= uv
 UV_PIP = $(UV) pip install --system
+
+# Lint, type and test through the PROJECT ENVIRONMENT, never through PATH.
+# pyproject relies on ruff 0.16's expanded default rule set (see the
+# `extend-select` comment there), so an older ruff first on PATH — the miniforge
+# base build, say — disagrees about which rules exist: it reports this tree's
+# real `# noqa: BLE001` / `# noqa: TRY004` directives as unused RUF100 and
+# `make fix` DELETES them, exiting 0, after which CI's pinned 0.16.1 fails on
+# violations the developer never wrote. `--no-sync` pins the resolution without
+# touching the environment; `UV_PROJECT_ENVIRONMENT` is honoured when exported,
+# so the Conda flow above still works.
+RUN = $(UV) run --no-sync
 TORCH_BACKEND ?= cu130
 TORCH_VERSION ?= 2.13.0
 
@@ -24,17 +35,17 @@ install-cuda: require-conda
 	$(UV_PIP) --reinstall --torch-backend $(TORCH_BACKEND) "torch==$(TORCH_VERSION)"
 
 fix:
-	ruff format .
-	ruff check --fix .
+	$(RUN) ruff format .
+	$(RUN) ruff check --fix .
 
 typecheck:
-	mypy src tests
+	$(RUN) mypy src tests
 
 test:
-	pytest -n auto tests/
+	$(RUN) pytest -n auto tests/
 
 test-verbose:
-	pytest -n auto -v tests/
+	$(RUN) pytest -n auto -v tests/
 
 # Mirrors the CI vulnerability gate so advisory failures surface before a push.
 # dev+video+allsky is the widest auditable set. torch ships from the PyTorch
@@ -66,9 +77,9 @@ clean:
 	find . -type f -name "*.pyc" -delete
 
 check: lock-check
-	ruff format --check .
-	ruff check .
-	mypy src tests
-	pytest -n auto tests/
+	$(RUN) ruff format --check .
+	$(RUN) ruff check .
+	$(RUN) mypy src tests
+	$(RUN) pytest -n auto tests/
 
 all: fix check

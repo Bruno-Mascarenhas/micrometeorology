@@ -34,7 +34,9 @@ def export_csv(
     float_format:
         Format string for floating point values.
     include_datetime_columns:
-        If True, add ``year``, ``month``, ``day``, ``hour`` columns.
+        If True, prepend ``year``, ``month``, ``day``, ``hour`` columns. They
+        replace the index rather than joining it: the timestamp is then written
+        only as those four columns, never also as a leading index column.
 
     Returns
     -------

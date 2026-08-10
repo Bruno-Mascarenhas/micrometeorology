@@ -63,6 +63,15 @@ dev = [
     "pytest-xdist>=3.5",
     "types-PyYAML",
 ]
+# INSTALLABLE THROUGH `uv sync --extra video` ONLY. moviepy 2.2.x requires
+# pillow<12.0 while the runtime floor above is pillow>=12.3.0 (a CVE floor), so
+# the two are mutually unsatisfiable in DISTRIBUTION METADATA. What reconciles
+# them is `[tool.uv] override-dependencies` below, which is project-local uv
+# configuration and does not travel with the built wheel or sdist — so
+# `pip install '.[video]'` and any future PyPI release of the extra abort with
+# ResolutionImpossible. The floor is not lowered, because that would ship a
+# CVE-affected pillow to everyone to make one optional extra pip-installable.
+# Revisit when moviepy allows pillow 12.
 video = [
     "moviepy>=2.2",
 ]
@@ -110,6 +119,23 @@ solrad-colab = "solrad_correction.cli_colab:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/micrometeorology", "src/solrad_correction", "src/allsky"]
+
+# The sensor QC limits, the sum/direction aggregation columns and the
+# calibration table all live in configs/micromet/, which sits at the repo root
+# and so shipped in neither the wheel nor the sdist. An installed CLI then
+# resolved every one of them to its empty default and exported unfiltered,
+# uncalibrated data with exit code 0. Shipping the tree inside the package is
+# what makes `_project_root()`'s installed-layout fallback resolvable.
+[tool.hatch.build.targets.wheel.force-include]
+"configs/micromet" = "micrometeorology/configs/micromet"
+
+# The sdist keeps the tree's own layout, deliberately: `uv build` produces the
+# wheel FROM the unpacked sdist, so the wheel's force-include above has to find
+# `configs/micromet` at the same path it has here. Relocating it in the sdist
+# instead made that second build fail with "Forced include not found" — a break
+# invisible to `uv build --wheel`, which reads the working tree.
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "configs/micromet", "README.md", "LICENSE", "pyproject.toml"]
 
 # Lock torch against the CPU wheel index on Linux/macOS so the resolver does not
 # pull the multi-GB CUDA dependency stack into uv.lock. Windows wheels on PyPI

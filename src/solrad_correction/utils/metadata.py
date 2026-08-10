@@ -4,10 +4,9 @@ import platform
 import sys
 import time
 from importlib import metadata as importlib_metadata
-from pathlib import Path
 from typing import Any
 
-from micrometeorology.common.git import run_git
+from micrometeorology.common.git import run_git, source_root
 
 
 def collect_run_metadata(
@@ -77,18 +76,19 @@ def _device_metadata() -> dict[str, Any]:
             info["torch_cuda_version"] = torch.version.cuda
     # torch is optional and its CUDA probe talks to a driver: a missing package
     # (ImportError), an unloadable shared library (OSError) and a failed CUDA
-    # init (RuntimeError) are all recorded rather than raised.
+    # init (RuntimeError) are recorded rather than raised.
     except (ImportError, OSError, RuntimeError) as exc:
         info["error"] = str(exc)
     return info
 
 
 def _git_metadata() -> dict[str, Any]:
-    cwd = Path.cwd()
-    commit = run_git(["rev-parse", "HEAD"], cwd=cwd)
-    # `bool` of the porcelain output, so a clean tree ("") and an unavailable
-    # git (None) both read as "not dirty" exactly as before.
-    dirty_text = run_git(["status", "--porcelain", "--untracked-files=no"], cwd=cwd)
+    # The source tree, not the process working directory: a run launched from a
+    # sibling checkout must still record THIS repository's HEAD and dirty flag.
+    repo_root = source_root()
+    commit = run_git(["rev-parse", "HEAD"], cwd=repo_root)
+    # A clean tree ("") and an unavailable git (None) both read as "not dirty".
+    dirty_text = run_git(["status", "--porcelain", "--untracked-files=no"], cwd=repo_root)
     return {
         "commit": commit,
         "dirty": bool(dirty_text),
@@ -117,9 +117,8 @@ def _model_metadata(model: Any | None) -> dict[str, Any]:
                 p.numel() for p in module.parameters() if p.requires_grad
             )
         # `module` is duck-typed: anything that is not an iterable of tensors
-        # fails as AttributeError/TypeError, and a tensor that cannot report its
-        # size (an unmaterialized lazy parameter) as RuntimeError. The count is
-        # optional, so the fault is recorded next to the rest of the metadata.
+        # fails as AttributeError/TypeError, and an unmaterialized lazy parameter
+        # that cannot report its size as RuntimeError. The count is optional.
         except (AttributeError, TypeError, RuntimeError) as exc:
             info["parameter_count_error"] = str(exc)
     info["best_metric"] = getattr(model, "best_metric", None)
@@ -128,8 +127,8 @@ def _model_metadata(model: Any | None) -> dict[str, Any]:
     if settings is not None:
         try:
             info["dataloader"] = settings.to_dict()
-        # Duck-typed `to_dict()`: a missing method is an AttributeError and one
-        # with another signature a TypeError. Recorded, not raised.
+        # Duck-typed `to_dict()`: a missing method raises AttributeError, one
+        # with another signature TypeError. Recorded, not raised.
         except (AttributeError, TypeError) as exc:
             info["dataloader_error"] = str(exc)
     return info

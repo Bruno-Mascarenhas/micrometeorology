@@ -83,7 +83,6 @@ def extract_point_series(
             if not valid_vars:
                 continue
 
-            # Handle variables that have spatial dims and those that don't
             extracted = {}
             for vname in valid_vars:
                 val = ds[vname]
@@ -117,6 +116,6 @@ def extract_point_series(
 
     df = pd.concat(all_records)
     df.index.name = "time"
-    # Drop rows with NaT index which might happen on failed parses
+    # ``errors="coerce"`` above turns an unparsable stamp into NaT.
     df = df[df.index.notna()]
     return df.sort_index()

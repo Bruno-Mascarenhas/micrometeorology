@@ -41,12 +41,44 @@ def atomic_write(path: str | Path, writer: Callable[[Path], Any]) -> Path:
     ok = False
     try:
         writer(tmp)
+        # ``os.replace`` makes the DIRECTORY ENTRY swap atomic; it does not order
+        # the payload's blocks ahead of the rename. Without these two fsyncs the
+        # guarantee above held only for a process crash, not for a host reset or
+        # power loss, where a first-ever write could come back zero-length or
+        # holed while its meta sidecar recorded the checksum of the whole file.
+        _fsync_path(tmp)
         os.replace(tmp, out)
+        _fsync_directory(out.parent)
         ok = True
     finally:
         if not ok:
             tmp.unlink(missing_ok=True)
     return out
+
+
+def _fsync_path(path: Path) -> None:
+    """Flush a file's own blocks to disk, best-effort."""
+    with open(path, "rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Flush a directory entry to disk, best-effort.
+
+    Not every platform allows opening a directory for this (Windows does not),
+    and where it fails the rename is still atomic — only its durability across a
+    host crash is weaker, which is exactly the pre-existing behaviour.
+    """
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def atomic_write_json(path: str | Path, obj: Any) -> Path:

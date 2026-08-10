@@ -11,19 +11,30 @@ import matplotlib
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib import dates as mdates
 from matplotlib import pyplot as plt
 from matplotlib.colors import to_hex
 from typer.testing import CliRunner
 
 from micrometeorology.cli import generate_station_graphs
 from micrometeorology.cli.plot_station_graphs import (
+    DEFAULT_BALANCE_COMPONENTS,
     DEFAULT_COLUMNS,
+    DEFAULT_DIRECTION_COMPONENTS,
     DEFAULT_WRF_COLUMNS,
     GRAPH_SPECS,
     _plot_balance,
     app,
+    load_graph_config,
+    render_site_graphs,
+    resolve_column,
 )
-from micrometeorology.sensors.plotting import BALANCE_COMPONENT_COLORS, create_figure
+from micrometeorology.sensors.monitoring import MONITORING_CHARTS
+from micrometeorology.sensors.plotting import (
+    BALANCE_COMPONENT_COLORS,
+    create_figure,
+    setup_date_axis,
+)
 
 runner = CliRunner()
 
@@ -111,13 +122,23 @@ def test_legacy_balance_uses_shared_palette_and_negates_upward_channels(monkeypa
         plt.close(fig)
 
 
+def _logger_name(key: str) -> str:
+    """The column ``labmim-sensor-process`` exports for a contract graph.
+
+    The TAIL of the candidate chain. The head is the unified name that only
+    ``labmim-archive`` builds, and a processed hourly CSV never carries it.
+    """
+    return DEFAULT_COLUMNS[key][-1]
+
+
 def _write_hourly_csv(path: Path, *, columns: dict[str, str] | None = None, days: int = 10) -> Path:
     """Write a synthetic hourly processed-sensor CSV with all contract columns.
 
     ``columns`` overrides the default logical→CSV column names so tests can
-    exercise renamed loggers; ``None`` uses :data:`DEFAULT_COLUMNS`.
+    exercise renamed loggers; ``None`` uses the logger spellings of
+    :data:`DEFAULT_COLUMNS`.
     """
-    mapping = columns if columns is not None else DEFAULT_COLUMNS
+    mapping = columns if columns is not None else {k: _logger_name(k) for k in DEFAULT_COLUMNS}
     idx = pd.date_range("2026-06-01", periods=days * 24, freq="1h")
     n = len(idx)
     rng = np.random.default_rng(7)
@@ -155,12 +176,10 @@ class TestSiteCommand:
         assert result.exit_code == 0, result.output
         produced = sorted(p.name for p in out.glob("*.png"))
         assert produced == sorted(CONTRACT_PNGS)
-        # Every image is a real, non-empty PNG.
         for name in produced:
             assert (out / name).stat().st_size > 0
 
     def test_last_days_clips_the_window(self, tmp_path):
-        # 10 days of data, ask for 3; graphs still emit, no crash on the clip.
         csv = _write_hourly_csv(tmp_path / "long.csv", days=10)
         out = tmp_path / "g"
         result = runner.invoke(
@@ -171,9 +190,8 @@ class TestSiteCommand:
         assert len(list(out.glob("*.png"))) == len(CONTRACT_PNGS)
 
     def test_missing_column_warns_and_skips_but_exits_zero(self, tmp_path):
-        # Drop the temperature source column only.
         df = pd.read_csv(_write_hourly_csv(tmp_path / "src.csv"), index_col=0, parse_dates=True)
-        df = df.drop(columns=[DEFAULT_COLUMNS["temperatura"]])
+        df = df.drop(columns=[_logger_name("temperatura")])
         csv = tmp_path / "no_temp.csv"
         df.to_csv(csv)
 
@@ -190,7 +208,7 @@ class TestSiteCommand:
 
     def test_strict_makes_a_missing_column_fail(self, tmp_path):
         df = pd.read_csv(_write_hourly_csv(tmp_path / "src.csv"), index_col=0, parse_dates=True)
-        df = df.drop(columns=[DEFAULT_COLUMNS["radiacao_par"]])
+        df = df.drop(columns=[_logger_name("radiacao_par")])
         csv = tmp_path / "no_par.csv"
         df.to_csv(csv)
 
@@ -203,9 +221,9 @@ class TestSiteCommand:
         assert result.exit_code != 0
 
     def test_col_override_retargets_a_renamed_logger_column(self, tmp_path):
-        # Logger renamed the temperature column; --col points the graph at it
-        # without any code change.
-        renamed = dict(DEFAULT_COLUMNS)
+        # A logger that renames its temperature column must be reachable by
+        # --col alone, with no code change.
+        renamed = {key: _logger_name(key) for key in DEFAULT_COLUMNS}
         renamed["temperatura"] = "AirT2_C_Avg"
         csv = _write_hourly_csv(tmp_path / "renamed.csv", columns=renamed)
 
@@ -236,7 +254,7 @@ class TestSiteCommand:
         assert (out2 / "temperatura.png").stat().st_size > 0
 
     def test_config_yaml_overrides_columns(self, tmp_path):
-        renamed = dict(DEFAULT_COLUMNS)
+        renamed = {key: _logger_name(key) for key in DEFAULT_COLUMNS}
         renamed["umidade"] = "RH_probe2"
         csv = _write_hourly_csv(tmp_path / "cfg.csv", columns=renamed)
 
@@ -264,7 +282,7 @@ class TestSiteCommand:
     def test_direction_reconstructed_from_uv_components(self, tmp_path):
         # No direct WindDir column, but U/V present -> direction graph still made.
         df = pd.read_csv(_write_hourly_csv(tmp_path / "src.csv"), index_col=0, parse_dates=True)
-        df = df.drop(columns=[DEFAULT_COLUMNS["direcao"]])
+        df = df.drop(columns=[_logger_name("direcao")])
         df["u"] = -np.sin(np.radians(45.0))
         df["v"] = -np.cos(np.radians(45.0))
         csv = tmp_path / "uv.csv"
@@ -424,3 +442,271 @@ class TestColumnsCommand:
         assert result.exit_code == 0, result.output
         assert "not found" in result.output
         assert not (out / "NoSuchColumn_last_7d.png").exists()
+
+
+class TestTheTwoProducersAgree:
+    """The PNG and the interactive payload draw the same nine charts.
+
+    Both are documented as coming "from the same archive" and as being read the
+    same way, so their literals must not drift apart. The humidity frame is the
+    sharp case: the payload declares 105 % because the model exceeds saturation
+    and those points have to stay visible, so a PNG clipped at 100 % would hide
+    in one product what the other publishes.
+    """
+
+    @staticmethod
+    def _payload_limits() -> dict[str, tuple[float, float] | None]:
+        return {chart.id: chart.y_limits for chart in MONITORING_CHARTS}
+
+    def test_the_two_catalogues_cover_the_same_charts(self) -> None:
+        assert {spec.key for spec in GRAPH_SPECS} == {chart.id for chart in MONITORING_CHARTS}
+
+    def test_y_limits_agree_chart_by_chart(self) -> None:
+        payload = self._payload_limits()
+        for spec in GRAPH_SPECS:
+            expected = payload[spec.key]
+            actual = tuple(float(bound) for bound in spec.ylim) if spec.ylim else None
+            assert actual == expected, (
+                f"{spec.key}: PNG frames {actual} while the payload declares {expected}; "
+                "the same data must not be clipped in one product and shown in the other"
+            )
+
+    def test_the_rain_candidates_are_one_list_not_two(self) -> None:
+        """The ordered tuple is what makes a new spelling a data change."""
+        precipitation = next(chart for chart in MONITORING_CHARTS if chart.id == "precipitacao")
+        assert DEFAULT_WRF_COLUMNS["precipitacao"] == precipitation.series[0].wrf
+
+
+class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
+    """A column that exists but holds no value must not be announced.
+
+    Plotting an all-NaN series draws nothing and still registers a legend entry,
+    so the chart named a series the reader cannot see — which reads as a line off
+    the scale, or as an instrument stuck flat. Two independent causes reach this
+    state: a column belonging to a different instrument era, and a channel the
+    station genuinely did not record that year.
+    """
+
+    @staticmethod
+    def _frame() -> pd.DataFrame:
+        index = pd.date_range("2023-08-26", periods=48, freq="h")
+        return pd.DataFrame(
+            {
+                # Present and populated.
+                "PL01_mm_Tot": np.zeros(48),
+                # Present and entirely empty — the case under test.
+                "AirT1_C_Avg": np.full(48, np.nan),
+                "RH1": np.full(48, np.nan),
+                "BP1_mbar_Avg": np.full(48, np.nan),
+                "WS_ms": np.full(48, np.nan),
+                "WindDir": np.full(48, np.nan),
+                "Net_Wm2_Avg": np.full(48, np.nan),
+                "PSP_Wm2_Avg": np.full(48, np.nan),
+                "PAR_Wm2_Avg": np.full(48, np.nan),
+            },
+            index=index,
+        )
+
+    def test_the_empty_columns_are_reported_and_not_drawn(self, tmp_path: Path) -> None:
+        written, missing, empty = render_site_graphs(
+            self._frame(),
+            tmp_path,
+            DEFAULT_COLUMNS,
+            DEFAULT_BALANCE_COMPONENTS,
+            DEFAULT_DIRECTION_COMPONENTS,
+        )
+
+        # Only precipitation had data, so only it can be published; the eight
+        # empty ones drew no layer at all and must not overwrite a good image.
+        assert [p.name for p in written] == ["precipitacao.png"]
+        assert set(empty) >= {"temperatura", "umidade", "pressao", "velocidade", "direcao"}
+        # `missing` is reserved for a column the frame does not CARRY, which is a
+        # configuration error; every column here is present and simply has no
+        # value, which is the station being down. Only the first fails --strict.
+        assert missing == []
+
+    def test_a_model_layer_still_publishes_without_the_station(self, tmp_path: Path) -> None:
+        """The chart keeps whatever layer does have data — it just stops
+        claiming the one that does not."""
+        frame = self._frame()
+        model = pd.DataFrame({"pressure": np.linspace(1010, 1020, 48)}, index=frame.index)
+
+        written, _missing, empty = render_site_graphs(
+            frame,
+            tmp_path,
+            DEFAULT_COLUMNS,
+            DEFAULT_BALANCE_COMPONENTS,
+            DEFAULT_DIRECTION_COMPONENTS,
+            wrf=model,
+        )
+
+        assert "pressao.png" in [p.name for p in written]
+        assert "pressao" in empty
+
+    def test_strict_fails_on_a_missing_column_but_not_on_an_empty_one(self, tmp_path: Path) -> None:
+        """The distinction is a broken configuration against a broken instrument.
+
+        The Gill thermohygrometer railed in December 2025, so temperature and
+        humidity are empty in every current window. Failing `--strict` on that
+        would make the hourly cron exit non-zero every run until the instrument
+        is repaired, freezing the site on its last good artifacts — for a
+        condition these images exist to report, not to hide.
+        """
+        frame = self._frame()
+        csv = tmp_path / "empty.csv"
+        frame.to_csv(csv)
+
+        empty_run = runner.invoke(
+            app,
+            [
+                "site",
+                "-i",
+                str(csv),
+                "-o",
+                str(tmp_path / "a"),
+                "--strict",
+                "--log-level",
+                "WARNING",
+            ],
+        )
+        assert empty_run.exit_code == 0, empty_run.output
+        assert "without the station layer" in empty_run.output
+
+        # Drop a column outright: that IS a configuration error.
+        frame.drop(columns=[_logger_name("precipitacao")]).to_csv(csv)
+        missing_run = runner.invoke(
+            app,
+            [
+                "site",
+                "-i",
+                str(csv),
+                "-o",
+                str(tmp_path / "b"),
+                "--strict",
+                "--log-level",
+                "WARNING",
+            ],
+        )
+        assert missing_run.exit_code == 1, missing_run.output
+
+    def test_both_producers_plot_the_same_physical_longwave(self) -> None:
+        """The two producers of ``balanco.png`` must read the same quantity.
+
+        ``CG3*_Wm2_Avg`` is the pyrgeometer's raw thermopile signal, missing the
+        sigma*T_body^4 case term; ``CG3*_Wm2Cr_Avg`` is the flux. Plotting the
+        first gives a downwelling longwave of about -42 W/m2 — a value this
+        station cannot measure — under the same filename and title as the
+        interactive chart showing +406.
+
+        The correction adds the same term to both channels, so net longwave is
+        identical either way: a chart that still sums to Rn is no evidence that
+        the two individual values are right, and here both are off by ~447 W/m2.
+        """
+        from micrometeorology.cli import generate_station_graphs as sibling
+
+        source = Path(sibling.__file__).read_text(encoding="utf-8")
+        for channel in ("lw_down", "lw_up"):
+            column = DEFAULT_BALANCE_COMPONENTS[channel][-1]
+            assert column.endswith("Cr_Avg"), f"{channel} must be the corrected flux, got {column}"
+            assert f'"{column}"' in source, f"{column} disagrees with the sibling producer"
+
+
+class TestTheUnifiedChannelWinsWhenTheFrameHasIt:
+    """Which instrument carries a quantity changes over the record.
+
+    The shade ring was off the PSP from 2019-09 to 2025-05 and the CMP21 carried
+    diffuse instead, so reading ``PSP_Wm2_Avg`` unconditionally publishes
+    near-global irradiance for any window replayed inside those six years, under
+    the title "Radiação Difusa" -- 100.3 W/m2 for the 2022-07 reference week
+    against the 67.6 the interactive page publishes for the very same hours from
+    ``Sw_dif``.
+    """
+
+    @staticmethod
+    def _both_names() -> pd.DataFrame:
+        """A frame as ``labmim-archive`` writes it: unified name beside its source."""
+        idx = pd.date_range("2022-07-01", periods=48, freq="1h")
+        step = np.arange(len(idx))
+        return pd.DataFrame(
+            {
+                # The unshaded PSP reads essentially global irradiance here.
+                "PSP_Wm2_Avg": np.clip(400.0 * np.sin(step / 12.0), 0, None),
+                # The era-correct diffuse channel is the CMP21 behind the ring.
+                "Sw_dif": np.clip(150.0 * np.sin(step / 12.0), 0, None),
+            },
+            index=idx,
+        )
+
+    def test_the_era_mapped_channel_is_what_gets_plotted(self, tmp_path):
+        frame = self._both_names()
+
+        written, missing, _empty = render_site_graphs(
+            frame,
+            tmp_path / "g",
+            DEFAULT_COLUMNS,
+            {},
+            DEFAULT_DIRECTION_COMPONENTS,
+        )
+
+        assert "radiacao_difusa" not in missing
+        assert any(path.name == "radiacao_difusa.png" for path in written)
+        assert resolve_column(frame, DEFAULT_COLUMNS["radiacao_difusa"]) == "Sw_dif"
+
+    def test_the_logger_column_still_works_when_it_is_all_there_is(self, tmp_path):
+        """The processed-CSV path has no unified names and must keep working."""
+        frame = self._both_names().drop(columns=["Sw_dif"])
+
+        assert resolve_column(frame, DEFAULT_COLUMNS["radiacao_difusa"]) == "PSP_Wm2_Avg"
+
+        written, missing, _empty = render_site_graphs(
+            frame,
+            tmp_path / "g",
+            DEFAULT_COLUMNS,
+            {},
+            DEFAULT_DIRECTION_COMPONENTS,
+        )
+
+        assert "radiacao_difusa" not in missing
+        assert any(path.name == "radiacao_difusa.png" for path in written)
+
+    def test_an_override_replaces_the_whole_chain(self):
+        """`--col` names ONE column; the shipped alternatives must not outrank it."""
+        columns, _balance, _direction = load_graph_config(None, ["radiacao_difusa=PSP_Wm2_Avg"])
+
+        assert columns["radiacao_difusa"] == ("PSP_Wm2_Avg",)
+        assert resolve_column(self._both_names(), columns["radiacao_difusa"]) == "PSP_Wm2_Avg"
+
+
+class TestTheDateAxisSurvivesALongWindow:
+    """A fixed ``DayLocator`` does not thin -- past 1000 ticks matplotlib drops them.
+
+    The archive's own hourly frame spans 2016-2026, which asks for 3,844 daily
+    ticks; the axis then renders as an unreadable black band.
+    """
+
+    @staticmethod
+    def _axis(days: int):
+        fig, ax = create_figure()
+        index = pd.date_range("2020-01-01", periods=days * 24, freq="1h")
+        ax.plot(index, np.arange(len(index), dtype=float))
+        setup_date_axis(ax)
+        return fig, ax
+
+    def test_a_week_keeps_one_tick_per_day(self):
+        """The contract graphs plot a week; that look must not change."""
+        fig, ax = self._axis(7)
+        try:
+            assert isinstance(ax.xaxis.get_major_locator(), mdates.DayLocator)
+            labels = [t for t in ax.xaxis.get_majorticklabels() if t.get_text()]
+            assert 6 <= len(labels) <= 9, [t.get_text() for t in labels]
+        finally:
+            plt.close(fig)
+
+    def test_a_decade_stays_readable(self):
+        fig, ax = self._axis(365 * 10)
+        try:
+            ticks = ax.xaxis.get_major_locator()()
+            assert len(ticks) <= 12, len(ticks)
+            assert len(ticks) >= 3, len(ticks)
+        finally:
+            plt.close(fig)

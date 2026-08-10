@@ -1,6 +1,6 @@
 """Physics tests for the derived surface radiation budget.
 
-Three independent kinds of evidence that the published numbers are right:
+Four independent kinds of evidence that the published numbers are right:
 
 1. **Closed form** — analytic limits and hand-computed values, so the formulas
    are pinned against arithmetic rather than against themselves.
@@ -33,6 +33,7 @@ import numpy as np
 import pytest
 
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
+from micrometeorology.wrf import variables
 from micrometeorology.wrf.reader import WRFDataset
 from micrometeorology.wrf.value_source import (
     DAYLIGHT_ONLY_VARIABLES,
@@ -331,8 +332,7 @@ def test_upwelling_longwave_falls_in_the_published_terrestrial_band(surface_stat
     The bracket is deliberately loose — the fixture reaches 315 K skin
     temperature, and hot dry land at midday genuinely reaches 550-590 W/m2, so
     a tight ceiling would be a false constraint. What this actually guards is
-    the order of magnitude: the legacy exporter's Celsius-for-Kelvin bug landed
-    at ~1e-2 W/m2.
+    the order of magnitude: a Celsius-for-Kelvin slip lands at ~1e-2 W/m2.
     """
     lwup = compute_upwelling_longwave(
         surface_state["emiss"], surface_state["tsk"], surface_state["glw"]
@@ -573,8 +573,7 @@ def test_derived_lwup_reproduces_wrfs_own_lwupb():
 def test_derived_lwup_beats_the_emission_only_form_on_real_data():
     """The reflected term is not decoration: it is ~an order of magnitude of error.
 
-    This is the empirical counterpart of the analytic guard above, and the
-    regression test for the legacy exporter's formula.
+    The empirical counterpart of the analytic guard above.
     """
     with netCDF4.Dataset(_LWUPB_FILE) as ds:
         step = 30
@@ -661,8 +660,8 @@ def test_published_radiation_fields_stay_in_physical_range_on_a_real_run():
         for variable, (low, high) in bounds.items():
             source = build_value_frame_source(ds, variable)
             assert source is not None, variable
-            # Step 0 carries GLW = 0: radiation has not been called yet at the
-            # first output time, so it is spin-up, not a physical state.
+            # Step 0 carries GLW = 0: radiation has not been called yet, so it
+            # is spin-up rather than a physical state.
             checked = 0
             for step in [m["index"] for m in metadata if publishes_step(variable, m)][1:]:
                 frame = source.frame_for_step(step)
@@ -1001,3 +1000,95 @@ def test_clearness_index_bounds_survive_an_all_night_file(tmp_path):
         assert np.isfinite(source.scale_min)
         assert np.isfinite(source.scale_max)
         assert np.isnan(source.frame_for_step(3)).all()
+
+
+def test_the_cold_start_step_is_not_published_at_all(tmp_path):
+    """WRF writes step 0 before it calls radiation, so GLW is identically zero.
+
+    Every GLW-derived field is then physically impossible there: net radiation
+    reads -416 W/m2 domain-mean against a -60..+604 range for every other step,
+    sky emissivity exactly 0.00 against a 0.72-0.99 legend, and upwelling
+    longwave sits ~18 W/m2 low with the reflected (1 - eps) * GLW term missing
+    (measured on the 2026-05-03 operational run). The publish gate and the
+    colour-scale population must exclude the same steps, or the legend and the
+    cells of one artifact disagree.
+    """
+    wrf = tmp_path / "wrfout_d02_cold_start.nc"
+    _write_radiation_wrf_file(wrf)
+    with netCDF4.Dataset(wrf, "a") as ds:
+        ds.variables["GLW"][0, :, :] = 0.0  # the uninitialised radiation state
+
+    with WRFDataset(wrf) as ds:
+        for variable in (
+            WRFVariable.LWUP,
+            WRFVariable.LWNET,
+            WRFVariable.RNET,
+            WRFVariable.SKY_EMISSIVITY,
+        ):
+            source = build_value_frame_source(ds, variable)
+            assert source is not None, variable
+            assert np.isnan(source.frame_for_step(0)).all(), (
+                f"{variable}: the cold-start frame must be entirely no-value so the "
+                "publish gate drops it and the domain summary never records it"
+            )
+            assert np.isfinite(source.frame_for_step(1)).any(), (
+                f"{variable}: only the uninitialised step goes"
+            )
+
+
+def test_a_continuation_run_keeps_its_first_step(tmp_path):
+    """A run restarted from a previous forecast already has its radiation state."""
+    wrf = tmp_path / "wrfout_d02_continuation.nc"
+    _write_radiation_wrf_file(wrf)
+
+    with WRFDataset(wrf) as ds:
+        assert ds.get_variable("GLW")[0].max() > 0.0, "the fixture must not be a cold start"
+        for variable in (WRFVariable.LWUP, WRFVariable.RNET, WRFVariable.SKY_EMISSIVITY):
+            source = build_value_frame_source(ds, variable)
+            assert source is not None, variable
+            assert np.isfinite(source.frame_for_step(0)).any(), variable
+
+
+def _add_surface_field(dataset, name: str, value: float) -> None:
+    """Create a constant ``(Time, south_north, west_east)`` field on an open file."""
+    shape = dataset.variables["T2"].shape
+    variable = dataset.createVariable(name, "f4", ("Time", "south_north", "west_east"))
+    variable[:] = np.full(shape, value, dtype="f4")
+
+
+def test_wind_components_are_rotated_onto_true_north(tmp_path):
+    """``U10``/``V10`` are GRID-relative; a bearing from them is off by alpha.
+
+    The operational domains are Mercator, where SINALPHA is 0 everywhere and
+    the rotation is the identity, so a missing rotation stays invisible until a
+    Lambert or polar domain is added and every arrow is drawn wrong.
+    """
+    wrf = tmp_path / "wrfout_d02_rotated.nc"
+    _write_radiation_wrf_file(wrf)
+    with netCDF4.Dataset(wrf, "a") as ds:
+        _add_surface_field(ds, "COSALPHA", 0.0)
+        _add_surface_field(ds, "SINALPHA", 1.0)
+        _add_surface_field(ds, "U10", 3.0)
+        _add_surface_field(ds, "V10", 4.0)
+
+    with WRFDataset(wrf) as ds:
+        u, v, _low, _high = variables.extract_wind(ds)
+
+    # A 90 deg rotation: (u, v) = (3, 4) becomes (4, -3), same speed.
+    np.testing.assert_allclose(u, 4.0, atol=1e-5)
+    np.testing.assert_allclose(v, -3.0, atol=1e-5)
+    np.testing.assert_allclose(np.hypot(u, v), 5.0, atol=1e-5)
+
+
+def test_a_file_without_the_rotation_fields_keeps_its_components(tmp_path):
+    wrf = tmp_path / "wrfout_d02_unrotated.nc"
+    _write_radiation_wrf_file(wrf)
+    with netCDF4.Dataset(wrf, "a") as ds:
+        _add_surface_field(ds, "U10", 3.0)
+        _add_surface_field(ds, "V10", 4.0)
+
+    with WRFDataset(wrf) as ds:
+        u, v, _low, _high = variables.extract_wind(ds)
+
+    np.testing.assert_allclose(u, 3.0, atol=1e-5)
+    np.testing.assert_allclose(v, 4.0, atol=1e-5)

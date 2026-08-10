@@ -126,9 +126,8 @@ def create_wind_vectors_json(
     v_sampled = v[0:ny:downsampling, 0:nx:downsampling]
 
     magnitude = np.hypot(u_sampled, v_sampled)
-    # Bearing the flow blows TOWARD: degrees clockwise from North.
-    # The meteorological "comes FROM" bearing is (this + 180) % 360 — see
-    # sensors.wind.wind_direction_from_components, which returns that one.
+    # Blows-TOWARD convention, unlike sensors.wind.wind_direction_from_components,
+    # which returns the meteorological comes-FROM bearing.
     flow_bearing_deg = np.degrees(np.arctan2(u_sampled, v_sampled))
     flow_bearing_deg = np.where(flow_bearing_deg < 0, flow_bearing_deg + 360.0, flow_bearing_deg)
 
@@ -141,7 +140,6 @@ def create_wind_vectors_json(
 
     valid = ~np.isnan(angles_sampled)
 
-    # Date formatting
     if date_time is None:
         date_str = "N/A"
     else:
@@ -174,11 +172,11 @@ def write_grid_geojson_stream(
 ) -> Path:
     """Write grid GeoJSON feature-by-feature without building a full feature list.
 
-    Corner coordinates are computed vectorized (same element arithmetic and
-    operand order as the historical per-cell writer, in the input dtype) and the
-    feature text is assembled in chunks with f-strings. The output bytes are
-    identical to serialising each :func:`_grid_cell_feature` dict with
-    ``json.dump(..., separators=(",", ":"), ensure_ascii=False)``.
+    Byte contract with the site: the output is identical to serialising each
+    ``tests.micromet._reference._grid_cell_feature`` dict with
+    ``json.dump(..., separators=(",", ":"), ensure_ascii=False)``. Corner
+    coordinates keep that writer's element arithmetic and operand order, in the
+    input dtype.
     """
     n_rows, n_cols = _validate_grid(lon, lat, context=f"streamed GeoJSON grid for {output_path}")
     metadata = {"resolucao_m": [float(resolution_x), float(resolution_y)]}
@@ -302,10 +300,10 @@ def _grid_cell_corner_arrays(
 ) -> tuple[NDArray, NDArray, NDArray, NDArray]:
     """Compute unrounded 2-D corner arrays ``(lon_left, lon_right, lat_top, lat_bottom)``.
 
-    The arithmetic preserves the historical per-cell writer exactly — same
-    expressions and operand order, evaluated in the input dtype (float32
-    grids stay float32). Shared by the legacy GeoJSON writer and the compact
-    grid writer so both serialize the SAME corner values.
+    Same expressions and operand order as the per-cell reference writer,
+    evaluated in the input dtype (float32 grids stay float32). Shared by the
+    legacy GeoJSON writer and the compact grid writer so both serialize the SAME
+    corner values.
     """
     # WRF readers hand back MaskedArrays (mask all False); np.ma arithmetic
     # promotes ``/ 2`` to float64, unlike the per-element scalar path.
@@ -399,8 +397,7 @@ def _write_flat_values_chunks(f: TextIO, arr: NDArray, *, chunk_size: int) -> No
         # commas, and a Python float repr always puts a digit before the dot, so
         # a ".0" directly before a separator (or chunk end) can only be a whole
         # float's suffix. ``str.replace`` rescans after each hit, so adjacent
-        # whole floats ("1.0,0.0,2.0") are all stripped; it is 20x faster than
-        # the lookahead regex it replaces.
+        # whole floats ("1.0,0.0,2.0") are all stripped.
         text = (
             json.dumps(values, separators=(",", ":"))[1:-1].replace(".0,", ",").removesuffix(".0")
         )
