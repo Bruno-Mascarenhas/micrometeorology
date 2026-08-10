@@ -301,3 +301,89 @@ class TestSubsetTotalsAgree:
         payload = build_variable_payload(spec, samples, version="v1", atoms=atoms)
 
         assert payload["subsets"]["observed_all"]["atoms"][0]["count"] == 55
+
+
+class TestCaveatsCarryThePublishedNumbers:
+    """A number in prose is a copy, and a copy stops being true.
+
+    Three shipped wrong at once: the PAR caveats asserted 552, 24 and 18
+    point-mass hours beside published atoms of 538, 13 and 17, and the net
+    radiation caveat quoted a = 0,775 / b = -24,4 / 36,2 W/m2 while the fit
+    panel on the same screen printed 0,7730 / -23,59 / 35,61. Nothing was wrong
+    with the numbers -- masking 52 clock-corrupted days moved them and only the
+    sentences stayed behind.
+    """
+
+    @staticmethod
+    def _spec(caveat: str) -> VariableSpec:
+        return VariableSpec(
+            id="probe",
+            label="Sonda",
+            unit="m/s",
+            chart="histogram",
+            family="weibull",
+            family_label="Weibull",
+            edges=tuple(float(v) for v in range(21)),
+            caveats=(caveat,),
+        )
+
+    def test_an_atom_count_comes_from_the_atom(self, wind_samples):
+        spec = self._spec("Saem do ajuste {{atom:calm:count}} horas de calmaria.")
+        atoms = {"observed_all": [Atom("calm", "Calmarias", 0.037, 3663)]}
+
+        payload = build_variable_payload(spec, wind_samples, version="v1", atoms=atoms)
+
+        assert payload["caveats"][0] == "Saem do ajuste 3.663 horas de calmaria."
+        assert payload["subsets"]["observed_all"]["atoms"][0]["count"] == 3663
+
+    def test_an_atom_share_comes_from_the_atom(self, wind_samples):
+        spec = self._spec("Calmarias: {{atom:calm:share}} % do registro.")
+        atoms = {"observed_all": [Atom("calm", "Calmarias", 0.0523, 3663)]}
+
+        payload = build_variable_payload(spec, wind_samples, version="v1", atoms=atoms)
+
+        assert payload["caveats"][0] == "Calmarias: 5,2 % do registro."
+
+    def test_a_fitted_parameter_comes_from_the_fit(self, wind_samples):
+        spec = self._spec("Forma estimada: {{param:shape:3}}.")
+
+        payload = build_variable_payload(spec, wind_samples, version="v1")
+
+        shape = payload["subsets"]["observed_all"]["fit"]["params"]["shape"]
+        printed = f"{shape:.3f}".replace(".", ",")
+        assert payload["caveats"][0] == f"Forma estimada: {printed}."
+
+    def test_an_unpublished_atom_stops_the_export(self, wind_samples):
+        """A sentence quoting a number nobody published must not reach a reader."""
+        spec = self._spec("Saem {{atom:ausente:count}} horas.")
+
+        with pytest.raises(ValueError, match="ausente"):
+            build_variable_payload(spec, wind_samples, version="v1")
+
+    def test_an_unpublished_parameter_stops_the_export(self, wind_samples):
+        spec = self._spec("Coeficiente {{param:inexistente:2}}.")
+
+        with pytest.raises(ValueError, match="inexistente"):
+            build_variable_payload(spec, wind_samples, version="v1")
+
+
+class TestTheShippedCaveatsQuoteNoLooseCount:
+    """No caveat in the catalogue may hard-code a count the export computes.
+
+    The check is on the CATALOGUE, not on one export: a literal reintroduced by
+    a future edit is exactly how the three above got there.
+    """
+
+    def test_no_shipped_caveat_states_a_bare_hour_count(self):
+        # Counts are what go stale; a threshold ("acima de 10°") or a cited
+        # range does not, so only "<digits> horas" is refused.
+        offenders = [
+            f"{spec.id}: {match.group(0)}"
+            for spec in CLIMATOLOGY_VARIABLES
+            for caveat in spec.caveats
+            for match in re.finditer(r"(\d[\d.]*)\s+horas", caveat)
+        ]
+        assert offenders == [], (
+            "hard-coded hour counts in caveat prose; interpolate with "
+            "{{atom:<id>:count}} so the sentence and the panel cannot disagree"
+        )

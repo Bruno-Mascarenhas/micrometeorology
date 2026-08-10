@@ -366,6 +366,67 @@ REFERENCES: dict[str, Reference] = {
 # resolves, which _assert_references does at import time.
 _REFERENCE_MARKER = re.compile(r"\[\[([a-z0-9_]+)\]\]")
 
+# Value syntax inside caveats: {{atom:<id>:count}}, {{atom:<id>:share}} and
+# {{param:<name>:<decimals>}}, resolved against the subset the page prints the
+# prose beside (``observed_all``).
+#
+# Prose used to carry these as literals, and a literal is a copy that stops
+# being true. Three shipped wrong at once: the PAR caveats asserted 552, 24 and
+# 18 point-mass hours beside published atoms of 538, 13 and 17, and the net
+# radiation caveat quoted a = 0,775 / b = -24,4 / 36,2 W/m2 while the fit panel
+# on the same screen printed 0,7730 / -23,59 / 35,61. Nothing was wrong with the
+# numbers — masking 52 clock-corrupted days moved them, and only the sentence
+# stayed behind. Interpolating makes the two agree by construction instead of by
+# vigilance.
+_VALUE_MARKER = re.compile(r"\{\{(atom|param):([A-Za-z0-9_]+):([A-Za-z0-9_]+)\}\}")
+
+
+def _format_count(value: int) -> str:
+    """Portuguese thousands separator, matching how the page prints counts."""
+    return f"{value:,}".replace(",", ".")
+
+
+def _format_decimal(value: float, decimals: int) -> str:
+    """Portuguese decimal comma, at the precision the caveat's author chose."""
+    return f"{value:.{decimals}f}".replace(".", ",")
+
+
+def _resolve_values(text: str, subset: dict[str, Any], where: str) -> str:
+    """Replace every ``{{...}}`` marker with the value the subset publishes.
+
+    Raises on anything unresolvable — an unknown atom id, a parameter the fit
+    does not carry, a malformed precision. A caveat that quotes a number nobody
+    published is the defect this exists to remove, so it stops the export that
+    writes the artifacts rather than reaching a reader.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        kind, name, detail = match.groups()
+        if kind == "atom":
+            atoms = {atom["id"]: atom for atom in subset.get("atoms", [])}
+            if name not in atoms:
+                raise ValueError(
+                    f"{where}: caveat cites atom {name!r}, published atoms are "
+                    f"{sorted(atoms) or 'none'}"
+                )
+            atom = atoms[name]
+            if detail == "count":
+                return _format_count(int(atom["count"]))
+            if detail == "share":
+                return _format_decimal(100.0 * float(atom["fraction"]), 1)
+            raise ValueError(f"{where}: unknown atom detail {detail!r}; use count or share")
+        params = ((subset.get("fit") or {}).get("params")) or {}
+        if name not in params:
+            raise ValueError(
+                f"{where}: caveat cites parameter {name!r}, the fit publishes "
+                f"{sorted(params) or 'none'}"
+            )
+        if not detail.isdigit():
+            raise ValueError(f"{where}: parameter precision {detail!r} is not a number of decimals")
+        return _format_decimal(float(params[name]), int(detail))
+
+    return _VALUE_MARKER.sub(replace, text)
+
 
 def _assert_references() -> None:
     """Fail at import if any published sentence cites a reference that is not declared.
@@ -551,9 +612,9 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         fit_options=INDUCED,
         caveats=(
             "Restrita às horas com elevação solar acima de 10°, como toda variável de onda curta desta página. Até esta versão a PAR era a única exportada sobre TODAS as horas, e 38% dos valores publicados eram exatamente zero porque eram noite; a mesma curva contra a amostra sem o corte daria distância KS de 0,55.",
-            "Mesma densidade induzida da onda curta incidente, com as escalas multiplicadas pela fração PAR média da era (0,4475, razão de energias com o denominador acima de 50 W/m²). A literatura não atribui densidade canônica à PAR em si — o que ela modela é a RAZÃO entre PAR e global —, e é justamente por isso que a curva entra por essa razão em vez de por um ajuste direto.",
-            "[[custodio2021]] medem PAR/global diária de 0,50 em Petrolina e 0,44 em Brasília, e citam a faixa de 0,41 a 0,52 para a banda de 400 a 700 nm, que é a deste sensor. Os 0,4475 desta era estão dentro da faixa.",
-            "Duas massas pontuais saem do ajuste e são impressas ao lado: 552 horas diurnas com PAR exatamente zero, concentradas entre agosto e outubro de 2018 e coincidindo com onda curta negativa, isto é, um período de zero do registrador; e 24 horas com PAR/global acima de 0,6, fisicamente impossível por a PAR ser sub-banda da global.",
+            "Mesma densidade induzida da onda curta incidente, com as escalas multiplicadas pela fração PAR média da era ({{param:gain:4}}, razão de energias com o denominador acima de 50 W/m²). A literatura não atribui densidade canônica à PAR em si — o que ela modela é a RAZÃO entre PAR e global —, e é justamente por isso que a curva entra por essa razão em vez de por um ajuste direto.",
+            "[[custodio2021]] medem PAR/global diária de 0,50 em Petrolina e 0,44 em Brasília, e citam a faixa de 0,41 a 0,52 para a banda de 400 a 700 nm, que é a deste sensor. Os {{param:gain:4}} desta era estão dentro da faixa.",
+            "Duas massas pontuais saem do ajuste e são impressas ao lado: {{atom:daytime_zero:count}} horas diurnas com PAR exatamente zero, concentradas entre agosto e outubro de 2018 e coincidindo com onda curta negativa, isto é, um período de zero do registrador; e {{atom:par_over_global:count}} horas com PAR/global acima de 0,6, fisicamente impossível por a PAR ser sub-banda da global.",
         ),
     ),
     VariableSpec(
@@ -567,9 +628,9 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         fit_options=INDUCED,
         caveats=(
             "Restrita às horas com elevação solar acima de 10°, como a era anterior. Sem o corte, 21% dos valores publicados eram zeros de noite.",
-            "Mesma densidade induzida da era anterior; a ÚNICA coisa que difere entre as duas curvas é a fração PAR média: 0,4475 antes contra 0,2590 aqui. A razão entre as duas, 1,728, quantifica em quatro dígitos o erro de escala suspeito.",
-            "[[custodio2021]] citam a faixa de 0,41 a 0,52 para a banda de 400 a 700 nm. Os 0,2590 desta era ficam bem abaixo, e nenhuma calibração documentada explica a diferença.",
-            "Os valores estão como medidos, sem correção: comparar as duas eras é o ponto. Após o corte diurno esta era não tem nenhum zero; 18 horas com PAR/global acima de 0,6 saem como massa pontual.",
+            "Mesma densidade induzida da era anterior; a ÚNICA coisa que difere entre as duas curvas é a fração PAR média: 0,4475 antes contra {{param:gain:4}} aqui. A razão entre as duas, 1,728, quantifica em quatro dígitos o erro de escala suspeito.",
+            "[[custodio2021]] citam a faixa de 0,41 a 0,52 para a banda de 400 a 700 nm. Os {{param:gain:4}} desta era ficam bem abaixo, e nenhuma calibração documentada explica a diferença.",
+            "Os valores estão como medidos, sem correção: comparar as duas eras é o ponto. Após o corte diurno esta era não tem nenhum zero; {{atom:par_over_global:count}} horas com PAR/global acima de 0,6 saem como massa pontual.",
         ),
     ),
     VariableSpec(
@@ -648,7 +709,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         fit_options=(*INDUCED, "slope", "intercept", "residual_sd"),
         caveats=(
             "O saldo é uma mistura de dois regimes com escalas completamente diferentes, e juntar os dois num histograma só produz uma distribuição bimodal que nenhum modelo explica. Por isso dia e noite são publicados separados: aqui, as horas com elevação solar acima de 10°.",
-            "A curva compõe dois resultados: a densidade de [[hollands1983]] para o índice de claridade, já publicada nesta página, e a relação linear entre saldo e onda curta incidente de [[hu2012]], reajustada localmente. Rn = a·Kt·I0h + b + erro, com a = 0,775, b = -24,4 W/m² e erro gaussiano de 36,2 W/m², marginalizado sobre a irradiância extraterrestre observada.",
+            "A curva compõe dois resultados: a densidade de [[hollands1983]] para o índice de claridade, já publicada nesta página, e a relação linear entre saldo e onda curta incidente de [[hu2012]], reajustada localmente. Rn = a·Kt·I0h + b + erro, com a = {{param:slope:4}}, b = {{param:intercept:2}} W/m² e erro gaussiano de {{param:residual_sd:2}} W/m², marginalizado sobre a irradiância extraterrestre observada.",
             "A convolução gaussiana é licenciada por medida, não suposta: o resíduo da regressão tem assimetria 0,010 e curtose em excesso 0,063, com R² de 0,975.",
             "Atenção ao comparar com [[hu2012]]: o trabalho original é em MJ/m² por dia, não em W/m² horários. Os coeficientes acima são os desta estação, não os deles.",
             "Uma beta de quatro parâmetros ajusta cerca de duas vezes melhor — na análise de referência sobre o registro inteiro, distância KS de 0,0283 contra 0,0559 — e não tem lei publicada por trás. A curva publicada é a que tem procedência, e a diferença fica registrada aqui.",
@@ -1100,7 +1161,12 @@ def build_variable_payload(
         "chart": spec.chart,
         "family": spec.family,
         "family_label": spec.family_label,
-        "caveats": list(spec.caveats),
+        # Resolved against the recorte the page prints the prose beside, so a
+        # number in a sentence is the same object as the number in the panel.
+        "caveats": [
+            _resolve_values(caveat, subsets.get("observed_all") or {}, f"{spec.id} caveat {index}")
+            for index, caveat in enumerate(spec.caveats)
+        ],
         "subsets": subsets,
     }
     if spec.chart == "histogram":

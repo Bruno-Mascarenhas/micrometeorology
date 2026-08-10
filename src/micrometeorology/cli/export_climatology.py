@@ -443,7 +443,11 @@ def _check_caveats_quote_the_published_scalar(spec: object, payload: dict) -> No
     decimal in a sentence would be the wrong trade. It is printed at generation
     time, when someone is watching.
     """
-    caveats = getattr(spec, "caveats", ())
+    # The PUBLISHED sentences, not the specs' templates: a caveat that carries a
+    # ``{{param:...}}`` marker resolves to the fitted value, and checking the
+    # unresolved template would report every interpolated sentence as missing
+    # the very number it is guaranteed to carry.
+    caveats = payload.get("caveats", ())
     fit = (payload.get("subsets", {}).get("observed_all") or {}).get("fit")
     if not caveats or not fit:
         return
