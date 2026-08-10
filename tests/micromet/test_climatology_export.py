@@ -135,7 +135,15 @@ class TestVariablePayload:
         spec = next(s for s in CLIMATOLOGY_VARIABLES if s.chart == "rose")
         generator = np.random.default_rng(6)
         samples = {"observed_all": generator.uniform(0, 360, 5_000)}
-        payload = build_variable_payload(spec, samples, version="v1")
+        # The rose's caveats cite both of its atoms by id, and a citation that
+        # resolves to nothing is refused rather than published half-written.
+        atoms = {
+            "observed_all": [
+                Atom("arithmetic_mean_era", "Era de média aritmética", 0.465, 32588),
+                Atom("calm", "Calmarias", 0.052, 2785),
+            ]
+        }
+        payload = build_variable_payload(spec, samples, version="v1", atoms=atoms)
         assert "sectors" in payload
         assert "edges" not in payload
         assert sum(payload["subsets"]["observed_all"]["frequencies"]) == pytest.approx(
@@ -297,10 +305,19 @@ class TestSubsetTotalsAgree:
         spec = next(s for s in CLIMATOLOGY_VARIABLES if s.chart == "rose")
         generator = np.random.default_rng(9)
         samples = {"observed_all": generator.uniform(0, 360, 500)}
-        atoms = {"observed_all": [Atom("calm", "Calmarias", 0.1, 55)]}
+        # Both atoms, because the shipped wind_direction caveats cite both and an
+        # unresolvable citation is a hard failure by design.
+        atoms = {
+            "observed_all": [
+                Atom("arithmetic_mean_era", "Era de média aritmética", 0.465, 32588),
+                Atom("calm", "Calmarias", 0.1, 55),
+            ]
+        }
         payload = build_variable_payload(spec, samples, version="v1", atoms=atoms)
 
-        assert payload["subsets"]["observed_all"]["atoms"][0]["count"] == 55
+        published = {atom["id"]: atom for atom in payload["subsets"]["observed_all"]["atoms"]}
+        assert published["calm"]["count"] == 55
+        assert published["arithmetic_mean_era"]["count"] == 32588
 
 
 class TestCaveatsCarryThePublishedNumbers:

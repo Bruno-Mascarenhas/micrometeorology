@@ -585,6 +585,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         edges=_linear_edges(0.0, 360.0, 360.0 / ROSE_SECTORS),
         caveats=(
             "Direção é uma grandeza circular: 0° e 360° são o mesmo rumo, então o gráfico é uma rosa dos ventos e as estatísticas são circulares. Média e desvio-padrão aritméticos de graus não têm significado aqui.",
+            "Um trecho do registro sai inteiro: de 2019-05-31 a 2023-02-20 a direção foi gravada como MÉDIA ARITMÉTICA do ângulo, um escalar médio atravessando a virada de 0/360. O sintoma medido é que não há uma única amostra de 5 minutos a menos de 15° do norte em todo o ano de 2021. São {{atom:arithmetic_mean_era:share}} % do registro, e é por isso que a calmaria impressa aqui ({{atom:calm:share}} %) não é a mesma que o painel de velocidade imprime: esta é uma fração da era mantida, aquela é do registro inteiro do mesmo anemômetro.",
             "As calmarias ficam fora da rosa: no limiar de partida do anemômetro, ou abaixo dele, o rumo é o da concha parada e não o do vento. A fração removida é informada à parte.",
         ),
     ),

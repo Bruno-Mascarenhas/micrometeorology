@@ -307,6 +307,22 @@ def _strip_atoms(
     return series.to_numpy(), []
 
 
+def _paired_speed(
+    spec_id: str, frame: pd.DataFrame, series: pd.Series, column: str | None = None
+) -> pd.Series | None:
+    """The wind speed a calm cut is judged by, or ``None`` when there is none.
+
+    Direction is cut by the speed measured beside it, not by itself: a bearing
+    carries no information about whether the cup was turning.
+    """
+    if spec_id == "wind_speed":
+        return series
+    if spec_id != "wind_direction":
+        return None
+    name = column or OBSERVED_COLUMN["wind_speed"]
+    return frame[name].reindex(series.index) if name in frame.columns else None
+
+
 def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Atom]]:
     """Select, gate and de-atomise one variable from the observed hourly frame."""
     if spec_id == "clearness_index":
@@ -328,19 +344,41 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
         series = series.loc[series.index < ERA_SPLIT]
     elif spec_id in ("par_late", "shortwave_up"):
         series = series.loc[series.index >= ERA_SPLIT]
-    elif spec_id == "wind_direction":
+    era_atoms: list[Atom] = []
+    if spec_id == "wind_direction":
         first, last = INVALID_DIRECTION
-        series = series.loc[(series.index < first) | (series.index > last)]
+        retained = series.loc[(series.index < first) | (series.index > last)]
+        # Published rather than applied in silence. The cut removes 46.5% of the
+        # record, and every number on the rose is a share of what is left — so
+        # the calm fraction it prints (7,4%) disagreed with the one the
+        # wind-speed panel prints (5,2%) for the same anemometer over the same
+        # declared period, with nothing on the page able to explain the gap.
+        #
+        # Published even when it removes nothing — a window entirely after the
+        # bad era reports 0 h rather than dropping the entry, the same way the
+        # model's calm atom does. An atom that appears and disappears with the
+        # window would make the caveat that cites it unresolvable, and would
+        # leave the reader unable to tell "none excluded" from "not checked".
+        removed = len(series) - len(retained)
+        era_atoms = [
+            Atom(
+                "arithmetic_mean_era",
+                f"Direção registrada como média aritmética do ângulo "
+                f"({first.date()} a {last.date()}), inutilizável",
+                removed / len(series) if len(series) else float("nan"),
+                removed,
+            )
+        ]
+        series = retained
 
     if spec_id in ("par_early", "par_late"):
         return _par_sample(series, frame)
 
-    speed = (
-        series
-        if spec_id == "wind_speed"
-        else frame[OBSERVED_COLUMN["wind_speed"]].reindex(series.index)
-    )
-    return _strip_atoms(spec_id, series, speed)
+    # Only the two wind variables need the paired speed, and only they may
+    # require the column to be present: reading it for every variable made a
+    # frame without an anemometer fail on the rain gauge.
+    sample, atoms = _strip_atoms(spec_id, series, _paired_speed(spec_id, frame, series))
+    return sample, [*era_atoms, *atoms]
 
 
 def _par_sample_mask(series: pd.Series, global_flux: pd.Series) -> pd.Series:
@@ -409,14 +447,9 @@ def _wrf_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Ato
     # The SAME de-atomisation the observed branch applies. Publishing a model
     # histogram conditional on a different event than the observed one it is
     # drawn beside makes the comparison the page exists for meaningless.
-    speed = (
-        series
-        if spec_id == "wind_speed"
-        else frame[WRF_COLUMN["wind_speed"]].reindex(series.index)
-        if WRF_COLUMN["wind_speed"] in frame.columns
-        else None
+    return _strip_atoms(
+        spec_id, series, _paired_speed(spec_id, frame, series, WRF_COLUMN["wind_speed"])
     )
-    return _strip_atoms(spec_id, series, speed)
 
 
 def _scale_mixture(top: np.ndarray) -> tuple[list[float], list[float]]:
@@ -591,14 +624,31 @@ def _net_radiation_line(daylight: pd.DataFrame) -> dict[str, object] | None:
     }
 
 
+def _available_hours(spec_id: str, block: pd.DataFrame) -> int:
+    """Hours the sensor delivered, which is NOT the hours that survive the fit.
+
+    The panel is labelled "horas válidas" and read as sensor availability, so it
+    has to count before the point masses leave. Counting after made the rain
+    gauge report 6.980 valid hours where 80.518 exist — 91,3% of them dry, which
+    is weather and not an outage — and a reader comparing that strip with the
+    temperature strip would conclude the gauge was down for most of the record.
+    Wind speed read 66.345 against 70.008, relative humidity 75.551 against
+    75.770, shortwave 34.955 against 35.111.
+
+    Published as ``n + sum(atom counts)``, which is also the identity the
+    variable payload makes checkable from the bytes alone.
+    """
+    sample, atoms = _observed_sample(spec_id, block)
+    return int(np.isfinite(sample).sum()) + sum(atom.count for atom in atoms)
+
+
 def _coverage(frame: pd.DataFrame) -> dict[str, object]:
     """Valid hours per year and per season, per variable — the honesty panel."""
     years = []
     for year, block in frame.groupby(_times(frame).year):
         hours = {}
         for spec in CLIMATOLOGY_VARIABLES:
-            sample, _atoms = _observed_sample(spec.id, block)
-            hours[spec.id] = int(np.isfinite(sample).sum())
+            hours[spec.id] = _available_hours(spec.id, block)
         years.append({"year": int(str(year)), "hours": hours})
 
     seasons = []
@@ -608,8 +658,7 @@ def _coverage(frame: pd.DataFrame) -> dict[str, object]:
         present = sorted({int(year) for year in _times(block).year})
         hours = {}
         for spec in CLIMATOLOGY_VARIABLES:
-            sample, _atoms = _observed_sample(spec.id, block)
-            hours[spec.id] = int(np.isfinite(sample).sum())
+            hours[spec.id] = _available_hours(spec.id, block)
         seasons.append({"season": name, "years": present, "hours": hours})
 
     return {

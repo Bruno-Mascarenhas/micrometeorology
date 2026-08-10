@@ -15,9 +15,11 @@ import pytest
 
 from micrometeorology.cli.export_climatology import (
     CALM_THRESHOLD_MS,
+    INVALID_DIRECTION,
     OBSERVED_COLUMN,
     SATURATION_RH,
     WRF_COLUMN,
+    _available_hours,
     _observed_sample,
     _strip_atoms,
     _wrf_sample,
@@ -102,14 +104,23 @@ class TestBothSourcesAreConditionedIdentically:
         assert atoms[0].count == 1
         assert len(values) == 3
 
-    def test_both_sources_publish_the_same_atom_ids(self):
-        """Structural parity across every variable the model carries."""
+    def test_both_sources_publish_the_same_value_based_atoms(self):
+        """Parity is over the masses a VALUE creates, not over instrument history.
+
+        ``arithmetic_mean_era`` is deliberately one-sided: it removes the window
+        in which the logger averaged an angle arithmetically, which is a fault of
+        this station's recording and not of anything the model did. Requiring it
+        on both sides would delete good model hours to mirror a broken sensor.
+        """
         observed, model = self._paired([70.0, 80.0, 90.0, 99.9], [0.1, 2.0, 3.0, 4.0])
+        instrument_only = {"arithmetic_mean_era"}
 
         for spec_id in ("relative_humidity", "wind_speed", "wind_direction"):
             _obs, obs_atoms = _observed_sample(spec_id, observed)
             _wrf, wrf_atoms = _wrf_sample(spec_id, model)
-            assert [a.id for a in obs_atoms] == [a.id for a in wrf_atoms], spec_id
+            assert [a.id for a in obs_atoms if a.id not in instrument_only] == [
+                a.id for a in wrf_atoms if a.id not in instrument_only
+            ], spec_id
 
 
 class TestAVariableWithNoPointMassGetsNoAtom:
@@ -120,3 +131,82 @@ class TestAVariableWithNoPointMassGetsNoAtom:
 
         assert atoms == []
         np.testing.assert_array_equal(values, series.to_numpy())
+
+
+class TestCoverageMeansSensorAvailability:
+    """The panel is labelled "horas válidas" and read as uptime.
+
+    Counting after the point masses left made the rain gauge report 6.980 valid
+    hours where 80.518 exist -- 91,3% of them dry, which is weather, not an
+    outage. A reader comparing that strip with the temperature strip (75.622)
+    would conclude the gauge was out of service for 92% of the record.
+    """
+
+    def test_dry_hours_are_available_hours(self):
+        frame = _frame({OBSERVED_COLUMN["precipitation"]: [0.0, 0.0, 0.0, 0.4, 1.2]})
+
+        sample, atoms = _observed_sample("precipitation", frame)
+
+        assert len(sample) == 2, "only the wet hours are fitted"
+        assert atoms[0].count == 3
+        assert _available_hours("precipitation", frame) == 5
+
+    def test_the_published_identity_is_n_plus_the_atoms(self):
+        """coverage == n + sum(atom counts), checkable from the bytes alone."""
+        frame = _frame(
+            {
+                OBSERVED_COLUMN["wind_speed"]: [0.10, CALM_THRESHOLD_MS, 4.0, 5.0, 6.0],
+                OBSERVED_COLUMN["relative_humidity"]: [50.0, 99.9, 70.0, 80.0, 90.0],
+            }
+        )
+
+        for spec_id in ("wind_speed", "relative_humidity"):
+            sample, atoms = _observed_sample(spec_id, frame)
+            assert _available_hours(spec_id, frame) == len(sample) + sum(a.count for a in atoms)
+
+    def test_a_missing_sensor_still_reports_zero(self):
+        assert _available_hours("precipitation", _frame({"unrelated": [1.0, 2.0]})) == 0
+
+
+class TestTheDirectionEraCutIsPublished:
+    """46,5% of the record leaves, and it used to leave in silence.
+
+    Every number on the rose is then a share of what is left, which is why its
+    calm fraction (7,4%) disagreed with the wind-speed panel's (5,2%) for the
+    same anemometer over the same declared period.
+    """
+
+    @staticmethod
+    def _frame_spanning_the_cut() -> pd.DataFrame:
+        first, last = INVALID_DIRECTION
+        index = pd.DatetimeIndex(
+            [
+                first - pd.Timedelta(hours=1),
+                first + pd.Timedelta(days=1),
+                first + pd.Timedelta(days=2),
+                last + pd.Timedelta(hours=1),
+            ]
+        )
+        return pd.DataFrame(
+            {
+                OBSERVED_COLUMN["wind_direction"]: [10.0, 20.0, 30.0, 40.0],
+                OBSERVED_COLUMN["wind_speed"]: [4.0, 4.0, 4.0, 4.0],
+            },
+            index=index,
+        )
+
+    def test_the_excluded_era_is_an_atom_not_a_silent_drop(self):
+        frame = self._frame_spanning_the_cut()
+
+        sample, atoms = _observed_sample("wind_direction", frame)
+
+        assert [atom.id for atom in atoms] == ["arithmetic_mean_era", "calm"]
+        assert atoms[0].count == 2
+        assert atoms[0].fraction == pytest.approx(0.5)
+        assert sorted(sample) == [10.0, 40.0]
+
+    def test_the_excluded_hours_come_back_in_the_coverage_panel(self):
+        """The logger did write them; what is wrong is how it averaged them."""
+        frame = self._frame_spanning_the_cut()
+
+        assert _available_hours("wind_direction", frame) == 4
