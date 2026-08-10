@@ -33,6 +33,7 @@ import numpy as np
 import pytest
 
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
+from micrometeorology.wrf import variables
 from micrometeorology.wrf.reader import WRFDataset
 from micrometeorology.wrf.value_source import (
     DAYLIGHT_ONLY_VARIABLES,
@@ -1049,3 +1050,49 @@ def test_a_continuation_run_keeps_its_first_step(tmp_path):
             source = build_value_frame_source(ds, variable)
             assert source is not None, variable
             assert np.isfinite(source.frame_for_step(0)).any(), variable
+
+
+def _add_surface_field(dataset, name: str, value: float) -> None:
+    """Create a constant ``(Time, south_north, west_east)`` field on an open file."""
+    shape = dataset.variables["T2"].shape
+    variable = dataset.createVariable(name, "f4", ("Time", "south_north", "west_east"))
+    variable[:] = np.full(shape, value, dtype="f4")
+
+
+def test_wind_components_are_rotated_onto_true_north(tmp_path):
+    """``U10``/``V10`` are GRID-relative; a bearing from them is off by alpha.
+
+    The operational domains are Mercator, where SINALPHA is 0 everywhere and
+    the rotation is the identity -- which is exactly why nothing catches a
+    missing rotation until a Lambert or polar domain is added and every arrow
+    is drawn confidently wrong.
+    """
+    wrf = tmp_path / "wrfout_d02_rotated.nc"
+    _write_radiation_wrf_file(wrf)
+    with netCDF4.Dataset(wrf, "a") as ds:
+        _add_surface_field(ds, "COSALPHA", 0.0)
+        _add_surface_field(ds, "SINALPHA", 1.0)
+        _add_surface_field(ds, "U10", 3.0)
+        _add_surface_field(ds, "V10", 4.0)
+
+    with WRFDataset(wrf) as ds:
+        u, v, _low, _high = variables.extract_wind(ds)
+
+    # A 90 deg rotation: (u, v) = (3, 4) becomes (4, -3), same speed.
+    np.testing.assert_allclose(u, 4.0, atol=1e-5)
+    np.testing.assert_allclose(v, -3.0, atol=1e-5)
+    np.testing.assert_allclose(np.hypot(u, v), 5.0, atol=1e-5)
+
+
+def test_a_file_without_the_rotation_fields_keeps_its_components(tmp_path):
+    wrf = tmp_path / "wrfout_d02_unrotated.nc"
+    _write_radiation_wrf_file(wrf)
+    with netCDF4.Dataset(wrf, "a") as ds:
+        _add_surface_field(ds, "U10", 3.0)
+        _add_surface_field(ds, "V10", 4.0)
+
+    with WRFDataset(wrf) as ds:
+        u, v, _low, _high = variables.extract_wind(ds)
+
+    np.testing.assert_allclose(u, 3.0, atol=1e-5)
+    np.testing.assert_allclose(v, 4.0, atol=1e-5)

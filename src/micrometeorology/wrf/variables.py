@@ -224,10 +224,30 @@ def extract_relative_humidity(ds: WRFDataset) -> tuple[NDArray, float, float]:
     return rh, rh_min, rh_max
 
 
+def rotate_to_earth_relative(ds: WRFDataset, u: NDArray, v: NDArray) -> tuple[NDArray, NDArray]:
+    """Rotate grid-relative wind components onto true north.
+
+    ``U10``/``V10`` are grid-relative: on a Lambert or polar-stereographic
+    domain the grid's y axis is not north, and every bearing derived from them
+    is off by the local rotation angle — up to tens of degrees at the edges of a
+    wide domain, and the arrows would be drawn confidently wrong.
+
+    ``COSALPHA``/``SINALPHA`` carry that angle per cell, so the rotation is
+    exact rather than estimated. The operational domains are Mercator, where
+    ``SINALPHA`` is 0 everywhere and this is the identity, which is why nothing
+    published today changes; a file without the fields keeps the components as
+    they are, because there is nothing to rotate them by.
+    """
+    if not (ds.has_variable("COSALPHA") and ds.has_variable("SINALPHA")):
+        return u, v
+    cos_alpha = ds.get_variable("COSALPHA")
+    sin_alpha = ds.get_variable("SINALPHA")
+    return u * cos_alpha + v * sin_alpha, v * cos_alpha - u * sin_alpha
+
+
 def extract_wind(ds: WRFDataset) -> tuple[NDArray, NDArray, float, float]:
     """Extract 10-m U/V wind components and compute speed bounds."""
-    u10 = ds.get_variable("U10")
-    v10 = ds.get_variable("V10")
+    u10, v10 = rotate_to_earth_relative(ds, ds.get_variable("U10"), ds.get_variable("V10"))
     ws_min, ws_max = get_low_high_wind(u10, v10)
     return u10, v10, ws_min, ws_max
 
@@ -755,6 +775,9 @@ def stream_wind_at_heights(
         v_c = v_raw[:, :, :-1, :] + v_raw[:, :, 1:, :]
         v_c /= 2.0
         del v_raw
+        # Onto true north before any bearing is taken from them, for the same
+        # reason extract_wind does it at 10 m.
+        u_c, v_c = rotate_to_earth_relative(ds, u_c, v_c)
 
         ph = ds.get_variable_block("PH", t0, t1)
         phb = ds.get_variable_block("PHB", t0, t1)
