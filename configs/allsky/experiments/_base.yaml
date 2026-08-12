@@ -32,7 +32,7 @@ targets:                         # V0-V4 / V6 / V7 share this set; V5 overrides
     loss: mse
     weight: 1.0
   sky:
-    enabled: true                # 3-class cross-entropy (clear / partial / overcast)
+    enabled: true                # cross-entropy over the four Kt sky conditions
     weight: 1.0
 
 train:
