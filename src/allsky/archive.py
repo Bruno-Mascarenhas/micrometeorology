@@ -464,6 +464,14 @@ class Ledger:
         return record
 
     def video(self, key: str) -> dict[str, Any] | None:
+        """The download record of day *key*, or None if it was never fetched.
+
+        Returns
+        -------
+        dict or None
+            Filename, path, size in bytes, sha256, ``Last-Modified``, source URL
+            and download time; None when the ledger has never seen the day.
+        """
         record = self.entries.get(key)
         if not isinstance(record, dict):
             return None
@@ -471,6 +479,14 @@ class Ledger:
         return stored
 
     def frames(self, key: str) -> dict[str, Any] | None:
+        """The frame-extraction record of day *key*, or None if never extracted.
+
+        Returns
+        -------
+        dict or None
+            Output directory, frame count, the ``step``/``resize`` the run used
+            and which clock timestamped the frames; None when no extraction ran.
+        """
         record = self.entries.get(key)
         if not isinstance(record, dict):
             return None
@@ -521,10 +537,16 @@ class Ledger:
         return stored.get("step") == step and stored.get("resize") == resize
 
     def last_modified(self, key: str) -> str | None:
+        """The ``Last-Modified`` header stored for day *key*'s video, if any."""
         stored = self.video(key)
         return None if stored is None else stored.get("last_modified")
 
     def uploaded(self, key: str, destination: str) -> bool:
+        """Whether day *key* has already reached *destination*.
+
+        *destination* is the full rclone path the upload targeted, so a day can
+        be recorded against several remotes independently.
+        """
         record = self.entries.get(key)
         if not isinstance(record, dict) or not destination:
             return False
