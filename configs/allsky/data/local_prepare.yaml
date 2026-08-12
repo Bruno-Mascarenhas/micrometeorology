@@ -62,4 +62,6 @@ embeddings:
 splits:
   val_fraction: 0.15
   test_fraction: 0.15
-  seed: 42
+  seed: 42                       # only moves strategy: random
+  strategy: "chronological"      # earliest days train, latest test
+  gap_days: 1                    # dropped at each boundary; adjacent days are near-duplicates

@@ -401,13 +401,23 @@ class EmbeddingsConfig(BaseModel):
 
 
 class SplitsConfig(BaseModel):
-    """Day-based train/val/test split fractions and seed."""
+    """Day-based train/val/test partition.
+
+    ``strategy`` defaults to ``chronological``: the earliest days train, the
+    latest test, and ``gap_days`` are dropped at each boundary so no training
+    day is adjacent to an evaluation day. ``random`` is available for studies
+    that estimate a quantity from a simultaneous image, and has to be asked for
+    by name — chosen silently it reports a forecasting skill the model does not
+    have.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     val_fraction: float = 0.2
     test_fraction: float = 0.1
     seed: int = 42
+    strategy: Literal["chronological", "random"] = "chronological"
+    gap_days: int = 1
 
 
 class PrepareConfig(BaseModel):

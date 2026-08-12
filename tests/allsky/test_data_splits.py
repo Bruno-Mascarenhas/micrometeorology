@@ -29,16 +29,20 @@ class TestCreateDaySplits:
         b = create_day_splits(list(reversed(DAYS)), seed=3)
         assert a.split_id == b.split_id
 
-    def test_different_seed_changes_assignment(self):
-        a = create_day_splits(DAYS, seed=1)
-        b = create_day_splits(DAYS, seed=2)
+    def test_the_seed_only_moves_a_random_split(self):
+        a = create_day_splits(DAYS, seed=1, strategy="random")
+        b = create_day_splits(DAYS, seed=2, strategy="random")
         assert a.assignment != b.assignment
+
+        chronological_a = create_day_splits(DAYS, seed=1)
+        chronological_b = create_day_splits(DAYS, seed=2)
+        assert chronological_a.assignment == chronological_b.assignment
 
     def test_fractions_respected(self):
         split = create_day_splits(DAYS, val_fraction=0.25, test_fraction=0.1, seed=0)
         assert len(split.days_for("test")) == 2  # floor(20 * 0.1)
         assert len(split.days_for("val")) == 5  # floor(20 * 0.25)
-        assert len(split.days_for("train")) == 13
+        assert len(split.days_for("train")) == 11  # 13 minus the two gap days
 
     def test_no_leakage_across_splits(self):
         split = create_day_splits(DAYS, val_fraction=0.2, test_fraction=0.2, seed=5)
@@ -48,7 +52,40 @@ class TestCreateDaySplits:
         assert train.isdisjoint(val)
         assert train.isdisjoint(test)
         assert val.isdisjoint(test)
-        assert train | val | test == set(DAYS)
+        assert train | val | test <= set(DAYS)
+
+    def test_a_random_split_assigns_every_day_because_it_has_no_boundary_to_guard(self):
+        split = create_day_splits(
+            DAYS, val_fraction=0.2, test_fraction=0.2, seed=5, strategy="random"
+        )
+        assigned = (
+            set(split.days_for("train")) | set(split.days_for("val")) | set(split.days_for("test"))
+        )
+        assert assigned == set(DAYS)
+        assert split.gap_days == 0
+
+    def test_the_chronological_default_puts_every_training_day_before_every_test_day(self):
+        split = create_day_splits(DAYS, val_fraction=0.2, test_fraction=0.2)
+        assert split.strategy == "chronological"
+        assert max(split.days_for("train")) < min(split.days_for("val"))
+        assert max(split.days_for("val")) < min(split.days_for("test"))
+
+    def test_the_gap_days_belong_to_no_split(self):
+        split = create_day_splits(DAYS, val_fraction=0.2, test_fraction=0.2, gap_days=2)
+        assigned = set(split.assignment)
+        assert len(set(DAYS) - assigned) == 4
+        assert split.gap_days == 2
+
+    def test_a_negative_gap_is_rejected(self):
+        with pytest.raises(ValueError, match="gap_days"):
+            create_day_splits(DAYS, gap_days=-1)
+
+    def test_the_strategy_and_gap_are_part_of_the_split_identity(self):
+        chronological = create_day_splits(DAYS, val_fraction=0.2, test_fraction=0.2)
+        random_split = create_day_splits(
+            DAYS, val_fraction=0.2, test_fraction=0.2, strategy="random"
+        )
+        assert chronological.split_id != random_split.split_id
 
     def test_small_nonzero_fraction_keeps_at_least_one_day(self):
         split = create_day_splits(DAYS, val_fraction=0.01, test_fraction=0.01, seed=0)
@@ -60,7 +97,9 @@ class TestCreateDaySplits:
         assert split.days_for("test") == []
 
     def test_duplicated_days_collapsed(self):
-        split = create_day_splits([*DAYS, *DAYS], val_fraction=0.2, test_fraction=0.1, seed=0)
+        split = create_day_splits(
+            [*DAYS, *DAYS], val_fraction=0.2, test_fraction=0.1, seed=0, strategy="random"
+        )
         assert len(split.assignment) == len(DAYS)
 
     def test_invalid_fraction_raises(self):

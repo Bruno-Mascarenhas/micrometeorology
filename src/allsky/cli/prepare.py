@@ -688,7 +688,12 @@ def _run_splits_step(
     day_ids = manifest_df["day_id"].astype(str).tolist()
     try:
         split = create_day_splits(
-            day_ids, cfg.splits.val_fraction, cfg.splits.test_fraction, cfg.splits.seed
+            day_ids,
+            cfg.splits.val_fraction,
+            cfg.splits.test_fraction,
+            cfg.splits.seed,
+            strategy=cfg.splits.strategy,
+            gap_days=cfg.splits.gap_days,
         )
     except ValueError as exc:
         typer.echo(f"ERROR: cannot create splits: {exc}")

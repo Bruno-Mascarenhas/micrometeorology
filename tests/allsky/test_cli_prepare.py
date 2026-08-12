@@ -28,6 +28,8 @@ def _write_config(
     video_pattern: str,
     dat_path: Path,
     seed: int = 42,
+    val_fraction: float = 0.2,
+    test_fraction: float = 0.1,
 ) -> Path:
     """Write a PrepareConfig YAML for the CLI.
 
@@ -44,7 +46,10 @@ def _write_config(
         "output:\n"
         f"  dataset_dir: '{dataset_dir}'\n"
         "splits:\n"
-        f"  seed: {seed}\n",
+        f"  seed: {seed}\n"
+        f"  val_fraction: {val_fraction}\n"
+        f"  test_fraction: {test_fraction}\n"
+        "  gap_days: 0\n",
         encoding="utf-8",
     )
     return path
@@ -295,7 +300,7 @@ class TestSplitsGuard:
         # Multi-day manifest so a day split is feasible.
         _write_manifest(
             dataset_dir,
-            ["2025-03-21 12:00", "2025-03-22 12:00", "2025-03-23 12:00"],
+            [f"2025-03-{day} 12:00" for day in range(21, 27)],
             create_files=True,
         )
         config = _write_config(
@@ -309,13 +314,15 @@ class TestSplitsGuard:
         assert first.exit_code == 0, first.output
         assert (dataset_dir / "splits.json").exists()
 
-        # A different seed -> different split_id -> guarded.
+        # Different fractions -> different assignment -> guarded. The seed cannot
+        # serve here: a chronological split ignores it by construction.
         config2 = _write_config(
             tmp_path / "c2.yaml",
             dataset_dir=dataset_dir,
             video_pattern="none-*.mp4",
             dat_path=tmp_path / "x.dat",
-            seed=99,
+            val_fraction=0.4,
+            test_fraction=0.2,
         )
         guarded = runner.invoke(
             app, ["prepare-local", "--config", str(config2), "--steps", "splits"]
