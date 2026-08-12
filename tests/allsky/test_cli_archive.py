@@ -1,0 +1,596 @@
+"""Tests for allsky.cli.archive — the dedup planner and both commands, offline.
+
+``sync-archive`` and ``snapshot`` are driven against a local HTTP mirror with
+``--insecure``, because the default context build repairs the archive's TLS
+chain by fetching the CA intermediate over the network.
+"""
+
+import json
+import os
+from collections.abc import Iterator
+from pathlib import Path
+
+import pandas as pd
+import pytest
+from typer.testing import CliRunner, Result
+
+from allsky.archive import LEDGER_FILENAME, ArchiveEntry, ArchiveError, Ledger, ledger_lock
+from allsky.cli import app
+from allsky.cli.archive import (
+    FRAMES_SUBDIR,
+    REMOTE_FRAMES,
+    REMOTE_VIDEOS,
+    STATE_SUBDIR,
+    VIDEOS_SUBDIR,
+    DayPlan,
+    UploadChoice,
+    _plan_day,
+)
+from allsky.drive import DriveTarget
+from allsky.overlay import MANIFEST_FILENAME
+from tests.allsky import _archive_fake as fake
+
+runner = CliRunner()
+
+DAY_OLD = "20260809"
+DAY_NEW = "20260810"
+DAY_LATER = "20260811"
+LIVE_IMAGE = b"\xff\xd8\xff\xe0live-frame-bytes"
+FRAME_HEIGHT = 272
+FRAME_WIDTH = 480
+STAMPS = {
+    DAY_OLD: ("20260809120000", "20260809120100", "20260809120200"),
+    DAY_NEW: ("20260810120000", "20260810120100", "20260810120200"),
+    DAY_LATER: ("20260811120000", "20260811120100", "20260811120200"),
+}
+TARGET = DriveTarget(remote="labmim")
+
+
+@pytest.fixture
+def ledger(tmp_path: Path) -> Ledger:
+    return Ledger(tmp_path / STATE_SUBDIR / LEDGER_FILENAME)
+
+
+@pytest.fixture
+def entry() -> ArchiveEntry:
+    return fake.archive_entry(DAY_NEW)
+
+
+@pytest.fixture
+def mirror(tmp_path: Path) -> Iterator[fake.ArchiveMirror]:
+    """An archive serving two days of real overlay-stamped timelapses."""
+    served = fake.ArchiveMirror(tmp_path / "site")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    for day in (DAY_OLD, DAY_NEW):
+        served.publish_video_file(_timelapse(staging, day))
+    served.publish_image(LIVE_IMAGE)
+    try:
+        yield served
+    finally:
+        served.close()
+
+
+@pytest.fixture
+def rclone_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    log = tmp_path / "rclone-invocations.log"
+    fake.write_fake_rclone(binaries, log)
+    monkeypatch.setenv("PATH", f"{binaries}{os.pathsep}{os.environ['PATH']}")
+    return log
+
+
+def _timelapse(directory: Path, day: str) -> Path:
+    return fake.write_overlay_video(
+        directory / f"allsky-{day}.mp4", STAMPS[day], height=FRAME_HEIGHT, width=FRAME_WIDTH
+    )
+
+
+def _sync(data_dir: Path, mirror: fake.ArchiveMirror, *extra: str) -> Result:
+    return runner.invoke(
+        app,
+        [
+            "sync-archive",
+            "--data-dir",
+            str(data_dir),
+            "--base-url",
+            mirror.base_url,
+            "--insecure",
+            "--retries",
+            "1",
+            "--delay",
+            "0",
+            *extra,
+        ],
+    )
+
+
+def _reload(data_dir: Path) -> Ledger:
+    return Ledger.load(data_dir / STATE_SUBDIR / LEDGER_FILENAME)
+
+
+def _plan(
+    entry: ArchiveEntry,
+    ledger: Ledger,
+    root: Path,
+    *,
+    target: DriveTarget | None = None,
+    extract: bool = False,
+    step: int = 1,
+    resize: int | None = None,
+    upload: UploadChoice = UploadChoice.none,
+) -> DayPlan:
+    return _plan_day(
+        entry,
+        ledger=ledger,
+        root=root,
+        target=target,
+        extract=extract,
+        step=step,
+        resize=resize,
+        upload=upload,
+    )
+
+
+def _mark_fully_mirrored(ledger: Ledger, root: Path, entry: ArchiveEntry) -> None:
+    fake.record_downloaded_day(ledger, root, entry.key)
+    ledger.record_frames(
+        entry.key,
+        directory=f"{FRAMES_SUBDIR}/{entry.key}",
+        count=3,
+        step=1,
+        resize=None,
+        timestamps="overlay",
+    )
+    ledger.record_upload(entry.key, TARGET.path(REMOTE_VIDEOS, entry.filename), kind="video")
+    ledger.record_upload(entry.key, TARGET.path(REMOTE_FRAMES, entry.key), kind="frames")
+
+
+def test_a_day_the_ledger_has_never_seen_is_planned_for_download(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    plan = _plan(entry, ledger, tmp_path)
+    assert plan.download is True
+    assert plan.has_work is True
+    assert (plan.extract, plan.upload_video, plan.upload_frames) == (False, False, False)
+
+
+def test_a_day_already_downloaded_extracted_and_uploaded_everywhere_has_no_work_left(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    _mark_fully_mirrored(ledger, tmp_path, entry)
+    plan = _plan(entry, ledger, tmp_path, target=TARGET, extract=True, upload=UploadChoice.both)
+
+    assert plan.has_work is False
+    assert (plan.download, plan.extract, plan.upload_video, plan.upload_frames) == (
+        False,
+        False,
+        False,
+        False,
+    )
+
+
+def test_a_day_whose_upload_failed_is_planned_for_upload_again_without_re_downloading(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    fake.record_downloaded_day(ledger, tmp_path, entry.key)
+    plan = _plan(entry, ledger, tmp_path, target=TARGET, upload=UploadChoice.videos)
+
+    assert plan.download is False
+    assert plan.upload_video is True
+    assert plan.extract is False
+
+
+def test_asking_for_upload_after_the_fact_replans_an_already_held_day(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    fake.record_downloaded_day(ledger, tmp_path, entry.key)
+    assert _plan(entry, ledger, tmp_path).has_work is False
+
+    later = _plan(entry, ledger, tmp_path, target=TARGET, upload=UploadChoice.videos)
+    assert later.has_work is True
+    assert later.download is False
+    assert later.upload_video is True
+
+
+@pytest.mark.parametrize(("step", "resize"), [(2, None), (1, 224), (4, 448)])
+def test_changing_the_extraction_parameters_replans_extraction_only(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path, step: int, resize: int | None
+):
+    _mark_fully_mirrored(ledger, tmp_path, entry)
+    plan = _plan(
+        entry,
+        ledger,
+        tmp_path,
+        target=TARGET,
+        extract=True,
+        step=step,
+        resize=resize,
+        upload=UploadChoice.videos,
+    )
+
+    assert plan.extract is True
+    assert plan.download is False
+    assert plan.upload_video is False
+
+
+def test_frames_are_only_planned_for_upload_once_they_exist_or_are_about_to(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    fake.record_downloaded_day(ledger, tmp_path, entry.key)
+    without_extract = _plan(entry, ledger, tmp_path, target=TARGET, upload=UploadChoice.frames)
+    assert without_extract.upload_frames is False
+
+    with_extract = _plan(
+        entry, ledger, tmp_path, target=TARGET, extract=True, upload=UploadChoice.frames
+    )
+    assert with_extract.extract is True
+    assert with_extract.upload_frames is True
+
+
+def test_a_pruned_day_is_not_fetched_again_just_because_its_bytes_are_gone(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    result = fake.record_downloaded_day(ledger, tmp_path, entry.key)
+    ledger.record_upload(entry.key, TARGET.path(REMOTE_VIDEOS, entry.filename), kind="video")
+    ledger.mark_pruned(entry.key)
+    result.path.unlink()
+
+    plan = _plan(entry, ledger, tmp_path, target=TARGET, upload=UploadChoice.videos)
+    assert plan.has_work is False
+
+
+def test_a_pruned_day_is_fetched_again_when_a_new_destination_still_wants_it(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    result = fake.record_downloaded_day(ledger, tmp_path, entry.key)
+    ledger.mark_pruned(entry.key)
+    result.path.unlink()
+
+    plan = _plan(entry, ledger, tmp_path, target=TARGET, upload=UploadChoice.videos)
+    assert plan.download is True
+    assert plan.upload_video is True
+
+
+def test_a_locally_damaged_video_is_refetched_only_when_some_step_still_needs_its_bytes(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    result = fake.record_downloaded_day(ledger, tmp_path, entry.key)
+    result.path.write_bytes(b"truncated on disk")
+
+    assert _plan(entry, ledger, tmp_path).download is False
+    assert _plan(entry, ledger, tmp_path, extract=True).download is True
+
+
+def test_describe_names_every_step_the_plan_still_owes(entry: ArchiveEntry):
+    plan = DayPlan(entry=entry, download=True, extract=False, upload_video=True, upload_frames=True)
+    assert plan.describe() == f"{entry.filename}: download, upload-video, upload-frames"
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ((False, False, False, False), False),
+        ((True, False, False, False), True),
+        ((False, True, False, False), True),
+        ((False, False, True, False), True),
+        ((False, False, False, True), True),
+    ],
+)
+def test_has_work_is_the_disjunction_of_the_four_steps(
+    entry: ArchiveEntry, flags: tuple[bool, bool, bool, bool], expected: bool
+):
+    download, extract, upload_video, upload_frames = flags
+    plan = DayPlan(
+        entry=entry,
+        download=download,
+        extract=extract,
+        upload_video=upload_video,
+        upload_frames=upload_frames,
+    )
+    assert plan.has_work is expected
+
+
+def test_a_first_sync_mirrors_every_published_day_and_the_next_one_finds_nothing_to_do(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    first = _sync(data, mirror)
+    assert first.exit_code == 0, first.output
+    assert "2 day(s) processed, 0 failed" in first.output
+
+    videos = sorted((data / VIDEOS_SUBDIR).glob("*.mp4"))
+    assert [path.name for path in videos] == [f"allsky-{DAY_OLD}.mp4", f"allsky-{DAY_NEW}.mp4"]
+    assert videos[1].read_bytes() == (mirror.videos_dir / f"allsky-{DAY_NEW}.mp4").read_bytes()
+    ledger = _reload(data)
+    assert sorted(ledger.entries) == [DAY_OLD, DAY_NEW]
+    assert ledger.has_video(DAY_NEW, local_root=data) is True
+
+    mirror.requests.clear()
+    second = _sync(data, mirror)
+    assert second.exit_code == 0, second.output
+    assert "nothing to do" in second.output
+    assert mirror.video_requests() == []
+
+
+def test_the_ledger_keeps_a_purged_day_while_recording_a_newly_published_one(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    assert _sync(data, mirror).exit_code == 0
+    purged = _reload(data).video(DAY_OLD)
+    assert purged is not None
+
+    mirror.unpublish_video(f"allsky-{DAY_OLD}.mp4")
+    mirror.publish_video_file(_timelapse(tmp_path / "staging", DAY_LATER))
+    later = _sync(data, mirror)
+
+    assert later.exit_code == 0, later.output
+    assert "1 day(s) processed" in later.output
+    reloaded = _reload(data)
+    assert sorted(reloaded.entries) == [DAY_OLD, DAY_NEW, DAY_LATER]
+    assert reloaded.video(DAY_OLD) == purged
+
+
+def test_list_only_reports_the_plan_and_transfers_nothing(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    result = _sync(data, mirror, "--list")
+
+    assert result.exit_code == 0, result.output
+    assert f"allsky-{DAY_NEW}.mp4: download" in result.output
+    assert mirror.video_requests() == []
+    assert not (data / VIDEOS_SUBDIR).exists()
+
+
+def test_since_and_until_narrow_the_days_the_run_considers(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    result = _sync(data, mirror, "--since", "2026-08-10", "--until", "2026-08-10")
+
+    assert result.exit_code == 0, result.output
+    assert "published: 2 day(s); selected: 1" in result.output
+    assert sorted(_reload(data).entries) == [DAY_NEW]
+
+
+def test_a_malformed_since_date_is_rejected_before_anything_is_fetched(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    result = _sync(tmp_path / "data", mirror, "--since", "10/08/2026")
+    assert result.exit_code != 0
+    assert "must be YYYY-MM-DD" in result.output
+
+
+def test_limit_caps_how_many_days_one_run_transfers(mirror: fake.ArchiveMirror, tmp_path: Path):
+    data = tmp_path / "data"
+    result = _sync(data, mirror, "--limit", "1")
+
+    assert result.exit_code == 0, result.output
+    assert "limited to 1 day(s) this run" in result.output
+    assert sorted(_reload(data).entries) == [DAY_OLD]
+
+
+def test_extraction_names_frames_from_the_overlay_and_a_repeat_run_re_uses_them(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    first = _sync(data, mirror, "--extract", "--since", "2026-08-10")
+    assert first.exit_code == 0, first.output
+
+    frames_dir = data / FRAMES_SUBDIR / DAY_NEW
+    assert sorted(path.name for path in frames_dir.glob("*.jpg")) == [
+        f"allsky-{DAY_NEW}-1200.jpg",
+        f"allsky-{DAY_NEW}-1201.jpg",
+        f"allsky-{DAY_NEW}-1202.jpg",
+    ]
+    manifest = pd.read_parquet(frames_dir / MANIFEST_FILENAME)
+    assert manifest["timestamp"].iloc[0] == pd.Timestamp("2026-08-10 12:00:00")
+
+    recorded = _reload(data).frames(DAY_NEW)
+    assert recorded is not None
+    assert recorded["timestamps"] == "overlay"
+    assert recorded["count"] == 3
+    assert recorded["dir"] == f"{FRAMES_SUBDIR}/{DAY_NEW}"
+
+    mirror.requests.clear()
+    second = _sync(data, mirror, "--extract", "--since", "2026-08-10")
+    assert "nothing to do" in second.output
+    assert mirror.video_requests() == []
+
+
+def test_the_config_timestamp_model_names_frames_from_a_fixed_start_time_instead(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    result = _sync(data, mirror, "--extract", "--timestamps", "config", "--since", "2026-08-10")
+
+    assert result.exit_code == 0, result.output
+    frames_dir = data / FRAMES_SUBDIR / DAY_NEW
+    assert sorted(path.name for path in frames_dir.glob("*.jpg")) == [
+        f"allsky-{DAY_NEW}-0600.jpg",
+        f"allsky-{DAY_NEW}-0601.jpg",
+        f"allsky-{DAY_NEW}-0602.jpg",
+    ]
+    recorded = _reload(data).frames(DAY_NEW)
+    assert recorded is not None
+    assert recorded["timestamps"] == "config"
+
+
+def test_changing_the_step_re_extracts_without_asking_the_server_for_the_video_again(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    assert _sync(data, mirror, "--extract", "--since", "2026-08-10").exit_code == 0
+
+    mirror.requests.clear()
+    second = _sync(data, mirror, "--extract", "--step", "2", "--since", "2026-08-10")
+
+    assert second.exit_code == 0, second.output
+    assert mirror.video_requests() == []
+    recorded = _reload(data).frames(DAY_NEW)
+    assert recorded is not None
+    assert recorded["step"] == 2
+    assert recorded["count"] == 2
+
+
+def test_a_day_the_index_advertises_without_a_file_is_reported_as_a_failure(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    mirror.advertise(f"allsky-{DAY_LATER}.mp4")
+    result = _sync(data, mirror)
+
+    assert result.exit_code == 1
+    assert "2 day(s) processed, 1 failed" in result.output
+    assert sorted(_reload(data).entries) == [DAY_OLD, DAY_NEW]
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (("--upload", "videos"), "needs --drive-remote"),
+        (("--prune-uploaded",), "only makes sense together with --upload"),
+        (("--upload", "frames", "--drive-remote", "labmim"), "needs --extract"),
+    ],
+)
+def test_incoherent_upload_flag_combinations_are_rejected(
+    mirror: fake.ArchiveMirror, tmp_path: Path, extra: tuple[str, ...], message: str
+):
+    result = _sync(tmp_path / "data", mirror, *extra)
+    assert result.exit_code != 0
+    assert message in result.output
+
+
+def test_uploading_records_the_destination_so_the_next_run_leaves_it_alone(
+    mirror: fake.ArchiveMirror, tmp_path: Path, rclone_log: Path
+):
+    data = tmp_path / "data"
+    first = _sync(data, mirror, "--upload", "videos", "--drive-remote", "labmim")
+    assert first.exit_code == 0, first.output
+
+    invocations = fake.rclone_invocations(rclone_log)
+    assert invocations[0].startswith("lsd labmim:")
+    assert sum(1 for line in invocations if line.startswith("copyto")) == 2
+    assert _reload(data).uploaded(DAY_NEW, TARGET.path(REMOTE_VIDEOS, f"allsky-{DAY_NEW}.mp4"))
+
+    second = _sync(data, mirror, "--upload", "videos", "--drive-remote", "labmim")
+    assert "nothing to do" in second.output
+
+
+def test_an_upload_that_failed_is_retried_next_run_without_fetching_the_video_again(
+    mirror: fake.ArchiveMirror, tmp_path: Path, rclone_log: Path
+):
+    data = tmp_path / "data"
+    fake.write_fake_rclone(rclone_log.parent / "bin", rclone_log, fail_on="copyto")
+
+    failed = _sync(data, mirror, "--upload", "videos", "--drive-remote", "labmim")
+    assert failed.exit_code == 1
+    assert "0 day(s) processed, 2 failed" in failed.output
+    stalled = _reload(data)
+    assert stalled.uploaded(DAY_NEW, TARGET.path(REMOTE_VIDEOS, f"allsky-{DAY_NEW}.mp4")) is False
+    assert stalled.has_video(DAY_NEW, local_root=data) is True
+
+    fake.write_fake_rclone(rclone_log.parent / "bin", rclone_log)
+    mirror.requests.clear()
+    retried = _sync(data, mirror, "--upload", "videos", "--drive-remote", "labmim")
+
+    assert retried.exit_code == 0, retried.output
+    assert "2 day(s) processed, 0 failed" in retried.output
+    assert mirror.video_requests() == []
+    assert _reload(data).uploaded(DAY_NEW, TARGET.path(REMOTE_VIDEOS, f"allsky-{DAY_NEW}.mp4"))
+
+
+@pytest.mark.usefixtures("rclone_log")
+def test_pruning_deletes_the_local_video_but_keeps_what_the_ledger_knows_about_it(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    result = _sync(
+        data,
+        mirror,
+        "--upload",
+        "videos",
+        "--drive-remote",
+        "labmim",
+        "--prune-uploaded",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert list((data / VIDEOS_SUBDIR).glob("*.mp4")) == []
+    stored = _reload(data).video(DAY_NEW)
+    assert stored is not None
+    assert stored["pruned"] is True
+    assert stored["sha256"]
+
+    assert (
+        "nothing to do"
+        in _sync(data, mirror, "--upload", "videos", "--drive-remote", "labmim").output
+    )
+
+
+def test_extra_rclone_flags_reach_every_invocation(
+    mirror: fake.ArchiveMirror, tmp_path: Path, rclone_log: Path
+):
+    _sync(
+        tmp_path / "data",
+        mirror,
+        "--upload",
+        "videos",
+        "--drive-remote",
+        "labmim",
+        "--rclone-arg",
+        "--transfers=8",
+    )
+    assert all(line.endswith("--transfers=8") for line in fake.rclone_invocations(rclone_log))
+
+
+def test_a_second_sync_cannot_start_while_another_holds_the_ledger_lock(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    (data / STATE_SUBDIR).mkdir(parents=True)
+    with ledger_lock(data / STATE_SUBDIR / LEDGER_FILENAME):
+        result = _sync(data, mirror)
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ArchiveError)
+    assert "already running" in str(result.exception)
+    assert mirror.video_requests() == []
+
+
+def test_snapshot_writes_the_live_frame_and_a_provenance_sidecar(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    out_dir = tmp_path / "snapshots"
+    result = runner.invoke(
+        app,
+        [
+            "snapshot",
+            "--out",
+            str(out_dir),
+            "--base-url",
+            mirror.base_url,
+            "--insecure",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    (image,) = list(out_dir.glob("*.jpg"))
+    (sidecar,) = list(out_dir.glob("*.json"))
+    assert image.read_bytes() == LIVE_IMAGE
+    metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert metadata["bytes"] == len(LIVE_IMAGE)
+    assert metadata["image"] == image.name
+    assert metadata["content_type"] == "image/jpeg"
+    assert metadata["captured_at_source"] == "server-last-modified"
+    assert metadata["source_url"].endswith("/image.jpg")
+
+
+def test_both_archive_commands_are_registered_on_the_allsky_app():
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "sync-archive" in result.output
+    assert "snapshot" in result.output
