@@ -211,11 +211,23 @@ ignore = [
     "E501",
 ]
 
+# Suppression policy, one rule for the whole tree: a suppression is admissible
+# only where the rule does not APPLY, never to waive a defect, and it is always
+# written at the NARROWEST scope that expresses it.
+#
+# That makes the inline `# noqa: RULE - reason` at the offending line the normal
+# form, because it covers exactly one statement: the 16 in `src/` are broad
+# `except` clauses that must not fail their caller (BLE001), deliberate seeding
+# of numpy's legacy global stream (NPY002), subprocess calls on an executable
+# resolved at runtime rather than a literal path (S603), a `ValueError` raised
+# where the documented contract promises one (TRY004), and scikit-learn's own
+# `C` parameter name (N803). Every one carries its reason on the same line.
+#
+# A `per-file-ignores` entry below is for the case an inline marker cannot
+# express: the rule does not apply to the file as a whole. It is broader by
+# construction — it hides future violations of that rule in that file — so it is
+# used only where the whole-file claim is true, and each entry says why.
 [tool.ruff.lint.per-file-ignores]
-# Everything below is a rule that does not APPLY to the file, not a defect being
-# waived: the tree carries no inline `# noqa` / `# type: ignore` outside the
-# handful documented at their own call sites. Each entry is scoped as narrowly
-# as the rule allows so a genuinely new violation still surfaces.
 #
 # `np.random.seed` seeds the legacy GLOBAL stream on purpose — that is the one
 # sklearn, torch's DataLoader shuffling and every bare `np.random.*` call draw

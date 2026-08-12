@@ -45,7 +45,7 @@ class SVMRegressor(SklearnRegressorModel):
     def __init__(
         self,
         kernel: str = "rbf",
-        C: float = 1.0,  # noqa: N803
+        C: float = 1.0,  # noqa: N803 - scikit-learn's own SVR parameter name, part of this public API
         epsilon: float = 0.1,
         gamma: str = "scale",
     ) -> None:
