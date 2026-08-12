@@ -1,0 +1,604 @@
+"""Archive-mirroring CLI commands: ``sync-archive`` and ``snapshot``."""
+
+import datetime as dt
+import logging
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
+from typing import Annotated, Any
+
+import typer
+
+from allsky.archive import (
+    ARCHIVE_BASE_URL,
+    LEDGER_FILENAME,
+    ArchiveClient,
+    ArchiveEntry,
+    ArchiveError,
+    Ledger,
+    build_ssl_context,
+    ledger_lock,
+)
+from allsky.drive import DriveTarget, RcloneError, RcloneUploader
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_DATA_DIR = Path("data/all-sky")
+VIDEOS_SUBDIR = "videos"
+FRAMES_SUBDIR = "frames"
+STATE_SUBDIR = ".state"
+REMOTE_VIDEOS = "videos"
+REMOTE_FRAMES = "frames"
+REMOTE_SNAPSHOTS = "snapshots"
+
+
+class UploadChoice(StrEnum):
+    none = "none"
+    videos = "videos"
+    frames = "frames"
+    both = "both"
+
+    @property
+    def wants_videos(self) -> bool:
+        return self in (UploadChoice.videos, UploadChoice.both)
+
+    @property
+    def wants_frames(self) -> bool:
+        return self in (UploadChoice.frames, UploadChoice.both)
+
+
+class TimestampSource(StrEnum):
+    overlay = "overlay"
+    config = "config"
+
+
+@dataclass(frozen=True)
+class DayPlan:
+    entry: ArchiveEntry
+    download: bool
+    extract: bool
+    upload_video: bool
+    upload_frames: bool
+
+    @property
+    def has_work(self) -> bool:
+        return self.download or self.extract or self.upload_video or self.upload_frames
+
+    def describe(self) -> str:
+        wanted = [
+            name
+            for name, flag in (
+                ("download", self.download),
+                ("extract", self.extract),
+                ("upload-video", self.upload_video),
+                ("upload-frames", self.upload_frames),
+            )
+            if flag
+        ]
+        return f"{self.entry.filename}: {', '.join(wanted)}"
+
+
+def _parse_date(raw: str | None, label: str) -> dt.date | None:
+    if raw is None:
+        return None
+    try:
+        return dt.date.fromisoformat(raw)
+    except ValueError:
+        raise typer.BadParameter(f"{label} must be YYYY-MM-DD, got {raw!r}") from None
+
+
+def _build_client(
+    base_url: str,
+    state_dir: Path,
+    *,
+    ca_file: Path | None,
+    insecure: bool,
+    timeout: float,
+    retries: int,
+    delay: float,
+) -> ArchiveClient:
+    if insecure:
+        logger.warning(
+            "TLS verification is OFF (--insecure): the downloaded frames are unauthenticated"
+        )
+    state_dir.mkdir(parents=True, exist_ok=True)
+    context = build_ssl_context(
+        state_dir=state_dir, ca_file=ca_file, insecure=insecure, timeout=timeout
+    )
+    return ArchiveClient(
+        base_url,
+        context=context,
+        timeout=timeout,
+        retries=retries,
+        delay=delay,
+        allow_plaintext=base_url.startswith("http://"),
+    )
+
+
+def _select(
+    entries: tuple[ArchiveEntry, ...], *, since: dt.date | None, until: dt.date | None
+) -> tuple[ArchiveEntry, ...]:
+    return tuple(
+        entry
+        for entry in entries
+        if (since is None or entry.date >= since) and (until is None or entry.date <= until)
+    )
+
+
+def _plan_day(
+    entry: ArchiveEntry,
+    *,
+    ledger: Ledger,
+    root: Path,
+    target: DriveTarget | None,
+    extract: bool,
+    step: int,
+    resize: int | None,
+    upload: UploadChoice,
+) -> DayPlan:
+    frames_done = ledger.frames_match(entry.key, step=step, resize=resize)
+    wants_extract = extract and not frames_done
+    wants_video_upload = upload.wants_videos and not ledger.uploaded(
+        entry.key, _video_destination(target, entry)
+    )
+    wants_frame_upload = (
+        upload.wants_frames
+        and (frames_done or wants_extract)
+        and not ledger.uploaded(entry.key, _frames_destination(target, entry))
+    )
+    video_on_disk = ledger.has_video(entry.key, local_root=root)
+    needs_video_bytes = wants_extract or wants_video_upload
+    return DayPlan(
+        entry=entry,
+        download=not video_on_disk and (needs_video_bytes or not ledger.has_video(entry.key)),
+        extract=wants_extract,
+        upload_video=wants_video_upload,
+        upload_frames=wants_frame_upload,
+    )
+
+
+def _video_destination(target: DriveTarget | None, entry: ArchiveEntry) -> str:
+    return target.path(REMOTE_VIDEOS, entry.filename) if target else ""
+
+
+def _frames_destination(target: DriveTarget | None, entry: ArchiveEntry) -> str:
+    return target.path(REMOTE_FRAMES, entry.key) if target else ""
+
+
+def sync_archive(
+    data_dir: Annotated[
+        Path, typer.Option("--data-dir", help="Root for videos/, frames/ and the ledger.")
+    ] = DEFAULT_DATA_DIR,
+    base_url: Annotated[
+        str, typer.Option(help="All-sky website root to mirror.")
+    ] = ARCHIVE_BASE_URL,
+    since: Annotated[
+        str | None, typer.Option(help="Only days on/after this date (YYYY-MM-DD).")
+    ] = None,
+    until: Annotated[
+        str | None, typer.Option(help="Only days on/before this date (YYYY-MM-DD).")
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option(min=1, help="Stop after N days (backfill in slices).")
+    ] = None,
+    list_only: Annotated[
+        bool, typer.Option("--list", help="Report the plan only, transfer nothing.")
+    ] = False,
+    extract: Annotated[
+        bool, typer.Option("--extract/--no-extract", help="Extract JPEG frames from new videos.")
+    ] = False,
+    step: Annotated[int, typer.Option(min=1, help="Keep every Nth video frame.")] = 1,
+    resize: Annotated[
+        int | None, typer.Option(min=1, help="Resize extracted frames to NxN pixels.")
+    ] = None,
+    timestamps: Annotated[
+        TimestampSource,
+        typer.Option(
+            help=(
+                "Frame timestamps: 'overlay' reads the stamp the camera burns into each "
+                "frame; 'config' uses the PrepareConfig start_time/minutes_per_frame model."
+            )
+        ),
+    ] = TimestampSource.overlay,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-c",
+            help="PrepareConfig YAML used when --timestamps config.",
+            exists=True,
+            dir_okay=False,
+        ),
+    ] = None,
+    upload: Annotated[
+        UploadChoice, typer.Option(help="What to push to Drive.")
+    ] = UploadChoice.none,
+    drive_remote: Annotated[
+        str | None, typer.Option(help="rclone remote name (from `rclone config`).")
+    ] = None,
+    drive_root: Annotated[
+        str, typer.Option(help="Folder prefix inside the remote.")
+    ] = "LabMiM/allsky",
+    rclone_arg: Annotated[
+        list[str] | None, typer.Option("--rclone-arg", help="Extra rclone flag (repeatable).")
+    ] = None,
+    prune_uploaded: Annotated[
+        bool, typer.Option("--prune-uploaded", help="Delete the local mp4 once it is uploaded.")
+    ] = False,
+    ca_file: Annotated[
+        Path | None,
+        typer.Option(help="PEM bundle to verify against instead of the AIA repair.", exists=True),
+    ] = None,
+    insecure: Annotated[
+        bool, typer.Option("--insecure", help="Disable TLS verification (last resort).")
+    ] = False,
+    timeout: Annotated[float, typer.Option(help="Per-request timeout in seconds.")] = 60.0,
+    retries: Annotated[int, typer.Option(min=1, help="Attempts per request.")] = 3,
+    delay: Annotated[float, typer.Option(help="Pause between downloads, in seconds.")] = 1.0,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Report the plan; transfer nothing.")
+    ] = False,
+) -> None:
+    """Mirror new days from the Salvador all-sky archive; optionally extract frames and upload."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
+    )
+    root = data_dir
+    videos_dir = root / VIDEOS_SUBDIR
+    frames_root = root / FRAMES_SUBDIR
+    state_dir = root / STATE_SUBDIR
+    since_date = _parse_date(since, "--since")
+    until_date = _parse_date(until, "--until")
+
+    if upload is not UploadChoice.none and drive_remote is None:
+        raise typer.BadParameter("--upload needs --drive-remote (the name from `rclone config`)")
+    if upload is UploadChoice.none and prune_uploaded:
+        raise typer.BadParameter("--prune-uploaded only makes sense together with --upload")
+    if upload.wants_frames and not extract:
+        raise typer.BadParameter("--upload frames/both needs --extract")
+
+    target = DriveTarget(remote=drive_remote, root=drive_root) if drive_remote else None
+
+    try:
+        client = _build_client(
+            base_url,
+            state_dir,
+            ca_file=ca_file,
+            insecure=insecure,
+            timeout=timeout,
+            retries=retries,
+            delay=delay,
+        )
+        published = client.list_videos()
+    except ArchiveError as exc:
+        logger.error("%s", exc)
+        raise typer.Exit(code=1) from exc
+
+    selected = _select(published, since=since_date, until=until_date)
+    failures = 0
+    with ledger_lock(state_dir / LEDGER_FILENAME):
+        ledger = Ledger.load(state_dir / LEDGER_FILENAME)
+        plans = [
+            plan
+            for plan in (
+                _plan_day(
+                    entry,
+                    ledger=ledger,
+                    root=root,
+                    target=target,
+                    extract=extract,
+                    step=step,
+                    resize=resize,
+                    upload=upload,
+                )
+                for entry in selected
+            )
+            if plan.has_work
+        ]
+        typer.echo(
+            f"published: {len(published)} day(s); selected: {len(selected)}; "
+            f"needing work: {len(plans)}"
+        )
+        if not plans:
+            typer.echo("nothing to do — the local mirror and the remote are up to date")
+            return
+        if limit is not None:
+            plans = plans[:limit]
+            typer.echo(f"limited to {len(plans)} day(s) this run")
+        if list_only or dry_run:
+            for plan in plans:
+                typer.echo(f"  {plan.describe()}")
+            return
+
+        uploader = (
+            RcloneUploader(target=target, extra_args=tuple(rclone_arg or ()))
+            if target is not None and upload is not UploadChoice.none
+            else None
+        )
+        if uploader is not None:
+            try:
+                uploader.check()
+            except RcloneError as exc:
+                logger.error("%s", exc)
+                raise typer.Exit(code=1) from exc
+
+        video_config = _video_config(timestamps, config)
+        processed = 0
+        for plan in plans:
+            try:
+                _process_day(
+                    plan,
+                    client=client,
+                    ledger=ledger,
+                    root=root,
+                    videos_dir=videos_dir,
+                    frames_root=frames_root,
+                    video_config=video_config,
+                    step=step,
+                    resize=resize,
+                    uploader=uploader,
+                    prune_uploaded=prune_uploaded,
+                )
+                processed += 1
+            except (ArchiveError, RcloneError, OSError, ValueError) as exc:
+                failures += 1
+                logger.error("%s failed: %s", plan.entry.filename, exc)
+            finally:
+                ledger.save()
+
+        typer.echo(f"done: {processed} day(s) processed, {failures} failed")
+        typer.echo(f"ledger: {ledger.path}")
+    if failures:
+        raise typer.Exit(code=1)
+
+
+def _video_config(timestamps: TimestampSource, config: Path | None) -> Any | None:
+    if timestamps is TimestampSource.overlay:
+        if config is not None:
+            logger.warning("--config is ignored with --timestamps overlay")
+        return None
+    from allsky.config import PrepareConfig, load_prepare_config
+
+    cfg = PrepareConfig() if config is None else load_prepare_config(config)
+    logger.warning(
+        "--timestamps config maps frame N to %s + N x %s min, a model this camera does not "
+        "follow: its capture interval changes between day and night and its videos do not all "
+        "start at the same hour",
+        cfg.video.start_time,
+        cfg.video.minutes_per_frame,
+    )
+    return cfg.video
+
+
+def _process_day(
+    plan: DayPlan,
+    *,
+    client: ArchiveClient,
+    ledger: Ledger,
+    root: Path,
+    videos_dir: Path,
+    frames_root: Path,
+    video_config: Any | None,
+    step: int,
+    resize: int | None,
+    uploader: RcloneUploader | None,
+    prune_uploaded: bool,
+) -> None:
+    entry = plan.entry
+    video_path = ledger.video_path(entry.key, root=root) or videos_dir / entry.filename
+    if plan.download:
+        result = client.download(entry, videos_dir)
+        ledger.record_video(result, root=root)
+        video_path = result.path
+
+    frames_dir = frames_root / entry.key
+    if plan.extract:
+        manifest = _extract(video_path, frames_dir, video_config, step=step, resize=resize)
+        ledger.record_frames(
+            entry.key,
+            directory=frames_dir.relative_to(root)
+            if frames_dir.is_relative_to(root)
+            else frames_dir,
+            count=len(manifest),
+            step=step,
+            resize=resize,
+            timestamps="config" if video_config is not None else "overlay",
+        )
+
+    if uploader is None:
+        return
+
+    if plan.upload_video:
+        destination = uploader.upload_file(video_path, REMOTE_VIDEOS, entry.filename)
+        record = ledger.video(entry.key) or {}
+        ledger.record_upload(
+            entry.key,
+            destination,
+            kind="video",
+            size=record.get("size"),
+            sha256=record.get("sha256"),
+        )
+
+    if plan.upload_frames:
+        recorded = ledger.frames(entry.key) or {}
+        source = ledger.frames_dir(entry.key, root=root) or frames_dir
+        destination = uploader.upload_dir(source, REMOTE_FRAMES, entry.key, pattern="*.jpg")
+        ledger.record_upload(
+            entry.key, destination, kind="frames", count=recorded.get("count"), step=step
+        )
+
+    if prune_uploaded and ledger.uploaded(
+        entry.key, uploader.target.path(REMOTE_VIDEOS, entry.filename)
+    ):
+        video_path.unlink(missing_ok=True)
+        ledger.mark_pruned(entry.key)
+        logger.info("pruned local %s (kept on Drive)", video_path.name)
+
+
+def _extract(
+    video_path: Path, frames_dir: Path, video_config: Any | None, *, step: int, resize: int | None
+) -> Any:
+    if video_config is None:
+        from allsky.overlay import extract_frames_with_overlay_timestamps
+
+        return extract_frames_with_overlay_timestamps(
+            video_path, frames_dir, step=step, resize=resize
+        )
+    from allsky.video import extract_frames
+
+    return extract_frames(video_path, frames_dir, video_config, step=step, resize=resize)
+
+
+def snapshot(
+    out_dir: Annotated[
+        Path, typer.Option("--out", "-o", help="Directory for the image, sidecar and prediction.")
+    ],
+    base_url: Annotated[str, typer.Option(help="All-sky website root.")] = ARCHIVE_BASE_URL,
+    checkpoint: Annotated[
+        Path | None,
+        typer.Option(
+            "--checkpoint",
+            "-k",
+            help="Trained checkpoint; supplying it runs a prediction on the frame.",
+            exists=True,
+            dir_okay=False,
+        ),
+    ] = None,
+    sensor_csv: Annotated[
+        Path | None,
+        typer.Option(
+            help="Logger export supplying the meteorological features (else imputed).",
+            exists=True,
+            dir_okay=False,
+        ),
+    ] = None,
+    tolerance_minutes: Annotated[
+        float, typer.Option(min=0, help="Max age of the sensor row used, in minutes.")
+    ] = 15.0,
+    device: Annotated[str, typer.Option(help="Torch device for inference.")] = "cpu",
+    trust_checkpoint: Annotated[
+        bool,
+        typer.Option(
+            "--trust-checkpoint/--no-trust-checkpoint",
+            help="Read the checkpoint with the unrestricted unpickler (own files only).",
+        ),
+    ] = False,
+    drive_remote: Annotated[
+        str | None, typer.Option(help="Upload the snapshot to this rclone remote.")
+    ] = None,
+    drive_root: Annotated[
+        str, typer.Option(help="Folder prefix inside the remote.")
+    ] = "LabMiM/allsky",
+    rclone_arg: Annotated[
+        list[str] | None, typer.Option("--rclone-arg", help="Extra rclone flag (repeatable).")
+    ] = None,
+    ca_file: Annotated[
+        Path | None,
+        typer.Option(help="PEM bundle to verify against instead of the AIA repair.", exists=True),
+    ] = None,
+    insecure: Annotated[
+        bool, typer.Option("--insecure", help="Disable TLS verification (last resort).")
+    ] = False,
+    timeout: Annotated[float, typer.Option(help="Request timeout in seconds.")] = 60.0,
+) -> None:
+    """Capture the camera's current frame, optionally predict on it, and write both."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
+    )
+    from allsky.snapshot import capture_snapshot
+
+    try:
+        client = _build_client(
+            base_url,
+            out_dir / STATE_SUBDIR,
+            ca_file=ca_file,
+            insecure=insecure,
+            timeout=timeout,
+            retries=3,
+            delay=0.0,
+        )
+        captured = capture_snapshot(client, out_dir)
+    except (ArchiveError, ValueError) as exc:
+        logger.error("%s", exc)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"captured {captured.image_path} at {captured.captured_at}")
+    typer.echo(f"  metadata: {captured.metadata_path}")
+
+    prediction_path = (
+        _predict_snapshot(
+            captured,
+            checkpoint,
+            sensor_csv=sensor_csv,
+            tolerance_minutes=tolerance_minutes,
+            device=device,
+            trust_checkpoint=trust_checkpoint,
+        )
+        if checkpoint is not None
+        else None
+    )
+
+    if drive_remote is not None:
+        uploader = RcloneUploader(
+            target=DriveTarget(remote=drive_remote, root=drive_root),
+            extra_args=tuple(rclone_arg or ()),
+        )
+        day = f"{captured.captured_at:%Y%m%d}"
+        try:
+            for path in _existing(captured.image_path, captured.metadata_path, prediction_path):
+                uploader.upload_file(path, REMOTE_SNAPSHOTS, day, path.name)
+        except RcloneError as exc:
+            logger.error("%s", exc)
+            raise typer.Exit(code=1) from exc
+        typer.echo(f"  uploaded to {uploader.target.path(REMOTE_SNAPSHOTS, day)}")
+
+
+def _predict_snapshot(
+    captured: Any,
+    checkpoint: Path,
+    *,
+    sensor_csv: Path | None,
+    tolerance_minutes: float,
+    device: str,
+    trust_checkpoint: bool,
+) -> Path:
+    import pandas as pd
+
+    from allsky.atomic import atomic_write_json
+    from allsky.snapshot import predict_snapshot
+
+    try:
+        prediction = predict_snapshot(
+            captured.image_path,
+            checkpoint,
+            timestamp=captured.captured_at,
+            sensor_csv=sensor_csv,
+            tolerance=pd.Timedelta(minutes=tolerance_minutes),
+            device=device,
+            trust_checkpoint=trust_checkpoint,
+        )
+    except (ValueError, KeyError, RuntimeError, OSError) as exc:
+        logger.error("prediction failed: %s", exc)
+        raise typer.Exit(code=1) from exc
+
+    path = atomic_write_json(captured.image_path.with_suffix(".prediction.json"), prediction)
+    typer.echo(f"  prediction: {path}")
+    for name, value in prediction["predictions"].items():
+        typer.echo(f"    {name}: {value}")
+    imputed: list[str] = prediction["features"]["imputed"]
+    if imputed:
+        typer.echo(
+            f"  WARNING: {len(imputed)} feature(s) imputed at the training mean "
+            f"({', '.join(imputed)}) — pass --sensor-csv for a fully informed prediction"
+        )
+    return path
+
+
+def _existing(*paths: Any) -> tuple[Path, ...]:
+    return tuple(Path(path) for path in paths if path is not None and Path(path).is_file())
+
+
+def register(app: typer.Typer) -> None:
+    """Attach the ``sync-archive`` and ``snapshot`` commands onto *app*."""
+    app.command("sync-archive")(sync_archive)
+    app.command("snapshot")(snapshot)
