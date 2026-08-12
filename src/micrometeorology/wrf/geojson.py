@@ -41,7 +41,41 @@ def write_values_json_stream(
     *,
     chunk_size: int = JSON_VALUE_CHUNK_SIZE,
 ) -> Path:
-    """Write value JSON without materializing the full flattened values list."""
+    """Write one time step's values JSON without materializing the flattened list.
+
+    Parameters
+    ----------
+    output_path:
+        Destination file; parent directories are created.
+    var:
+        ``(ny, nx)`` frame in the variable's published unit. Ravelled row-major,
+        so a value's position is the grid's ``linear_index``; masked cells and
+        non-finite values are written as JSON ``null``, never as a bare ``NaN``
+        token.
+    scale_min, scale_max:
+        Colour-scale bounds in the same unit. The file carries them as the six
+        evenly spaced legend ticks from *scale_min* to *scale_max* inclusive,
+        each rounded to two decimals, rather than as two separate keys.
+    date_str:
+        The step's local datetime, preformatted as the site parses it.
+    wind_data:
+        Optional arrow overlay payload embedded under ``metadata.wind``.
+    chunk_size:
+        Values serialized per pass over the frame.
+
+    Returns
+    -------
+    Path
+        The path written.
+
+    Raises
+    ------
+    ValueError
+        When the scale bounds are not finite, which is what an all-no-value
+        field yields; the frame would otherwise ship a legend of ``NaN``.
+    MemoryError
+        When the frame exceeds the array-size ceiling.
+    """
     arr = var.filled(np.nan) if isinstance(var, np.ma.MaskedArray) else np.asarray(var)
     assert_reasonable_array_size(
         arr.shape,
@@ -105,6 +139,20 @@ def create_wind_vectors_json(
         Forecast datetime (local).
     downsampling:
         Stride for spatial downsampling of the arrow grid.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``metadata.date_time`` plus three equal-length lists covering the kept
+        cells: ``downsampled_angles`` in degrees rounded to 1 decimal,
+        ``downsampled_magnitudes`` in m/s rounded to 2, and
+        ``downsampled_linear_indices``, the cells' row-major ids on the FULL
+        grid. Cells whose components are NaN are dropped from all three.
+
+    Raises
+    ------
+    ValueError
+        When *u* and *v* have different shapes.
     """
     u = np.asarray(u, dtype=np.float64)
     v = np.asarray(v, dtype=np.float64)
@@ -157,11 +205,6 @@ def create_wind_vectors_json(
     }
 
 
-# ---------------------------------------------------------------------------
-# File I/O
-# ---------------------------------------------------------------------------
-
-
 def write_grid_geojson_stream(
     output_path: str | Path,
     lon: NDArray,
@@ -177,6 +220,28 @@ def write_grid_geojson_stream(
     ``json.dump(..., separators=(",", ":"), ensure_ascii=False)``. Corner
     coordinates keep that writer's element arithmetic and operand order, in the
     input dtype.
+
+    Parameters
+    ----------
+    output_path:
+        Destination file; parent directories are created.
+    lon, lat:
+        ``(ny, nx)`` cell-centre coordinates in degrees east and degrees north.
+    resolution_x, resolution_y:
+        Grid spacing in meters, published under ``metadata.resolucao_m``.
+    _colormap:
+        Accepted for call compatibility with the frozen reference writer and
+        unused.
+
+    Returns
+    -------
+    Path
+        The path written.
+
+    Raises
+    ------
+    ValueError
+        When the grids disagree in shape, are not 2-D, or are smaller than 2x2.
     """
     n_rows, n_cols = _validate_grid(lon, lat, context=f"streamed GeoJSON grid for {output_path}")
     metadata = {"resolucao_m": [float(resolution_x), float(resolution_y)]}
@@ -284,8 +349,13 @@ def _grid_is_separable(
     lat_top: NDArray,
     lat_bottom: NDArray,
 ) -> bool:
-    """True when longitude edges repeat identically across rows and latitude
-    edges across columns (exact equality on the unrounded values)."""
+    """Whether the cell rectangles collapse to one lon and one lat edge vector.
+
+    True when the longitude edges repeat identically across rows and the
+    latitude edges across columns, tested by exact equality on the UNROUNDED
+    corner arrays: rounding first could call a curvilinear grid separable and
+    publish edges that no longer bound its cells.
+    """
     return bool(
         (lon_left == lon_left[0:1, :]).all()
         and (lon_right == lon_right[0:1, :]).all()
@@ -360,6 +430,11 @@ def _rounded_coordinate_list(arr: NDArray) -> list[float]:
 
 
 def _validate_grid(lon: NDArray, lat: NDArray, *, context: str) -> tuple[int, int]:
+    """Check a coordinate grid pair and return its ``(n_rows, n_cols)``.
+
+    The 2x2 floor is what the corner arithmetic needs: the edge cells take their
+    outer half-width from the neighbour, which a single row or column has none of.
+    """
     if lon.shape != lat.shape:
         raise ValueError(f"lon/lat grid shapes differ: {lon.shape!r} vs {lat.shape!r}")
     if len(lon.shape) != 2:
@@ -377,6 +452,11 @@ def _validate_grid(lon: NDArray, lat: NDArray, *, context: str) -> tuple[int, in
 
 
 def _write_flat_values_chunks(f: TextIO, arr: NDArray, *, chunk_size: int) -> None:
+    """Serialize a frame's values row-major, *chunk_size* at a time, without brackets.
+
+    Values are rounded to two decimals; every non-finite one becomes ``null``, so
+    no-value cells stay distinguishable from a physical zero.
+    """
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
     flat = np.ravel(arr)

@@ -38,7 +38,6 @@ def _project_root() -> Path:
     for parent in [current, *current.parents]:
         if (parent / "pyproject.toml").exists():
             return parent
-    # Fallback: the package directory, which carries the configs in a wheel.
     return current.parent
 
 
@@ -66,8 +65,18 @@ def _load_named_yaml(path: Path, variable: str) -> dict[str, Any]:
 class Settings(BaseSettings):
     """Global application settings.
 
-    Values are read from environment variables with the ``LABMIM_`` prefix
-    and can be overridden by a YAML config file.
+    Values come from the YAML layers and from environment variables carrying
+    the ``LABMIM_`` prefix, the environment winning where both name a key (see
+    :func:`get_settings`, which is what enforces that order).
+
+    Notes
+    -----
+    There are deliberately no WRF settings here. ``get_settings()`` is imported
+    only by ``labmim-archive`` and ``labmim-sensor-process``, and each WRF CLI
+    owns a ``DEFAULT_VARS`` list different from its siblings' on purpose — the
+    GeoJSON exporter's matches the front-end variable registry, the figure
+    renderer's the variables that have a colormap — so no key here could be
+    authoritative for all three.
     """
 
     model_config = SettingsConfigDict(
@@ -76,7 +85,6 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # Paths (all cross-platform via pathlib)
     data_dir: Path = Field(default=Path("data"), description="Root data directory")
     output_dir: Path = Field(default=Path("output"), description="Output directory")
     figures_dir: Path = Field(default=Path("output/figures"), description="Figure output directory")
@@ -85,13 +93,6 @@ class Settings(BaseSettings):
         default=Path("configs/micromet"), description="Configuration directory"
     )
 
-    # No WRF settings here: `get_settings()` is imported only by labmim-archive
-    # and labmim-sensor-process, and each WRF CLI owns a DEFAULT_VARS list
-    # deliberately different from its siblings' — the GeoJSON exporter's matches
-    # the front-end variable registry, the figure renderer's the variables that
-    # have a colormap — so no key here could be authoritative for all three.
-
-    # Sensor defaults
     sensor_min_samples_per_hour: int = Field(
         default=6,
         description="Minimum valid samples required per hour for aggregation",
@@ -127,7 +128,6 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Logging
     log_level: str = Field(default="INFO", description="Logging level")
 
     def resolve_paths(self, root: Path | None = None) -> None:
@@ -143,40 +143,50 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Build and cache the application settings.
 
-    Loading order:
-    1. ``configs/default.yaml``
-    2. ``configs/<LABMIM_ENV>.yaml`` (if ``LABMIM_ENV`` is set)
-    3. ``LABMIM_CONFIG_PATH`` (if set, overrides step 2)
-    4. Environment variables
+    Loading order, each layer overriding the ones above it:
+
+    1. ``configs/micromet/default.yaml``, falling back to ``configs/default.yaml``
+    2. ``configs/micromet/<LABMIM_ENV>.yaml`` (if ``LABMIM_ENV`` is set)
+    3. ``LABMIM_CONFIG_PATH`` (if set, applied on top of step 2)
+    4. Environment variables named ``LABMIM_<key>``
+
+    Returns
+    -------
+    Settings
+        The process-wide settings, cached, with every path field resolved to an
+        absolute path against the project root.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no shipped default file is found, or if a file the operator named
+        through ``LABMIM_ENV`` / ``LABMIM_CONFIG_PATH`` is absent. Every sensor
+        rule lives in those files; without them ``Settings`` builds from bare
+        defaults and the CLIs export unfiltered data with exit code 0.
     """
     root = _project_root()
     configs_dir = root / "configs" / "micromet"
 
-    # Layer 1: defaults (check micromet/ subdir first, then root configs/)
     merged: dict[str, Any] = _load_yaml(configs_dir / "default.yaml")
     if not merged:
         merged = _load_yaml(root / "configs" / "default.yaml")
     if not merged:
-        # Every sensor rule lives in that file; without it Settings builds from
-        # bare defaults and the CLIs export unfiltered data with exit code 0.
         raise FileNotFoundError(
             "no shipped configuration found; searched "
             f"{configs_dir / 'default.yaml'} and {root / 'configs' / 'default.yaml'}"
         )
 
-    # Layer 2: environment-specific
     env_name = os.environ.get("LABMIM_ENV", "")
     if env_name:
         merged.update(_load_named_yaml(configs_dir / f"{env_name}.yaml", "LABMIM_ENV"))
 
-    # Layer 3: explicit config path
     config_path = os.environ.get("LABMIM_CONFIG_PATH")
     if config_path:
         merged.update(_load_named_yaml(Path(config_path), "LABMIM_CONFIG_PATH"))
 
-    # Layer 4: environment variables. pydantic-settings ranks init kwargs above
-    # env vars, so YAML keys the operator has already set in the environment are
-    # withheld from the constructor to keep the documented order.
+    # pydantic-settings ranks init kwargs above env vars, so YAML keys the
+    # operator has already set in the environment are withheld from the
+    # constructor to keep the documented order.
     environment_names = {name.upper() for name in os.environ}
     yaml_without_env_overrides = {
         key: value

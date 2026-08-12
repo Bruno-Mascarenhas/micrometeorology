@@ -101,26 +101,31 @@ def assert_one_file_per_domain(paths: Sequence[str | Path]) -> None:
 class WRFDataset:
     """Thin wrapper around a WRF ``netCDF4.Dataset``.
 
+    The file is opened with auto-masking off, so every read returns a plain
+    ``ndarray`` rather than a ``MaskedArray``. The grid level is detected from
+    the file name before the open, because that detection needs only the name
+    and raising after the open would strand an HDF5 handle no ``__exit__`` ever
+    closes. Grid coordinates and parsed times are cached for the object's life.
+
     Parameters
     ----------
     path:
         Path to a ``wrfout_*`` NetCDF file.
+
+    Raises
+    ------
+    ValueError
+        When the file name carries no ``D01``..``D05`` domain token.
     """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        # Detected before the open: it needs only the name, and raising here
-        # would otherwise strand an HDF5 handle no ``__exit__`` ever closes.
         self._grid_level = self._detect_grid_level()
         self._ds = netCDF4.Dataset(str(self.path), mode="r")
-        self._ds.set_auto_mask(False)  # Return plain ndarray, not MaskedArray
+        self._ds.set_auto_mask(False)
         self._grid_cache: tuple[NDArray, NDArray] | None = None
         self._time_cache: list[datetime] | None = None
         logger.info("Opened WRF dataset: %s (grid %s)", self.path.name, self._grid_level)
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
 
     @property
     def dataset(self) -> netCDF4.Dataset:
@@ -142,12 +147,16 @@ class WRFDataset:
         """Grid spacing in y-direction (meters)."""
         return float(self._ds.getncattr("DY"))
 
-    # ------------------------------------------------------------------
-    # Grid coordinates
-    # ------------------------------------------------------------------
-
     def read_grid(self) -> tuple[NDArray, NDArray]:
-        """Return ``(lon, lat)`` 2-D arrays for the first time step."""
+        """Return the cell-centre coordinates of the domain.
+
+        Returns
+        -------
+        tuple[NDArray, NDArray]
+            ``(lon, lat)``, each ``(ny, nx)`` in the file's own dtype (float32
+            in operational wrfout), degrees east and degrees north on WGS84.
+            Read from the first time step, which the grid never leaves.
+        """
         if self._grid_cache is None:
             lon = np.asarray(self._ds.variables["XLONG"][0, :, :])
             lat = np.asarray(self._ds.variables["XLAT"][0, :, :])
@@ -155,7 +164,11 @@ class WRFDataset:
         return self._grid_cache
 
     def grid_bounds(self) -> tuple[float, float, float, float]:
-        """Return ``(lon_min, lon_max, lat_min, lat_max)``."""
+        """Return ``(lon_min, lon_max, lat_min, lat_max)`` in degrees.
+
+        The extent of the cell CENTRES, so it is half a cell inside the extent
+        of the cell rectangles the GeoJSON writers publish.
+        """
         lon, lat = self.read_grid()
         return (
             float(np.amin(lon)),
@@ -164,17 +177,17 @@ class WRFDataset:
             float(np.amax(lat)),
         )
 
-    # ------------------------------------------------------------------
-    # Time handling
-    # ------------------------------------------------------------------
-
     def parse_times(self) -> list[datetime]:
-        """Parse the ``Times`` variable into a list of UTC ``datetime`` objects."""
+        """Parse the ``Times`` variable into a list of UTC ``datetime`` objects.
+
+        WRF writes ``Times`` as ``YYYY-MM-DD_HH:MM:SS`` without an offset and the
+        values are UTC by definition, so the tzinfo attached here states the
+        file's own convention rather than assuming one.
+        """
         if self._time_cache is not None:
             return self._time_cache
         times_var = self._ds.variables["Times"]
         time_strings = _decode_wrf_time_strings(times_var[:])
-        # WRF writes ``Times`` without an offset; the values are UTC by definition.
         result: list[datetime] = [
             datetime.strptime(ts, "%Y-%m-%d_%H:%M:%S").replace(tzinfo=UTC) for ts in time_strings
         ]
@@ -185,10 +198,21 @@ class WRFDataset:
         self,
         skip_first_n: int = 0,
     ) -> list[dict]:
-        """Build metadata dicts for each valid time step.
+        """Build one metadata dict per time step of the file.
 
-        Returns a list of dicts with keys:
-        ``index``, ``datetime_utc``, ``datetime_local``, ``label``, ``name_suffix``.
+        Parameters
+        ----------
+        skip_first_n:
+            How many leading steps to mark ``skip``; the entries are still
+            returned, so indices keep matching the file's time axis.
+
+        Returns
+        -------
+        list[dict]
+            One entry per step, with keys ``index`` (position on the file's time
+            axis), ``datetime_utc``, ``datetime_local`` (in
+            :func:`product_timezone`), ``label`` (the Portuguese figure caption),
+            ``name_suffix`` (``{domain}_{index:03d}``) and ``skip``.
         """
         times = self.parse_times()
         grid = self._grid_level.value
@@ -218,16 +242,21 @@ class WRFDataset:
             )
         return entries
 
-    # ------------------------------------------------------------------
-    # Variable access
-    # ------------------------------------------------------------------
-
     def get_variable(self, name: str) -> NDArray:
-        """Read a variable from the dataset, squeezed.
+        """Read a whole variable eagerly, squeezed, in the file's own dtype.
 
         All singleton axes are squeezed EXCEPT axis 0 (``Time``), so a
         single-timestep file keeps its time axis and downstream per-step
-        slicing/bounds logic keeps working.
+        slicing/bounds logic keeps working. A surface field therefore comes back
+        ``(T, ny, nx)``.
+
+        Raises
+        ------
+        KeyError
+            When the file carries no variable *name* — callers that treat an
+            absent field as skippable check :meth:`has_variable` first.
+        MemoryError
+            When the full read would exceed the array-size ceiling.
         """
         var = self._ds.variables[name]
         shape = tuple(int(size) for size in var.shape)
@@ -248,7 +277,16 @@ class WRFDataset:
         """Read a ``[t_start:t_stop]`` time block of a variable, unsqueezed.
 
         Blocks always span the full spatial extent so each compressed HDF5
-        chunk is decompressed exactly once per streaming pass.
+        chunk is decompressed exactly once per streaming pass. *t_stop* is
+        clamped to the file's step count, so the last block of a pass may be
+        shorter than requested.
+
+        Raises
+        ------
+        ValueError
+            When the block is empty or starts before the first step.
+        MemoryError
+            When the block would exceed the array-size ceiling.
         """
         if t_start < 0 or t_stop <= t_start:
             raise ValueError(f"Invalid time block [{t_start}:{t_stop}] for variable {name}")
@@ -266,10 +304,6 @@ class WRFDataset:
     def has_variable(self, name: str) -> bool:
         """Whether ``name`` is present among the file's NetCDF variables."""
         return name in self._ds.variables
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
 
     def _detect_grid_level(self) -> GridLevel:
         """Infer the grid level from the file name (e.g. ``wrfout_d01_…``).

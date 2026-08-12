@@ -15,5 +15,11 @@ def ensure_dir(path: str | Path) -> Path:
 
 
 def find_files(directory: str | Path, pattern: str = "*.dat") -> list[Path]:
-    """Glob for files matching *pattern* inside *directory*, sorted by name."""
+    """Glob for files matching *pattern* inside *directory*, sorted by name.
+
+    The glob is not recursive unless *pattern* says so with ``**``, and the sort
+    is lexicographic, which for the station's ``LBM_*_<year>.dat`` naming is not
+    the same as chronological -- callers that need ingest order state it
+    themselves (see :data:`micrometeorology.sensors.archive.LENTA_MANIFEST`).
+    """
     return sorted(Path(directory).glob(pattern))

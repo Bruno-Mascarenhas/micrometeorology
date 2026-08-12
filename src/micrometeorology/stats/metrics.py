@@ -42,6 +42,16 @@ def valid_pairs(observed: NDArray, predicted: NDArray) -> int:
     observation whether or not a model row matched, and each column then loses
     its own gaps. Published beside the metrics so the sample size is recoverable
     from the artifact itself.
+
+    Parameters
+    ----------
+    observed, predicted:
+        Aligned samples of one variable, shape ``(N,)``, coerced to ``float64``.
+
+    Returns
+    -------
+    int
+        Positions where both arrays are finite.
     """
     obs = np.asarray(observed, dtype=float)
     pred = np.asarray(predicted, dtype=float)
@@ -49,7 +59,23 @@ def valid_pairs(observed: NDArray, predicted: NDArray) -> int:
 
 
 def rmse(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
-    """Root Mean Square Error."""
+    """Root Mean Square Error.
+
+    Parameters
+    ----------
+    observed, predicted:
+        Aligned samples of one variable, shape ``(N,)``, in the variable's own
+        physical unit (degrees for a bearing). Coerced to ``float64`` by the
+        pairwise filter.
+    clean:
+        Drop the non-finite pairs first. ``False`` skips the filter, so the
+        caller must hand in finite float arrays.
+
+    Returns
+    -------
+    float
+        Error in the unit of the inputs; ``NaN`` below two valid pairs.
+    """
     obs, pred = _clean_pairs(observed, predicted) if clean else (observed, predicted)
     if len(obs) < 2:
         return float("nan")
@@ -57,7 +83,25 @@ def rmse(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
 
 
 def mae(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
-    """Mean Absolute Error."""
+    """Mean Absolute Error.
+
+    Parameters
+    ----------
+    observed, predicted:
+        Aligned samples of one variable, shape ``(N,)``, in the variable's own
+        physical unit (degrees for a bearing). Coerced to ``float64`` by the
+        pairwise filter.
+    clean:
+        Drop the non-finite pairs first. ``False`` skips the filter, so the
+        caller must hand in finite float arrays.
+
+    Returns
+    -------
+    float
+        Error in the unit of the inputs; ``NaN`` below two valid pairs. Less
+        sensitive to a single outlier than :func:`rmse`, which is why the two
+        are reported together.
+    """
     obs, pred = _clean_pairs(observed, predicted) if clean else (observed, predicted)
     if len(obs) < 2:
         return float("nan")
@@ -65,7 +109,25 @@ def mae(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
 
 
 def mbe(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
-    """Mean Bias Error (positive = model over-predicts)."""
+    """Mean Bias Error (positive = model over-predicts).
+
+    Parameters
+    ----------
+    observed, predicted:
+        Aligned samples of one variable, shape ``(N,)``, in the variable's own
+        physical unit (degrees for a bearing). Coerced to ``float64`` by the
+        pairwise filter.
+    clean:
+        Drop the non-finite pairs first. ``False`` skips the filter, so the
+        caller must hand in finite float arrays.
+
+    Returns
+    -------
+    float
+        Signed bias in the unit of the inputs; ``NaN`` below two valid pairs.
+        Opposite-signed errors cancel here, so this number is only readable
+        beside :func:`rmse` or :func:`mae`.
+    """
     obs, pred = _clean_pairs(observed, predicted) if clean else (observed, predicted)
     if len(obs) < 2:
         return float("nan")
@@ -73,7 +135,24 @@ def mbe(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
 
 
 def r_squared(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
-    """Coefficient of determination (R²)."""
+    """Coefficient of determination (R²).
+
+    Parameters
+    ----------
+    observed, predicted:
+        Aligned samples of one variable, shape ``(N,)``, in the variable's own
+        physical unit. Coerced to ``float64`` by the pairwise filter.
+    clean:
+        Drop the non-finite pairs first. ``False`` skips the filter, so the
+        caller must hand in finite float arrays.
+
+    Returns
+    -------
+    float
+        Dimensionless: 1 is a perfect fit, 0 matches the observed mean, and a
+        negative value is a model worse than that mean. ``NaN`` below two valid
+        pairs or when the observed values have no spread.
+    """
     obs, pred = _clean_pairs(observed, predicted) if clean else (observed, predicted)
     if len(obs) < 2:
         return float("nan")
@@ -85,7 +164,24 @@ def r_squared(observed: NDArray, predicted: NDArray, clean: bool = True) -> floa
 
 
 def correlation(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
-    """Pearson correlation coefficient."""
+    """Pearson correlation coefficient.
+
+    Parameters
+    ----------
+    observed, predicted:
+        Aligned samples of one variable, shape ``(N,)``, in the variable's own
+        physical unit. Coerced to ``float64`` by the pairwise filter.
+    clean:
+        Drop the non-finite pairs first. ``False`` skips the filter, so the
+        caller must hand in finite float arrays.
+
+    Returns
+    -------
+    float
+        Dimensionless, in ``[-1, 1]``. Insensitive to a constant offset or a
+        scaling, so a perfectly correlated but badly biased model still scores
+        1. ``NaN`` below two valid pairs or when either array has no spread.
+    """
     obs, pred = _clean_pairs(observed, predicted) if clean else (observed, predicted)
     if len(obs) < 2:
         return float("nan")
@@ -98,7 +194,20 @@ def correlation(observed: NDArray, predicted: NDArray, clean: bool = True) -> fl
 def d_index(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
     """Willmott's index of agreement (d).
 
-    Ranges from 0 (no agreement) to 1 (perfect agreement).
+    Parameters
+    ----------
+    observed, predicted:
+        Aligned samples of one variable, shape ``(N,)``, in the variable's own
+        physical unit. Coerced to ``float64`` by the pairwise filter.
+    clean:
+        Drop the non-finite pairs first. ``False`` skips the filter, so the
+        caller must hand in finite float arrays.
+
+    Returns
+    -------
+    float
+        Dimensionless, from 0 (no agreement) to 1 (perfect agreement). ``NaN``
+        below two valid pairs or when the observed values have no spread.
     """
     obs, pred = _clean_pairs(observed, predicted) if clean else (observed, predicted)
     if len(obs) < 2:
@@ -112,14 +221,32 @@ def d_index(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
 
 
 def ia(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
-    """Index of Agreement (alternative formulation)."""
+    """Index of Agreement — an alias of :func:`d_index`, same arguments and value.
+
+    Both spellings appear in the literature; this name exists so a caller that
+    knows the metric as ``ia`` finds it.
+    """
     return d_index(observed, predicted, clean=clean)
 
 
 def ioa(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
     """Refined Index of Agreement (Willmott et al., 2012).
 
-    Ranges from -1 to 1, with 1 indicating perfect agreement.
+    Parameters
+    ----------
+    observed, predicted:
+        Aligned samples of one variable, shape ``(N,)``, in the variable's own
+        physical unit. Coerced to ``float64`` by the pairwise filter.
+    clean:
+        Drop the non-finite pairs first. ``False`` skips the filter, so the
+        caller must hand in finite float arrays.
+
+    Returns
+    -------
+    float
+        Dimensionless, from -1 to 1, with 1 indicating perfect agreement.
+        ``NaN`` below two valid pairs or when the observed values have no
+        spread.
     """
     obs, pred = _clean_pairs(observed, predicted) if clean else (observed, predicted)
     if len(obs) < 2:
@@ -137,7 +264,24 @@ def ioa(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
 
 
 def nrmse(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
-    """Normalised RMSE (NRMSE), as RMSE / range(observed)."""
+    """Normalised RMSE (NRMSE), as RMSE / range(observed).
+
+    Parameters
+    ----------
+    observed, predicted:
+        Aligned samples of one variable, shape ``(N,)``, in the variable's own
+        physical unit. Coerced to ``float64`` by the pairwise filter.
+    clean:
+        Drop the non-finite pairs first. ``False`` skips the filter, so the
+        caller must hand in finite float arrays.
+
+    Returns
+    -------
+    float
+        Dimensionless — the unit cancels against the observed range, which is
+        what makes it comparable across variables. ``NaN`` below two valid
+        pairs or when that range is zero.
+    """
     obs, pred = _clean_pairs(observed, predicted) if clean else (observed, predicted)
     if len(obs) < 2:
         return float("nan")
@@ -206,10 +350,23 @@ def compute_all(
 ) -> dict[str, float]:
     """Compute all available metrics and return as a dict.
 
-    Set *circular* for a bearing in degrees. Residuals are then wrapped to the
-    shortest angular separation and only :data:`CIRCULAR_METRICS` are computed;
-    the others come back NaN. The key set never changes — it is parsed
-    downstream — so a suppressed metric is an empty cell, not a missing row.
+    Parameters
+    ----------
+    observed, predicted:
+        Aligned samples of one variable, shape ``(N,)``, in the variable's own
+        physical unit. Coerced to ``float64``; non-finite pairs are dropped once
+        here rather than by each metric.
+    circular:
+        Set for a bearing in degrees. Residuals are then wrapped to the shortest
+        angular separation and only :data:`CIRCULAR_METRICS` are computed; the
+        others come back NaN.
+
+    Returns
+    -------
+    dict[str, float]
+        One entry per key of :data:`ALL_METRICS`. The key set never changes — it
+        is parsed downstream — so a suppressed metric is an empty cell, not a
+        missing row, and fewer than two valid pairs give every key ``NaN``.
     """
     obs, pred = _clean_pairs(observed, predicted)
     if len(obs) < 2:

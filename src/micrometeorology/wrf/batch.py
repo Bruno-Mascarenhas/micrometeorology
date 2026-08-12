@@ -43,16 +43,27 @@ MAX_TASKS_PER_CHILD = int(os.environ.get("LABMIM_MAX_TASKS_PER_CHILD", "64"))
 WorkerBackend = Literal["auto", "serial", "memmap"]
 
 
-# ---------------------------------------------------------------------------
-# Configuration structures (frozen, picklable)
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class MapConfig:
-    """Invariant per-domain map configuration, passed to every worker."""
+    """Invariant per-domain map configuration, passed to every worker.
 
-    grid_level: str  # "D01", "D02", etc. (str for pickling)
+    Attributes
+    ----------
+    grid_level:
+        Domain id as a plain string (``"D01"``, ``"D02"``, ...) rather than the
+        enum, so the config pickles across the pool boundary.
+    lon_min, lon_max, lat_min, lat_max:
+        Map extent in degrees east and degrees north, set with PlateCarree.
+    coast_width, state_width:
+        Line widths for the coastline and the state borders, in points; the
+        inner domains carry heavier lines because they cover less ground.
+    draw_municipalities:
+        Whether to overlay the IBGE municipality mesh.
+    shapes_dir:
+        Directory holding that shapefile, or ``None`` when it was not supplied.
+    """
+
+    grid_level: str
     lon_min: float
     lon_max: float
     lat_min: float
@@ -64,9 +75,39 @@ class MapConfig:
 
 
 class FigureTask(NamedTuple):
-    """Lightweight, picklable description of a single frame to render."""
+    """Lightweight, picklable description of a single frame to render.
 
-    # Pre-sliced 2D arrays: small enough to pickle across the pool boundary.
+    Attributes
+    ----------
+    lon, lat:
+        ``(ny, nx)`` cell-centre coordinates in degrees east and degrees north.
+    data:
+        ``(ny, nx)`` field to colour, in its published unit. Pre-sliced to one
+        time step, which is what keeps the task small enough to pickle across the
+        pool boundary.
+    vmin, vmax:
+        Colour-scale bounds in the unit of *data*.
+    cmap_name:
+        Matplotlib colormap name, saturated by
+        :func:`~micrometeorology.wrf.plotting.saturated_cmap`.
+    overlay_data, overlay_levels:
+        Optional ``(ny, nx)`` field drawn as labelled contours over the mesh —
+        surface pressure in hPa over temperature — and the levels to draw.
+    u, v:
+        Optional ``(ny, nx)`` wind components in m/s, drawn as a quiver over the
+        mesh; both or neither.
+    title:
+        Figure caption.
+    output_path:
+        Destination PNG; parent directories are created by the worker.
+    map_config:
+        The domain's invariant map configuration.
+    dpi:
+        Raster resolution of the saved PNG.
+    saturation:
+        Colour saturation multiplier applied to the colormap.
+    """
+
     lon: NDArray
     lat: NDArray
     data: NDArray
@@ -74,11 +115,9 @@ class FigureTask(NamedTuple):
     vmax: float
     cmap_name: str
 
-    # Overlay (optional pressure contours for temperature)
     overlay_data: NDArray | None
     overlay_levels: list[float] | None
 
-    # Wind-specific (optional)
     u: NDArray | None
     v: NDArray | None
 
@@ -90,7 +129,14 @@ class FigureTask(NamedTuple):
 
 
 class FigureMemmapTask(NamedTuple):
-    """Figure task with array payloads stored in temporary ``.npy`` files."""
+    """Figure task with array payloads stored in temporary ``.npy`` files.
+
+    Field for field a :class:`FigureTask` with every array replaced by the path
+    of the ``.npy`` it was spilled to, so a frame crosses the pool boundary as a
+    filename and the worker maps it read-only instead of unpickling a copy. The
+    ``None`` paths mean the same as the ``None`` arrays there. Scalar fields keep
+    their meaning, shape, dtype and unit unchanged.
+    """
 
     lon_path: str
     lat_path: str
@@ -107,11 +153,6 @@ class FigureMemmapTask(NamedTuple):
     map_config: MapConfig
     dpi: int
     saturation: float
-
-
-# ---------------------------------------------------------------------------
-# Worker functions (top-level for pickling)
-# ---------------------------------------------------------------------------
 
 
 @functools.lru_cache(maxsize=4)
@@ -278,17 +319,29 @@ def _render_figure_memmap(task: FigureMemmapTask) -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# Batch orchestration
-# ---------------------------------------------------------------------------
-
-
 def build_map_config(
     grid_level: str,
     bounds: tuple[float, float, float, float],
     shapes_dir: str | None = None,
 ) -> MapConfig:
-    """Build a frozen ``MapConfig`` from domain metadata."""
+    """Build a frozen ``MapConfig`` from domain metadata.
+
+    Parameters
+    ----------
+    grid_level:
+        Domain id (``"D01"``..``"D05"``); it selects the line widths and whether
+        the municipality mesh is drawn, which only the inner domains resolve.
+    bounds:
+        ``(lon_min, lon_max, lat_min, lat_max)`` in degrees, as
+        :meth:`~micrometeorology.wrf.reader.WRFDataset.grid_bounds` returns them.
+    shapes_dir:
+        Directory holding the IBGE municipality shapefile.
+
+    Returns
+    -------
+    MapConfig
+        Configuration every worker of this domain renders with.
+    """
     lon_min, lon_max, lat_min, lat_max = bounds
     coast_map = {"D03": 2, "D04": 3, "D05": 3}
     state_map = {"D03": 2, "D04": 2, "D05": 2}
@@ -308,12 +361,23 @@ def build_map_config(
 
 
 def default_workers() -> int:
-    """Return the default number of parallel workers."""
+    """Number of parallel workers to use when the caller names none.
+
+    Four cores are left to the parent process and the operating system, so a
+    full-machine render does not starve the run's own I/O; a machine reporting no
+    core count is treated as a 4-core one, which yields a single worker.
+    """
     n = os.cpu_count() or 4
     return max(1, n - 4)
 
 
 def _max_tasks_per_child(n_workers: int) -> int | None:
+    """How many tasks a pool worker runs before being replaced.
+
+    ``None`` (no recycling) for a single worker, since there is no other process
+    to take over, and whenever ``LABMIM_MAX_TASKS_PER_CHILD`` is set to zero or
+    less. Recycling bounds the memory a long-lived worker accumulates.
+    """
     if n_workers <= 1 or MAX_TASKS_PER_CHILD <= 0:
         return None
     return MAX_TASKS_PER_CHILD

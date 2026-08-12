@@ -20,7 +20,23 @@ logger = logging.getLogger(__name__)
 
 
 def load_calibrations(config_path: str | Path) -> list[dict[str, Any]]:
-    """Load calibration records from a YAML file."""
+    """Load calibration records from a YAML file.
+
+    Parameters
+    ----------
+    config_path:
+        Path to ``calibrations.yaml``.
+
+    Returns
+    -------
+    list of dict
+        The ``calibrations`` list as written, each record carrying ``column``,
+        optional ``start_date`` / ``end_date``, ``factor`` and ``description``.
+        A missing file yields an empty list and a warning. That warning is the
+        only signal: nothing downstream distinguishes "no calibrations were
+        declared" from "none were needed", since a column carrying no record is
+        taken to need none.
+    """
     path = Path(config_path)
     if not path.exists():
         logger.warning("Calibration config not found: %s", path)
@@ -44,7 +60,6 @@ def _resolve_inclusive_end(value: Any, fallback: pd.Timestamp) -> pd.Timestamp:
         return fallback
     end = pd.Timestamp(value)
     if end == end.normalize():
-        # Date-only boundary → inclusive of the whole day.
         return end + pd.Timedelta(days=1) - pd.Timedelta(1, "ns")
     return end
 
@@ -135,21 +150,33 @@ def apply_calibrations(
     Parameters
     ----------
     df:
-        DataFrame with a DatetimeIndex.
+        DataFrame with a naive station-local ``DatetimeIndex``.
     calibrations:
         List of calibration records, each with keys:
         ``column``, ``start_date``, ``end_date``, ``factor``, ``description``.
+        ``factor`` multiplies the raw column, so it carries the unit ratio the
+        instrument's sensitivity revision implies; a null ``factor`` instead
+        declares the data invalid over the period and blanks it.
+
+    Returns
+    -------
+    pd.DataFrame
+        The same DataFrame, mutated in place, with each record applied to its
+        own window. A record matching no populated sample is logged as a
+        warning rather than raising: it is a configuration drift, not a data
+        fault.
+
+    Raises
+    ------
+    ValueError
+        If two records for one column cover an overlapping date range, which
+        would make the published factor depend on record order.
 
     Notes
     -----
     Both dates are **inclusive at day granularity**: a date-only ``end_date``
     covers every sub-daily sample of the boundary day, while one carrying an
     explicit time keeps exact ``<= end`` (see :func:`_resolve_inclusive_end`).
-
-    Returns
-    -------
-    pd.DataFrame
-        The same DataFrame with corrections applied.
     """
     ranges_by_column: dict[str, list[_ResolvedRange]] = {}
     for record in calibrations:
@@ -190,7 +217,6 @@ def apply_calibrations(
             )
 
         if factor is None:
-            # A null factor declares the data invalid over this period.
             df.loc[mask, column] = np.nan
             logger.info(
                 "  %s [%s -> %s]: set to NaN (%s)", column, start.date(), end.date(), description
@@ -214,6 +240,20 @@ def load_sensor_switches(config_path: str | Path) -> list[dict[str, Any]]:
 
     Sensor switches define which raw column maps to a unified variable
     during specific date ranges (e.g. PSP1 → CM3Up after 2018-11).
+
+    Parameters
+    ----------
+    config_path:
+        Path to ``calibrations.yaml``, the same file
+        :func:`load_calibrations` reads.
+
+    Returns
+    -------
+    list of dict
+        The ``sensor_switches`` list as written, each entry carrying a
+        ``unified_name`` and its ``mappings``. A missing file yields an empty
+        list, silently: the unification step then simply creates no unified
+        column, which the caller sees directly.
     """
     path = Path(config_path)
     if not path.exists():
@@ -235,8 +275,25 @@ def resolve_mapping_windows(
     survive: anything that judges a unified channel unusable must reach its
     source too, or the same number stays published under the other name.
 
-    Returns ``{unified_name: [(source column, start, end), ...]}`` for mappings
-    whose column is in *df*, resolved exactly as that copy resolves them.
+    Parameters
+    ----------
+    df:
+        The frame the windows are resolved against; an open-ended mapping
+        inherits its first or last timestamp, so the same switch yields
+        different bounds on a different frame.
+    switches:
+        Sensor-switch definitions, as :func:`load_sensor_switches` returns them.
+    unified_names:
+        Which unified channels to report on. Names absent here are skipped
+        entirely, which is what keeps the caller from having to know about
+        channels it does not mask.
+
+    Returns
+    -------
+    dict
+        ``{unified_name: [(source column, start, end), ...]}`` for mappings
+        whose column is in *df*, with inclusive naive station-local bounds
+        resolved exactly as :func:`unify_sensor_columns` resolves them.
     """
     wanted = set(unified_names)
     windows: dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]] = {}
@@ -274,8 +331,19 @@ def uncalibrated_mapping_windows(
     column calibrated over PART of the window it feeds, which puts a step in the
     published series at the boundary and nowhere in the instrument record.
 
-    Returns ``(unified name, source column, gap start, gap end)`` per uncovered
-    stretch, oldest first; a ``factor: null`` record counts as coverage.
+    Returns
+    -------
+    list
+        ``(unified name, source column, gap start, gap end)`` per uncovered
+        stretch, oldest first, with inclusive naive station-local bounds. A
+        ``factor: null`` record counts as coverage: declaring a period invalid
+        is a decision about it, not an omission.
+
+    Notes
+    -----
+    Each mapping window is walked with a cursor that consumes the calibrated
+    stretches in date order; whatever the cursor steps over is what gets
+    reported.
     """
     covered: dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
     for record in calibrations:
@@ -296,8 +364,6 @@ def uncalibrated_mapping_windows(
             start, end = _resolve_record_range(mapping, df)
             if start > end:
                 continue
-            # Walk the mapping window, consuming the calibrated stretches in
-            # date order; whatever the cursor skips over is uncovered.
             cursor = start
             for cal_start, cal_end in sorted(covered.get(column, [])):
                 if cal_end < cursor:
@@ -322,6 +388,29 @@ def unify_sensor_columns(
 
     For each switch, creates a new column with the ``unified_name`` that
     concatenates data from different raw columns based on date ranges.
+
+    Parameters
+    ----------
+    df:
+        The frame to add the unified columns to, indexed by a naive
+        station-local ``DatetimeIndex``.
+    switches:
+        Sensor-switch definitions, as :func:`load_sensor_switches` returns them.
+
+    Returns
+    -------
+    pd.DataFrame
+        The same DataFrame, mutated in place, with one column added per switch
+        that matched at least one present raw column. The source columns are
+        COPIED, not consumed, so both spellings of a measurement stay in the
+        frame -- which is why anything that invalidates a unified channel has to
+        reach its sources as well (:func:`resolve_mapping_windows`).
+
+    Raises
+    ------
+    ValueError
+        If two mappings of one unified name cover an overlapping date range,
+        which would make the concatenation order decide the published value.
 
     Notes
     -----

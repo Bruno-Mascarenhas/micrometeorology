@@ -34,6 +34,12 @@ def create_gif(
         Glob pattern to select images.
     duration:
         Duration of each frame in seconds.
+
+    Returns
+    -------
+    Path
+        The GIF written, looping forever. When no image matched, the path is
+        returned with nothing written and a warning logged.
     """
     import imageio.v2 as imageio
 
@@ -72,6 +78,17 @@ def create_webm_from_images(
         Path for the output ``.webm`` file.
     fps:
         Frames per second.
+
+    Returns
+    -------
+    Path
+        The WebM written. When *image_paths* is empty, the path is returned with
+        nothing written and a warning logged.
+
+    Raises
+    ------
+    ImportError
+        When the ``video`` extra is not installed.
     """
     try:
         from moviepy import ImageSequenceClip
@@ -108,6 +125,16 @@ def gif_to_webm(
     """Convert a GIF to WebM video using moviepy.
 
     Requires the ``video`` optional dependency (``uv sync --extra video``).
+
+    Returns
+    -------
+    Path
+        The WebM written, defaulting to the GIF's path with a ``.webm`` suffix.
+
+    Raises
+    ------
+    ImportError
+        When the ``video`` extra is not installed.
     """
     try:
         from moviepy import VideoFileClip
@@ -165,6 +192,12 @@ def batch_create_webm(
         Frames per second for each video.
     workers:
         Number of parallel workers.  Defaults to ``min(cpu_count - 4, num_groups)``.
+
+    Returns
+    -------
+    list[str]
+        Paths of the videos written, in COMPLETION order. A group whose encode
+        failed is logged and left out, so the list may be shorter than the input.
     """
     n_workers = workers or max(1, (os.cpu_count() or 4) - 4)
     n_workers = min(n_workers, len(grouped_images)) if grouped_images else 1

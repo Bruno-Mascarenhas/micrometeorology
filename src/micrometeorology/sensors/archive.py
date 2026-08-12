@@ -15,9 +15,15 @@ an audit of every table in the archive (2016-09 to 2026-04):
    bytes fixed before the merge, which :func:`stage_archive` does into a scratch
    directory: nothing here ever writes to ``data/``.
 
-So the manifest lives here as data, in ingest order, each file's disposition next
-to it, and :func:`verify_frame` checks the merged result against the row counts,
-span and monotonicity the audit measured.
+So the manifest lives here as data, in ingest order — chronological by first
+timestamp — each file's disposition next to it, and :func:`verify_frame` checks
+the merged result against the row counts, span and monotonicity the audit
+measured.
+
+Timestamps are naive station-local throughout, stamped by the logger's own
+clock; two of the repairs below exist precisely because that clock has slipped.
+Solar geometry therefore needs an explicit offset, pinned here as
+:data:`STATION_UTC_OFFSET_HOURS` rather than read from the host time zone.
 
 Relationship to the neighbouring modules
 ----------------------------------------
@@ -84,7 +90,7 @@ ARCHIVE_END = pd.Timestamp("2026-04-24 13:00:00")
 # coercion unless named explicitly (see ingestion.read_campbell_dat).
 STATUS_COLUMNS = ("MetSENS1_Status", "MetSENS2_Status", "MetSENS_Status")
 
-# Staging directives, resolved by _stage_file.
+# Staging directives, dispatched through _STAGERS in stage_archive.
 _CLOCK_PLUS_ONE_HOUR = "clock+1h"
 _DROP_LATE_TAIL = "drop-late-tail"
 _KEEP_2023_BLOCK = "keep-2023-block"
@@ -115,10 +121,6 @@ class ArchiveFile:
     staging: str | None = None
     note: str = ""
 
-
-# ---------------------------------------------------------------------------
-# The manifests, in ingest order (chronological by first timestamp)
-# ---------------------------------------------------------------------------
 
 _DIR = "dados-labmim"
 
@@ -196,7 +198,28 @@ RAIN_MANIFEST: tuple[ArchiveFile, ...] = (
 
 @dataclass(frozen=True)
 class ArchiveReport:
-    """What a merged frame actually contains, against what the audit measured."""
+    """What a merged frame actually contains, against what the audit measured.
+
+    Attributes
+    ----------
+    kind:
+        ``"lenta"`` or ``"rain"``, the manifest the frame was built from.
+    rows, expected_rows:
+        Rows merged, and the count the audit measured for that manifest.
+    columns:
+        Width of the merged frame, which grows over the record as sensors are
+        added, so it is reported rather than checked.
+    first, last:
+        Index bounds as naive station-local timestamps, ``None`` for an empty
+        frame.
+    duplicated:
+        Timestamps appearing more than once. Should be zero: the merge collapses
+        overlapping stamps per column.
+    monotonic:
+        Whether the index increases throughout.
+    problems:
+        One sentence per mismatch, empty when the frame matches the audit.
+    """
 
     kind: str
     rows: int
@@ -210,12 +233,9 @@ class ArchiveReport:
 
     @property
     def ok(self) -> bool:
+        """Whether the merge reproduced the audited archive exactly."""
         return not self.problems
 
-
-# ---------------------------------------------------------------------------
-# Staging — repairs that cannot live in configuration
-# ---------------------------------------------------------------------------
 
 # A TOA5 file is four header lines then data. Staged copies are rewritten in that
 # shape so every consumer can keep using the same reader and the same skiprows.
@@ -304,8 +324,9 @@ def stage_archive(
     data_dir:
         Root of the archive. **Never written to.**
     staging_dir:
-        Scratch for the repaired copies, recreated every run so a stale staged
-        file cannot survive a change to the repair logic.
+        Scratch for the repaired copies. Every one of them is rewritten from its
+        source on each call, never read back from a previous run, so a stale
+        staged file cannot survive a change to the repair logic.
 
     Returns
     -------
@@ -341,11 +362,6 @@ def stage_archive(
     return resolved
 
 
-# ---------------------------------------------------------------------------
-# Merge and verification
-# ---------------------------------------------------------------------------
-
-
 def build_five_minute_frame(
     manifest: tuple[ArchiveFile, ...],
     data_dir: str | Path,
@@ -355,9 +371,26 @@ def build_five_minute_frame(
 ) -> pd.DataFrame:
     """Merge one manifest into a single 5-minute frame, raw values preserved.
 
-    ``sentinel_value`` defaults to ``None``, unlike the reader's own -900, which
-    matches nothing in this archive. Sentinel masking is a separate, era-scoped
-    step applied after the merge.
+    Parameters
+    ----------
+    manifest:
+        :data:`LENTA_MANIFEST` or :data:`RAIN_MANIFEST`.
+    data_dir:
+        Root of the archive. **Never written to.**
+    staging_dir:
+        Scratch directory for the repaired copies.
+    sentinel_value:
+        Threshold passed through to the reader. It defaults to ``None``, unlike
+        the reader's own -900, which matches nothing in this archive; sentinel
+        masking is a separate, era-scoped step applied after the merge by
+        :func:`mask_sentinels`.
+
+    Returns
+    -------
+    pd.DataFrame
+        Every manifest file merged, indexed by naive station-local timestamp at
+        the logger's 5-minute cadence, values raw and uncalibrated, with the
+        per-row status flags preserved as text.
     """
     paths = stage_archive(manifest, data_dir, staging_dir)
     return merge_dat_files(
@@ -420,10 +453,7 @@ def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
     )
 
 
-# ---------------------------------------------------------------------------
-# Sentinel masking — the values a logger writes instead of "missing"
-# ---------------------------------------------------------------------------
-#
+# The values a logger writes instead of "missing", per column.
 # read_campbell_dat's -900 threshold catches NONE of these; each entry came from
 # the exact-value histogram of a column, where a sentinel shows up as one value
 # repeating thousands of times. A VALUE rule holds for the whole record because
@@ -540,11 +570,23 @@ def unshaded_diffuse_days(
     what the hand-curated list misses — and that list goes stale, silently, the
     next time the ring comes off, since the column keeps its name.
 
+    Parameters
+    ----------
+    frame:
+        5-minute frame in W/m2, holding both *column* and
+        :data:`DIFFUSE_GLOBAL_COLUMN`. Missing either, the check reports
+        nothing rather than guessing.
+    column:
+        The diffuse channel to test. Defaults to the CMP21, which held the
+        diffuse role until the 2025 handover to the PSP.
+
     Returns
     -------
     list
         ``(iso date, median clear-sky ratio)`` per offending day, oldest first.
-        Empty for the archive as shipped: every episode it detects is masked.
+        The ratio is dimensionless, diffuse over global, taken over the samples
+        above :data:`DIFFUSE_CLEAR_SKY_FLOOR` only. Empty for the archive as
+        shipped: every episode it detects is masked.
     """
     if column not in frame.columns or DIFFUSE_GLOBAL_COLUMN not in frame.columns:
         return []
@@ -656,10 +698,22 @@ def mask_impossible_shortwave(
     same measurement bit for bit, outside it the raw column is a different
     instrument that never failed this check.
 
+    Parameters
+    ----------
+    frame:
+        5-minute frame in W/m2 with a naive station-local index, carrying at
+        least ``Sw_dw``. Without it nothing is checked, since the BSRN ceiling
+        is defined on the global horizontal flux.
+    sources:
+        Era windows per unified channel, or ``None`` to mask the unified
+        columns alone.
+
     Returns
     -------
     tuple
-        The masked frame and a ``{column: samples removed}`` tally.
+        The same frame, mutated in place, and a ``{column: samples removed}``
+        tally. An empty tally means every sample sits under the ceiling; on the
+        full record it does not, which is the point of the step.
     """
     removed: dict[str, int] = {}
     if "Sw_dw" not in frame.columns:
@@ -688,6 +742,16 @@ def night_corrupted_days(
     era-specific raw aliases each witness only part of it. A criterion rather
     than a table of the 52 dated windows it finds, which would go stale the next
     time the logger's clock slips, and silently: the values look ordinary.
+
+    Parameters
+    ----------
+    frame:
+        Frame in W/m2 with a naive station-local index, against which the sun's
+        elevation is computed from :data:`STATION_SITE` and the pinned
+        :data:`STATION_UTC_OFFSET_HOURS`.
+    columns:
+        Shortwave channels to witness the fault on. Longwave must stay out: a
+        pyrgeometer reads 300-400 W/m2 all night by design.
 
     Returns
     -------
@@ -729,11 +793,23 @@ def mask_night_corrupted_days(
     fault of the LOGGER, so every solar-geometry-dependent channel it wrote that
     day is misplaced, including the ones that were not the unified source then.
 
+    Parameters
+    ----------
+    frame:
+        Frame in W/m2 with a naive station-local index.
+    days:
+        ``(iso date, sample count)`` pairs as :func:`night_corrupted_days`
+        returns them; only the date is read, the count being provenance for the
+        reader. An empty sequence masks nothing.
+    sources:
+        Raw columns per unified channel, or ``None`` to mask the unified
+        columns alone.
+
     Returns
     -------
     tuple
-        The masked frame and a ``{column: samples removed}`` tally, in the shape
-        :func:`mask_sentinels` reports.
+        The same frame, mutated in place, and a ``{column: samples removed}``
+        tally, in the shape :func:`mask_sentinels` reports.
     """
     removed: dict[str, int] = {}
     if not days:
@@ -765,7 +841,19 @@ def close_net_radiation(frame: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
     components were recorded before the logger began writing a net, and drops the
     125 where a component is missing and no net is defined.
 
-    Returns the frame, the samples gained and the samples dropped.
+    Parameters
+    ----------
+    frame:
+        Frame in W/m2 holding :data:`NET_RADIATION_COMPONENTS`. Missing any of
+        them, the frame is returned untouched: a net rebuilt from three terms
+        would be wrong in a way nothing downstream could detect.
+
+    Returns
+    -------
+    tuple
+        The same frame, mutated in place, and the samples gained and dropped —
+        gained where the components define a net the logger never wrote,
+        dropped where a component is missing so no net is defined.
     """
     if not all(column in frame.columns for column in NET_RADIATION_COMPONENTS):
         return frame, 0, 0
@@ -785,11 +873,19 @@ def mask_sentinels(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
     in December 2025 the pressure and wind channels on the same logger stayed
     good.
 
+    Parameters
+    ----------
+    frame:
+        Raw merged frame with a naive station-local index, in the logger's own
+        units — the rules are written against those values, so this must run
+        before any calibration factor.
+
     Returns
     -------
     tuple
-        The masked frame and a ``{column: samples removed}`` tally, which the
-        CLI prints so a rule that silently stops matching is visible.
+        The same frame, mutated in place, and a ``{column: samples removed}``
+        tally, which the CLI prints so a rule that silently stops matching is
+        visible.
     """
     removed: dict[str, int] = {}
 

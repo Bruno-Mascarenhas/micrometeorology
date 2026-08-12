@@ -23,6 +23,23 @@ def plot_comparison(
 
     The figure is built without the pyplot state machine, so it is never
     registered with the global figure manager and the caller owns its lifetime.
+
+    Parameters
+    ----------
+    paired_df:
+        Output of :func:`micrometeorology.stats.comparison.pair_dataframes`,
+        carrying ``<variable>_obs`` and ``<variable>_model`` columns on a time
+        index.
+    variable:
+        Base name to draw; it labels the y-axis, so it should read in the
+        variable's own unit.
+    output_path:
+        Written as PNG when given; ``None`` returns the figure undrawn to disk.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The two-panel figure. The caller is responsible for closing it.
     """
     obs_col = f"{variable}_obs"
     model_col = f"{variable}_model"

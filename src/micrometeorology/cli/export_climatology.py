@@ -185,6 +185,19 @@ def read_wrf_series(path: str | Path) -> pd.DataFrame:
     Hour 21 local is 00 UTC, each run's initialisation hour, where surface fluxes
     and boundary-layer height are identically zero; those rows are dropped
     wholesale so one uniform rule can be stated on the page.
+
+    Parameters
+    ----------
+    path:
+        The ``series_operacional.dat`` the operational extraction appends to.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Hourly model variables on a sorted, de-duplicated
+        :class:`~pandas.DatetimeIndex` of naive station-local hours (UTC-03),
+        with the spin-up hour removed. A repeated timestamp keeps the LAST row,
+        which is the most recent run's value for that hour.
     """
     frame = pd.read_csv(path)
     frame = frame.drop(columns=[c for c in frame.columns if str(c).startswith("Unnamed")])

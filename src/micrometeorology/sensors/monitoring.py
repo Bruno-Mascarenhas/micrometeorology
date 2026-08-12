@@ -86,14 +86,26 @@ class MonitoringChart:
     id:
         The PNG stem the page replaces (``temperatura``, ``balanco``, ...), kept
         so the two products stay comparable during the migration.
+    title:
+        Portuguese heading of the card.
+    unit:
+        Physical unit every series on the card is drawn in, already the unit the
+        archive publishes; the card never rescales.
     kind:
         ``line`` — raw as dots, hourly as a line;
         ``bar`` — hourly as bars over a raw accumulation line (precipitation);
         ``scatter`` — every layer as dots, because the quantity is circular and
         a connecting line would sweep across the 0/360 wrap.
+    series:
+        The lines of the card, in legend order.
     y_limits:
         Fixed frame, or ``None`` to autoscale. Taken from the legacy contract
         except where measurement showed the frame was clipping real values.
+    caveats:
+        Portuguese sentences the page prints with the card. They carry what the
+        chart cannot show for itself -- a model bias, an instrument handover, a
+        sign convention -- so a reader is not left to infer it from the shape of
+        the lines.
     """
 
     id: str
@@ -232,9 +244,21 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
 def resolve_wrf_column(series: MonitoringSeries, available: pd.Index) -> str | None:
     """First candidate WRF column that the extraction actually provides.
 
-    Returns ``None`` when the model has no counterpart yet. That is a normal
-    state, not an error: the page reports the absence, and the same call starts
-    returning a name the moment the extraction script grows the column.
+    Parameters
+    ----------
+    series:
+        The chart series whose ``wrf`` tuple lists the candidate spellings, in
+        preference order.
+    available:
+        Column index of the loaded ``series_operacional.dat``.
+
+    Returns
+    -------
+    str or None
+        The winning column name, or ``None`` when the model has no counterpart
+        yet. The absence is a normal state, not an error: the page reports it,
+        and the same call starts returning a name the moment the extraction
+        script grows the column.
     """
     for candidate in series.wrf:
         if candidate in available:

@@ -27,7 +27,7 @@ def vertical_interpolate(
     Parameters
     ----------
     values:
-        N-D array of the field to interpolate.
+        N-D array of the field to interpolate, in the field's own unit.
     heights:
         N-D array of heights at each level (meters AGL), matching *values* shape.
     target_height:
@@ -38,7 +38,18 @@ def vertical_interpolate(
     Returns
     -------
     NDArray
-        (N-1)-D array with interpolated values.
+        (N-1)-D array with interpolated values, in the unit of *values* and at
+        least float32. A column with no valid level comes back ``NaN``; one with
+        exactly one valid level comes back that level's value, unextrapolated;
+        one whose bracket collapses (``h2 == h1``) forces the fraction to zero
+        and so comes back the lower level's value.
+
+    Raises
+    ------
+    ValueError
+        When *values* and *heights* have different shapes.
+    MemoryError
+        When the block would exceed the array-size ceiling.
     """
     values_arr = np.asarray(values)
     heights_arr = np.asarray(heights)
@@ -195,11 +206,24 @@ class VerticalInterpolator:
         field instead of once per target — the scan alone is a full pass over
         the block, and the pipeline asks for the same field at three heights.
 
+        Parameters
+        ----------
+        values:
+            N-D array of the field to interpolate, same shape as the heights
+            passed to the constructor.
+        targets:
+            Heights in meters above ground level.
+
         Returns
         -------
         list[NDArray]
             One (N-1)-D array per target, in *targets* order, each
             bitwise-identical to :meth:`interpolate` for that target.
+
+        Raises
+        ------
+        ValueError
+            When *values* does not match the constructor's height shape.
         """
         values_arr = np.asarray(values)
         if values_arr.shape != self._shape:

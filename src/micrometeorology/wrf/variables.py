@@ -2,6 +2,18 @@
 
 One extractor per published variable, each returning the field together with
 the ``(vmin, vmax)`` colour-scale bounds the map and JSON writers render from.
+
+Derived surface radiation budget
+--------------------------------
+wrfout carries the DOWNWELLING fluxes (SWDOWN, GLW) always, the upwelling ones
+only with RRTMG's bottom-of-atmosphere outputs on: LWUPB/SWUPB are in the 2013
+archive runs and absent from the 2026 operational runs. Every budget term here
+is therefore rebuilt from fields every wrfout generation carries — EMISS, TSK,
+GLW, SWDOWN, ALBEDO, T2, COSZEN — so a term publishes identically across runs.
+Validated where WRF's own fluxes exist (d02 2013, 9801 cells x 9 steps): LWUP
+reproduces LWUPB to MAE 0.82 W/m2 (0.11% of a ~420 W/m2 signal), SWUP
+reproduces SWUPB exactly. Per-term formulas, their sources in the WRF source
+tree and their limitations live on the ``compute_*`` functions below.
 """
 
 import logging
@@ -18,11 +30,6 @@ from micrometeorology.wrf.safety import assert_reasonable_array_size
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Colour-scale bound helpers
-# ---------------------------------------------------------------------------
-
-
 def _drop_spinup_step(value: NDArray) -> NDArray:
     """Drop the spin-up first time step.
 
@@ -34,12 +41,27 @@ def _drop_spinup_step(value: NDArray) -> NDArray:
 
 
 def squeeze_array(value: NDArray) -> NDArray:
-    """Squeeze an ndarray."""
+    """Drop every singleton axis, turning a one-step ``(1, ny, nx)`` slice into a frame.
+
+    Returns
+    -------
+    NDArray
+        A view of *value* with all length-1 axes removed, in its dtype and unit.
+    """
     return np.squeeze(value)
 
 
 def materialize_2d(value: NDArray) -> NDArray:
-    """Validate and return a 2-D worker payload."""
+    """Validate and return a 2-D ``(ny, nx)`` worker payload in the field's unit.
+
+    Raises
+    ------
+    ValueError
+        When the squeezed input is not 2-D, which would reach the writers as a
+        values array whose length no longer matches the published grid.
+    MemoryError
+        When the frame exceeds the array-size ceiling.
+    """
     squeezed = np.squeeze(value)
     if squeezed.ndim != 2:
         raise ValueError(f"Expected a 2-D worker payload, got shape {squeezed.shape!r}")
@@ -49,6 +71,11 @@ def materialize_2d(value: NDArray) -> NDArray:
 
 def blank_uninitialised_radiation(values: NDArray, glw: NDArray) -> NDArray:
     """NaN every step at which WRF had not yet called the radiation scheme.
+
+    *values* is a derived ``(T, ny, nx)`` field and *glw* the ``(T, ny, nx)``
+    downwelling longwave (W/m2) it was derived from; they share the time axis.
+    The result is *values* itself when no step is uninitialised, and otherwise a
+    float64 copy with the affected steps set to NaN.
 
     On a cold start the first output step precedes the first radiation call, so
     ``GLW`` is identically zero domain-wide — an unambiguous marker, not a
@@ -105,19 +132,14 @@ def get_low_high_rain(variable: NDArray) -> tuple[float, float]:
     return float(np.nanmin(flat)), float(np.nanmax(flat))
 
 
-# ---------------------------------------------------------------------------
-# Variable extractors
-# ---------------------------------------------------------------------------
-
-
 def extract_temperature(ds: WRFDataset) -> tuple[NDArray, float, float]:
     """Extract 2-m temperature (°C).
 
-    Returns the raw Kelvin array — converted per step by
+    Returns the raw ``(T, ny, nx)`` Kelvin array — converted per step by
     :func:`extract_temperature_step` — with bounds already in °C. Callers needing
     surface pressure read PSFC themselves, so this never loads an unused variable.
     """
-    t2 = ds.get_variable("T2")  # Kelvin
+    t2 = ds.get_variable("T2")
 
     t_min, t_max = percentile_scale_bounds(t2)
     t_min -= 273.15
@@ -224,14 +246,28 @@ def rotate_to_earth_relative(
 
 
 def extract_wind(ds: WRFDataset) -> tuple[NDArray, NDArray, float, float]:
-    """Extract 10-m U/V wind components and compute speed bounds."""
+    """Extract 10-m U/V wind components and compute speed bounds.
+
+    Returns
+    -------
+    tuple[NDArray, NDArray, float, float]
+        ``(u10, v10, speed_min, speed_max)``: two ``(T, ny, nx)`` arrays in m/s,
+        earth-relative (rotated onto true north by
+        :func:`rotate_to_earth_relative`), and the true min/max of the resulting
+        speed in m/s — no percentile cap here, unlike the scalar fields.
+    """
     u10, v10 = rotate_to_earth_relative(ds, ds.get_variable("U10"), ds.get_variable("V10"))
     ws_min, ws_max = get_low_high_wind(u10, v10)
     return u10, v10, ws_min, ws_max
 
 
 def extract_rain(ds: WRFDataset) -> tuple[NDArray, float, float]:
-    """Extract total precipitation (convective + non-convective, cumulative)."""
+    """Extract total precipitation, ``RAINC + RAINNC``, in mm.
+
+    The field is CUMULATIVE since the run start, as WRF writes it; the published
+    per-step increment comes from :func:`extract_rain_step`. The bounds are
+    already those of the increment, so the map legend matches what is drawn.
+    """
     rainc = ds.get_variable("RAINC")
     rainnc = ds.get_variable("RAINNC")
     total = rainc + rainnc
@@ -241,6 +277,9 @@ def extract_rain(ds: WRFDataset) -> tuple[NDArray, float, float]:
 
 def extract_rain_step(total: NDArray, i: int) -> NDArray:
     """Compute incremental rain for step *i* from cumulative totals.
+
+    *total* is the ``(T, ny, nx)`` cumulative field in mm; the result is the
+    ``(ny, nx)`` accumulation over the step ending at *i*, also in mm.
 
     Step 0 has no increment to compute at a file or restart boundary, so it is
     no-value rather than zero: a field of zeros is the statement that it rained
@@ -257,24 +296,15 @@ def extract_rain_step(total: NDArray, i: int) -> NDArray:
 
 
 def extract_scalar(ds: WRFDataset, var_name: str) -> tuple[NDArray, float, float]:
-    """Generic extractor for scalar fields (HFX, LH, SWDOWN)."""
+    """Generic extractor for scalar fields published in their wrfout unit.
+
+    Used for the fields that need no conversion — HFX, LH and SWDOWN, all W/m2 —
+    returning the ``(T, ny, nx)`` array and its percentile scale bounds unchanged.
+    """
     var = ds.get_variable(var_name)
     v_min, v_max = percentile_scale_bounds(var)
     return var, v_min, v_max
 
-
-# ---------------------------------------------------------------------------
-# Derived surface radiation budget
-#
-# wrfout carries the DOWNWELLING fluxes (SWDOWN, GLW) always, the upwelling ones
-# only with RRTMG's bottom-of-atmosphere outputs on: LWUPB/SWUPB are in the 2013
-# archive runs and absent from the 2026 operational runs. Everything below is
-# therefore rebuilt from fields every wrfout generation carries — EMISS, TSK,
-# GLW, SWDOWN, ALBEDO, T2, COSZEN — so a budget term publishes identically
-# across runs. Validated where WRF's own fluxes exist (d02 2013, 9801 cells x 9
-# steps): LWUP reproduces LWUPB to MAE 0.82 W/m2 (0.11% of a ~420 W/m2 signal),
-# SWUP reproduces SWUPB exactly.
-# ---------------------------------------------------------------------------
 
 #: Stefan-Boltzmann constant, W m-2 K-4 (CODATA 2018).
 STEFAN_BOLTZMANN = 5.670374419e-8
@@ -610,16 +640,28 @@ def extract_wind_power_density_10m(ds: WRFDataset) -> tuple[NDArray, float, floa
     return power_density, p_min, p_max
 
 
-# ---------------------------------------------------------------------------
-# Block-streamed wind-at-height extraction (bounded memory for long files)
-# ---------------------------------------------------------------------------
-
 DEFAULT_STREAM_BLOCK_STEPS = 64
 
 
 @dataclass(frozen=True)
 class WindHeightSeries:
-    """Interpolated wind speed series and per-step wind vectors for one height."""
+    """Interpolated wind speed series and per-step wind vectors for one height.
+
+    Attributes
+    ----------
+    target:
+        The height the series was interpolated to, meters above ground level.
+    vmin, vmax:
+        Colour-scale bounds for the speed field, m/s, from
+        :func:`percentile_scale_bounds` (so *vmax* is the 98th percentile).
+    speed_steps:
+        ``(T, ny, nx)`` wind speed in m/s, in the interpolation dtype (float32
+        for operational wrfout), spanning the file's whole time axis.
+    wind_vectors:
+        One entry per time step, in step order: the downsampled arrow payload
+        :func:`_package_wind_vectors_step` builds, or ``None`` for a step whose
+        packaging failed.
+    """
 
     target: int
     vmin: float
@@ -680,6 +722,34 @@ def stream_wind_at_heights(
     the eager whole-array path bit-for-bit (float32 chain, same operand order),
     which the byte-diff gates pin. Requires an eager
     :class:`~micrometeorology.wrf.reader.WRFDataset` (uses ``get_variable_block``).
+
+    The staggered U/V are averaged onto the mass points and rotated onto true
+    north, as :func:`extract_wind` does at 10 m. The interpolation heights are
+    geopotential height ``(PH + PHB) / 9.81`` in meters, averaged from the
+    staggered w-levels onto the level centres and referenced to the terrain
+    ``HGT``, so *targets* are meters above ground level and not above sea level.
+
+    Parameters
+    ----------
+    ds:
+        Open wrfout carrying U, V, PH, PHB and HGT.
+    targets:
+        Heights in meters above ground level, one series each.
+    block_steps:
+        Time steps per streaming block.
+    downsampling:
+        Stride of the arrow subgrid the wind-vector payload keeps; 1 keeps every
+        cell.
+
+    Returns
+    -------
+    list[WindHeightSeries]
+        One series per target, in *targets* order.
+
+    Raises
+    ------
+    ValueError
+        When *block_steps* is not positive.
     """
     from micrometeorology.wrf.interpolation import VerticalInterpolator
 
@@ -703,7 +773,6 @@ def stream_wind_at_heights(
         v_c = v_raw[:, :, :-1, :] + v_raw[:, :, 1:, :]
         v_c /= 2.0
         del v_raw
-        # Onto true north before any bearing is taken, as extract_wind does at 10 m.
         u_c, v_c = rotate_to_earth_relative(ds, u_c, v_c, t0, t1)
 
         ph = ds.get_variable_block("PH", t0, t1)
@@ -715,7 +784,7 @@ def stream_wind_at_heights(
         height_agl /= 2.0
         del height
         hgt = ds.get_variable_block("HGT", t0, t1)
-        height_agl -= hgt[:, np.newaxis, :, :]  # level-centered height -> meters AGL
+        height_agl -= hgt[:, np.newaxis, :, :]
         del hgt
 
         speed_4d = np.hypot(u_c, v_c)

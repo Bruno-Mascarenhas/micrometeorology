@@ -3,6 +3,10 @@
 Each column is reduced by the rule its quantity demands: mean for state
 variables, sum for accumulations such as precipitation, and a vector mean for
 wind direction (which has no scalar average across the 0/360 wrap).
+
+Timestamps are naive station-local throughout, as they arrive from the
+datalogger's own clock (see :mod:`micrometeorology.sensors.ingestion`); the
+window edges are therefore local wall-clock hours, not UTC ones.
 """
 
 import logging
@@ -32,10 +36,14 @@ def aggregate_to_hourly(
     Parameters
     ----------
     df:
-        Input DataFrame with a DatetimeIndex (e.g. 5-minute data).
+        Input DataFrame with a naive station-local ``DatetimeIndex`` (e.g.
+        5-minute data). Non-numeric columns are excluded from the result.
     min_samples:
         Minimum number of valid (non-NaN) samples required per window.
-        Windows with fewer samples produce NaN.
+        Windows with fewer samples produce NaN. This is a completeness gate, not
+        a physical one: it decides whether an hour is representable at all, so a
+        partly-clouded hour reported from four samples is withheld rather than
+        published as if it summarised twelve.
     sum_columns:
         Column names that should be *summed* (e.g. precipitation).
     wind_dir_columns:
@@ -51,7 +59,12 @@ def aggregate_to_hourly(
     Returns
     -------
     pd.DataFrame
-        Aggregated DataFrame at the requested frequency.
+        Aggregated frame at the requested frequency, indexed by window start in
+        the same naive station-local clock as *df*. It holds every numeric
+        column plus any declared sum or direction column, in the units they
+        arrived in; direction stays in degrees ``[0, 360)``. Windows failing
+        *min_samples* hold ``NaN``, and so do windows the index never covered,
+        since resampling fills the gaps.
     """
     sum_cols = set(sum_columns or [])
     dir_cols = set(wind_dir_columns or [])

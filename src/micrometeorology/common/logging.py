@@ -21,6 +21,12 @@ def setup_logging(level: str = "INFO", *, log_file: str | None = None) -> None:
     log_file:
         Optional path to a log file. If given, a ``FileHandler`` is added
         alongside the stream handler.
+
+    Notes
+    -----
+    ``matplotlib``, ``PIL``, ``fiona`` and ``rasterio`` are pinned to
+    ``WARNING``: at ``INFO`` they bury the pipeline's own messages under font
+    cache and driver chatter.
     """
     fmt = "%(asctime)s | %(name)-40s | %(levelname)-7s | %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
@@ -40,6 +46,5 @@ def setup_logging(level: str = "INFO", *, log_file: str | None = None) -> None:
         force=True,
     )
 
-    # Third-party loggers that are chatty at INFO.
     for name in ("matplotlib", "PIL", "fiona", "rasterio"):
         logging.getLogger(name).setLevel(logging.WARNING)
