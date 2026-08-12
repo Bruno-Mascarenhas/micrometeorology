@@ -44,8 +44,6 @@ __all__ = [
 #: lazily on the first item, so importing this module never pulls it.
 type SampleTensors = dict[str, Any]
 
-#: Regression target columns (raw physical units; NaN = missing).
-_REGRESSION_TARGETS = ("target_dhi", "target_kindex", "cloud_fraction")
 
 #: Dataset-level temporal windowing modes for the embedding dataset. The name
 #: set is owned by :data:`allsky.config.AlignmentStrategyName` (a leaf module),

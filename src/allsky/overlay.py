@@ -26,8 +26,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from allsky.data.contracts import QCFlag
+from allsky.video import JPEG_QUALITY, MANIFEST_FILENAME
+from allsky.video import MANIFEST_COLUMNS as VIDEO_MANIFEST_COLUMNS
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +80,10 @@ PACKED_GLYPH_BANK = (
 )
 
 FRAME_FILENAME_FORMAT = "allsky-%Y%m%d-%H%M"
-MANIFEST_FILENAME = "manifest.parquet"
-MANIFEST_COLUMNS = ("frame_path", "timestamp", "video", "index", "qc_frame_flags")
-JPEG_QUALITY = 92
+#: Overlay-timestamped extraction writes the frame manifest of
+#: :mod:`allsky.video` with one extra column carrying the timestamp provenance,
+#: so both extraction paths produce a manifest the builder reads the same way.
+MANIFEST_COLUMNS = (*VIDEO_MANIFEST_COLUMNS, "qc_frame_flags")
 
 
 class OverlayTimestampError(ValueError):
@@ -510,7 +514,7 @@ def extract_frames_with_overlay_timestamps(
     *,
     step: int = 1,
     resize: int | tuple[int, int] | None = None,
-):
+) -> pd.DataFrame:
     """Extract JPEG frames named by the timestamp burned into each frame.
 
     Files are written as ``allsky-YYYYMMDD-HHMM.jpg`` at quality
@@ -550,7 +554,6 @@ def extract_frames_with_overlay_timestamps(
         cannot be trusted; nothing is written in that case.
     """
     import imageio.v3 as iio
-    import pandas as pd
 
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
