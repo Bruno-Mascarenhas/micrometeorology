@@ -7,12 +7,14 @@ empty safety, and degenerate single-class classification input.
 import math
 
 import numpy as np
+import pytest
 
 from allsky.evaluation.metrics import (
     CLASSIFICATION_METRIC_KEYS,
     REGRESSION_METRIC_KEYS,
     classification_metrics,
     regression_metrics,
+    skill_score,
 )
 
 
@@ -108,3 +110,20 @@ class TestClassificationMetrics:
         assert metrics["n"] == 0
         assert math.isnan(metrics["accuracy"])
         assert metrics["confusion"] == [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+
+
+def test_a_model_matching_its_reference_scores_zero_skill():
+    assert skill_score(10.0, 10.0) == 0.0
+
+
+def test_a_perfect_model_scores_full_skill():
+    assert skill_score(0.0, 10.0) == 1.0
+
+
+def test_a_model_worse_than_its_reference_scores_negative_skill():
+    assert skill_score(20.0, 10.0) == -1.0
+
+
+@pytest.mark.parametrize("reference", [0.0, float("nan")])
+def test_an_unusable_reference_yields_no_skill_rather_than_infinity(reference: float):
+    assert math.isnan(skill_score(10.0, reference))

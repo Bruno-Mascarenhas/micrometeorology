@@ -32,12 +32,14 @@ from allsky.config import SiteConfig
 from allsky.solar import cos_zenith, solar_elevation_deg
 
 type DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
+type ArrayLike = Sequence[float] | np.ndarray | pd.Series
 
 __all__ = [
     "HAURWITZ_A_WM2",
     "HAURWITZ_B",
     "clear_sky_index",
     "haurwitz_ghi",
+    "haurwitz_ghi_from_cos_zenith",
 ]
 
 #: Amplitude coefficient of the Haurwitz clear-sky model, W m-2.
@@ -77,7 +79,25 @@ def haurwitz_ghi(
     normalization reference for ``k*``, where that bias largely cancels, not
     as an absolute irradiance predictor.
     """
-    cosz = np.asarray(cos_zenith(timestamps, site, utc_offset_hours), dtype=np.float64)
+    return haurwitz_ghi_from_cos_zenith(cos_zenith(timestamps, site, utc_offset_hours))
+
+
+def haurwitz_ghi_from_cos_zenith(cos_zenith_values: ArrayLike) -> np.ndarray:
+    """Haurwitz clear-sky GHI from the cosine of the solar zenith angle.
+
+    Parameters
+    ----------
+    cos_zenith_values:
+        Cosine of the solar zenith angle, shape ``(N,)``, dimensionless.
+        Non-positive entries mean the sun is below the horizon.
+
+    Returns
+    -------
+    numpy.ndarray
+        Clear-sky global horizontal irradiance, shape ``(N,)``, W m-2, zero
+        wherever the sun is down.
+    """
+    cosz = np.asarray(cos_zenith_values, dtype=np.float64)
     sun_up = cosz > 0.0
     # Clamp the below-horizon cosines to 1.0 before dividing so the exp never
     # sees 0 or a negative argument; the result is masked back to 0 anyway.
