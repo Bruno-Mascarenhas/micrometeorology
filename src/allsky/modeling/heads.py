@@ -23,6 +23,7 @@ from typing import cast
 from torch import Tensor, nn
 
 from allsky.config import TargetsConfig
+from allsky.data.contracts import SKY_CLASS_COUNT
 from allsky.modeling.contracts import ModelOutputs
 
 __all__ = [
@@ -145,7 +146,7 @@ class KIndexHead(nn.Module):
 class SkyHead(nn.Module):
     """Sky-condition classification head (three logits)."""
 
-    def __init__(self, in_dim: int, n_classes: int = 3) -> None:
+    def __init__(self, in_dim: int, n_classes: int = SKY_CLASS_COUNT) -> None:
         super().__init__()
         self.linear = nn.Linear(in_dim, n_classes)
 
@@ -176,7 +177,9 @@ class Heads(nn.Module):
     :class:`~allsky.modeling.contracts.ModelOutputs`.
     """
 
-    def __init__(self, in_dim: int, targets: TargetsConfig, *, n_classes: int = 3) -> None:
+    def __init__(
+        self, in_dim: int, targets: TargetsConfig, *, n_classes: int = SKY_CLASS_COUNT
+    ) -> None:
         super().__init__()
         heads: list[nn.Module] = []
         if targets.dhi.enabled:

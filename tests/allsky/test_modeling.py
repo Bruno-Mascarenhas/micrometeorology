@@ -13,6 +13,7 @@ import torch
 from torch import nn
 
 from allsky.config import ExperimentConfig, load_experiment_config
+from allsky.data.contracts import SKY_CLASS_COUNT
 from allsky.features import active_feature_groups, resolve_feature_set
 from allsky.features.normalization import TargetNormalizer
 from allsky.modeling.baselines import ClimatologyModel
@@ -121,7 +122,7 @@ def test_registry_model_builds_and_forwards_all_heads(model_name: str):
     assert out["dhi"].shape == (BATCH,)
     assert out["dhi_log_var"].shape == (BATCH,)
     assert out["kindex"].shape == (BATCH,)
-    assert out["sky_logits"].shape == (BATCH, 3)
+    assert out["sky_logits"].shape == (BATCH, SKY_CLASS_COUNT)
     assert out["cloud_fraction"].shape == (BATCH,)
     for key, value in out.items():
         assert value.dtype == torch.float32, key

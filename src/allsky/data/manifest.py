@@ -40,7 +40,15 @@ from allsky.data.alignment import CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
     GEOMETRY_COLUMNS,
+    SKY_CLASS_KT_UPPER_BOUNDS,
     SKY_CLASS_MISSING,
+    SKY_CLASS_NAMES,
+    SKY_CLASS_NAMES_PT,
+    SKY_CLASS_REFERENCE,
+    SKY_CLEAR,
+    SKY_CLOUDY,
+    SKY_PARTLY_CLOUDY_CLEAR,
+    SKY_PARTLY_CLOUDY_DIFFUSE,
     QCFlag,
     manifest_column_dtypes,
     to_relative,
@@ -84,8 +92,6 @@ def build_manifest(
     diffuse_column: str | None = "PSP_Wm2_Avg",
     kindex_kind: str = "kstar",
     alignment: CenterFrame | None = None,
-    class_clear: float = 0.65,
-    class_overcast: float = 0.35,
     min_elevation_deg: float = 10.0,
     night_min_elevation_deg: float | None = 5.0,
     max_kindex: float | None = None,
@@ -123,9 +129,6 @@ def build_manifest(
         Build-time pairing strategy; must be a :class:`CenterFrame` (the
         default) — the windowed strategies pool at dataset level and have no
         ``pair`` method.
-    class_clear, class_overcast:
-        k-index thresholds for the ``sky_class`` bins (>= clear, >= overcast,
-        else overcast).
     min_elevation_deg:
         Elevation floor below which the k-index is undefined and ``LOW_SUN`` is
         flagged.  Rows here are *kept* (with ``LOW_SUN``) as long as they clear
@@ -294,7 +297,7 @@ def build_manifest(
     else:
         target_dhi = pseudo_diffuse(ghi, kt)
 
-    sky_class = _classify_sky(kindex, class_clear, class_overcast)
+    sky_class = _classify_sky(kt, labelable=elevation >= min_elevation_deg)
     cloud_fraction = np.full(len(frames), np.nan, dtype=np.float64)
 
     # --- qc flags ----------------------------------------------------------
@@ -338,6 +341,7 @@ def build_manifest(
             "target_source": [target_source] * n_rows,
             "target_kindex": np.asarray(kindex, dtype=np.float64),
             "kindex_kind": [kindex_kind] * n_rows,
+            "target_kt": np.asarray(kt, dtype=np.float64),
             "sky_class": sky_class,
             "cloud_fraction": cloud_fraction,
             "qc_flags": qc_flags,
@@ -360,8 +364,6 @@ def build_manifest(
         row_count=len(manifest),
         site=site,
         thresholds={
-            "class_clear": class_clear,
-            "class_overcast": class_overcast,
             "min_elevation_deg": min_elevation_deg,
             "night_min_elevation_deg": night_min_elevation_deg,
             "max_kindex": max_kindex,
@@ -411,8 +413,6 @@ def build_manifest_from_prepare_config(
         diffuse_column=cfg.targets.diffuse_column,
         kindex_kind=cfg.targets.kindex_kind,
         alignment=alignment,
-        class_clear=cfg.targets.class_clear,
-        class_overcast=cfg.targets.class_overcast,
         night_min_elevation_deg=cfg.night_filter.min_solar_elevation_deg,
         config_sha256=config_sha256,
     )
@@ -562,11 +562,42 @@ def _reject_dead_channel(values: np.ndarray, column: str, remedy: str) -> None:
     )
 
 
-def _classify_sky(kindex: np.ndarray, clear: float, overcast: float) -> np.ndarray:
-    """k-index -> sky class (0 clear / 1 partial / 2 overcast); NaN -> -1."""
-    k = np.asarray(kindex, dtype=np.float64)
-    labels = np.select([k >= clear, k >= overcast], [0, 1], default=2).astype(np.int64)
-    labels[~np.isfinite(k)] = SKY_CLASS_MISSING
+def _classify_sky(kt: np.ndarray, *, labelable: np.ndarray) -> np.ndarray:
+    """Label each sample with its published sky condition from the clearness index.
+
+    Parameters
+    ----------
+    kt:
+        Clearness index Kt (GHI over extraterrestrial horizontal irradiance),
+        shape ``(N,)``, dimensionless.  Non-finite entries are unlabelable.
+    labelable:
+        Boolean mask, shape ``(N,)``, false where the sun is too low for Kt to
+        mean anything (its denominator collapses towards zero near the
+        horizon).  Those rows are labelled :data:`SKY_CLASS_MISSING` rather than
+        binned, so a horizon artefact never enters training as a real class.
+
+    Returns
+    -------
+    numpy.ndarray
+        Class integers, shape ``(N,)``, dtype ``int64``: ``0`` cloudy, ``1``
+        partly cloudy with diffuse dominance, ``2`` partly cloudy with clear
+        dominance, ``3`` clear, and :data:`SKY_CLASS_MISSING` where Kt is not
+        finite.  The integer is the published condition number minus one.
+
+    Notes
+    -----
+    The bins are the four sky conditions of Escobedo et al. (2009), applied to
+    Kt and not to the clear-sky index: the published bounds are defined on the
+    clearness index, so classifying k\\* against them would relabel the record.
+    """
+    values = np.asarray(kt, dtype=np.float64)
+    cloudy, diffuse_dominant, clear_dominant = SKY_CLASS_KT_UPPER_BOUNDS
+    labels = np.select(
+        [values <= cloudy, values <= diffuse_dominant, values <= clear_dominant],
+        [SKY_CLOUDY, SKY_PARTLY_CLOUDY_DIFFUSE, SKY_PARTLY_CLOUDY_CLEAR],
+        default=SKY_CLEAR,
+    ).astype(np.int64)
+    labels[~np.isfinite(values) | ~np.asarray(labelable, dtype=bool)] = SKY_CLASS_MISSING
     return labels
 
 
@@ -611,6 +642,12 @@ def _build_meta(
         "feature_set": feature_set,
         "feature_columns": list(feature_columns),
         "kindex_kind": kindex_kind,
+        "sky_classes": {
+            "names": list(SKY_CLASS_NAMES),
+            "names_pt": list(SKY_CLASS_NAMES_PT),
+            "kt_upper_bounds": list(SKY_CLASS_KT_UPPER_BOUNDS),
+            "reference": SKY_CLASS_REFERENCE,
+        },
         "target_source": target_source,
         "config_sha256": config_sha256,
         "code_version": _code_version(),

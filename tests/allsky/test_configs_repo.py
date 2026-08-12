@@ -28,6 +28,7 @@ from allsky.config import (
     load_experiment_config,
     load_prepare_config,
 )
+from allsky.data.contracts import SKY_CLASS_COUNT
 from allsky.modeling.registry import MODEL_BUILDERS, build_model
 
 _CONFIGS = Path(__file__).resolve().parents[2] / "configs" / "allsky"
@@ -163,6 +164,6 @@ def test_experiment_builds_and_forwards(experiment: Path) -> None:
     if cfg.targets.kindex.enabled:
         assert outputs["kindex"].shape == (_BATCH,)
     if cfg.targets.sky.enabled:
-        assert outputs["sky_logits"].shape == (_BATCH, 3)
+        assert outputs["sky_logits"].shape == (_BATCH, SKY_CLASS_COUNT)
     # cloud_fraction stays disabled everywhere (no ground truth yet).
     assert "cloud_fraction" not in outputs

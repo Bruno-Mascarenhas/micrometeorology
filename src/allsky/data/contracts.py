@@ -28,12 +28,17 @@ __all__ = [
     "GEOMETRY_COLUMNS",
     "META_COLUMNS",
     "PROVENANCE_COLUMNS",
+    "SKY_CLASS_COUNT",
+    "SKY_CLASS_KT_UPPER_BOUNDS",
     "SKY_CLASS_MISSING",
     "SKY_CLASS_NAMES",
+    "SKY_CLASS_NAMES_PT",
+    "SKY_CLASS_REFERENCE",
     "SKY_CLASS_VALUES",
     "SKY_CLEAR",
-    "SKY_OVERCAST",
-    "SKY_PARTIALLY_CLOUDY",
+    "SKY_CLOUDY",
+    "SKY_PARTLY_CLOUDY_CLEAR",
+    "SKY_PARTLY_CLOUDY_DIFFUSE",
     "SPLIT_COLUMN",
     "TARGET_COLUMNS",
     "QCFlag",
@@ -77,6 +82,7 @@ TARGET_COLUMNS: Mapping[str, str] = {
     "target_source": "string",
     "target_kindex": "float64",
     "kindex_kind": "string",
+    "target_kt": "float64",
     "sky_class": "int64",
     "cloud_fraction": "float64",
     "qc_flags": "int64",
@@ -120,16 +126,44 @@ class QCFlag(IntFlag):
     FRAME_SATURATED = 32
 
 
-#: Sky-condition class labels (match the k-index cloud bins).
-SKY_CLEAR = 0
-SKY_PARTIALLY_CLOUDY = 1
-SKY_OVERCAST = 2
-#: Sentinel for an unlabelable sample (NaN k-index); ``-1`` in the batch.
+#: Sky-condition classes I..IV, ordered by increasing clearness index so the
+#: class integer is the published condition number minus one.
+# Escobedo, Gomes, Oliveira & Soares (2009), Applied Energy 86(3):299-309, §3.1;
+# Portuguese nomenclature after Teramoto & Escobedo (2012), RBEAA 16(9):985-992.
+SKY_CLOUDY = 0
+SKY_PARTLY_CLOUDY_DIFFUSE = 1
+SKY_PARTLY_CLOUDY_CLEAR = 2
+SKY_CLEAR = 3
+#: Sentinel for an unlabelable sample (non-finite Kt); ``-1`` in the batch.
 SKY_CLASS_MISSING = -1
 #: Valid class integers (the missing sentinel is intentionally excluded).
-SKY_CLASS_VALUES = (SKY_CLEAR, SKY_PARTIALLY_CLOUDY, SKY_OVERCAST)
-#: Human-readable class names, indexable by the class integer.
-SKY_CLASS_NAMES = ("clear", "partially_cloudy", "overcast")
+SKY_CLASS_VALUES = (
+    SKY_CLOUDY,
+    SKY_PARTLY_CLOUDY_DIFFUSE,
+    SKY_PARTLY_CLOUDY_CLEAR,
+    SKY_CLEAR,
+)
+#: Machine-readable class names, indexable by the class integer.
+SKY_CLASS_NAMES = ("cloudy", "partly_cloudy_diffuse", "partly_cloudy_clear", "clear")
+#: The published Portuguese condition names, in the same order.
+SKY_CLASS_NAMES_PT = (
+    "nebuloso",
+    "parcialmente nebuloso com dominancia para o difuso",
+    "parcialmente nebuloso com dominancia para o claro",
+    "claro",
+)
+#: Upper Kt bounds of conditions I..III; condition IV is everything above the
+#: last bound.  Inclusive upper edges, as published.
+SKY_CLASS_KT_UPPER_BOUNDS = (0.35, 0.55, 0.65)
+#: Citation recorded in every manifest sidecar so a published figure can be
+#: traced back to the classification it used.
+SKY_CLASS_REFERENCE = (
+    "Escobedo, Gomes, Oliveira & Soares (2009), Applied Energy 86(3):299-309, "
+    "sec. 3.1; Portuguese nomenclature after Teramoto & Escobedo (2012), "
+    "RBEAA 16(9):985-992"
+)
+#: Number of sky classes a classification head must emit.
+SKY_CLASS_COUNT = len(SKY_CLASS_VALUES)
 
 
 def sky_class_name(value: int) -> str:

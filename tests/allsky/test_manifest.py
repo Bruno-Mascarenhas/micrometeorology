@@ -170,12 +170,39 @@ class TestBuildManifest:
         manifest, _ = build_manifest(frames, make_sensor_frame(site), site=site, data_root=tmp_path)
         assert manifest["cloud_fraction"].isna().all()
 
-    def test_sky_class_from_kindex_bins(self, site: SiteConfig, tmp_path: Path):
+    @pytest.mark.parametrize(
+        ("ghi_scale", "expected"),
+        [(0.9, 3), (0.6, 2), (0.45, 1), (0.2, 0)],
+    )
+    def test_the_sky_class_bins_kt_into_the_four_published_conditions(
+        self, site: SiteConfig, tmp_path: Path, ghi_scale: float, expected: int
+    ):
         frames = make_frames(tmp_path, ["2025-03-21 12:00"])
-        # ghi_scale 0.9 -> k* ~ clear (>= 0.65).
-        clear_sensor = make_sensor_frame(site, ghi_scale=0.9)
-        manifest, _ = build_manifest(frames, clear_sensor, site=site, data_root=tmp_path)
-        assert manifest["sky_class"].iloc[0] == 0
+        sensor = make_sensor_frame(site, ghi_scale=ghi_scale)
+        manifest, _ = build_manifest(frames, sensor, site=site, data_root=tmp_path)
+        assert manifest["sky_class"].iloc[0] == expected
+        kt = float(manifest["target_kt"].iloc[0])
+        assert 0.0 <= kt <= 1.5
+
+    def test_the_class_bounds_are_read_off_kt_and_not_off_the_clear_sky_index(
+        self, site: SiteConfig, tmp_path: Path
+    ):
+        frames = make_frames(tmp_path, ["2025-03-21 12:00"])
+        sensor = make_sensor_frame(site, ghi_scale=0.6)
+        on_kt, _ = build_manifest(frames, sensor, site=site, data_root=tmp_path, kindex_kind="kt")
+        on_kstar, _ = build_manifest(
+            frames, sensor, site=site, data_root=tmp_path, kindex_kind="kstar"
+        )
+        assert on_kt["target_kindex"].iloc[0] != on_kstar["target_kindex"].iloc[0]
+        assert on_kt["sky_class"].iloc[0] == on_kstar["sky_class"].iloc[0]
+
+    def test_the_manifest_records_the_classification_it_used(
+        self, site: SiteConfig, tmp_path: Path
+    ):
+        frames = make_frames(tmp_path, ["2025-03-21 12:00"])
+        _, meta = build_manifest(frames, make_sensor_frame(site), site=site, data_root=tmp_path)
+        assert meta["sky_classes"]["kt_upper_bounds"] == [0.35, 0.55, 0.65]
+        assert "Escobedo" in meta["sky_classes"]["reference"]
 
     def test_missing_ghi_column_raises(self, site: SiteConfig, tmp_path: Path):
         frames = make_frames(tmp_path, ["2025-03-21 12:00"])

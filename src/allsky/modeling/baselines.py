@@ -24,6 +24,7 @@ from numpy.typing import ArrayLike
 from torch import Tensor, nn
 
 from allsky.config import TargetsConfig
+from allsky.data.contracts import SKY_CLASS_COUNT
 from allsky.features.normalization import TargetNormalizer
 from allsky.modeling.contracts import ModelOutputs
 from allsky.modeling.heads import Heads, Trunk
@@ -60,7 +61,7 @@ class ClimatologyModel(nn.Module):
     cloud_fraction_const: Tensor
     sky_logits_const: Tensor
 
-    def __init__(self, targets: TargetsConfig, *, n_classes: int = 3) -> None:
+    def __init__(self, targets: TargetsConfig, *, n_classes: int = SKY_CLASS_COUNT) -> None:
         super().__init__()
         self.n_classes = n_classes
         self._enabled = {

@@ -173,7 +173,7 @@ class KIndexTargetConfig(BaseModel):
 
 
 class SkyClassTargetConfig(BaseModel):
-    """Sky-condition classification head (clear / partial / overcast)."""
+    """Sky-condition classification head over the four published Kt conditions."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -354,14 +354,18 @@ class PrepareSensorConfig(BaseModel):
 
 
 class PrepareTargetsConfig(BaseModel):
-    """Target derivation: diffuse column, k-index kind and sky-class thresholds."""
+    """Target derivation: the diffuse column and which k-index to record.
+
+    The sky-condition bins are not configurable: they are the published bounds
+    of :data:`allsky.data.contracts.SKY_CLASS_KT_UPPER_BOUNDS`, always applied
+    to Kt. A config carrying the retired ``class_clear``/``class_overcast`` keys
+    is rejected rather than silently ignored.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     diffuse_column: str | None = "PSP_Wm2_Avg"
     kindex_kind: Literal["kstar", "kt"] = "kstar"
-    class_clear: float = 0.65
-    class_overcast: float = 0.35
 
 
 class DatasetOutputConfig(BaseModel):
