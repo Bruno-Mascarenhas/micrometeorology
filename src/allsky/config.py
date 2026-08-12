@@ -1,10 +1,20 @@
 """Configuration models for the all-sky pipeline."""
 
+import datetime as dt
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+#: Fixed UTC offset of the LabMiM camera and datalogger clocks. Pinned rather
+#: than read from the host TZ: a UTC-configured container would otherwise shift
+#: every capture time by three hours while the instruments keep stamping local
+#: time. A fixed offset is correct here because America/Bahia has observed no
+#: DST since 2019.
+SITE_UTC_OFFSET_HOURS = -3
+SITE_TZ_NAME = "America/Bahia"
+SITE_TZ = dt.timezone(dt.timedelta(hours=SITE_UTC_OFFSET_HOURS))
 
 
 class VideoConfig(BaseModel):

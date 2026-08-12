@@ -26,7 +26,7 @@ content ``manifest_sha256``.
 import json
 import logging
 from collections.abc import Iterable, Mapping
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,7 @@ import pandas as pd
 
 from allsky.atomic import atomic_write, atomic_write_json
 from allsky.clearsky import clear_sky_index
-from allsky.config import PrepareConfig, SiteConfig
+from allsky.config import SITE_TZ, SITE_TZ_NAME, SITE_UTC_OFFSET_HOURS, PrepareConfig, SiteConfig
 from allsky.data.alignment import CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
@@ -66,10 +66,11 @@ __all__ = [
 TARGET_SOURCE_MEASURED = "measured"
 TARGET_SOURCE_ERBS = "erbs_pseudo"
 
-#: Fixed UTC offset of the America/Bahia logger/camera clock (no DST since 2019).
-LOCAL_UTC_OFFSET_HOURS = -3
-LOCAL_TZ_NAME = "America/Bahia"
-_LOCAL_TZ = timezone(timedelta(hours=LOCAL_UTC_OFFSET_HOURS))
+#: Fixed UTC offset of the America/Bahia logger/camera clock, re-exported from
+#: :mod:`allsky.config` so the pipeline has one pinned site clock.
+LOCAL_UTC_OFFSET_HOURS = SITE_UTC_OFFSET_HOURS
+LOCAL_TZ_NAME = SITE_TZ_NAME
+_LOCAL_TZ = SITE_TZ
 
 
 def build_manifest(

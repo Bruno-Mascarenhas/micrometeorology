@@ -8,19 +8,19 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeIs
+from typing import Any, Protocol, TypeIs, runtime_checkable
 
 import numpy as np
 import pandas as pd
 
-from allsky.archive import ArchiveClient
 from allsky.atomic import atomic_write, atomic_write_json
-from allsky.config import SiteConfig
+from allsky.config import SITE_TZ, SiteConfig
 from allsky.provenance import code_version
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "LiveFrameSource",
     "Snapshot",
     "capture_snapshot",
     "predict_snapshot",
@@ -33,6 +33,16 @@ SENSOR_TIME_COLUMNS = ("timestamp", "TIMESTAMP", "datetime", "time")
 LIVE_FRAME_MAX_AGE = pd.Timedelta(minutes=10)
 
 
+@runtime_checkable
+class LiveFrameSource(Protocol):
+    """The part of :class:`allsky.archive.ArchiveClient` a capture actually uses."""
+
+    base_url: str
+
+    def fetch_live_image(self) -> tuple[bytes, dict[str, str]]:
+        """Return the camera's current frame and the response headers."""
+
+
 @dataclass(frozen=True)
 class Snapshot:
     image_path: Path
@@ -43,7 +53,12 @@ class Snapshot:
     prediction: dict[str, Any] | None = None
 
 
-def _naive_local_from_http_date(headers: dict[str, str]) -> pd.Timestamp | None:
+def _site_now() -> pd.Timestamp:
+    """Current time on the camera's own clock, as a naive local timestamp."""
+    return pd.Timestamp(dt.datetime.now(tz=SITE_TZ).replace(tzinfo=None)).floor("s")
+
+
+def _naive_site_time_from_http_date(headers: dict[str, str]) -> pd.Timestamp | None:
     raw = headers.get("last-modified")
     if not raw:
         return None
@@ -52,7 +67,7 @@ def _naive_local_from_http_date(headers: dict[str, str]) -> pd.Timestamp | None:
     except ValueError:
         logger.warning("unparseable Last-Modified header on the live frame: %r", raw)
         return None
-    return pd.Timestamp(parsed.astimezone().replace(tzinfo=None))
+    return pd.Timestamp(parsed.astimezone(SITE_TZ).replace(tzinfo=None))
 
 
 def _overlay_timestamp(payload: bytes) -> tuple[pd.Timestamp | None, str | None]:
@@ -77,16 +92,16 @@ def _fresh(candidate: pd.Timestamp | None, now: pd.Timestamp) -> TypeIs[pd.Times
 
 
 def capture_snapshot(
-    client: ArchiveClient, out_dir: str | Path, *, timestamp: pd.Timestamp | None = None
+    client: LiveFrameSource, out_dir: str | Path, *, timestamp: pd.Timestamp | None = None
 ) -> Snapshot:
     """Fetch the current frame into *out_dir* alongside a JSON provenance sidecar."""
     payload, headers = client.fetch_live_image()
     if not payload:
         raise ValueError("the camera returned an empty live frame")
 
-    now = pd.Timestamp.now().floor("s")
+    now = _site_now()
     overlay_time, overlay_text = _overlay_timestamp(payload)
-    server_time = _naive_local_from_http_date(headers)
+    server_time = _naive_site_time_from_http_date(headers)
     if timestamp is not None:
         captured, source = timestamp, "argument"
     elif _fresh(overlay_time, now):

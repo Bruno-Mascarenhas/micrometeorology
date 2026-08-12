@@ -5,13 +5,17 @@
 chain by fetching the CA intermediate over the network.
 """
 
+import datetime as dt
+import io
 import json
 import os
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
 import pandas as pd
 import pytest
+from PIL import Image
 from typer.testing import CliRunner, Result
 
 from allsky.archive import LEDGER_FILENAME, ArchiveEntry, ArchiveError, Ledger, ledger_lock
@@ -26,8 +30,10 @@ from allsky.cli.archive import (
     UploadChoice,
     _plan_day,
 )
+from allsky.config import SITE_TZ
 from allsky.drive import DriveTarget
 from allsky.overlay import MANIFEST_FILENAME
+from allsky.snapshot import capture_snapshot
 from tests.allsky import _archive_fake as fake
 
 runner = CliRunner()
@@ -594,3 +600,50 @@ def test_both_archive_commands_are_registered_on_the_allsky_app():
     assert result.exit_code == 0
     assert "sync-archive" in result.output
     assert "snapshot" in result.output
+
+
+class _StubLiveCamera:
+    """Serves one live frame with fixed headers, so only the clock varies."""
+
+    base_url = "https://camera.invalid/"
+
+    def __init__(self, payload: bytes, headers: dict[str, str]) -> None:
+        self._payload = payload
+        self._headers = headers
+
+    def fetch_live_image(self) -> tuple[bytes, dict[str, str]]:
+        return self._payload, self._headers
+
+
+def _overlay_jpeg(stamp: dt.datetime) -> bytes:
+    frame = fake.render_overlay_frame(stamp.strftime("%Y%m%d%H%M%S"))
+    buffer = io.BytesIO()
+    Image.fromarray(frame).save(buffer, format="JPEG", quality=95)
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("zone", ["America/Bahia", "UTC", "Asia/Tokyo"])
+def test_the_capture_clock_is_the_sites_not_the_hosts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, zone: str
+):
+    site_now = dt.datetime.now(tz=SITE_TZ).replace(microsecond=0)
+    naive_site_now = site_now.replace(tzinfo=None)
+    camera = _StubLiveCamera(
+        _overlay_jpeg(naive_site_now),
+        {
+            "last-modified": site_now.astimezone(dt.UTC).strftime("%a, %d %b %Y %H:%M:%S GMT"),
+            "content-type": "image/jpeg",
+        },
+    )
+    monkeypatch.setenv("TZ", zone)
+    time.tzset()
+    try:
+        snapshot = capture_snapshot(camera, tmp_path / zone.replace("/", "_"))
+    finally:
+        monkeypatch.delenv("TZ", raising=False)
+        time.tzset()
+
+    assert snapshot.captured_at == pd.Timestamp(naive_site_now)
+    metadata = json.loads(snapshot.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["captured_at_source"] == "overlay"
+    assert metadata["server_last_modified_as_local"] == naive_site_now.isoformat()
