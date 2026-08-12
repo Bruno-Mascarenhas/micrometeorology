@@ -43,7 +43,7 @@ from numpy.typing import NDArray
 # The same solar geometry the climatology exporter uses, so "deep night" means
 # the same angle in both places.
 from allsky.config import SiteConfig
-from allsky.solar import cos_zenith, solar_elevation
+from allsky.solar import cos_zenith, solar_elevation_deg
 from micrometeorology.common.paths import ensure_dir
 from micrometeorology.sensors.ingestion import merge_dat_files
 
@@ -700,7 +700,7 @@ def night_corrupted_days(
     if not present:
         return []
     index = pd.DatetimeIndex(frame.index)
-    deep_night = solar_elevation(index, STATION_SITE, STATION_UTC_OFFSET_HOURS) < (
+    deep_night = solar_elevation_deg(index, STATION_SITE, STATION_UTC_OFFSET_HOURS) < (
         NIGHT_CORRUPTION_ELEVATION_DEG
     )
     offending = np.zeros(len(frame), dtype=bool)

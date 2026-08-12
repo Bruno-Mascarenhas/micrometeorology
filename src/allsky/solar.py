@@ -40,10 +40,10 @@ __all__ = [
     "eccentricity_correction",
     "equation_of_time",
     "extraterrestrial_ghi",
-    "hour_angle",
-    "solar_azimuth",
-    "solar_declination",
-    "solar_elevation",
+    "hour_angle_deg",
+    "solar_azimuth_deg",
+    "solar_declination_rad",
+    "solar_elevation_deg",
 ]
 
 #: Total solar irradiance at 1 AU (Kopp & Lean 2011), W m-2.
@@ -74,7 +74,7 @@ def _fractional_year(times: pd.DatetimeIndex) -> np.ndarray:
     return 2.0 * np.pi / 365.0 * (doy - 1.0 + (hours - 12.0) / 24.0)
 
 
-def solar_declination(timestamps: DatetimeLike) -> np.ndarray:
+def solar_declination_rad(timestamps: DatetimeLike) -> np.ndarray:
     """Solar declination in **radians** (Spencer 1971 series).
 
     Formula
@@ -145,7 +145,7 @@ def _resolve_utc_offset(longitude: float, utc_offset_hours: float | None) -> flo
     return round(longitude / 15.0)
 
 
-def hour_angle(
+def hour_angle_deg(
     timestamps: DatetimeLike,
     longitude: float,
     utc_offset_hours: float | None = None,
@@ -192,14 +192,14 @@ def cos_zenith(
     """
     times = _as_datetime_index(timestamps)
     lat = np.deg2rad(site.latitude)
-    decl = solar_declination(times)
-    ha = np.deg2rad(hour_angle(times, site.longitude, utc_offset_hours))
+    decl = solar_declination_rad(times)
+    ha = np.deg2rad(hour_angle_deg(times, site.longitude, utc_offset_hours))
     cosz = np.sin(lat) * np.sin(decl) + np.cos(lat) * np.cos(decl) * np.cos(ha)
     clipped: np.ndarray = np.clip(cosz, -1.0, 1.0)
     return clipped
 
 
-def solar_elevation(
+def solar_elevation_deg(
     timestamps: DatetimeLike,
     site: SiteConfig,
     utc_offset_hours: float | None = None,
@@ -214,7 +214,7 @@ def solar_elevation(
     return elevation
 
 
-def solar_azimuth(
+def solar_azimuth_deg(
     timestamps: DatetimeLike,
     site: SiteConfig,
     utc_offset_hours: float | None = None,
@@ -256,10 +256,10 @@ def solar_azimuth(
     """
     times = _as_datetime_index(timestamps)
     lat = np.deg2rad(site.latitude)
-    decl = solar_declination(times)
+    decl = solar_declination_rad(times)
     cosz = cos_zenith(times, site, utc_offset_hours)
     sinz = np.sin(np.arccos(cosz))
-    ha = hour_angle(times, site.longitude, utc_offset_hours)
+    ha = hour_angle_deg(times, site.longitude, utc_offset_hours)
 
     denominator = np.cos(lat) * sinz
     off_zenith = np.abs(denominator) > 1e-12

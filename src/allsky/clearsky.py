@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 from allsky.config import SiteConfig
-from allsky.solar import cos_zenith, solar_elevation
+from allsky.solar import cos_zenith, solar_elevation_deg
 
 type DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
 
@@ -128,7 +128,7 @@ def clear_sky_index(
     ghi_cs = haurwitz_ghi(timestamps, site, utc_offset_hours)
     if ghi_arr.shape != ghi_cs.shape:
         raise ValueError(f"ghi shape {ghi_arr.shape} does not match {ghi_cs.shape} timestamps")
-    elevation = solar_elevation(timestamps, site, utc_offset_hours)
+    elevation = solar_elevation_deg(timestamps, site, utc_offset_hours)
     valid = (elevation >= min_elevation_deg) & (ghi_cs > 0.0) & np.isfinite(ghi_arr)
     kstar = np.full_like(ghi_arr, np.nan)
     np.divide(ghi_arr, ghi_cs, out=kstar, where=valid)

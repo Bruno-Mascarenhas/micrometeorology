@@ -140,8 +140,8 @@ class TestFeatureEngineering:
 
         index = pd.DatetimeIndex(sensor_frame.index)
         frame = build_feature_frame(sensor_frame, index, site, "safe")
-        elevation = solar.solar_elevation(index, site)
-        azimuth = np.deg2rad(solar.solar_azimuth(index, site))
+        elevation = solar.solar_elevation_deg(index, site)
+        azimuth = np.deg2rad(solar.solar_azimuth_deg(index, site))
         np.testing.assert_allclose(frame["solar_elevation"].to_numpy(), elevation)
         np.testing.assert_allclose(frame["solar_zenith"].to_numpy(), 90.0 - elevation)
         np.testing.assert_allclose(frame["azimuth_sin"].to_numpy(), np.sin(azimuth))

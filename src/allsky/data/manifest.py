@@ -57,7 +57,7 @@ from allsky.data.splits import DaySplit
 from allsky.erbs import pseudo_diffuse
 from allsky.features import build_feature_frame, resolve_feature_set, validate_features
 from allsky.provenance import code_version, content_sha256
-from allsky.solar import clearness_index, solar_azimuth, solar_elevation
+from allsky.solar import clearness_index, solar_azimuth_deg, solar_elevation_deg
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +249,7 @@ def build_manifest(
 
     # --- geometry ----------------------------------------------------------
     utc_offset = float(LOCAL_UTC_OFFSET_HOURS)
-    elevation = solar_elevation(frame_times, site, utc_offset)
+    elevation = solar_elevation_deg(frame_times, site, utc_offset)
 
     # --- drop night frames (below the night threshold) BEFORE targets ------
     if night_min_elevation_deg is not None:
@@ -274,7 +274,7 @@ def build_manifest(
                 f"(night_min_elevation_deg={night_min_elevation_deg}); check sun coverage"
             )
 
-    azimuth = solar_azimuth(frame_times, site, utc_offset)
+    azimuth = solar_azimuth_deg(frame_times, site, utc_offset)
     zenith = 90.0 - elevation
 
     # --- targets -----------------------------------------------------------

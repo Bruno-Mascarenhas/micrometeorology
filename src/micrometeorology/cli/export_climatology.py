@@ -33,7 +33,7 @@ import typer
 # allsky.solar is pure numpy/pandas (no torch) and ships in the same wheel, so
 # this CLI reuses NOAA's formulas without pulling a training dependency in.
 from allsky.config import SiteConfig
-from allsky.solar import extraterrestrial_ghi, solar_elevation
+from allsky.solar import extraterrestrial_ghi, solar_elevation_deg
 from micrometeorology.common.git import run_git, source_root
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.stats import distributions as dist
@@ -213,7 +213,7 @@ def _season_slices(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
 def _elevation(frame: pd.DataFrame) -> np.ndarray:
     """Solar elevation in degrees for every row, for the daylight gates."""
-    elevation: np.ndarray = solar_elevation(_times(frame), SITE, UTC_OFFSET_HOURS)
+    elevation: np.ndarray = solar_elevation_deg(_times(frame), SITE, UTC_OFFSET_HOURS)
     return elevation
 
 
