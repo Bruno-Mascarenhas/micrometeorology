@@ -2,6 +2,8 @@
 
 A package that pairs one-day all-sky camera timelapses with LabMiM radiation-sensor records into a portable **v2 multimodal dataset** (manifest + frames + precomputed visual embeddings), then trains a ladder of multimodal models (V0–V7) that predict **diffuse horizontal irradiance** — and optionally a clear-sky index and a clear / partially-cloudy / overcast **sky class** — from the sky image plus engineered sensor features.
 
+> **Getting the videos.** The Planetário da UFBA camera archive is mirrored by `allsky sync-archive`, which also extracts frames and can push them to Google Drive — see [`allsky-archive.md`](allsky-archive.md). Read it before extracting frames from that camera: its capture interval changes between day and night and its videos do not all start at the same hour, so the `VideoConfig` `start_time`/`minutes_per_frame` model mislabels frames by up to 2 h 33 min. `sync-archive --extract` reads the timestamp the camera burns into each frame instead.
+
 The legacy v0 SkyFusionNet pipeline (`allsky info` / `build-index` / `allsky train --index`) has been **retired**. This document describes the current multimodal stack only. The full internal design — module map, artifact contracts, anti-leakage policy, alignment strategies, and the V0–V7 ladder — is in [`allsky-architecture.md`](allsky-architecture.md); this file is the CLI + config quickstart.
 
 ---
@@ -30,6 +32,10 @@ src/allsky/
 ├── __init__.py        # Package version and docstring
 ├── config.py          # VideoConfig/SiteConfig + Experiment/Prepare config trees + YAML loaders
 ├── video.py           # Streamed frame decoding, frame -> wall-clock mapping, JPEG extraction
+├── archive.py         # Mirrors the Planetário camera archive (HTTPS client, ledger, TLS repair)
+├── overlay.py         # Reads the timestamp the camera burns into each frame + timestamped extraction
+├── drive.py           # rclone uploads to Google Drive
+├── snapshot.py        # Live-frame capture + single-image prediction
 ├── preprocessing.py   # Static mask / crop / resize + per-frame visual QC
 ├── solar.py           # NOAA/Spencer solar position, extraterrestrial GHI, clearness index kt
 ├── clearsky.py        # Haurwitz clear-sky GHI + clear-sky index k*
