@@ -10,13 +10,19 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class VideoConfig(BaseModel):
     """How all-sky videos map to wall-clock time.
 
-    The camera produces one-day timelapse files named by date; each frame
-    covers ``minutes_per_frame`` minutes of real time starting at
-    ``start_time`` local time.
+    ``timestamps: overlay`` (the default) reads the capture time the camera
+    burns into every frame. ``timestamps: modelled`` instead places frame *N*
+    at ``start_time + N * minutes_per_frame``, which the Planetário da UFBA
+    camera does not follow — its capture interval changes between day and night
+    and its videos do not all start at the same hour, so the modelled mapping
+    mislabels frames by up to two and a half hours. See
+    ``docs/allsky-archive.md``; ``start_time`` and ``minutes_per_frame`` are
+    read only in ``modelled`` mode.
     """
 
     pattern: str = "data/all-sky/allsky-*.mp4"
     filename_date_format: str = "allsky-%Y%m%d"
+    timestamps: Literal["overlay", "modelled"] = "overlay"
     start_time: str = "06:00"
     minutes_per_frame: float = 1.0
 

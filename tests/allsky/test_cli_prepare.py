@@ -16,6 +16,7 @@ from allsky.bundle import validate_bundle
 from allsky.cli import app
 from allsky.config import SiteConfig
 from allsky.data.manifest import build_manifest, write_manifest_parquet
+from tests.allsky._archive_fake import write_overlay_video
 
 runner = CliRunner()
 
@@ -28,10 +29,16 @@ def _write_config(
     dat_path: Path,
     seed: int = 42,
 ) -> Path:
-    """Write a PrepareConfig YAML for the CLI."""
+    """Write a PrepareConfig YAML for the CLI.
+
+    The synthetic fixture video is 64 px wide and carries no burned-in stamp, so
+    these runs ask for the modelled frame->time mapping; the overlay default is
+    exercised by ``test_prepare_local_timestamps_frames_from_the_overlay``.
+    """
     path.write_text(
         "video:\n"
         f"  pattern: '{video_pattern}'\n"
+        "  timestamps: 'modelled'\n"
         "sensor:\n"
         f"  paths: ['{dat_path}']\n"
         "output:\n"
@@ -176,6 +183,39 @@ class TestPrepareLocal:
         assert "DRY RUN" in result.output
         assert "videos found:   1" in result.output
         assert not dataset_dir.exists()
+
+    def test_prepare_local_timestamps_frames_from_the_overlay(
+        self, tmp_path: Path, synthetic_dat: Path
+    ):
+        videos = tmp_path / "videos"
+        videos.mkdir()
+        stamps = [f"2026010106{minute:02d}30" for minute in range(4)]
+        write_overlay_video(videos / "allsky-20260101.mp4", stamps)
+        dataset_dir = tmp_path / "dataset"
+        config = tmp_path / "overlay.yaml"
+        config.write_text(
+            "video:\n"
+            f"  pattern: '{videos}/allsky-*.mp4'\n"
+            "sensor:\n"
+            f"  paths: ['{synthetic_dat}']\n"
+            "output:\n"
+            f"  dataset_dir: '{dataset_dir}'\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            app,
+            ["prepare-local", "--config", str(config), "--steps", "extract-frames,build-manifest"],
+        )
+        assert result.exit_code == 0, result.output
+
+        frames = pd.read_parquet(dataset_dir / "frames" / "allsky-20260101" / "manifest.parquet")
+        read_back = sorted(str(value) for value in frames["timestamp"])
+        assert read_back == [
+            "2026-01-01 06:00:30",
+            "2026-01-01 06:01:30",
+            "2026-01-01 06:02:30",
+            "2026-01-01 06:03:30",
+        ]
 
     def test_full_run_builds_manifest(
         self, tmp_path: Path, synthetic_video: Path, synthetic_dat: Path

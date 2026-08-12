@@ -264,6 +264,9 @@ def prepare_local(
     if not videos:
         typer.echo(f"WARNING: no videos matched pattern {cfg.video.pattern!r}")
 
+    if videos and "build-manifest" in step_set:
+        _check_sensor_coverage(cfg, videos)
+
     per_video = _run_extract_step(
         cfg=cfg,
         videos=videos,
@@ -458,6 +461,78 @@ def _write_frame_manifest(video_manifest: Path, frame_manifest: PandasDataFrame)
     atomic_write(video_manifest, lambda tmp: frame_manifest.to_parquet(tmp, index=False))
 
 
+def _video_day(path: str, cfg: PrepareConfig) -> Any:
+    from allsky.video import video_date
+
+    return video_date(path, cfg.video)
+
+
+def _check_sensor_coverage(cfg: PrepareConfig, videos: list[str]) -> None:
+    """Fail before extraction when the logger cannot pair with the videos on hand.
+
+    Extraction and visual QC run for minutes per video and every frame is then
+    discarded by the pairing step, so a coverage gap has to surface here rather
+    than as an empty manifest an hour later.
+    """
+    import datetime as dt
+
+    import pandas as pd
+
+    sensor_df = _load_sensor_df(cfg)
+    if sensor_df.empty:
+        typer.echo(f"ERROR: no sensor records read from {cfg.sensor.paths}")
+        raise typer.Exit(code=1)
+
+    index = pd.DatetimeIndex(sensor_df.index)
+    sensor_start, sensor_end = index.min(), index.max()
+    days = sorted({_video_day(video, cfg) for video in videos})
+    covered = [
+        day
+        for day in days
+        if sensor_start.date() <= day + dt.timedelta(days=1) and day <= sensor_end.date()
+    ]
+
+    typer.echo(
+        f"sensor coverage: {sensor_start:%Y-%m-%d %H:%M} .. {sensor_end:%Y-%m-%d %H:%M} "
+        f"({len(index)} records)"
+    )
+    typer.echo(f"video days:      {days[0]} .. {days[-1]} ({len(days)} videos)")
+
+    if not covered:
+        typer.echo(
+            "ERROR: the sensor record and the videos do not overlap, so no frame could ever "
+            "be paired with a measurement.\n"
+            f"  sensor ends   {sensor_end:%Y-%m-%d %H:%M}\n"
+            f"  videos start  {days[0]}\n"
+            "Export the logger up to the video dates (or narrow video.pattern to the days the "
+            "logger covers) before preparing."
+        )
+        raise typer.Exit(code=1)
+    if len(covered) < len(days):
+        typer.echo(
+            f"WARNING: only {len(covered)} of {len(days)} video days fall inside the sensor "
+            f"record ({covered[0]} .. {covered[-1]}); the rest will contribute no rows"
+        )
+
+
+def _extract_frames_for(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDataFrame:
+    """Extract every frame, timestamped per ``cfg.video.timestamps``."""
+    if cfg.video.timestamps == "overlay":
+        from allsky.overlay import extract_frames_with_overlay_timestamps
+
+        return extract_frames_with_overlay_timestamps(video, video_dir, step=1, resize=None)
+
+    from allsky.video import extract_frames
+
+    logger.warning(
+        "video.timestamps is 'modelled': frame N is placed at %s + N x %s min, a cadence this "
+        "camera does not follow (see docs/allsky-archive.md)",
+        cfg.video.start_time,
+        cfg.video.minutes_per_frame,
+    )
+    return extract_frames(video, video_dir, cfg.video, step=1, resize=None)
+
+
 def _extract_and_qc(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDataFrame:
     """Extract native frames then read them back for visual QC + preprocessing.
 
@@ -473,9 +548,9 @@ def _extract_and_qc(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDa
     import pandas as pd
 
     from allsky.preprocessing import _needs_preprocessing, process_frame, resolve_mask, visual_qc
-    from allsky.video import JPEG_QUALITY, extract_frames
+    from allsky.video import JPEG_QUALITY
 
-    frame_manifest = extract_frames(video, video_dir, cfg.video, step=1, resize=None)
+    frame_manifest = _extract_frames_for(video, video_dir, cfg)
     needs = _needs_preprocessing(cfg)
     mask = resolve_mask(cfg) if needs else None
 

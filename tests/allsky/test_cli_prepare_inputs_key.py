@@ -152,6 +152,7 @@ class TestIrrelevantConfigEditsDoNotRebuild:
         base = (
             "video:\n"
             f"  pattern: '{two_day_videos}/allsky-*.mp4'\n"
+            "  timestamps: 'modelled'\n"
             "sensor:\n"
             f"  paths: ['{multi_day_dat}']\n"
             "output:\n"
