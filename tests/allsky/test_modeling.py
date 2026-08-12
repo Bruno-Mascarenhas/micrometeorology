@@ -8,11 +8,12 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
 
-from allsky.config import ExperimentConfig, load_experiment_config
+from allsky.config import ExperimentConfig, TargetsConfig, load_experiment_config
 from allsky.data.contracts import SKY_CLASS_COUNT
 from allsky.features import active_feature_groups, resolve_feature_set
 from allsky.features.normalization import TargetNormalizer
@@ -607,3 +608,9 @@ def test_multimodal_param_groups_split_backbone():
     assert any(g.get("lr") == 1e-5 for g in groups)
     # without a backbone_lr it collapses to a single group
     assert len(model.param_groups()) == 1
+
+
+def test_the_climatology_baseline_refuses_an_all_nan_target_instead_of_reporting_zero():
+    model = ClimatologyModel(TargetsConfig())
+    with pytest.raises(ValueError, match="no finite value"):
+        model.fit_from_targets(dhi=np.array([np.nan, np.nan]))

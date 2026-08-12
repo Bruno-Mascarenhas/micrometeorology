@@ -256,3 +256,14 @@ class TestTargetNormalizer:
         norms = fit_target_normalizers(frame, ["target_dhi", "target_kindex"])
         assert set(norms) == {"target_dhi", "target_kindex"}
         assert norms["target_dhi"].mean == pytest.approx(20.0)
+
+
+def test_fitting_the_feature_normalizer_on_a_nan_refuses_instead_of_propagating():
+    frame = pd.DataFrame({"air_temp_c": [20.0, np.nan, 22.0], "rel_humidity": [70.0, 71.0, 72.0]})
+    with pytest.raises(ValueError, match="air_temp_c"):
+        FeatureNormalizer.fit(frame)
+
+
+def test_fitting_the_feature_normalizer_on_an_empty_frame_refuses():
+    with pytest.raises(ValueError, match="empty frame"):
+        FeatureNormalizer.fit(pd.DataFrame({"air_temp_c": []}))

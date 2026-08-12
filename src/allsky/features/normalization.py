@@ -41,13 +41,42 @@ class FeatureNormalizer:
 
     @classmethod
     def fit(cls, frame: pd.DataFrame, columns: Sequence[str] | None = None) -> FeatureNormalizer:
-        """Fit mean/std over *columns* (all columns when None).
+        """Fit per-column mean and standard deviation on the training split.
 
-        Must be called on the **training split only**.  Input values are
-        expected finite; NaNs would propagate into the statistics.
+        Parameters
+        ----------
+        frame:
+            Engineered feature frame, shape ``(N, F)``, one row per sample.
+        columns:
+            Feature names to fit, in the order the model will see them.
+            ``None`` fits every column of *frame*.
+
+        Returns
+        -------
+        FeatureNormalizer
+            Statistics over *columns*, in that order.
+
+        Raises
+        ------
+        ValueError
+            If *frame* is empty, or any fitted column holds a non-finite value.
+            A single NaN would otherwise poison that column's mean and standard
+            deviation, standardise every sample of it to NaN and drive the loss
+            to NaN several epochs into a run.
         """
         cols = list(columns) if columns is not None else list(frame.columns)
         values = frame.loc[:, cols].to_numpy(dtype=np.float32)
+        if values.size == 0:
+            raise ValueError("cannot fit a FeatureNormalizer on an empty frame")
+        non_finite = ~np.isfinite(values)
+        if non_finite.any():
+            offenders = [
+                name for name, bad in zip(cols, non_finite.any(axis=0), strict=True) if bad
+            ]
+            raise ValueError(
+                f"non-finite values in feature column(s) {offenders}; fit the normalizer on "
+                "screened rows (the manifest builder drops non-finite feature rows already)"
+            )
         mean = values.mean(axis=0)
         std = values.std(axis=0)
         std = np.where(std < _MIN_STD, 1.0, std).astype(np.float32)

@@ -103,7 +103,13 @@ class ClimatologyModel(nn.Module):
                 continue
             arr = np.asarray(values, dtype=np.float64)
             finite = arr[np.isfinite(arr)]
-            mean = float(finite.mean()) if finite.size else 0.0
+            if not finite.size:
+                raise ValueError(
+                    f"climatology target {name!r} has no finite value to average; a constant "
+                    "0.0 would be reported as a plausible baseline, and for an irradiance "
+                    "0 W m-2 is a physically valid reading rather than a missing one"
+                )
+            mean = float(finite.mean())
             if target_normalizers is not None and name in target_normalizers:
                 mean = float(target_normalizers[name].normalize(mean))
             getattr(self, f"{name}_const").fill_(mean)
