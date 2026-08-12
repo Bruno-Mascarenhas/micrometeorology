@@ -82,6 +82,18 @@ def solar_declination_rad(timestamps: DatetimeLike) -> np.ndarray:
     ``decl = 0.006918 - 0.399912 cos(g) + 0.070257 sin(g) - 0.006758 cos(2g)
     + 0.000907 sin(2g) - 0.002697 cos(3g) + 0.00148 sin(3g)``
 
+    Parameters
+    ----------
+    timestamps:
+        Naive local standard times, ``(N,)``; tz-aware input is rejected.
+
+    Returns
+    -------
+    numpy.ndarray
+        Declination, shape ``(N,)``, ``float64``, radians, in the
+        equatorial coordinate system (positive north of the celestial
+        equator).
+
     Limitation
     ----------
     Accurate to ~0.01 rad; adequate for irradiance decomposition, not for
@@ -107,6 +119,17 @@ def equation_of_time(timestamps: DatetimeLike) -> np.ndarray:
     -------
     ``eqtime = 229.18 * (0.000075 + 0.001868 cos(g) - 0.032077 sin(g)
     - 0.014615 cos(2g) - 0.040849 sin(2g))``
+
+    Parameters
+    ----------
+    timestamps:
+        Naive local standard times, ``(N,)``; tz-aware input is rejected.
+
+    Returns
+    -------
+    numpy.ndarray
+        Apparent-minus-mean solar time, shape ``(N,)``, ``float64``,
+        minutes (roughly -14 to +16 over a year).
     """
     g = _fractional_year(_as_datetime_index(timestamps))
     minutes: np.ndarray = 229.18 * np.asarray(
@@ -126,6 +149,19 @@ def eccentricity_correction(timestamps: DatetimeLike) -> np.ndarray:
     -------
     ``E0 = (r0/r)^2 = 1.000110 + 0.034221 cos(g) + 0.001280 sin(g)
     + 0.000719 cos(2g) + 0.000077 sin(2g)``
+
+    Parameters
+    ----------
+    timestamps:
+        Naive local standard times, ``(N,)``; tz-aware input is rejected.
+
+    Returns
+    -------
+    numpy.ndarray
+        Inverse-square distance correction, shape ``(N,)``, ``float64``,
+        dimensionless, spanning roughly 0.967 (aphelion) to 1.035
+        (perihelion).  Multiply the solar constant by it to obtain the
+        irradiance at the Earth's actual distance.
     """
     g = _fractional_year(_as_datetime_index(timestamps))
     eccentricity: np.ndarray = np.asarray(
@@ -160,11 +196,18 @@ def hour_angle_deg(
     Parameters
     ----------
     timestamps:
-        Naive local clock times.
+        Naive local clock times, ``(N,)``.
     longitude:
         Site longitude in degrees (east positive).
     utc_offset_hours:
         UTC offset of the local clock; inferred from ``longitude`` when None.
+
+    Returns
+    -------
+    numpy.ndarray
+        Hour angle, shape ``(N,)``, ``float64``, degrees in the local
+        horizontal frame: 0 at solar noon, 15 deg per hour, negative
+        before noon.  It is not wrapped to ``[-180, 180)``.
     """
     times = _as_datetime_index(timestamps)
     offset = _resolve_utc_offset(longitude, utc_offset_hours)
@@ -189,6 +232,22 @@ def cos_zenith(
     Formula
     -------
     ``cos(theta_z) = sin(lat) sin(decl) + cos(lat) cos(decl) cos(ha)``
+
+    Parameters
+    ----------
+    timestamps:
+        Naive local clock times, ``(N,)``.
+    site:
+        Observation site (latitude/longitude in degrees).
+    utc_offset_hours:
+        UTC offset of the local clock; inferred from ``site.longitude``
+        when None.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``cos(theta_z)``, shape ``(N,)``, ``float64``, dimensionless;
+        positive with the sun above the horizon, negative below it.
     """
     times = _as_datetime_index(timestamps)
     lat = np.deg2rad(site.latitude)
@@ -209,6 +268,24 @@ def solar_elevation_deg(
     Formula
     -------
     ``elevation = 90 - zenith = arcsin(cos(theta_z))``
+
+    Parameters
+    ----------
+    timestamps:
+        Naive local clock times, ``(N,)``.
+    site:
+        Observation site (latitude/longitude in degrees).
+    utc_offset_hours:
+        UTC offset of the local clock; inferred from ``site.longitude``
+        when None.
+
+    Returns
+    -------
+    numpy.ndarray
+        Elevation above the local horizon, shape ``(N,)``, ``float64``,
+        degrees in ``[-90, 90]``.  This is the geometric elevation: no
+        atmospheric-refraction correction is applied, so near the horizon
+        the sun appears about 0.5 deg higher than this.
     """
     elevation: np.ndarray = np.rad2deg(np.arcsin(cos_zenith(timestamps, site, utc_offset_hours)))
     return elevation
@@ -239,20 +316,27 @@ def solar_azimuth_deg(
     Parameters
     ----------
     timestamps:
-        Naive local clock times (v0 contract; tz-aware input is rejected).
+        Naive local clock times, ``(N,)`` (v0 contract; tz-aware input is
+        rejected).
     site:
         Observation site (latitude/longitude in degrees).
     utc_offset_hours:
         UTC offset of the local clock; inferred from ``site.longitude`` when
-        None (see :func:`hour_angle`).
+        None (see :func:`hour_angle_deg`).
+
+    Returns
+    -------
+    numpy.ndarray
+        Azimuth, shape ``(N,)``, ``float64``, degrees clockwise from North
+        in the local horizontal frame, wrapped to ``[0, 360)``.
 
     Limitation
     ----------
     Undefined exactly at the zenith (``sin(theta_z) = 0``, which occurs at
     this latitude near the two annual zenith-crossing noons); the ratio is
     guarded so the result stays finite there.  Azimuth is returned for every
-    row, including night — filter with :func:`solar_elevation` when a horizon
-    cut is required.
+    row, including night — filter with :func:`solar_elevation_deg` when a
+    horizon cut is required.
     """
     times = _as_datetime_index(timestamps)
     lat = np.deg2rad(site.latitude)
@@ -287,6 +371,23 @@ def extraterrestrial_ghi(
     ``E0h = S0 * E0 * cos(theta_z)`` with ``S0 = 1361 W m-2`` (solar
     constant) and ``E0`` the Spencer eccentricity correction; clipped to
     zero when the sun is below the horizon.
+
+    Parameters
+    ----------
+    timestamps:
+        Naive local clock times, ``(N,)``.
+    site:
+        Observation site (latitude/longitude in degrees).
+    utc_offset_hours:
+        UTC offset of the local clock; inferred from ``site.longitude``
+        when None.
+
+    Returns
+    -------
+    numpy.ndarray
+        Top-of-atmosphere irradiance on a horizontal surface, shape
+        ``(N,)``, ``float64``, W m-2, exactly zero at night.  This is the
+        denominator of :func:`clearness_index`.
     """
     times = _as_datetime_index(timestamps)
     e0h = (
@@ -310,6 +411,30 @@ def clearness_index(
     -------
     ``kt = GHI / E0h`` where ``E0h > 0``, else NaN (undefined at night).
     NaN GHI propagates to NaN kt.
+
+    Parameters
+    ----------
+    ghi:
+        Measured global horizontal irradiance, shape ``(N,)``, W m-2,
+        aligned 1:1 with *timestamps*.
+    timestamps:
+        Naive local clock times, ``(N,)``.
+    site:
+        Observation site (latitude/longitude in degrees).
+    utc_offset_hours:
+        UTC offset of the local clock; inferred from ``site.longitude``
+        when None.
+
+    Returns
+    -------
+    numpy.ndarray
+        Clearness index, shape ``(N,)``, ``float64``, dimensionless, NaN
+        wherever the sun is below the horizon.
+
+    Raises
+    ------
+    ValueError
+        If *ghi* and *timestamps* have different lengths.
 
     Limitation
     ----------

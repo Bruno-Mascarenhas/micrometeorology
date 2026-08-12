@@ -27,9 +27,11 @@
    model / optimizer / scheduler / scaler / epoch / global_step / best / RNG —
    but only after the checkpoint's dataset provenance matches this run (a rebuilt
    manifest is refused, not silently re-scaled), with the stored best discarded
-   when the early-stopping monitor changed, a restored cosine horizon re-pointed
-   at the current epoch budget, and nothing trained at all when the stopping rule
-   was already satisfied.
+   when the early-stopping monitor changed — it belongs to another metric, on
+   another scale and often in the other comparison direction, so seeding from it
+   would make every improvement test meaningless — a restored cosine horizon
+   re-pointed at the current epoch budget, and nothing trained at all when the
+   stopping rule was already satisfied.
 
 The engine imports torch at module scope and is therefore only ever imported
 lazily (from the CLI or via :func:`allsky.training.__getattr__`), so
@@ -88,6 +90,22 @@ def resolve_run_device(requested: str) -> str:
     :func:`allsky.training.device.resolve_device`, then raises a clear
     :class:`RuntimeError` when ``"cuda"`` is asked for but no CUDA device is
     available (rather than failing opaquely deep inside the first ``.to("cuda")``).
+
+    Parameters
+    ----------
+    requested:
+        ``"auto"``, or an explicit device string from ``cfg.train.device`` / the
+        CLI override.
+
+    Returns
+    -------
+    str
+        The concrete device the run will use.
+
+    Raises
+    ------
+    RuntimeError
+        If ``"cuda"`` was requested but no CUDA device is available.
     """
     from allsky.training.device import resolve_device
 
@@ -130,7 +148,11 @@ def run_experiment(
         Overrides ``cfg.train.amp.enabled``.
     resume:
         ``"auto"`` loads ``<run_dir>/last.ckpt`` if present; a path loads that
-        checkpoint; ``None`` starts fresh.
+        checkpoint; ``None`` starts fresh.  A resume into a checkpoint whose
+        early-stopping rule is already satisfied trains nothing: the rule is
+        otherwise only re-tested at the END of an epoch, so each invocation
+        would train one more epoch and a cron re-running ``--resume auto`` would
+        walk the whole remaining budget past the declared stop.
     trust_checkpoint:
         Read the resumed checkpoint with the unrestricted unpickler. Off by
         default: a checkpoint that travelled through Colab or a shared Drive is
@@ -138,8 +160,10 @@ def run_experiment(
         payload outside the allowlist is refused rather than executed.
     image_backbone_builder:
         Zero-arg factory returning the image backbone for ``input_mode="image"``
-        visual models.  The DINOv2 backbone is only used when explicitly injected
-        here (tests inject a tiny stub); no backbone is downloaded implicitly.
+        visual models.  When omitted, :func:`_default_image_backbone_builder`
+        constructs the backbone the model config names (``model.backbone``,
+        default ``dinov2_vits14``) on the run device, which may download hub
+        weights; tests inject a tiny stub to avoid that.
     embedding_reader:
         Injected :class:`~allsky.data.datasets.EmbeddingReader` for
         ``input_mode="embedding"`` (tests pass a dict-backed fake); defaults to a
@@ -163,7 +187,6 @@ def run_experiment(
     )
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- data ---------------------------------------------------------------
     manifest_path = resolve_against_root(cfg.data.manifest, root)
     manifest, meta = load_manifest(manifest_path)
     split = load_split(resolve_against_root(cfg.data.split_artifact, root))
@@ -182,9 +205,6 @@ def run_experiment(
     )
     feature_normalizer = train_ds.stats
     batch_size = int(cfg.train.batch_size)
-    # Dedicated CPU generator for the train RandomSampler: re-seeded per epoch
-    # below so the batch order is deterministic in (seed, epoch) and identical
-    # whether the epoch is reached in one run or after a resume (see finding 1).
     train_sampler_generator = torch.Generator()
     train_loader = _make_loader(
         train_ds,
@@ -196,19 +216,12 @@ def run_experiment(
     )
     val_loader = _make_loader(val_ds, cfg, resolved_device, batch_size, shuffle=False)
 
-    # --- model / optimizer / scheduler / amp --------------------------------
     from allsky.modeling.registry import build_model, temporal_pooling_for_strategy
 
     image_backbone = None
     if cfg.data.input_mode == "image":
-        # Production path (finding F6): with no injected builder, construct the
-        # backbone the config names (default DINOv2) so a shipped image-mode
-        # experiment (v6) actually runs. The injection hook still wins for tests.
         builder = image_backbone_builder or _default_image_backbone_builder(cfg, resolved_device)
         image_backbone = builder()
-    # The windowed-alignment strategy selects the visual temporal pooler so the
-    # model matches what the dataset emits (attention_pooling -> learned attention
-    # over embedding_seq; center_frame / mean_embedding -> mask-aware mean).
     temporal_pooling = temporal_pooling_for_strategy(cfg.data.alignment.strategy)
     model = build_model(
         cfg,
@@ -218,9 +231,6 @@ def run_experiment(
         temporal_pooling=temporal_pooling,
     ).to(resolved_device)
 
-    # Bind the narrowed model rather than a bare bool: only ClimatologyModel carries
-    # fit_from_targets, and `climatology is not None` is the same predicate the
-    # isinstance check produced.
     climatology = model if isinstance(model, ClimatologyModel) else None
     is_climatology = climatology is not None
     if climatology is not None:
@@ -242,7 +252,6 @@ def run_experiment(
 
     loss_fn = MultitaskLoss(cfg.targets, target_normalizers).to(resolved_device)
 
-    # --- resume -------------------------------------------------------------
     fields = _csv_fields(cfg)
     start_epoch = 0
     global_step = 0
@@ -252,9 +261,6 @@ def run_experiment(
     history: list[dict[str, Any]] = []
     resume_path = _resume_path(resume, run_dir)
     if resume_path is not None:
-        # Load once, then check the payload against this run before any of it is
-        # applied: a refused resume must leave the model, the optimizer and the
-        # metrics files exactly as it found them.
         checkpoint = load_checkpoint(
             resume_path, map_location=resolved_device, trust_pickle=trust_checkpoint
         )
@@ -276,17 +282,12 @@ def run_experiment(
             scaler,
             skip_scheduler_state=monitor_changed and scheduler_is_plateau,
         )
-        # Restore the patience counter; a pre-field checkpoint yields a safe lower
-        # bound (epochs since the recorded best), never a negative value.
         epochs_no_improve = (
             restored_no_improve
             if restored_no_improve is not None
             else (max(0, start_epoch - best_epoch) if best_epoch is not None else 0)
         )
         if monitor_changed:
-            # The stored best belongs to another metric — another scale, and often
-            # the other comparison direction — so seeding from it would make every
-            # improvement test meaningless.
             logger.warning(
                 "resume: early-stopping monitor changed %r -> %r; discarding the stored "
                 "best (%s=%s @ epoch %s) and the patience counter — only epochs from here "
@@ -300,10 +301,6 @@ def run_experiment(
             best_value, best_epoch, epochs_no_improve = None, None, 0
             _rotate_stale_best(run_dir)
         _reconcile_cosine_horizon(scheduler, optimizer, cfg)
-        # Crash-window dedupe: metrics.csv/json are written before last.ckpt each
-        # epoch, so a crash in that gap can leave rows for an epoch the checkpoint
-        # never completed. Drop rows past the resumed epoch and rewrite both files
-        # from the truncated history before the loop appends again (finding 3).
         history = _truncate_metrics(run_dir, fields, start_epoch)
         logger.info(
             "resumed from %s at epoch %d (global_step %d, epochs_no_improve %d)",
@@ -313,12 +310,8 @@ def run_experiment(
             epochs_no_improve,
         )
     else:
-        # Fresh start into a possibly-reused run dir: stale metrics.csv/json from
-        # an earlier run would otherwise be appended to (finding F10). Rotate them
-        # aside so this run's metrics files contain exactly this run's epochs.
         _reset_stale_metrics(run_dir)
 
-    # --- epoch loop ---------------------------------------------------------
     from torch.utils.tensorboard import SummaryWriter
 
     dhi_mean, dhi_std = _stats_or_identity(target_normalizers, "dhi")
@@ -329,10 +322,6 @@ def run_experiment(
     patience = int(cfg.train.early_stopping.patience)
     min_delta = float(cfg.train.early_stopping.min_delta)
     if resume_path is not None and epochs_no_improve >= patience:
-        # The stopping rule is only re-tested at the END of an epoch, so a resume
-        # into an already-early-stopped checkpoint would train one more epoch per
-        # invocation — and a cron re-running `--resume auto` would walk the whole
-        # remaining budget past the declared stop.
         logger.info(
             "early stopping already satisfied at epoch %d (no %s improvement for %d >= "
             "patience %d); nothing to train — raise train.early_stopping.patience to continue",
@@ -345,14 +334,7 @@ def run_experiment(
         writer = SummaryWriter(log_dir=str(run_dir / "runs"))
         try:
             for epoch in range(start_epoch, cfg.train.epochs):
-                # Deterministic, resume-stable batch order: order = f(seed, epoch),
-                # independent of the resume point, persistent_workers, or global-RNG
-                # draw count (finding 1).
                 train_sampler_generator.manual_seed(cfg.seed * 100003 + epoch)
-                # Read the rates BEFORE the epoch trains and before scheduler.step():
-                # what is logged must be the rate this epoch actually ran at, per
-                # named group (param_groups[0] is the backbone whenever backbone_lr
-                # is set, not the rate driving the trunk and heads).
                 lrs = _current_lrs(optimizer, lr_labels)
                 train_metrics, global_step = _train_epoch(
                     model=model,
@@ -475,11 +457,6 @@ def run_experiment(
     }
 
 
-# ---------------------------------------------------------------------------
-# data helpers
-# ---------------------------------------------------------------------------
-
-
 def _select_splits(manifest: pd.DataFrame, split: Any) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Slice train/val manifest rows by ``day_id`` (validation split required)."""
     day_ids = manifest["day_id"].astype(str)
@@ -515,8 +492,17 @@ def _build_datasets(
 ) -> tuple[Any, Any, int | None]:
     """Build the train/val datasets for the configured input mode.
 
-    Returns ``(train_ds, val_ds, embedding_dim)`` where ``embedding_dim`` is the
-    reader dimension in embedding mode and ``None`` in image mode.
+    The alignment strategy is wired end to end: ``center_frame`` (default) keeps
+    each row's single-frame embedding, while ``mean_embedding`` /
+    ``attention_pooling`` make the dataset resolve the row's same-day co-frame
+    window and pool over it.  The config's ``AlignmentStrategyName`` IS the
+    dataset's ``WindowMode``, so the two cannot disagree about which modes exist.
+
+    Returns
+    -------
+    tuple[Any, Any, int | None]
+        ``(train_ds, val_ds, embedding_dim)`` where ``embedding_dim`` is the
+        reader dimension in embedding mode and ``None`` in image mode.
     """
     from allsky.data.datasets import MultimodalEmbeddingDataset, MultimodalImageDataset
 
@@ -527,11 +513,6 @@ def _build_datasets(
             else default_embedding_reader(cfg, root)
         )
         _validate_embedding_coverage(reader, train_df, val_df)
-        # Wire the alignment strategy end to end: center_frame (default) keeps the
-        # single-frame embedding; mean_embedding / attention_pooling resolve each
-        # row's same-day co-frame window (dataset-level) and pool accordingly.
-        # The config's AlignmentStrategyName IS the dataset's WindowMode, so the
-        # two can no longer disagree about which modes exist.
         window = cfg.data.alignment.strategy
         window_minutes = float(cfg.data.alignment.window_minutes)
         train_ds = MultimodalEmbeddingDataset(
@@ -637,18 +618,13 @@ def _make_loader(
     )
 
 
-# ---------------------------------------------------------------------------
-# model / optimizer / scheduler / amp helpers
-# ---------------------------------------------------------------------------
-
-
 def _model_param(cfg: ExperimentConfig, key: str, default: Any) -> Any:
     """Read an architecture hyper-parameter off the permissive model config."""
     return dict(cfg.model.model_dump()).get(key, default)
 
 
 def _default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Callable[[], nn.Module]:
-    """Build the default image backbone factory for ``input_mode='image'`` (finding F6).
+    """Build the default image backbone factory for ``input_mode='image'``.
 
     When no ``image_backbone_builder`` is injected, image-mode training must still
     build a real visual backbone or the shipped v6 config cannot run.  The factory
@@ -659,12 +635,12 @@ def _default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Calla
     wraps the DINOv2 extraction wrapper; an ``nn.Module`` — e.g. a test stub, or a
     monkeypatched ``build_backbone`` — passes straight through).  Construction is
     deferred to call time and any failure is re-raised with a message naming the
-    config knobs to fix.
+    config knobs to fix.  ``build_backbone`` is imported inside the factory, not
+    at module scope, so a test that monkeypatches
+    ``allsky.embeddings.backbone.build_backbone`` is honoured.
     """
 
     def build() -> nn.Module:
-        # build_backbone is imported here, not at module scope, so a test that
-        # monkeypatches allsky.embeddings.backbone.build_backbone is honoured.
         from allsky.embeddings.backbone import build_backbone
         from allsky.modeling.visual_encoder import coerce_image_backbone
 
@@ -745,9 +721,6 @@ def _build_optimizer(
         params = [p for p in model.parameters() if p.requires_grad]
         labels = ["lr"]
     if cfg.train.backbone_lr is not None and "lr_backbone" not in labels:
-        # Either the model has no param_groups at all or its backbone contributed
-        # no trainable parameter: nothing runs at backbone_lr, which is only
-        # obvious from the metrics much later (an lr_backbone column left blank).
         logger.warning(
             "train.backbone_lr=%s is set but model %r produced no separate backbone "
             "parameter group; every trainable parameter runs at train.lr=%s",
@@ -761,6 +734,11 @@ def _build_optimizer(
 
 def _current_lrs(optimizer: torch.optim.Optimizer, labels: list[str]) -> dict[str, float]:
     """The learning rate in effect per labelled parameter group.
+
+    Call this before the epoch trains and before ``scheduler.step()``: what is
+    logged must be the rate the epoch actually ran at.  The labels matter as much
+    as the values — ``param_groups[0]`` is the image backbone whenever
+    ``backbone_lr`` is set, not the rate driving the trunk and heads.
 
     ``strict=True`` is safe across a resume: ``load_state_dict`` already raises on
     a group-count mismatch, so the labels stay index-aligned with the groups.
@@ -803,11 +781,6 @@ def _build_amp(amp_enabled: bool, dtype: str, device: str) -> tuple[str | None, 
         return "cuda", torch.float16, torch.amp.GradScaler("cuda")
     autocast_device = "cuda" if device == "cuda" else "cpu"
     return autocast_device, torch.bfloat16, None
-
-
-# ---------------------------------------------------------------------------
-# epoch passes
-# ---------------------------------------------------------------------------
 
 
 def _autocast(device: str | None, dtype: Any) -> Any:
@@ -973,13 +946,17 @@ class _MetricAccumulator:
     def update(
         self, outputs: Mapping[str, Tensor], batch: dict[str, Tensor], losses: Mapping[str, Tensor]
     ) -> None:
-        """Fold one batch's outputs/targets/losses into the running sums."""
+        """Fold one batch's outputs/targets/losses into the running sums.
+
+        A loss component with no entry in :data:`_COMPONENT_TARGET_COLUMNS` — an
+        unrecognised, later-added head — falls back to being weighted by the
+        batch row count.
+        """
         size = int(batch["features"].shape[0])
         for key, value in losses.items():
             if key == "loss":
                 continue
             column = _COMPONENT_TARGET_COLUMNS.get(key)
-            # An unrecognised (future) component falls back to the batch row count.
             count = size if column is None else _present_target_count(batch, column)
             self._component_sums.setdefault(key, 0.0)
             self._component_counts.setdefault(key, 0)
@@ -1054,11 +1031,6 @@ def _mae_accumulate(
     return abs_sum, count
 
 
-# ---------------------------------------------------------------------------
-# resume / checkpoint payload helpers
-# ---------------------------------------------------------------------------
-
-
 def _resume_path(resume: str | Path | None, run_dir: Path) -> Path | None:
     """Resolve the checkpoint to resume from (``"auto"`` finds ``last.ckpt``)."""
     if resume is None:
@@ -1094,13 +1066,15 @@ def _check_resume_provenance(
     pre-provenance checkpoints still resume, mirroring the evaluator's
     ``_check_split_id``.  Unlike an evaluation, a resume has no legitimate reason
     to continue on a mismatch.
+
+    The alignment fields are checked alongside the dataset ones because they
+    decide what every sample's embedding IS — the pooling window's width, and
+    centre-frame against mean — while leaving no architectural trace: the
+    attention pooler's ``(1, 1, D)`` query is sequence-length independent and
+    centre-frame shares the mean pooler, so ``load_state_dict`` would accept the
+    old weights and the run would continue on differently-pooled inputs, with
+    ``best.ckpt`` selected across two regimes.
     """
-    # The alignment fields decide what every sample's embedding IS — the pooling
-    # window's width, and centre-frame against mean — and they leave no
-    # architectural trace: the attention pooler's (1, 1, D) query is
-    # sequence-length independent and centre-frame shares the mean pooler, so
-    # ``load_state_dict`` accepts the old weights and the run continues on
-    # differently-pooled inputs with best.ckpt selected across two regimes.
     stored_cfg = checkpoint.get("config") or {}
     stored_data = stored_cfg.get("data") or {}
     stored_alignment = stored_data.get("alignment") or {}
@@ -1297,11 +1271,6 @@ def _dataset_version(meta: Mapping[str, Any]) -> str:
     return str(meta.get("dataset_version", DATASET_VERSION))
 
 
-# ---------------------------------------------------------------------------
-# metrics logging helpers
-# ---------------------------------------------------------------------------
-
-
 def _monitor_key(monitor: str) -> str:
     """Normalize an early-stopping monitor string to a val-metric key."""
     for prefix in ("val/", "val_"):
@@ -1444,7 +1413,7 @@ def _reset_stale_metrics(run_dir: Path) -> None:
     """Rotate any pre-existing ``metrics.csv`` / ``metrics.json`` aside on a fresh run.
 
     A fresh (non-resume) run into a reused run directory must not append to the
-    previous run's metrics (finding F10).  Each stale file is renamed to
+    previous run's metrics.  Each stale file is renamed to
     ``<name>.stale`` (replacing an older backup) rather than deleted, so the prior
     run's numbers are still recoverable; the fresh run then re-creates the files
     from scratch.

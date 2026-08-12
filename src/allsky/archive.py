@@ -95,7 +95,31 @@ def build_ssl_context(
     insecure: bool = False,
     timeout: float = 30.0,
 ) -> ssl.SSLContext:
-    """Build a verifying context, repairing the chain the archive host serves."""
+    """Build a verifying context, repairing the chain the archive host serves.
+
+    The host omits its CA intermediate, so the certificate cannot be verified
+    against the system store alone. The intermediate is fetched from the pinned
+    :data:`AIA_INTERMEDIATE_URL` and cached under *state_dir*, after which no
+    network call is needed to build a context.
+
+    Parameters
+    ----------
+    state_dir:
+        Directory the fetched intermediate is cached in. Left None the
+        intermediate is fetched on every call and never written to disk.
+    ca_file:
+        PEM bundle to trust instead, skipping the fetch entirely.
+    insecure:
+        Disable verification altogether. This makes the connection
+        unauthenticated, so use it only to diagnose a chain problem.
+    timeout:
+        Seconds allowed for the intermediate fetch.
+
+    Raises
+    ------
+    ArchiveError
+        If the intermediate cannot be fetched and no *ca_file* was given.
+    """
     context = ssl.create_default_context()
     if insecure:
         context.check_hostname = False
@@ -119,17 +143,39 @@ def build_ssl_context(
 
 @dataclass(frozen=True)
 class ArchiveEntry:
+    """One archived day: its local date, its filename and where to fetch it."""
+
     date: dt.date
     filename: str
     url: str
 
     @property
     def key(self) -> str:
+        """``YYYYMMDD`` identifier this day is filed under in the ledger."""
         return self.date.strftime("%Y%m%d")
 
 
 @dataclass(frozen=True)
 class DownloadResult:
+    """Outcome of one day's download, whether or not bytes actually moved.
+
+    Attributes
+    ----------
+    entry:
+        The archived day this describes.
+    path:
+        Where the video is (or already was) on disk.
+    size:
+        Bytes written; on a 304 the size already on disk, or 0 if it is gone.
+    sha256:
+        Digest of the bytes just streamed. Empty on a 304 — nothing was read, so
+        no digest could be computed, and the ledger's stored one still stands.
+    last_modified:
+        The server's ``Last-Modified``, echoed back unchanged on a 304.
+    downloaded:
+        False when the server answered 304 and the local copy was kept.
+    """
+
     entry: ArchiveEntry
     path: Path
     size: int
@@ -139,7 +185,19 @@ class DownloadResult:
 
 
 def parse_catalog(html: str, base_url: str = ARCHIVE_BASE_URL) -> tuple[ArchiveEntry, ...]:
-    """Extract the archived timelapse days from the ``videos/`` listing, oldest first."""
+    """Extract the archived timelapse days from the ``videos/`` listing, oldest first.
+
+    The listing is scraped for ``allsky-YYYYMMDD.mp4`` names rather than parsed
+    as HTML, so a change of directory-index theme does not break the sync. A
+    filename whose digits are not a real date is logged and skipped; repeats of
+    the same day collapse to one entry.
+
+    Returns
+    -------
+    tuple of ArchiveEntry
+        One entry per distinct day, sorted oldest first, each with an absolute
+        URL resolved against *base_url*.
+    """
     videos_url = urljoin(base_url, VIDEO_PATH)
     entries: dict[str, ArchiveEntry] = {}
     for match in _VIDEO_FILENAME_RE.finditer(html):
@@ -156,7 +214,15 @@ def parse_catalog(html: str, base_url: str = ARCHIVE_BASE_URL) -> tuple[ArchiveE
 
 
 class ArchiveClient:
-    """Fetches the archive over HTTPS only, with retries and a polite delay."""
+    """Fetches the archive over HTTPS only, with retries and a polite delay.
+
+    The opener carries no plaintext HTTP handler unless *allow_plaintext* is
+    set, so a redirect to ``http://`` fails rather than silently downgrading.
+    A failed request is retried *retries* times with a linear ``backoff *
+    attempt`` pause, but only when it is worth retrying: a 5xx, a 429 or a
+    transport error. Any other 4xx is final. *delay* seconds are slept after
+    each completed download to stay polite to a university host.
+    """
 
     def __init__(
         self,
@@ -212,18 +278,30 @@ class ArchiveClient:
         raise ArchiveError(f"GET {url} failed after {self.retries} attempt(s): {last}")
 
     def fetch_text(self, path: str) -> str:
+        """Fetch *path* and decode it with the response's own charset.
+
+        Undecodable bytes are replaced rather than raising: the catalog page is
+        scraped by regex, and one mis-encoded byte elsewhere on it must not cost
+        a whole day's sync.
+        """
         with self._open(urljoin(self.base_url, path)) as response:
             payload = bytes(response.read())
             charset = response.headers.get_content_charset() or "utf-8"
         return payload.decode(charset, errors="replace")
 
     def fetch_binary(self, path: str) -> tuple[bytes, dict[str, str]]:
+        """Fetch *path* whole, returning its bytes and lowercase-keyed headers.
+
+        The whole payload is read into memory, so this is for small resources
+        (the live frame); a day's video is streamed by :meth:`download` instead.
+        """
         with self._open(urljoin(self.base_url, path)) as response:
             payload = bytes(response.read())
             headers = {key.lower(): value for key, value in response.headers.items()}
         return payload, headers
 
     def list_videos(self) -> tuple[ArchiveEntry, ...]:
+        """Every day the archive currently offers, oldest first."""
         entries = parse_catalog(self.fetch_text(VIDEO_PATH), self.base_url)
         logger.info(
             "archive lists %d day(s)%s",
@@ -235,7 +313,35 @@ class ArchiveClient:
     def download(
         self, entry: ArchiveEntry, dest_dir: str | Path, *, if_modified_since: str | None = None
     ) -> DownloadResult:
-        """Stream one day's timelapse into *dest_dir*, atomically, verifying its length."""
+        """Stream one day's timelapse into *dest_dir*, atomically, verifying its length.
+
+        The body is written to a temp file in *dest_dir* and only renamed into
+        place once it is complete, so an interrupted download never leaves a
+        truncated video where a valid one is expected. When the server announces
+        a ``Content-Length`` that the streamed byte count does not match, the
+        file is deleted rather than kept.
+
+        Parameters
+        ----------
+        entry:
+            The day to fetch.
+        dest_dir:
+            Directory the video lands in, created if missing.
+        if_modified_since:
+            An earlier ``Last-Modified`` value. When the server answers 304 the
+            local copy is left untouched.
+
+        Returns
+        -------
+        DownloadResult
+            With ``downloaded=False`` and an empty ``sha256`` on a 304.
+
+        Raises
+        ------
+        ArchiveError
+            If every retry failed, or the payload was short of its announced
+            length.
+        """
         destination = Path(dest_dir) / entry.filename
         headers = {"If-Modified-Since": if_modified_since} if if_modified_since else None
         digest = hashlib.sha256()
@@ -284,6 +390,7 @@ class ArchiveClient:
         )
 
     def fetch_live_image(self) -> tuple[bytes, dict[str, str]]:
+        """The camera's current frame as JPEG bytes, plus the response headers."""
         return self.fetch_binary(LIVE_IMAGE_PATH)
 
 
@@ -292,7 +399,13 @@ def _utc_now() -> str:
 
 
 class Ledger:
-    """Append-only record of the days downloaded, extracted and uploaded."""
+    """Append-only record of the days downloaded, extracted and uploaded.
+
+    One JSON object per day, keyed ``YYYYMMDD``, is what makes the sync
+    idempotent: a rerun consults the ledger and skips the work already done.
+    Stored paths are relative to the local root whenever they can be, so a ledger
+    survives the archive tree being moved.
+    """
 
     def __init__(self, path: str | Path, payload: dict[str, Any] | None = None) -> None:
         self.path = Path(path)
@@ -304,6 +417,15 @@ class Ledger:
 
     @classmethod
     def load(cls, path: str | Path) -> Self:
+        """Read a ledger, or start an empty one when *path* does not exist yet.
+
+        Raises
+        ------
+        ArchiveError
+            If the file is not a ledger at all, or was written by a different
+            ledger version — a rerun must never half-read a layout it does not
+            understand and re-download everything.
+        """
         ledger_path = Path(path)
         if not ledger_path.is_file():
             return cls(ledger_path)
@@ -319,6 +441,7 @@ class Ledger:
         return cls(ledger_path, payload)
 
     def save(self) -> Path:
+        """Stamp ``updated_at`` in UTC and write the ledger atomically."""
         self._payload["updated_at"] = _utc_now()
         return atomic_write_json(self.path, self._payload)
 
@@ -328,6 +451,13 @@ class Ledger:
         return record
 
     def entry(self, key: str) -> dict[str, Any]:
+        """The mutable record for one day, created empty if this is its first.
+
+        Raises
+        ------
+        ArchiveError
+            If the stored entry is not an object.
+        """
         record = self.entries.setdefault(key, {})
         if not isinstance(record, dict):
             raise ArchiveError(f"ledger entry {key!r} is corrupt: expected an object")
@@ -348,19 +478,27 @@ class Ledger:
         return stored
 
     def video_path(self, key: str, *, root: str | Path | None = None) -> Path | None:
+        """Where *key*'s video lives, resolved against *root* if it was stored relative."""
         stored = self.video(key)
         if stored is None or not stored.get("path"):
             return None
         return _resolved(Path(stored["path"]), root)
 
     def frames_dir(self, key: str, *, root: str | Path | None = None) -> Path | None:
+        """Where *key*'s extracted frames live, resolved against *root* the same way."""
         stored = self.frames(key)
         if stored is None or not stored.get("dir"):
             return None
         return _resolved(Path(stored["dir"]), root)
 
     def has_video(self, key: str, *, local_root: str | Path | None = None) -> bool:
-        """True when *key* was downloaded and, when *local_root* is given, is still on disk."""
+        """True when *key* was downloaded and, when *local_root* is given, is still on disk.
+
+        With *local_root* the check is real: a day marked pruned is False, and so
+        is one whose file has vanished or whose size no longer matches what was
+        recorded — a truncated video reads as absent, so the next sync refetches
+        it.
+        """
         stored = self.video(key)
         if stored is None:
             return False
@@ -372,7 +510,11 @@ class Ledger:
         return path.is_file() and path.stat().st_size == stored.get("size", -1)
 
     def frames_match(self, key: str, *, step: int, resize: int | None) -> bool:
-        """True when *key* was already extracted with these very parameters."""
+        """True when *key* was already extracted with these very parameters.
+
+        Frames extracted under a different *step* or *resize* are a different
+        artifact, so they do not count as done and the day is re-extracted.
+        """
         stored = self.frames(key)
         if stored is None:
             return False
@@ -390,6 +532,7 @@ class Ledger:
         return destination in uploads
 
     def record_video(self, result: DownloadResult, *, root: str | Path | None = None) -> None:
+        """File a completed download, storing its path relative to *root* when it can."""
         path = result.path
         if root is not None:
             try:
@@ -416,6 +559,7 @@ class Ledger:
         resize: int | None,
         timestamps: str,
     ) -> None:
+        """File a frame extraction, including the parameters :meth:`frames_match` tests."""
         self.entry(key)["frames"] = {
             "dir": Path(directory).as_posix(),
             "count": count,
@@ -426,10 +570,17 @@ class Ledger:
         }
 
     def record_upload(self, key: str, destination: str, **details: Any) -> None:
+        """File an upload under its remote destination, which :meth:`uploaded` tests."""
         uploads: dict[str, Any] = self.entry(key).setdefault("uploads", {})
         uploads[destination] = {"uploaded_at": _utc_now(), **details}
 
     def mark_pruned(self, key: str) -> None:
+        """Note that a day's local video was deleted, keeping the rest of its record.
+
+        The download stays on file with its digest and upload history, so a
+        pruned day is remembered as done rather than refetched — only
+        :meth:`has_video` against a local root now answers False.
+        """
         stored = self.video(key)
         if stored is not None:
             stored["pruned"] = True
@@ -461,4 +612,5 @@ def ledger_lock(path: str | Path) -> Generator[None]:
 
 
 def archive_host(base_url: str = ARCHIVE_BASE_URL) -> str:
+    """Hostname of the archive, for log lines and remote folder names."""
     return urlsplit(base_url).hostname or base_url

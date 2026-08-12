@@ -121,8 +121,18 @@ class ForbiddenFeatureError(ValueError):
 def source_column(name: str) -> str | None:
     """Source logger column for an engineered feature name.
 
-    Returns ``None`` for geometry/timestamp-derived features (``solar_*``,
-    ``azimuth_*``, ``doy_*``).  Raises :class:`KeyError` for unknown names.
+    Returns
+    -------
+    str or None
+        The logger column the feature is read from, or ``None`` for the
+        geometry/timestamp-derived features (``solar_*``, ``azimuth_*``,
+        ``doy_*``) that :mod:`allsky.features.engineering` computes.
+
+    Raises
+    ------
+    KeyError
+        If *name* is declared by neither :data:`SAFE_FEATURES` nor
+        :data:`EXTENDED_FEATURES`.
     """
     if name in SAFE_FEATURES:
         return SAFE_FEATURES[name]
@@ -139,6 +149,11 @@ def resolve_feature_set(name: FeatureSet | str, extra: Iterable[str] = ()) -> li
     appended verbatim (deduplicated, order preserved) for bespoke ablations.
     The result preserves policy declaration order, which is the canonical
     feature-column order for the whole stack.
+
+    Returns
+    -------
+    list[str]
+        The ``F`` engineered feature names, in canonical order.
 
     Raises
     ------
@@ -163,6 +178,12 @@ def active_feature_groups(name: FeatureSet | str) -> dict[str, list[str]]:
     Drops the ``radiometry_aux`` group for the safe set (nothing populates it),
     so the union of the returned groups is exactly
     :func:`resolve_feature_set` for that set.
+
+    Returns
+    -------
+    dict[str, list[str]]
+        Group name -> its member feature names, copied from
+        :data:`FEATURE_GROUPS` so the caller cannot mutate the policy.
     """
     groups = {group: list(members) for group, members in FEATURE_GROUPS.items()}
     if name != "extended":

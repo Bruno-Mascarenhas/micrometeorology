@@ -37,8 +37,6 @@ app = typer.Typer(
     help="All-sky camera + radiation-sensor fusion pipeline (LabMiM/UFBA).",
 )
 
-# Register command groups. Each register() attaches its commands inside its own
-# module, so adding a command never touches this file.
 archive.register(app)
 frames.register(app)
 prepare.register(app)

@@ -64,12 +64,18 @@ def haurwitz_ghi(
     Parameters
     ----------
     timestamps:
-        Naive local clock times.
+        Naive local clock times, ``(N,)``.
     site:
         Observation site (latitude/longitude in degrees).
     utc_offset_hours:
         UTC offset of the local clock; inferred from ``site.longitude`` when
         None.
+
+    Returns
+    -------
+    numpy.ndarray
+        Clear-sky global horizontal irradiance, shape ``(N,)``,
+        ``float64``, W m-2, exactly zero at night.
 
     Limitation
     ----------
@@ -126,10 +132,10 @@ def clear_sky_index(
     Parameters
     ----------
     ghi:
-        Measured global horizontal irradiance, W m-2, aligned 1:1 with
-        *timestamps*.
+        Measured global horizontal irradiance, shape ``(N,)``, W m-2,
+        aligned 1:1 with *timestamps*.
     timestamps:
-        Naive local clock times.
+        Naive local clock times, ``(N,)``.
     site:
         Observation site (latitude/longitude in degrees).
     min_elevation_deg:
@@ -138,6 +144,17 @@ def clear_sky_index(
     utc_offset_hours:
         UTC offset of the local clock; inferred from ``site.longitude`` when
         None.
+
+    Returns
+    -------
+    numpy.ndarray
+        Clear-sky index, shape ``(N,)``, ``float64``, dimensionless, NaN
+        wherever the sun is too low or the GHI is missing.
+
+    Raises
+    ------
+    ValueError
+        If *ghi* and *timestamps* have different lengths.
 
     Limitation
     ----------

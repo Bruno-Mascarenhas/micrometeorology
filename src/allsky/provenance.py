@@ -24,7 +24,6 @@ from micrometeorology.common.git import run_git, source_root
 
 __all__ = ["code_version", "content_sha256", "git_commit"]
 
-#: Installed distribution queried for the package-version stamp.
 _DISTRIBUTION = "labmim-micrometeorology"
 
 
@@ -37,7 +36,15 @@ def git_commit() -> str | None:
 
 
 def code_version() -> dict[str, str | None]:
-    """Package version plus a best-effort git commit (reproducibility stamp)."""
+    """Package version plus a best-effort git commit (reproducibility stamp).
+
+    Returns
+    -------
+    dict
+        ``{"package_version", "git_commit"}``. Either value is ``None`` when
+        it cannot be determined — the package is not installed, or the source
+        tree is not a git checkout — so a stamp is always writable.
+    """
     try:
         version: str | None = importlib_metadata.version(_DISTRIBUTION)
     except importlib_metadata.PackageNotFoundError:
@@ -56,10 +63,10 @@ def content_sha256(manifest: pd.DataFrame) -> str:
     """
     digest = hashlib.sha256()
     digest.update(",".join(manifest.columns).encode("utf-8"))
-    # ``lineterminator`` pinned: pandas defaults it to ``os.linesep``, which
-    # made the digest platform-dependent — the same manifest hashed on Windows
-    # never matched itself re-hashed on Linux, so ``validate_bundle`` reported
-    # a byte-intact bundle as corrupt on exactly the cross-machine handoff it
-    # exists for. "\n" is what Linux already produced, so no recorded digest moves.
+    # ``lineterminator`` pinned: pandas defaults it to ``os.linesep``, which would
+    # make the digest platform-dependent — a manifest hashed on Windows would never
+    # match itself re-hashed on Linux, and ``validate_bundle`` would report a
+    # byte-intact bundle as corrupt on exactly the cross-machine handoff it exists
+    # for. "\n" is what Linux already produced, so no recorded digest moves.
     digest.update(manifest.to_csv(index=False, lineterminator="\n").encode("utf-8"))
     return digest.hexdigest()

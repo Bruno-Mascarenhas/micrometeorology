@@ -26,13 +26,10 @@ from micrometeorology.common.timeparse import parse_naive_timestamp
 
 logger = logging.getLogger(__name__)
 
-#: Filename of the parquet manifest written next to extracted JPEG frames.
 MANIFEST_FILENAME = "manifest.parquet"
 
-#: JPEG quality used by :func:`extract_frames`.
 JPEG_QUALITY = 92
 
-#: Column order of the frame manifest returned by :func:`extract_frames`.
 MANIFEST_COLUMNS = ("frame_path", "timestamp", "video", "index")
 
 
@@ -71,6 +68,11 @@ def video_date(path: str | Path, cfg: VideoConfig) -> dt.date:
     cfg:
         Video config providing ``filename_date_format``.
 
+    Returns
+    -------
+    datetime.date
+        Local calendar date the video covers.
+
     Raises
     ------
     ValueError
@@ -78,11 +80,10 @@ def video_date(path: str | Path, cfg: VideoConfig) -> dt.date:
     """
     stem = Path(path).stem
     try:
-        # Only the calendar date survives (``.date()``), and the module docstring
-        # pins this pipeline to naive local time on purpose — hence
-        # :func:`parse_naive_timestamp`, which applies the strftime format with
-        # ``strptime``'s match-or-raise semantics while staying naive (see its
-        # module docstring for the pandas escape hatches it closes).
+        # This pipeline is naive local by construction, hence
+        # :func:`parse_naive_timestamp` rather than pandas: it applies the strftime
+        # format with ``strptime``'s match-or-raise semantics while staying naive
+        # (see its module docstring for the pandas escape hatches it closes).
         return parse_naive_timestamp(stem, cfg.filename_date_format).date()
     except ValueError as exc:
         raise ValueError(

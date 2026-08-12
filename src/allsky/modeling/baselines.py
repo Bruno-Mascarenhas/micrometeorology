@@ -93,6 +93,31 @@ class ClimatologyModel(nn.Module):
         *target_normalizers* (keyed by ``"dhi"`` / ``"kindex"`` /
         ``"cloud_fraction"``) when available.  Sky logits are the
         log-frequencies of the valid (``>= 0``) class labels.
+
+        Parameters
+        ----------
+        dhi:
+            ``(N,)`` raw train-split diffuse horizontal irradiance in W m-2;
+            NaN marks a missing target.
+        kindex:
+            ``(N,)`` raw train-split clear-sky index (dimensionless ratio);
+            NaN marks a missing target.
+        cloud_fraction:
+            ``(N,)`` raw train-split cloud fraction in ``[0, 1]``
+            (dimensionless); NaN marks a missing target.
+        sky_class:
+            ``(N,)`` integer sky-class labels; ``-1`` marks a missing label and
+            is excluded from the frequency count.
+        target_normalizers:
+            Train-split normalizers used to map each regression mean into the
+            normalized space the trained models predict in.
+
+        Raises
+        ------
+        ValueError
+            If a provided regression array holds no finite value: a constant
+            ``0.0`` would be reported as a plausible baseline, and 0 W m-2 is a
+            physically valid irradiance rather than a missing one.
         """
         for name, values in (
             ("dhi", dhi),
@@ -126,10 +151,25 @@ class ClimatologyModel(nn.Module):
             self.sky_logits_const.copy_(torch.tensor(logits, dtype=torch.float32))
 
     def forward(self, batch: dict[str, Tensor]) -> ModelOutputs:
-        """Return the constant predictions broadcast to the batch size."""
+        """Broadcast the fitted constants to the batch, keeping a gradient path.
+
+        Parameters
+        ----------
+        batch:
+            Batch dict; only its leading dimension is read (from ``features``
+            when present, else from an arbitrary entry).
+
+        Returns
+        -------
+        ModelOutputs
+            The enabled heads' keys, each ``(B,)`` (or ``(B, n_classes)`` for
+            ``sky_logits``) float32.  Regression entries are the train means in
+            **normalized** space; every entry is tied to the dummy parameter
+            through a multiply-by-zero so ``loss.backward()`` always has a graph.
+        """
         reference = batch["features"] if "features" in batch else next(iter(batch.values()))
         batch_size = int(reference.shape[0])
-        zero = self._dummy * 0.0  # keeps a grad path for the optimizer
+        zero = self._dummy * 0.0
         outputs: dict[str, Tensor] = {}
         if self._enabled["dhi"]:
             outputs["dhi"] = self.dhi_const.expand(batch_size) + zero
@@ -147,7 +187,22 @@ class ClimatologyModel(nn.Module):
 
 
 class SensorOnlyModel(nn.Module):
-    """Sensor-only baseline: ``sensor encoder -> trunk -> heads``."""
+    """Sensor-only baseline: ``sensor encoder -> trunk -> heads``.
+
+    Parameters
+    ----------
+    n_features:
+        Number of engineered feature columns ``F`` served to the model.
+    targets:
+        Enabled heads (:class:`allsky.config.TargetsConfig`).
+    sensor_hidden:
+        Sensor-encoder block widths; the last one is the sensor embedding width
+        that feeds the trunk.
+    trunk_hidden, trunk_layers:
+        Trunk width and depth.
+    dropout:
+        Dropout shared by the sensor encoder and the trunk.
+    """
 
     def __init__(
         self,
@@ -167,7 +222,19 @@ class SensorOnlyModel(nn.Module):
         self.heads = Heads(int(self.trunk.out_dim), targets)
 
     def forward(self, batch: dict[str, Tensor]) -> ModelOutputs:
-        """Encode the sensor vector and return the enabled head outputs."""
+        """Encode the sensor vector and return the enabled head outputs.
+
+        Parameters
+        ----------
+        batch:
+            Batch dict whose ``features`` entry is ``(B, F)`` float32
+            standardized engineered features (dimensionless).
+
+        Returns
+        -------
+        ModelOutputs
+            The enabled heads' outputs (regression entries in normalized space).
+        """
         sensor = self.sensor_encoder(batch["features"])
         outputs: ModelOutputs = self.heads(self.trunk(sensor))
         return outputs
@@ -184,6 +251,10 @@ class ImageOnlyModel(nn.Module):
         integer ``out_dim`` and a ``forward(batch)``.
     targets:
         Enabled heads.
+    trunk_hidden, trunk_layers:
+        Trunk width and depth.
+    dropout:
+        Dropout inside the trunk.
     backbone_lr:
         Learning rate for the image backbone's own parameter group (see
         :meth:`param_groups`); ``None`` trains everything at the run's ``train.lr``.
@@ -207,7 +278,20 @@ class ImageOnlyModel(nn.Module):
         self.heads = Heads(int(self.trunk.out_dim), targets)
 
     def forward(self, batch: dict[str, Tensor]) -> ModelOutputs:
-        """Encode the visual input and return the enabled head outputs."""
+        """Encode the visual input and return the enabled head outputs.
+
+        Parameters
+        ----------
+        batch:
+            Batch dict read by the visual encoder: ``image`` ``(B, 3, H, W)``
+            float32 in image mode, or ``embedding`` / ``embedding_seq`` in
+            embedding mode.  ``features`` is ignored by this baseline.
+
+        Returns
+        -------
+        ModelOutputs
+            The enabled heads' outputs (regression entries in normalized space).
+        """
         visual = self.visual_encoder(batch)
         outputs: ModelOutputs = self.heads(self.trunk(visual))
         return outputs
@@ -218,7 +302,19 @@ class ImageOnlyModel(nn.Module):
         Same split (and same group order) as
         :meth:`allsky.modeling.multimodal.MultimodalNet.param_groups`: without it
         the engine would fall back to one group and train the unfrozen ViT blocks
-        at the head learning rate.  *backbone_lr* overrides the constructor value.
+        at the head learning rate.
+
+        Parameters
+        ----------
+        backbone_lr:
+            Overrides the constructor's ``backbone_lr``; ``None`` falls back to
+            it, and a ``None`` on both sides collapses to a single group.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            ``[backbone_group, everything_else]``, or one group of every
+            trainable parameter when no backbone rate applies.
         """
         lr = backbone_lr if backbone_lr is not None else self.backbone_lr
         return split_backbone_param_groups(self, self.visual_encoder, lr)

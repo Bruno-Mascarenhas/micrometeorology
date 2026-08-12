@@ -67,6 +67,11 @@ class DaySplit:
         and folded into :attr:`split_id`).
     created_at:
         ISO-8601 UTC creation timestamp (excluded from :attr:`split_id`).
+    strategy:
+        How the partition was drawn (see :data:`SplitStrategy`).
+    gap_days:
+        Days dropped at each chronological boundary; ``0`` for a random
+        partition, which has no boundary to guard.
     """
 
     assignment: dict[str, str]
@@ -90,13 +95,25 @@ class DaySplit:
         )
 
     def days_for(self, split: str) -> list[str]:
-        """Sorted ``day_id`` list assigned to *split*."""
+        """Sorted ``day_id`` list assigned to *split*.
+
+        Raises
+        ------
+        ValueError
+            If *split* is not one of :data:`SPLIT_NAMES`.
+        """
         if split not in SPLIT_NAMES:
             raise ValueError(f"unknown split {split!r}; expected one of {SPLIT_NAMES}")
         return sorted(day for day, name in self.assignment.items() if name == split)
 
     def check_leakage(self) -> None:
-        """Assert the three split day-sets are pairwise disjoint (self-check)."""
+        """Assert the three split day-sets are pairwise disjoint (self-check).
+
+        Raises
+        ------
+        ValueError
+            Naming every day that landed in more than one split.
+        """
         check_split_leakage(self.days_for("train"), self.days_for("val"), self.days_for("test"))
 
     def to_dict(self) -> dict[str, Any]:
@@ -116,7 +133,18 @@ class DaySplit:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> DaySplit:
-        """Inverse of :meth:`to_dict`; verifies the stored ``split_id``."""
+        """Inverse of :meth:`to_dict`; verifies the stored ``split_id``.
+
+        Raises
+        ------
+        KeyError
+            If *payload* is missing a required key.
+        ValueError
+            If the stored ``split_id`` disagrees with the one recomputed from
+            the assignment (a corrupt artifact), if the strategy name is one
+            this build does not implement, or if the assignment leaks a day
+            across splits.
+        """
         assignment = {str(k): str(v) for k, v in payload["assignment"].items()}
         split = cls(
             assignment=assignment,
@@ -243,11 +271,28 @@ def create_day_splits(
 def save_split_artifact(split: DaySplit, path: str | Path, *, force: bool = False) -> Path:
     """Atomically write *split* to *path* as JSON; guard against silent regeneration.
 
-    If *path* already holds a split with a **different** ``split_id`` and
-    *force* is False, :class:`SplitExistsError` is raised.  An identical
-    existing split is left untouched (idempotent).
+    An identical existing split is left untouched (idempotent), so re-running a
+    pipeline never rewrites the artifact a checkpoint was trained against.
 
-    Returns the artifact path.
+    Parameters
+    ----------
+    split:
+        The partition to persist, serialized with :meth:`DaySplit.to_dict`.
+    path:
+        Destination JSON path.
+    force:
+        Overwrite an existing artifact whose ``split_id`` differs.
+
+    Returns
+    -------
+    pathlib.Path
+        The artifact path.
+
+    Raises
+    ------
+    SplitExistsError
+        If *path* already holds a split with a **different** ``split_id`` and
+        *force* is False.
     """
     out = Path(path)
     if out.exists() and not force:
@@ -268,7 +313,13 @@ def save_split_artifact(split: DaySplit, path: str | Path, *, force: bool = Fals
 
 
 def load_split_artifact(path: str | Path) -> DaySplit:
-    """Load and verify a split artifact (checks ``split_id`` and leakage)."""
+    """Load and verify a split artifact (checks ``split_id`` and leakage).
+
+    Raises
+    ------
+    ValueError
+        For any of the corruption modes listed on :meth:`DaySplit.from_dict`.
+    """
     with open(path, encoding="utf-8") as handle:
         payload = json.load(handle)
     return DaySplit.from_dict(payload)
@@ -293,11 +344,6 @@ def check_split_leakage(
     leaked = {pair: days for pair, days in overlaps.items() if days}
     if leaked:
         raise ValueError(f"day-level split leakage detected: {leaked}")
-
-
-# ---------------------------------------------------------------------------
-# internals
-# ---------------------------------------------------------------------------
 
 
 def _split_size(n: int, fraction: float) -> int:

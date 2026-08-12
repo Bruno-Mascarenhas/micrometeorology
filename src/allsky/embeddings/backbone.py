@@ -27,10 +27,6 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# DINOv2 identity (pinned) + ImageNet normalization constants.
-# ---------------------------------------------------------------------------
-
 #: ``torch.hub`` GitHub repo hosting the DINOv2 entrypoints.
 DINOV2_REPO = "facebookresearch/dinov2"
 #: The DINOv2 ViT-S/14 entrypoint (384-dim patch/CLS tokens, patch size 14).
@@ -207,7 +203,20 @@ class DinoV2Backbone:
         return self._model
 
     def transform(self, images: Sequence[np.ndarray]) -> Any:
-        """Resize + ImageNet-normalize frames to a ``(B, 3, H, W)`` CPU tensor."""
+        """Resize + ImageNet-normalize frames to a ``(B, 3, H, W)`` CPU tensor.
+
+        Parameters
+        ----------
+        images:
+            Sequence of ``(H, W, 3)`` ``uint8`` RGB frames (channels-last, 0-255).
+
+        Returns
+        -------
+        torch.Tensor
+            Shape ``(B, 3, image_size, image_size)``, float32, channels-first,
+            scaled to ``[0, 1]`` and standardized by :data:`IMAGENET_MEAN` /
+            :data:`IMAGENET_STD` (dimensionless).
+        """
         import torch
 
         mean = torch.tensor(IMAGENET_MEAN, dtype=torch.float32).view(3, 1, 1)
@@ -233,7 +242,12 @@ class DinoV2Backbone:
         return torch.cat([cls, patch_mean], dim=-1)
 
     def encode(self, batch: Any) -> Any:
-        """Encode a transform batch to a ``(B, dim)`` fp32 CPU tensor."""
+        """Encode a :meth:`transform` batch to a ``(B, dim)`` fp32 CPU tensor.
+
+        The hub model is loaded on first use.  fp16 autocast applies on CUDA only
+        (see the ``dtype`` parameter); the returned embeddings are float32
+        whatever the compute precision was, and carry no physical unit.
+        """
         import torch
 
         self._ensure_model()
@@ -274,7 +288,7 @@ class FakeBackbone:
         self.transform_description = "identity (deterministic sha256 hash of frame bytes)"
 
     def transform(self, images: Sequence[np.ndarray]) -> list[np.ndarray]:
-        """Return the frames as contiguous ``uint8`` arrays (no torch)."""
+        """Return the ``(H, W, 3)`` ``uint8`` frames as contiguous arrays (no torch)."""
         return [np.ascontiguousarray(np.asarray(image, dtype=np.uint8)) for image in images]
 
     def _embed_one(self, image: np.ndarray) -> np.ndarray:
@@ -284,7 +298,12 @@ class FakeBackbone:
         return rng.standard_normal(self.dim).astype(np.float32)
 
     def encode(self, batch: Any) -> Any:
-        """Hash each frame to a deterministic ``(B, dim)`` fp32 torch tensor."""
+        """Hash each frame to a deterministic ``(B, dim)`` fp32 torch tensor.
+
+        The vector for a frame is drawn from a generator seeded with the first
+        eight bytes of the SHA-256 of that frame's bytes, so equal frames encode
+        equally on any machine.
+        """
         import torch
 
         vectors = np.stack([self._embed_one(image) for image in batch])
@@ -310,6 +329,12 @@ def build_backbone(
         Forwarded to :class:`DinoV2Backbone` (ignored by :class:`FakeBackbone`).
     fake_dim:
         Embedding dimension for :class:`FakeBackbone`.
+
+    Returns
+    -------
+    VisualBackbone
+        A ready backbone; the DINOv2 weights are fetched on first encode, not
+        here.
 
     Raises
     ------

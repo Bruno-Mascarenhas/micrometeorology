@@ -155,8 +155,9 @@ def build_manifest(
     -------
     tuple[pandas.DataFrame, dict]
         The manifest (columns/dtypes per
-        :func:`allsky.data.contracts.manifest_column_dtypes`) and the sidecar
-        meta dict (``manifest_sha256`` is added by
+        :func:`allsky.data.contracts.manifest_column_dtypes`, with the ``split``
+        column left empty for :func:`attach_split_column` to fill) and the
+        sidecar meta dict (``manifest_sha256`` is added by
         :func:`write_manifest_parquet`).
 
     Raises
@@ -189,7 +190,6 @@ def build_manifest(
     target_columns = [ghi_column] if diffuse_column is None else [ghi_column, diffuse_column]
     validate_features(feature_columns, target_columns=target_columns)
 
-    # --- sort/dedupe inputs -------------------------------------------------
     frames = frames_manifest.sort_values("timestamp").reset_index(drop=True)
     frames["timestamp"] = pd.to_datetime(frames["timestamp"]).astype("datetime64[ns]")
     dup_frames = frames["timestamp"].duplicated(keep="first")
@@ -209,7 +209,6 @@ def build_manifest(
     frame_times = pd.DatetimeIndex(frames["timestamp"])
     sensor_index = pd.DatetimeIndex(sensors.index)
 
-    # --- pair frames to sensor records -------------------------------------
     pairing = strategy.pair(frame_times, sensor_index)
     keep = pairing.matched
     if not keep.any():
@@ -225,7 +224,6 @@ def build_manifest(
     paired_sensor = sensors.iloc[matched_pos].copy()
     paired_sensor.index = frame_times
 
-    # --- features (drop rows whose feature vector is not finite) -----------
     features = build_feature_frame(
         paired_sensor,
         frame_times,
@@ -247,11 +245,9 @@ def build_manifest(
     if len(frames) == 0:
         raise ValueError("no rows survived the finite-feature filter; check sensor coverage")
 
-    # --- geometry ----------------------------------------------------------
     utc_offset = float(LOCAL_UTC_OFFSET_HOURS)
     elevation = solar_elevation_deg(frame_times, site, utc_offset)
 
-    # --- drop night frames (below the night threshold) BEFORE targets ------
     if night_min_elevation_deg is not None:
         day_mask = elevation >= float(night_min_elevation_deg)
         n_night = int((~day_mask).sum())
@@ -277,7 +273,6 @@ def build_manifest(
     azimuth = solar_azimuth_deg(frame_times, site, utc_offset)
     zenith = 90.0 - elevation
 
-    # --- targets -----------------------------------------------------------
     ghi = paired_sensor[ghi_column].to_numpy(dtype=np.float64)
     _reject_dead_channel(ghi, ghi_column, "the live GHI channel is 'CM3Up_Wm2_Avg'")
     kt = clearness_index(ghi, frame_times, site, utc_offset)
@@ -300,7 +295,6 @@ def build_manifest(
     sky_class = _classify_sky(kt, labelable=elevation >= min_elevation_deg)
     cloud_fraction = np.full(len(frames), np.nan, dtype=np.float64)
 
-    # --- qc flags ----------------------------------------------------------
     qc_flags = _qc_flags(
         elevation=elevation,
         ghi=ghi,
@@ -311,14 +305,12 @@ def build_manifest(
         far_distance_minutes=far_distance_minutes,
     )
 
-    # --- identity ----------------------------------------------------------
     sample_id = [f"allsky-{ts:%Y%m%d-%H%M}" for ts in frame_times]
     _check_sample_id_unique(sample_id)
     day_id = frame_times.strftime("%Y-%m-%d")
     timestamp_utc = frame_times.tz_localize(_LOCAL_TZ).tz_convert("UTC").as_unit("ns")
     image_path = [to_relative(path, data_root) for path in frames["frame_path"]]
 
-    # --- assemble in canonical order ---------------------------------------
     dtypes = manifest_column_dtypes(feature_columns)
     data: dict[str, Any] = {
         "sample_id": sample_id,
@@ -345,8 +337,6 @@ def build_manifest(
             "sky_class": sky_class,
             "cloud_fraction": cloud_fraction,
             "qc_flags": qc_flags,
-            # Constant provenance columns (mirror the sidecar meta); ``split`` is
-            # nullable and left empty until attach_split_column fills it.
             "dataset_version": [DATASET_VERSION] * n_rows,
             "alignment_id": [strategy.id] * n_rows,
             "split": [None] * n_rows,
@@ -395,8 +385,23 @@ def build_manifest_from_prepare_config(
     from ``cfg.sensor.ghi_column``, plus the site, alignment window, diffuse
     column, k-index kind, sky-class thresholds and the night drop threshold
     (``cfg.night_filter.min_solar_elevation_deg`` -> ``night_min_elevation_deg``).
-    *data_root* defaults to the config's output ``dataset_dir`` (the directory the
-    manifest's relative ``image_path`` values are resolved against).
+
+    Parameters
+    ----------
+    frames_manifest, sensor_df:
+        As in :func:`build_manifest`.
+    cfg:
+        Prepare configuration carrying every build parameter listed above.
+    data_root:
+        Directory the manifest's relative ``image_path`` values are resolved
+        against; defaults to the config's output ``dataset_dir``.
+    config_sha256:
+        Optional hash of the originating config, stored in the meta.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, dict]
+        The manifest and sidecar meta produced by :func:`build_manifest`.
     """
     root = data_root if data_root is not None else cfg.output.dataset_dir
     alignment = CenterFrame(
@@ -430,8 +435,22 @@ def write_manifest_parquet(
     meta.  Both files are written to a temp name in the same directory and
     ``os.replace``-d into place.
 
-    Returns the meta dict actually written (with ``manifest_sha256`` /
-    ``row_count`` populated).
+    Parameters
+    ----------
+    manifest:
+        The manifest DataFrame to persist.
+    meta:
+        Sidecar meta as returned by :func:`build_manifest`; copied, never
+        mutated in place.
+    path:
+        Destination parquet path; the sidecar is written beside it as
+        ``<name>.meta.json``.
+
+    Returns
+    -------
+    dict
+        The meta actually written, with ``manifest_sha256`` and ``row_count``
+        populated.
     """
     out = Path(path)
 
@@ -502,17 +521,16 @@ def attach_split_column(
     return written
 
 
-# ---------------------------------------------------------------------------
-# internals
-# ---------------------------------------------------------------------------
-
-
 def _split_assignment_and_id(
     split_artifact: DaySplit | dict[str, Any],
 ) -> tuple[Mapping[str, str], str | None]:
-    """Extract the ``day_id -> split`` map and ``split_id`` from either form."""
+    """Extract the ``day_id -> split`` map and ``split_id`` from either form.
+
+    A :class:`~allsky.data.splits.DaySplit` is recognised by its ``assignment``
+    attribute; the dict form carries the same two keys.
+    """
     assignment = getattr(split_artifact, "assignment", None)
-    if assignment is not None:  # DaySplit
+    if assignment is not None:
         split_id = getattr(split_artifact, "split_id", None)
         return {str(k): str(v) for k, v in assignment.items()}, split_id
     if isinstance(split_artifact, dict):

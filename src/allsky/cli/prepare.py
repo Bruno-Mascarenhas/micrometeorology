@@ -136,11 +136,6 @@ def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]
     return digest.hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# validate-dataset
-# ---------------------------------------------------------------------------
-
-
 def validate_dataset(
     config: ConfigOption = None,
     manifest: Annotated[
@@ -161,7 +156,18 @@ def validate_dataset(
         ),
     ] = False,
 ) -> None:
-    """Validate a prepared manifest; exit 1 on errors (or on warnings if --strict)."""
+    """Validate a prepared manifest; exit 1 on errors (or on warnings if --strict).
+
+    The split artifact next to the manifest is validated together with it when
+    present, and the ``.meta.json`` sidecar supplies the provenance the checks
+    compare against (its absence is a warning, not a failure).
+
+    Raises
+    ------
+    typer.Exit
+        Code 1 when the manifest is absent or the report holds errors (or, under
+        ``--strict``, warnings).
+    """
     _configure_logging()
     cfg = _load_prepare(config)
 
@@ -215,11 +221,6 @@ def validate_dataset(
     typer.echo("OK")
 
 
-# ---------------------------------------------------------------------------
-# prepare-local
-# ---------------------------------------------------------------------------
-
-
 def prepare_local(
     config: ConfigOption = None,
     steps: Annotated[
@@ -234,7 +235,20 @@ def prepare_local(
         typer.Option("--force", help="Re-extract, rebuild and regenerate regardless of state."),
     ] = False,
 ) -> None:
-    """Prepare a local dataset: extract frames, build the manifest and day splits."""
+    """Prepare a local dataset: extract frames, build the manifest and day splits.
+
+    Each step resumes on the artifacts already on disk unless ``--force`` is
+    given: a video whose frame manifest is complete is not re-extracted, and the
+    manifest is rebuilt only when the inputs it is derived from changed (see
+    :func:`_manifest_inputs_sha256`).
+
+    Raises
+    ------
+    typer.Exit
+        Code 1 on an unknown ``--steps`` name, on a sensor record that cannot be
+        paired with any video day, when ``build-manifest`` runs with no extracted
+        frames, or when the split artifact already exists for a different day set.
+    """
     _configure_logging()
     cfg = _load_prepare(config)
 
@@ -296,11 +310,6 @@ def prepare_local(
         )
 
 
-# ---------------------------------------------------------------------------
-# export-colab-bundle
-# ---------------------------------------------------------------------------
-
-
 def export_colab_bundle_cmd(
     out: Annotated[Path, typer.Option("--out", "-o", help="Destination bundle .tar.gz.")],
     config: ConfigOption = None,
@@ -335,11 +344,6 @@ def export_colab_bundle_cmd(
         include_frames=include_frames,
     )
     typer.echo(json.dumps(summary, indent=2, default=str))
-
-
-# ---------------------------------------------------------------------------
-# step helpers
-# ---------------------------------------------------------------------------
 
 
 def _parse_steps(steps: str) -> set[str]:

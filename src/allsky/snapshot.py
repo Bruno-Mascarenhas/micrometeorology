@@ -1,5 +1,11 @@
 """Captures the camera's live frame and runs a trained checkpoint over it.
 
+Timestamps here are **naive local time** on the camera's own clock, matching the
+overlay and datalogger pipelines: :func:`capture_snapshot` prefers the stamp
+burned into the frame, falls back to the server's ``Last-Modified`` header
+converted through :data:`allsky.config.SITE_TZ`, and only then to the host
+clock — recording which of the three it used in the JSON sidecar.
+
 Which feature columns a live frame cannot supply, and what imputing them costs,
 are documented in ``docs/allsky-archive.md``.
 """
@@ -45,6 +51,27 @@ class LiveFrameSource(Protocol):
 
 @dataclass(frozen=True)
 class Snapshot:
+    """One captured live frame, its provenance sidecar and any prediction over it.
+
+    Attributes
+    ----------
+    image_path:
+        JPEG written as ``allsky-YYYYMMDD-HHMMSS.jpg``, named from
+        *captured_at*.
+    metadata_path:
+        JSON sidecar beside it, recording the capture-time source, the response
+        headers and the code version.
+    captured_at:
+        Naive local capture time.
+    size:
+        Size of the fetched JPEG payload in bytes.
+    server_last_modified:
+        Raw ``Last-Modified`` header as the server sent it, or None.
+    prediction:
+        Payload from :func:`predict_snapshot`, or None when the capture was not
+        scored.
+    """
+
     image_path: Path
     metadata_path: Path
     captured_at: pd.Timestamp
@@ -94,7 +121,33 @@ def _fresh(candidate: pd.Timestamp | None, now: pd.Timestamp) -> TypeIs[pd.Times
 def capture_snapshot(
     client: LiveFrameSource, out_dir: str | Path, *, timestamp: pd.Timestamp | None = None
 ) -> Snapshot:
-    """Fetch the current frame into *out_dir* alongside a JSON provenance sidecar."""
+    """Fetch the current frame into *out_dir* alongside a JSON provenance sidecar.
+
+    Parameters
+    ----------
+    client:
+        Anything exposing the camera's live-frame endpoint (in practice an
+        :class:`allsky.archive.ArchiveClient`).
+    out_dir:
+        Directory the JPEG and its sidecar are written into, atomically.
+    timestamp:
+        Naive local capture time to use verbatim, bypassing the overlay and
+        header probes. Left None the capture time is taken from the frame's own
+        overlay when it is within :data:`LIVE_FRAME_MAX_AGE` of now, else from
+        the server's ``Last-Modified`` under the same freshness test, else from
+        the local clock with a warning.
+
+    Returns
+    -------
+    Snapshot
+        Written paths, the naive local capture time and the payload size. The
+        ``prediction`` field is always None here.
+
+    Raises
+    ------
+    ValueError
+        If the camera returns an empty payload.
+    """
     payload, headers = client.fetch_live_image()
     if not payload:
         raise ValueError("the camera returned an empty live frame")
@@ -232,7 +285,55 @@ def predict_snapshot(
     device: str = "cpu",
     trust_checkpoint: bool = False,
 ) -> dict[str, Any]:
-    """Run a trained checkpoint over one sky image and return physical-unit predictions."""
+    """Run a trained checkpoint over one sky image and return physical-unit predictions.
+
+    The image is read as ``(3, S, S)`` ``float32`` in ``[0, 1]``, channels-first,
+    at the checkpoint's own ``image_size``. Sensor features are engineered for
+    *timestamp* under the checkpoint's feature set; any column that comes out
+    non-finite is replaced by the training mean and listed in the returned
+    ``features.imputed``, so an imputed prediction is never silently equivalent
+    to a measured one. Regression heads are denormalized back to physical units.
+
+    Parameters
+    ----------
+    image_path:
+        Sky image to score, in any PIL-readable format.
+    checkpoint_path:
+        Trained checkpoint carrying the config, feature columns and normalizers.
+    timestamp:
+        Naive local capture time of the image; drives both the solar geometry
+        features and the sensor-row lookup.
+    sensor_csv:
+        Datalogger export to draw the measured features from. Left None every
+        sensor-derived column is imputed.
+    tolerance:
+        Largest gap between *timestamp* and the nearest sensor row still
+        accepted; beyond it the row is discarded and the columns imputed.
+    site:
+        Observation site for the solar geometry; defaults to
+        :class:`~allsky.config.SiteConfig`.
+    device:
+        Torch device the backbone and model run on.
+    trust_checkpoint:
+        Allow unpickling a checkpoint that is not weights-only. Leave False for
+        any checkpoint whose origin is not your own training run.
+
+    Returns
+    -------
+    dict
+        ``{"predictions", "features", "model", "image"}``. ``predictions`` holds
+        whichever heads the checkpoint has: ``dhi`` (diffuse horizontal
+        irradiance, W m-2), ``kindex`` (dimensionless), ``cloud_fraction``
+        (in [0, 1]), and ``sky_class`` with its ``sky_probabilities`` over
+        :data:`allsky.data.contracts.SKY_CLASS_NAMES`. ``features`` records the
+        raw values fed in and which of them were imputed.
+
+    Raises
+    ------
+    ValueError
+        If the checkpoint expects a feature column its configured feature set
+        does not produce.
+    """
     import torch
 
     from allsky.config import ExperimentConfig

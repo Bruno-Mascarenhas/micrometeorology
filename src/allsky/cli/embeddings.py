@@ -82,7 +82,18 @@ def precompute_embeddings(
         typer.Option("--dry-run", help="Report the plan and write nothing."),
     ] = False,
 ) -> None:
-    """Precompute visual embeddings for a dataset manifest (DINOv2 or fake)."""
+    """Precompute visual embeddings for a dataset manifest (DINOv2 or fake).
+
+    The manifest's ``image_path`` values are relative POSIX paths against the
+    manifest's own directory, so that directory is the data root the extraction
+    loop resolves frames against.
+
+    Raises
+    ------
+    typer.Exit
+        Code 1 when the manifest is absent, the configured backbone name is
+        unknown, or the extraction loop fails.
+    """
     import pandas as pd
 
     from allsky.config import load_prepare_config
@@ -96,7 +107,6 @@ def precompute_embeddings(
     manifest_path = manifest if manifest is not None else dataset_dir / "manifest.parquet"
     out_dir = out if out is not None else dataset_dir / "embeddings"
     device_pref = device if device is not None else cfg.embeddings.device
-    # Manifest image paths are relative POSIX against the manifest's directory.
     data_root = manifest_path.parent
 
     if not manifest_path.exists():

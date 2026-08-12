@@ -176,6 +176,17 @@ SKY_CLASS_COUNT = len(SKY_CLASS_VALUES)
 def sky_class_name(value: int) -> str:
     """Name for a sky-class integer; ``"missing"`` for the ``-1`` sentinel.
 
+    Parameters
+    ----------
+    value:
+        Class integer as stored in the manifest's ``sky_class`` column.
+
+    Returns
+    -------
+    str
+        The machine-readable name from :data:`SKY_CLASS_NAMES`, or ``"missing"``
+        for an unlabelable sample.
+
     Raises
     ------
     ValueError
@@ -244,9 +255,19 @@ def to_relative(path: str | Path, data_root: str | Path) -> str:
     *data_root* is itself relative — both are then relative to the same working
     directory, as with the shipped ``output/allsky/dataset`` default — its
     prefix is stripped too, so ``resolve(to_relative(p, root), root)`` names the
-    same file it started from.  An absolute *path* must live inside *data_root*;
-    otherwise a :class:`ValueError` is raised (a manifest must never encode a
-    location outside its data root).
+    same file it started from.
+
+    Returns
+    -------
+    str
+        POSIX-separated path relative to *data_root*, as stored in the
+        manifest's ``image_path`` column.
+
+    Raises
+    ------
+    ValueError
+        If *path* is absolute and does not live inside *data_root*: a manifest
+        must never encode a location outside its data root.
     """
     candidate = Path(path)
     if not candidate.is_absolute():
@@ -273,6 +294,11 @@ def to_relative(path: str | Path, data_root: str | Path) -> str:
 
 def resolve(relative: str | Path, data_root: str | Path) -> Path:
     """Resolve a relative POSIX manifest path against *data_root* to a full path.
+
+    Returns
+    -------
+    pathlib.Path
+        *relative* joined onto *data_root* in the host's path flavour.
 
     Raises
     ------

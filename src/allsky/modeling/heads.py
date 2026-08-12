@@ -72,6 +72,11 @@ class Trunk(nn.Module):
         Number of trunk blocks.
     dropout:
         Dropout inside every block.
+
+    Raises
+    ------
+    ValueError
+        If *n_layers* is not positive.
     """
 
     def __init__(
@@ -97,7 +102,18 @@ class Trunk(nn.Module):
         return self._out_dim
 
     def forward(self, x: Tensor) -> Tensor:
-        """Map a fused vector ``(B, in_dim)`` to ``(B, out_dim)``."""
+        """Run the fused vector through every trunk block.
+
+        Parameters
+        ----------
+        x:
+            ``(B, in_dim)`` float32 fused vector (dimensionless).
+
+        Returns
+        -------
+        Tensor
+            ``(B, out_dim)`` float32 task-agnostic embedding (dimensionless).
+        """
         for block in self.blocks:
             x = block(x)
         out: Tensor = x
@@ -105,26 +121,63 @@ class Trunk(nn.Module):
 
 
 class DHIHead(nn.Module):
-    """Single-value DHI regression head (normalized space)."""
+    """Single-value DHI regression head (normalized space).
+
+    Parameters
+    ----------
+    in_dim:
+        Width of the trunk embedding this head reads.
+    """
 
     def __init__(self, in_dim: int) -> None:
         super().__init__()
         self.linear = nn.Linear(in_dim, 1)
 
     def forward(self, x: Tensor) -> dict[str, Tensor]:
-        """Return ``{"dhi": (B,)}``."""
+        """Predict the normalized DHI from the trunk embedding.
+
+        Parameters
+        ----------
+        x:
+            ``(B, in_dim)`` float32 trunk embedding (dimensionless).
+
+        Returns
+        -------
+        dict[str, Tensor]
+            ``{"dhi": (B,)}`` float32 in **normalized** target space
+            (dimensionless; the engine denormalizes to W m-2).
+        """
         return {"dhi": self.linear(x).squeeze(-1)}
 
 
 class DHIHeteroscedasticHead(nn.Module):
-    """DHI head predicting a mean and a clamped log-variance (Gaussian NLL)."""
+    """DHI head predicting a mean and a clamped log-variance (Gaussian NLL).
+
+    Parameters
+    ----------
+    in_dim:
+        Width of the trunk embedding this head reads.
+    """
 
     def __init__(self, in_dim: int) -> None:
         super().__init__()
         self.linear = nn.Linear(in_dim, 2)
 
     def forward(self, x: Tensor) -> dict[str, Tensor]:
-        """Return ``{"dhi": (B,), "dhi_log_var": (B,)}`` with log-var clamped."""
+        """Predict the normalized DHI mean and its log-variance.
+
+        Parameters
+        ----------
+        x:
+            ``(B, in_dim)`` float32 trunk embedding (dimensionless).
+
+        Returns
+        -------
+        dict[str, Tensor]
+            ``{"dhi": (B,), "dhi_log_var": (B,)}`` float32, both in
+            **normalized** target space; the log-variance is clamped to
+            ``[_LOG_VAR_MIN, _LOG_VAR_MAX]``.
+        """
         out = self.linear(x)
         mean = out[..., 0]
         log_var = out[..., 1].clamp(_LOG_VAR_MIN, _LOG_VAR_MAX)
@@ -132,31 +185,75 @@ class DHIHeteroscedasticHead(nn.Module):
 
 
 class KIndexHead(nn.Module):
-    """Single-value k-index regression head (normalized space)."""
+    """Single-value k-index regression head (normalized space).
+
+    Parameters
+    ----------
+    in_dim:
+        Width of the trunk embedding this head reads.
+    """
 
     def __init__(self, in_dim: int) -> None:
         super().__init__()
         self.linear = nn.Linear(in_dim, 1)
 
     def forward(self, x: Tensor) -> dict[str, Tensor]:
-        """Return ``{"kindex": (B,)}``."""
+        """Predict the normalized clear-sky index from the trunk embedding.
+
+        Parameters
+        ----------
+        x:
+            ``(B, in_dim)`` float32 trunk embedding (dimensionless).
+
+        Returns
+        -------
+        dict[str, Tensor]
+            ``{"kindex": (B,)}`` float32 in **normalized** target space (the
+            k-index itself is a dimensionless ratio).
+        """
         return {"kindex": self.linear(x).squeeze(-1)}
 
 
 class SkyHead(nn.Module):
-    """Sky-condition classification head (three logits)."""
+    """Sky-condition classification head (three logits).
+
+    Parameters
+    ----------
+    in_dim:
+        Width of the trunk embedding this head reads.
+    n_classes:
+        Number of sky classes (clear / partially_cloudy / overcast).
+    """
 
     def __init__(self, in_dim: int, n_classes: int = SKY_CLASS_COUNT) -> None:
         super().__init__()
         self.linear = nn.Linear(in_dim, n_classes)
 
     def forward(self, x: Tensor) -> dict[str, Tensor]:
-        """Return ``{"sky_logits": (B, n_classes)}``."""
+        """Score the sky classes from the trunk embedding.
+
+        Parameters
+        ----------
+        x:
+            ``(B, in_dim)`` float32 trunk embedding (dimensionless).
+
+        Returns
+        -------
+        dict[str, Tensor]
+            ``{"sky_logits": (B, n_classes)}`` float32 raw logits (unitless, not
+            softmaxed).
+        """
         return {"sky_logits": self.linear(x)}
 
 
 class CloudFractionHead(nn.Module):
-    """Cloud-fraction regression head bounded to ``[0, 1]`` via sigmoid."""
+    """Cloud-fraction regression head bounded to ``[0, 1]`` via sigmoid.
+
+    Parameters
+    ----------
+    in_dim:
+        Width of the trunk embedding this head reads.
+    """
 
     def __init__(self, in_dim: int) -> None:
         super().__init__()
@@ -164,7 +261,19 @@ class CloudFractionHead(nn.Module):
         self.act = nn.Sigmoid()
 
     def forward(self, x: Tensor) -> dict[str, Tensor]:
-        """Return ``{"cloud_fraction": (B,)}`` in ``[0, 1]``."""
+        """Predict the sky-covering cloud fraction from the trunk embedding.
+
+        Parameters
+        ----------
+        x:
+            ``(B, in_dim)`` float32 trunk embedding (dimensionless).
+
+        Returns
+        -------
+        dict[str, Tensor]
+            ``{"cloud_fraction": (B,)}`` float32 in ``[0, 1]``, a dimensionless
+            fraction that is **not** normalized (it is already bounded).
+        """
         return {"cloud_fraction": self.act(self.linear(x)).squeeze(-1)}
 
 
@@ -175,6 +284,15 @@ class Heads(nn.Module):
     heteroscedastic variant when ``targets.dhi.loss == "heteroscedastic"``.
     ``forward`` merges each head's output into a single
     :class:`~allsky.modeling.contracts.ModelOutputs`.
+
+    Parameters
+    ----------
+    in_dim:
+        Width of the trunk embedding every head reads.
+    targets:
+        Which heads to build (:class:`allsky.config.TargetsConfig`).
+    n_classes:
+        Number of sky classes, used only when the sky head is enabled.
     """
 
     def __init__(
@@ -196,7 +314,19 @@ class Heads(nn.Module):
         self.heads = nn.ModuleList(heads)
 
     def forward(self, x: Tensor) -> ModelOutputs:
-        """Return the merged outputs of every enabled head."""
+        """Run every enabled head over the trunk embedding and merge their outputs.
+
+        Parameters
+        ----------
+        x:
+            ``(B, in_dim)`` float32 trunk embedding (dimensionless).
+
+        Returns
+        -------
+        ModelOutputs
+            The union of the enabled heads' keys; regression entries are in
+            normalized target space except ``cloud_fraction``.
+        """
         outputs: dict[str, Tensor] = {}
         for head in self.heads:
             outputs.update(head(x))

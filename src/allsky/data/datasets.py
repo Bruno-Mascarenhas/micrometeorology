@@ -1,13 +1,14 @@
 """Map-style multimodal datasets emitting the new-stack batch contract.
 
-Two datasets share one batch contract (see :meth:`MultimodalImageDataset.__getitem__`):
+Two datasets share one batch contract (see :class:`MultimodalImageDataset`):
 
 - :class:`MultimodalImageDataset` loads sky JPEGs (paths relative to
   ``data_root``) end-to-end with a PIL decode -> RGB -> bilinear resize -> CHW
   float32 in ``[0, 1]`` recipe.
 - :class:`MultimodalEmbeddingDataset` reads a precomputed visual embedding per
-  sample through an :class:`EmbeddingReader` (the real safetensors reader lands
-  in wave C2; here it is a minimal ``sample_id -> np.ndarray`` protocol).
+  sample through an :class:`EmbeddingReader`, the minimal
+  ``sample_id -> np.ndarray`` protocol that
+  :class:`allsky.embeddings.storage.SafetensorsEmbeddingReader` implements.
 
 Both standardize the engineered feature vector with a **train-only**
 :class:`allsky.features.FeatureNormalizer` (validation/test must be handed the
@@ -52,7 +53,7 @@ _REGRESSION_TARGETS = ("target_dhi", "target_kindex", "cloud_fraction")
 #: never disagree about which modes exist.
 type WindowMode = AlignmentStrategyName
 _WINDOW_MODES: tuple[WindowMode, ...] = get_args(AlignmentStrategyName)
-#: Nanoseconds per minute (int64 timestamp arithmetic is done in ns).
+#: Window bounds are computed on int64 nanosecond timestamps.
 _NS_PER_MINUTE = 60_000_000_000
 
 
@@ -60,13 +61,14 @@ _NS_PER_MINUTE = 60_000_000_000
 class EmbeddingReader(Protocol):
     """Minimal reader interface: ``sample_id -> (D,) float embedding``.
 
-    The concrete safetensors-backed reader arrives in wave C2; any callable (or
-    object with ``__call__``) returning a 1-D array for a ``sample_id`` — and
-    optionally exposing an integer ``dim`` — satisfies this protocol.
+    :class:`allsky.embeddings.storage.SafetensorsEmbeddingReader` is the shipped
+    implementation; any callable (or object with ``__call__``) returning a 1-D
+    array for a ``sample_id`` — and optionally exposing an integer ``dim`` —
+    satisfies this protocol.
     """
 
     def __call__(self, sample_id: str) -> np.ndarray:
-        """Return the embedding vector for *sample_id*."""
+        """Return the ``(D,)`` float embedding stored for *sample_id*."""
         ...
 
 
@@ -111,7 +113,6 @@ class _BaseMultimodalDataset:
         self._cloud_fraction = self._raw_target("cloud_fraction")
         self._sky_class = self.manifest["sky_class"].to_numpy(dtype=np.int64, copy=True)
         self._sample_ids = [str(s) for s in self.manifest["sample_id"]]
-        #: Whole-column tensors, built on the first item (see _column_tensors).
         self._columns: SampleTensors | None = None
 
     def _raw_target(self, column: str) -> np.ndarray:
@@ -186,6 +187,13 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
     train, stats:
         Train-only standardization: on the training split ``stats`` is fit from
         *manifest*; validation/test must be handed ``train_dataset.stats``.
+
+    Raises
+    ------
+    ValueError
+        If *feature_columns* is empty or names a column *manifest* lacks, if
+        *stats* covers different columns, or if ``train=False`` is passed
+        without the training split's *stats* (the leakage guard).
     """
 
     def __init__(
@@ -224,6 +232,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         return np.ascontiguousarray(scaled.transpose(2, 0, 1))
 
     def __getitem__(self, idx: int) -> SampleTensors:
+        """Row *idx*: the shared target tensors plus ``image`` ``(3, H, W)`` float32."""
         import torch
 
         item = self._target_item(idx)
@@ -263,6 +272,13 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         Temporal windowing mode (see above).
     window_minutes:
         Full window width in minutes for the windowed modes.
+
+    Raises
+    ------
+    ValueError
+        If *window* is not one of the modes above, if *window_minutes* is not
+        positive, or for any of the feature/normalizer failures listed on
+        :class:`MultimodalImageDataset`.
     """
 
     def __init__(
@@ -286,9 +302,8 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         self._embedding_dim = int(declared) if declared is not None else None
         self.window = window
         self.window_minutes = float(window_minutes)
-        #: Fixed padded window length for ``attention_pooling`` (simple collation).
+        #: Fixed padded window length ``T`` for ``attention_pooling``.
         self.seq_len = math.ceil(self.window_minutes) + 1
-        #: Per-row positional window members (empty list for ``center_frame``).
         self._windows: list[list[int]] = self._resolve_windows() if window != "center_frame" else []
 
     @property
@@ -307,6 +322,10 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         whose ``timestamp_utc`` is within ``window_minutes / 2`` of the row's own
         time, in time order.  The row's own position is always included (distance
         zero), so a window is never empty.
+
+        All rows are resolved in one lexsort (day, then time, then original
+        position) rather than by rescanning the day column per day: each day's
+        bounds are then a pair of searchsorted calls over its sorted times.
         """
         index = pd.DatetimeIndex(self.manifest["timestamp_utc"]).tz_convert("UTC").tz_localize(None)
         times_ns = index.as_unit("ns").to_numpy().astype("int64")
@@ -314,9 +333,6 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         half_ns = round(self.window_minutes / 2.0 * _NS_PER_MINUTE)
         n_rows = len(self.manifest)
         windows: list[list[int]] = [[] for _ in range(n_rows)]
-        # One grouping pass (day, then time, then original position) instead of
-        # rescanning the day column per day; the per-day bounds are then a pair of
-        # searchsorted calls over that day's already-sorted times.
         order = np.lexsort((np.arange(n_rows), times_ns, day_codes))
         sorted_days = day_codes[order]
         sorted_times = times_ns[order]
@@ -364,6 +380,13 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         ]
 
     def __getitem__(self, idx: int) -> SampleTensors:
+        """Row *idx*: the shared target tensors plus its visual payload.
+
+        The payload is ``embedding`` ``(D,)`` float32 under ``center_frame`` and
+        ``mean_embedding``; under ``attention_pooling`` it is ``embedding_seq``
+        ``(T, D)`` float32 zero-padded to :attr:`seq_len` plus ``frame_mask``
+        ``(T,)`` bool, True where the row of the sequence is a real frame.
+        """
         import torch
 
         item = self._target_item(idx)
@@ -373,7 +396,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
             return item
 
         vectors = self._window_embeddings(idx)
-        if not vectors:  # all co-frames missing -> fall back to the row's own frame
+        if not vectors:
             vectors = [self._read(self._sample_ids[idx])]
 
         if self.window == "mean_embedding":
@@ -381,7 +404,6 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
             item["embedding"] = torch.from_numpy(np.ascontiguousarray(pooled))
             return item
 
-        # attention_pooling: zero-padded (T, D) sequence + bool frame_mask.
         take = vectors[: self.seq_len]
         dim = take[0].shape[0]
         seq = np.zeros((self.seq_len, dim), dtype=np.float32)

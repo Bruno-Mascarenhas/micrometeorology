@@ -6,11 +6,13 @@ index ``kt = GHI / E0h``, plus :func:`pseudo_diffuse` which converts a
 GHI series into a **pseudo** diffuse-irradiance target.
 
 .. warning::
-   These are *pseudo-targets*: LabMiM has no shaded pyranometer yet, so
-   the training pipeline bootstraps on Erbs-derived diffuse values
-   (``target_source="erbs_pseudo"``).  Replace them with real
-   measurements (``PrepareTargetsConfig.diffuse_column``) as soon as a
-   diffuse sensor exists.
+   :func:`pseudo_diffuse` produces *pseudo-targets*, not measurements.
+   The prepare pipeline reaches for it only when
+   ``PrepareTargetsConfig.diffuse_column`` is null; with the default
+   ``PSP_Wm2_Avg`` it builds measured diffuse targets instead.  Rows
+   built here are flagged ``target_source="erbs_pseudo"``, and a
+   regression metric over them scores agreement with the Erbs
+   decomposition rather than with a pyranometer.
 
 References
 ----------
@@ -40,7 +42,19 @@ def erbs_diffuse_fraction(kt: ErbsInput) -> np.ndarray:
       ``kd = 0.9511 - 0.1604 kt + 4.388 kt^2 - 16.638 kt^3 + 12.336 kt^4``
     - ``kt > 0.80``:  ``kd = 0.165``
 
-    The result is clipped to ``[0, 1]``; NaN input yields NaN output.
+    Parameters
+    ----------
+    kt:
+        Clearness index ``GHI / E0h``, shape ``(N,)`` (or ``()`` for a
+        scalar), dimensionless.  NaN marks a sample where ``kt`` is
+        undefined, typically night.
+
+    Returns
+    -------
+    numpy.ndarray
+        Diffuse fraction ``kd = DHI / GHI``, same shape as *kt*,
+        ``float64``, dimensionless, clipped to ``[0, 1]``.  NaN input
+        yields NaN output.
 
     Limitation
     ----------
@@ -70,14 +84,27 @@ def pseudo_diffuse(ghi: ErbsInput, kt: ErbsInput) -> np.ndarray:
     -------
     ``DHI = erbs_diffuse_fraction(kt) * GHI``
 
-    Since ``kd`` is bounded in [0, 1], the result satisfies
-    ``0 <= DHI <= GHI`` for non-negative GHI.  NaN in either input
-    propagates to NaN.
+    Parameters
+    ----------
+    ghi:
+        Measured global horizontal irradiance, shape ``(N,)``, W m-2.
+    kt:
+        Clearness index aligned 1:1 with *ghi*, shape ``(N,)``,
+        dimensionless.
+
+    Returns
+    -------
+    numpy.ndarray
+        Pseudo diffuse horizontal irradiance, shape ``(N,)``,
+        ``float64``, W m-2.  Since ``kd`` is bounded in [0, 1] the result
+        satisfies ``0 <= DHI <= GHI`` for non-negative GHI; NaN in either
+        input propagates to NaN.
 
     Limitation
     ----------
-    This is a **pseudo-target** (no shaded pyranometer at the site yet);
-    dataset rows built from it carry ``target_source="erbs_pseudo"``.
+    This is a **pseudo-target**, selected only when no diffuse column is
+    configured; dataset rows built from it carry
+    ``target_source="erbs_pseudo"``.
     """
     ghi_arr = np.asarray(ghi, dtype=np.float64)
     return erbs_diffuse_fraction(kt) * ghi_arr

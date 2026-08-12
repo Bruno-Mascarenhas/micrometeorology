@@ -68,11 +68,20 @@ class MultitaskLoss(nn.Module):
         it raises :class:`NotImplementedError` so callers cannot silently rely
         on unweighted behaviour.
 
+    Raises
+    ------
+    NotImplementedError
+        If *learned_uncertainty* is enabled.
+
     Notes
     -----
     :meth:`forward` returns ``{"loss": total, "loss_<head>": component, ...}``
     where the total is the weighted sum and every ``loss_<head>`` component is
     the **unweighted** per-head loss (only enabled heads appear).
+
+    ``TargetsConfig.cloud_fraction`` carries no configurable loss kind, so the
+    cloud head defaults to ``"mse"``; a ``loss`` attribute is honoured if the
+    config ever grows one.
     """
 
     def __init__(
@@ -102,8 +111,6 @@ class MultitaskLoss(nn.Module):
         self._sky_weight = float(targets.sky.weight)
         self._cloud_enabled = bool(targets.cloud_fraction.enabled)
         self._cloud_weight = float(targets.cloud_fraction.weight)
-        # cloud_fraction carries no configurable loss kind yet; honour one if a
-        # future config grows the attribute.
         self._cloud_kind = str(getattr(targets.cloud_fraction, "loss", "mse"))
 
         self._dhi_mean, self._dhi_std = _norm_stats(target_normalizers, "dhi")
@@ -118,9 +125,17 @@ class MultitaskLoss(nn.Module):
             The model's :class:`allsky.modeling.contracts.ModelOutputs` (only
             the enabled heads' keys are read).
         batch:
-            Batch dict with raw physical targets ``dhi`` / ``kindex`` /
-            ``cloud_fraction`` (``float``, NaN = missing) and ``sky_class``
-            (``int64``, ``-1`` = missing).
+            Batch dict with raw physical targets ``dhi`` ``(B,)`` in W m-2,
+            ``kindex`` ``(B,)`` (dimensionless ratio) and ``cloud_fraction``
+            ``(B,)`` in ``[0, 1]`` — all ``float``, NaN = missing — plus
+            ``sky_class`` ``(B,)`` ``int64`` with ``-1`` = missing.
+
+        Returns
+        -------
+        dict[str, Tensor]
+            ``{"loss": total, "loss_<head>": component, ...}``, every value a
+            scalar tensor.  With no head enabled the total is an exact
+            grad-free zero rather than an empty or NaN value.
         """
         components: dict[str, Tensor] = {}
         total: Tensor | None = None
@@ -155,11 +170,8 @@ class MultitaskLoss(nn.Module):
             total = _accumulate(total, self._cloud_weight, component)
 
         if total is None:
-            # No head enabled: return a finite, grad-free zero.
             total = torch.zeros((), dtype=torch.float32)
         return {"loss": total, **components}
-
-    # -- per-head helpers ---------------------------------------------------
 
     def _dhi_loss(self, outputs: ModelOutputs, target: Tensor) -> Tensor:
         """DHI component: heteroscedastic Gaussian NLL or a plain regression loss."""

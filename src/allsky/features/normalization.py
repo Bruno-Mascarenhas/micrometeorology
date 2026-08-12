@@ -33,6 +33,14 @@ class FeatureNormalizer:
     Fit on the training split via :meth:`fit`; apply to any split with
     :meth:`transform`.  ``std`` entries below :data:`_MIN_STD` are clamped to
     1.0 so constant columns pass through as zeros instead of exploding.
+
+    Attributes
+    ----------
+    columns:
+        The ``F`` feature names, in the order the model consumes them.
+    mean, std:
+        Shape ``(F,)`` ``float32``, each entry in the physical unit of its
+        column, aligned with :attr:`columns`.
     """
 
     columns: tuple[str, ...]
@@ -83,7 +91,13 @@ class FeatureNormalizer:
         return cls(columns=tuple(cols), mean=mean.astype(np.float32), std=std)
 
     def transform(self, frame: pd.DataFrame) -> np.ndarray:
-        """Standardize *frame* to ``(n_rows, n_columns)`` float32 in fit order."""
+        """Standardize *frame* into a ``(N, F)`` ``float32`` array in fit order.
+
+        The columns are selected and ordered by :attr:`columns`, so the model
+        sees the same layout it was trained with.  Output is dimensionless
+        z-scores; a row holding a NaN feature keeps it (screening is the
+        manifest builder's job, not the normalizer's).
+        """
         values = frame.loc[:, list(self.columns)].to_numpy(dtype=np.float32)
         standardized: np.ndarray = (values - self.mean) / self.std
         return standardized
@@ -119,7 +133,22 @@ class TargetNormalizer:
 
     @classmethod
     def fit(cls, values: Sequence[float] | np.ndarray | pd.Series) -> TargetNormalizer:
-        """Fit over finite values of *values* (training split only)."""
+        """Fit over finite values of *values* (training split only).
+
+        Parameters
+        ----------
+        values:
+            Shape ``(N,)`` observations of one target in its physical unit
+            (W/m2 for DHI, dimensionless for a k-index); non-finite entries are
+            ignored rather than propagated into the statistics.
+
+        Returns
+        -------
+        TargetNormalizer
+            Mean and standard deviation of the finite values; ``mean=0``,
+            ``std=1`` when none are finite, and ``std`` clamped to 1.0 below
+            :data:`_MIN_STD`.
+        """
         arr = np.asarray(values, dtype=np.float64)
         finite = arr[np.isfinite(arr)]
         mean = float(finite.mean()) if finite.size else 0.0
@@ -129,12 +158,12 @@ class TargetNormalizer:
         return cls(mean=mean, std=std)
 
     def normalize(self, values: Sequence[float] | np.ndarray | float) -> np.ndarray:
-        """Map physical units to normalized space."""
+        """Map physical units to normalized space (``float64``, shape preserved)."""
         normalized: np.ndarray = (np.asarray(values, dtype=np.float64) - self.mean) / self.std
         return normalized
 
     def denormalize(self, values: Sequence[float] | np.ndarray | float) -> np.ndarray:
-        """Map normalized space back to physical units."""
+        """Map normalized space back to physical units (``float64``, shape preserved)."""
         physical: np.ndarray = np.asarray(values, dtype=np.float64) * self.std + self.mean
         return physical
 
@@ -152,5 +181,19 @@ def fit_target_normalizers(
     frame: pd.DataFrame,
     columns: Sequence[str],
 ) -> dict[str, TargetNormalizer]:
-    """Fit one :class:`TargetNormalizer` per target column (training split only)."""
+    """Fit one :class:`TargetNormalizer` per target column (training split only).
+
+    Parameters
+    ----------
+    frame:
+        Training-split frame, shape ``(N, ...)``, holding every name in
+        *columns* in its physical unit.
+    columns:
+        Target column names to fit.
+
+    Returns
+    -------
+    dict[str, TargetNormalizer]
+        One normalizer per requested column, keyed by column name.
+    """
     return {col: TargetNormalizer.fit(frame[col]) for col in columns}

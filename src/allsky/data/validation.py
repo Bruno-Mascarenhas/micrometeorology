@@ -148,11 +148,6 @@ def validate_manifest(
     return report
 
 
-# ---------------------------------------------------------------------------
-# individual checks
-# ---------------------------------------------------------------------------
-
-
 def _check_dataset_version(meta: dict[str, Any], report: ValidationReport) -> None:
     version = meta.get("dataset_version")
     if version is None:

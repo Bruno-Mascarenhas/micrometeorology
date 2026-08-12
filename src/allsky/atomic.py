@@ -43,9 +43,9 @@ def atomic_write(path: str | Path, writer: Callable[[Path], Any]) -> Path:
         writer(tmp)
         # ``os.replace`` makes the DIRECTORY ENTRY swap atomic; it does not order
         # the payload's blocks ahead of the rename. Without these two fsyncs the
-        # guarantee above held only for a process crash, not for a host reset or
-        # power loss, where a first-ever write could come back zero-length or
-        # holed while its meta sidecar recorded the checksum of the whole file.
+        # guarantee holds only for a process crash, not for a host reset or power
+        # loss, where a first-ever write can come back zero-length or holed while
+        # its meta sidecar records the checksum of the whole file.
         _fsync_path(tmp)
         os.replace(tmp, out)
         _fsync_directory(out.parent)

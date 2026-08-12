@@ -1,4 +1,20 @@
-"""Reads the capture timestamp the all-sky camera burns into every video frame."""
+"""Reads the capture timestamp the all-sky camera burns into every video frame.
+
+The stamp is a fourteen-digit ``YYYYMMDDHHMMSS`` run of blue-on-dark glyphs in a
+fixed band at the top of the frame. Each digit cell is matched against a packed
+bank of exemplars over a small horizontal shift window, and the cells the pixels
+leave ambiguous are re-decided against the neighbouring frames, whose capture
+times can only increase.
+
+Every timestamp this module produces is **naive local time**: it is the camera's
+own clock, read back off the image, and re-stamping it as UTC would invent a
+precision the acquisition does not have. The UTC boundary is the manifest layer,
+which converts using :data:`allsky.config.SITE_UTC_OFFSET_HOURS`.
+
+Frames are ``(H, W, 3)`` ``uint8`` RGB arrays in the camera's native
+resolution — the overlay is read before any crop or resize, since the digit
+cell geometry is pinned to raw pixel columns.
+"""
 
 import base64
 import datetime as dt
@@ -72,6 +88,27 @@ class OverlayTimestampError(ValueError):
 
 @dataclass(frozen=True)
 class OverlayReading:
+    """One frame's overlay read, and how much of it the pixels actually settled.
+
+    Attributes
+    ----------
+    index:
+        Zero-based frame position in the source video, or ``-1`` for a read
+        taken outside a video (a single live frame).
+    timestamp:
+        Naive local capture time, or ``None`` when the stamp could not be read
+        or parsed at all.
+    text:
+        The fourteen digits as read, verbatim — kept even when *timestamp* was
+        overridden, so a disputed read stays auditable.
+    interpolated:
+        The stamp was unreadable and *timestamp* was interpolated between the
+        nearest readable neighbours.
+    corrected:
+        The stamp parsed but contradicted its neighbours, and *timestamp* was
+        re-decided from the runner-up glyph candidates.
+    """
+
     index: int
     timestamp: dt.datetime | None
     text: str
@@ -136,7 +173,28 @@ def _cell_alternatives(scores: list[tuple[str, int]]) -> tuple[str, ...]:
 
 
 def read_frame_timestamp(frame: np.ndarray) -> OverlayReading:
-    """Read one frame's burned-in ``YYYYMMDD HH:MM:SS`` stamp."""
+    """Read one frame's burned-in ``YYYYMMDD HH:MM:SS`` stamp.
+
+    Parameters
+    ----------
+    frame:
+        ``(H, W, 3)`` ``uint8`` RGB frame at the camera's native resolution,
+        in image (row, column) coordinates.
+
+    Returns
+    -------
+    OverlayReading
+        Index ``-1`` (no video position is known here) and a naive local
+        ``timestamp``, which is ``None`` when no overlay is present or the
+        digits do not form a real date. Neither ``interpolated`` nor
+        ``corrected`` is ever set: a single frame has no neighbours to be
+        re-decided against.
+
+    Raises
+    ------
+    OverlayTimestampError
+        If the frame is not RGB, or is too narrow to contain the digit band.
+    """
     return _read_frame(frame)[0]
 
 
@@ -292,7 +350,41 @@ def _repair(readings: list[OverlayReading]) -> list[OverlayReading]:
 def read_video_timestamps(
     path: str | Path, *, step: int = 1, video_date: dt.date | None = None
 ) -> list[OverlayReading]:
-    """Read the overlay timestamp of every *step*-th frame, repairing isolated failures."""
+    """Read the overlay timestamp of every *step*-th frame, repairing isolated failures.
+
+    Three passes run over the day: each sampled frame is read on its own, reads
+    that contradict their neighbours are re-decided from the runner-up glyph
+    candidates, then frames still without a stamp are linearly interpolated
+    between the nearest readable ones. A read landing outside *video_date* or
+    the day after is discarded before any of that.
+
+    Parameters
+    ----------
+    path:
+        One-day timelapse video, named ``allsky-YYYYMMDD`` when *video_date* is
+        not given.
+    step:
+        Read one frame every *step* source frames; every frame is still decoded,
+        as the codec requires.
+    video_date:
+        Local calendar day the video covers; parsed from the filename when None.
+
+    Returns
+    -------
+    list of OverlayReading
+        One entry per sampled frame, in capture order, carrying naive local
+        timestamps. Entries flagged ``interpolated`` or ``corrected`` did not
+        come from their own pixels alone.
+
+    Raises
+    ------
+    ValueError
+        If *step* is below 1.
+    OverlayTimestampError
+        If the filename encodes no date, if more than
+        :data:`MAX_UNREADABLE_FRACTION` of the sampled frames are unreadable, or
+        if the recovered timestamps run backwards.
+    """
     import imageio.v3 as iio
 
     if step < 1:
@@ -419,7 +511,44 @@ def extract_frames_with_overlay_timestamps(
     step: int = 1,
     resize: int | tuple[int, int] | None = None,
 ):
-    """Extract JPEG frames named by the timestamp burned into each frame."""
+    """Extract JPEG frames named by the timestamp burned into each frame.
+
+    Files are written as ``allsky-YYYYMMDD-HHMM.jpg`` at quality
+    :data:`JPEG_QUALITY`, alongside a ``manifest.parquet`` describing them. Frame
+    names carry minute resolution, matching the manifest's ``sample_id``, so a
+    second frame captured within the same minute is skipped rather than
+    overwriting the first.
+
+    Parameters
+    ----------
+    path:
+        One-day timelapse video named ``allsky-YYYYMMDD``.
+    out_dir:
+        Output directory, created if missing. The manifest is overwritten on
+        every call, so use one directory per video.
+    step:
+        Keep one frame every *step* source frames.
+    resize:
+        Output size in pixels — ``int`` for square, ``(width, height)``
+        otherwise. ``None`` keeps the native resolution. The overlay is always
+        read at native resolution first.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per written frame with columns :data:`MANIFEST_COLUMNS`:
+        ``frame_path`` (as written), ``timestamp`` (naive local,
+        ``datetime64[ns]``), ``video`` (source filename), ``index`` (source
+        frame position, ``int64``) and ``qc_frame_flags`` (``int64`` bitmask of
+        :class:`~allsky.data.contracts.QCFlag`, recording whether the capture
+        time was interpolated or corrected).
+
+    Raises
+    ------
+    OverlayTimestampError
+        Propagated from :func:`read_video_timestamps` when the day's overlays
+        cannot be trusted; nothing is written in that case.
+    """
     import imageio.v3 as iio
     import pandas as pd
 

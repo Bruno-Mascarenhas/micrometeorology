@@ -1,4 +1,18 @@
-"""Configuration models for the all-sky pipeline."""
+"""Configuration models for the all-sky pipeline.
+
+Two roots sit at the top of the tree. :class:`ExperimentConfig` describes a
+multimodal training run — portable manifest, embeddings, model zoo, experiment
+engine. :class:`PrepareConfig` describes dataset preparation and drives
+``prepare-local``, ``validate-dataset``, ``precompute-embeddings`` and
+``export-colab-bundle``. Both reuse the permissive :class:`VideoConfig` and
+:class:`SiteConfig` sections verbatim; every other section is strict
+(``extra="forbid"``), so a typo in a YAML key fails loudly instead of being
+ignored.
+
+YAML files compose through an ``extends:`` list that
+:func:`load_experiment_config` and :func:`load_prepare_config` resolve
+depth-first before validation.
+"""
 
 import datetime as dt
 from pathlib import Path
@@ -42,16 +56,6 @@ class SiteConfig(BaseModel):
 
     latitude: float = -13.00
     longitude: float = -38.51
-
-
-# ---------------------------------------------------------------------------
-# Multimodal experiment / prepare configs (the all-sky v2 stack): portable
-# manifest, embeddings, model zoo, experiment engine. They are strict
-# (``extra="forbid"``) so a typo in a YAML key fails loudly instead of being
-# ignored; the permissive :class:`VideoConfig` / :class:`SiteConfig` sections
-# above are reused verbatim by :class:`PrepareConfig`. YAML files compose via an
-# ``extends:`` list resolved by the loaders at the bottom of this module.
-# ---------------------------------------------------------------------------
 
 
 #: The window modes a dataset can build. This module is the single owner of the
@@ -304,12 +308,6 @@ class ExperimentConfig(BaseModel):
     train: ExperimentTrainConfig = Field(default_factory=ExperimentTrainConfig)
 
 
-# ---------------------------------------------------------------------------
-# PrepareConfig tree — drives prepare-local / validate-dataset /
-# precompute-embeddings / export-colab-bundle.
-# ---------------------------------------------------------------------------
-
-
 class MaskConfig(BaseModel):
     """Static horizon/obstruction mask. ``threshold=None`` selects an auto value."""
 
@@ -355,6 +353,12 @@ class PrepareSensorConfig(BaseModel):
 
 class PrepareTargetsConfig(BaseModel):
     """Target derivation: the diffuse column and which k-index to record.
+
+    ``diffuse_column`` names the logger channel holding measured diffuse
+    horizontal irradiance in W m-2; rows built from it are flagged
+    ``target_source="measured"``. Setting it to ``None`` switches the whole
+    dataset to Erbs pseudo-targets derived from GHI
+    (:func:`allsky.erbs.pseudo_diffuse`, ``target_source="erbs_pseudo"``).
 
     The sky-condition bins are not configurable: they are the published bounds
     of :data:`allsky.data.contracts.SKY_CLASS_KT_UPPER_BOUNDS`, always applied
@@ -425,15 +429,15 @@ class PrepareConfig(BaseModel):
 
     ``video`` and ``site`` reuse the permissive legacy sections
     (:class:`VideoConfig` / :class:`SiteConfig`); every prepare-specific section
-    is strict so typos fail loudly.
+    is strict so typos fail loudly. ``features`` selects the sensor feature
+    policy baked into the manifest at build time — its YAML key is ``set``,
+    aliasing the ``feature_set`` attribute.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     video: VideoConfig = Field(default_factory=VideoConfig)
     site: SiteConfig = Field(default_factory=SiteConfig)
-    #: Sensor feature policy (``safe`` | ``extended``) baked into the manifest at
-    #: build time; the ``set`` YAML key aliases the ``feature_set`` attribute.
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     mask: MaskConfig = Field(default_factory=MaskConfig)
     crop: CropConfig = Field(default_factory=CropConfig)
@@ -445,11 +449,6 @@ class PrepareConfig(BaseModel):
     output: DatasetOutputConfig = Field(default_factory=DatasetOutputConfig)
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     splits: SplitsConfig = Field(default_factory=SplitsConfig)
-
-
-# ---------------------------------------------------------------------------
-# YAML composition (``extends:``) + loaders.
-# ---------------------------------------------------------------------------
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

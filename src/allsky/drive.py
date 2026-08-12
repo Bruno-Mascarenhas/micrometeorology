@@ -33,13 +33,19 @@ class DriveTarget:
     root: str = "LabMiM/allsky"
 
     def path(self, *parts: str) -> str:
+        """Join *parts* under the root into an ``remote:folder/sub`` rclone spec."""
         segments = [segment.strip("/") for segment in (self.root, *parts) if segment.strip("/")]
         return f"{self.remote}:{'/'.join(segments)}"
 
 
 @dataclass
 class RcloneUploader:
-    """Idempotent wrapper over ``rclone``, one process per file or per directory."""
+    """Idempotent wrapper over ``rclone``, one process per file or per directory.
+
+    Every transfer runs with ``--checksum``, so re-uploading an unchanged file
+    moves no bytes and a partial sync can simply be rerun. With *dry_run* set,
+    rclone reports what it would do and transfers nothing.
+    """
 
     target: DriveTarget
     binary: str = "rclone"
@@ -49,6 +55,14 @@ class RcloneUploader:
     _resolved_binary: str | None = field(default=None, init=False, repr=False)
 
     def executable(self) -> str:
+        """Absolute path to the rclone binary, resolved once and cached.
+
+        Raises
+        ------
+        RcloneError
+            If the binary is not on PATH; the message carries the one-time
+            install and remote-configuration steps.
+        """
         if self._resolved_binary is None:
             found = shutil.which(self.binary)
             if found is None:
@@ -88,6 +102,13 @@ class RcloneUploader:
         logger.info("rclone remote %s: reachable", self.target.remote)
 
     def upload_file(self, local: str | Path, *remote_parts: str) -> str:
+        """Copy one file to ``target.path(*remote_parts)`` and return that destination.
+
+        Raises
+        ------
+        RcloneError
+            If *local* is not a file, or rclone exits non-zero.
+        """
         source = Path(local)
         if not source.is_file():
             raise RcloneError(f"nothing to upload: {source} is not a file")
@@ -97,7 +118,15 @@ class RcloneUploader:
         return destination
 
     def upload_dir(self, local_dir: str | Path, *remote_parts: str, pattern: str = "*") -> str:
-        """Copy a whole directory in one invocation, not one process per file."""
+        """Copy a whole directory in one invocation, not one process per file.
+
+        *pattern* narrows the copy to matching names via ``--include``.
+
+        Raises
+        ------
+        RcloneError
+            If *local_dir* is not a directory, or rclone exits non-zero.
+        """
         source = Path(local_dir)
         if not source.is_dir():
             raise RcloneError(f"nothing to upload: {source} is not a directory")
@@ -110,6 +139,12 @@ class RcloneUploader:
         return destination
 
     def list_remote(self, *remote_parts: str) -> tuple[str, ...]:
+        """Names directly under a remote folder, or an empty tuple if it cannot be listed.
+
+        A missing folder and an unreachable remote both come back empty: this is
+        an informational listing, and a caller that needs the remote to be
+        configured should use :meth:`check`.
+        """
         destination = self.target.path(*remote_parts)
         try:
             output = self._run(["lsf", destination])

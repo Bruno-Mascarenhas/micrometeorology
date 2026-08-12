@@ -11,8 +11,9 @@ magic constants):
   (a single learnable query over one :class:`torch.nn.MultiheadAttention`),
   selected by ``temporal_pooling``.
 - :class:`ImageEncoder` — wraps any ``nn.Module`` exposing an integer ``.dim``
-  attribute (the DINOv2 wrapper from the embeddings wave, or a small conv net
-  in tests).  Supports a frozen backbone, partial fine-tuning of the last *n*
+  attribute (the DINOv2 wrapper from
+  :func:`allsky.embeddings.backbone.build_backbone`, or a small conv net in
+  tests).  Supports a frozen backbone, partial fine-tuning of the last *n*
   ViT blocks when the backbone exposes a ``blocks`` sequence (independently of
   ``frozen``), and a :meth:`ImageEncoder.param_groups` helper for a separate
   backbone learning rate.
@@ -155,7 +156,7 @@ class PrecomputedEmbedding(nn.Module):
             all_pad = key_padding_mask.all(dim=1)
             if bool(all_pad.any()):
                 key_padding_mask = key_padding_mask.clone()
-                key_padding_mask[all_pad, 0] = False  # keep softmax finite
+                key_padding_mask[all_pad, 0] = False
         attended, _ = self.temporal_attn(
             query, sequence, sequence, key_padding_mask=key_padding_mask, need_weights=False
         )
@@ -171,7 +172,26 @@ class PrecomputedEmbedding(nn.Module):
         return pooled
 
     def forward(self, batch: dict[str, Tensor]) -> Tensor:
-        """Return the ``(B, out_dim)`` visual embedding for *batch*."""
+        """Read (and pool, when windowed) the batch's precomputed visual embedding.
+
+        Parameters
+        ----------
+        batch:
+            Batch dict carrying either ``embedding`` ``(B, D)`` float32 or
+            ``embedding_seq`` ``(B, T, D)`` float32 plus an optional
+            ``frame_mask`` ``(B, T)`` bool (True = valid frame).  Embeddings are
+            dimensionless backbone features.
+
+        Returns
+        -------
+        Tensor
+            ``(B, out_dim)`` float32 visual embedding (dimensionless).
+
+        Raises
+        ------
+        KeyError
+            If *batch* carries neither ``embedding`` nor ``embedding_seq``.
+        """
         if "embedding" in batch:
             embedding = batch["embedding"]
         elif "embedding_seq" in batch:
@@ -269,7 +289,19 @@ class ImageEncoder(nn.Module):
         return self._out_dim
 
     def forward(self, batch: dict[str, Tensor]) -> Tensor:
-        """Encode ``batch["image"]`` ``(B, 3, H, W)`` to ``(B, out_dim)``."""
+        """Run the image backbone over the batch's frames.
+
+        Parameters
+        ----------
+        batch:
+            Batch dict whose ``image`` entry is ``(B, 3, H, W)`` float32,
+            channels-first and normalized (dimensionless).
+
+        Returns
+        -------
+        Tensor
+            ``(B, out_dim)`` float32 visual embedding (dimensionless).
+        """
         features = self.backbone(batch["image"])
         out: Tensor = self.projection(features)
         return out
@@ -277,9 +309,18 @@ class ImageEncoder(nn.Module):
     def param_groups(self, backbone_lr: float) -> list[dict[str, Any]]:
         """Optimizer parameter groups putting the backbone on its own learning rate.
 
-        Returns up to two groups of **trainable** parameters: the backbone
-        parameters at ``lr=backbone_lr`` and everything else (the projection)
-        with no per-group override.  Frozen parameters are omitted.
+        Parameters
+        ----------
+        backbone_lr:
+            Learning rate for the backbone group.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            Up to two groups of **trainable** parameters: the backbone
+            parameters at ``lr=backbone_lr``, then everything else (the
+            projection) with no per-group override.  Frozen parameters are
+            omitted, so a wholly frozen backbone yields no backbone group.
         """
         backbone_params = [p for p in self.backbone.parameters() if p.requires_grad]
         other_params = [
@@ -300,15 +341,27 @@ def split_backbone_param_groups(
 ) -> list[dict[str, Any]]:
     """Optimizer groups for *model* with its image backbone on its own rate.
 
-    Returns ``[backbone_at_backbone_lr, everything_else]`` when *visual_encoder*
-    exposes a ``param_groups`` method (only :class:`ImageEncoder` does) and
-    *backbone_lr* is set, else a single group holding every trainable parameter of
-    *model*.  A wholly frozen backbone contributes no parameters, so it collapses
-    to that single group too.
-
     The group ORDER is part of the contract: ``torch`` matches optimizer groups
     positionally in ``load_state_dict``, so ``--resume`` on an existing checkpoint
     requires the backbone group to stay first.
+
+    Parameters
+    ----------
+    model:
+        The model whose trainable parameters are split.
+    visual_encoder:
+        *model*'s visual branch; only :class:`ImageEncoder` exposes the
+        ``param_groups`` method that identifies the backbone parameters.
+    backbone_lr:
+        Learning rate for the backbone group; ``None`` disables the split.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        ``[backbone_at_backbone_lr, everything_else]`` when *visual_encoder*
+        exposes ``param_groups`` and *backbone_lr* is set, else a single group
+        holding every trainable parameter of *model*.  A wholly frozen backbone
+        contributes no parameters, so it collapses to that single group too.
     """
     get_backbone_groups = getattr(visual_encoder, "param_groups", None)
     if backbone_lr is None or get_backbone_groups is None:
@@ -405,12 +458,24 @@ class _HubVisualBackbone(nn.Module):
 def coerce_image_backbone(backbone: Any, *, pooling: str = "cls") -> nn.Module:
     """Return an ``nn.Module`` image backbone from *backbone*.
 
-    An ``nn.Module`` (the test stubs, or any already-module backbone) is returned
-    unchanged; a :class:`VisualBackbone` extraction wrapper (e.g. ``DinoV2Backbone``
-    from :func:`allsky.embeddings.backbone.build_backbone`) is wrapped in
-    :class:`_HubVisualBackbone` so it becomes a trainable, gradient-carrying image
-    encoder.  ``pooling`` is only used to seed the wrapper when the source does
-    not carry its own.
+    Parameters
+    ----------
+    backbone:
+        An ``nn.Module`` (the test stubs, or any already-module backbone), which
+        is returned unchanged; or a :class:`VisualBackbone` extraction wrapper
+        (e.g. ``DinoV2Backbone`` from
+        :func:`allsky.embeddings.backbone.build_backbone`), which is wrapped in
+        :class:`_HubVisualBackbone` so it becomes a trainable, gradient-carrying
+        image encoder.
+    pooling:
+        Token pooling (``cls`` | ``mean`` | ``cls+mean``) used only to seed the
+        wrapper when the source does not carry its own.
+
+    Returns
+    -------
+    nn.Module
+        A module mapping ``(B, 3, H, W)`` float32 frames to ``(B, dim)`` float32
+        embeddings and exposing an integer ``dim``.
     """
     if isinstance(backbone, nn.Module):
         return backbone
@@ -430,9 +495,32 @@ def build_visual_encoder(
 ) -> nn.Module:
     """Build the visual source for *input_mode* (``embedding`` or ``image``).
 
-    ``temporal_pooling`` selects how a windowed ``embedding_seq`` is pooled in
-    embedding mode (``"mean"`` or learned ``"attention"``); it is inert in image
-    mode.
+    Parameters
+    ----------
+    input_mode:
+        ``"embedding"`` builds a :class:`PrecomputedEmbedding`; ``"image"``
+        builds an :class:`ImageEncoder`.
+    embedding_dim:
+        Embedding width ``D``, required in embedding mode.
+    image_backbone:
+        Backbone module, required in image mode.
+    out_dim:
+        Projection width; ``None`` or equal to the source width leaves an
+        identity passthrough.
+    frozen, unfreeze_last_n:
+        Image-mode fine-tuning controls (see :class:`ImageEncoder`); inert in
+        embedding mode.
+    dropout:
+        Dropout inside the projection block and the attention pooler.
+    temporal_pooling:
+        How a windowed ``embedding_seq`` is pooled in embedding mode (``"mean"``
+        or learned ``"attention"``); inert in image mode.
+
+    Returns
+    -------
+    nn.Module
+        The visual source, exposing an integer ``out_dim`` and a
+        ``forward(batch) -> (B, out_dim)``.
 
     Raises
     ------

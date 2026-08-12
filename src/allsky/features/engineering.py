@@ -13,6 +13,10 @@ of transforms live here:
 
 Column order is always :func:`allsky.features.policy.resolve_feature_set`, so
 downstream normalization/checkpoint feature ordering is reproducible.
+
+Timestamps here are **naive local** clock time, as the camera and the datalogger
+stamp them; the solar geometry converts them with ``utc_offset_hours``, inferred
+from the site longitude when the caller does not pin it.
 """
 
 from collections.abc import Iterable
@@ -88,7 +92,10 @@ def build_feature_frame(
     Returns
     -------
     pandas.DataFrame
-        Indexed by *timestamps*, columns in policy order.
+        Shape ``(N, F)`` of ``float64`` columns, indexed by *timestamps* and
+        ordered by the policy: ``solar_elevation`` / ``solar_zenith`` in degrees,
+        the cyclic sine/cosine pairs dimensionless in ``[-1, 1]``, and the
+        remaining channels in the units their names carry (degC, %, mbar, m/s).
 
     Raises
     ------

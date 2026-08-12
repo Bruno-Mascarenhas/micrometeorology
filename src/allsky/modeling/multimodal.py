@@ -121,7 +121,23 @@ class MultimodalNet(nn.Module):
         self.heads = Heads(int(self.trunk.out_dim), targets)
 
     def forward(self, batch: dict[str, Tensor]) -> ModelOutputs:
-        """Encode both modalities, fuse, and return the enabled head outputs."""
+        """Encode both modalities, fuse, and return the enabled head outputs.
+
+        Parameters
+        ----------
+        batch:
+            Batch dict carrying ``features`` ``(B, F)`` float32 standardized
+            engineered features (dimensionless), the visual entry the configured
+            ``input_mode`` needs (``image`` ``(B, 3, H, W)`` float32, or
+            ``embedding`` / ``embedding_seq``), and — for cross-attention only —
+            an optional ``group_mask`` ``(B, n_groups)`` bool marking the groups
+            to ignore.
+
+        Returns
+        -------
+        ModelOutputs
+            The enabled heads' outputs (regression entries in normalized space).
+        """
         sensor = self.sensor_encoder(batch["features"])
         visual = self.visual_encoder(batch)
         if getattr(self.fusion, "needs_features", False):
@@ -139,11 +155,20 @@ class MultimodalNet(nn.Module):
     def param_groups(self, backbone_lr: float | None = None) -> list[dict[str, Any]]:
         """Optimizer parameter groups; the image backbone gets its own LR.
 
-        When the visual encoder wraps an image backbone and a ``backbone_lr``
-        is available (argument or the constructor value), the backbone
-        parameters form one group at that LR and every other trainable
-        parameter forms a second group.  Otherwise a single group of all
-        trainable parameters is returned.
+        Parameters
+        ----------
+        backbone_lr:
+            Overrides the constructor's ``backbone_lr``; ``None`` falls back to
+            it.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            When the visual encoder wraps an image backbone and a
+            ``backbone_lr`` is available, the backbone parameters form one group
+            at that rate (first, as ``load_state_dict`` matches groups
+            positionally) and every other trainable parameter forms a second
+            group.  Otherwise a single group of all trainable parameters.
         """
         lr = backbone_lr if backbone_lr is not None else self.backbone_lr
         get_backbone_groups = getattr(self.visual_encoder, "param_groups", None)

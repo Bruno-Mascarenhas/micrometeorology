@@ -68,8 +68,12 @@ _COMPILE_PREFIX = "_orig_mod."
 def capture_rng_state() -> dict[str, Any]:
     """Snapshot the python / numpy / torch (and cuda) RNG state.
 
-    The cuda entry is included only when a CUDA device is present, matching the
-    ``rng_state`` contract (``cuda`` key "when present").
+    Returns
+    -------
+    dict[str, Any]
+        ``{"python", "numpy", "torch"}`` plus ``"cuda"`` only when a CUDA device
+        is present, matching the ``rng_state`` contract (``cuda`` key "when
+        present").
     """
     import torch
 
@@ -86,7 +90,15 @@ def capture_rng_state() -> dict[str, Any]:
 
 
 def restore_rng_state(state: Mapping[str, Any]) -> None:
-    """Restore RNG generators from a :func:`capture_rng_state` snapshot."""
+    """Restore RNG generators from a :func:`capture_rng_state` snapshot.
+
+    Parameters
+    ----------
+    state:
+        The snapshot mapping.  Every key is optional: an absent generator is
+        left untouched, and ``"cuda"`` is skipped when no CUDA device is present
+        (so a GPU checkpoint resumes on CPU).
+    """
     import torch
 
     python_state = state.get("python")
@@ -130,8 +142,44 @@ def save_checkpoint(
 
     All state dicts, provenance and RNG state are packed into one payload and
     saved via a same-directory temp file + ``os.replace`` (no partial file on
-    failure).  ``rng_state`` / ``code_version_info`` are captured on the spot
-    when not supplied.  Returns the written path.
+    failure).
+
+    Parameters
+    ----------
+    path:
+        Destination file, typically ``<run_dir>/last.ckpt`` or ``best.ckpt``.
+    model, optimizer, scheduler, scaler:
+        Objects whose ``state_dict()`` is stored; *scheduler* and *scaler* may
+        be ``None`` (stored as ``None``).
+    epoch, global_step:
+        Completed epochs and optimizer steps at the time of writing.
+    best_metric:
+        ``{name, value, epoch}`` of the best monitored value so far, so a
+        resumed run never clobbers a better ``best.ckpt``.
+    config:
+        The full experiment config dump.
+    normalizers:
+        Train-split ``feature_normalizer`` and ``target_normalizers`` as
+        JSON-able dicts — the scaling the stored weights were trained under.
+    feature_columns, feature_groups:
+        The ordered engineered feature names and their group membership.
+    dataset_version, split_id, manifest_sha256:
+        Dataset provenance, checked before a resume is allowed.
+    backbone_info:
+        Image-mode backbone identity (name / revision / pooling / dim / frozen);
+        ``None`` in embedding mode.
+    code_version_info:
+        Package and git-commit provenance; captured on the spot when ``None``.
+    rng_state:
+        A :func:`capture_rng_state` snapshot; captured on the spot when ``None``.
+    epochs_no_improve:
+        Early-stopping patience counter, so a resumed run restores its exact
+        position on the patience curve.
+
+    Returns
+    -------
+    Path
+        The written path.
     """
     payload: dict[str, Any] = {
         "model_state": model.state_dict(),
@@ -202,6 +250,26 @@ def load_checkpoint(
     ``trust_pickle=True`` to fall back to the unrestricted reader for a file you
     produced yourself.  Any ``_orig_mod.`` compile prefixes are stripped from the
     model state so it loads into a plain module.
+
+    Parameters
+    ----------
+    path:
+        The checkpoint file.
+    map_location:
+        Device the tensors are mapped onto, as ``torch.load`` understands it.
+    trust_pickle:
+        Read with the unrestricted unpickler instead of the allowlist.
+
+    Returns
+    -------
+    dict[str, Any]
+        The payload :func:`save_checkpoint` wrote.
+
+    Raises
+    ------
+    ValueError
+        If the payload carries a Python object outside the allowlist; it is
+        refused rather than unpickled.
     """
     import pickle
 
@@ -223,11 +291,6 @@ def load_checkpoint(
     if isinstance(model_state, dict):
         checkpoint["model_state"] = _strip_compiled_prefix(model_state)
     return checkpoint
-
-
-# ---------------------------------------------------------------------------
-# internals
-# ---------------------------------------------------------------------------
 
 
 def _atomic_torch_save(payload: dict[str, Any], out: Path) -> None:

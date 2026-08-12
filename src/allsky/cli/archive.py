@@ -33,6 +33,8 @@ REMOTE_SNAPSHOTS = "snapshots"
 
 
 class UploadChoice(StrEnum):
+    """What ``sync-archive`` pushes to Drive: nothing, the mp4, the frames or both."""
+
     none = "none"
     videos = "videos"
     frames = "frames"
@@ -48,12 +50,39 @@ class UploadChoice(StrEnum):
 
 
 class TimestampSource(StrEnum):
+    """Where a frame's wall-clock time comes from.
+
+    ``overlay`` reads the stamp the camera burns into the frame, which is what
+    this camera's varying capture cadence requires; ``config`` places frame N at
+    ``start_time + N x minutes_per_frame`` from the :class:`PrepareConfig` video
+    section, a constant-cadence model this camera does not follow (selecting it
+    logs a warning; see ``docs/allsky-archive.md``).
+    """
+
     overlay = "overlay"
     config = "config"
 
 
 @dataclass(frozen=True)
 class DayPlan:
+    """The transfers one archived day still needs, decided against the ledger.
+
+    Attributes
+    ----------
+    entry:
+        The published archive entry (filename, date and key) the plan is for.
+    download:
+        Fetch the day's mp4: it is absent from disk and either a later step needs
+        its bytes or the ledger has never recorded it.
+    extract:
+        Run frame extraction for the day (no frames recorded for this
+        ``step``/``resize`` pair yet).
+    upload_video:
+        Push the mp4 to its Drive destination, which the ledger has not recorded.
+    upload_frames:
+        Push the day's frame directory to its Drive destination.
+    """
+
     entry: ArchiveEntry
     download: bool
     extract: bool
@@ -62,9 +91,11 @@ class DayPlan:
 
     @property
     def has_work(self) -> bool:
+        """True when at least one transfer or extraction is still pending."""
         return self.download or self.extract or self.upload_video or self.upload_frames
 
     def describe(self) -> str:
+        """One-line ``filename: action, action`` summary for the plan listing."""
         wanted = [
             name
             for name, flag in (
@@ -136,6 +167,15 @@ def _plan_day(
     resize: int | None,
     upload: UploadChoice,
 ) -> DayPlan:
+    """Decide what *entry* still needs by asking the ledger what it already holds.
+
+    A day is downloaded when its mp4 is not on disk and either extraction or an
+    upload needs the bytes or the ledger never recorded it — so a day already
+    uploaded and pruned is not fetched again.  It is extracted when no frame set
+    matches this *step*/*resize* pair, and uploaded when the ledger holds no
+    record of that exact Drive destination.  Frames are only queued for upload
+    once they exist or are about to.
+    """
     frames_done = ledger.frames_match(entry.key, step=step, resize=resize)
     wants_extract = extract and not frames_done
     wants_video_upload = upload.wants_videos and not ledger.uploaded(
@@ -239,7 +279,23 @@ def sync_archive(
         bool, typer.Option("--dry-run", help="Report the plan; transfer nothing.")
     ] = False,
 ) -> None:
-    """Mirror new days from the Salvador all-sky archive; optionally extract frames and upload."""
+    """Mirror new days from the Salvador all-sky archive; optionally extract frames and upload.
+
+    The ledger under ``<data-dir>/.state`` records every downloaded video,
+    extracted frame set and completed upload, and is held under a lock for the
+    whole run, so a rerun transfers only what is missing.  It is saved after each
+    day, so a failure mid-run keeps the days already done.
+
+    Raises
+    ------
+    typer.BadParameter
+        For a malformed ``--since``/``--until``, ``--upload`` without
+        ``--drive-remote``, ``--prune-uploaded`` without ``--upload``, or
+        ``--upload frames``/``both`` without ``--extract``.
+    typer.Exit
+        Code 1 when the archive listing or rclone is unreachable, or when any day
+        failed to process.
+    """
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
     )
@@ -353,6 +409,12 @@ def sync_archive(
 
 
 def _video_config(timestamps: TimestampSource, config: Path | None) -> Any | None:
+    """Resolve the video section driving frame timestamps, or None for overlay mode.
+
+    Choosing the modelled cadence is warned about at resolution time rather than
+    per video, because the constant interval it assumes is not the one this
+    camera records with.
+    """
     if timestamps is TimestampSource.overlay:
         if config is not None:
             logger.warning("--config is ignored with --timestamps overlay")
@@ -384,6 +446,12 @@ def _process_day(
     uploader: RcloneUploader | None,
     prune_uploaded: bool,
 ) -> None:
+    """Execute one :class:`DayPlan`, recording each completed step in the ledger.
+
+    The ledger is updated as each transfer lands, so an interruption leaves the
+    work already done visible to the next run.  With *prune_uploaded* the local
+    mp4 is deleted only after the ledger confirms the upload.
+    """
     entry = plan.entry
     video_path = ledger.video_path(entry.key, root=root) or videos_dir / entry.filename
     if plan.download:
@@ -501,7 +569,19 @@ def snapshot(
     ] = False,
     timeout: Annotated[float, typer.Option(help="Request timeout in seconds.")] = 60.0,
 ) -> None:
-    """Capture the camera's current frame, optionally predict on it, and write both."""
+    """Capture the camera's current frame, optionally predict on it, and write both.
+
+    Writes the JPEG plus a metadata sidecar into *out_dir*; with ``--checkpoint``
+    it adds ``<image>.prediction.json``.  Meteorological features come from
+    ``--sensor-csv`` when a row falls within ``--tolerance-minutes`` of the
+    capture, and any feature without one is imputed at its training mean and
+    named in the warning the command prints.
+
+    Raises
+    ------
+    typer.Exit
+        Code 1 when the capture, the prediction or the Drive upload fails.
+    """
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
     )
@@ -562,6 +642,12 @@ def _predict_snapshot(
     device: str,
     trust_checkpoint: bool,
 ) -> Path:
+    """Predict on the captured frame and write ``<image>.prediction.json``.
+
+    Any feature the sensor export could not supply within *tolerance_minutes* is
+    imputed at its training mean, and those names are echoed as a warning so a
+    prediction is never read as fully informed when it is not.
+    """
     import pandas as pd
 
     from allsky.atomic import atomic_write_json

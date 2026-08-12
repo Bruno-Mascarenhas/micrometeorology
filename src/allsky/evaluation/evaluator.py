@@ -1,6 +1,6 @@
 """Run a trained checkpoint over a split and compute stratified metrics.
 
-:func:`evaluate_checkpoint` is the entry point: it loads a C4a checkpoint under
+:func:`evaluate_checkpoint` is the entry point: it loads a training checkpoint under
 torch's **restricted** unpickler (a checkpoint travels through Colab and shared
 Drives, so it is not a trusted local file; ``trust_checkpoint=True`` /
 ``--trust-checkpoint`` opts back into the unrestricted reader), rebuilds the
@@ -145,7 +145,7 @@ def evaluate_checkpoint(
     Parameters
     ----------
     checkpoint_path:
-        A ``last.ckpt`` / ``best.ckpt`` written by the C4a engine.
+        A ``last.ckpt`` / ``best.ckpt`` written by :mod:`allsky.training.engine`.
     split:
         ``"val"`` (default), ``"test"`` or ``"train"``.
     data_root:
@@ -187,9 +187,14 @@ def evaluate_checkpoint(
     -------
     EvaluationResult
         Global + stratified metrics, the predictions frame and provenance.
+
+    Raises
+    ------
+    ValueError
+        If *split* has no days in the artifact or none of its days appear in the
+        manifest; and, under ``strict``, on a manifest-hash, split-id or
+        k-index-kind mismatch between the checkpoint and the data on disk.
     """
-    # Kept for signature symmetry with the CLI (see the parameter docs above);
-    # this function never writes reports, so the value is intentionally dropped.
     del report_dir
 
     from allsky.training.checkpointing import load_checkpoint
@@ -280,11 +285,6 @@ def evaluate_checkpoint(
         predictions=predictions,
         meta=meta_out,
     )
-
-
-# ---------------------------------------------------------------------------
-# loading / provenance
-# ---------------------------------------------------------------------------
 
 
 def _check_manifest_hash(stored: str | None, meta: Mapping[str, Any], *, strict: bool) -> bool:
@@ -390,11 +390,6 @@ def _enabled_targets(cfg: ExperimentConfig) -> list[str]:
     return targets
 
 
-# ---------------------------------------------------------------------------
-# inference
-# ---------------------------------------------------------------------------
-
-
 def _run_inference(
     *,
     cfg: ExperimentConfig,
@@ -429,9 +424,9 @@ def _run_inference(
 
     image_backbone = None
     if cfg.data.input_mode == "image":
-        # Same gap as training (finding F6): with no injected builder the rebuilt
-        # model still needs the backbone architecture to load_state_dict, so
-        # default to the config-named backbone. The injection hook still wins.
+        # As in training: with no injected builder the rebuilt model still needs
+        # the backbone architecture to load_state_dict, so default to the
+        # config-named backbone. The injection hook still wins.
         builder = image_backbone_builder or _default_image_backbone_builder(cfg, device)
         image_backbone = builder()
     # Rebuild with the same temporal pooler the checkpoint was trained with, or
@@ -541,11 +536,6 @@ def _extract_prediction(name: str, outputs: Mapping[str, Any]) -> np.ndarray:
     return np.asarray(values).ravel()
 
 
-# ---------------------------------------------------------------------------
-# predictions frame + strata
-# ---------------------------------------------------------------------------
-
-
 def _build_predictions_frame(
     split_df: pd.DataFrame, predicted: Mapping[str, np.ndarray], enabled_targets: Sequence[str]
 ) -> pd.DataFrame:
@@ -610,11 +600,6 @@ _STRATUM_KINDS: dict[str, str] = {
     "qc": "qc_flags",
     "kindex_band": "kindex_band",
 }
-
-
-# ---------------------------------------------------------------------------
-# metric computation
-# ---------------------------------------------------------------------------
 
 
 def _global_metrics(
