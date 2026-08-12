@@ -7,9 +7,14 @@ physics). The stack estimates **diffuse horizontal irradiance (DHI)**, a
 image (as a precomputed DINOv2 embedding *or* end-to-end) plus non-radiometric
 sensor context.
 
-All timestamps are naive local **America/Bahia** (fixed UTC-3, no DST). The
-manifest stores tz-aware `timestamp_utc`; `day_id` is the local calendar day; a
-`sample_id` is `allsky-YYYYMMDD-HHMM` (local, matching the frame filename stem).
+All timestamps are naive local **America/Bahia** (fixed UTC-3, no DST). This is
+the instrument-clock exception to the laboratory's tz-aware-UTC rule: the
+Campbell datalogger and the camera overlay both stamp local time, and restamping
+that as UTC would invent a precision the acquisition does not have. **The
+manifest layer is the UTC boundary** — it writes tz-aware `timestamp_utc` from
+the site's pinned offset (`allsky.config.SITE_UTC_OFFSET_HOURS`, never the
+host's timezone). `day_id` is the local calendar day; a `sample_id` is
+`allsky-YYYYMMDD-HHMM` (local, matching the frame filename stem).
 
 ---
 
