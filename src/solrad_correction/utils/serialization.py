@@ -15,7 +15,12 @@ class ModelIntegrityError(RuntimeError):
 
 
 def save_sklearn_model(model: object, path: str | Path) -> None:
-    """Save a scikit-learn model via joblib."""
+    """Save a scikit-learn model via joblib, creating parent directories.
+
+    The artifact is a pickle, so it is only as trustworthy as the checksum the
+    experiment manifest records for it — :func:`load_sklearn_model` is what
+    checks that on the way back in.
+    """
     import joblib
 
     p = Path(path)
@@ -87,6 +92,18 @@ def verify_pickle_integrity(path: str | Path) -> None:
     checksum is surfaced rather than hidden. A manifest that exists but cannot
     be parsed (a run killed mid-write leaves a truncated one) is reported as
     such instead of as a missing manifest.
+
+    Parameters
+    ----------
+    path:
+        Artifact about to be unpickled. Resolved before it is looked up in the
+        manifest, so a relative or symlinked spelling matches the same entry.
+
+    Raises
+    ------
+    ModelIntegrityError
+        If the manifest records a sha256 for the artifact and the file does not
+        hash to it.
     """
     p = Path(path)
     lookup = _find_manifest(p)
@@ -133,6 +150,11 @@ def load_sklearn_model(path: str | Path) -> object:
     (raising :class:`ModelIntegrityError` on a checksum mismatch); when no
     manifest covers the file an unverified load is logged. See
     :func:`verify_pickle_integrity`.
+
+    Raises
+    ------
+    ModelIntegrityError
+        If the manifest's recorded sha256 does not match the file.
     """
     import joblib
 
@@ -151,7 +173,34 @@ def save_torch_checkpoint(
     scaler_state: dict | None = None,
     metadata: dict | None = None,
 ) -> None:
-    """Save a PyTorch checkpoint."""
+    """Save a PyTorch checkpoint, creating parent directories.
+
+    Only the pieces that exist are written, so a checkpoint from a run without a
+    scheduler or without AMP carries no key for them and
+    :func:`load_torch_checkpoint` reads it back unchanged.
+
+    Parameters
+    ----------
+    model_state:
+        ``state_dict`` of the module, written verbatim; any ``_orig_mod.`` key
+        prefix a ``torch.compile`` wrapper left on it is normalized away by
+        :func:`load_torch_checkpoint`, not here.
+    optimizer_state, scheduler_state, scaler_state:
+        ``state_dict`` of the optimizer, LR scheduler and AMP grad scaler;
+        ``None`` omits the entry.
+    config:
+        Serialized experiment config, so the checkpoint says what produced it.
+    epoch:
+        Epoch counter stored with the weights; a resume restarts training from
+        it, so it is a count of completed epochs rather than an index.
+    path:
+        Destination file.
+    metadata:
+        Extra values to carry along, typically the RNG snapshot from
+        :func:`capture_rng_state` and the preprocessing fingerprint a resume is
+        checked against. Everything in it must survive
+        ``torch.load(..., weights_only=True)``.
+    """
     import torch
 
     p = Path(path)
@@ -183,6 +232,13 @@ def capture_rng_state() -> dict[str, Any]:
     is stored as its ``MT19937`` key array (a uint32 tensor) plus ``pos``, NOT as
     the ``np.random.get_state()`` tuple — that tuple is refused by the
     restricted unpickler and would make every checkpoint unloadable.
+
+    Returns
+    -------
+    dict
+        Mapping consumed only by :func:`restore_rng_state`. The CUDA entry is
+        present only when a device was visible at capture time, so a checkpoint
+        written on GPU still restores on a CPU-only machine.
     """
     import random
 
@@ -215,6 +271,17 @@ def restore_rng_state(state: Mapping[str, Any]) -> None:
 
     Silently tolerates a checkpoint written before RNG state was persisted, so
     an older ``last.pt`` still resumes (just not bit-reproducibly).
+
+    Restoring rather than reseeding is what lets a resumed run continue the
+    stream it was interrupted in: reseeding would replay the shuffle order and
+    dropout masks of the first epochs.
+
+    Parameters
+    ----------
+    state:
+        A :func:`capture_rng_state` snapshot, or an empty mapping to leave the
+        generators alone. The CUDA entry is applied only when a device is
+        available now, so a GPU checkpoint restores on CPU without failing.
     """
     import random
 
@@ -262,7 +329,20 @@ def _strip_compiled_prefix(state: dict) -> dict:
 
 
 def load_torch_checkpoint(path: str | Path) -> dict:
-    """Load a PyTorch checkpoint securely."""
+    """Load a PyTorch checkpoint securely.
+
+    Read with ``weights_only=True``, so the restricted unpickler admits only
+    tensors and plain primitives and a tampered checkpoint cannot execute code
+    on load — this is why :func:`capture_rng_state` stores the RNG snapshot in
+    those types. Mapped to CPU, leaving placement to the caller's device config.
+
+    Returns
+    -------
+    dict
+        The saved mapping, with ``torch.compile``'s ``_orig_mod.`` key prefixes
+        already stripped from ``model_state_dict`` so it loads into a plain
+        module.
+    """
     import torch
 
     checkpoint: dict = torch.load(path, map_location="cpu", weights_only=True)

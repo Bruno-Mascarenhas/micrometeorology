@@ -23,6 +23,20 @@ class LSTMNet(nn.Module):
             -> LSTM layers
             -> Last hidden state
             -> Linear -> ReLU -> Linear -> output (scalar)
+
+    Parameters
+    ----------
+    input_size:
+        Number of features ``F`` per time step.
+    hidden_size:
+        Width of the LSTM hidden state; the head halves it before the output.
+    num_layers:
+        Number of stacked LSTM layers.
+    dropout:
+        Dropout probability inside the head, and between the LSTM layers. Torch
+        applies inter-layer dropout only when there is more than one layer, so
+        it is passed as ``0.0`` for a single layer rather than letting torch
+        warn about a setting it would ignore.
     """
 
     def __init__(
@@ -48,19 +62,25 @@ class LSTMNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> Any:
-        """Forward pass.
+        """Run the encoder and regress from the final time step.
+
+        Only the last step's hidden state reaches the head: the window is
+        summarized by where it ends, which is also the row the target belongs
+        to.
 
         Parameters
         ----------
         x:
-            Tensor of shape ``(batch, seq_len, input_size)``.
+            Tensor of shape ``(B, T, F)``, ``float32``, in the scaled feature
+            space the model was fitted on.
 
         Returns
         -------
-        Tensor of shape ``(batch, 1)``.
+        torch.Tensor
+            Tensor of shape ``(B, 1)``, ``float32``, in scaled target units.
         """
         lstm_out, _ = self.lstm(x)
-        last_hidden = lstm_out[:, -1, :]  # Take last time step
+        last_hidden = lstm_out[:, -1, :]
         return self.head(last_hidden)
 
 
@@ -110,7 +130,11 @@ class LSTMRegressor(TorchRegressorModel):
         input_size: int,
         device: str | None = None,
     ) -> LSTMRegressor:
-        """Create from experiment config."""
+        """Create an untrained regressor from the ``lstm_*`` fields of a config.
+
+        ``input_size`` comes from the built dataset rather than the config: it
+        is the number of feature columns that survived preprocessing.
+        """
         return cls(
             input_size=input_size,
             hidden_size=config.lstm_hidden_size,
@@ -121,7 +145,16 @@ class LSTMRegressor(TorchRegressorModel):
 
     @classmethod
     def load(cls, path: str | Path) -> LSTMRegressor:
-        """Load LSTM from checkpoint."""
+        """Rebuild an LSTM from a checkpoint, architecture included.
+
+        The architecture arguments travel inside the checkpoint, so the module
+        is reconstructed at the width it was trained at. Optimizer, scheduler
+        and AMP scaler states are carried over as well, which is what lets the
+        loaded model continue a run rather than only score one; the best-metric
+        and early-stopping counters, in contrast, start empty here and are
+        recovered from checkpoint metadata by the resume path in
+        ``TorchRegressorModel``.
+        """
         checkpoint = load_torch_checkpoint(path)
         cfg = checkpoint.get("config", {})
 
@@ -142,7 +175,12 @@ class LSTMRegressor(TorchRegressorModel):
         return instance
 
     def save(self, path: str | Path) -> None:
-        """Save LSTM with architecture config for reconstruction."""
+        """Save weights plus the architecture arguments ``load`` needs.
+
+        The ``_config_kwargs`` captured at construction — not the experiment
+        config — are what travel with the weights, so the checkpoint always
+        describes the module that was actually built.
+        """
         from solrad_correction.utils.serialization import save_torch_checkpoint
 
         save_torch_checkpoint(

@@ -15,7 +15,12 @@ from solrad_correction.utils.io import save_json, save_predictions
 
 @dataclass(slots=True)
 class ExperimentWriter:
-    """Own all stable paths and artifact writes for one experiment."""
+    """Own all stable paths and artifact writes for one experiment.
+
+    Each stage of the pipeline writes through this object, so the run's
+    artifacts are produced in one vocabulary and the manifest can close over
+    all of them at the end.
+    """
 
     layout: ArtifactLayout
 
@@ -44,6 +49,14 @@ class ExperimentWriter:
         The artifact writes are timed as the ``write_experiment_results`` stage
         and the stage closes before ``profile.json`` is serialized, so the
         profile reports its own artifact-writing cost.
+
+        The manifest is written last, so its checksums cover every other
+        artifact of the run.
+
+        Raises
+        ------
+        RuntimeError
+            If preprocessing or the model was never persisted.
         """
         self._require_persisted_stages(config)
         with profile.stage("write_experiment_results"):
@@ -92,7 +105,12 @@ class ExperimentWriter:
         pipeline.save_state_json(self.layout.preprocessing_state)
 
     def write_datasets(self, result: ExperimentResult) -> None:
-        """Serialize the train/val/test datasets under ``datasets/`` (val optional)."""
+        """Serialize the train/val/test datasets under ``datasets/`` (val optional).
+
+        The feature names are written alongside the arrays, so a stored dataset
+        can be read back with its columns identified rather than as an anonymous
+        matrix.
+        """
         from solrad_correction.datasets.serialization import save_dataset
 
         feature_names = result.processed.feature_cols
@@ -139,7 +157,11 @@ class ExperimentWriter:
     def _write_training_history(
         self, train_history: dict[str, list[float]], *, merge_existing: bool
     ) -> None:
-        """Write ``training_history.csv``, optionally continuing an earlier run's rows."""
+        """Write ``training_history.csv``, optionally continuing an earlier run's rows.
+
+        When merging, this run's rows win a collision with the ones on disk:
+        they are the epochs just trained.
+        """
         import pandas as pd
 
         history_frame = pd.DataFrame(train_history)
@@ -151,13 +173,17 @@ class ExperimentWriter:
             previous = pd.read_csv(self.layout.training_history)
             if "epoch" in previous.columns:
                 history_frame = pd.concat([previous, history_frame], ignore_index=True)
-                # This run's rows win a collision: they are the ones just trained.
                 history_frame = history_frame.drop_duplicates(subset="epoch", keep="last")
         history_frame = history_frame.sort_values("epoch")
         history_frame.set_index("epoch").to_csv(self.layout.training_history)
 
     def write_predictions(self, result: ExperimentResult) -> None:
-        """Write the aligned ``y_true``/``y_pred`` table to ``predictions.csv``."""
+        """Write the aligned ``y_true``/``y_pred`` table to ``predictions.csv``.
+
+        Both columns are the inverse-transformed arrays, in the original units
+        of the target column, indexed by the prediction timestamps so the file
+        can be joined back onto the source series.
+        """
         save_predictions(
             result.evaluation.y_true,
             result.evaluation.y_pred,

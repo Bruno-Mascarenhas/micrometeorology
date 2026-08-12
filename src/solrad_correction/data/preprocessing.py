@@ -15,7 +15,21 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class PreprocessingState:
-    """Serializable preprocessing state learned from the training split."""
+    """Serializable preprocessing state learned from the training split.
+
+    Everything a fitted :class:`Preprocessor` needs to reproduce its transform on
+    another split, and nothing that depends on the split it is applied to.
+    ``input_columns`` is the schema ``fit`` saw, ``output_columns`` what survived
+    the NaN-ratio drop, and ``dropped_columns`` maps each removed column to the
+    ratio that removed it. ``fill_values`` (column means), ``last_values`` (the
+    final observed row, populated only under the ``ffill`` strategy) and
+    ``scaling`` (statistic name -> column -> value, in the columns' original
+    units) are all computed on the training split alone. ``row_counts`` records
+    the fit's input/output row and column counts as provenance.
+
+    ``version`` is the on-disk schema version; :meth:`from_dict` accepts only
+    the current one rather than silently reading an older layout.
+    """
 
     version: int = 3
     scaler_type: str = "standard"
@@ -107,7 +121,38 @@ class PreprocessingState:
 
 
 class Preprocessor:
-    """Stateful train-only preprocessing with strict schema validation."""
+    """Stateful train-only preprocessing with strict schema validation.
+
+    Fit on the training split, then transform every split with the same frozen
+    statistics: drop the columns that are too sparse, impute the remaining
+    feature gaps, and scale. The target column is deliberately never imputed —
+    see :meth:`transform`.
+
+    Parameters
+    ----------
+    scaler_type:
+        ``standard`` (subtract the mean, divide by the standard deviation),
+        ``minmax`` (rescale to ``[0, 1]`` over the fitted range) or ``none``.
+        A zero spread is replaced by 1 so a constant column maps to 0 instead of
+        to infinity.
+    impute_strategy:
+        ``drop``, ``ffill``, ``mean`` or ``interpolate``.
+    drop_na_threshold:
+        NaN fraction in ``[0, 1]``; a column whose training-split NaN ratio
+        strictly exceeds it is dropped from every split.
+    feature_columns, target_column:
+        Recorded in the state so a resumed run can be checked against the
+        feature set the checkpoint's weights were trained on; ``target_column``
+        additionally marks the column imputation must leave untouched.
+    strict_schema:
+        When true (the default) :meth:`transform` refuses any frame whose column
+        set differs from the one seen at fit time.
+
+    Raises
+    ------
+    ValueError
+        If ``scaler_type`` or ``impute_strategy`` is not one of the values above.
+    """
 
     def __init__(
         self,
@@ -163,6 +208,26 @@ class Preprocessor:
         All statistics are computed here and frozen into :attr:`state`; call this
         on the training split alone so no validation/test information leaks into
         the fitted parameters. Returns ``self`` for chaining.
+
+        Parameters
+        ----------
+        df:
+            Training split, shape ``(n_train_rows, n_columns)``, in the columns'
+            original units. Its column set becomes the schema
+            :meth:`transform` enforces.
+
+        Returns
+        -------
+        Preprocessor
+            ``self``, now fitted.
+
+        Raises
+        ------
+        ValueError
+            If a column kept by the NaN-ratio filter has no defined scaling
+            statistic — a non-numeric dtype, fewer than two observations, or a
+            non-finite value. Scaling it would silently return NaN for every row
+            of every split.
         """
         input_columns = list(df.columns)
         na_ratio = df.isna().mean()
@@ -227,6 +292,20 @@ class Preprocessor:
         but rows whose observed target is missing are dropped, so metrics and
         the validation loss are never computed against fabricated targets.
 
+        Parameters
+        ----------
+        df:
+            Any split, shape ``(n_rows, n_columns)``, in the columns' original
+            units.
+
+        Returns
+        -------
+        pd.DataFrame
+            Shape ``(n_kept_rows, n_output_columns)`` holding the fitted output
+            columns in scaled (dimensionless) units, or the original units when
+            ``scaler_type='none'``. Rows are a subset of the input's, with the
+            input index preserved.
+
         Raises
         ------
         RuntimeError
@@ -250,7 +329,21 @@ class Preprocessor:
         """Map scaled ``values`` for one column back to their original units.
 
         Undoes only the scaling step (standard or min-max); a no-op when
-        ``scaler_type='none'``.
+        ``scaler_type='none'``. The drop and imputation steps are not invertible
+        and are not undone, so this maps model outputs back to physical units
+        (W m-2 for the diffuse-irradiance target) but does not restore rows.
+
+        Parameters
+        ----------
+        values:
+            Scaled values for a single column, any shape, cast to ``float64``.
+        column:
+            Name of the fitted output column ``values`` were scaled with.
+
+        Returns
+        -------
+        np.ndarray
+            ``float64``, same shape as ``values``, in ``column``'s original unit.
 
         Raises
         ------

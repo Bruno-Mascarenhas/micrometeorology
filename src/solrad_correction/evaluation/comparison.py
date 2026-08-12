@@ -13,12 +13,18 @@ def compare_experiments(experiment_dirs: list[str | Path]) -> pd.DataFrame:
     Parameters
     ----------
     experiment_dirs:
-        List of experiment directories using the v2 artifact layout.
+        List of experiment directories using the v2 artifact layout. A
+        directory with no ``metrics/metrics.json`` is skipped, so a run still
+        in flight or one that failed before evaluation drops out of the table
+        instead of aborting the comparison.
 
     Returns
     -------
     pd.DataFrame
-        Comparison table with experiments as rows and metrics as columns.
+        Comparison table indexed by experiment name, one column per metric, in
+        the original units each run reported. Empty when no directory yielded
+        metrics. Metrics are only comparable across rows when the runs share an
+        evaluation policy and a test period.
     """
     rows: list[dict] = []
     for d in experiment_dirs:

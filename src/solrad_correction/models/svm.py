@@ -14,6 +14,23 @@ logger = logging.getLogger(__name__)
 class SVMRegressor(SklearnRegressorModel):
     """SVR wrapper following the project's regressor interface.
 
+    Parameters
+    ----------
+    kernel:
+        Kernel passed to :class:`sklearn.svm.SVR` (``"rbf"``, ``"linear"``,
+        ``"poly"``, ``"sigmoid"``).
+    C:
+        Regularization strength: larger values buy a tighter fit at the cost of
+        a wider margin. Spelled uppercase because it is sklearn's own
+        parameter name.
+    epsilon:
+        Half-width of the tube inside which errors cost nothing, in the units
+        the target arrives in — the preprocessed target space, not the
+        original physical one, so its meaning depends on the configured
+        scaler.
+    gamma:
+        Kernel coefficient for the non-linear kernels.
+
     Example::
 
         model = SVMRegressor(kernel="rbf", C=10.0, epsilon=0.1)
@@ -36,7 +53,7 @@ class SVMRegressor(SklearnRegressorModel):
 
     @classmethod
     def from_config(cls, config: ModelConfig) -> SVMRegressor:
-        """Create from experiment config."""
+        """Create an unfitted regressor from the ``svm_*`` fields of a config."""
         return cls(
             kernel=config.svm_kernel,
             C=config.svm_c,
@@ -46,7 +63,11 @@ class SVMRegressor(SklearnRegressorModel):
 
     @classmethod
     def load(cls, path: str | Path) -> SVMRegressor:
-        """Load a saved SVM model."""
+        """Load a saved SVM model, keeping the estimator exactly as fitted.
+
+        The instance is built without ``__init__`` so the unpickled estimator
+        is not replaced by a fresh one carrying the default hyperparameters.
+        """
         from solrad_correction.utils.serialization import load_sklearn_model
 
         estimator = load_sklearn_model(path)

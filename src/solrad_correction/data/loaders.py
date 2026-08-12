@@ -4,6 +4,12 @@ The experiment runner uses ``load_table`` for preprocessed tabular inputs.
 It supports CSV and Parquet with format detection, column projection, date
 index parsing, dtype hints, development row limits, and optional Parquet
 caching for CSV inputs.
+
+Every loader here reproduces the timestamps of its source without re-labelling
+them. For the datalogger path that means naive station-local time end to end, as
+stamped by the instrument's own clock (see
+:mod:`micrometeorology.sensors.ingestion`); the UTC boundary belongs to the
+layers that publish, not to this one.
 """
 
 import hashlib
@@ -21,7 +27,27 @@ DataFormat = Literal["auto", "csv", "parquet"]
 def detect_table_format(
     path: str | Path, requested: DataFormat = "auto"
 ) -> Literal["csv", "parquet"]:
-    """Resolve a table format from an explicit value or file suffix."""
+    """Resolve a table format from an explicit value or file suffix.
+
+    Parameters
+    ----------
+    path:
+        Table path; only its suffix is inspected, and the file need not exist.
+    requested:
+        ``csv`` or ``parquet`` to force a format, ``auto`` to detect one from
+        the suffix (``.csv``/``.txt`` and ``.parquet``/``.pq``, case-insensitive).
+
+    Returns
+    -------
+    {"csv", "parquet"}
+        The resolved format.
+
+    Raises
+    ------
+    ValueError
+        If ``requested`` is not a known format, or if ``auto`` detection finds
+        no known suffix — guessing here would read a file as the wrong format.
+    """
     if requested != "auto":
         if requested not in {"csv", "parquet"}:
             raise ValueError("data format must be one of: auto, csv, parquet")
@@ -75,6 +101,20 @@ def load_table(
         sets no ``limit_rows``; a partial read is never cached, because a later
         wider read could not be served from it.  Subsequent loads read the cache
         if it is newer than the source file.
+
+    Returns
+    -------
+    pd.DataFrame
+        Shape ``(n_rows, n_columns)`` holding the projected data columns in
+        their source units.  With ``datetime_index`` the index is a
+        ``DatetimeIndex`` carrying the timestamps exactly as the acquisition
+        wrote them, so it is naive local wherever the source is.
+
+    Raises
+    ------
+    ValueError
+        If ``limit_rows`` is not positive, the format cannot be resolved, or the
+        requested datetime column is missing or not datetime-like.
     """
     if limit_rows is not None and limit_rows <= 0:
         raise ValueError("limit_rows must be positive when set")
@@ -294,7 +334,13 @@ def _read_parquet_head(
 
 
 def _stored_pandas_index_columns(parquet_file: Any) -> list[str]:
-    """Return stored pandas index columns that exist as physical parquet fields."""
+    """Return stored pandas index columns that exist as physical parquet fields.
+
+    In the ``pandas`` schema metadata a named or MultiIndex level is recorded as
+    the string name of a real column, while a ``RangeIndex`` is recorded as a
+    descriptor dict backed by no column at all; only the former can be read
+    back, so the dict entries are filtered out.
+    """
     import json
 
     metadata = parquet_file.schema_arrow.metadata or {}
@@ -302,7 +348,6 @@ def _stored_pandas_index_columns(parquet_file: Any) -> list[str]:
     if pandas_meta is None:
         return []
     index_columns = json.loads(pandas_meta).get("index_columns", [])
-    # RangeIndex entries are dicts (no physical column); named/level indexes are strings.
     return [column for column in index_columns if isinstance(column, str)]
 
 
@@ -337,6 +382,26 @@ def load_sensor_raw(
         Glob pattern for file selection.
     calibrations_path:
         Path to calibrations YAML.  If provided, calibrations are applied.
+    resample_freq:
+        Pandas offset alias to aggregate the raw records to (``"1h"`` and the
+        like).  ``None`` keeps the native logging interval.
+    min_samples:
+        Minimum number of raw records an aggregation bin needs before it is
+        emitted; sparser bins become gaps rather than averages of one or two
+        readings.  Read only when ``resample_freq`` is set.
+
+    Returns
+    -------
+    pd.DataFrame
+        Shape ``(n_records, n_channels)``, one column per logged channel in that
+        channel's sensor unit — calibrated only when ``calibrations_path`` is
+        given — indexed by the datalogger's own clock, which is naive local time,
+        not UTC.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no file under ``data_dir`` matches ``pattern``.
     """
     from micrometeorology.common.paths import find_files
     from micrometeorology.sensors.ingestion import merge_dat_files
@@ -378,8 +443,17 @@ def load_sensor_hourly(
 ) -> pd.DataFrame:
     """Load preprocessed hourly sensor data from CSV or Parquet.
 
-    CSV inputs preserve the historical default of using the first column as
-    the datetime index.
+    A thin alias of :func:`load_table` — see it for the full parameter
+    semantics — whose only contribution is the default ``datetime_column=0``,
+    which keeps CSV inputs on the historical convention of the first column
+    being the timestamp.
+
+    Returns
+    -------
+    pd.DataFrame
+        Shape ``(n_hours, n_columns)`` in the source's own units, indexed by the
+        hourly timestamps as recorded (naive station-local for datalogger-derived
+        archives).
     """
     return load_table(
         path,
@@ -401,7 +475,26 @@ def load_wrf_series(
 ) -> pd.DataFrame:
     """Extract WRF point time-series at (lat, lon).
 
-    Delegates to ``micrometeorology.wrf.series.extract_point_series``.
+    Delegates to ``micrometeorology.wrf.series.extract_point_series``, which
+    selects the grid cell nearest the requested point rather than interpolating.
+
+    Parameters
+    ----------
+    wrf_files:
+        ``wrfout`` NetCDF files to concatenate, sorted chronologically.
+    lat, lon:
+        Site coordinates in decimal degrees north and degrees east, on the
+        wrfout's own ``XLAT``/``XLONG`` grid.
+    variables:
+        NetCDF variable names to extract; ``None`` takes the extractor's default
+        set of surface variables.
+
+    Returns
+    -------
+    pd.DataFrame
+        Shape ``(n_times, n_variables)``, one column per variable found, each in
+        the wrfout's own unit with no conversion applied, indexed by model valid
+        time. Empty when no file yielded a column.
     """
     from micrometeorology.wrf.series import extract_point_series
 

@@ -12,7 +12,26 @@ from solrad_correction.datasets.tabular import TabularDataset
 def save_dataset(
     dataset: object, path: str | Path, *, feature_names: list[str] | None = None
 ) -> None:
-    """Persist a supported dataset without leaking artifact logic to callers."""
+    """Persist a supported dataset without leaking artifact logic to callers.
+
+    Parameters
+    ----------
+    dataset:
+        A :class:`~solrad_correction.datasets.tabular.TabularDataset` or a
+        :class:`~solrad_correction.datasets.sequence.WindowedSequenceDataset`.
+    path:
+        Directory to write; each dataset kind lays out its own files there.
+    feature_names:
+        Base-matrix column names, read only for the sequence dataset.
+
+    Raises
+    ------
+    TypeError
+        For any other dataset kind. A dense
+        :class:`~solrad_correction.datasets.sequence.SequenceDataset` is
+        deliberately not serializable here: writing the expanded windows is the
+        artifact the lazy dataset exists to avoid.
+    """
     if isinstance(dataset, TabularDataset):
         save_tabular_dataset(dataset, path)
         return

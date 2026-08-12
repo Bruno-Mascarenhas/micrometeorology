@@ -25,11 +25,26 @@ def create_sequences(
     Returns
     -------
     tuple of (x_sequences, y_targets)
-        ``x_sequences``: shape ``(n_sequences, sequence_length, n_features)``
-        ``y_targets``: shape ``(n_sequences,)``; window rows ``[i, i + sequence_length)``
-        are paired with ``y[i + sequence_length - 1]``, the target concurrent with the
-        last row *inside* the window (same-time correction, not one-step-ahead
-        forecasting).
+        ``x_sequences``: ``float32``, shape ``(n_sequences, sequence_length, n_features)``
+        ``y_targets``: ``float32``, shape ``(n_sequences,)``; window rows
+        ``[i, i + sequence_length)`` are paired with ``y[i + sequence_length - 1]``,
+        the target concurrent with the last row *inside* the window (same-time
+        correction, not one-step-ahead forecasting).
+
+    Raises
+    ------
+    ValueError
+        If ``features`` and ``target`` differ in length, or ``sequence_length``
+        is not shorter than the series.
+    MemoryError
+        If the dense output would exceed the ``SOLRAD_MAX_ARRAY_GB`` guardrail.
+
+    Notes
+    -----
+    ``np.lib.stride_tricks.sliding_window_view`` returns a zero-copy strided view
+    with the window axis last, ``(n_sequences, n_features, sequence_length)``; the
+    transpose plus ``ascontiguousarray`` is what materializes the documented
+    ``(n_sequences, sequence_length, n_features)`` layout.
     """
     x = np.asarray(features)
     y = np.asarray(target).flatten()
@@ -48,9 +63,7 @@ def create_sequences(
         multiplier=2.0,
     )
 
-    # sliding_window_view creates a zero-copy strided view.
     x_windows = np.lib.stride_tricks.sliding_window_view(x, sequence_length, axis=0)
-    # x_windows shape: (n, n_features, sequence_length); transpose to (n, seq_len, n_features)
     x_out = np.ascontiguousarray(x_windows[:n].transpose(0, 2, 1), dtype=np.float32)
     y_out = y[sequence_length - 1 :].astype(np.float32)
 
@@ -66,5 +79,19 @@ def create_sequences_index(
     Window ``i`` covers rows ``[i, i + sequence_length)`` and predicts the target
     at the window's last row, so target timestamps start at position
     ``sequence_length - 1``. Useful for mapping predictions back to timestamps.
+
+    Parameters
+    ----------
+    index:
+        Timestamps of the base rows, shape ``(n_samples,)``, aligned with the
+        ``features``/``target`` passed to :func:`create_sequences`.
+    sequence_length:
+        Number of time steps per sequence window.
+
+    Returns
+    -------
+    pd.DatetimeIndex
+        Shape ``(n_sequences,)`` with ``n_sequences = n_samples - sequence_length + 1``,
+        one timestamp per window target.
     """
     return index[sequence_length - 1 :]

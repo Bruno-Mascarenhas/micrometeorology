@@ -7,7 +7,22 @@ import pandas as pd
 def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add calendar-based features derived from the DatetimeIndex.
 
-    Adds ``hour``, ``day_of_year``, ``month``, ``weekday``.
+    Parameters
+    ----------
+    df:
+        Frame whose index carries the observation timestamps.
+
+    Returns
+    -------
+    pd.DataFrame
+        A copy of ``df`` with integer columns ``hour`` (0-23), ``day_of_year``
+        (1-366), ``month`` (1-12) and ``weekday`` (0=Monday). The values are read
+        straight off the index, so they are in whatever clock the index carries.
+
+    Raises
+    ------
+    TypeError
+        If the index is not a ``DatetimeIndex``.
     """
     out = df.copy()
     if not isinstance(out.index, pd.DatetimeIndex):
@@ -23,8 +38,23 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
 def add_all_cyclic_encodings(df: pd.DataFrame) -> pd.DataFrame:
     """Add cyclic encodings for standard temporal features.
 
-    Expects columns: ``hour``, ``day_of_year``, ``month``.
-    Call ``add_temporal_features()`` first.
+    Each calendar column is mapped onto the unit circle so that the last value
+    of a period is adjacent to the first (hour 23 next to hour 0), which a raw
+    integer column cannot express.
+
+    Parameters
+    ----------
+    df:
+        Frame carrying any of ``hour``, ``day_of_year`` and ``month`` — run
+        :func:`add_temporal_features` first. Columns that are absent are skipped.
+
+    Returns
+    -------
+    pd.DataFrame
+        A copy of ``df`` with a ``{col}_sin``/``{col}_cos`` pair per encoded
+        column, dimensionless in ``[-1, 1]``. Periods are 24 h, 365.25 days and
+        12 months; the quarter-day drift of the fixed 365.25-day year is below
+        the resolution of hourly features.
     """
     new_cols = {}
 

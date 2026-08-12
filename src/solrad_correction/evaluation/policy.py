@@ -24,6 +24,25 @@ def sequence_target_positions(
     exactly when the pipeline hands the sequence dataset ``index=None`` and
     every window survives; callers must then fall back to the positional
     horizon ``sequence_length - 1``.
+
+    Parameters
+    ----------
+    index:
+        Index of the processed frame, of length ``rows``. Anything that is not
+        a ``DatetimeIndex`` of at least two entries yields ``None``.
+    sequence_length:
+        Window length ``T`` in rows.
+    max_gap:
+        Largest step allowed inside a window. ``None`` infers it as the median
+        timestamp delta of this same frame, so the limit follows the acquisition
+        rate rather than a hard-coded frequency.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Row positions of shape ``(M,)``, ``int64``, strictly increasing, with
+        ``M <= rows - T + 1``; ``None`` for a non-temporal index. The array is
+        empty when every window spans a gap.
     """
     if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
         return None
@@ -56,6 +75,32 @@ def prediction_index(
     — not every row from position ``sequence_length - 1`` on. Under
     ``model_native`` tabular models keep the full processed index; predictions
     therefore always carry timestamps.
+
+    Parameters
+    ----------
+    index:
+        Timestamps of the processed test frame.
+    model_type:
+        Registered model name, which decides whether this run is tabular or
+        sequential.
+    sequence_length:
+        Window length ``T`` in rows.
+    evaluation_policy:
+        ``"model_native"`` scores each model on the rows it natively predicts;
+        ``"common_sequence_horizon"`` puts both families on the sequence rows.
+    max_gap:
+        Largest step allowed inside a window; ``None`` infers it from the index.
+
+    Returns
+    -------
+    pandas.DatetimeIndex
+        Timestamps of the predicted rows, in order and the same length as the
+        model's prediction vector.
+
+    Raises
+    ------
+    ValueError
+        If ``evaluation_policy`` is not one of the two accepted values.
     """
     if evaluation_policy not in {"model_native", "common_sequence_horizon"}:
         raise ValueError(f"Unknown evaluation_policy: {evaluation_policy}")
@@ -86,6 +131,27 @@ def align_test_frame(
     window that spans no temporal gap. Rows are selected positionally, so a
     timestamp repeated by the source table cannot multiply them, and the gap
     limit is inferred from the untrimmed frame both branches see.
+
+    Parameters
+    ----------
+    test_df:
+        Processed test frame, features and target, indexed by timestamp.
+    model_type:
+        Registered model name. A sequence model is returned untouched: it
+        already predicts exactly the window-target rows.
+    sequence_length:
+        Window length ``T`` in rows.
+    evaluation_policy:
+        ``"model_native"`` leaves the frame alone; ``"common_sequence_horizon"``
+        trims it to the sequence horizon.
+    max_gap:
+        Largest step allowed inside a window; ``None`` infers it from the index.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The same frame, or the subset of rows a sequence model would predict.
+        Columns and dtypes are unchanged.
 
     Raises
     ------

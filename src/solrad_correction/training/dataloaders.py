@@ -10,7 +10,34 @@ from solrad_correction.config import RuntimeConfig
 
 @dataclass(frozen=True, slots=True)
 class DataLoaderSettings:
-    """Resolved PyTorch DataLoader settings."""
+    """Resolved PyTorch DataLoader and training-runtime settings.
+
+    Every field is already concrete: the ``auto``/``None`` requests a config
+    may carry have been decided against the machine the run is on, so both the
+    loop and the checkpoint metadata read the same values.
+
+    Attributes
+    ----------
+    device:
+        Torch device string the batches and the module are moved to.
+    num_workers:
+        Loader worker processes; ``0`` means loading happens in the training
+        process.
+    pin_memory:
+        Whether batches are staged in page-locked memory, which only pays off
+        for a host-to-device copy.
+    persistent_workers:
+        Whether workers survive between epochs; meaningless without workers.
+    prefetch_factor:
+        Batches each worker loads ahead, or ``None`` when there are no workers.
+    amp:
+        Whether the training loop runs under autocast with a gradient scaler.
+        CUDA-only: inference never uses it, and neither does a CPU run.
+    torch_compile:
+        Whether to attempt ``torch.compile`` on the module.
+    gradient_clip:
+        Max gradient norm per step, or ``None`` to leave gradients unclipped.
+    """
 
     device: str
     num_workers: int
@@ -36,7 +63,28 @@ class DataLoaderSettings:
 
 
 def resolve_device(requested: str = "auto") -> str:
-    """Resolve a user-requested device into an available torch device string."""
+    """Resolve a user-requested device into an available torch device string.
+
+    An explicit ``"cuda"`` request is never downgraded: a run that asks for the
+    GPU and silently gets the CPU would report timings and, through AMP,
+    numerics that belong to a different machine.
+
+    Parameters
+    ----------
+    requested:
+        ``"auto"``, ``"cpu"`` or ``"cuda"``, as written in the runtime config.
+
+    Returns
+    -------
+    str
+        ``"cpu"`` or ``"cuda"``.
+
+    Raises
+    ------
+    ValueError
+        If ``"cuda"`` is requested where CUDA is unavailable, or if the request
+        is not one of the three accepted values.
+    """
     if requested == "cpu":
         return "cpu"
     if requested == "cuda":
@@ -51,7 +99,25 @@ def resolve_device(requested: str = "auto") -> str:
 def resolve_dataloader_settings(
     runtime: RuntimeConfig,
 ) -> DataLoaderSettings:
-    """Resolve runtime config into concrete DataLoader/training settings."""
+    """Resolve runtime config into concrete DataLoader/training settings.
+
+    Unset (``None``) fields are decided from the resolved device: no worker
+    processes on CPU or on Windows, otherwise up to four bounded by the torch
+    thread count; pinned memory only off-CPU; persistent workers only when
+    there are workers; and AMP only on CUDA, which is also enforced on an
+    explicit request, since the gradient scaler is a CUDA-only path.
+
+    Parameters
+    ----------
+    runtime:
+        Runtime section of the experiment config.
+
+    Returns
+    -------
+    DataLoaderSettings
+        Fully resolved settings, recorded in checkpoint metadata so a resumed
+        run can be compared against the one it continues.
+    """
     device = resolve_device(runtime.device)
 
     if runtime.num_workers is None:

@@ -18,7 +18,14 @@ from solrad_correction.config.split import SplitConfig
 
 @dataclass
 class ExperimentConfig:
-    """Top-level experiment configuration."""
+    """Top-level experiment configuration.
+
+    One instance is the complete, versionable description of a run: the section
+    dataclasses below carry every knob the pipeline reads, and ``seed`` is the
+    single value that seeds Python, NumPy and torch for it. Round-trips through
+    YAML via :meth:`from_yaml` and :meth:`save`; cross-section invariants are
+    checked by :meth:`validate`, not by the individual sections.
+    """
 
     name: str = "unnamed"
     description: str = ""

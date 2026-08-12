@@ -30,6 +30,17 @@ def temporal_train_val_test_split(
     Returns
     -------
     tuple of (train_df, val_df, test_df)
+        Contiguous slices covering the whole frame with no overlap: validation
+        begins where training ends and test runs to the last row, in
+        chronological order unless ``shuffle`` was set. Row counts come from
+        truncated fractions of ``len(df)``, so
+        the remainder of the division lands in the test slice. Columns, dtypes
+        and units are those of ``df``.
+
+    Raises
+    ------
+    ValueError
+        If the three ratios do not sum to 1.0 within 1e-6.
     """
     total = train_ratio + val_ratio + test_ratio
     if abs(total - 1.0) > 1e-6:
@@ -65,6 +76,19 @@ class ExpandingWindowSplit:
 
     At each step the training window grows and validation is the
     next ``val_size`` rows.
+
+    Training always starts at row 0 and ends where validation begins, so no fold
+    ever trains on a row that follows its own validation rows.
+
+    Parameters
+    ----------
+    initial_train_size:
+        Rows in the first fold's training window.
+    val_size:
+        Rows in every validation window.
+    step:
+        Rows the window advances between folds; defaults to ``val_size``, which
+        makes consecutive validation windows adjacent and non-overlapping.
     """
 
     def __init__(
@@ -81,7 +105,22 @@ class ExpandingWindowSplit:
         self,
         df: pd.DataFrame,
     ) -> Generator[tuple[np.ndarray, np.ndarray]]:
-        """Yield ``(train_idx, val_idx)`` tuples."""
+        """Yield one ``(train_idx, val_idx)`` pair per expanding-window fold.
+
+        Parameters
+        ----------
+        df:
+            Frame in chronological row order; only its length is read.
+
+        Yields
+        ------
+        tuple of (train_idx, val_idx)
+            Positional row indices into ``df``, ``int64``, both strictly
+            increasing: ``train_idx`` has shape ``(start,)`` and grows by
+            ``step`` each fold, ``val_idx`` shape ``(val_size,)``. Iteration
+            stops once a full validation window no longer fits, so a trailing
+            partial window is never yielded.
+        """
         n = len(df)
         start = self.initial_train_size
 
@@ -97,6 +136,16 @@ class TimeSeriesKFold:
 
     Unlike ``sklearn.model_selection.TimeSeriesSplit``, this provides
     non-overlapping folds where training always precedes validation.
+
+    The frame is cut into ``n_splits + 1`` equal blocks of ``len(df) //
+    (n_splits + 1)`` rows; fold ``i`` trains on blocks ``0..i`` and validates on
+    block ``i + 1``, so every fold has a validation block and none of them
+    overlap.
+
+    Parameters
+    ----------
+    n_splits:
+        Number of folds.
     """
 
     def __init__(self, n_splits: int = 5) -> None:
@@ -106,7 +155,22 @@ class TimeSeriesKFold:
         self,
         df: pd.DataFrame,
     ) -> Generator[tuple[np.ndarray, np.ndarray]]:
-        """Yield ``(train_idx, val_idx)`` tuples."""
+        """Yield one ``(train_idx, val_idx)`` pair per fold, oldest fold first.
+
+        Parameters
+        ----------
+        df:
+            Frame in chronological row order; only its length is read.
+
+        Yields
+        ------
+        tuple of (train_idx, val_idx)
+            Positional row indices into ``df``, ``int64``. Fold ``i`` yields
+            ``train_idx`` of shape ``(fold_size * (i + 1),)`` starting at row 0
+            and ``val_idx`` of shape ``(fold_size,)`` immediately after it. Rows
+            past the last block boundary are left out of every fold, and the
+            arrays are empty when ``df`` is shorter than ``n_splits + 1`` rows.
+        """
         n = len(df)
         fold_size = n // (self.n_splits + 1)
 

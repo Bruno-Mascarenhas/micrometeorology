@@ -51,6 +51,42 @@ class Trainer:
     - Best-model checkpointing
     - Transfer learning (resume from start_epoch)
     - Device management (CPU/CUDA auto-detection)
+
+    Parameters
+    ----------
+    model:
+        Module to train, moved to the resolved device by ``train``.
+    device:
+        Fallback device, used only when no runtime config is supplied;
+        otherwise the runtime's resolved device wins.
+    config:
+        Hyperparameters for the run. ``None`` falls back to
+        :class:`TrainingPlan` defaults.
+    runtime:
+        Runtime settings: device, workers, AMP, ``torch.compile``, gradient
+        clipping and the checkpoint directory.
+    start_epoch:
+        Absolute epoch to start from. Non-zero on a resume, and measured
+        against the same ``max_epochs`` budget.
+    optimizer_state, scheduler_state, scaler_state:
+        State dicts recovered from a resume checkpoint. Each is applied
+        best-effort: an incompatible one is logged and skipped rather than
+        aborting the run.
+    checkpoint_config:
+        Architecture arguments stored inside every checkpoint this run writes.
+    best_metric, best_epoch:
+        Seeded from a resume checkpoint so a resumed run never overwrites a
+        better model persisted by the previous run.
+    epochs_no_improve:
+        Early-stopping counter carried across a resume so patience is not
+        silently reset to zero.
+    rng_state:
+        Python/numpy/torch RNG snapshot from the resume checkpoint. Applied
+        once the module and optimizer exist, since both draw from the global
+        streams.
+    preprocessing_fingerprint:
+        Digest of the transform this run's features were scaled with, baked
+        into every checkpoint so a later resume can refuse a changed scaler.
     """
 
     def __init__(
@@ -92,17 +128,10 @@ class Trainer:
         self.optimizer_state: dict[str, Any] | None = None
         self.scheduler_state: dict[str, Any] | None = None
         self.scaler_state: dict[str, Any] | None = None
-        # Seeded from a resume checkpoint so a resumed run never overwrites a
-        # better model persisted by the previous run.
         self.best_metric: float | None = best_metric
         self.best_epoch: int | None = best_epoch
-        # Carried across a resume so patience is not silently reset to zero.
         self.epochs_no_improve = epochs_no_improve
-        # Applied once the module and optimizer exist, since both draw from the
-        # global Python/numpy/torch RNGs.
         self._resume_rng_state = rng_state or {}
-        # Digest of the transform this run's features were scaled with, baked
-        # into every checkpoint so a later resume can refuse a changed scaler.
         self._preprocessing_fingerprint = preprocessing_fingerprint
         self.dataloader_settings: DataLoaderSettings | None = None
 
@@ -125,8 +154,50 @@ class Trainer:
         ``n_samples / n_batches``: such a run must not be resumed here, because
         the seeded best would be compared against a differently-scaled value.
 
-        Returns ``(trained_model, history)`` where history contains
-        per-epoch losses.
+        Parameters
+        ----------
+        train_data:
+            Windowed training set yielding ``(B, T, F)`` features and ``(B,)``
+            targets, ``float32`` and in the pipeline's scaled space.
+        val_data:
+            Optional validation set in the same space. Without it the training
+            loss becomes the monitored metric, which makes early stopping and
+            best-model selection measure fit rather than generalization.
+
+        Returns
+        -------
+        tuple of (nn.Module, dict)
+            The model carrying the best weights of the run — plain, never a
+            ``torch.compile`` wrapper, so downstream ``save``/``state_dict``
+            keys stay free of the ``_orig_mod.`` prefix — and the history dict
+            of per-epoch losses.
+
+        Notes
+        -----
+        ``torch.compile`` is typed as returning a bare callable, so module
+        identity is re-established with an ``isinstance`` check before the rest
+        of the loop (``.to``, ``.parameters()``, ``_unwrap_compiled``) uses it;
+        anything else it returns leaves the eager model in place.
+
+        The TensorBoard writer is released in a ``finally`` so a raise
+        mid-training still flushes the queued scalars: its event-file thread is
+        a daemon with no atexit hook, so an unclosed writer loses exactly the
+        epochs leading up to the failure. ``progress.finish()`` stays on the
+        success path — it prints "Training complete".
+
+        The early-stopping counter is updated BEFORE any checkpoint is
+        persisted, so a file written this epoch records the current
+        no-improvement count and a later resume restores it instead of
+        resetting patience to zero.
+
+        When no epoch of a resumed run beats the seeded best metric, nothing is
+        captured in memory and the on-disk ``best.pt`` is what keeps the
+        returned model the best across all runs. The ``self.best_metric is not
+        None`` guard is what confines that fallback to a resume: without it a
+        FRESH run reusing an existing checkpoint directory would, whenever no
+        epoch produced a finite improving metric (divergence, an all-NaN
+        feature column), load and score the previous run's weights under this
+        run's config.
         """
         if self.start_epoch >= self.max_epochs:
             logger.warning(
@@ -170,9 +241,6 @@ class Trainer:
             except Exception as exc:  # noqa: BLE001 - optional speedup; any backend fault falls back
                 logger.debug("torch.compile not supported or failed: %s", exc)
             else:
-                # `torch.compile` is typed as returning a bare callable, so module
-                # identity has to be re-established before the rest of the loop
-                # (`.to`, `.parameters()`, `_unwrap_compiled`) can use it.
                 if isinstance(compiled, nn.Module):
                     self.model = compiled
                     logger.info("Successfully applied torch.compile to the model")
@@ -182,14 +250,9 @@ class Trainer:
                         type(compiled).__name__,
                     )
 
-        # All persistence (checkpoints, best-state capture) uses the plain
-        # module so state_dict keys never carry the `_orig_mod.` prefix.
         plain_model = _unwrap_compiled(self.model)
 
         if self._resume_rng_state:
-            # Continues the interrupted random stream rather than replaying it, so
-            # the shuffle order, dropout masks and lazy initializations from here
-            # on are the ones the uninterrupted run would have drawn.
             restore_rng_state(self._resume_rng_state)
             logger.info("Restored RNG state from the resume checkpoint")
 
@@ -202,10 +265,7 @@ class Trainer:
         criterion = create_criterion()
         early_stop = EarlyStopping(patience=self.patience, min_delta=self.min_delta)
         if self.best_metric is not None:
-            # On a resume, improvement is measured against the previous run's
-            # best metric rather than from scratch.
             early_stop.best_score = self.best_metric
-        # Patience continues from where the interrupted run left off.
         early_stop.counter = self.epochs_no_improve
 
         use_amp = settings.amp
@@ -247,7 +307,6 @@ class Trainer:
 
         best = BestModelState()
         if self.best_metric is not None:
-            # Seeded so a worse epoch never clobbers the previously saved best.pt.
             best.metric = self.best_metric
             best.epoch = self.best_epoch or 0
         checkpoint_manager = CheckpointManager.from_runtime(
@@ -256,11 +315,6 @@ class Trainer:
             preprocessing_fingerprint=self._preprocessing_fingerprint,
         )
 
-        # The writer is released in `finally` so a raise mid-training still
-        # flushes the queued scalars: its event-file thread is a daemon with no
-        # atexit hook, so an unclosed writer loses exactly the epochs leading up
-        # to the failure. `progress.finish()` stays on the success path — it
-        # prints "Training complete".
         try:
             for epoch in range(self.start_epoch, self.max_epochs):
                 self.completed_epochs = epoch + 1
@@ -276,8 +330,6 @@ class Trainer:
                     clip_val=settings.gradient_clip,
                     progress_callback=progress.update_batch,
                 )
-                # Absolute epoch number: `epoch` counts from start_epoch, so a
-                # resumed run labels its rows 41..60 rather than 1..20.
                 history["epoch"].append(float(epoch + 1))
                 history["train_loss"].append(train_loss)
 
@@ -309,12 +361,8 @@ class Trainer:
 
                 scheduler.step(monitor)
 
-                # Updated BEFORE persisting, so any checkpoint written this epoch
-                # records the current no-improvement counter and a later resume
-                # restores it instead of resetting patience to zero.
                 stop = early_stop(monitor)
 
-                # Best-model tracking keeps only CPU model weights in memory.
                 if best.capture_if_better(plain_model, monitor, epoch + 1):
                     self.best_metric = best.metric
                     self.best_epoch = best.epoch
@@ -359,8 +407,6 @@ class Trainer:
 
         progress.finish()
 
-        # When a resumed run never beats the seeded best metric, the on-disk
-        # best.pt is what keeps the returned model the best across all runs.
         if best.state_dict:
             logger.info("Restoring best model weights (loss=%.6f)", best.metric)
             best.restore(plain_model)
@@ -369,11 +415,6 @@ class Trainer:
             and checkpoint_manager.enabled
             and checkpoint_manager.directory is not None
         ):
-            # The `self.best_metric is not None` guard is what confines this
-            # fallback to a resume. Without it a FRESH run reusing an existing
-            # checkpoint directory would, whenever no epoch produced a finite
-            # improving metric (divergence, an all-NaN feature column), load and
-            # score the previous run's weights under this run's config.
             best_path = checkpoint_manager.directory / "best.pt"
             if best_path.exists():
                 checkpoint = load_torch_checkpoint(best_path)
@@ -385,7 +426,6 @@ class Trainer:
                     best_path,
                 )
 
-        # Handed back plain so downstream save()/state_dict() keys stay clean.
         self.model = plain_model
 
         self.epochs_no_improve = early_stop.counter

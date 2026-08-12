@@ -28,15 +28,24 @@ class TorchRegressorModel(SequenceRegressorModel):
 
     Subclasses must:
     1. Set ``self._module`` (a ``nn.Module``) in ``__init__``.
-    2. Override ``_build_module(**kwargs)`` to construct the architecture.
-    3. Override ``name`` property.
+    2. Override the ``name`` property.
+    3. Override ``load`` to rebuild their architecture from a checkpoint, and
+       ``save`` to write the architecture arguments that rebuild needs.
 
     Supports full training resume via ``RuntimeConfig.resume``.
+
+    Attributes
+    ----------
+    _start_epoch:
+        Epoch the next ``fit`` starts from: ``0`` for a fresh model, and for a
+        resumed one the number of epochs the previous run completed. It is an
+        absolute count, so ``config.max_epochs`` remains the budget of the
+        whole run rather than of each resume.
     """
 
     _module: nn.Module
     _device: str
-    _start_epoch: int  # for transfer learning: resume from this epoch
+    _start_epoch: int
 
     def __init__(self, device: str | None = None) -> None:
         self._device = device or get_device()
@@ -54,11 +63,24 @@ class TorchRegressorModel(SequenceRegressorModel):
         logger.info("Device: %s", self._device)
 
     def _build_module(self, **kwargs: Any) -> nn.Module:
-        """Construct the nn.Module. Subclasses must override this."""
+        """Extension hook for building the architecture from keyword arguments.
+
+        No shipped subclass uses it: both build their module directly in
+        ``__init__`` and rebuild it in ``load``. It stays as the seam a future
+        model can hook into.
+        """
         raise NotImplementedError
 
     def _load_resume_checkpoint(self, path: str) -> None:
-        """Load a full training checkpoint for resumed training."""
+        """Load a full training checkpoint for resumed training.
+
+        Weights, optimizer, scheduler and scaler states are applied here, along
+        with the best-metric and early-stopping counters recovered from the
+        checkpoint metadata. The RNG snapshot is only carried, not applied: it
+        has to be restored AFTER the module and optimizer are built, since both
+        draw from the global streams, which is why ``Trainer`` applies it at the
+        top of ``train()``.
+        """
         checkpoint = load_torch_checkpoint(path)
         self._module.load_state_dict(checkpoint["model_state_dict"])
         self._start_epoch = checkpoint.get("epoch", 0)
@@ -69,9 +91,6 @@ class TorchRegressorModel(SequenceRegressorModel):
         self._epochs_no_improve = self._resolve_resume_epochs_no_improve(
             checkpoint, self._best_epoch, self._start_epoch
         )
-        # Carried, not applied here: the RNG must be restored AFTER the module
-        # and optimizer are built (both draw from it), which is why Trainer
-        # applies it at the top of train().
         metadata = checkpoint.get("metadata") or {}
         self._rng_state = metadata.get("rng_state") or {}
         self._resume_preprocessing_fingerprint = metadata.get("preprocessing_fingerprint")
@@ -166,7 +185,32 @@ class TorchRegressorModel(SequenceRegressorModel):
         config: ModelConfig | None = None,
         **kwargs: Any,
     ) -> TrainingResult:
-        """Train using the standard training loop with progress display."""
+        """Train using the standard training loop with progress display.
+
+        Parameters
+        ----------
+        train_data:
+            Windowed training set yielding ``(B, T, F)`` feature batches and
+            ``(B,)`` targets, both ``float32`` and in the pipeline's scaled
+            space.
+        val_data:
+            Optional validation set, in the same scaled space, driving the
+            scheduler, early stopping and best-model selection.
+        config:
+            Hyperparameters for this run (learning rate, epoch budget, batch
+            size, patience).
+        **kwargs:
+            ``runtime`` (a ``RuntimeConfig``) selects device, AMP, DataLoader
+            settings and resume; ``preprocessing_fingerprint`` identifies the
+            transform the features were scaled with and is checked against the
+            checkpoint's before a resume is allowed to continue.
+
+        Returns
+        -------
+        TrainingResult
+            This model, carrying the best weights of the run, and the per-epoch
+            history.
+        """
         from solrad_correction.training.trainer import Trainer
 
         runtime = kwargs.get("runtime")
@@ -211,17 +255,26 @@ class TorchRegressorModel(SequenceRegressorModel):
 
     @property
     def training_history(self) -> dict[str, list[float]]:
-        """Training history from the latest fit call."""
+        """Per-epoch curves from the latest fit call.
+
+        Keyed by ``"epoch"`` (absolute 1-based epoch numbers), ``"train_loss"``
+        and ``"val_loss"``; losses are in scaled target units. Empty before the
+        first fit.
+        """
         return getattr(self, "_history", {})
 
     @property
     def best_metric(self) -> float | None:
-        """Best monitored training metric from the latest fit call."""
+        """Best monitored loss seen so far, in scaled target units.
+
+        Spans a resumed run's whole history, not only the epochs since the
+        resume. ``None`` when no epoch has produced a finite metric yet.
+        """
         return getattr(self, "_best_metric", None)
 
     @property
     def best_epoch(self) -> int | None:
-        """Best epoch from the latest fit call."""
+        """Absolute 1-based epoch at which ``best_metric`` was reached."""
         return getattr(self, "_best_epoch", None)
 
     @property
@@ -237,6 +290,27 @@ class TorchRegressorModel(SequenceRegressorModel):
         half-precision predictions (~3 significant digits) would make saved
         predictions and metrics differ between CUDA and CPU for the same
         checkpoint.
+
+        Parameters
+        ----------
+        data:
+            Windowed dataset, or a feature array of shape ``(N, T, F)``,
+            already in the scaled feature space the model was fitted on.
+
+        Returns
+        -------
+        numpy.ndarray
+            Predictions of shape ``(N,)``, ``float32``, in scaled target units,
+            in dataset order — the loader never shuffles, so row ``i`` of the
+            output belongs to window ``i`` of the input.
+
+        Notes
+        -----
+        The batch size comes from the config ``fit`` stored, falling back to
+        256. ``_config`` is absent entirely on an instance built by ``load()``,
+        which bypasses ``__init__`` — hence the ``getattr`` — and is otherwise
+        the ``ModelConfig | None`` that ``fit()`` stored, so "not None" is
+        exactly the case that carries a batch size.
         """
         from torch.utils.data import DataLoader, Dataset, TensorDataset
 
@@ -252,11 +326,6 @@ class TorchRegressorModel(SequenceRegressorModel):
             x_input = torch.as_tensor(arr, dtype=torch.float32)
             dataset = TensorDataset(x_input)
 
-        # Batch size defaults to a reasonable number if not specified in config.
-        # `_config` is absent entirely on an instance built by `load()`, which
-        # bypasses `__init__` — hence the getattr — and is otherwise the
-        # `ModelConfig | None` that `fit()` stored, so "not None" is exactly the
-        # case that carries a `batch_size`.
         config = getattr(self, "_config", None)
         batch_size = 256 if config is None else config.batch_size
 
@@ -293,7 +362,12 @@ class TorchRegressorModel(SequenceRegressorModel):
         return np.concatenate(all_preds)
 
     def save(self, path: str | Path) -> None:
-        """Save model checkpoint (state_dict + config for transfer learning)."""
+        """Save model checkpoint (state_dict + config for transfer learning).
+
+        The plain module is what gets persisted: ``torch.compile`` wrappers
+        prefix state_dict keys with ``_orig_mod.``, which plain modules cannot
+        load back.
+        """
         import dataclasses
 
         config_dict = None
@@ -304,8 +378,6 @@ class TorchRegressorModel(SequenceRegressorModel):
                 else self._config
             )
 
-        # Persist the plain module: torch.compile wrappers prefix state_dict
-        # keys with `_orig_mod.`, which plain modules cannot load back.
         module = getattr(self._module, "_orig_mod", self._module)
         save_torch_checkpoint(
             model_state=module.state_dict(),
@@ -321,7 +393,9 @@ class TorchRegressorModel(SequenceRegressorModel):
     def load(cls, path: str | Path) -> TorchRegressorModel:
         """Load model from checkpoint.
 
-        Subclasses should override to properly reconstruct the module.
+        Restores the training state only. The module itself is left unbuilt,
+        so subclasses must override this to reconstruct their architecture and
+        load the weights into it before the instance can predict.
         """
         checkpoint = load_torch_checkpoint(path)
         instance = cls.__new__(cls)
@@ -333,5 +407,4 @@ class TorchRegressorModel(SequenceRegressorModel):
         instance._best_metric = None
         instance._best_epoch = None
         instance._dataloader_settings = None
-        # Subclass must call _build_module and load_state_dict
         return instance
