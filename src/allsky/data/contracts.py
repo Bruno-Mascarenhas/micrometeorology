@@ -107,8 +107,10 @@ class QCFlag(IntFlag):
 
     Flags are additive: a single ``int64`` column carries any combination.
     ``LOW_SUN``/``SENSOR_GAP``/``ALIGNMENT_FAR``/``KT_ARTIFACT`` are set by the
-    manifest builder; ``FRAME_DARK``/``FRAME_SATURATED`` are reserved for the
-    image-preprocessing wave and default to unset here.
+    manifest builder. ``FRAME_DARK``/``FRAME_SATURATED`` come from the visual QC
+    pass, and ``TIMESTAMP_INTERPOLATED``/``TIMESTAMP_CORRECTED`` from the overlay
+    reader, so a sample whose capture time was manufactured rather than read
+    stays identifiable after the frame manifest is folded into the dataset.
     """
 
     NONE = 0
@@ -120,10 +122,15 @@ class QCFlag(IntFlag):
     ALIGNMENT_FAR = 4
     #: Clearness/clear-sky index above the physical-plausibility ceiling.
     KT_ARTIFACT = 8
-    #: (reserved, preprocessing wave) frame too dark to be usable.
+    #: Frame too dark to be usable.
     FRAME_DARK = 16
-    #: (reserved, preprocessing wave) frame saturated/over-exposed.
+    #: Frame saturated/over-exposed.
     FRAME_SATURATED = 32
+    #: Capture time interpolated from neighbouring frames, not read off this one.
+    TIMESTAMP_INTERPOLATED = 64
+    #: Capture time re-decided from the capture sequence because the glyphs
+    #: this frame carries did not settle a digit on their own.
+    TIMESTAMP_CORRECTED = 128
 
 
 #: Sky-condition classes I..IV, ordered by increasing clearness index so the

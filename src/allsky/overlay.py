@@ -11,6 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
+from allsky.data.contracts import QCFlag
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -60,7 +62,7 @@ PACKED_GLYPH_BANK = (
 
 FRAME_FILENAME_FORMAT = "allsky-%Y%m%d-%H%M"
 MANIFEST_FILENAME = "manifest.parquet"
-MANIFEST_COLUMNS = ("frame_path", "timestamp", "video", "index")
+MANIFEST_COLUMNS = ("frame_path", "timestamp", "video", "index", "qc_frame_flags")
 JPEG_QUALITY = 92
 
 
@@ -400,6 +402,16 @@ def _frames_with_timestamps(
             yield reading, np.asarray(frame, dtype=np.uint8)
 
 
+def _timestamp_flags(reading: OverlayReading) -> int:
+    """QC bits recording whether this frame's capture time was manufactured."""
+    bits = 0
+    if reading.interpolated:
+        bits |= int(QCFlag.TIMESTAMP_INTERPOLATED)
+    if reading.corrected:
+        bits |= int(QCFlag.TIMESTAMP_CORRECTED)
+    return bits
+
+
 def extract_frames_with_overlay_timestamps(
     path: str | Path,
     out_dir: str | Path,
@@ -438,6 +450,7 @@ def extract_frames_with_overlay_timestamps(
                 "timestamp": pd.Timestamp(stamp),
                 "video": video_name,
                 "index": reading.index,
+                "qc_frame_flags": _timestamp_flags(reading),
             }
         )
 
@@ -451,6 +464,7 @@ def extract_frames_with_overlay_timestamps(
     manifest = pd.DataFrame(rows, columns=list(MANIFEST_COLUMNS))
     manifest["timestamp"] = pd.to_datetime(manifest["timestamp"]).astype("datetime64[ns]")
     manifest["index"] = manifest["index"].astype("int64")
+    manifest["qc_frame_flags"] = manifest["qc_frame_flags"].astype("int64")
     manifest.to_parquet(out_path / MANIFEST_FILENAME, index=False)
     logger.info(
         "extracted %d frame(s) from %s to %s spanning %s..%s",

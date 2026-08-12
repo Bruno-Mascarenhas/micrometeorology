@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from allsky.data.contracts import QCFlag
 from allsky.overlay import (
     DIGIT_CELL_LEFT_EDGES,
     DIGIT_CELL_WIDTH,
@@ -332,3 +333,26 @@ def test_a_frame_with_no_overlay_at_all_reads_as_unknown_not_as_the_year_1111():
     reading = read_frame_timestamp(blank)
     assert reading.timestamp is None
     assert reading.text == ""
+
+
+def test_a_manufactured_timestamp_is_flagged_in_the_frame_manifest(tmp_path: Path):
+    stamps = (
+        "20260810120000",
+        "20260810120100",
+        "20261310120200",
+        "20260810120300",
+        "20260810120400",
+        "20260810120500",
+    )
+    manifest = extract_frames_with_overlay_timestamps(_video(tmp_path, stamps), tmp_path / "frames")
+
+    flags = manifest.set_index("index")["qc_frame_flags"]
+    assert flags.loc[2] & int(QCFlag.TIMESTAMP_INTERPOLATED)
+    assert not (flags.drop(index=2) & int(QCFlag.TIMESTAMP_INTERPOLATED)).any()
+
+
+def test_a_read_timestamp_carries_no_provenance_flag(tmp_path: Path):
+    manifest = extract_frames_with_overlay_timestamps(
+        _video(tmp_path, MINUTE_APART), tmp_path / "frames"
+    )
+    assert (manifest["qc_frame_flags"] == 0).all()

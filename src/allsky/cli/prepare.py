@@ -565,7 +565,14 @@ def _extract_and_qc(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDa
             iio.imwrite(frame_path, process_frame(image, cfg, mask=mask), quality=JPEG_QUALITY)
 
     result = frame_manifest.copy()
-    result["qc_frame_flags"] = pd.array(qc_flags, dtype="int64")
+    existing = (
+        result["qc_frame_flags"].to_numpy(dtype="int64")
+        if "qc_frame_flags" in result.columns
+        else np.zeros(len(result), dtype="int64")
+    )
+    result["qc_frame_flags"] = pd.array(
+        existing | np.asarray(qc_flags, dtype="int64"), dtype="int64"
+    )
     return result
 
 
