@@ -81,10 +81,10 @@ __all__ = [
 
 # Measured over the manifests below. A merge that does not reproduce these has
 # lost or gained a file; see verify_frame.
-EXPECTED_LENTA_ROWS = 987_969
-EXPECTED_RAIN_ROWS = 988_249
+EXPECTED_LENTA_ROWS = 1_017_857
+EXPECTED_RAIN_ROWS = 1_018_291
 ARCHIVE_START = pd.Timestamp("2016-09-29 13:40:00")
-ARCHIVE_END = pd.Timestamp("2026-04-24 13:00:00")
+ARCHIVE_END = pd.Timestamp("2026-08-12 00:00:00")
 
 # Per-row instrument quality flags. Text, and therefore destroyed by a numeric
 # coercion unless named explicitly (see ingestion.read_campbell_dat).
@@ -165,7 +165,7 @@ LENTA_MANIFEST: tuple[ArchiveFile, ...] = (
     ArchiveFile(f"{_DIR}/LBM_lenta_2025.dat.2.backup", note="2025-03 commissioning"),
     ArchiveFile(f"{_DIR}/LBM_lenta_2025.dat.3.backup", note="2025-03 commissioning"),
     ArchiveFile(f"{_DIR}/LBM_lenta_2025.dat.4.backup", note="2025-03-28..05-14, dual GMX units"),
-    ArchiveFile("LBM_lenta_2025.dat", note="v22 era to 2026-04-24; PSP takes over diffuse"),
+    ArchiveFile("LBM_lenta_2025.dat", note="v22 era to 2026-08-12; PSP takes over diffuse"),
 )
 
 RAIN_MANIFEST: tuple[ArchiveFile, ...] = (
@@ -192,7 +192,7 @@ RAIN_MANIFEST: tuple[ArchiveFile, ...] = (
     ArchiveFile(f"{_DIR}/LBM_rain_2023.dat", note="2023"),
     ArchiveFile(f"{_DIR}/LBM_rain2023_14032024.dat", note="2024-03 handover"),
     ArchiveFile(f"{_DIR}/LBM_rain_2024.dat", note="2024"),
-    ArchiveFile("LBM_rain_2025.dat", note="2025 to 2026-04-24"),
+    ArchiveFile("LBM_rain_2025.dat", note="2025 to 2026-08-12"),
 )
 
 
