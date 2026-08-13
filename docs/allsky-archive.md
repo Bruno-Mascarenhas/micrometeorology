@@ -286,8 +286,15 @@ contributes only its daylight span:
 | a full day (e.g. `20260701`) | ~1350 | ~610 (45 %) | ~06:45 – 16:30 |
 | a night-only day (`20260508`, `20260520`) | ~600 | **0** | — |
 
-Night-only days exist in this archive and contribute nothing to a
-diffuse-radiation dataset; budget disk and expectations on the daylight half.
+Night-only days contribute nothing to a diffuse-radiation dataset, and they are
+not the exception this table makes them look like: **the camera ran dusk-to-dawn
+only until 2026-06-02 and switched to 24-hour capture on 2026-06-04**
+(`20260603` is the transition). It is a meteor camera, so night is its purpose
+and daylight is the recent addition. The break is visible in the published file
+sizes without downloading anything — 13–17 MB for a night, 29–35 MB for a full
+day — and over the 96 days the server held on 2026-08-12 it split 27 night-only
+against 69 full days. Budget disk and expectations on the daylight half of the
+full days alone.
 
 **3. The frame timestamps have to be real**, for the reason in the section
 above: the pairing is what consumes them, and it cannot tell a wrong timestamp
