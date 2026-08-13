@@ -4,8 +4,10 @@ Diffuse (DHI) is estimated from a sky image plus *non-radiometric* sensor
 context.  The station's broadband radiometers are exactly the quantities the
 targets are derived from (GHI drives ``kt``/``k*``; the diffuse pyranometer is
 the label itself), so admitting them as features would let the model read the
-answer off the inputs.  This module pins three tiers:
+answer off the inputs.  This module pins four tiers:
 
+- :data:`MINIMAL_FEATURES` — :data:`SAFE_FEATURES` without the thermohygrometer,
+  for periods where that instrument is down; no radiometry either.
 - :data:`SAFE_FEATURES` — solar geometry + standard-met channels, the default
   feature set; no radiometry.
 - :data:`EXTENDED_FEATURES` — auxiliary radiometric channels (UV, PAR,
@@ -26,7 +28,9 @@ __all__ = [
     "EXTENDED_FEATURES",
     "FEATURE_GROUPS",
     "FORBIDDEN_FEATURES",
+    "MINIMAL_FEATURES",
     "SAFE_FEATURES",
+    "THERMOHYGROMETER_FEATURES",
     "FeatureSet",
     "ForbiddenFeatureError",
     "active_feature_groups",
@@ -35,8 +39,8 @@ __all__ = [
     "validate_features",
 ]
 
-#: The two named feature tiers a config may request.
-FeatureSet = Literal["safe", "extended"]
+#: The three named feature tiers a config may request.
+FeatureSet = Literal["minimal", "safe", "extended"]
 
 #: Engineered feature name -> source logger column (``None`` = computed from
 #: timestamps/solar geometry).  Insertion order is the canonical feature order.
@@ -54,6 +58,23 @@ SAFE_FEATURES: Mapping[str, str | None] = {
     "wind_speed_ms": "WS_ms",
     "wind_dir_sin": "WindDir",
     "wind_dir_cos": "WindDir",
+}
+
+#: The three channels the Gill MetSENS1 thermohygrometer supplies. It has been
+#: railed since 2025-12-19 — 1000 degC air, 1000 degC dew point, 999 %RH — and
+#: ``micrometeorology.sensors.archive.mask_sentinels`` turns each rail into NaN,
+#: which :func:`allsky.data.manifest.build_manifest` then drops row-wise. Over
+#: the all-sky camera archive (2026-05-08 onward) that leaves 0.02 % of the
+#: paired rows, so the safe set cannot build a dataset while the instrument is
+#: down.
+THERMOHYGROMETER_FEATURES: frozenset[str] = frozenset({"air_temp_c", "dew_point_c", "rel_humidity"})
+
+#: The safe set minus :data:`THERMOHYGROMETER_FEATURES`: solar geometry plus the
+#: barometer and anemometer, which stayed live through that failure. Derived
+#: rather than transcribed so it cannot drift from the safe set it narrows, and
+#: it keeps the safe declaration order that the whole stack treats as canonical.
+MINIMAL_FEATURES: Mapping[str, str | None] = {
+    name: column for name, column in SAFE_FEATURES.items() if name not in THERMOHYGROMETER_FEATURES
 }
 
 #: Auxiliary radiometric channels — ablation only, never in the default set.
@@ -144,6 +165,7 @@ def source_column(name: str) -> str | None:
 def resolve_feature_set(name: FeatureSet | str, extra: Iterable[str] = ()) -> list[str]:
     """Resolve a feature-set name to its ordered engineered-feature list.
 
+    ``"minimal"`` returns the safe features without the thermohygrometer;
     ``"safe"`` returns the safe features; ``"extended"`` returns the safe
     features followed by the auxiliary radiometric ones.  *extra* names are
     appended verbatim (deduplicated, order preserved) for bespoke ablations.
@@ -158,14 +180,16 @@ def resolve_feature_set(name: FeatureSet | str, extra: Iterable[str] = ()) -> li
     Raises
     ------
     ValueError
-        If *name* is neither ``"safe"`` nor ``"extended"``.
+        If *name* is none of ``"minimal"``, ``"safe"`` or ``"extended"``.
     """
-    if name == "safe":
+    if name == "minimal":
+        resolved = list(MINIMAL_FEATURES)
+    elif name == "safe":
         resolved = list(SAFE_FEATURES)
     elif name == "extended":
         resolved = [*SAFE_FEATURES, *EXTENDED_FEATURES]
     else:
-        raise ValueError(f"unknown feature set {name!r}; expected 'safe' or 'extended'")
+        raise ValueError(f"unknown feature set {name!r}; expected 'minimal', 'safe' or 'extended'")
     for feature in extra:
         if feature not in resolved:
             resolved.append(feature)
@@ -175,9 +199,11 @@ def resolve_feature_set(name: FeatureSet | str, extra: Iterable[str] = ()) -> li
 def active_feature_groups(name: FeatureSet | str) -> dict[str, list[str]]:
     """Sensor-token groups active for a feature set.
 
-    Drops the ``radiometry_aux`` group for the safe set (nothing populates it),
-    so the union of the returned groups is exactly
-    :func:`resolve_feature_set` for that set.
+    Each group is narrowed to the features the set actually resolves and a group
+    left empty is dropped, so the union of the returned groups is exactly
+    :func:`resolve_feature_set` for that set — ``radiometry_aux`` disappears
+    below the extended set, and ``temperature``/``humidity`` disappear under
+    ``"minimal"``, which carries no thermohygrometer.
 
     Returns
     -------
@@ -185,10 +211,12 @@ def active_feature_groups(name: FeatureSet | str) -> dict[str, list[str]]:
         Group name -> its member feature names, copied from
         :data:`FEATURE_GROUPS` so the caller cannot mutate the policy.
     """
-    groups = {group: list(members) for group, members in FEATURE_GROUPS.items()}
-    if name != "extended":
-        groups.pop("radiometry_aux", None)
-    return groups
+    resolved = set(resolve_feature_set(name))
+    groups = {
+        group: [member for member in members if member in resolved]
+        for group, members in FEATURE_GROUPS.items()
+    }
+    return {group: members for group, members in groups.items() if members}
 
 
 def validate_features(names: Iterable[str], *, target_columns: Iterable[str] = ()) -> None:

@@ -127,16 +127,18 @@ class DataSourceConfig(BaseModel):
 class FeaturesConfig(BaseModel):
     """Sensor feature policy selector.
 
-    ``set`` (``safe`` | ``extended``) maps to
-    :data:`allsky.features.policy.SAFE_FEATURES` / ``EXTENDED_FEATURES``. The
-    extended set adds ablation-only radiometric auxiliaries and is never
-    selected silently. The Python attribute is ``feature_set`` (``set`` is the
-    YAML key, exposed via alias) to avoid shadowing the builtin.
+    ``set`` (``minimal`` | ``safe`` | ``extended``) maps to
+    :data:`allsky.features.policy.MINIMAL_FEATURES` / ``SAFE_FEATURES`` /
+    ``EXTENDED_FEATURES``. The minimal set drops the thermohygrometer channels
+    for periods where that instrument is down; the extended set adds
+    ablation-only radiometric auxiliaries and is never selected silently. The
+    Python attribute is ``feature_set`` (``set`` is the YAML key, exposed via
+    alias) to avoid shadowing the builtin.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    feature_set: Literal["safe", "extended"] = Field(default="safe", alias="set")
+    feature_set: Literal["minimal", "safe", "extended"] = Field(default="safe", alias="set")
 
 
 class DHITargetConfig(BaseModel):

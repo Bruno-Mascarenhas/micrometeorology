@@ -5,7 +5,7 @@
 # (fixed UTC-3, no DST since 2019).
 
 video:
-  pattern: "data/all-sky/allsky-*.mp4"
+  pattern: "data/all-sky/videos/allsky-*.mp4"
   filename_date_format: "allsky-%Y%m%d"
   start_time: "06:00"            # local time of frame 0 — match the camera schedule
   minutes_per_frame: 1.0
@@ -15,7 +15,11 @@ site:
   longitude: -38.51              # UTC-3 fixed
 
 features:
-  set: safe                      # geometry + standard met only; NO radiometry (anti-leakage)
+  # geometry + barometer + anemometer; NO radiometry (anti-leakage). Not `safe`:
+  # the Gill MetSENS1 thermohygrometer has been railed since 2025-12-19, so the
+  # three channels safe adds are NaN across the whole camera archive and would
+  # take 99.98% of the paired rows with them.
+  set: minimal
 
 mask:
   path: null                     # static horizon/obstruction mask; null -> auto
@@ -24,7 +28,9 @@ mask:
 crop:
   enabled: false                 # no pixel crop before resize by default
 
-resize: null                     # keep native resolution; DINOv2 transform resizes at embed time
+resize: 512                      # the sync-archive house size (docs/allsky-archive.md); the
+                                 # DINOv2 transform squares the frame at embed time regardless,
+                                 # so storing 1920x1080 costs ~5x the disk for no extra pixels
 
 night_filter:
   min_solar_elevation_deg: 10.0  # drop near-horizon / night frames (k-index noise-dominated)

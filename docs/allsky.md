@@ -166,6 +166,8 @@ These are *weak* labels: the k-index conflates cloudiness with turbidity and cal
 
 The default `safe` feature set is **solar geometry + standard meteorology only — no radiometry**. GHI, the diffuse pyranometer, and every derived target are *forbidden* as features and raise `ForbiddenFeatureError` if requested. This is the central anti-leakage guarantee of the v2 stack: a model must learn diffuse irradiance from the *sky image* and non-radiometric context, not from a radiometric shortcut. The `extended` set adds ablation-only radiometric auxiliaries and is never selected silently. `validate-dataset` fails if a forbidden feature reaches the manifest.
 
+> **`safe` needs a working thermohygrometer, and the station's has not had one since 2025-12-19.** The Gill MetSENS1 rails at 1000 °C air, 1000 °C dew point and 999 %RH; `mask_sentinels` turns each rail into NaN and `build_manifest` drops any row with a non-finite feature, so `safe` retains 0.02 % of the rows paired against the all-sky camera archive. Use `features.set: minimal` — the same set without those three channels (10 features: solar geometry, barometer, anemometer) — until the instrument is repaired. `configs/allsky/data/local_prepare.yaml` ships that way.
+
 ---
 
 ## CLI Reference

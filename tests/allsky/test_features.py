@@ -7,7 +7,9 @@ import pytest
 from allsky.config import SiteConfig
 from allsky.features import (
     EXTENDED_FEATURES,
+    MINIMAL_FEATURES,
     SAFE_FEATURES,
+    THERMOHYGROMETER_FEATURES,
     FeatureNormalizer,
     ForbiddenFeatureError,
     TargetNormalizer,
@@ -99,6 +101,29 @@ class TestFeaturePolicy:
         covered = {f for members in groups.values() for f in members}
         assert covered == set(resolve_feature_set("extended"))
         assert "radiometry_aux" in groups
+
+    def test_resolve_minimal_is_safe_without_the_thermohygrometer(self):
+        assert resolve_feature_set("minimal") == [
+            name for name in SAFE_FEATURES if name not in THERMOHYGROMETER_FEATURES
+        ]
+
+    def test_minimal_carries_no_thermohygrometer_channel(self):
+        assert not (set(MINIMAL_FEATURES) & THERMOHYGROMETER_FEATURES)
+
+    def test_minimal_keeps_the_barometer_and_the_anemometer(self):
+        resolved = resolve_feature_set("minimal")
+        assert {"pressure_mbar", "wind_speed_ms", "wind_dir_sin", "wind_dir_cos"} <= set(resolved)
+
+    def test_minimal_features_pass_validation(self):
+        validate_features(resolve_feature_set("minimal"))  # must not raise
+
+    def test_groups_cover_exactly_resolved_minimal(self):
+        groups = active_feature_groups("minimal")
+        covered = [f for members in groups.values() for f in members]
+        assert covered == resolve_feature_set("minimal")
+        assert "temperature" not in groups
+        assert "humidity" not in groups
+        assert "radiometry_aux" not in groups
 
 
 # ---------------------------------------------------------------------------

@@ -87,8 +87,8 @@ One row per paired sample. Columns (see `data/contracts.py`):
 - **Solar geometry** (degrees): `solar_elevation`, `solar_azimuth`,
   `solar_zenith`. Elevation/zenith double as features; azimuth is fed as the
   `azimuth_sin`/`azimuth_cos` cyclic pair.
-- **Feature columns** per the active policy set (13 for `safe`, +4 for
-  `extended`).
+- **Feature columns** per the active policy set (13 for `safe`, 10 for
+  `minimal`, +4 for `extended`).
 - **Targets/labels**: `target_dhi`, `target_source` (`measured`/`erbs_pseudo`),
   `target_kindex`, `kindex_kind` (`kstar`/`kt`), `sky_class`
   (`0/1/2`, `-1` = missing), `cloud_fraction` (nullable, all-NaN today),
@@ -215,12 +215,19 @@ denormalize with the stored `TargetNormalizer`.
 
 DHI is derived from the station radiometers (GHI drives `kt`/`k*`; the diffuse
 pyranometer *is* the label), so those channels must never be model inputs.
-`features/policy.py` pins three tiers:
+`features/policy.py` pins four tiers:
 
 - **`SAFE_FEATURES`** (default, 13): solar geometry (`solar_elevation`,
   `solar_zenith`, `azimuth_sin`, `azimuth_cos`, `doy_sin`, `doy_cos`) + standard
   met (`air_temp_c`, `dew_point_c`, `rel_humidity`, `pressure_mbar`,
   `wind_speed_ms`, `wind_dir_sin`, `wind_dir_cos`). **No radiometry.**
+- **`MINIMAL_FEATURES`** (10): the safe set minus `THERMOHYGROMETER_FEATURES`
+  (`air_temp_c`, `dew_point_c`, `rel_humidity`), derived from it rather than
+  transcribed. For periods where the Gill MetSENS1 is down — it has been railed
+  at 1000 °C / 1000 °C / 999 %RH since 2025-12-19, `mask_sentinels` turns each
+  rail into NaN, and `build_manifest` drops those rows whole, which over the
+  all-sky camera archive costs 99.98 % of the dataset. Selected by
+  `features.set: minimal`; still **no radiometry**.
 - **`EXTENDED_FEATURES`** (ablation only, never silent): `uv_wm2`, `par_wm2`,
   `longwave_up_wm2`, `longwave_down_wm2`. Selected only by `features.set:
   extended`.
@@ -234,7 +241,10 @@ pyranometer *is* the label), so those channels must never be model inputs.
 silent drop — a leakage-prone request stops the run.
 
 `FEATURE_GROUPS` (used for cross-attention tokens): `solar`, `temperature`,
-`humidity`, `pressure`, `wind`, and `radiometry_aux` (extended set only).
+`humidity`, `pressure`, `wind`, and `radiometry_aux`. `active_feature_groups`
+narrows every group to the features the requested set resolves and drops the
+ones left empty, so `radiometry_aux` appears only under `extended` and
+`temperature`/`humidity` disappear under `minimal`.
 
 ---
 

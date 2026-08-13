@@ -29,14 +29,13 @@ from allsky.config import (
     load_prepare_config,
 )
 from allsky.data.contracts import SKY_CLASS_COUNT
+from allsky.features.policy import resolve_feature_set
 from allsky.modeling.registry import MODEL_BUILDERS, build_model
 
 _CONFIGS = Path(__file__).resolve().parents[2] / "configs" / "allsky"
 _EXPERIMENTS = sorted((_CONFIGS / "experiments").glob("v*.yaml"))
 _FRAGMENTS = sorted((_CONFIGS / "models").glob("*.yaml"))
 
-#: Feature count of the ``safe`` policy set (all shipped experiments use it).
-_N_FEATURES = 13
 #: Embedding width used for the embedding-mode forward probes.
 _EMBED_DIM = 32
 _BATCH = 4
@@ -72,7 +71,10 @@ def test_local_prepare_config_loads() -> None:
     cfg = load_prepare_config(_CONFIGS / "data" / "local_prepare.yaml")
     assert cfg.output.dataset_dir == "output/allsky-mm/dataset"
     assert cfg.output.dataset_version == "2"
-    assert cfg.features.feature_set == "safe"
+    # Not `safe`: the Gill MetSENS1 thermohygrometer has been railed since
+    # 2025-12-19, so the three channels safe adds are NaN across the camera
+    # archive and the row-wise finite filter would drop 99.98% of the dataset.
+    assert cfg.features.feature_set == "minimal"
     assert cfg.sensor.ghi_column == "CM3Up_Wm2_Avg"
     assert cfg.targets.diffuse_column == "PSP_Wm2_Avg"
     assert cfg.targets.kindex_kind == "kstar"
@@ -84,6 +86,20 @@ def test_local_prepare_config_loads() -> None:
     assert cfg.splits.val_fraction == pytest.approx(0.15)
     assert cfg.splits.test_fraction == pytest.approx(0.15)
     assert cfg.splits.seed == 42
+
+
+def test_the_experiments_train_on_the_set_the_prepare_config_builds() -> None:
+    """The two configs pin the same feature set, or training dies on the manifest.
+
+    The engine resolves its feature columns from the EXPERIMENT config while the
+    manifest carries the ones the PREPARE config asked for, and nothing
+    reconciles them: dropping only the prepare side to ``minimal`` cost a full
+    dataset build before ``manifest is missing feature columns`` surfaced.
+    """
+    prepared = load_prepare_config(_CONFIGS / "data" / "local_prepare.yaml")
+    for experiment in _EXPERIMENTS:
+        trained = load_experiment_config(experiment)
+        assert trained.features.feature_set == prepared.features.feature_set, experiment.name
 
 
 @pytest.mark.parametrize("fragment", _FRAGMENTS, ids=lambda p: p.name)
@@ -99,7 +115,9 @@ def test_experiment_loads_and_names_a_real_model(experiment: Path) -> None:
     cfg = load_experiment_config(experiment)
     assert cfg.experiment is True
     assert cfg.seed == 42
-    assert cfg.features.feature_set == "safe"
+    # Has to be the set data/local_prepare.yaml BUILDS with, or the engine asks
+    # the manifest for feature columns it does not carry.
+    assert cfg.features.feature_set == "minimal"
     assert cfg.model.name in MODEL_BUILDERS, cfg.model.name
     assert cfg.output_dir == f"output/allsky-mm/experiments/{experiment.stem}"
     # The default embedding path, plus the one image-mode finetune experiment.
@@ -139,17 +157,21 @@ def test_data_paths_resolve_without_doubling_data_root(experiment: Path) -> None
 def test_experiment_builds_and_forwards(experiment: Path) -> None:
     """Each experiment builds and forwards a dummy batch, emitting its enabled heads."""
     cfg = load_experiment_config(experiment)
+    # Read the width off the config's own policy set rather than pinning it: the
+    # engine sizes the sensor branch the same way, so a hardcoded 13 turned a
+    # switch to `minimal` into a shape error in the test instead of in the code.
+    n_features = len(resolve_feature_set(cfg.features.feature_set))
 
     if cfg.data.input_mode == "image":
-        model = build_model(cfg, _N_FEATURES, image_backbone=_StubBackbone())
+        model = build_model(cfg, n_features, image_backbone=_StubBackbone())
         batch = {
-            "features": torch.randn(_BATCH, _N_FEATURES),
+            "features": torch.randn(_BATCH, n_features),
             "image": torch.randn(_BATCH, 3, 8, 8),
         }
     else:
-        model = build_model(cfg, _N_FEATURES, embedding_dim=_EMBED_DIM)
+        model = build_model(cfg, n_features, embedding_dim=_EMBED_DIM)
         batch = {
-            "features": torch.randn(_BATCH, _N_FEATURES),
+            "features": torch.randn(_BATCH, n_features),
             "embedding": torch.randn(_BATCH, _EMBED_DIM),
         }
 
