@@ -233,6 +233,32 @@ def _sensor_row_near(
     return row
 
 
+def _with_absent_sources_as_nan(sensor: pd.DataFrame, feature_set: str) -> pd.DataFrame:
+    """Add the *feature_set*'s missing source columns to *sensor*, filled with NaN.
+
+    ``build_feature_frame`` raises on a source column it cannot find, which is
+    what a dataset build needs — a silently NaN feature column has no place in a
+    manifest.  A snapshot is the opposite case: it is documented to impute every
+    feature it cannot measure at the training mean, and reaches that path only
+    through the NaN this fills in.  Without it a capture with no ``--sensor-csv``
+    at all, the very case the fallback exists for, died on a ``KeyError``.
+    """
+    from allsky.features.policy import resolve_feature_set, source_column
+
+    required = {
+        column
+        for column in (source_column(name) for name in resolve_feature_set(feature_set))
+        if column is not None
+    }
+    absent = sorted(required - set(sensor.columns))
+    if not absent:
+        return sensor
+    filled = sensor.copy()
+    for column in absent:
+        filled[column] = np.nan
+    return filled
+
+
 def _feature_vector(
     timestamp: pd.Timestamp,
     *,
@@ -250,7 +276,9 @@ def _feature_vector(
         if sensor_csv is not None
         else pd.DataFrame(index=pd.DatetimeIndex([]))
     )
-    engineered = build_feature_frame(sensor, [timestamp], site, feature_set)
+    engineered = build_feature_frame(
+        _with_absent_sources_as_nan(sensor, feature_set), [timestamp], site, feature_set
+    )
     unknown = [name for name in feature_columns if name not in engineered.columns]
     if unknown:
         raise ValueError(
@@ -261,6 +289,14 @@ def _feature_vector(
     finite = np.isfinite(values)
     imputed = [name for name, ok in zip(feature_columns, finite, strict=True) if not ok]
     return np.where(finite, values, training_means).astype(np.float32), imputed
+
+
+def _image_as_hwc(image_path: str | Path) -> np.ndarray:
+    """Read a frame as ``(H, W, 3)`` ``uint8`` RGB — what a visual backbone's transform takes."""
+    from PIL import Image
+
+    with Image.open(image_path) as handle:
+        return np.asarray(handle.convert("RGB"), dtype=np.uint8)
 
 
 def _image_as_chw(image_path: str | Path, size: int) -> np.ndarray:
@@ -383,7 +419,14 @@ def predict_snapshot(
             device=device,
             pooling=_model_param(cfg, "backbone_pooling", "cls"),
         )
-        vector = np.asarray(backbone.encode(_image_as_chw(image_path, image_size)))
+        # Through transform(), never straight into encode(): the backbone's
+        # contract takes a SEQUENCE of (H, W, 3) uint8 HWC frames and does its
+        # own resize, ImageNet normalisation and stacking, and that is the
+        # recipe precompute-embeddings fed the training store. Handing it the
+        # (3, S, S) float array the image branch uses died on the raw ndarray
+        # and, had it survived, would have embedded a differently prepared
+        # image than the model was fitted on.
+        vector = np.asarray(backbone.encode(backbone.transform([_image_as_hwc(image_path)])))
         embedding = np.reshape(vector, (1, -1)).astype(np.float32)
         embedding_dim = int(embedding.shape[1])
         batch["embedding"] = torch.from_numpy(embedding).to(device)
