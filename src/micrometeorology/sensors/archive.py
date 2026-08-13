@@ -482,11 +482,36 @@ SENTINEL_VALUES: dict[str, tuple[float, ...]] = {
     "RH2": (999.0,),
 }
 
-# The Eppley case/dome thermistors report kelvin; anything outside this is the
-# channel being unwired rather than a temperature.
+# Bounds a working instrument cannot leave; outside them the channel is not
+# measuring. Wider than the QC gates in configs/micromet/default.yaml on purpose:
+# those remove the implausible, this removes the impossible, and only this one
+# runs ahead of the allsky feature build.
+#
+# The Eppley case/dome thermistors report kelvin, so anything outside 250-330 K
+# is the channel being unwired rather than a temperature.
+#
+# The GMX barometer needs a gate because when MetSENS1 faults it parks
+# BP1_mbar_Avg on the same fill value it writes to RH1 and WS1_ms_GMX — 2.62 hPa
+# in 420 samples, 0.95 in 11, 157.07 once, 872.14 in two — and every one of them
+# passes the -900 sentinel threshold and the finite filter untouched. A range
+# rather than the observed values because that fill is a spilled reading, not a
+# designed rail, so the next fault can park on a different number. The floor is
+# measured, not assumed: across 139,039 readings the record holds 436 samples
+# below 950 hPa and then nothing at all until 980, while real pressure at this
+# sea-level site spans 1005 to 1022 (1st percentile to maximum, never above
+# 1030). At 950 hPa the station would have to stand half a kilometre uphill.
+#
+# BP1 alone, and deliberately: it is the barometer the allsky feature policy
+# reads, and mask_sentinels is the only gate standing between the logger and
+# that feature build. BP2/BP_mbar_Avg/Pmb_WXT carry impossible values too (a
+# tally of 1504/7/143192 samples), but they reach only the micrometeorology
+# chain, which already gates them in configs/micromet/default.yaml. That config
+# gates BP1 at the tighter [985, 1030]; the ~11 readings between 980 and 1005
+# are implausible rather than impossible and stay on that side of the line.
 SENTINEL_RANGES: dict[str, tuple[float, float]] = {
     "T_C1_Avg": (250.0, 330.0),
     "T_D1_Avg": (250.0, 330.0),
+    "BP1_mbar_Avg": (950.0, 1100.0),
 }
 
 # (column, value, first, last) — a value that is legitimate outside the window.

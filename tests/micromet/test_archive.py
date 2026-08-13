@@ -251,6 +251,22 @@ class TestMaskSentinels:
         masked, _removed = mask_sentinels(frame)
         assert masked["T_C1_Avg"].isna().tolist() == [False, True]
 
+    def test_the_barometer_fill_value_of_a_faulted_metsens_is_range_gated(self):
+        """2.62 hPa is the fill MetSENS1 spills across BP1/RH1/WS1 when it faults."""
+        frame = frame_at(
+            ["2026-08-10 13:00", "2026-08-10 13:05", "2026-08-10 13:10", "2026-08-10 13:15"],
+            BP1_mbar_Avg=[1015.4, 2.62, 0.95, 872.14],
+        )
+        masked, removed = mask_sentinels(frame)
+        assert masked["BP1_mbar_Avg"].isna().tolist() == [False, True, True, True]
+        assert removed["BP1_mbar_Avg"] == 3
+
+    def test_the_barometer_gate_leaves_a_merely_implausible_reading_alone(self):
+        """985-1030 is the QC gate's job; this one only removes the impossible."""
+        frame = frame_at(["2026-06-08 12:00"], BP1_mbar_Avg=[999.15])
+        masked, _removed = mask_sentinels(frame)
+        assert masked["BP1_mbar_Avg"].notna().all()
+
     def test_zero_is_masked_only_inside_its_window(self):
         """Zero is a real wind speed: a global rule would delete every calm hour."""
         frame = frame_at(["2021-06-01 12:00", "2023-06-01 12:00"], WS_WXT_Avg=[0.0, 0.0])
