@@ -399,8 +399,22 @@ def _run_extract_step(
     inside that pass leaves a manifest without the ``qc_frame_flags`` column
     (every FRAME_DARK / FRAME_SATURATED bit silently lost) and an interrupted
     write leaves one that cannot be read at all.  Both are re-extracted.
+
+    A video whose own timestamps are unusable is skipped, not fatal, and every
+    skip is named again on the next run.  The overlay reader refuses a day it
+    cannot timestamp — the 2026-06-04 archive video steps its clock 7 s backwards
+    at frame 851 — and that refusal is right, but it describes ONE day: letting
+    it end the loop threw away the other 95 days of a two-hour extraction, and
+    would have stopped the daily job in ``docs/allsky-archive.md`` permanently.
+    A skipped day contributes no manifest rows, which is what a night-only day
+    already does.  The exit code stays zero for the same reason: the fault is a
+    permanent property of that day's bytes, so a run that failed on it will fail
+    on it forever, and an exit code that can never go green signals nothing.
     """
+    from allsky.overlay import OverlayTimestampError
+
     per_video: list[PandasDataFrame] = []
+    unusable: list[str] = []
     for video in videos:
         stem = Path(video).stem
         video_dir = frames_root / stem
@@ -433,10 +447,20 @@ def _run_extract_step(
                 f"resume: frame manifest for {stem} is unreadable or predates visual QC, "
                 "re-extracting"
             )
-        frame_manifest = _extract_and_qc(video, video_dir, cfg)
+        try:
+            frame_manifest = _extract_and_qc(video, video_dir, cfg)
+        except OverlayTimestampError as exc:
+            unusable.append(stem)
+            typer.echo(f"WARNING: skipping {stem}: {exc}")
+            continue
         _write_frame_manifest(video_manifest, frame_manifest)
         per_video.append(frame_manifest)
         typer.echo(f"extract-frames: {len(frame_manifest)} frames from {stem} -> {video_dir}")
+    if unusable:
+        typer.echo(
+            f"WARNING: {len(unusable)} video(s) could not be timestamped and contribute no "
+            f"rows: {', '.join(unusable)}"
+        )
     return per_video
 
 

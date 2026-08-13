@@ -300,6 +300,16 @@ full days alone.
 above: the pairing is what consumes them, and it cannot tell a wrong timestamp
 from a right one.
 
+Some days cannot supply them. `allsky-20260604` steps its clock 7 s backwards at
+frame 851 (20:19:53 -> 20:19:46) — the overlay reads cleanly on both sides, so
+this is the camera's own clock and not an OCR slip — and the overlay reader
+refuses to timestamp a sequence that goes backwards. `prepare-local` **skips**
+such a day, names it, and repeats the list at the end of the extract step: one
+unusable day out of 96 must not end a two-hour extraction or wedge the daily job
+above. A skipped day contributes no manifest rows, exactly like a night-only
+one, and the run still exits 0 — the fault is a permanent property of that day's
+bytes, so an exit code that can never go green would signal nothing.
+
 Once `prepare-local` succeeds, `allsky validate-dataset` is the gate to run
 before training — it checks the manifest schema, the feature finiteness, the
 anti-leakage policy, split integrity and that every referenced JPEG exists.

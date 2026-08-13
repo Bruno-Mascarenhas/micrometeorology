@@ -222,6 +222,45 @@ class TestPrepareLocal:
             "2026-01-01 06:03:30",
         ]
 
+    def test_a_video_whose_clock_steps_backwards_is_skipped_not_fatal(
+        self, tmp_path: Path, synthetic_dat: Path
+    ):
+        videos = tmp_path / "videos"
+        videos.mkdir()
+        write_overlay_video(
+            videos / "allsky-20260101.mp4",
+            [f"2026010106{minute:02d}30" for minute in range(4)],
+        )
+        # 06:02:30 lands before 06:03:30, exactly as the 2026-06-04 archive video
+        # steps its clock back 7 s partway through the night.
+        write_overlay_video(
+            videos / "allsky-20260102.mp4",
+            ["20260102060030", "20260102060130", "20260102060330", "20260102060230"],
+        )
+        dataset_dir = tmp_path / "dataset"
+        config = tmp_path / "overlay.yaml"
+        config.write_text(
+            "video:\n"
+            f"  pattern: '{videos}/allsky-*.mp4'\n"
+            "sensor:\n"
+            f"  paths: ['{synthetic_dat}']\n"
+            "output:\n"
+            f"  dataset_dir: '{dataset_dir}'\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            app,
+            ["prepare-local", "--config", str(config), "--steps", "extract-frames"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "skipping allsky-20260102" in result.output
+        assert "go backwards" in result.output
+        assert "1 video(s) could not be timestamped" in result.output
+        assert (dataset_dir / "frames" / "allsky-20260101" / "manifest.parquet").exists()
+        assert not (dataset_dir / "frames" / "allsky-20260102" / "manifest.parquet").exists()
+
     def test_full_run_builds_manifest(
         self, tmp_path: Path, synthetic_video: Path, synthetic_dat: Path
     ):
