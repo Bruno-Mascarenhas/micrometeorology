@@ -16,7 +16,37 @@ def collect_run_metadata(
     started_at: float | None = None,
     training_duration_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Collect reproducibility metadata without failing the experiment."""
+    """Collect reproducibility metadata without failing the experiment.
+
+    What a third party needs to place a result: interpreter and platform, the
+    versions of the packages that do the numerics, the device the run used, the
+    commit of THIS source tree and whether it was dirty, wall-clock timings, a
+    model summary and a flattened view of the config.
+
+    Every probe here is best-effort by contract. A metadata collector must never
+    be the reason a finished experiment loses its artifacts, so a failure is
+    recorded as a value in the returned mapping instead of propagating.
+
+    Parameters
+    ----------
+    config:
+        Experiment config; read by duck typing, so a partial stand-in reports
+        ``None`` for the attributes it lacks rather than failing.
+    model:
+        Trained model, if one exists yet. Its parameter counts and best-epoch
+        markers are read when present.
+    started_at:
+        ``time.monotonic()`` reading taken when the run began, used for the
+        end-to-end duration in seconds.
+    training_duration_seconds:
+        Time spent in the training loop alone, recorded as passed.
+
+    Returns
+    -------
+    dict
+        JSON-safe metadata mapping, or ``{"metadata_error": <message>}`` if
+        collection itself failed.
+    """
     try:
         meta: dict[str, Any] = {
             "python": _python_metadata(),

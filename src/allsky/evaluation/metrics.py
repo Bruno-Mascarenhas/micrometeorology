@@ -27,6 +27,7 @@ from solrad_correction.evaluation.metrics import compute_regression_metrics
 __all__ = [
     "CLASSIFICATION_METRIC_KEYS",
     "REGRESSION_METRIC_KEYS",
+    "SKILL_METRIC_KEYS",
     "classification_metrics",
     "regression_metrics",
 ]
@@ -57,6 +58,43 @@ REGRESSION_METRIC_KEYS: tuple[str, ...] = (
     "nrmse",
     "n",
 )
+
+#: Skill entries appended to a regression target's metrics, one per reference.
+SKILL_METRIC_KEYS: tuple[str, ...] = (
+    "rmse_persistence",
+    "skill_persistence",
+    "rmse_clearsky",
+    "skill_clearsky",
+)
+
+
+def skill_score(model_rmse: float, reference_rmse: float) -> float:
+    """Fraction of a reference forecast's error the model removes.
+
+    Parameters
+    ----------
+    model_rmse, reference_rmse:
+        Root-mean-square errors of the model and of the reference, in the same
+        physical unit.
+
+    Returns
+    -------
+    float
+        ``1 - rmse_model / rmse_reference``: ``1`` is a perfect model, ``0`` is
+        no better than the reference, and a negative value means the reference
+        wins.  NaN when the reference is not finite or is exactly zero, which
+        is the honest answer rather than an infinite skill.
+
+    Notes
+    -----
+    An RMSE on its own does not say whether a model is worth running. The skill
+    score states it against a named alternative, which is why irradiance work
+    reports it against persistence and a clear-sky model rather than alone.
+    """
+    if not np.isfinite(model_rmse) or not np.isfinite(reference_rmse) or reference_rmse == 0.0:
+        return float("nan")
+    return float(1.0 - model_rmse / reference_rmse)
+
 
 #: Ordered scalar keys :func:`classification_metrics` always returns (besides the
 #: nested ``confusion`` matrix).

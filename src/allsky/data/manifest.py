@@ -26,7 +26,7 @@ content ``manifest_sha256``.
 import json
 import logging
 from collections.abc import Iterable, Mapping
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,12 +35,20 @@ import pandas as pd
 
 from allsky.atomic import atomic_write, atomic_write_json
 from allsky.clearsky import clear_sky_index
-from allsky.config import PrepareConfig, SiteConfig
+from allsky.config import SITE_TZ, SITE_TZ_NAME, SITE_UTC_OFFSET_HOURS, PrepareConfig, SiteConfig
 from allsky.data.alignment import CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
     GEOMETRY_COLUMNS,
+    SKY_CLASS_KT_UPPER_BOUNDS,
     SKY_CLASS_MISSING,
+    SKY_CLASS_NAMES,
+    SKY_CLASS_NAMES_PT,
+    SKY_CLASS_REFERENCE,
+    SKY_CLEAR,
+    SKY_CLOUDY,
+    SKY_PARTLY_CLOUDY_CLEAR,
+    SKY_PARTLY_CLOUDY_DIFFUSE,
     QCFlag,
     manifest_column_dtypes,
     to_relative,
@@ -49,7 +57,7 @@ from allsky.data.splits import DaySplit
 from allsky.erbs import pseudo_diffuse
 from allsky.features import build_feature_frame, resolve_feature_set, validate_features
 from allsky.provenance import code_version, content_sha256
-from allsky.solar import clearness_index, solar_azimuth, solar_elevation
+from allsky.solar import clearness_index, solar_azimuth_deg, solar_elevation_deg
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +74,11 @@ __all__ = [
 TARGET_SOURCE_MEASURED = "measured"
 TARGET_SOURCE_ERBS = "erbs_pseudo"
 
-#: Fixed UTC offset of the America/Bahia logger/camera clock (no DST since 2019).
-LOCAL_UTC_OFFSET_HOURS = -3
-LOCAL_TZ_NAME = "America/Bahia"
-_LOCAL_TZ = timezone(timedelta(hours=LOCAL_UTC_OFFSET_HOURS))
+#: Fixed UTC offset of the America/Bahia logger/camera clock, re-exported from
+#: :mod:`allsky.config` so the pipeline has one pinned site clock.
+LOCAL_UTC_OFFSET_HOURS = SITE_UTC_OFFSET_HOURS
+LOCAL_TZ_NAME = SITE_TZ_NAME
+_LOCAL_TZ = SITE_TZ
 
 
 def build_manifest(
@@ -83,8 +92,6 @@ def build_manifest(
     diffuse_column: str | None = "PSP_Wm2_Avg",
     kindex_kind: str = "kstar",
     alignment: CenterFrame | None = None,
-    class_clear: float = 0.65,
-    class_overcast: float = 0.35,
     min_elevation_deg: float = 10.0,
     night_min_elevation_deg: float | None = 5.0,
     max_kindex: float | None = None,
@@ -122,9 +129,6 @@ def build_manifest(
         Build-time pairing strategy; must be a :class:`CenterFrame` (the
         default) — the windowed strategies pool at dataset level and have no
         ``pair`` method.
-    class_clear, class_overcast:
-        k-index thresholds for the ``sky_class`` bins (>= clear, >= overcast,
-        else overcast).
     min_elevation_deg:
         Elevation floor below which the k-index is undefined and ``LOW_SUN`` is
         flagged.  Rows here are *kept* (with ``LOW_SUN``) as long as they clear
@@ -151,8 +155,9 @@ def build_manifest(
     -------
     tuple[pandas.DataFrame, dict]
         The manifest (columns/dtypes per
-        :func:`allsky.data.contracts.manifest_column_dtypes`) and the sidecar
-        meta dict (``manifest_sha256`` is added by
+        :func:`allsky.data.contracts.manifest_column_dtypes`, with the ``split``
+        column left empty for :func:`attach_split_column` to fill) and the
+        sidecar meta dict (``manifest_sha256`` is added by
         :func:`write_manifest_parquet`).
 
     Raises
@@ -185,7 +190,6 @@ def build_manifest(
     target_columns = [ghi_column] if diffuse_column is None else [ghi_column, diffuse_column]
     validate_features(feature_columns, target_columns=target_columns)
 
-    # --- sort/dedupe inputs -------------------------------------------------
     frames = frames_manifest.sort_values("timestamp").reset_index(drop=True)
     frames["timestamp"] = pd.to_datetime(frames["timestamp"]).astype("datetime64[ns]")
     dup_frames = frames["timestamp"].duplicated(keep="first")
@@ -205,7 +209,6 @@ def build_manifest(
     frame_times = pd.DatetimeIndex(frames["timestamp"])
     sensor_index = pd.DatetimeIndex(sensors.index)
 
-    # --- pair frames to sensor records -------------------------------------
     pairing = strategy.pair(frame_times, sensor_index)
     keep = pairing.matched
     if not keep.any():
@@ -221,7 +224,6 @@ def build_manifest(
     paired_sensor = sensors.iloc[matched_pos].copy()
     paired_sensor.index = frame_times
 
-    # --- features (drop rows whose feature vector is not finite) -----------
     features = build_feature_frame(
         paired_sensor,
         frame_times,
@@ -243,11 +245,9 @@ def build_manifest(
     if len(frames) == 0:
         raise ValueError("no rows survived the finite-feature filter; check sensor coverage")
 
-    # --- geometry ----------------------------------------------------------
     utc_offset = float(LOCAL_UTC_OFFSET_HOURS)
-    elevation = solar_elevation(frame_times, site, utc_offset)
+    elevation = solar_elevation_deg(frame_times, site, utc_offset)
 
-    # --- drop night frames (below the night threshold) BEFORE targets ------
     if night_min_elevation_deg is not None:
         day_mask = elevation >= float(night_min_elevation_deg)
         n_night = int((~day_mask).sum())
@@ -270,10 +270,9 @@ def build_manifest(
                 f"(night_min_elevation_deg={night_min_elevation_deg}); check sun coverage"
             )
 
-    azimuth = solar_azimuth(frame_times, site, utc_offset)
+    azimuth = solar_azimuth_deg(frame_times, site, utc_offset)
     zenith = 90.0 - elevation
 
-    # --- targets -----------------------------------------------------------
     ghi = paired_sensor[ghi_column].to_numpy(dtype=np.float64)
     _reject_dead_channel(ghi, ghi_column, "the live GHI channel is 'CM3Up_Wm2_Avg'")
     kt = clearness_index(ghi, frame_times, site, utc_offset)
@@ -293,10 +292,9 @@ def build_manifest(
     else:
         target_dhi = pseudo_diffuse(ghi, kt)
 
-    sky_class = _classify_sky(kindex, class_clear, class_overcast)
+    sky_class = _classify_sky(kt, labelable=elevation >= min_elevation_deg)
     cloud_fraction = np.full(len(frames), np.nan, dtype=np.float64)
 
-    # --- qc flags ----------------------------------------------------------
     qc_flags = _qc_flags(
         elevation=elevation,
         ghi=ghi,
@@ -307,14 +305,12 @@ def build_manifest(
         far_distance_minutes=far_distance_minutes,
     )
 
-    # --- identity ----------------------------------------------------------
     sample_id = [f"allsky-{ts:%Y%m%d-%H%M}" for ts in frame_times]
     _check_sample_id_unique(sample_id)
     day_id = frame_times.strftime("%Y-%m-%d")
     timestamp_utc = frame_times.tz_localize(_LOCAL_TZ).tz_convert("UTC").as_unit("ns")
     image_path = [to_relative(path, data_root) for path in frames["frame_path"]]
 
-    # --- assemble in canonical order ---------------------------------------
     dtypes = manifest_column_dtypes(feature_columns)
     data: dict[str, Any] = {
         "sample_id": sample_id,
@@ -337,11 +333,10 @@ def build_manifest(
             "target_source": [target_source] * n_rows,
             "target_kindex": np.asarray(kindex, dtype=np.float64),
             "kindex_kind": [kindex_kind] * n_rows,
+            "target_kt": np.asarray(kt, dtype=np.float64),
             "sky_class": sky_class,
             "cloud_fraction": cloud_fraction,
             "qc_flags": qc_flags,
-            # Constant provenance columns (mirror the sidecar meta); ``split`` is
-            # nullable and left empty until attach_split_column fills it.
             "dataset_version": [DATASET_VERSION] * n_rows,
             "alignment_id": [strategy.id] * n_rows,
             "split": [None] * n_rows,
@@ -359,8 +354,6 @@ def build_manifest(
         row_count=len(manifest),
         site=site,
         thresholds={
-            "class_clear": class_clear,
-            "class_overcast": class_overcast,
             "min_elevation_deg": min_elevation_deg,
             "night_min_elevation_deg": night_min_elevation_deg,
             "max_kindex": max_kindex,
@@ -392,8 +385,23 @@ def build_manifest_from_prepare_config(
     from ``cfg.sensor.ghi_column``, plus the site, alignment window, diffuse
     column, k-index kind, sky-class thresholds and the night drop threshold
     (``cfg.night_filter.min_solar_elevation_deg`` -> ``night_min_elevation_deg``).
-    *data_root* defaults to the config's output ``dataset_dir`` (the directory the
-    manifest's relative ``image_path`` values are resolved against).
+
+    Parameters
+    ----------
+    frames_manifest, sensor_df:
+        As in :func:`build_manifest`.
+    cfg:
+        Prepare configuration carrying every build parameter listed above.
+    data_root:
+        Directory the manifest's relative ``image_path`` values are resolved
+        against; defaults to the config's output ``dataset_dir``.
+    config_sha256:
+        Optional hash of the originating config, stored in the meta.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, dict]
+        The manifest and sidecar meta produced by :func:`build_manifest`.
     """
     root = data_root if data_root is not None else cfg.output.dataset_dir
     alignment = CenterFrame(
@@ -410,8 +418,6 @@ def build_manifest_from_prepare_config(
         diffuse_column=cfg.targets.diffuse_column,
         kindex_kind=cfg.targets.kindex_kind,
         alignment=alignment,
-        class_clear=cfg.targets.class_clear,
-        class_overcast=cfg.targets.class_overcast,
         night_min_elevation_deg=cfg.night_filter.min_solar_elevation_deg,
         config_sha256=config_sha256,
     )
@@ -429,8 +435,22 @@ def write_manifest_parquet(
     meta.  Both files are written to a temp name in the same directory and
     ``os.replace``-d into place.
 
-    Returns the meta dict actually written (with ``manifest_sha256`` /
-    ``row_count`` populated).
+    Parameters
+    ----------
+    manifest:
+        The manifest DataFrame to persist.
+    meta:
+        Sidecar meta as returned by :func:`build_manifest`; copied, never
+        mutated in place.
+    path:
+        Destination parquet path; the sidecar is written beside it as
+        ``<name>.meta.json``.
+
+    Returns
+    -------
+    dict
+        The meta actually written, with ``manifest_sha256`` and ``row_count``
+        populated.
     """
     out = Path(path)
 
@@ -501,17 +521,16 @@ def attach_split_column(
     return written
 
 
-# ---------------------------------------------------------------------------
-# internals
-# ---------------------------------------------------------------------------
-
-
 def _split_assignment_and_id(
     split_artifact: DaySplit | dict[str, Any],
 ) -> tuple[Mapping[str, str], str | None]:
-    """Extract the ``day_id -> split`` map and ``split_id`` from either form."""
+    """Extract the ``day_id -> split`` map and ``split_id`` from either form.
+
+    A :class:`~allsky.data.splits.DaySplit` is recognised by its ``assignment``
+    attribute; the dict form carries the same two keys.
+    """
     assignment = getattr(split_artifact, "assignment", None)
-    if assignment is not None:  # DaySplit
+    if assignment is not None:
         split_id = getattr(split_artifact, "split_id", None)
         return {str(k): str(v) for k, v in assignment.items()}, split_id
     if isinstance(split_artifact, dict):
@@ -561,11 +580,42 @@ def _reject_dead_channel(values: np.ndarray, column: str, remedy: str) -> None:
     )
 
 
-def _classify_sky(kindex: np.ndarray, clear: float, overcast: float) -> np.ndarray:
-    """k-index -> sky class (0 clear / 1 partial / 2 overcast); NaN -> -1."""
-    k = np.asarray(kindex, dtype=np.float64)
-    labels = np.select([k >= clear, k >= overcast], [0, 1], default=2).astype(np.int64)
-    labels[~np.isfinite(k)] = SKY_CLASS_MISSING
+def _classify_sky(kt: np.ndarray, *, labelable: np.ndarray) -> np.ndarray:
+    """Label each sample with its published sky condition from the clearness index.
+
+    Parameters
+    ----------
+    kt:
+        Clearness index Kt (GHI over extraterrestrial horizontal irradiance),
+        shape ``(N,)``, dimensionless.  Non-finite entries are unlabelable.
+    labelable:
+        Boolean mask, shape ``(N,)``, false where the sun is too low for Kt to
+        mean anything (its denominator collapses towards zero near the
+        horizon).  Those rows are labelled :data:`SKY_CLASS_MISSING` rather than
+        binned, so a horizon artefact never enters training as a real class.
+
+    Returns
+    -------
+    numpy.ndarray
+        Class integers, shape ``(N,)``, dtype ``int64``: ``0`` cloudy, ``1``
+        partly cloudy with diffuse dominance, ``2`` partly cloudy with clear
+        dominance, ``3`` clear, and :data:`SKY_CLASS_MISSING` where Kt is not
+        finite.  The integer is the published condition number minus one.
+
+    Notes
+    -----
+    The bins are the four sky conditions of Escobedo et al. (2009), applied to
+    Kt and not to the clear-sky index: the published bounds are defined on the
+    clearness index, so classifying k\\* against them would relabel the record.
+    """
+    values = np.asarray(kt, dtype=np.float64)
+    cloudy, diffuse_dominant, clear_dominant = SKY_CLASS_KT_UPPER_BOUNDS
+    labels = np.select(
+        [values <= cloudy, values <= diffuse_dominant, values <= clear_dominant],
+        [SKY_CLOUDY, SKY_PARTLY_CLOUDY_DIFFUSE, SKY_PARTLY_CLOUDY_CLEAR],
+        default=SKY_CLEAR,
+    ).astype(np.int64)
+    labels[~np.isfinite(values) | ~np.asarray(labelable, dtype=bool)] = SKY_CLASS_MISSING
     return labels
 
 
@@ -610,6 +660,12 @@ def _build_meta(
         "feature_set": feature_set,
         "feature_columns": list(feature_columns),
         "kindex_kind": kindex_kind,
+        "sky_classes": {
+            "names": list(SKY_CLASS_NAMES),
+            "names_pt": list(SKY_CLASS_NAMES_PT),
+            "kt_upper_bounds": list(SKY_CLASS_KT_UPPER_BOUNDS),
+            "reference": SKY_CLASS_REFERENCE,
+        },
         "target_source": target_source,
         "config_sha256": config_sha256,
         "code_version": _code_version(),

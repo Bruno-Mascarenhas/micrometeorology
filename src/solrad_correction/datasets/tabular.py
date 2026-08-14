@@ -14,6 +14,22 @@ class TabularDataset:
     """Holds feature matrix X, target vector y, and metadata.
 
     Designed for sklearn-style models where each row is independent.
+
+    Attributes
+    ----------
+    X:
+        ``float32``, shape ``(n_samples, n_features)``, columns ordered as
+        ``feature_names``. Preprocessed (scaled) values, so dimensionless unless
+        the experiment ran with ``scaler_type='none'``.
+    y:
+        ``float32``, shape ``(n_samples,)``, one target per row of ``X`` and in
+        the same scaling as ``X``.
+    feature_names:
+        Column names of ``X``, length ``n_features``.
+    index:
+        Timestamps of the rows, shape ``(n_samples,)``, or ``None`` when the
+        source frame was not datetime-indexed. Carried so predictions can be
+        written back against the time they belong to.
     """
 
     X: np.ndarray
@@ -44,6 +60,22 @@ class TabularDataset:
             Name of the target column.
         drop_na:
             If True, drop rows with any NaN in features or target.
+
+        Returns
+        -------
+        TabularDataset
+            ``X`` of shape ``(n_kept_rows, len(feature_columns))`` and ``y`` of
+            shape ``(n_kept_rows,)``, both ``float32``, carrying ``df``'s values
+            unchanged. ``index`` is the surviving timestamps, or ``None`` when
+            ``df`` is not datetime-indexed.
+
+        Raises
+        ------
+        KeyError
+            If a requested feature or target column is absent from ``df``.
+        MemoryError
+            If the extracted arrays would exceed the ``SOLRAD_MAX_ARRAY_GB``
+            guardrail.
         """
         subset = df.loc[:, [*feature_columns, target_column]]
         if drop_na:
@@ -65,7 +97,9 @@ class TabularDataset:
     def save(self, path: str | Path) -> None:
         """Save dataset to disk for reproducibility.
 
-        Saves features, target, feature names, and index as NPZ + CSV.
+        Writes ``path`` as a directory holding ``data.npz`` (the ``X`` and ``y``
+        arrays), ``feature_names.csv`` and, when an index is set, ``index.csv``.
+        Read back by :meth:`load`.
         """
         from solrad_correction.datasets.serialization import save_tabular_dataset
 
@@ -73,7 +107,11 @@ class TabularDataset:
 
     @classmethod
     def load(cls, path: str | Path) -> TabularDataset:
-        """Load a previously saved dataset."""
+        """Load a dataset directory written by :meth:`save`.
+
+        The index sidecar is optional, so a dataset saved without timestamps
+        loads back with ``index=None`` rather than failing.
+        """
         from solrad_correction.datasets.serialization import load_tabular_dataset
 
         return load_tabular_dataset(path)

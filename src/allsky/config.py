@@ -1,22 +1,52 @@
-"""Configuration models for the all-sky pipeline."""
+"""Configuration models for the all-sky pipeline.
 
+Two roots sit at the top of the tree. :class:`ExperimentConfig` describes a
+multimodal training run — portable manifest, embeddings, model zoo, experiment
+engine. :class:`PrepareConfig` describes dataset preparation and drives
+``prepare-local``, ``validate-dataset``, ``precompute-embeddings`` and
+``export-colab-bundle``. Both reuse the permissive :class:`VideoConfig` and
+:class:`SiteConfig` sections verbatim; every other section is strict
+(``extra="forbid"``), so a typo in a YAML key fails loudly instead of being
+ignored.
+
+YAML files compose through an ``extends:`` list that
+:func:`load_experiment_config` and :func:`load_prepare_config` resolve
+depth-first before validation.
+"""
+
+import datetime as dt
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+#: Fixed UTC offset of the LabMiM camera and datalogger clocks. Pinned rather
+#: than read from the host TZ: a UTC-configured container would otherwise shift
+#: every capture time by three hours while the instruments keep stamping local
+#: time. A fixed offset is correct here because America/Bahia has observed no
+#: DST since 2019.
+SITE_UTC_OFFSET_HOURS = -3
+SITE_TZ_NAME = "America/Bahia"
+SITE_TZ = dt.timezone(dt.timedelta(hours=SITE_UTC_OFFSET_HOURS))
+
 
 class VideoConfig(BaseModel):
     """How all-sky videos map to wall-clock time.
 
-    The camera produces one-day timelapse files named by date; each frame
-    covers ``minutes_per_frame`` minutes of real time starting at
-    ``start_time`` local time.
+    ``timestamps: overlay`` (the default) reads the capture time the camera
+    burns into every frame. ``timestamps: modelled`` instead places frame *N*
+    at ``start_time + N * minutes_per_frame``, which the Planetário da UFBA
+    camera does not follow — its capture interval changes between day and night
+    and its videos do not all start at the same hour, so the modelled mapping
+    mislabels frames by up to two and a half hours. See
+    ``docs/allsky-archive.md``; ``start_time`` and ``minutes_per_frame`` are
+    read only in ``modelled`` mode.
     """
 
     pattern: str = "data/all-sky/allsky-*.mp4"
     filename_date_format: str = "allsky-%Y%m%d"
+    timestamps: Literal["overlay", "modelled"] = "overlay"
     start_time: str = "06:00"
     minutes_per_frame: float = 1.0
 
@@ -26,16 +56,6 @@ class SiteConfig(BaseModel):
 
     latitude: float = -13.00
     longitude: float = -38.51
-
-
-# ---------------------------------------------------------------------------
-# Multimodal experiment / prepare configs (the all-sky v2 stack): portable
-# manifest, embeddings, model zoo, experiment engine. They are strict
-# (``extra="forbid"``) so a typo in a YAML key fails loudly instead of being
-# ignored; the permissive :class:`VideoConfig` / :class:`SiteConfig` sections
-# above are reused verbatim by :class:`PrepareConfig`. YAML files compose via an
-# ``extends:`` list resolved by the loaders at the bottom of this module.
-# ---------------------------------------------------------------------------
 
 
 #: The window modes a dataset can build. This module is the single owner of the
@@ -107,16 +127,18 @@ class DataSourceConfig(BaseModel):
 class FeaturesConfig(BaseModel):
     """Sensor feature policy selector.
 
-    ``set`` (``safe`` | ``extended``) maps to
-    :data:`allsky.features.policy.SAFE_FEATURES` / ``EXTENDED_FEATURES``. The
-    extended set adds ablation-only radiometric auxiliaries and is never
-    selected silently. The Python attribute is ``feature_set`` (``set`` is the
-    YAML key, exposed via alias) to avoid shadowing the builtin.
+    ``set`` (``minimal`` | ``safe`` | ``extended``) maps to
+    :data:`allsky.features.policy.MINIMAL_FEATURES` / ``SAFE_FEATURES`` /
+    ``EXTENDED_FEATURES``. The minimal set drops the thermohygrometer channels
+    for periods where that instrument is down; the extended set adds
+    ablation-only radiometric auxiliaries and is never selected silently. The
+    Python attribute is ``feature_set`` (``set`` is the YAML key, exposed via
+    alias) to avoid shadowing the builtin.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    feature_set: Literal["safe", "extended"] = Field(default="safe", alias="set")
+    feature_set: Literal["minimal", "safe", "extended"] = Field(default="safe", alias="set")
 
 
 class DHITargetConfig(BaseModel):
@@ -157,7 +179,7 @@ class KIndexTargetConfig(BaseModel):
 
 
 class SkyClassTargetConfig(BaseModel):
-    """Sky-condition classification head (clear / partial / overcast)."""
+    """Sky-condition classification head over the four published Kt conditions."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -288,12 +310,6 @@ class ExperimentConfig(BaseModel):
     train: ExperimentTrainConfig = Field(default_factory=ExperimentTrainConfig)
 
 
-# ---------------------------------------------------------------------------
-# PrepareConfig tree — drives prepare-local / validate-dataset /
-# precompute-embeddings / export-colab-bundle.
-# ---------------------------------------------------------------------------
-
-
 class MaskConfig(BaseModel):
     """Static horizon/obstruction mask. ``threshold=None`` selects an auto value."""
 
@@ -338,14 +354,24 @@ class PrepareSensorConfig(BaseModel):
 
 
 class PrepareTargetsConfig(BaseModel):
-    """Target derivation: diffuse column, k-index kind and sky-class thresholds."""
+    """Target derivation: the diffuse column and which k-index to record.
+
+    ``diffuse_column`` names the logger channel holding measured diffuse
+    horizontal irradiance in W m-2; rows built from it are flagged
+    ``target_source="measured"``. Setting it to ``None`` switches the whole
+    dataset to Erbs pseudo-targets derived from GHI
+    (:func:`allsky.erbs.pseudo_diffuse`, ``target_source="erbs_pseudo"``).
+
+    The sky-condition bins are not configurable: they are the published bounds
+    of :data:`allsky.data.contracts.SKY_CLASS_KT_UPPER_BOUNDS`, always applied
+    to Kt. A config carrying the retired ``class_clear``/``class_overcast`` keys
+    is rejected rather than silently ignored.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     diffuse_column: str | None = "PSP_Wm2_Avg"
     kindex_kind: Literal["kstar", "kt"] = "kstar"
-    class_clear: float = 0.65
-    class_overcast: float = 0.35
 
 
 class DatasetOutputConfig(BaseModel):
@@ -381,13 +407,23 @@ class EmbeddingsConfig(BaseModel):
 
 
 class SplitsConfig(BaseModel):
-    """Day-based train/val/test split fractions and seed."""
+    """Day-based train/val/test partition.
+
+    ``strategy`` defaults to ``chronological``: the earliest days train, the
+    latest test, and ``gap_days`` are dropped at each boundary so no training
+    day is adjacent to an evaluation day. ``random`` is available for studies
+    that estimate a quantity from a simultaneous image, and has to be asked for
+    by name — chosen silently it reports a forecasting skill the model does not
+    have.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     val_fraction: float = 0.2
     test_fraction: float = 0.1
     seed: int = 42
+    strategy: Literal["chronological", "random"] = "chronological"
+    gap_days: int = 1
 
 
 class PrepareConfig(BaseModel):
@@ -395,15 +431,15 @@ class PrepareConfig(BaseModel):
 
     ``video`` and ``site`` reuse the permissive legacy sections
     (:class:`VideoConfig` / :class:`SiteConfig`); every prepare-specific section
-    is strict so typos fail loudly.
+    is strict so typos fail loudly. ``features`` selects the sensor feature
+    policy baked into the manifest at build time — its YAML key is ``set``,
+    aliasing the ``feature_set`` attribute.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     video: VideoConfig = Field(default_factory=VideoConfig)
     site: SiteConfig = Field(default_factory=SiteConfig)
-    #: Sensor feature policy (``safe`` | ``extended``) baked into the manifest at
-    #: build time; the ``set`` YAML key aliases the ``feature_set`` attribute.
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     mask: MaskConfig = Field(default_factory=MaskConfig)
     crop: CropConfig = Field(default_factory=CropConfig)
@@ -415,11 +451,6 @@ class PrepareConfig(BaseModel):
     output: DatasetOutputConfig = Field(default_factory=DatasetOutputConfig)
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     splits: SplitsConfig = Field(default_factory=SplitsConfig)
-
-
-# ---------------------------------------------------------------------------
-# YAML composition (``extends:``) + loaders.
-# ---------------------------------------------------------------------------
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

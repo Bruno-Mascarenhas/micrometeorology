@@ -33,7 +33,36 @@ def build_model(
     input_size: int | None = None,
     device: str | None = None,
 ) -> BaseRegressorModel:
-    """Build a model from config using the registry."""
+    """Build a model from config using the registry.
+
+    Each concrete model module is imported inside the branch that builds it, so
+    a tabular run never pays for a torch import.
+
+    Parameters
+    ----------
+    config:
+        Model section of the experiment config: ``model_type`` selects the
+        model and the remaining fields supply that model's hyperparameters.
+    input_size:
+        Number of input features ``F`` per time step. Required by the sequence
+        models, which size their first layer from it; unused by the tabular
+        ones, which take their width from the fitted estimator.
+    device:
+        Torch device string the sequence models are moved to. ``None`` lets the
+        model resolve the device itself.
+
+    Returns
+    -------
+    BaseRegressorModel
+        An untrained model instance.
+
+    Raises
+    ------
+    ValueError
+        If ``config.model_type`` is not registered, if a sequence model is
+        requested without ``input_size``, or if a registered name reaches the
+        end of this factory without a branch that builds it.
+    """
     spec = get_model_spec(config.model_type)
 
     if spec.name == "svm":

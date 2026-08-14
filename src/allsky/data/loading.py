@@ -41,10 +41,18 @@ def resolve_against_root(path: str | Path, root: Path) -> Path:
 def load_manifest(manifest_path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Read the manifest parquet and its ``<name>.meta.json`` sidecar (if any).
 
-    Returns ``(manifest, meta)``; *meta* is an empty dict when the sidecar is
-    absent, in which case a warning is logged because the provenance fields it
-    carries (``manifest_sha256`` for the hash check, ``split_id``,
-    ``dataset_version``) are then unavailable to callers.
+    Returns
+    -------
+    tuple[pandas.DataFrame, dict]
+        The manifest and its sidecar meta.  *meta* is an empty dict when the
+        sidecar is absent, in which case a warning is logged: the provenance
+        fields it carries (``manifest_sha256`` for the hash check, ``split_id``,
+        ``dataset_version``) are then unavailable to callers.
+
+    Raises
+    ------
+    FileNotFoundError
+        If *manifest_path* does not exist.
     """
     if not manifest_path.exists():
         raise FileNotFoundError(f"manifest parquet not found: {manifest_path}")
@@ -63,7 +71,17 @@ def load_manifest(manifest_path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
 
 
 def load_split(path: Path) -> DaySplit:
-    """Load the persisted day-split artifact from *path*."""
+    """Load the persisted day-split artifact from *path*.
+
+    Raises
+    ------
+    FileNotFoundError
+        If *path* does not exist.
+    ValueError
+        If the artifact's stored ``split_id`` does not match its assignment, or
+        the assignment leaks a day across splits (see
+        :func:`allsky.data.splits.load_split_artifact`).
+    """
     if not path.exists():
         raise FileNotFoundError(f"split artifact not found: {path}")
     return load_split_artifact(path)
@@ -72,11 +90,17 @@ def load_split(path: Path) -> DaySplit:
 def default_embedding_reader(cfg: ExperimentConfig, root: Path) -> EmbeddingReader:
     """Build the safetensors embedding reader from ``cfg.data.embeddings_dir``.
 
-    Preloads every shard into one resident array by default (finding F7):
-    shuffled training makes the shard LRU thrash, so the whole store is loaded
-    once unless ``cfg.data.embeddings_preload`` is False.  The training engine
-    and the evaluator share this loader so evaluation reads embeddings exactly
-    as training did.
+    Preloads every shard into one resident array by default: shuffled training
+    makes the shard LRU thrash, so the whole store is loaded once unless
+    ``cfg.data.embeddings_preload`` is False.  The training engine and the
+    evaluator share this loader so evaluation reads embeddings exactly as
+    training did.
+
+    Raises
+    ------
+    ValueError
+        If ``cfg.data.embeddings_dir`` is unset, which embedding-mode runs
+        require.
     """
     from allsky.embeddings.storage import SafetensorsEmbeddingReader
 

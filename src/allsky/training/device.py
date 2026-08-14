@@ -8,7 +8,19 @@ thus ``import allsky.training`` — stays importable in a torch-free environment
 
 
 def resolve_device(requested: str = "auto") -> str:
-    """Resolve ``"auto"`` to the best available device: cuda -> mps -> cpu."""
+    """Resolve ``"auto"`` to the best available device: cuda -> mps -> cpu.
+
+    Parameters
+    ----------
+    requested:
+        A torch device string, or ``"auto"``.  Anything else passes through
+        untouched, so an explicit request is never silently downgraded.
+
+    Returns
+    -------
+    str
+        The resolved device string; ``"cpu"`` when torch is not installed.
+    """
     if requested != "auto":
         return requested
     try:

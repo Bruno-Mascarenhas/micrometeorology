@@ -19,7 +19,20 @@ from solrad_correction.evaluation.metrics import REGRESSION_METRICS, MetricFn
 
 @dataclass
 class TrainingResult:
-    """Result of a model training session."""
+    """Result of a model training session.
+
+    Attributes
+    ----------
+    model:
+        The trained model. Torch models return themselves carrying the best
+        weights seen during the run, not the last epoch's.
+    history:
+        Per-epoch curves keyed by ``"epoch"``, ``"train_loss"`` and
+        ``"val_loss"``. ``"val_loss"`` is empty without a validation set; the
+        others hold one entry per epoch trained. Losses are in the preprocessed
+        target units the criterion saw. Models that train in a single
+        closed-form fit, such as the sklearn ones, leave the whole dict empty.
+    """
 
     model: BaseRegressorModel
     history: dict[str, list[float]] = field(default_factory=dict)
@@ -46,20 +59,40 @@ class BaseRegressorModel(ABC):
         Parameters
         ----------
         train_data:
-            Training data (TabularDataset or SequenceDataset).
+            Training data (``TabularDataset`` or a sequence dataset), already
+            preprocessed: features and target arrive in the scaled space
+            the fitted pipeline produced.
         val_data:
-            Optional validation data for early stopping / monitoring.
+            Optional validation data for early stopping and monitoring.
         config:
-            Model configuration overrides.
+            Model configuration supplying the hyperparameters of this run.
         **kwargs:
-            Additional training arguments (like runtime config).
+            Additional training arguments, such as ``runtime`` (a
+            ``RuntimeConfig``) and ``preprocessing_fingerprint``.
+
+        Returns
+        -------
+        TrainingResult
+            The trained model and its per-epoch history.
         """
 
     @abstractmethod
     def predict(self, data: Any) -> np.ndarray:
-        """Generate predictions.
+        """Generate predictions for the rows of ``data`` the model evaluates.
 
-        Returns a 1-D array of predicted values.
+        Parameters
+        ----------
+        data:
+            Dataset, or a feature array, of the kind the concrete model
+            accepts.
+
+        Returns
+        -------
+        numpy.ndarray
+            Predictions of shape ``(N,)``, ``float32``, in the preprocessed
+            target units the model was fitted on. ``N`` counts the rows the
+            model actually predicts, which for a windowed sequence dataset is
+            fewer than the rows of the frame it was built from.
         """
 
     def evaluate(
@@ -67,13 +100,35 @@ class BaseRegressorModel(ABC):
         data: Any,
         metrics: dict[str, MetricFn] | None = None,
     ) -> dict[str, float]:
-        """Evaluate the model on a dataset.
-
-        Default implementation: predict then compute metrics.
+        """Evaluate the model on a dataset: predict, then score.
 
         ``target_values()`` takes precedence over ``y`` so that windowed
         datasets compare predictions against the window-aligned targets
         instead of the full-length base target vector.
+
+        Parameters
+        ----------
+        data:
+            Dataset exposing its targets as ``target_values()`` or as ``y``,
+            of shape ``(N,)``.
+        metrics:
+            Metric callables keyed by display name; defaults to
+            :data:`~solrad_correction.evaluation.metrics.REGRESSION_METRICS`.
+
+        Returns
+        -------
+        dict of str to float
+            One score per metric, expressed in whatever units the dataset's
+            targets carry — the preprocessed target space, unless the caller
+            inverse-transformed them first.
+
+        Raises
+        ------
+        TypeError
+            If ``data`` exposes neither ``target_values()`` nor ``y``.
+        ValueError
+            If targets and predictions differ in length, which means the
+            dataset rows are misaligned with the model outputs.
         """
         if metrics is None:
             metrics = REGRESSION_METRICS
@@ -100,16 +155,27 @@ class BaseRegressorModel(ABC):
 
     @abstractmethod
     def save(self, path: str | Path) -> None:
-        """Save model to disk."""
+        """Write the fitted model to ``path`` in the backend's own format.
+
+        The file carries the weights and the architecture arguments needed to
+        rebuild the model, but never the preprocessing: the pipeline persists
+        its fitted scaler separately, under the experiment's
+        ``preprocessing/`` directory.
+        """
 
     @classmethod
     @abstractmethod
     def load(cls, path: str | Path) -> BaseRegressorModel:
-        """Load model from disk."""
+        """Rebuild a model previously written by :meth:`save`.
+
+        The returned instance is ready to :meth:`predict`, but it carries no
+        preprocessing: callers must feed it features scaled with the same
+        fitted pipeline the weights were trained under.
+        """
 
 
 class TabularRegressorModel(BaseRegressorModel):
-    """Strictly typed interface for tabular models."""
+    """Interface for models whose samples are independent rows."""
 
     @abstractmethod
     def fit(
@@ -119,15 +185,19 @@ class TabularRegressorModel(BaseRegressorModel):
         config: ModelConfig | None = None,
         **kwargs: Any,
     ) -> TrainingResult:
-        """Train the model on tabular data."""
+        """Train on a feature matrix of shape ``(N, F)`` and targets ``(N,)``."""
 
     @abstractmethod
     def predict(self, data: TabularDataset | np.ndarray) -> np.ndarray:
-        """Predict on tabular data."""
+        """Predict one value per row of an ``(N, F)`` feature matrix.
+
+        Returns an array of shape ``(N,)``, ``float32``, in preprocessed
+        target units.
+        """
 
 
 class SequenceRegressorModel(BaseRegressorModel):
-    """Strictly typed interface for sequence models."""
+    """Interface for models whose samples are windows over the time axis."""
 
     @abstractmethod
     def fit(
@@ -137,8 +207,14 @@ class SequenceRegressorModel(BaseRegressorModel):
         config: ModelConfig | None = None,
         **kwargs: Any,
     ) -> TrainingResult:
-        """Train the model on sequential data."""
+        """Train on batches of windows ``(B, T, F)`` with targets ``(B,)``."""
 
     @abstractmethod
     def predict(self, data: SequenceDataset | WindowedSequenceDataset | np.ndarray) -> np.ndarray:
-        """Predict on sequential data."""
+        """Predict one value per window.
+
+        Returns an array of shape ``(N,)``, ``float32``, in preprocessed target
+        units, where ``N`` is the number of windows the dataset yields — fewer
+        than its rows, since no window ends before position ``T - 1`` and
+        windows spanning a temporal gap are dropped.
+        """

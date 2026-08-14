@@ -24,17 +24,38 @@ def train_one_epoch(
 
     Parameters
     ----------
+    model:
+        Module in training mode by the end of the call; its parameters are
+        updated in place.
+    dataloader:
+        Yields ``(x, y)`` pairs with ``x`` of shape ``(B, T, F)`` and ``y`` of
+        shape ``(B,)``, both ``float32`` and in the pipeline's scaled
+        space. ``y`` is
+        unsqueezed to ``(B, 1)`` to match the models' output.
+    optimizer:
+        Stepped once per batch.
     criterion:
         Must reduce with ``reduction='mean'`` over the batch dimension: the
         returned value re-weights each batch by its sample count, which is only
         correct for a batch-mean loss.
+    device:
+        Device the batches are moved to; also selects the autocast device type.
+    scaler:
+        AMP gradient scaler. Passing one enables autocast for the forward pass;
+        ``None`` trains in full precision.
+    clip_val:
+        Max gradient norm, or ``None`` to skip clipping.
     progress_callback:
         Called with ``(batch_idx, total_batches)`` for progress display.
 
-    Returns the sample-weighted average of the per-batch losses over the epoch,
-    so a partial tail batch counts in proportion to its size. This is not the
-    dataset MSE: the parameters change after every optimizer step, so it is a
-    running average over a moving model.
+    Returns
+    -------
+    float
+        The sample-weighted average of the per-batch losses over the epoch, in
+        scaled target units squared, so a partial tail batch counts in
+        proportion to its size. This is not the dataset MSE: the parameters
+        change after every optimizer step, so it is a running average over a
+        moving model.
     """
     model.train()
     total_loss = 0.0
@@ -90,15 +111,31 @@ def evaluate_epoch(
 
     Parameters
     ----------
+    model:
+        Module switched to eval mode; no gradients are taken and no parameter
+        changes.
+    dataloader:
+        Yields ``(x, y)`` pairs with ``x`` of shape ``(B, T, F)`` and ``y`` of
+        shape ``(B,)``, both ``float32`` and in the pipeline's scaled space.
     criterion:
         Must reduce with ``reduction='mean'`` over the batch dimension: the
         returned value re-weights each batch by its sample count, which is only
         correct for a batch-mean loss.
+    device:
+        Device the batches are moved to; also selects the autocast device type.
+    amp_enabled:
+        Whether to run the forward pass under autocast. ``None`` falls back to
+        "autocast on CUDA"; the trainer passes the run's resolved AMP setting so
+        the validation loss is computed at the same precision as the training
+        loss it is compared against.
 
-    Returns the sample-weighted mean loss over the whole dataset. With a
-    batch-mean criterion and a fixed model this is exactly the dataset-level
-    loss (for ``nn.MSELoss``, the dataset MSE), independent of how the samples
-    are split into batches.
+    Returns
+    -------
+    float
+        The sample-weighted mean loss over the whole dataset, in scaled target
+        units squared. With a batch-mean criterion and a fixed model this is
+        exactly the dataset-level loss (for ``nn.MSELoss``, the dataset MSE),
+        independent of how the samples are split into batches.
     """
     model.eval()
     total_loss = 0.0

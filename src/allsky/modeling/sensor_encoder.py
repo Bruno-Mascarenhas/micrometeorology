@@ -30,6 +30,11 @@ class SensorEncoder(nn.Module):
         ``(64, 128)`` gives the spec's ``F -> 64 -> 128``.
     dropout:
         Dropout probability applied at the end of every block.
+
+    Raises
+    ------
+    ValueError
+        If *in_dim* is not positive or *hidden_dims* is empty.
     """
 
     def __init__(
@@ -59,6 +64,19 @@ class SensorEncoder(nn.Module):
         return self._out_dim
 
     def forward(self, features: Tensor) -> Tensor:
-        """Encode a ``(B, F)`` standardized feature vector to ``(B, out_dim)``."""
+        """Encode the standardized feature vector into a dense sensor embedding.
+
+        Parameters
+        ----------
+        features:
+            ``(B, F)`` float32 standardized engineered features (dimensionless:
+            each column has been centred and scaled by the train-split
+            :class:`~allsky.features.normalization.FeatureNormalizer`).
+
+        Returns
+        -------
+        Tensor
+            ``(B, out_dim)`` float32 sensor embedding (dimensionless).
+        """
         out: Tensor = self.net(features)
         return out

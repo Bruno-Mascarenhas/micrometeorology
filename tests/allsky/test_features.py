@@ -7,7 +7,9 @@ import pytest
 from allsky.config import SiteConfig
 from allsky.features import (
     EXTENDED_FEATURES,
+    MINIMAL_FEATURES,
     SAFE_FEATURES,
+    THERMOHYGROMETER_FEATURES,
     FeatureNormalizer,
     ForbiddenFeatureError,
     TargetNormalizer,
@@ -100,6 +102,29 @@ class TestFeaturePolicy:
         assert covered == set(resolve_feature_set("extended"))
         assert "radiometry_aux" in groups
 
+    def test_resolve_minimal_is_safe_without_the_thermohygrometer(self):
+        assert resolve_feature_set("minimal") == [
+            name for name in SAFE_FEATURES if name not in THERMOHYGROMETER_FEATURES
+        ]
+
+    def test_minimal_carries_no_thermohygrometer_channel(self):
+        assert not (set(MINIMAL_FEATURES) & THERMOHYGROMETER_FEATURES)
+
+    def test_minimal_keeps_the_barometer_and_the_anemometer(self):
+        resolved = resolve_feature_set("minimal")
+        assert {"pressure_mbar", "wind_speed_ms", "wind_dir_sin", "wind_dir_cos"} <= set(resolved)
+
+    def test_minimal_features_pass_validation(self):
+        validate_features(resolve_feature_set("minimal"))  # must not raise
+
+    def test_groups_cover_exactly_resolved_minimal(self):
+        groups = active_feature_groups("minimal")
+        covered = [f for members in groups.values() for f in members]
+        assert covered == resolve_feature_set("minimal")
+        assert "temperature" not in groups
+        assert "humidity" not in groups
+        assert "radiometry_aux" not in groups
+
 
 # ---------------------------------------------------------------------------
 # engineering.py
@@ -140,8 +165,8 @@ class TestFeatureEngineering:
 
         index = pd.DatetimeIndex(sensor_frame.index)
         frame = build_feature_frame(sensor_frame, index, site, "safe")
-        elevation = solar.solar_elevation(index, site)
-        azimuth = np.deg2rad(solar.solar_azimuth(index, site))
+        elevation = solar.solar_elevation_deg(index, site)
+        azimuth = np.deg2rad(solar.solar_azimuth_deg(index, site))
         np.testing.assert_allclose(frame["solar_elevation"].to_numpy(), elevation)
         np.testing.assert_allclose(frame["solar_zenith"].to_numpy(), 90.0 - elevation)
         np.testing.assert_allclose(frame["azimuth_sin"].to_numpy(), np.sin(azimuth))
@@ -256,3 +281,14 @@ class TestTargetNormalizer:
         norms = fit_target_normalizers(frame, ["target_dhi", "target_kindex"])
         assert set(norms) == {"target_dhi", "target_kindex"}
         assert norms["target_dhi"].mean == pytest.approx(20.0)
+
+
+def test_fitting_the_feature_normalizer_on_a_nan_refuses_instead_of_propagating():
+    frame = pd.DataFrame({"air_temp_c": [20.0, np.nan, 22.0], "rel_humidity": [70.0, 71.0, 72.0]})
+    with pytest.raises(ValueError, match="air_temp_c"):
+        FeatureNormalizer.fit(frame)
+
+
+def test_fitting_the_feature_normalizer_on_an_empty_frame_refuses():
+    with pytest.raises(ValueError, match="empty frame"):
+        FeatureNormalizer.fit(pd.DataFrame({"air_temp_c": []}))

@@ -137,11 +137,6 @@ def compare_experiments(
     return table
 
 
-# ---------------------------------------------------------------------------
-# rendering helpers
-# ---------------------------------------------------------------------------
-
-
 def _confusion_frame(confusion: Mapping[str, Any]) -> pd.DataFrame:
     """Confusion matrix as a labelled DataFrame (rows = true, cols = predicted).
 
@@ -250,11 +245,6 @@ def _fmt(value: Any) -> str:
             return str(int(value))
         return f"{value:.4g}"
     return str(value)
-
-
-# ---------------------------------------------------------------------------
-# atomic writers
-# ---------------------------------------------------------------------------
 
 
 def _atomic(path: Path, write: Callable[[Path], Any]) -> Path:

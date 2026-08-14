@@ -82,7 +82,7 @@ def _make_embeddings(dataset_dir: Path) -> Path:
 
 def _make_split(dataset_dir: Path) -> Path:
     manifest = pd.read_parquet(dataset_dir / "manifest.parquet")
-    split = create_day_splits(manifest["day_id"].astype(str).tolist(), 0.2, 0.1, seed=7)
+    split = create_day_splits(manifest["day_id"].astype(str).tolist(), 0.2, 0.1, seed=7, gap_days=0)
     path = dataset_dir / "splits.json"
     save_split_artifact(split, path)
     return path

@@ -243,6 +243,20 @@ default `safe` feature policy is geometry + meteorology only (no radiometry, no
 leakage); diffuse targets come from the PSP pyranometer (`PSP_Wm2_Avg`) or an Erbs
 pseudo-target; splits are by calendar day (no same-day leakage).
 
+The camera itself is the Planetário da UFBA meteor camera, whose public archive is
+mirrored (and optionally pushed to Google Drive) by `allsky sync-archive`:
+
+```bash
+allsky sync-archive --extract --step 10 --resize 512                            # mirror new days + frames
+allsky sync-archive --extract --step 10 --resize 512 \
+                    --upload both --drive-remote gdrive                         # ... and to Google Drive
+allsky snapshot --out output/allsky/live --checkpoint <ckpt>                    # live frame + prediction
+```
+
+Frames extracted this way are timestamped from the stamp the camera burns into each
+frame, not from a fixed cadence model — see [`docs/allsky-archive.md`](docs/allsky-archive.md),
+which documents why the `VideoConfig` model mislabels this camera's frames.
+
 ```bash
 allsky prepare-local          --config configs/allsky/data/local_prepare.yaml   # frames → v2 manifest → splits
 allsky precompute-embeddings  --config configs/allsky/data/local_prepare.yaml   # DINOv2 fp16 shards
@@ -354,6 +368,7 @@ make audit                # dependency vulnerability gate (mirrors CI)
 | [`docs/micrometeorology.md`](docs/micrometeorology.md) | Sensor ingestion, calibration, aggregation, WRF parallel pipeline, batch rendering, statistics, CLI reference, [site-labmim integration contract](docs/micrometeorology.md#front-end-integration-site-labmim), FAQ |
 | [`docs/solrad_correction.md`](docs/solrad_correction.md) | Model types (SVM/LSTM/Transformer), experiment configs, transfer learning, data leakage prevention, feature engineering, FAQ |
 | [`docs/allsky.md`](docs/allsky.md) | All-sky camera + radiation fusion: frame extraction, v2 dataset prep, the multimodal CLI/config quickstart, Colab GPU training, FAQ |
+| [`docs/allsky-archive.md`](docs/allsky-archive.md) | Mirroring the Planetário da UFBA camera archive: `sync-archive`/`snapshot`, the broken TLS chain and its repair, overlay-read frame timestamps, ledger dedup, rclone uploads to Google Drive |
 | [`docs/allsky-architecture.md`](docs/allsky-architecture.md) | Multimodal v2 architecture: local→bundle→Colab flow, module map, artifact contracts, anti-leakage policy, V0–V7 model ladder, reproduction commands, limitations |
 
 ---

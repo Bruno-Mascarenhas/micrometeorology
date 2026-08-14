@@ -74,14 +74,26 @@ BESPOKE_VARIABLE_INPUTS: dict[str, tuple[str, ...]] = {
 
 @dataclass(frozen=True, slots=True)
 class ValueFrameSource:
-    """Values and color-scale bounds for one exported WRF variable."""
+    """Values and color-scale bounds for one exported WRF variable.
+
+    Attributes
+    ----------
+    frame_for_step:
+        Maps a time-step index to that step's ``(ny, nx)`` frame, in the
+        variable's published unit.
+    scale_min, scale_max:
+        Colour-scale bounds in the same unit, shared by the map figures and the
+        values JSON so the two products cannot render one field on two scales.
+    vector_for_step:
+        Set only when the frame is a vector magnitude, mapping a time-step index
+        to that step's ``(u, v)`` components: the figure path draws them as a
+        quiver over the frame, and re-deriving them would materialize every step
+        twice.
+    """
 
     frame_for_step: Callable[[int], NDArray]
     scale_min: float
     scale_max: float
-    # Set only when the frame is a vector magnitude: the figure path draws the
-    # components as a quiver over it, and re-deriving them would materialize
-    # every step twice.
     vector_for_step: Callable[[int], tuple[NDArray, NDArray]] | None = None
 
 
@@ -112,8 +124,21 @@ def build_value_frame_source(
 ) -> ValueFrameSource | None:
     """Build a frame reader and color-scale bounds for one exported variable.
 
-    Returns ``None`` when the variable is absent from the file, which every
-    caller reports as a skipped variable rather than failing the run.
+    Parameters
+    ----------
+    dataset:
+        Open wrfout the frames are read from.
+    variable_name:
+        Exported variable id, as the CLI and the site name it — not the NetCDF
+        field name, which several of these are derived from rather than read.
+
+    Returns
+    -------
+    ValueFrameSource | None
+        ``None`` when the file carries none of the fields the variable needs,
+        which every caller reports as a skipped variable rather than failing the
+        run. The bounds are computed eagerly over the whole file; the frames
+        themselves are sliced per step.
     """
     # ``WRFDataset.get_variable`` raises ``KeyError`` on an absent field, so a
     # wrfout missing one input would abort the whole run instead of skipping one

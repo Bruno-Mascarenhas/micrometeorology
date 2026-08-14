@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["extract_embeddings"]
 
-#: Per-shard index part filename pattern (glob) and formatter.
+#: Glob matching the per-shard index parts written by :func:`_write_index_part`.
 _INDEX_PART_GLOB = "index.part-*.parquet"
 
 
@@ -147,6 +147,17 @@ def extract_embeddings(
         Summary: ``out_dir``, ``backbone``, ``revision``, ``pooling``, ``dim``,
         ``dtype``, ``device``, ``total``, ``skipped``, ``encoded``,
         ``shards_written``, ``resume`` and ``dry_run``.
+
+    Raises
+    ------
+    ValueError
+        If *batch_size*, *shard_size* or *decode_workers* is below 1, if the
+        manifest lacks ``sample_id`` / ``image_path``, or if the backbone emits
+        vectors of a width other than its declared ``dim``.
+    RuntimeError
+        On a resume into a store whose ``embeddings.meta.json`` describes a
+        different backbone/config, or which has an index but no meta at all (see
+        :func:`_check_resume_compatible`).
     """
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")

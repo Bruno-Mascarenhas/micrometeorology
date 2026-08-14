@@ -24,15 +24,20 @@ def export_csv(
     Parameters
     ----------
     df:
-        DataFrame to export (must have a DatetimeIndex).
+        DataFrame to export (must have a naive station-local ``DatetimeIndex``).
+        Values are written in whatever units the frame carries; this step
+        converts nothing.
     output_path:
-        Output file path.
+        Output file path. Parent directories are created.
     separator:
         Column separator.
     na_rep:
-        String representation for NaN values.
+        String representation for NaN values. It is written for every missing
+        sample rather than the row being dropped, so a gap in the record stays
+        visible as a gap.
     float_format:
-        Format string for floating point values.
+        Format string for floating point values. It rounds what is written, so
+        a CSV is a presentation of the frame, not a round-trip of it.
     include_datetime_columns:
         If True, prepend ``year``, ``month``, ``day``, ``hour`` columns. They
         replace the index rather than joining it: the timestamp is then written

@@ -24,6 +24,26 @@ Families and where they come from
   circular: it has no quantile function on the line and belongs on a rose, not
   a histogram.
 
+Induced densities for the radiation fluxes
+------------------------------------------
+``compound_hollands_huget``, ``power_normal_mixture`` and
+``compound_hollands_gaussian`` are not new laws. Each is an EXACT change of
+variable applied to a law that is already fitted and already published on the
+page, and that is the whole reason they can carry a citation at all.
+
+Irradiance in W/m2 has no canonical density: half the record is night and the
+extraterrestrial forcing swings with the hour and the season, so the shape of a
+raw-flux histogram is mostly solar geometry, not climate. The quantity the
+literature does model is the clearness index ``kt = global / extraterrestrial``.
+Since the flux IS ``kt`` times the extraterrestrial irradiance, the published
+``kt`` law induces a density on the flux — one that inherits its parameters and
+introduces no new free ones.
+
+Marginalising over the observed extraterrestrial irradiance turns that into a
+finite scale mixture: bin the covariate, and each bin contributes a rescaled copy
+of the parent density. The Jacobian ``1/s`` per component is what keeps the
+result a density; dropping it is the classic error here.
+
 Why no p-values
 ---------------
 :func:`goodness_of_fit` deliberately returns distances only. At the sample sizes
@@ -250,11 +270,6 @@ class Family:
     options: tuple[str, ...] = ()
 
 
-# ---------------------------------------------------------------------------
-# Sample preparation
-# ---------------------------------------------------------------------------
-
-
 def _clean(values: NDArray) -> NDArray:
     """Flatten to 1-D float and drop every non-finite entry.
 
@@ -292,11 +307,6 @@ def _within_support(sample: NDArray, support: tuple[float, float]) -> NDArray:
         return sample
     logger.debug("dropped %d samples outside %s", int((~inside).sum()), support)
     return sample[inside]
-
-
-# ---------------------------------------------------------------------------
-# Histogram
-# ---------------------------------------------------------------------------
 
 
 def histogram(values: NDArray, edges: Sequence[float] | NDArray) -> Histogram:
@@ -345,11 +355,6 @@ def histogram(values: NDArray, edges: Sequence[float] | NDArray) -> Histogram:
         below=below,
         above=above,
     )
-
-
-# ---------------------------------------------------------------------------
-# Weibull (wind speed)
-# ---------------------------------------------------------------------------
 
 
 def _weibull_shape(log_sample: NDArray, start: float) -> float:
@@ -421,12 +426,14 @@ def _fit_weibull(values: NDArray) -> dict[str, float]:
 
 
 def _weibull_pdf(x: NDArray, params: Mapping[str, float]) -> NDArray:
-    # Evaluated through the log-density, like the gamma below and for the same
-    # reason: `reduced ** shape` overflows once the shape reaches the degenerate
-    # clamp (1e4), and a near-constant sample fits exactly there. The exponent is
-    # capped at the largest representable double's log — past it the density is
-    # zero far below machine precision anyway, so the cap changes no value that
-    # can be represented.
+    """Weibull density, evaluated through the log-density.
+
+    ``reduced ** shape`` overflows once the shape reaches the degenerate clamp
+    (1e4), and a near-constant sample fits exactly there. The exponent is capped
+    at the largest representable double's log — past it the density is zero far
+    below machine precision anyway, so the cap changes no value that can be
+    represented.
+    """
     shape, scale = params["shape"], params["scale"]
     values = np.asarray(x, dtype=float)
     positive = values > 0.0
@@ -452,11 +459,6 @@ def _weibull_ppf(q: NDArray, params: Mapping[str, float]) -> NDArray:
     quantiles = np.asarray(q, dtype=float)
     inverse: NDArray = scale * (-np.log1p(-quantiles)) ** (1.0 / shape)
     return inverse
-
-
-# ---------------------------------------------------------------------------
-# Gamma (wet-hour precipitation intensity)
-# ---------------------------------------------------------------------------
 
 
 def _fit_gamma(values: NDArray) -> dict[str, float]:
@@ -521,11 +523,6 @@ def _gamma_ppf(q: NDArray, params: Mapping[str, float]) -> NDArray:
     shape, scale = params["shape"], params["scale"]
     inverse: NDArray = scale * special.gammaincinv(shape, np.asarray(q, dtype=float))
     return inverse
-
-
-# ---------------------------------------------------------------------------
-# Beta (relative humidity on [0, 1])
-# ---------------------------------------------------------------------------
 
 
 def _fit_beta(values: NDArray) -> dict[str, float]:
@@ -623,11 +620,6 @@ def _beta_ppf(q: NDArray, params: Mapping[str, float]) -> NDArray:
     return inverse
 
 
-# ---------------------------------------------------------------------------
-# Normal (air temperature, station pressure)
-# ---------------------------------------------------------------------------
-
-
 def _fit_normal(values: NDArray) -> dict[str, float]:
     """Gaussian by maximum likelihood, reported with the unbiased spread.
 
@@ -658,11 +650,6 @@ def _normal_ppf(q: NDArray, params: Mapping[str, float]) -> NDArray:
     mu, sigma = params["mu"], params["sigma"]
     inverse: NDArray = mu + sigma * special.ndtri(np.asarray(q, dtype=float))
     return inverse
-
-
-# ---------------------------------------------------------------------------
-# Hollands-Huget (clearness index)
-# ---------------------------------------------------------------------------
 
 
 def _hollands_moments(lam: float, kt_max: float) -> tuple[float, float]:
@@ -774,28 +761,6 @@ def _hollands_ppf(q: NDArray, params: Mapping[str, float]) -> NDArray:
         low = np.where(overshoot, low, middle)
     midpoint: NDArray = 0.5 * (low + high)
     return midpoint
-
-
-# ---------------------------------------------------------------------------
-# Induced densities
-# ---------------------------------------------------------------------------
-#
-# The three families below are not new laws. Each is an EXACT change of variable
-# applied to a law that is already fitted and already published on the page, and
-# that is the whole reason they can carry a citation at all.
-#
-# Irradiance in W/m2 has no canonical density: half the record is night and the
-# extraterrestrial forcing swings with the hour and the season, so the shape of
-# a raw-flux histogram is mostly solar geometry, not climate. The quantity the
-# literature does model is the clearness index kt = global / extraterrestrial.
-# Since the flux IS kt times the extraterrestrial irradiance, the published kt
-# law induces a density on the flux — one that inherits its parameters and
-# introduces no new free ones.
-#
-# Marginalising over the observed extraterrestrial irradiance turns that into a
-# finite scale mixture: bin the covariate, and each bin contributes a rescaled
-# copy of the parent density. The Jacobian 1/s per component is what keeps the
-# result a density; dropping it is the classic error here.
 
 
 # CODATA 2018. Only used to invert Stefan-Boltzmann at unit emissivity, which is
@@ -1244,23 +1209,59 @@ def fit_distribution(family: str, values: NDArray, **options: object) -> Distrib
 
 
 def pdf(distribution: DistributionFit, x: NDArray) -> NDArray:
-    """Probability density of a fit at ``x`` (zero outside its support)."""
+    """Probability density of a fit at ``x`` (zero outside its support).
+
+    Parameters
+    ----------
+    distribution:
+        A fit produced by :func:`fit_distribution`.
+    x:
+        Abscissae, shape ``(M,)``, in the variable's own unit and on the same
+        scale the fit was estimated on (a caller that fitted a rescaled sample
+        must rescale here too).
+
+    Returns
+    -------
+    numpy.ndarray
+        Density, shape ``(M,)``, ``float64``, per unit of ``x``.
+    """
     return FAMILIES[distribution.family].pdf(np.asarray(x, dtype=float), distribution.params)
 
 
 def cdf(distribution: DistributionFit, x: NDArray) -> NDArray:
-    """Cumulative distribution of a fit at ``x``."""
+    """Cumulative distribution of a fit at ``x``.
+
+    Parameters
+    ----------
+    distribution:
+        A fit produced by :func:`fit_distribution`.
+    x:
+        Abscissae, shape ``(M,)``, in the variable's own unit.
+
+    Returns
+    -------
+    numpy.ndarray
+        Cumulative probability, shape ``(M,)``, ``float64``, in ``[0, 1]``.
+    """
     return FAMILIES[distribution.family].cdf(np.asarray(x, dtype=float), distribution.params)
 
 
 def ppf(distribution: DistributionFit, q: NDArray) -> NDArray:
-    """Quantiles of a fit at probabilities ``q``."""
+    """Quantiles of a fit at probabilities ``q``.
+
+    Parameters
+    ----------
+    distribution:
+        A fit produced by :func:`fit_distribution`.
+    q:
+        Probabilities, shape ``(M,)``, in ``[0, 1]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Quantiles, shape ``(M,)``, ``float64``, in the variable's own unit.
+    """
     return FAMILIES[distribution.family].ppf(np.asarray(q, dtype=float), distribution.params)
-
-
-# ---------------------------------------------------------------------------
-# Goodness of fit — distances only
-# ---------------------------------------------------------------------------
 
 
 def effective_sample_size(values: NDArray) -> tuple[float, float]:
@@ -1275,9 +1276,20 @@ def effective_sample_size(values: NDArray) -> tuple[float, float]:
     of magnitude below ``n`` — which is precisely why a nominal p-value computed
     from ``n`` would be meaningless.
 
-    The input must be in **chronological order**; the correlation is taken
-    between consecutive entries as given. A negative or non-finite estimate
-    falls back to ``n``.
+    Parameters
+    ----------
+    values:
+        Sample in **chronological order**, any shape (flattened), in the
+        variable's own unit. The correlation is taken between consecutive
+        entries as given, so a reordered array yields a meaningless ``n_eff``.
+
+    Returns
+    -------
+    tuple of float
+        ``(n_effective, r_1)``. ``n_effective`` counts samples and never exceeds
+        the finite count; ``r_1`` is dimensionless. A negative or non-finite
+        ``r_1`` falls back to ``n``, and a sample below three finite entries or
+        with zero spread reports ``r_1`` as ``NaN``.
     """
     sample = np.asarray(values, dtype=float).ravel()
     if sample.size < 3:
@@ -1364,11 +1376,6 @@ def goodness_of_fit(
         n_effective=n_effective,
         lag1_autocorrelation=lag1,
     )
-
-
-# ---------------------------------------------------------------------------
-# Circular statistics (wind direction)
-# ---------------------------------------------------------------------------
 
 
 def circular_summary(degrees: NDArray) -> dict[str, float]:
@@ -1584,6 +1591,21 @@ def von_mises_mixture_pdf(mixture: VonMisesMixture, degrees: NDArray) -> NDArray
     The von Mises density is defined per radian; dividing by ``180/pi`` converts
     it to the per-degree scale a sector frequency lives on, which is what makes
     ``frequency ~= pdf * sector_width`` hold.
+
+    Parameters
+    ----------
+    mixture:
+        A mixture from :func:`fit_von_mises_mixture`.
+    degrees:
+        Angles, shape ``(M,)``, in degrees on the meteorological convention (the
+        direction the wind blows *from*); wrapped into ``[0, 360)`` internally.
+
+    Returns
+    -------
+    numpy.ndarray
+        Density, shape ``(M,)``, ``float64``, per degree. All ``NaN`` when the
+        mixture carries a non-finite weight or concentration, which is how an
+        unfitted (empty-sample) mixture propagates.
     """
     angles = np.deg2rad(np.asarray(degrees, dtype=float) % 360.0)
     density = np.zeros_like(angles)

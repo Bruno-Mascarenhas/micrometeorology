@@ -7,7 +7,11 @@ experiment: true                 # routes `allsky train` to the multimodal engin
 seed: 42
 
 features:
-  set: safe                      # geometry + standard met; NO radiometry (anti-leakage)
+  # Must match the set the manifest was BUILT with — the engine resolves the
+  # feature columns from here and fails on the ones the manifest lacks. Kept in
+  # step with configs/allsky/data/local_prepare.yaml, which dropped to `minimal`
+  # while the Gill MetSENS1 thermohygrometer is railed. Still NO radiometry.
+  set: minimal
 
 data:
   # manifest / embeddings_dir / split_artifact are BARE names resolved against
@@ -32,7 +36,7 @@ targets:                         # V0-V4 / V6 / V7 share this set; V5 overrides
     loss: mse
     weight: 1.0
   sky:
-    enabled: true                # 3-class cross-entropy (clear / partial / overcast)
+    enabled: true                # cross-entropy over the four Kt sky conditions
     weight: 1.0
 
 train:

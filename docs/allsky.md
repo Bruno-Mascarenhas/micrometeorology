@@ -2,6 +2,8 @@
 
 A package that pairs one-day all-sky camera timelapses with LabMiM radiation-sensor records into a portable **v2 multimodal dataset** (manifest + frames + precomputed visual embeddings), then trains a ladder of multimodal models (V0–V7) that predict **diffuse horizontal irradiance** — and optionally a clear-sky index and a clear / partially-cloudy / overcast **sky class** — from the sky image plus engineered sensor features.
 
+> **Getting the videos.** The Planetário da UFBA camera archive is mirrored by `allsky sync-archive`, which also extracts frames and can push them to Google Drive — see [`allsky-archive.md`](allsky-archive.md). Read it before extracting frames from that camera: its capture interval changes between day and night and its videos do not all start at the same hour, so the `VideoConfig` `start_time`/`minutes_per_frame` model mislabels frames by up to 2 h 33 min. `sync-archive --extract` reads the timestamp the camera burns into each frame instead.
+
 The legacy v0 SkyFusionNet pipeline (`allsky info` / `build-index` / `allsky train --index`) has been **retired**. This document describes the current multimodal stack only. The full internal design — module map, artifact contracts, anti-leakage policy, alignment strategies, and the V0–V7 ladder — is in [`allsky-architecture.md`](allsky-architecture.md); this file is the CLI + config quickstart.
 
 ---
@@ -30,6 +32,10 @@ src/allsky/
 ├── __init__.py        # Package version and docstring
 ├── config.py          # VideoConfig/SiteConfig + Experiment/Prepare config trees + YAML loaders
 ├── video.py           # Streamed frame decoding, frame -> wall-clock mapping, JPEG extraction
+├── archive.py         # Mirrors the Planetário camera archive (HTTPS client, ledger, TLS repair)
+├── overlay.py         # Reads the timestamp the camera burns into each frame + timestamped extraction
+├── drive.py           # rclone uploads to Google Drive
+├── snapshot.py        # Live-frame capture + single-image prediction
 ├── preprocessing.py   # Static mask / crop / resize + per-frame visual QC
 ├── solar.py           # NOAA/Spencer solar position, extraterrestrial GHI, clearness index kt
 ├── clearsky.py        # Haurwitz clear-sky GHI + clear-sky index k*
@@ -159,6 +165,8 @@ These are *weak* labels: the k-index conflates cloudiness with turbidity and cal
 ## Anti-leakage feature policy
 
 The default `safe` feature set is **solar geometry + standard meteorology only — no radiometry**. GHI, the diffuse pyranometer, and every derived target are *forbidden* as features and raise `ForbiddenFeatureError` if requested. This is the central anti-leakage guarantee of the v2 stack: a model must learn diffuse irradiance from the *sky image* and non-radiometric context, not from a radiometric shortcut. The `extended` set adds ablation-only radiometric auxiliaries and is never selected silently. `validate-dataset` fails if a forbidden feature reaches the manifest.
+
+> **`safe` needs a working thermohygrometer, and the station's has not had one since 2025-12-19.** The Gill MetSENS1 rails at 1000 °C air, 1000 °C dew point and 999 %RH; `mask_sentinels` turns each rail into NaN and `build_manifest` drops any row with a non-finite feature, so `safe` retains 0.02 % of the rows paired against the all-sky camera archive. Use `features.set: minimal` — the same set without those three channels (10 features: solar geometry, barometer, anemometer) — until the instrument is repaired. `configs/allsky/data/local_prepare.yaml` ships that way.
 
 ---
 

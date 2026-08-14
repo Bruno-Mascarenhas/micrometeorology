@@ -39,7 +39,12 @@ logger = logging.getLogger(__name__)
 
 
 def prepare_runtime(config: ExperimentConfig) -> None:
-    """Resolve output-coupled runtime defaults in-place."""
+    """Resolve output-coupled runtime defaults in-place.
+
+    A torch run with no configured checkpoint directory gets the one inside its
+    own experiment directory, so checkpoints land beside the run's other
+    artifacts instead of nowhere.
+    """
     model_type = config.model.model_type.lower()
     if model_type in {"lstm", "transformer"} and config.runtime.checkpoint_dir is None:
         artifact_layout = ArtifactLayout.from_experiment_dir(config.experiment_dir)
@@ -52,6 +57,16 @@ def load_data(config: ExperimentConfig) -> LoadedData:
     ``data.use_raw`` decides only when a config populates both input paths;
     otherwise the populated path selects the loader, so every config that
     already works keeps its branch.
+
+    Returns
+    -------
+    LoadedData
+        The loaded table, truncated to ``runtime.limit_rows`` when set.
+
+    Raises
+    ------
+    ValueError
+        If the config declares no input path at all.
     """
     _warn_about_ignored_site_coordinates(config)
     if config.data.use_raw and config.data.sensor_data_path:
@@ -145,15 +160,22 @@ def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame
     target into the features. Lags are built from every declared base column,
     because ``{target}_lag_{n}`` with ``n >= 1`` (enforced by
     ``ExperimentConfig.validate``) is legitimate autoregression.
+
+    The frame is sorted chronologically FIRST, because every stage below is
+    POSITIONAL (``shift``, ``rolling``, ``diff``) while the chronological sort
+    otherwise happens later, inside ``temporal_train_val_test_split``. On an
+    out-of-order source — two concatenated per-period exports, say —
+    ``{col}_lag_1`` therefore meant "one row earlier in the file", and after
+    the sort those values were attached to rows that PRECEDE them in time: a
+    future value inside a training row, with the disorder invisible downstream
+    because the split had already hidden it.
+
+    Returns
+    -------
+    FeatureFrame
+        The engineered frame and the resolved model input columns.
     """
     engineered_frame = loaded.frame
-    # Order first: every stage below is POSITIONAL (`shift`, `rolling`, `diff`),
-    # while the chronological sort happens later inside
-    # ``temporal_train_val_test_split``. On an out-of-order source — two
-    # concatenated per-period exports, say — `{col}_lag_1` therefore meant "one
-    # row earlier in the file", and after the sort those values were attached to
-    # rows that PRECEDE them in time: a future value inside a training row, with
-    # the disorder invisible downstream because the split had already hidden it.
     index = engineered_frame.index
     if isinstance(index, pd.DatetimeIndex) and not index.is_monotonic_increasing:
         logger.warning(
@@ -216,7 +238,11 @@ def build_features(loaded: LoadedData, config: ExperimentConfig) -> FeatureFrame
 
 
 def split_data(config: ExperimentConfig, features: FeatureFrame) -> SplitFrames:
-    """Split data chronologically according to config."""
+    """Split data chronologically according to config.
+
+    The three splits are contiguous blocks in time, so the validation and test
+    periods sit strictly after the training one.
+    """
     training_frame, validation_frame, test_frame = temporal_train_val_test_split(
         features.frame,
         config.split.train_ratio,
@@ -232,7 +258,24 @@ def preprocess_splits(
     features: FeatureFrame,
     splits: SplitFrames,
 ) -> PreprocessedSplits:
-    """Fit preprocessing on train and transform all splits."""
+    """Fit preprocessing on train and transform all splits.
+
+    The scaler and the imputation statistics are estimated on the training
+    split alone and merely applied to validation and test: fitting them over
+    the whole frame would let the test period's mean and scale reach the model.
+
+    Returns
+    -------
+    PreprocessedSplits
+        The three transformed frames, the fitted pipeline, and the feature
+        columns that survived it.
+
+    Raises
+    ------
+    ValueError
+        If preprocessing dropped the target column, which would leave nothing
+        to regress against.
+    """
     preprocessing_pipeline = PreprocessingPipeline(
         scaler_type=config.preprocess.scaler_type,
         impute_strategy=config.preprocess.impute_strategy,
@@ -264,6 +307,12 @@ def build_datasets(config: ExperimentConfig, processed: PreprocessedSplits) -> D
     The prediction index is taken from the built test dataset itself so it is
     always row-aligned with the model's predictions (including rows dropped
     for NaNs or temporal gaps) under every evaluation policy.
+
+    Returns
+    -------
+    DatasetBundle
+        Train/validation/test datasets of the kind the configured model
+        consumes, plus the test targets ``(N,)`` and their timestamps.
     """
     preprocessed_splits = processed
     model_type = config.model.model_type.lower()
@@ -283,7 +332,13 @@ def _build_tabular_dataset_bundle(
     *,
     model_type: str,
 ) -> DatasetBundle:
-    """Build independent-row datasets with an evaluation-aligned test frame."""
+    """Build independent-row datasets with an evaluation-aligned test frame.
+
+    Only the test frame is trimmed by the evaluation policy: under
+    ``common_sequence_horizon`` the tabular model is scored on exactly the rows
+    a sequence model over the same frame would predict, which is what makes the
+    two families' metrics comparable. Training and validation keep every row.
+    """
     feature_columns = preprocessed_splits.feature_cols
     target_column = config.data.target_column
     training_dataset = TabularDataset.from_dataframe(
@@ -321,7 +376,13 @@ def _build_sequence_dataset_bundle(
     config: ExperimentConfig,
     preprocessed_splits: PreprocessedSplits,
 ) -> DatasetBundle:
-    """Build lazy sliding-window datasets and their aligned evaluation payload."""
+    """Build lazy sliding-window datasets and their aligned evaluation payload.
+
+    The windows are materialized on demand rather than stacked up front, so
+    memory stays proportional to the frame and not to ``rows * T``. No
+    evaluation-policy trimming happens here: a sequence model already predicts
+    exactly the window-target rows the policy defines.
+    """
     feature_columns = preprocessed_splits.feature_cols
     target_column = config.data.target_column
     sequence_length = config.model.sequence_length
@@ -364,7 +425,13 @@ def _build_windowed_dataset(
     target_column: str,
     sequence_length: int,
 ) -> WindowedSequenceDataset:
-    """Convert one preprocessed split into a lazy sliding-window dataset."""
+    """Convert one preprocessed split into a lazy sliding-window dataset.
+
+    Features become a ``(rows, F)`` ``float32`` matrix and targets a
+    ``(rows,)`` ``float32`` vector, both in the scaled space. The frame's index
+    travels with them when it is temporal, which is what lets the dataset drop
+    windows that straddle an acquisition gap.
+    """
     feature_matrix = dataframe_to_float32_numpy(
         frame,
         feature_columns,
@@ -388,7 +455,12 @@ def _datetime_index_or_none(frame: pd.DataFrame) -> pd.DatetimeIndex | None:
 
 
 def build_configured_model(config: ExperimentConfig, bundle: DatasetBundle) -> BaseRegressorModel:
-    """Build the configured model through the registry."""
+    """Build the configured model through the registry.
+
+    The input width comes from the bundle, not the config: it is the number of
+    feature columns that survived preprocessing. The device is resolved here so
+    the model is constructed straight onto it.
+    """
     device = resolve_device(config.runtime.device)
     return build_model(config.model, input_size=bundle.input_size, device=device)
 
@@ -407,6 +479,14 @@ def train_model(
     resume: a resume refits the scaler from the data on disk now and never loads
     the checkpoint's own transform, so without the check a changed feature set
     or re-fitted mean/scale feeds the restored weights differently-scaled inputs.
+
+    Only the sequence models are handed the runtime config and the fingerprint;
+    the tabular ones fit in a single closed-form pass with nothing to resume.
+
+    Returns
+    -------
+    TrainingOutput
+        The training result and the wall-clock duration of the fit.
     """
     started = time.monotonic()
     if get_model_spec(config.model.model_type).kind == "sequence":
@@ -423,7 +503,12 @@ def train_model(
 
 
 def predict_model(model: BaseRegressorModel, bundle: DatasetBundle) -> PredictionOutput:
-    """Generate model predictions for the test dataset."""
+    """Generate model predictions for the test dataset.
+
+    Targets and timestamps are carried over from the bundle rather than
+    recomputed, so predictions, observations and index stay one aligned set of
+    ``N`` rows. Everything is still in scaled target units at this point.
+    """
     return PredictionOutput(
         y_true=bundle.y_true,
         y_pred=model.predict(bundle.test),
@@ -436,7 +521,19 @@ def evaluate_predictions(
     config: ExperimentConfig,
     predictions: PredictionOutput,
 ) -> EvaluationResult:
-    """Inverse-transform and compute regression metrics."""
+    """Inverse-transform and compute regression metrics.
+
+    Both vectors are returned to the physical units of the configured target
+    column before any metric is computed, so RMSE, MAE and MBE are reported as
+    physical errors rather than as multiples of the training standard
+    deviation.
+
+    Returns
+    -------
+    EvaluationResult
+        Observed and predicted arrays of shape ``(N,)`` in original target
+        units, and the metrics computed from them.
+    """
     y_true_orig = processed.pipeline.inverse_transform_column(
         predictions.y_true,
         config.data.target_column,
@@ -450,7 +547,29 @@ def evaluate_predictions(
 
 
 def run_pipeline(config: ExperimentConfig) -> ExperimentReport:
-    """Run an experiment through composable stages."""
+    """Run an experiment through composable stages.
+
+    The config is validated before anything is loaded and the global seed is
+    set before anything random happens, so the run is reproducible from the
+    versioned config alone.
+
+    Two artifacts are persisted mid-pipeline rather than at the end: the fitted
+    preprocessing, as soon as it exists, so a crash in a later stage never
+    discards reusable state; and the trained model, immediately after the fit,
+    so a crash during prediction or evaluation still leaves the weights
+    recoverable on disk.
+
+    Parameters
+    ----------
+    config:
+        Fully populated experiment config.
+
+    Returns
+    -------
+    ExperimentReport
+        Metrics, resolved config, training history and run metadata — the same
+        object whose contents were written under the experiment directory.
+    """
     config.validate()
     prepare_runtime(config)
     experiment_started_at = time.monotonic()
@@ -467,8 +586,6 @@ def run_pipeline(config: ExperimentConfig) -> ExperimentReport:
         split_frames = split_data(config, feature_frame)
     with pipeline_profile.stage("preprocess_splits"):
         preprocessed_splits = preprocess_splits(config, feature_frame, split_frames)
-    # Persist the fitted preprocessing state before any downstream stage can
-    # fail, so a crash after training never discards reusable state.
     with pipeline_profile.stage("persist_preprocessing"):
         experiment_writer.write_preprocessing(preprocessed_splits.pipeline)
     with pipeline_profile.stage("build_datasets"):
@@ -483,8 +600,6 @@ def run_pipeline(config: ExperimentConfig) -> ExperimentReport:
             preprocessing_fingerprint=preprocessed_splits.pipeline.state.fingerprint(),
         )
     trained_model = training_output.result.model
-    # Persist the trained model immediately after fit: a crash during
-    # prediction or evaluation must leave the model recoverable on disk.
     with pipeline_profile.stage("persist_model"):
         experiment_writer.write_model(config, trained_model)
     with pipeline_profile.stage("predict_model"):
@@ -513,8 +628,6 @@ def run_pipeline(config: ExperimentConfig) -> ExperimentReport:
         predictions=prediction_output,
         evaluation=evaluation_result,
     )
-    # ``write_result`` records its own ``write_experiment_results`` stage, so
-    # the timing it serializes into profile.json includes the artifact writes.
     experiment_writer.write_result(
         config=config,
         result=experiment_result,

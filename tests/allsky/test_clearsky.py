@@ -57,7 +57,7 @@ class TestClearSkyIndex:
     def test_nan_below_elevation_threshold(self, site: SiteConfig):
         day = pd.date_range("2025-06-25 00:00", "2025-06-25 23:55", freq="5min")
         ghi_cs = clearsky.haurwitz_ghi(day, site)
-        elevation = solar.solar_elevation(day, site)
+        elevation = solar.solar_elevation_deg(day, site)
         kstar = clearsky.clear_sky_index(ghi_cs, day, site, min_elevation_deg=10.0)
         assert np.isnan(kstar[elevation < 10.0]).all()
         assert np.isfinite(kstar[elevation >= 10.0]).all()

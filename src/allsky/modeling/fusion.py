@@ -35,7 +35,21 @@ __all__ = [
 
 
 class ConcatFusion(nn.Module):
-    """Concatenate the visual and sensor embeddings along the feature axis."""
+    """Concatenate the visual and sensor embeddings along the feature axis.
+
+    Parameters
+    ----------
+    visual_dim:
+        Visual-branch embedding width (the visual encoder's ``out_dim``).
+    sensor_dim:
+        Sensor-branch embedding width (the sensor encoder's ``out_dim``).
+
+    Attributes
+    ----------
+    needs_features:
+        ``False`` — the block is called as ``forward(visual, sensor)`` and never
+        sees the raw standardized feature vector.
+    """
 
     needs_features = False
 
@@ -51,7 +65,20 @@ class ConcatFusion(nn.Module):
         return self._out_dim
 
     def forward(self, visual: Tensor, sensor: Tensor) -> Tensor:
-        """Return ``concat(visual, sensor)`` ``(B, visual_dim + sensor_dim)``."""
+        """Concatenate the two embeddings along the feature axis.
+
+        Parameters
+        ----------
+        visual:
+            ``(B, visual_dim)`` float32 visual embedding (dimensionless).
+        sensor:
+            ``(B, sensor_dim)`` float32 sensor embedding (dimensionless).
+
+        Returns
+        -------
+        Tensor
+            ``(B, visual_dim + sensor_dim)`` float32 fused vector.
+        """
         fused: Tensor = torch.cat([visual, sensor], dim=-1)
         return fused
 
@@ -69,6 +96,20 @@ class FiLMFusion(nn.Module):
     initialization ``gamma = beta = 0`` and ``conditioned = visual`` — the
     block starts as an exact identity, i.e. equal to
     :class:`ConcatFusion`'s output.
+
+    Parameters
+    ----------
+    visual_dim:
+        Visual-branch embedding width (the modulated tensor).
+    sensor_dim:
+        Sensor-branch embedding width (the conditioning tensor, also kept as the
+        residual path).
+
+    Attributes
+    ----------
+    needs_features:
+        ``False`` — the block is called as ``forward(visual, sensor)`` and never
+        sees the raw standardized feature vector.
     """
 
     needs_features = False
@@ -88,7 +129,21 @@ class FiLMFusion(nn.Module):
         return self._out_dim
 
     def forward(self, visual: Tensor, sensor: Tensor) -> Tensor:
-        """Return ``concat((1 + gamma) * visual + beta, sensor)``."""
+        """Modulate *visual* on *sensor*, then concatenate the residual sensor path.
+
+        Parameters
+        ----------
+        visual:
+            ``(B, visual_dim)`` float32 visual embedding (dimensionless).
+        sensor:
+            ``(B, sensor_dim)`` float32 sensor embedding (dimensionless).
+
+        Returns
+        -------
+        Tensor
+            ``(B, visual_dim + sensor_dim)`` float32
+            ``concat((1 + gamma) * visual + beta, sensor)``.
+        """
         gamma, beta = self.film_gen(sensor).chunk(2, dim=-1)
         conditioned = (1.0 + gamma) * visual + beta
         fused: Tensor = torch.cat([conditioned, sensor], dim=-1)
@@ -181,16 +236,24 @@ class CrossAttentionFusion(nn.Module):
         sensor:
             ``(B, sensor_dim)`` sensor embedding (residual path).
         features:
-            ``(B, F)`` standardized feature vector, sliced into group tokens.
+            ``(B, F)`` float32 standardized feature vector (dimensionless),
+            sliced into the ``(B, n_groups, token_dim)`` key/value token stack.
         key_padding_mask:
             Optional ``(B, n_groups)`` bool mask; True entries are ignored.
+
+        Returns
+        -------
+        Tensor
+            ``(B, token_dim + sensor_dim)`` float32: the ``(B, 1, token_dim)``
+            visual query after attending over the group tokens, squeezed and
+            concatenated with *sensor*.
         """
         tokens = [
             proj(features[:, indices])
             for proj, indices in zip(self.group_proj, self._group_indices, strict=True)
         ]
-        keys = torch.stack(tokens, dim=1)  # (B, n_groups, token_dim)
-        query = self.visual_proj(visual).unsqueeze(1)  # (B, 1, token_dim)
+        keys = torch.stack(tokens, dim=1)
+        query = self.visual_proj(visual).unsqueeze(1)
         attended, _ = self.attn(
             query, keys, keys, key_padding_mask=key_padding_mask, need_weights=False
         )
@@ -209,6 +272,25 @@ def build_fusion(
     token_dim: int | None = None,
 ) -> nn.Module:
     """Construct a fusion block by *name* (``concat``/``film``/``cross_attention``).
+
+    Parameters
+    ----------
+    name:
+        ``"concat"``, ``"film"`` or ``"cross_attention"``.
+    visual_dim, sensor_dim:
+        Widths of the visual and sensor embeddings the block will fuse.
+    feature_columns, groups:
+        Cross-attention only: the standardized vector's ordered column names and
+        the ``group -> member feature names`` mapping the per-group tokens are
+        built from.  Ignored by ``concat`` and ``film``.
+    num_heads, token_dim:
+        Cross-attention only: attention heads and attention width (``token_dim``
+        defaults to *visual_dim* and must be divisible by *num_heads*).
+
+    Returns
+    -------
+    nn.Module
+        The fusion block, exposing ``out_dim`` and the ``needs_features`` flag.
 
     Raises
     ------

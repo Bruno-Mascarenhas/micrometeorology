@@ -100,6 +100,17 @@ def temporal_pooling_for_strategy(strategy: str) -> Literal["mean", "attention"]
     and reloaded on evaluate — with the matching pooler (an attention-pooled
     checkpoint carries the extra query/attention weights, so rebuilding it with
     ``"mean"`` would fail ``load_state_dict``).
+
+    Parameters
+    ----------
+    strategy:
+        ``cfg.data.alignment.strategy`` (``"center_frame"``, ``"mean_embedding"``
+        or ``"attention_pooling"``).
+
+    Returns
+    -------
+    Literal["mean", "attention"]
+        The pooler name to hand :func:`build_model`.
     """
     return "attention" if strategy == "attention_pooling" else "mean"
 
@@ -249,6 +260,12 @@ def build_model(
         applies (default ``"mean"``); the engine and evaluator pass the value
         implied by ``experiment_cfg.data.alignment.strategy`` via
         :func:`temporal_pooling_for_strategy` so training and evaluation agree.
+
+    Returns
+    -------
+    nn.Module
+        A model honouring the
+        :class:`allsky.modeling.contracts.MultimodalModel` contract.
 
     Raises
     ------

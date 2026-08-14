@@ -13,6 +13,10 @@ of transforms live here:
 
 Column order is always :func:`allsky.features.policy.resolve_feature_set`, so
 downstream normalization/checkpoint feature ordering is reproducible.
+
+Timestamps here are **naive local** clock time, as the camera and the datalogger
+stamp them; the solar geometry converts them with ``utc_offset_hours``, inferred
+from the site longitude when the caller does not pin it.
 """
 
 from collections.abc import Iterable
@@ -22,7 +26,7 @@ import pandas as pd
 
 from allsky.config import SiteConfig
 from allsky.features.policy import FeatureSet, resolve_feature_set, source_column
-from allsky.solar import solar_azimuth, solar_elevation
+from allsky.solar import solar_azimuth_deg, solar_elevation_deg
 from micrometeorology.sensors.wind import wind_components
 
 type DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
@@ -88,7 +92,10 @@ def build_feature_frame(
     Returns
     -------
     pandas.DataFrame
-        Indexed by *timestamps*, columns in policy order.
+        Shape ``(N, F)`` of ``float64`` columns, indexed by *timestamps* and
+        ordered by the policy: ``solar_elevation`` / ``solar_zenith`` in degrees,
+        the cyclic sine/cosine pairs dimensionless in ``[-1, 1]``, and the
+        remaining channels in the units their names carry (degC, %, mbar, m/s).
 
     Raises
     ------
@@ -113,8 +120,8 @@ def build_feature_frame(
 
     met = sensor_df.reindex(index)
 
-    elevation = solar_elevation(index, site, utc_offset_hours)
-    azimuth_rad = np.deg2rad(solar_azimuth(index, site, utc_offset_hours))
+    elevation = solar_elevation_deg(index, site, utc_offset_hours)
+    azimuth_rad = np.deg2rad(solar_azimuth_deg(index, site, utc_offset_hours))
     doy = index.dayofyear.to_numpy(dtype=np.float64)
     doy_angle = 2.0 * np.pi * (doy - 1.0) / DAYS_PER_YEAR
 

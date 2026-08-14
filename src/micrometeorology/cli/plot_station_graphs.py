@@ -79,11 +79,6 @@ app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Contract specification
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class GraphSpec:
     """One entry of the nine-image monitoring-page contract.
@@ -191,11 +186,6 @@ DEFAULT_WRF_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Configuration resolution
-# ---------------------------------------------------------------------------
-
-
 def _as_chain(value: object) -> tuple[str, ...]:
     """Normalise one configured mapping to a candidate chain, best first.
 
@@ -275,11 +265,6 @@ def load_graph_config(
     return columns, balance, direction_components
 
 
-# ---------------------------------------------------------------------------
-# CSV loading
-# ---------------------------------------------------------------------------
-
-
 def load_hourly_csv(input_path: Path, last_days: int) -> pd.DataFrame:
     """Load a processed hourly frame and clip it to the most recent window.
 
@@ -314,11 +299,6 @@ def load_hourly_csv(input_path: Path, last_days: int) -> pd.DataFrame:
         df = df.loc[df.index >= cutoff]
 
     return df
-
-
-# ---------------------------------------------------------------------------
-# Per-kind renderers
-# ---------------------------------------------------------------------------
 
 
 def _plot_line(ax: plt.Axes, series: pd.Series, *, label: str, over_raw: bool = False) -> None:
@@ -445,11 +425,6 @@ def _plot_balance(
             )
 
 
-# ---------------------------------------------------------------------------
-# Contract driver
-# ---------------------------------------------------------------------------
-
-
 def _resolve_direction_series(
     df: pd.DataFrame,
     direction_column: str,
@@ -513,6 +488,15 @@ def render_site_graphs(
         Channel → CSV-column mapping for the optional radiation-balance streams.
     direction_components:
         ``(u, v)`` fallback columns for wind-direction reconstruction.
+    raw:
+        Optional high-frequency record drawn as the recessive layer beneath the
+        hourly line, on the column that already resolved against ``df`` so one
+        chart stays one quantity.
+    wrf:
+        Optional model frame drawn on top, hourly, on a time index.
+    wrf_columns:
+        Graph key → candidate model columns, best first;
+        :data:`DEFAULT_WRF_COLUMNS` when omitted.
 
     Returns
     -------
@@ -558,7 +542,6 @@ def render_site_graphs(
 
         fig, ax = create_figure()
         try:
-            # Layer 1 — raw samples, drawn first so the others sit on top.
             if raw is not None and column in raw.columns:
                 _plot_raw(
                     ax,
@@ -567,10 +550,9 @@ def render_site_graphs(
                     dots=spec.kind != "bar",
                 )
 
-            # Layer 2 — the hourly aggregate, the subject of the chart. A column
-            # that EXISTS but holds no finite value over the window is skipped
-            # like an absent one: it draws nothing yet still registers a legend
-            # entry, which reads as a line off the scale.
+            # A column that EXISTS but holds no finite value over the window is
+            # skipped like an absent one: it draws nothing yet still registers a
+            # legend entry, which reads as a line off the scale.
             drawn_raw = raw is not None and column in raw.columns
             if not series.notna().any():
                 logger.warning(
@@ -594,7 +576,6 @@ def render_site_graphs(
                 }
                 _plot_balance(ax, series, present)
 
-            # Layer 3 — the model, on top and visually distinct from measurement.
             model, resolved = _wrf_series(wrf, spec.key, wrf_columns or DEFAULT_WRF_COLUMNS)
             if model is not None:
                 _plot_wrf(
@@ -652,11 +633,6 @@ def _load_wrf(path: Path, hourly: pd.DataFrame) -> pd.DataFrame:
     clipped: pd.DataFrame = frame.loc[hourly.index.min() : hourly.index.max()]
     logger.info("wrf layer: %d hours over the plotted window", len(clipped))
     return clipped
-
-
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
 
 
 @app.command()

@@ -35,6 +35,8 @@ ConfigOption = Annotated[
 
 
 class DeviceChoice(StrEnum):
+    """Torch device a run may be pinned to; ``auto`` resolves cuda -> mps -> cpu."""
+
     auto = "auto"
     cpu = "cpu"
     cuda = "cuda"

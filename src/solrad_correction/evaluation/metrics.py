@@ -1,4 +1,10 @@
-"""Regression metrics - reuses micrometeorology and adds MAPE."""
+"""Regression metrics - reuses micrometeorology and adds MAPE.
+
+Every metric here has the signature ``(observed, predicted) -> float``, in that
+order, over two 1-D arrays of equal length. The order is load-bearing for the
+signed metrics: MBE reports predicted minus observed, so swapping the arguments
+flips the sign of the reported bias.
+"""
 
 from collections.abc import Callable
 
@@ -14,7 +20,6 @@ from micrometeorology.stats.metrics import (
     rmse,
 )
 
-#: Callable signature for a metric function: ``(observed, predicted) -> float``.
 MetricFn = Callable[[NDArray, NDArray], float]
 
 
@@ -25,6 +30,21 @@ def mape(observed: NDArray, predicted: NDArray) -> float:
     non-finite pairs are dropped for the same reason
     :func:`micrometeorology.stats.metrics._clean_pairs` drops them: a single
     ``±inf`` survives an ``isnan`` filter and then poisons the whole mean.
+
+    Parameters
+    ----------
+    observed, predicted:
+        Aligned samples of shape ``(N,)``, in the variable's own physical unit.
+        Coerced to ``float64`` here.
+
+    Returns
+    -------
+    float
+        Mean absolute percentage error, in percent; ``NaN`` below two valid
+        pairs. For irradiance the exclusion of zeros matters physically: night
+        rows are genuine zeros, not missing data, and every one of them would
+        otherwise be an infinite relative error, so this metric describes
+        daylight only.
     """
     o = np.asarray(observed, dtype=float)
     p = np.asarray(predicted, dtype=float)
@@ -47,5 +67,23 @@ REGRESSION_METRICS: dict[str, MetricFn] = {
 
 
 def compute_regression_metrics(observed: NDArray, predicted: NDArray) -> dict[str, float]:
-    """Compute all regression metrics at once."""
+    """Compute all regression metrics at once.
+
+    RMSE, MAE and MBE are reported together on purpose: MBE alone hides
+    dispersion and RMSE alone hides a systematic bias.
+
+    Parameters
+    ----------
+    observed, predicted:
+        Aligned samples of shape ``(N,)``, in the same unit — the original
+        units of the target column, once the pipeline's inverse transform has
+        been applied.
+
+    Returns
+    -------
+    dict of str to float
+        One score per entry of :data:`REGRESSION_METRICS`, keyed by its display
+        name. The error metrics carry the unit of the inputs; ``R²``, ``r`` and
+        ``d`` are dimensionless and ``MAPE`` is a percentage.
+    """
     return {name: fn(observed, predicted) for name, fn in REGRESSION_METRICS.items()}

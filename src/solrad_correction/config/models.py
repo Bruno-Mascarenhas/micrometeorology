@@ -5,7 +5,23 @@ from dataclasses import dataclass
 
 @dataclass(slots=True)
 class ModelConfig:
-    """Model-specific hyperparameters."""
+    """Model-specific hyperparameters.
+
+    ``model_type`` must name a model registered in
+    ``solrad_correction.models.registry``; the ``svm_*``, ``lstm_*`` and ``tf_*``
+    groups apply only to their own architecture and are ignored by the others.
+
+    ``evaluation_policy`` selects what the reported metrics are computed over:
+    ``model_native`` scores every model on the rows it can predict, while
+    ``common_sequence_horizon`` restricts all models to the rows a sequence model
+    with ``sequence_length`` history can reach, so a tabular and a recurrent
+    model are compared on the same target rows.
+
+    ``ExperimentConfig.validate`` enforces the cross-field bounds: positive
+    ``sequence_length``, ``batch_size``, ``max_epochs``, ``tf_d_model`` and
+    ``tf_nhead``, with ``tf_d_model`` divisible by ``tf_nhead`` (each attention
+    head takes an equal slice of the model dimension).
+    """
 
     model_type: str = "svm"
     log_dir: str | None = None

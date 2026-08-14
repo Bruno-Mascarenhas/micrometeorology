@@ -1,6 +1,6 @@
 """Run a trained checkpoint over a split and compute stratified metrics.
 
-:func:`evaluate_checkpoint` is the entry point: it loads a C4a checkpoint under
+:func:`evaluate_checkpoint` is the entry point: it loads a training checkpoint under
 torch's **restricted** unpickler (a checkpoint travels through Colab and shared
 Drives, so it is not a trusted local file; ``trust_checkpoint=True`` /
 ``--trust-checkpoint`` opts back into the unrestricted reader), rebuilds the
@@ -35,6 +35,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from allsky.clearsky import haurwitz_ghi_from_cos_zenith
 from allsky.config import ExperimentConfig
 from allsky.data.contracts import SKY_CLASS_NAMES, sky_class_name
 from allsky.data.datasets import EmbeddingReader
@@ -44,8 +45,15 @@ from allsky.data.loading import (
     load_split,
     resolve_against_root,
 )
-from allsky.evaluation.metrics import classification_metrics, regression_metrics
+from allsky.erbs import pseudo_diffuse
+from allsky.evaluation.metrics import (
+    SKILL_METRIC_KEYS,
+    classification_metrics,
+    regression_metrics,
+    skill_score,
+)
 from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
+from allsky.solar import SOLAR_CONSTANT_WM2, eccentricity_correction
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +145,7 @@ def evaluate_checkpoint(
     Parameters
     ----------
     checkpoint_path:
-        A ``last.ckpt`` / ``best.ckpt`` written by the C4a engine.
+        A ``last.ckpt`` / ``best.ckpt`` written by :mod:`allsky.training.engine`.
     split:
         ``"val"`` (default), ``"test"`` or ``"train"``.
     data_root:
@@ -179,9 +187,14 @@ def evaluate_checkpoint(
     -------
     EvaluationResult
         Global + stratified metrics, the predictions frame and provenance.
+
+    Raises
+    ------
+    ValueError
+        If *split* has no days in the artifact or none of its days appear in the
+        manifest; and, under ``strict``, on a manifest-hash, split-id or
+        k-index-kind mismatch between the checkpoint and the data on disk.
     """
-    # Kept for signature symmetry with the CLI (see the parameter docs above);
-    # this function never writes reports, so the value is intentionally dropped.
     del report_dir
 
     from allsky.training.checkpointing import load_checkpoint
@@ -272,11 +285,6 @@ def evaluate_checkpoint(
         predictions=predictions,
         meta=meta_out,
     )
-
-
-# ---------------------------------------------------------------------------
-# loading / provenance
-# ---------------------------------------------------------------------------
 
 
 def _check_manifest_hash(stored: str | None, meta: Mapping[str, Any], *, strict: bool) -> bool:
@@ -382,11 +390,6 @@ def _enabled_targets(cfg: ExperimentConfig) -> list[str]:
     return targets
 
 
-# ---------------------------------------------------------------------------
-# inference
-# ---------------------------------------------------------------------------
-
-
 def _run_inference(
     *,
     cfg: ExperimentConfig,
@@ -421,9 +424,9 @@ def _run_inference(
 
     image_backbone = None
     if cfg.data.input_mode == "image":
-        # Same gap as training (finding F6): with no injected builder the rebuilt
-        # model still needs the backbone architecture to load_state_dict, so
-        # default to the config-named backbone. The injection hook still wins.
+        # As in training: with no injected builder the rebuilt model still needs
+        # the backbone architecture to load_state_dict, so default to the
+        # config-named backbone. The injection hook still wins.
         builder = image_backbone_builder or _default_image_backbone_builder(cfg, device)
         image_backbone = builder()
     # Rebuild with the same temporal pooler the checkpoint was trained with, or
@@ -533,11 +536,6 @@ def _extract_prediction(name: str, outputs: Mapping[str, Any]) -> np.ndarray:
     return np.asarray(values).ravel()
 
 
-# ---------------------------------------------------------------------------
-# predictions frame + strata
-# ---------------------------------------------------------------------------
-
-
 def _build_predictions_frame(
     split_df: pd.DataFrame, predicted: Mapping[str, np.ndarray], enabled_targets: Sequence[str]
 ) -> pd.DataFrame:
@@ -571,6 +569,8 @@ def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame) -> None:
     """Attach the stratification columns to *frame* from *split_df*."""
     local = pd.to_datetime(split_df["timestamp_utc"], utc=True).dt.tz_convert(_LOCAL_TZ)
     frame["hour"] = local.dt.hour.to_numpy(dtype=np.int64)
+    if "solar_zenith" in split_df.columns:
+        frame["solar_zenith"] = split_df["solar_zenith"].to_numpy(dtype=np.float64)
     frame["month"] = local.dt.month.to_numpy(dtype=np.int64)
 
     sky = split_df["sky_class"].to_numpy(dtype=np.int64)
@@ -602,11 +602,6 @@ _STRATUM_KINDS: dict[str, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# metric computation
-# ---------------------------------------------------------------------------
-
-
 def _global_metrics(
     predictions: pd.DataFrame, enabled_targets: Sequence[str]
 ) -> dict[str, dict[str, Any]]:
@@ -630,7 +625,62 @@ def _target_metrics(frame: pd.DataFrame, name: str) -> dict[str, Any]:
     obs_col, pred_col = f"obs_{name}", f"pred_{name}"
     if obs_col not in frame.columns:
         return regression_metrics(np.empty(0), np.empty(0))
-    return regression_metrics(frame[obs_col].to_numpy(), frame[pred_col].to_numpy())
+    observed = frame[obs_col].to_numpy(dtype=np.float64)
+    metrics = regression_metrics(observed, frame[pred_col].to_numpy())
+    metrics.update(_skill_against_references(frame, name, observed, float(metrics["rmse"])))
+    return metrics
+
+
+def _skill_against_references(
+    frame: pd.DataFrame, name: str, observed: np.ndarray, model_rmse: float
+) -> dict[str, float]:
+    """Skill of the model against persistence and against a clear-sky reference."""
+    entries = dict.fromkeys(SKILL_METRIC_KEYS, float("nan"))
+    for label, reference in (
+        ("persistence", _persistence_reference(frame, observed)),
+        ("clearsky", _clearsky_reference(frame, name)),
+    ):
+        if reference is None:
+            continue
+        reference_rmse = float(regression_metrics(observed, reference)["rmse"])
+        entries[f"rmse_{label}"] = reference_rmse
+        entries[f"skill_{label}"] = skill_score(model_rmse, reference_rmse)
+    return entries
+
+
+def _persistence_reference(frame: pd.DataFrame, observed: np.ndarray) -> np.ndarray | None:
+    """The previous observation in time, the no-change forecast."""
+    if "timestamp_utc" not in frame.columns or len(observed) < 2:
+        return None
+    order = np.argsort(pd.to_datetime(frame["timestamp_utc"], utc=True).to_numpy())
+    shifted = np.full(len(observed), np.nan, dtype=np.float64)
+    ordered = observed[order]
+    shifted[order[1:]] = ordered[:-1]
+    return shifted
+
+
+def _clearsky_reference(frame: pd.DataFrame, name: str) -> np.ndarray | None:
+    """What a cloudless sky would have produced for this target.
+
+    ``kindex`` is a ratio to a clear-sky reference, so a clear sky is exactly
+    ``1``. ``dhi`` needs the reference itself: Haurwitz clear-sky GHI at the
+    sample's own zenith, decomposed by Erbs at the clear-sky clearness index.
+    """
+    if name == "kindex":
+        return np.ones(len(frame), dtype=np.float64)
+    if name != "dhi" or "solar_zenith" not in frame.columns:
+        return None
+    cos_zenith_values = np.cos(np.radians(frame["solar_zenith"].to_numpy(dtype=np.float64)))
+    ghi_clear = haurwitz_ghi_from_cos_zenith(cos_zenith_values)
+    times = pd.to_datetime(frame["timestamp_utc"], utc=True).dt.tz_convert(_LOCAL_TZ)
+    extraterrestrial = (
+        SOLAR_CONSTANT_WM2
+        * eccentricity_correction(times.dt.tz_localize(None))
+        * np.maximum(cos_zenith_values, 0.0)
+    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kt_clear = np.where(extraterrestrial > 0.0, ghi_clear / extraterrestrial, np.nan)
+    return np.asarray(pseudo_diffuse(ghi_clear, kt_clear), dtype=np.float64)
 
 
 def _stratified_metrics(

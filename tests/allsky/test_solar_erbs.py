@@ -25,20 +25,20 @@ class TestSolarPosition:
         cosz = solar.cos_zenith(times, site)
         zenith = np.rad2deg(np.arccos(cosz))
         assert zenith[1] < zenith[0]
-        elevation = solar.solar_elevation(times, site)
+        elevation = solar.solar_elevation_deg(times, site)
         assert (elevation > 0).all()
 
     def test_solar_noon_near_1130_local(self, site: SiteConfig):
         # Salvador (lon -38.51) sits east of the UTC-3 meridian (-45 deg):
         # true solar noon falls ~26 min before clock noon.
         day = pd.date_range("2025-06-25 05:00", "2025-06-25 19:00", freq="1min")
-        elevation = solar.solar_elevation(day, site)
+        elevation = solar.solar_elevation_deg(day, site)
         peak = day[int(np.argmax(elevation))]
         assert pd.Timestamp("2025-06-25 11:15") <= peak <= pd.Timestamp("2025-06-25 12:00")
 
     def test_declination_annual_range(self):
         days = pd.date_range("2025-01-01 12:00", "2025-12-31 12:00", freq="1D")
-        decl_deg = np.rad2deg(solar.solar_declination(days))
+        decl_deg = np.rad2deg(solar.solar_declination_rad(days))
         assert np.abs(decl_deg).max() <= 24.0
         # June solstice: northern declination; December: southern.
         assert decl_deg[days.get_loc(pd.Timestamp("2025-06-21 12:00"))] > 20.0
@@ -107,15 +107,15 @@ class TestClearnessIndex:
 class TestSolarAzimuth:
     def test_range_within_0_360(self, site: SiteConfig):
         day = pd.date_range("2025-03-21 00:00", "2025-03-21 23:55", freq="5min")
-        az = solar.solar_azimuth(day, site)
+        az = solar.solar_azimuth_deg(day, site)
         assert (az >= 0.0).all()
         assert (az < 360.0).all()
 
     def test_morning_east_afternoon_west(self, site: SiteConfig):
         # Equinox: sunrise ~due east, sunset ~due west (declination ~0).
         times = pd.DatetimeIndex(["2025-03-21 08:00:00", "2025-03-21 16:00:00"])
-        az = solar.solar_azimuth(times, site)
-        assert (solar.solar_elevation(times, site) > 0).all()
+        az = solar.solar_azimuth_deg(times, site)
+        assert (solar.solar_elevation_deg(times, site) > 0).all()
         assert 45.0 < az[0] < 135.0  # morning: eastern sky (~90)
         assert 225.0 < az[1] < 315.0  # afternoon: western sky (~270)
 
@@ -123,21 +123,21 @@ class TestSolarAzimuth:
         # December (southern summer): the sun transits to the south of zenith,
         # so solar-noon azimuth is ~180 deg.
         day = pd.date_range("2025-12-21 05:00", "2025-12-21 19:00", freq="1min")
-        peak = day[int(np.argmax(solar.solar_elevation(day, site)))]
-        az = solar.solar_azimuth(pd.DatetimeIndex([peak]), site)[0]
+        peak = day[int(np.argmax(solar.solar_elevation_deg(day, site)))]
+        az = solar.solar_azimuth_deg(pd.DatetimeIndex([peak]), site)[0]
         assert 170.0 < az < 190.0
 
     def test_southern_winter_noon_points_north(self, site: SiteConfig):
         # June (southern winter): the sun transits to the north, azimuth ~0/360.
         day = pd.date_range("2025-06-25 05:00", "2025-06-25 19:00", freq="1min")
-        peak = day[int(np.argmax(solar.solar_elevation(day, site)))]
-        az = solar.solar_azimuth(pd.DatetimeIndex([peak]), site)[0]
+        peak = day[int(np.argmax(solar.solar_elevation_deg(day, site)))]
+        az = solar.solar_azimuth_deg(pd.DatetimeIndex([peak]), site)[0]
         assert min(az, 360.0 - az) < 15.0
 
     def test_tz_aware_timestamps_rejected(self, site: SiteConfig):
         times = pd.date_range("2025-06-25", periods=3, freq="1h", tz="UTC")
         with pytest.raises(ValueError, match="naive"):
-            solar.solar_azimuth(times, site)
+            solar.solar_azimuth_deg(times, site)
 
 
 # ---------------------------------------------------------------------------

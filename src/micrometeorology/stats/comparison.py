@@ -35,6 +35,18 @@ def read_dataset(
     timestamp_columns:
         Columns to combine into a datetime index (e.g. ``['year','month','day','hour']``).
         If ``None``, tries ``TIMESTAMP`` column or the unnamed leading index column.
+    parse_dates:
+        Allow the year/month/day/hour and leading-index fallbacks when neither
+        ``timestamp_columns`` nor a ``TIMESTAMP`` column applies. ``False``
+        leaves the default ``RangeIndex`` in place.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Every column coerced to numeric (unparseable text becomes ``NaN``), so
+        the metrics never meet an object dtype. The index is a
+        :class:`~pandas.DatetimeIndex` when one could be built and a
+        ``RangeIndex`` otherwise — a supported state here, not an error.
     """
     df = pd.read_csv(path, sep=separator, low_memory=False)
 
@@ -88,8 +100,28 @@ def pair_dataframes(
 ) -> pd.DataFrame:
     """Align observation and model DataFrames by nearest timestamp.
 
-    Returns a DataFrame with multi-level columns: ``('obs', var)`` and ``('model', var)``.
-    Only common columns are included.
+    Parameters
+    ----------
+    obs, model:
+        Frames indexed by a :class:`~pandas.DatetimeIndex`. Only the column
+        names they share are paired.
+    tolerance:
+        Largest offset a pair may span, as a :class:`~pandas.Timedelta` string.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Indexed by the observation times, with one ``<var>_obs`` and one
+        ``<var>_model`` column per shared variable. The merge is LEFT, so a row
+        survives whether or not a model sample fell inside ``tolerance`` and the
+        row count is therefore not the sample size. Empty when the two frames
+        share no column.
+
+    Raises
+    ------
+    TypeError
+        If either frame lacks a ``DatetimeIndex`` — pairing by time is the whole
+        contract, and a positional fallback would publish a silent misalignment.
     """
     common_cols = sorted(set(obs.columns) & set(model.columns))
     if not common_cols:
@@ -121,7 +153,24 @@ def compare_variables(
     paired_df: pd.DataFrame,
     variable: str,
 ) -> dict[str, float]:
-    """Compute all metrics for a single variable from a paired DataFrame."""
+    """Compute all metrics for a single variable from a paired DataFrame.
+
+    Parameters
+    ----------
+    paired_df:
+        Output of :func:`pair_dataframes`.
+    variable:
+        Base name whose ``<variable>_obs`` / ``<variable>_model`` columns are
+        scored. A name :func:`~micrometeorology.stats.metrics.is_circular_column`
+        recognises is scored as a bearing.
+
+    Returns
+    -------
+    dict[str, float]
+        ``"n"`` (the finite-pair count) followed by every key of
+        :data:`~micrometeorology.stats.metrics.ALL_METRICS`; empty when either
+        column is absent.
+    """
     obs_col = f"{variable}_obs"
     model_col = f"{variable}_model"
 
@@ -147,7 +196,16 @@ def compare_variables(
 def compare_all_variables(paired_df: pd.DataFrame) -> pd.DataFrame:
     """Compute metrics for all paired variables.
 
-    Returns a DataFrame with metrics as rows and variables as columns.
+    Parameters
+    ----------
+    paired_df:
+        Output of :func:`pair_dataframes`. Variables are discovered from the
+        ``_obs`` / ``_model`` column pairs it carries.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Metrics as rows (``n`` first) and variables as columns, sorted by name.
     """
     variables = sorted(
         {

@@ -48,9 +48,7 @@ __all__ = [
     "validate_bundle",
 ]
 
-#: Generated readme filename inside the bundle.
 BUNDLE_README_NAME = "BUNDLE_README.md"
-#: Default manifest / split filenames looked up under a dataset directory.
 _MANIFEST_NAME = "manifest.parquet"
 _SPLIT_NAME = "splits.json"
 _EMBEDDINGS_DIRNAME = "embeddings"
@@ -150,7 +148,6 @@ def export_colab_bundle(
         raise ValueError(f"manifest meta sidecar not found: {meta_file}")
 
     root = PurePosixPath(bundle_name)
-    # arcname -> source Path; generated text members are collected separately.
     file_members: dict[str, Path] = {
         _safe_arcname((root / _MANIFEST_NAME).as_posix()): manifest_file,
         _safe_arcname((root / f"{_MANIFEST_NAME}.meta.json").as_posix()): meta_file,
@@ -175,7 +172,6 @@ def export_colab_bundle(
         arc = _safe_arcname((root / "config" / src.name).as_posix())
         file_members[arc] = src
 
-    # Generated text members (resolved config dump + readme).
     text_members: dict[str, str] = {}
     if prepare_cfg is not None:
         resolved = yaml.safe_dump(prepare_cfg.model_dump(mode="json"), sort_keys=True)
@@ -259,11 +255,6 @@ def validate_bundle(path: str | Path) -> dict[str, Any]:
         "expected_sha256": expected,
         "manifest_sha256_ok": ok,
     }
-
-
-# ---------------------------------------------------------------------------
-# internals
-# ---------------------------------------------------------------------------
 
 
 def _resolve_sources(

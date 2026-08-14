@@ -10,12 +10,33 @@ from solrad_correction.utils.io import save_json
 
 @dataclass(frozen=True, slots=True)
 class ArtifactLayout:
-    """Canonical artifact locations for one experiment run."""
+    """Canonical artifact locations for one experiment run.
+
+    Every writer and reader resolves its paths through this one object, so the
+    on-disk layout of a run is described in a single place::
+
+        configs/       config.yaml, config_resolved.json
+        metrics/       metrics.json, training_history.csv
+        predictions/   predictions.csv
+        metadata/      metadata.json, preprocessing_state.json
+        preprocessing/ preprocessing_pipeline.joblib
+        models/        model.pt or model.joblib
+        checkpoints/   best.pt, last.pt
+        datasets/      train/, val/, test/
+        logs/, profiles/, cache/
+        manifest.json  checksummed inventory of everything above
+    """
 
     root: Path
 
     @classmethod
     def from_experiment_dir(cls, experiment_dir: str | Path) -> ArtifactLayout:
+        """Describe the layout under ``experiment_dir`` without touching disk.
+
+        The properties are pure path arithmetic; nothing is created until
+        :meth:`ensure_directories` runs, so a layout can be built to read an
+        existing run.
+        """
         return cls(Path(experiment_dir))
 
     @property
@@ -111,7 +132,12 @@ class ArtifactLayout:
         return self.root / "manifest.json"
 
     def ensure_directories(self) -> None:
-        """Create the stable experiment directory tree."""
+        """Create the stable experiment directory tree, idempotently.
+
+        The whole tree is created up front, even the parts a given run will not
+        fill, so the layout of an experiment directory does not depend on which
+        model family produced it.
+        """
         for directory in [
             self.configs_dir,
             self.metrics_dir,
@@ -131,7 +157,20 @@ class ArtifactLayout:
 
 
 def write_manifest(layout: ArtifactLayout, *, extra: dict[str, Any] | None = None) -> None:
-    """Write a manifest of existing artifacts with schema and checksums."""
+    """Write a manifest of existing artifacts with schema and checksums.
+
+    Every file under the experiment root is recorded with its byte size and
+    SHA-256, keyed by POSIX-style relative path in sorted order, so two runs of
+    the same config produce comparable manifests. The manifest itself is
+    excluded — it cannot contain its own digest.
+
+    Parameters
+    ----------
+    layout:
+        Layout whose root is walked and whose ``manifest.json`` is written.
+    extra:
+        Provenance fields recorded verbatim under ``"extra"``.
+    """
     artifacts: dict[str, dict[str, Any]] = {}
     for path in sorted(p for p in layout.root.rglob("*") if p.is_file() and p != layout.manifest):
         relative = path.relative_to(layout.root).as_posix()

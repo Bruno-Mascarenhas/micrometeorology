@@ -201,6 +201,18 @@ extend-select = [
     "PD",   # pandas-vet
     "NPY",  # numpy-specific rules (legacy RNG, deprecated aliases)
     "S",    # flake8-bandit — security anti-patterns
+    # Docstring presence on public classes (D101) and module-level functions
+    # (D103), both at zero today, so a new public API cannot ship undocumented.
+    # Deliberately NOT D102: 29 of this tree's public methods are `@property`
+    # accessors whose body is one attribute or one path join, and the only
+    # docstring such a property can carry restates its own name — which the
+    # repo's documentation standard forbids. Enabling D102 would force the
+    # writing of the exact docstrings that standard rejects. Note also that the
+    # numpy convention below silently disables D417, and that no presence rule
+    # can check the thing that matters in a scientific docstring — shape, dtype
+    # and unit — which stays a matter for review.
+    "D101",
+    "D103",
 ]
 ignore = [
     # Line length is enforced at format time by `line-length = 100`, not by
@@ -211,20 +223,42 @@ ignore = [
     "E501",
 ]
 
+# Suppression policy, one rule for the whole tree: a suppression is admissible
+# only where the rule does not APPLY, never to waive a defect, and it is always
+# written at the NARROWEST scope that expresses it.
+#
+# That makes the inline `# noqa: RULE - reason` at the offending line the normal
+# form, because it covers exactly one statement: the 16 in `src/` are broad
+# `except` clauses that must not fail their caller (BLE001), deliberate seeding
+# of numpy's legacy global stream (NPY002), subprocess calls on an executable
+# resolved at runtime rather than a literal path (S603), a `ValueError` raised
+# where the documented contract promises one (TRY004), and scikit-learn's own
+# `C` parameter name (N803). Every one carries its reason on the same line.
+#
+# A `per-file-ignores` entry below is for the case an inline marker cannot
+# express: the rule does not apply to the file as a whole. It is broader by
+# construction — it hides future violations of that rule in that file — so it is
+# used only where the whole-file claim is true, and each entry says why.
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
 [tool.ruff.lint.per-file-ignores]
-# Everything below is a rule that does not APPLY to the file, not a defect being
-# waived: the tree carries no inline `# noqa` / `# type: ignore` outside the
-# handful documented at their own call sites. Each entry is scoped as narrowly
-# as the rule allows so a genuinely new violation still surfaces.
 #
 # `np.random.seed` seeds the legacy GLOBAL stream on purpose — that is the one
 # sklearn, torch's DataLoader shuffling and every bare `np.random.*` call draw
 # from. `default_rng` returns an independent Generator none of them observe, so
 # there is no modern spelling of "make this run reproducible".
 "src/solrad_correction/utils/seeds.py" = ["NPY002"]
+# A test's NAME is its documentation in this repo — the standard puts the context
+# a name cannot hold into a descriptively-named test, not into prose beside it.
+# Requiring a docstring on `test_the_gap_days_belong_to_no_split` would force one
+# that restates the name, which the same standard forbids. Benchmarks are scripts
+# driven by their own `__main__`, not a public API.
+"tests/**" = ["D101", "D103", "S101"]
+"benchmarks/**" = ["D101", "D103"]
 # `assert` IS pytest's assertion API (2089 of them); S101 is a production-code
 # rule and ruff documents tests as its exception.
-"tests/**" = ["S101"]
+
 # Pickle is the thing under test, not an incidental choice: these two assert
 # that a WorkUnit and a torch tensor survive a round-trip through the pickle
 # protocol the process pool actually uses.

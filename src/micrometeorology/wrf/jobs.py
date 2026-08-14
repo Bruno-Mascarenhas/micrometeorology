@@ -77,7 +77,26 @@ def parse_poteolico_heights(variable: str) -> tuple[int, ...]:
 
 @dataclass(frozen=True, slots=True)
 class WorkUnit:
-    """Picklable description of one unit of work. Strings, ints and bools only."""
+    """Picklable description of one unit of work. Strings, ints and bools only.
+
+    Attributes
+    ----------
+    kind:
+        Which pipeline the worker runs for this unit.
+    wrf_path:
+        The wrfout the worker opens itself; the domain every output is named
+        after is read back out of this name.
+    variable:
+        Exported variable id, empty for the grid GeoJSON unit.
+    json_dir, geojson_dir:
+        Output directories for the values/series artifacts and for the grid
+        files respectively.
+    skip_first:
+        Leading time steps to leave unpublished.
+    site_artifacts:
+        Whether to also accumulate the consolidated ``.series.bin`` and
+        ``.summary.json`` the site front-end ingests.
+    """
 
     kind: UnitKind
     wrf_path: str
@@ -96,7 +115,36 @@ class WorkUnit:
 
 @dataclass(frozen=True, slots=True)
 class UnitResult:
-    """Outcome of one work unit, including the manifest of files written."""
+    """Outcome of one work unit, including the manifest of files written.
+
+    Attributes
+    ----------
+    label:
+        ``filename:variable`` tag of the unit that produced this result.
+    kind:
+        The unit's pipeline, carried through so the manifest can group results.
+    files:
+        Paths of every file the unit wrote.
+    seconds:
+        Wall-clock time the unit took, including the NetCDF open.
+    warnings:
+        Non-fatal messages the CLI surfaces after the run.
+    error:
+        ``None`` on success, otherwise ``"ExcType: message"``. A unit reports its
+        failure rather than raising, so one bad variable cannot sink the run.
+    start_local:
+        Run metadata for the manifest: the run's first local datetime, formatted
+        exactly like every JSON ``date_time``.
+    n_steps:
+        The file's time-step count, which the cell-series byte offsets depend on.
+    domain:
+        The domain this unit publishes under, derived from its filename so it is
+        known even when the unit never managed to open the file.
+    missing_variables:
+        Output variable ids the unit requested but the wrfout does not carry, so
+        the manifest can say "no steps this run" instead of leaving the previous
+        run's files silently vouched for under the freshly bumped version.
+    """
 
     label: str
     kind: UnitKind
@@ -104,16 +152,9 @@ class UnitResult:
     seconds: float = 0.0
     warnings: tuple[str, ...] = field(default=())
     error: str | None = None
-    # Run metadata for the manifest: the run's first local datetime (formatted
-    # like every JSON date_time) and the file's time-step count.
     start_local: str | None = None
     n_steps: int | None = None
-    # The domain this unit publishes under, derived from its filename so it is
-    # known even when the unit never managed to open the file.
     domain: str | None = None
-    # Output variable ids the unit requested but the wrfout does not carry, so
-    # the manifest can say "no steps this run" instead of leaving the previous
-    # run's files silently vouched for under the freshly bumped version.
     missing_variables: tuple[str, ...] = ()
 
 
@@ -182,8 +223,7 @@ _SERIES_INT_MAX = 2**31 - 1
 
 
 class _SiteArtifactAccumulator:
-    """Collects the per-step frames of one (domain, variable) into the two
-    consolidated artifacts the site front-end ingests.
+    """Collect one (domain, variable)'s frames into the site's two consolidated artifacts.
 
     - ``{stem}.series.bin`` — row-major (cells x steps) little-endian int32
       matrix of ``rint(round(value, 2) * 100)``, :data:`SERIES_MISSING` where a
@@ -214,6 +254,21 @@ class _SiteArtifactAccumulator:
         Values are rounded to two decimals and stored as scaled int32; masked
         or NaN cells become :data:`SERIES_MISSING`. A step with at least one
         finite cell also contributes a mean/min/max row to the summary.
+
+        Parameters
+        ----------
+        index:
+            Column of the matrix, the step's position on the file's time axis.
+        values:
+            The step's ``(ny, nx)`` frame in the variable's published unit;
+            ravelled row-major, so cell ids match the grid's ``linear_index``.
+        date_str:
+            The step's local datetime as the per-step JSONs write it.
+
+        Raises
+        ------
+        ValueError
+            When a value is too large for the int32 hundredths encoding.
         """
         arr = values.filled(np.nan) if isinstance(values, np.ma.MaskedArray) else values
         flat = np.round(np.ravel(np.asarray(arr)).astype(np.float64, copy=False), 2)
@@ -339,6 +394,11 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
 
 
 def _run_poteolico_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str]]:
+    """Write every timestep JSON of the wind-potential heights the unit requests.
+
+    Each height publishes under its own ``POT_EOLICO_{h}M`` output id, with the
+    arrow overlay embedded in the same file.
+    """
     files: list[str] = []
     grid_level = dataset.grid_level.value
     time_step_metadata = dataset.build_date_metadata(skip_first_n=unit.skip_first)
@@ -376,6 +436,11 @@ def _run_poteolico_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str],
 
 
 def _run_wind_vectors_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str]]:
+    """Write the standalone 10-m arrow overlay for every timestep.
+
+    These files carry no grid values, so the site can draw wind arrows over ANY
+    variable without every variable's JSON embedding them.
+    """
     files: list[str] = []
     grid_level = dataset.grid_level.value
     time_step_metadata = dataset.build_date_metadata(skip_first_n=unit.skip_first)
@@ -396,6 +461,7 @@ def _run_wind_vectors_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[st
 
 
 def _run_grid_geojson_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str]]:
+    """Write the domain's cell rectangles, once as legacy GeoJSON and once compact."""
     lon, lat = dataset.read_grid()
     grid_level = dataset.grid_level.value
     output_path = Path(unit.geojson_dir) / f"{grid_level}.geojson"
@@ -460,6 +526,27 @@ def write_run_manifest(
     (``files`` is empty on error, so the count proves nothing), and a stale
     version would pin long-cached clients to outdated data — an extra bump only
     costs a cache miss.
+
+    Parameters
+    ----------
+    json_dir:
+        Directory the manifest is written into, alongside the data files it
+        describes.
+    results:
+        Every unit result of the run, failures included.
+    requested_variables:
+        The variable ids the run was asked for, so ``availability`` can carry an
+        empty range for one that wrote nothing at all.
+    covers_every_variable:
+        Whether the run covered the full variable set. The ``features``
+        templates are directory-wide wildcards, so a partial run must not vouch
+        for files it did not rewrite.
+
+    Returns
+    -------
+    Path | None
+        Path of the written ``manifest.json``, or ``None`` when *results* is
+        empty and there is nothing to advertise.
     """
     if not results:
         return None
@@ -638,9 +725,14 @@ def _unit_domain(unit: WorkUnit) -> str | None:
 
 
 def process_unit(unit: WorkUnit) -> UnitResult:
-    """Execute one work unit. Runs in a worker process; never raises."""
+    """Execute one work unit. Runs in a worker process; never raises.
+
+    A failure is reported in the result's ``error`` instead, so one bad variable
+    cannot take the pool's other units with it. Setting ``LABMIM_TEST_CRASH_UNIT``
+    to a variable name makes that unit exit as an OOM-killed worker would, which
+    is how the pool-break recovery path is exercised.
+    """
     if os.environ.get("LABMIM_TEST_CRASH_UNIT") == unit.variable:
-        # Test hook: simulate an OOM-killed worker (exercises pool-break recovery).
         os._exit(137)
     t0 = time.perf_counter()
     missing_variables: list[str] = []
@@ -712,9 +804,21 @@ def build_units(
 ) -> list[WorkUnit]:
     """Expand (files x variables) into work units, one grid GeoJSON per file.
 
-    Raises ``ValueError`` before any unit is built when two of *wrf_paths*
-    belong to the same domain: see
-    :func:`~micrometeorology.wrf.reader.assert_one_file_per_domain`.
+    The unit kind follows from the variable name: anything starting with the
+    wind-potential prefix streams heights, ``wind_vectors`` writes the standalone
+    arrow overlay, everything else is a values variable.
+
+    Returns
+    -------
+    list[WorkUnit]
+        Units in build order; :func:`execute_units` reorders them by cost.
+
+    Raises
+    ------
+    ValueError
+        Before any unit is built, when two of *wrf_paths* belong to the same
+        domain: see
+        :func:`~micrometeorology.wrf.reader.assert_one_file_per_domain`.
     """
     assert_one_file_per_domain(wrf_paths)
     units: list[WorkUnit] = []
@@ -764,6 +868,20 @@ def execute_units(
     single-worker pools, so a unit that keeps killing its worker fails alone —
     with an error result, so callers can exit non-zero — instead of dooming the
     rest.
+
+    Parameters
+    ----------
+    units:
+        Units to run; a single resolved worker runs them in this process.
+    workers:
+        Upper bound on pool size, clamped to the unit count.
+    echo:
+        Progress sink, one line per completed unit.
+
+    Returns
+    -------
+    list[UnitResult]
+        One result per unit, in COMPLETION order, not in *units* order.
     """
     if not units:
         return []

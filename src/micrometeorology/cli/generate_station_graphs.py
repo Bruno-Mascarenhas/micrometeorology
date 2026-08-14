@@ -50,11 +50,8 @@ app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Column names expected in the 2022+ data format
-# ---------------------------------------------------------------------------
-
-# Columns to drop from the slow (lenta) file -- raw millivolt / admin columns
+# Columns of the 2022+ logger format dropped from the slow (lenta) file: raw
+# millivolt channels and administrative fields.
 LENTA_DROP_COLUMNS = [
     "RECORD",
     "rtime",
@@ -101,6 +98,20 @@ def read_wrf_series(path: str | Path) -> pd.DataFrame:
     The file is a CSV whose first four columns are year, month, day and hour;
     they become the DatetimeIndex. The remaining columns are hourly model
     variables (Sw_dw, T, ur, pressure, WS, WD, etc.).
+
+    Parameters
+    ----------
+    path:
+        The ``series_operacional.dat`` written by the operational extraction.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Indexed by naive station-local hours, matching the datalogger frames it
+        is overlaid on. Rows are left in file order and duplicates are kept —
+        this reader feeds an overlay line only. The defensive reader that sorts,
+        de-duplicates and drops the spin-up hour is
+        :func:`micrometeorology.cli.export_climatology.read_wrf_series`.
     """
     source = Path(path)
     logger.info("Reading WRF series: %s", source.name)
@@ -121,11 +132,6 @@ def _plot_wrf_overlay(ax, wrf: pd.DataFrame | None, col: str, label: str = "wrf 
     if wrf is None or col not in wrf.columns:
         return
     ax.plot(wrf.index, wrf[col], "--", color="black", label=label)
-
-
-# ---------------------------------------------------------------------------
-# Individual graph generators
-# ---------------------------------------------------------------------------
 
 
 def _plot_radiacao_difusa(
@@ -601,11 +607,6 @@ def _plot_precipitacao(
     add_labmim_watermark(ax)
     add_top_legend(ax, ncol=3, loc=1)
     return save_figure(fig, out_dir / "precipitacao.png")
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 
 @app.command()

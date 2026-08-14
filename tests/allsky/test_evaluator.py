@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from allsky.data.contracts import SKY_CLASS_COUNT
 from allsky.evaluation.evaluator import evaluate_checkpoint
 from allsky.training.engine import run_experiment
 from tests.allsky import _synthetic as synthetic
@@ -40,7 +41,7 @@ class TestGlobalMetrics:
         # classification target carries a fixed confusion matrix
         assert set(result.global_metrics["sky"]) >= {"accuracy", "macro_f1", "confusion"}
         assert result.confusion is not None
-        assert len(result.confusion["matrix"]) == 3
+        assert len(result.confusion["matrix"]) == SKY_CLASS_COUNT
         assert result.meta["manifest_hash_ok"] is True
         assert result.meta["split_id_ok"] is True
 

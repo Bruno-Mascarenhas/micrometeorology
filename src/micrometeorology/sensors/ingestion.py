@@ -9,6 +9,13 @@ added or removed.  This module handles dynamic headers gracefully by:
 
 This means the same ingestion code works regardless of which sensors are
 currently connected to the datalogger.
+
+Timestamps are **naive station-local** end to end, by construction: they are
+stamped by the datalogger's own clock, which runs on local time and knows
+nothing of a zone. Re-labelling them UTC would invent a precision the
+acquisition does not have -- that clock has slipped by an hour at least twice in
+the record (see :mod:`micrometeorology.sensors.archive`). The UTC boundary
+belongs to the layers that publish, which apply the site's pinned offset.
 """
 
 import logging
@@ -58,6 +65,24 @@ def read_campbell_dat(
         ``"Unknown Fault"``) is the only such column in the archive; the blanket
         coercion below would turn it into an all-NaN column that still looks
         populated. Names absent from the file are ignored.
+
+    Returns
+    -------
+    pd.DataFrame
+        The table indexed by its naive station-local ``TIMESTAMP``, that column
+        dropped and duplicate stamps reduced to their first occurrence. Values
+        keep the logger's own units, uncalibrated.
+
+    Raises
+    ------
+    ValueError
+        If *timestamp_column* is absent after *skip_rows*. Raised rather than
+        returned with a ``RangeIndex``: the column names would come from the
+        first surviving data row, and the caller's ``sort_index`` then dies on
+        mixed int/Timestamp labels with a ``TypeError`` naming neither the file
+        nor the cause. The archive holds one such table -- a headerless CSV
+        whose TOA5 metadata line is missing -- which the manifest path stages
+        and repairs.
     """
     if skip_rows is None:
         skip_rows = [0, 2, 3]
@@ -79,12 +104,6 @@ def read_campbell_dat(
     )
 
     if timestamp_column not in df.columns:
-        # Raised rather than returned with a RangeIndex: the column names would
-        # come from the first surviving data row, and the caller's ``sort_index``
-        # then dies on mixed int/Timestamp labels with a TypeError naming neither
-        # the file nor the cause. The archive holds one such table (a headerless
-        # CSV whose TOA5 metadata line is missing), which the manifest path
-        # stages and repairs.
         raise ValueError(
             f"{path.name}: no {timestamp_column!r} column after skiprows={skip_rows}. "
             "A non-TOA5 table needs staging before it can be read (see sensors.archive)."
@@ -140,6 +159,18 @@ def merge_dat_files(
         ``list[str | Path]`` would reject both.
     **kwargs:
         Additional keyword arguments passed to :func:`read_campbell_dat`.
+
+    Returns
+    -------
+    pd.DataFrame
+        One frame sorted by its naive station-local index, holding the union of
+        every file's columns; a file that lacks a column contributes ``NaN``
+        there rather than shortening the frame.
+
+    Raises
+    ------
+    ValueError
+        If *paths* is empty.
     """
     if not paths:
         raise ValueError("No files to merge")
@@ -179,8 +210,17 @@ def apply_physical_limits(
     df:
         Input DataFrame.
     limits:
-        List of dicts with keys ``column``, ``lower``, ``upper``.
+        List of dicts with keys ``column``, ``lower``, ``upper``. The bounds are
+        in the RAW logger units the gate was written for, several of them
+        millivolts, so they are applied before any calibration factor.
         Columns that don't exist in the DataFrame are skipped (dynamic headers).
+
+    Returns
+    -------
+    pd.DataFrame
+        The same object, mutated in place, with out-of-range samples set to
+        ``NaN``. Nothing is clipped to the bound: a rejected sample becomes
+        missing rather than becoming the threshold.
     """
     for lim in limits:
         col = lim["column"]
@@ -205,6 +245,13 @@ def values_outside_declared_limits(df: pd.DataFrame, limits: list[dict]) -> dict
     "the published column obeys its declared range" verifiable instead of
     assumed. The gate itself stays where it is: its thresholds are written in
     the logger's units and several name millivolts.
+
+    Returns
+    -------
+    dict
+        ``{column: sample count}`` for the columns still holding an offending
+        value, omitting the columns that are clean. Empty means every declared
+        gate holds on the frame as published.
     """
     outside: dict[str, int] = {}
     for lim in limits:

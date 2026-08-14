@@ -7,10 +7,15 @@ import time
 class TrainingProgress:
     """Display training progress with batch %, epoch %, and ETA.
 
-    ``total_epochs`` is the absolute epoch budget of the run
-    (``config.max_epochs``); on resume, ``start_epoch`` marks where the run
-    continues, so only the remaining ``total_epochs - start_epoch`` epochs
-    are counted toward the overall percentage.
+    Parameters
+    ----------
+    total_epochs:
+        Absolute epoch budget of the run (``config.max_epochs``).
+    start_epoch:
+        Where a resumed run continues from. Only the remaining
+        ``total_epochs - start_epoch`` epochs count toward the overall
+        percentage, so a resume does not report itself as almost finished
+        before it has trained anything.
 
     Usage::
 
@@ -30,17 +35,30 @@ class TrainingProgress:
         self.current_epoch = start_epoch
 
     def start_epoch(self, epoch: int) -> None:
-        """Mark the beginning of an epoch."""
+        """Mark the beginning of an epoch and restart the per-epoch clock.
+
+        ``epoch`` is the absolute 0-based index; the display adds one.
+        """
         self.current_epoch = epoch
         self.epoch_start_time = time.time()
 
     def update_batch(self, batch: int, total_batches: int) -> None:
-        """Update progress within an epoch (batch-level)."""
+        """Redraw the in-epoch progress line.
+
+        The epoch ETA extrapolates from the batches already done, while the
+        overall percentage counts the fraction of this run's remaining epochs.
+
+        Parameters
+        ----------
+        batch:
+            Batches completed in this epoch, 1-based.
+        total_batches:
+            Batches in the epoch.
+        """
         pct = batch / total_batches * 100
         elapsed = time.time() - self.epoch_start_time
         eta_epoch = elapsed / batch * (total_batches - batch) if batch > 0 else 0.0
 
-        # Overall progress
         epochs_done = self.current_epoch - self._initial_epoch + batch / total_batches
         total_to_do = self.total_epochs - self._initial_epoch
         overall_pct = epochs_done / total_to_do * 100 if total_to_do > 0 else 0
@@ -59,11 +77,21 @@ class TrainingProgress:
         val_loss: float | None = None,
         extra: str = "",
     ) -> None:
-        """Print epoch summary."""
+        """Print the epoch summary line, overwriting the in-epoch progress line.
+
+        Parameters
+        ----------
+        train_loss:
+            Epoch training loss, in scaled target units.
+        val_loss:
+            Epoch validation loss in the same units, or ``None`` when the run
+            has no validation set.
+        extra:
+            Suffix appended to the line, used to flag an early stop.
+        """
         elapsed = time.time() - self.epoch_start_time
         total_elapsed = time.time() - self.training_start_time
 
-        # ETA for remaining epochs
         epochs_done = self.current_epoch - self._initial_epoch + 1
         total_to_do = self.total_epochs - self._initial_epoch
         if epochs_done > 0:
@@ -81,7 +109,11 @@ class TrainingProgress:
         sys.stdout.flush()
 
     def finish(self) -> None:
-        """Print final training summary."""
+        """Print the total wall-clock time of the run.
+
+        Called on the success path only, so the line doubles as the signal
+        that training ran to completion.
+        """
         total = time.time() - self.training_start_time
         print(f"\nTraining complete in {self._fmt_time(total)}")
 

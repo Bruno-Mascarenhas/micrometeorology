@@ -33,7 +33,7 @@ import typer
 # allsky.solar is pure numpy/pandas (no torch) and ships in the same wheel, so
 # this CLI reuses NOAA's formulas without pulling a training dependency in.
 from allsky.config import SiteConfig
-from allsky.solar import extraterrestrial_ghi, solar_elevation
+from allsky.solar import extraterrestrial_ghi, solar_elevation_deg
 from micrometeorology.common.git import run_git, source_root
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.stats import distributions as dist
@@ -185,6 +185,19 @@ def read_wrf_series(path: str | Path) -> pd.DataFrame:
     Hour 21 local is 00 UTC, each run's initialisation hour, where surface fluxes
     and boundary-layer height are identically zero; those rows are dropped
     wholesale so one uniform rule can be stated on the page.
+
+    Parameters
+    ----------
+    path:
+        The ``series_operacional.dat`` the operational extraction appends to.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Hourly model variables on a sorted, de-duplicated
+        :class:`~pandas.DatetimeIndex` of naive station-local hours (UTC-03),
+        with the spin-up hour removed. A repeated timestamp keeps the LAST row,
+        which is the most recent run's value for that hour.
     """
     frame = pd.read_csv(path)
     frame = frame.drop(columns=[c for c in frame.columns if str(c).startswith("Unnamed")])
@@ -213,7 +226,7 @@ def _season_slices(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
 def _elevation(frame: pd.DataFrame) -> np.ndarray:
     """Solar elevation in degrees for every row, for the daylight gates."""
-    elevation: np.ndarray = solar_elevation(_times(frame), SITE, UTC_OFFSET_HOURS)
+    elevation: np.ndarray = solar_elevation_deg(_times(frame), SITE, UTC_OFFSET_HOURS)
     return elevation
 
 

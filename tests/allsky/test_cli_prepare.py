@@ -16,6 +16,7 @@ from allsky.bundle import validate_bundle
 from allsky.cli import app
 from allsky.config import SiteConfig
 from allsky.data.manifest import build_manifest, write_manifest_parquet
+from tests.allsky._archive_fake import write_overlay_video
 
 runner = CliRunner()
 
@@ -27,17 +28,28 @@ def _write_config(
     video_pattern: str,
     dat_path: Path,
     seed: int = 42,
+    val_fraction: float = 0.2,
+    test_fraction: float = 0.1,
 ) -> Path:
-    """Write a PrepareConfig YAML for the CLI."""
+    """Write a PrepareConfig YAML for the CLI.
+
+    The synthetic fixture video is 64 px wide and carries no burned-in stamp, so
+    these runs ask for the modelled frame->time mapping; the overlay default is
+    exercised by ``test_prepare_local_timestamps_frames_from_the_overlay``.
+    """
     path.write_text(
         "video:\n"
         f"  pattern: '{video_pattern}'\n"
+        "  timestamps: 'modelled'\n"
         "sensor:\n"
         f"  paths: ['{dat_path}']\n"
         "output:\n"
         f"  dataset_dir: '{dataset_dir}'\n"
         "splits:\n"
-        f"  seed: {seed}\n",
+        f"  seed: {seed}\n"
+        f"  val_fraction: {val_fraction}\n"
+        f"  test_fraction: {test_fraction}\n"
+        "  gap_days: 0\n",
         encoding="utf-8",
     )
     return path
@@ -177,6 +189,78 @@ class TestPrepareLocal:
         assert "videos found:   1" in result.output
         assert not dataset_dir.exists()
 
+    def test_prepare_local_timestamps_frames_from_the_overlay(
+        self, tmp_path: Path, synthetic_dat: Path
+    ):
+        videos = tmp_path / "videos"
+        videos.mkdir()
+        stamps = [f"2026010106{minute:02d}30" for minute in range(4)]
+        write_overlay_video(videos / "allsky-20260101.mp4", stamps)
+        dataset_dir = tmp_path / "dataset"
+        config = tmp_path / "overlay.yaml"
+        config.write_text(
+            "video:\n"
+            f"  pattern: '{videos}/allsky-*.mp4'\n"
+            "sensor:\n"
+            f"  paths: ['{synthetic_dat}']\n"
+            "output:\n"
+            f"  dataset_dir: '{dataset_dir}'\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            app,
+            ["prepare-local", "--config", str(config), "--steps", "extract-frames,build-manifest"],
+        )
+        assert result.exit_code == 0, result.output
+
+        frames = pd.read_parquet(dataset_dir / "frames" / "allsky-20260101" / "manifest.parquet")
+        read_back = sorted(str(value) for value in frames["timestamp"])
+        assert read_back == [
+            "2026-01-01 06:00:30",
+            "2026-01-01 06:01:30",
+            "2026-01-01 06:02:30",
+            "2026-01-01 06:03:30",
+        ]
+
+    def test_a_video_whose_clock_steps_backwards_is_skipped_not_fatal(
+        self, tmp_path: Path, synthetic_dat: Path
+    ):
+        videos = tmp_path / "videos"
+        videos.mkdir()
+        write_overlay_video(
+            videos / "allsky-20260101.mp4",
+            [f"2026010106{minute:02d}30" for minute in range(4)],
+        )
+        # 06:02:30 lands before 06:03:30, exactly as the 2026-06-04 archive video
+        # steps its clock back 7 s partway through the night.
+        write_overlay_video(
+            videos / "allsky-20260102.mp4",
+            ["20260102060030", "20260102060130", "20260102060330", "20260102060230"],
+        )
+        dataset_dir = tmp_path / "dataset"
+        config = tmp_path / "overlay.yaml"
+        config.write_text(
+            "video:\n"
+            f"  pattern: '{videos}/allsky-*.mp4'\n"
+            "sensor:\n"
+            f"  paths: ['{synthetic_dat}']\n"
+            "output:\n"
+            f"  dataset_dir: '{dataset_dir}'\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            app,
+            ["prepare-local", "--config", str(config), "--steps", "extract-frames"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "skipping allsky-20260102" in result.output
+        assert "go backwards" in result.output
+        assert "1 video(s) could not be timestamped" in result.output
+        assert (dataset_dir / "frames" / "allsky-20260101" / "manifest.parquet").exists()
+        assert not (dataset_dir / "frames" / "allsky-20260102" / "manifest.parquet").exists()
+
     def test_full_run_builds_manifest(
         self, tmp_path: Path, synthetic_video: Path, synthetic_dat: Path
     ):
@@ -255,7 +339,7 @@ class TestSplitsGuard:
         # Multi-day manifest so a day split is feasible.
         _write_manifest(
             dataset_dir,
-            ["2025-03-21 12:00", "2025-03-22 12:00", "2025-03-23 12:00"],
+            [f"2025-03-{day} 12:00" for day in range(21, 27)],
             create_files=True,
         )
         config = _write_config(
@@ -269,13 +353,15 @@ class TestSplitsGuard:
         assert first.exit_code == 0, first.output
         assert (dataset_dir / "splits.json").exists()
 
-        # A different seed -> different split_id -> guarded.
+        # Different fractions -> different assignment -> guarded. The seed cannot
+        # serve here: a chronological split ignores it by construction.
         config2 = _write_config(
             tmp_path / "c2.yaml",
             dataset_dir=dataset_dir,
             video_pattern="none-*.mp4",
             dat_path=tmp_path / "x.dat",
-            seed=99,
+            val_fraction=0.4,
+            test_fraction=0.2,
         )
         guarded = runner.invoke(
             app, ["prepare-local", "--config", str(config2), "--steps", "splits"]

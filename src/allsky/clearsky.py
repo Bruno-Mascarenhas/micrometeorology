@@ -29,15 +29,17 @@ import numpy as np
 import pandas as pd
 
 from allsky.config import SiteConfig
-from allsky.solar import cos_zenith, solar_elevation
+from allsky.solar import cos_zenith, solar_elevation_deg
 
 type DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
+type ArrayLike = Sequence[float] | np.ndarray | pd.Series
 
 __all__ = [
     "HAURWITZ_A_WM2",
     "HAURWITZ_B",
     "clear_sky_index",
     "haurwitz_ghi",
+    "haurwitz_ghi_from_cos_zenith",
 ]
 
 #: Amplitude coefficient of the Haurwitz clear-sky model, W m-2.
@@ -62,12 +64,18 @@ def haurwitz_ghi(
     Parameters
     ----------
     timestamps:
-        Naive local clock times.
+        Naive local clock times, ``(N,)``.
     site:
         Observation site (latitude/longitude in degrees).
     utc_offset_hours:
         UTC offset of the local clock; inferred from ``site.longitude`` when
         None.
+
+    Returns
+    -------
+    numpy.ndarray
+        Clear-sky global horizontal irradiance, shape ``(N,)``,
+        ``float64``, W m-2, exactly zero at night.
 
     Limitation
     ----------
@@ -77,7 +85,25 @@ def haurwitz_ghi(
     normalization reference for ``k*``, where that bias largely cancels, not
     as an absolute irradiance predictor.
     """
-    cosz = np.asarray(cos_zenith(timestamps, site, utc_offset_hours), dtype=np.float64)
+    return haurwitz_ghi_from_cos_zenith(cos_zenith(timestamps, site, utc_offset_hours))
+
+
+def haurwitz_ghi_from_cos_zenith(cos_zenith_values: ArrayLike) -> np.ndarray:
+    """Haurwitz clear-sky GHI from the cosine of the solar zenith angle.
+
+    Parameters
+    ----------
+    cos_zenith_values:
+        Cosine of the solar zenith angle, shape ``(N,)``, dimensionless.
+        Non-positive entries mean the sun is below the horizon.
+
+    Returns
+    -------
+    numpy.ndarray
+        Clear-sky global horizontal irradiance, shape ``(N,)``, W m-2, zero
+        wherever the sun is down.
+    """
+    cosz = np.asarray(cos_zenith_values, dtype=np.float64)
     sun_up = cosz > 0.0
     # Clamp the below-horizon cosines to 1.0 before dividing so the exp never
     # sees 0 or a negative argument; the result is masked back to 0 anyway.
@@ -106,10 +132,10 @@ def clear_sky_index(
     Parameters
     ----------
     ghi:
-        Measured global horizontal irradiance, W m-2, aligned 1:1 with
-        *timestamps*.
+        Measured global horizontal irradiance, shape ``(N,)``, W m-2,
+        aligned 1:1 with *timestamps*.
     timestamps:
-        Naive local clock times.
+        Naive local clock times, ``(N,)``.
     site:
         Observation site (latitude/longitude in degrees).
     min_elevation_deg:
@@ -118,6 +144,17 @@ def clear_sky_index(
     utc_offset_hours:
         UTC offset of the local clock; inferred from ``site.longitude`` when
         None.
+
+    Returns
+    -------
+    numpy.ndarray
+        Clear-sky index, shape ``(N,)``, ``float64``, dimensionless, NaN
+        wherever the sun is too low or the GHI is missing.
+
+    Raises
+    ------
+    ValueError
+        If *ghi* and *timestamps* have different lengths.
 
     Limitation
     ----------
@@ -128,7 +165,7 @@ def clear_sky_index(
     ghi_cs = haurwitz_ghi(timestamps, site, utc_offset_hours)
     if ghi_arr.shape != ghi_cs.shape:
         raise ValueError(f"ghi shape {ghi_arr.shape} does not match {ghi_cs.shape} timestamps")
-    elevation = solar_elevation(timestamps, site, utc_offset_hours)
+    elevation = solar_elevation_deg(timestamps, site, utc_offset_hours)
     valid = (elevation >= min_elevation_deg) & (ghi_cs > 0.0) & np.isfinite(ghi_arr)
     kstar = np.full_like(ghi_arr, np.nan)
     np.divide(ghi_arr, ghi_cs, out=kstar, where=valid)

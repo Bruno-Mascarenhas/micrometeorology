@@ -76,6 +76,24 @@ def save_shard(path: str | Path, embeddings: np.ndarray) -> Path:
     The array is cast to ``float16`` and stored contiguously under
     :data:`EMBEDDINGS_TENSOR_KEY`.  A partially written shard is impossible: the
     file appears in place only after a successful ``os.replace``.
+
+    Parameters
+    ----------
+    path:
+        Destination shard file (``embeddings-{i:05d}.safetensors``).
+    embeddings:
+        Shape ``(N, dim)`` array of dimensionless embedding components; any
+        float dtype is accepted and cast to ``float16`` for storage.
+
+    Returns
+    -------
+    pathlib.Path
+        *path*, once the shard is in place.
+
+    Raises
+    ------
+    ValueError
+        If *embeddings* is not 2-D.
     """
     from safetensors.numpy import save_file
 
@@ -275,9 +293,6 @@ class SafetensorsEmbeddingReader:
         #: True when all shards are resident in ``self._preloaded_embeddings``.
         self.preloaded = False
         self._preloaded_embeddings: np.ndarray | None = None
-        # The shared-memory torch tensor `_preloaded_embeddings` is a view of,
-        # when preloading succeeded in shared memory. It is what crosses the
-        # process boundary (as a handle); the view itself never does.
         self._shared_store: Any | None = None
         self._preloaded_row_by_sample_id: dict[str, int] = {}
         if preload:

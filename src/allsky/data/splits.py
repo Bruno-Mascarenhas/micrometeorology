@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -37,6 +37,17 @@ __all__ = [
 ]
 
 SPLIT_NAMES = ("train", "val", "test")
+
+#: How the day-level partition is drawn.  ``chronological`` puts the earliest
+#: days in train and the latest in test, separated by :data:`DEFAULT_GAP_DAYS`
+#: dropped days; ``random`` interleaves them, which is only defensible for
+#: instantaneous estimation and never for forecasting.
+SplitStrategy = Literal["chronological", "random"]
+
+#: Days discarded between consecutive splits so no training day sits within a
+#: day of an evaluation day. Sky state is strongly autocorrelated across a
+#: midnight boundary, so adjacent days are close to duplicates.
+DEFAULT_GAP_DAYS = 1
 
 
 class SplitExistsError(FileExistsError):
@@ -56,6 +67,11 @@ class DaySplit:
         and folded into :attr:`split_id`).
     created_at:
         ISO-8601 UTC creation timestamp (excluded from :attr:`split_id`).
+    strategy:
+        How the partition was drawn (see :data:`SplitStrategy`).
+    gap_days:
+        Days dropped at each chronological boundary; ``0`` for a random
+        partition, which has no boundary to guard.
     """
 
     assignment: dict[str, str]
@@ -63,20 +79,41 @@ class DaySplit:
     val_fraction: float
     test_fraction: float
     created_at: str
+    strategy: SplitStrategy = "chronological"
+    gap_days: int = DEFAULT_GAP_DAYS
 
     @property
     def split_id(self) -> str:
         """Content hash over the assignment + params (creation time excluded)."""
-        return _split_id(self.assignment, self.seed, self.val_fraction, self.test_fraction)
+        return _split_id(
+            self.assignment,
+            self.seed,
+            self.val_fraction,
+            self.test_fraction,
+            self.strategy,
+            self.gap_days,
+        )
 
     def days_for(self, split: str) -> list[str]:
-        """Sorted ``day_id`` list assigned to *split*."""
+        """Sorted ``day_id`` list assigned to *split*.
+
+        Raises
+        ------
+        ValueError
+            If *split* is not one of :data:`SPLIT_NAMES`.
+        """
         if split not in SPLIT_NAMES:
             raise ValueError(f"unknown split {split!r}; expected one of {SPLIT_NAMES}")
         return sorted(day for day, name in self.assignment.items() if name == split)
 
     def check_leakage(self) -> None:
-        """Assert the three split day-sets are pairwise disjoint (self-check)."""
+        """Assert the three split day-sets are pairwise disjoint (self-check).
+
+        Raises
+        ------
+        ValueError
+            Naming every day that landed in more than one split.
+        """
         check_split_leakage(self.days_for("train"), self.days_for("val"), self.days_for("test"))
 
     def to_dict(self) -> dict[str, Any]:
@@ -87,6 +124,8 @@ class DaySplit:
             "seed": self.seed,
             "val_fraction": self.val_fraction,
             "test_fraction": self.test_fraction,
+            "strategy": self.strategy,
+            "gap_days": self.gap_days,
             "created_at": self.created_at,
             "assignment": dict(sorted(self.assignment.items())),
             "counts": {name: len(self.days_for(name)) for name in SPLIT_NAMES},
@@ -94,7 +133,18 @@ class DaySplit:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> DaySplit:
-        """Inverse of :meth:`to_dict`; verifies the stored ``split_id``."""
+        """Inverse of :meth:`to_dict`; verifies the stored ``split_id``.
+
+        Raises
+        ------
+        KeyError
+            If *payload* is missing a required key.
+        ValueError
+            If the stored ``split_id`` disagrees with the one recomputed from
+            the assignment (a corrupt artifact), if the strategy name is one
+            this build does not implement, or if the assignment leaks a day
+            across splits.
+        """
         assignment = {str(k): str(v) for k, v in payload["assignment"].items()}
         split = cls(
             assignment=assignment,
@@ -102,6 +152,8 @@ class DaySplit:
             val_fraction=float(payload["val_fraction"]),
             test_fraction=float(payload["test_fraction"]),
             created_at=str(payload.get("created_at", "")),
+            strategy=_split_strategy(payload["strategy"]),
+            gap_days=int(payload["gap_days"]),
         )
         stored = payload.get("split_id")
         if stored is not None and stored != split.split_id:
@@ -118,24 +170,54 @@ def create_day_splits(
     val_fraction: float = 0.2,
     test_fraction: float = 0.1,
     seed: int = 42,
+    *,
+    strategy: SplitStrategy = "chronological",
+    gap_days: int = DEFAULT_GAP_DAYS,
 ) -> DaySplit:
     """Deterministically partition unique *day_ids* into train/val/test.
 
-    Days are de-duplicated, sorted, then shuffled with a seeded RNG.  Sizes are
-    ``floor(n * fraction)`` for test then val, but each non-zero fraction is
-    guaranteed at least one day when the day count allows; the remainder is
-    train.  Deterministic in ``(sorted unique day_ids, fractions, seed)``.
+    Days are de-duplicated and sorted. Sizes are ``floor(n * fraction)`` for test
+    then val, but each non-zero fraction is guaranteed at least one day when the
+    day count allows; the remainder is train.
+
+    Parameters
+    ----------
+    day_ids:
+        Local calendar days (``YYYY-MM-DD``); duplicates are collapsed.
+    val_fraction, test_fraction:
+        Share of days for validation and test; each in ``[0, 1)`` and summing
+        below 1.
+    seed:
+        Seed for ``strategy="random"``. Recorded either way so the artifact
+        describes what produced it.
+    strategy:
+        ``"chronological"`` (default) assigns the earliest days to train and the
+        latest to test, so no evaluation day precedes a training day.
+        ``"random"`` interleaves them: legitimate for estimating a quantity from
+        a simultaneous image, indefensible for forecasting, and never the
+        default because that error is invisible in the metrics.
+    gap_days:
+        Days dropped from every split at each chronological boundary. Ignored by
+        ``strategy="random"``, where no boundary exists to guard.
+
+    Returns
+    -------
+    DaySplit
+        The partition, its parameters and a content-addressed ``split_id``.
 
     Raises
     ------
     ValueError
-        If a fraction is out of ``[0, 1)``, their sum is >= 1, there are no
-        days, or there are too few days to honour the requested non-zero splits.
+        If a fraction is out of ``[0, 1)``, their sum is >= 1, *gap_days* is
+        negative, there are no days, or there are too few days to honour the
+        requested non-zero splits (the gap consumes days too).
     """
     if not 0.0 <= val_fraction < 1.0:
         raise ValueError(f"val_fraction must be in [0, 1), got {val_fraction}")
     if not 0.0 <= test_fraction < 1.0:
         raise ValueError(f"test_fraction must be in [0, 1), got {test_fraction}")
+    if gap_days < 0:
+        raise ValueError(f"gap_days must be >= 0, got {gap_days}")
     if val_fraction + test_fraction >= 1.0:
         raise ValueError(
             f"val_fraction + test_fraction must be < 1, got {val_fraction + test_fraction}"
@@ -154,13 +236,16 @@ def create_day_splits(
             f"test_fraction={test_fraction}: no days left for train"
         )
 
-    rng = np.random.default_rng(seed)
-    order = rng.permutation(n)
-    shuffled = [unique_days[i] for i in order]
-
-    test_days = shuffled[:n_test]
-    val_days = shuffled[n_test : n_test + n_val]
-    train_days = shuffled[n_test + n_val :]
+    if strategy == "random":
+        rng = np.random.default_rng(seed)
+        shuffled = [unique_days[i] for i in rng.permutation(n)]
+        test_days = shuffled[:n_test]
+        val_days = shuffled[n_test : n_test + n_val]
+        train_days = shuffled[n_test + n_val :]
+    else:
+        train_days, val_days, test_days = _chronological_blocks(
+            unique_days, n_val=n_val, n_test=n_test, gap_days=gap_days
+        )
 
     assignment: dict[str, str] = {}
     for day in train_days:
@@ -176,6 +261,8 @@ def create_day_splits(
         val_fraction=val_fraction,
         test_fraction=test_fraction,
         created_at=datetime.now(UTC).isoformat(),
+        strategy=strategy,
+        gap_days=gap_days if strategy == "chronological" else 0,
     )
     split.check_leakage()
     return split
@@ -184,11 +271,28 @@ def create_day_splits(
 def save_split_artifact(split: DaySplit, path: str | Path, *, force: bool = False) -> Path:
     """Atomically write *split* to *path* as JSON; guard against silent regeneration.
 
-    If *path* already holds a split with a **different** ``split_id`` and
-    *force* is False, :class:`SplitExistsError` is raised.  An identical
-    existing split is left untouched (idempotent).
+    An identical existing split is left untouched (idempotent), so re-running a
+    pipeline never rewrites the artifact a checkpoint was trained against.
 
-    Returns the artifact path.
+    Parameters
+    ----------
+    split:
+        The partition to persist, serialized with :meth:`DaySplit.to_dict`.
+    path:
+        Destination JSON path.
+    force:
+        Overwrite an existing artifact whose ``split_id`` differs.
+
+    Returns
+    -------
+    pathlib.Path
+        The artifact path.
+
+    Raises
+    ------
+    SplitExistsError
+        If *path* already holds a split with a **different** ``split_id`` and
+        *force* is False.
     """
     out = Path(path)
     if out.exists() and not force:
@@ -209,7 +313,13 @@ def save_split_artifact(split: DaySplit, path: str | Path, *, force: bool = Fals
 
 
 def load_split_artifact(path: str | Path) -> DaySplit:
-    """Load and verify a split artifact (checks ``split_id`` and leakage)."""
+    """Load and verify a split artifact (checks ``split_id`` and leakage).
+
+    Raises
+    ------
+    ValueError
+        For any of the corruption modes listed on :meth:`DaySplit.from_dict`.
+    """
     with open(path, encoding="utf-8") as handle:
         payload = json.load(handle)
     return DaySplit.from_dict(payload)
@@ -236,11 +346,6 @@ def check_split_leakage(
         raise ValueError(f"day-level split leakage detected: {leaked}")
 
 
-# ---------------------------------------------------------------------------
-# internals
-# ---------------------------------------------------------------------------
-
-
 def _split_size(n: int, fraction: float) -> int:
     """Day count for a fraction: ``floor(n*fraction)``, >= 1 when fraction > 0."""
     if fraction <= 0.0:
@@ -248,8 +353,45 @@ def _split_size(n: int, fraction: float) -> int:
     return max(1, int(np.floor(n * fraction)))
 
 
+def _split_strategy(value: Any) -> SplitStrategy:
+    """Read a strategy name off an artifact, refusing one this build cannot honour."""
+    name = str(value)
+    if name not in ("chronological", "random"):
+        raise ValueError(
+            f"split artifact declares strategy {name!r}, which this build does not implement"
+        )
+    return "chronological" if name == "chronological" else "random"
+
+
+def _chronological_blocks(
+    days: list[str], *, n_val: int, n_test: int, gap_days: int
+) -> tuple[list[str], list[str], list[str]]:
+    """Cut sorted *days* into train | gap | val | gap | test, oldest first.
+
+    The gap days belong to no split: dropping them is what stops the last
+    training day and the first validation day from being consecutive, which for
+    a sky record makes them near-duplicates of each other.
+    """
+    needed = n_val + n_test + (2 * gap_days if n_val and n_test else gap_days)
+    if needed >= len(days):
+        raise ValueError(
+            f"{len(days)} day(s) cannot carry val={n_val}, test={n_test} and "
+            f"gap_days={gap_days}: no days left for train"
+        )
+    test_days = days[len(days) - n_test :] if n_test else []
+    remaining = days[: len(days) - n_test - (gap_days if n_test else 0)]
+    val_days = remaining[len(remaining) - n_val :] if n_val else []
+    train_days = remaining[: len(remaining) - n_val - (gap_days if n_val else 0)]
+    return train_days, val_days, test_days
+
+
 def _split_id(
-    assignment: dict[str, str], seed: int, val_fraction: float, test_fraction: float
+    assignment: dict[str, str],
+    seed: int,
+    val_fraction: float,
+    test_fraction: float,
+    strategy: str,
+    gap_days: int,
 ) -> str:
     """sha256 over the canonical (sorted) assignment and split parameters."""
     canonical = json.dumps(
@@ -258,6 +400,8 @@ def _split_id(
             "seed": seed,
             "val_fraction": val_fraction,
             "test_fraction": test_fraction,
+            "strategy": strategy,
+            "gap_days": gap_days,
         },
         sort_keys=True,
         separators=(",", ":"),

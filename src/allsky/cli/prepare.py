@@ -136,11 +136,6 @@ def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]
     return digest.hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# validate-dataset
-# ---------------------------------------------------------------------------
-
-
 def validate_dataset(
     config: ConfigOption = None,
     manifest: Annotated[
@@ -161,7 +156,18 @@ def validate_dataset(
         ),
     ] = False,
 ) -> None:
-    """Validate a prepared manifest; exit 1 on errors (or on warnings if --strict)."""
+    """Validate a prepared manifest; exit 1 on errors (or on warnings if --strict).
+
+    The split artifact next to the manifest is validated together with it when
+    present, and the ``.meta.json`` sidecar supplies the provenance the checks
+    compare against (its absence is a warning, not a failure).
+
+    Raises
+    ------
+    typer.Exit
+        Code 1 when the manifest is absent or the report holds errors (or, under
+        ``--strict``, warnings).
+    """
     _configure_logging()
     cfg = _load_prepare(config)
 
@@ -215,11 +221,6 @@ def validate_dataset(
     typer.echo("OK")
 
 
-# ---------------------------------------------------------------------------
-# prepare-local
-# ---------------------------------------------------------------------------
-
-
 def prepare_local(
     config: ConfigOption = None,
     steps: Annotated[
@@ -234,7 +235,20 @@ def prepare_local(
         typer.Option("--force", help="Re-extract, rebuild and regenerate regardless of state."),
     ] = False,
 ) -> None:
-    """Prepare a local dataset: extract frames, build the manifest and day splits."""
+    """Prepare a local dataset: extract frames, build the manifest and day splits.
+
+    Each step resumes on the artifacts already on disk unless ``--force`` is
+    given: a video whose frame manifest is complete is not re-extracted, and the
+    manifest is rebuilt only when the inputs it is derived from changed (see
+    :func:`_manifest_inputs_sha256`).
+
+    Raises
+    ------
+    typer.Exit
+        Code 1 on an unknown ``--steps`` name, on a sensor record that cannot be
+        paired with any video day, when ``build-manifest`` runs with no extracted
+        frames, or when the split artifact already exists for a different day set.
+    """
     _configure_logging()
     cfg = _load_prepare(config)
 
@@ -264,6 +278,9 @@ def prepare_local(
     if not videos:
         typer.echo(f"WARNING: no videos matched pattern {cfg.video.pattern!r}")
 
+    if videos and "build-manifest" in step_set:
+        _check_sensor_coverage(cfg, videos)
+
     per_video = _run_extract_step(
         cfg=cfg,
         videos=videos,
@@ -291,11 +308,6 @@ def prepare_local(
             split_path=split_path,
             force=force,
         )
-
-
-# ---------------------------------------------------------------------------
-# export-colab-bundle
-# ---------------------------------------------------------------------------
 
 
 def export_colab_bundle_cmd(
@@ -332,11 +344,6 @@ def export_colab_bundle_cmd(
         include_frames=include_frames,
     )
     typer.echo(json.dumps(summary, indent=2, default=str))
-
-
-# ---------------------------------------------------------------------------
-# step helpers
-# ---------------------------------------------------------------------------
 
 
 def _parse_steps(steps: str) -> set[str]:
@@ -392,8 +399,22 @@ def _run_extract_step(
     inside that pass leaves a manifest without the ``qc_frame_flags`` column
     (every FRAME_DARK / FRAME_SATURATED bit silently lost) and an interrupted
     write leaves one that cannot be read at all.  Both are re-extracted.
+
+    A video whose own timestamps are unusable is skipped, not fatal, and every
+    skip is named again on the next run.  The overlay reader refuses a day it
+    cannot timestamp — the 2026-06-04 archive video steps its clock 7 s backwards
+    at frame 851 — and that refusal is right, but it describes ONE day: letting
+    it end the loop threw away the other 95 days of a two-hour extraction, and
+    would have stopped the daily job in ``docs/allsky-archive.md`` permanently.
+    A skipped day contributes no manifest rows, which is what a night-only day
+    already does.  The exit code stays zero for the same reason: the fault is a
+    permanent property of that day's bytes, so a run that failed on it will fail
+    on it forever, and an exit code that can never go green signals nothing.
     """
+    from allsky.overlay import OverlayTimestampError
+
     per_video: list[PandasDataFrame] = []
+    unusable: list[str] = []
     for video in videos:
         stem = Path(video).stem
         video_dir = frames_root / stem
@@ -426,10 +447,20 @@ def _run_extract_step(
                 f"resume: frame manifest for {stem} is unreadable or predates visual QC, "
                 "re-extracting"
             )
-        frame_manifest = _extract_and_qc(video, video_dir, cfg)
+        try:
+            frame_manifest = _extract_and_qc(video, video_dir, cfg)
+        except OverlayTimestampError as exc:
+            unusable.append(stem)
+            typer.echo(f"WARNING: skipping {stem}: {exc}")
+            continue
         _write_frame_manifest(video_manifest, frame_manifest)
         per_video.append(frame_manifest)
         typer.echo(f"extract-frames: {len(frame_manifest)} frames from {stem} -> {video_dir}")
+    if unusable:
+        typer.echo(
+            f"WARNING: {len(unusable)} video(s) could not be timestamped and contribute no "
+            f"rows: {', '.join(unusable)}"
+        )
     return per_video
 
 
@@ -458,6 +489,78 @@ def _write_frame_manifest(video_manifest: Path, frame_manifest: PandasDataFrame)
     atomic_write(video_manifest, lambda tmp: frame_manifest.to_parquet(tmp, index=False))
 
 
+def _video_day(path: str, cfg: PrepareConfig) -> Any:
+    from allsky.video import video_date
+
+    return video_date(path, cfg.video)
+
+
+def _check_sensor_coverage(cfg: PrepareConfig, videos: list[str]) -> None:
+    """Fail before extraction when the logger cannot pair with the videos on hand.
+
+    Extraction and visual QC run for minutes per video and every frame is then
+    discarded by the pairing step, so a coverage gap has to surface here rather
+    than as an empty manifest an hour later.
+    """
+    import datetime as dt
+
+    import pandas as pd
+
+    sensor_df = _load_sensor_df(cfg)
+    if sensor_df.empty:
+        typer.echo(f"ERROR: no sensor records read from {cfg.sensor.paths}")
+        raise typer.Exit(code=1)
+
+    index = pd.DatetimeIndex(sensor_df.index)
+    sensor_start, sensor_end = index.min(), index.max()
+    days = sorted({_video_day(video, cfg) for video in videos})
+    covered = [
+        day
+        for day in days
+        if sensor_start.date() <= day + dt.timedelta(days=1) and day <= sensor_end.date()
+    ]
+
+    typer.echo(
+        f"sensor coverage: {sensor_start:%Y-%m-%d %H:%M} .. {sensor_end:%Y-%m-%d %H:%M} "
+        f"({len(index)} records)"
+    )
+    typer.echo(f"video days:      {days[0]} .. {days[-1]} ({len(days)} videos)")
+
+    if not covered:
+        typer.echo(
+            "ERROR: the sensor record and the videos do not overlap, so no frame could ever "
+            "be paired with a measurement.\n"
+            f"  sensor ends   {sensor_end:%Y-%m-%d %H:%M}\n"
+            f"  videos start  {days[0]}\n"
+            "Export the logger up to the video dates (or narrow video.pattern to the days the "
+            "logger covers) before preparing."
+        )
+        raise typer.Exit(code=1)
+    if len(covered) < len(days):
+        typer.echo(
+            f"WARNING: only {len(covered)} of {len(days)} video days fall inside the sensor "
+            f"record ({covered[0]} .. {covered[-1]}); the rest will contribute no rows"
+        )
+
+
+def _extract_frames_for(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDataFrame:
+    """Extract every frame, timestamped per ``cfg.video.timestamps``."""
+    if cfg.video.timestamps == "overlay":
+        from allsky.overlay import extract_frames_with_overlay_timestamps
+
+        return extract_frames_with_overlay_timestamps(video, video_dir, step=1, resize=None)
+
+    from allsky.video import extract_frames
+
+    logger.warning(
+        "video.timestamps is 'modelled': frame N is placed at %s + N x %s min, a cadence this "
+        "camera does not follow (see docs/allsky-archive.md)",
+        cfg.video.start_time,
+        cfg.video.minutes_per_frame,
+    )
+    return extract_frames(video, video_dir, cfg.video, step=1, resize=None)
+
+
 def _extract_and_qc(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDataFrame:
     """Extract native frames then read them back for visual QC + preprocessing.
 
@@ -473,9 +576,9 @@ def _extract_and_qc(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDa
     import pandas as pd
 
     from allsky.preprocessing import _needs_preprocessing, process_frame, resolve_mask, visual_qc
-    from allsky.video import JPEG_QUALITY, extract_frames
+    from allsky.video import JPEG_QUALITY
 
-    frame_manifest = extract_frames(video, video_dir, cfg.video, step=1, resize=None)
+    frame_manifest = _extract_frames_for(video, video_dir, cfg)
     needs = _needs_preprocessing(cfg)
     mask = resolve_mask(cfg) if needs else None
 
@@ -490,7 +593,14 @@ def _extract_and_qc(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDa
             iio.imwrite(frame_path, process_frame(image, cfg, mask=mask), quality=JPEG_QUALITY)
 
     result = frame_manifest.copy()
-    result["qc_frame_flags"] = pd.array(qc_flags, dtype="int64")
+    existing = (
+        result["qc_frame_flags"].to_numpy(dtype="int64")
+        if "qc_frame_flags" in result.columns
+        else np.zeros(len(result), dtype="int64")
+    )
+    result["qc_frame_flags"] = pd.array(
+        existing | np.asarray(qc_flags, dtype="int64"), dtype="int64"
+    )
     return result
 
 
@@ -606,7 +716,12 @@ def _run_splits_step(
     day_ids = manifest_df["day_id"].astype(str).tolist()
     try:
         split = create_day_splits(
-            day_ids, cfg.splits.val_fraction, cfg.splits.test_fraction, cfg.splits.seed
+            day_ids,
+            cfg.splits.val_fraction,
+            cfg.splits.test_fraction,
+            cfg.splits.seed,
+            strategy=cfg.splits.strategy,
+            gap_days=cfg.splits.gap_days,
         )
     except ValueError as exc:
         typer.echo(f"ERROR: cannot create splits: {exc}")

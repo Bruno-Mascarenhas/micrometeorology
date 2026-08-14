@@ -9,8 +9,12 @@ from allsky.data.contracts import (
     GEOMETRY_COLUMNS,
     META_COLUMNS,
     PROVENANCE_COLUMNS,
+    SKY_CLASS_COUNT,
+    SKY_CLASS_KT_UPPER_BOUNDS,
     SKY_CLASS_MISSING,
     SKY_CLASS_NAMES,
+    SKY_CLASS_NAMES_PT,
+    SKY_CLASS_REFERENCE,
     SKY_CLASS_VALUES,
     TARGET_COLUMNS,
     QCFlag,
@@ -99,20 +103,37 @@ class TestQCFlag:
 
 
 class TestSkyClasses:
-    def test_names_and_values(self):
-        assert SKY_CLASS_VALUES == (0, 1, 2)
-        assert SKY_CLASS_NAMES == ("clear", "partially_cloudy", "overcast")
+    def test_the_four_published_conditions_are_ordered_by_increasing_clearness(self):
+        assert SKY_CLASS_VALUES == (0, 1, 2, 3)
+        assert SKY_CLASS_NAMES == (
+            "cloudy",
+            "partly_cloudy_diffuse",
+            "partly_cloudy_clear",
+            "clear",
+        )
+        assert SKY_CLASS_COUNT == 4
         assert SKY_CLASS_MISSING == -1
 
+    def test_the_kt_bounds_are_the_published_ones(self):
+        assert SKY_CLASS_KT_UPPER_BOUNDS == (0.35, 0.55, 0.65)
+
+    def test_every_class_carries_a_portuguese_name_from_the_reference(self):
+        assert len(SKY_CLASS_NAMES_PT) == SKY_CLASS_COUNT
+        assert SKY_CLASS_NAMES_PT[0] == "nebuloso"
+        assert SKY_CLASS_NAMES_PT[-1] == "claro"
+        assert "Escobedo" in SKY_CLASS_REFERENCE
+        assert "Teramoto" in SKY_CLASS_REFERENCE
+
     def test_sky_class_name_lookup(self):
-        assert sky_class_name(0) == "clear"
-        assert sky_class_name(1) == "partially_cloudy"
-        assert sky_class_name(2) == "overcast"
+        assert sky_class_name(0) == "cloudy"
+        assert sky_class_name(1) == "partly_cloudy_diffuse"
+        assert sky_class_name(2) == "partly_cloudy_clear"
+        assert sky_class_name(3) == "clear"
         assert sky_class_name(-1) == "missing"
 
     def test_sky_class_name_invalid_raises(self):
         with pytest.raises(ValueError, match="invalid sky_class"):
-            sky_class_name(3)
+            sky_class_name(4)
 
 
 class TestPortablePaths:

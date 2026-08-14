@@ -24,9 +24,21 @@ def find_nearest_indices(
     target_lat: float,
     target_lon: float,
 ) -> tuple[int, int]:
-    """Find the (row, col) indices of the nearest grid point.
+    """Find the (row, col) indices of the grid point nearest a target coordinate.
 
-    Uses Euclidean distance on the lat/lon arrays.
+    Parameters
+    ----------
+    lat_grid, lon_grid:
+        ``(ny, nx)`` cell-centre coordinates in degrees north and degrees east,
+        as :meth:`~micrometeorology.wrf.reader.WRFDataset.read_grid` returns them.
+    target_lat, target_lon:
+        Target coordinate in the same degrees.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(row, col)`` of the cell minimizing Euclidean distance in degree
+        space, not great-circle distance.
     """
     dist = np.hypot(lat_grid - target_lat, lon_grid - target_lon)
     idx = np.unravel_index(np.argmin(dist), dist.shape)
@@ -46,7 +58,7 @@ def extract_point_series(
     files:
         Sorted list of NetCDF file paths.
     target_lat, target_lon:
-        Coordinates of the target point.
+        Coordinates of the target point, degrees north and degrees east.
     variables:
         List of NetCDF variable names to extract.  If ``None``, a default
         set of surface variables is used.
@@ -54,7 +66,11 @@ def extract_point_series(
     Returns
     -------
     pd.DataFrame
-        DataFrame indexed by time, with one column per variable.
+        Indexed by time, one column per variable found, each in the wrfout's own
+        unit (no conversion is applied here). Steps whose ``Times`` stamp cannot
+        be parsed are dropped rather than carried as ``NaT``, and a variable that
+        does not reduce to a single time series (unexpected dimensions) is
+        skipped with a warning. Empty when no file yielded a column.
     """
     if variables is None:
         variables = ["T2", "PSFC", "U10", "V10", "Q2", "SWDOWN", "HFX", "LH"]
@@ -116,6 +132,5 @@ def extract_point_series(
 
     df = pd.concat(all_records)
     df.index.name = "time"
-    # ``errors="coerce"`` above turns an unparsable stamp into NaT.
     df = df[df.index.notna()]
     return df.sort_index()

@@ -10,8 +10,22 @@ def add_lag_features(
 ) -> pd.DataFrame:
     """Add lagged versions of specified columns.
 
-    Creates columns named ``{col}_lag_{n}`` for each column and lag value.
-    Columns absent from *df* are skipped.
+    Parameters
+    ----------
+    df:
+        Frame indexed in chronological order; lags are taken along that order.
+    columns:
+        Base columns to lag. Names absent from ``df`` are skipped.
+    lags:
+        Positive step counts. A lag of ``n`` reads the value ``n`` rows back, so
+        only past rows are visible and no future value leaks into a feature.
+
+    Returns
+    -------
+    pd.DataFrame
+        A copy of ``df`` with one ``{col}_lag_{n}`` column per (column, lag)
+        pair, in the units of the source column. The first ``n`` rows of each
+        added column are NaN.
     """
     derived = {}
     for column in columns:
@@ -33,8 +47,28 @@ def add_rolling_features(
 ) -> pd.DataFrame:
     """Add rolling statistics for specified columns.
 
-    Creates columns named ``{col}_roll_{agg}_{window}`` for each combination.
-    Columns absent from *df* are skipped.
+    Parameters
+    ----------
+    df:
+        Frame indexed in chronological order; windows are taken along that order.
+    columns:
+        Base columns to aggregate. Names absent from ``df`` are skipped.
+    windows:
+        Window widths in rows.
+    aggs:
+        ``pandas.core.window.Rolling`` method names; defaults to
+        ``["mean", "std"]``.
+
+    Returns
+    -------
+    pd.DataFrame
+        A copy of ``df`` with one ``{col}_roll_{agg}_{window}`` column per
+        (column, window, agg) combination. The windows are trailing and use
+        ``min_periods=1``, so a partial window at the start of the series is
+        still aggregated (``std`` is the exception: its first row is NaN, having
+        one observation) and every value includes the current row — which is why
+        rolling the target column onto itself is rejected by
+        ``ExperimentConfig.validate``.
     """
     if aggs is None:
         aggs = ["mean", "std"]
@@ -60,8 +94,24 @@ def add_diff_features(
 ) -> pd.DataFrame:
     """Add first-difference features.
 
-    Creates columns named ``{col}_diff_{periods}``; columns absent from *df*
-    are skipped.
+    Parameters
+    ----------
+    df:
+        Frame indexed in chronological order; differences are taken along that
+        order.
+    columns:
+        Base columns to difference. Names absent from ``df`` are skipped.
+    periods:
+        Row distance of the backward difference.
+
+    Returns
+    -------
+    pd.DataFrame
+        A copy of ``df`` with one ``{col}_diff_{periods}`` column per input
+        column, in the units of the source column per ``periods`` rows. The
+        first ``periods`` rows of each added column are NaN, and the difference
+        reads the current row — which is why differencing the target column is
+        rejected by ``ExperimentConfig.validate``.
     """
     derived = {}
     for column in columns:

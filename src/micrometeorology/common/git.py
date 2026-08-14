@@ -56,10 +56,17 @@ def run_git(args: Sequence[str], *, cwd: Path | None = None) -> str | None:
     args:
         Arguments after the executable, e.g. ``["rev-parse", "HEAD"]``.
     cwd:
-        Directory to run in. ``None`` inherits the process working directory.
+        Directory to run in. ``None`` inherits the process working directory,
+        which for a provenance probe is rarely what is wanted -- see
+        :func:`source_root`.
+
+    Returns
+    -------
+    str or None
+        Stripped stdout on success, ``None`` on any failure. An absent git
+        binary (source tarball, container without the client) is the common
+        failure, not the exceptional one.
     """
-    # An absent git (source tarball, container without the client) is the common
-    # case, and yields the same "no commit info" as the exec failure below.
     git_executable = shutil.which("git")
     if git_executable is None:
         return None
@@ -75,9 +82,8 @@ def run_git(args: Sequence[str], *, cwd: Path | None = None) -> str | None:
             text=True,
             timeout=_TIMEOUT_SECONDS,
         )
-    # All three mean "no commit info": a vanished or unexecutable binary, a hung
-    # call, and output that is not valid text -- the last raised while decoding
-    # under ``text=True``, so it never surfaces as a SubprocessError.
+    # UnicodeDecodeError is listed on its own because ``text=True`` raises it
+    # while decoding, outside the SubprocessError hierarchy the other two cover.
     except OSError, subprocess.SubprocessError, UnicodeDecodeError:
         return None
     if result.returncode != 0:

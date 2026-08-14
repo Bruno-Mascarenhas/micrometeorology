@@ -151,7 +151,16 @@ def load_colab_config(
     resume: str | None = None,
     allow_preprocessing_change: bool = False,
 ):
-    """Load config with the same override path used by local CLI."""
+    """Load config with the same override path used by local CLI.
+
+    Exposed separately from the command so a Colab notebook can build the
+    resolved :class:`~solrad_correction.config.ExperimentConfig` and inspect it
+    before committing a GPU session to a run. Every argument mirrors the flag of
+    the same name and every ``None`` leaves the YAML's value in place. ``device``
+    is the exception: it defaults to ``"cuda"``, applying the same Colab-friendly
+    override the command does, so a config written for a local CPU run still
+    reaches the GPU.
+    """
     return load_config_with_overrides(
         config,
         overrides=ExperimentOverrides(

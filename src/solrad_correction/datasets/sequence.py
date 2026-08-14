@@ -20,6 +20,13 @@ class PreCollatedBatch(NamedTuple):
     Marks the output of :meth:`WindowedSequenceDataset.__getitems__` so
     :func:`collate_sequence_batch` hands it straight to the model instead of
     trying to collate it a second time.
+
+    Attributes
+    ----------
+    features:
+        ``float32``, shape ``(batch, sequence_length, n_features)``.
+    targets:
+        ``float32``, shape ``(batch,)``, one target per window.
     """
 
     features: torch.Tensor
@@ -36,6 +43,20 @@ def collate_sequence_batch(
     DataLoader site — it is not opt-in. This must therefore be the ``collate_fn``
     of every loader over that dataset; anything else (a plain
     ``SequenceDataset``, a ``TensorDataset``) falls through to the default.
+
+    Parameters
+    ----------
+    samples:
+        Either a :class:`PreCollatedBatch` the dataset assembled itself, or the
+        list of per-index samples torch's fetcher gathers otherwise.
+
+    Returns
+    -------
+    tuple of (features, targets)
+        For a pre-collated batch, its two tensors unwrapped: ``float32`` of
+        shape ``(batch, sequence_length, n_features)`` and ``(batch,)``.
+        Otherwise whatever ``torch.utils.data.default_collate`` builds from the
+        sample list.
     """
     if isinstance(samples, PreCollatedBatch):
         return samples.features, samples.targets
@@ -46,8 +67,13 @@ class SequenceDataset(Dataset):
     """PyTorch Dataset for time-series sequences.
 
     Each sample is ``(x_window, y_target)`` where:
-    - ``x_window``: tensor of shape ``(sequence_length, n_features)``
-    - ``y_target``: scalar tensor (regression target at end of window)
+    - ``x_window``: ``float32`` tensor of shape ``(sequence_length, n_features)``
+    - ``y_target``: ``float32`` scalar tensor (regression target at end of window)
+
+    The windows are already materialized — typically by
+    :func:`solrad_correction.features.sequence.create_sequences` — and held in
+    memory as one dense tensor. :class:`WindowedSequenceDataset` is the lazy
+    alternative for series too large to expand.
     """
 
     def __init__(self, features: np.ndarray, targets: np.ndarray) -> None:
@@ -55,9 +81,15 @@ class SequenceDataset(Dataset):
         Parameters
         ----------
         features:
-            3-D array of shape ``(n_samples, sequence_length, n_features)``.
+            Dense windows, shape ``(n_samples, sequence_length, n_features)``,
+            cast to ``float32``.
         targets:
-            1-D array of shape ``(n_samples,)``.
+            One target per window, shape ``(n_samples,)``, cast to ``float32``.
+
+        Raises
+        ------
+        MemoryError
+            If either array exceeds the ``SOLRAD_MAX_ARRAY_GB`` guardrail.
         """
         assert_array_size(features.shape, np.float32, context="dense sequence feature tensor")
         assert_array_size(targets.shape, np.float32, context="dense sequence target vector")
@@ -101,9 +133,10 @@ class WindowedSequenceDataset(Dataset):
         Parameters
         ----------
         features:
-            2-D base feature matrix of shape ``(n_samples, n_features)``.
+            2-D base feature matrix of shape ``(n_samples, n_features)``, cast
+            to ``float32``. A ``np.memmap`` is kept on disk rather than read in.
         targets:
-            1-D target vector of shape ``(n_samples,)``.
+            1-D target vector of shape ``(n_samples,)``, cast to ``float32``.
         sequence_length:
             Number of time steps per input window.
         target_offset:
@@ -116,6 +149,18 @@ class WindowedSequenceDataset(Dataset):
         max_gap:
             Maximum allowed timestamp delta between consecutive rows inside a
             window. Defaults to the inferred base frequency (median delta).
+
+        Raises
+        ------
+        ValueError
+            If ``sequence_length`` is not positive or is not shorter than the
+            series, if ``target_offset`` is negative or past the last target, if
+            ``features``/``targets``/``index`` disagree in length, if
+            ``features`` is not 2-D, or if gap filtering leaves no usable
+            window.
+        MemoryError
+            If a materialized base array would exceed the
+            ``SOLRAD_MAX_ARRAY_GB`` guardrail.
         """
         if sequence_length <= 0:
             raise ValueError(f"sequence_length ({sequence_length}) must be positive")
@@ -201,6 +246,26 @@ class WindowedSequenceDataset(Dataset):
         return self._length
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Slice one window out of the base matrix.
+
+        Parameters
+        ----------
+        idx:
+            Window position; negative values count back from the last window.
+            Windows are numbered over the gap-filtered set, so ``idx`` is not a
+            base-row position whenever an index was supplied.
+
+        Returns
+        -------
+        tuple of (x_window, y_target)
+            ``float32`` tensors of shape ``(sequence_length, n_features)`` and
+            ``()``.
+
+        Raises
+        ------
+        IndexError
+            If ``idx`` is outside the window range.
+        """
         if idx < 0:
             idx += self._length
         if idx < 0 or idx >= self._length:
@@ -232,6 +297,23 @@ class WindowedSequenceDataset(Dataset):
         which is why every loader over this dataset must use
         :func:`collate_sequence_batch` — the default collate would try to stack
         the ``(B, L, F)`` block with the ``(B,)`` targets.
+
+        Parameters
+        ----------
+        indices:
+            Window positions, negative values counting back from the last
+            window, as torch's sampler emits them.
+
+        Returns
+        -------
+        PreCollatedBatch
+            ``float32`` tensors of shape ``(B, sequence_length, n_features)``
+            and ``(B,)``, with ``B = len(indices)``.
+
+        Raises
+        ------
+        IndexError
+            If any position is outside the window range.
         """
         length = self._length
         positions = np.fromiter(
@@ -266,7 +348,16 @@ class WindowedSequenceDataset(Dataset):
         return starts + self.target_offset
 
     def target_values(self) -> np.ndarray:
-        """Return targets aligned with the lazy sequence windows."""
+        """Return targets aligned with the lazy sequence windows.
+
+        Returns
+        -------
+        np.ndarray
+            ``float32``, shape ``(len(self),)``, in the targets' own units. The
+            i-th entry is the target :meth:`__getitem__` pairs with window i, so
+            this is the ground-truth vector predictions are scored against —
+            gap-dropped windows are absent from it too.
+        """
         positions = self._target_positions()
         if isinstance(self.y, torch.Tensor):
             values = self.y[torch.as_tensor(positions, dtype=torch.long)]
@@ -275,7 +366,16 @@ class WindowedSequenceDataset(Dataset):
         return selected
 
     def prediction_index(self) -> pd.DatetimeIndex | None:
-        """Return the timestamps of each window's target row, if an index is set."""
+        """Return the timestamps of each window's target row, if an index is set.
+
+        Returns
+        -------
+        pd.DatetimeIndex or None
+            Shape ``(len(self),)``, aligned entry-for-entry with
+            :meth:`target_values`, so predictions can be written back against
+            the time they belong to. ``None`` when the dataset was built without
+            an index.
+        """
         if self.index is None:
             return None
         return self.index[self._target_positions()]
@@ -287,7 +387,19 @@ class WindowedSequenceDataset(Dataset):
         feature_names: list[str] | None = None,
         index: pd.DatetimeIndex | None = None,
     ) -> None:
-        """Save the lazy dataset backing arrays without materializing windows."""
+        """Save the lazy dataset backing arrays without materializing windows.
+
+        Parameters
+        ----------
+        path:
+            Directory to write; created if missing.
+        feature_names:
+            Column names of the base matrix, length ``n_features``. Stored so a
+            reloaded dataset can be matched against a model's feature order.
+        index:
+            Timestamps of the base rows, shape ``(n_samples,)``. Defaults to the
+            dataset's own index when omitted.
+        """
         from solrad_correction.datasets.serialization import save_windowed_sequence_dataset
 
         save_windowed_sequence_dataset(self, path, feature_names=feature_names, index=index)
@@ -302,7 +414,31 @@ class WindowedSequenceDataset(Dataset):
 
 @dataclass
 class WindowedSequenceDatasetMeta:
-    """Metadata for lazy sequence datasets saved without dense windows."""
+    """Metadata for lazy sequence datasets saved without dense windows.
+
+    The on-disk form of a :class:`WindowedSequenceDataset`: the base arrays plus
+    the windowing parameters needed to reproduce exactly the same windows, so
+    the dense ``(n_windows, sequence_length, n_features)`` block is never written
+    out.
+
+    Attributes
+    ----------
+    features:
+        Base feature matrix, ``float32`` on disk, shape
+        ``(n_samples, n_features)``, columns ordered as ``feature_names``.
+    targets:
+        Base target vector, ``float32`` on disk, shape ``(n_samples,)``.
+    feature_names:
+        Column names of ``features``, length ``n_features``.
+    sequence_length:
+        Rows per window.
+    target_offset:
+        Target row offset from the window start; ``None`` means the last row
+        inside the window.
+    index:
+        Timestamps of the base rows, shape ``(n_samples,)``, or ``None``. Drives
+        the gap filtering when the dataset is rebuilt.
+    """
 
     features: np.ndarray
     targets: np.ndarray
@@ -319,7 +455,12 @@ class WindowedSequenceDatasetMeta:
         feature_names: list[str] | None = None,
         index: pd.DatetimeIndex | None = None,
     ) -> WindowedSequenceDatasetMeta:
-        """Create metadata from a lazy dataset without expanding windows."""
+        """Create metadata from a lazy dataset without expanding windows.
+
+        The base arrays are taken as they are held (a torch tensor is moved to
+        CPU and unwrapped), so no window is ever materialized. ``feature_names``
+        and ``index`` default to the dataset's own index when not supplied.
+        """
         features = (
             dataset.X.detach().cpu().numpy()
             if isinstance(dataset.X, torch.Tensor)
@@ -340,7 +481,13 @@ class WindowedSequenceDatasetMeta:
         )
 
     def to_torch_dataset(self) -> WindowedSequenceDataset:
-        """Create a lazy PyTorch dataset from the saved backing arrays."""
+        """Create a lazy PyTorch dataset from the saved backing arrays.
+
+        Rebuilds the same windows the saved dataset exposed, gap filtering
+        included: it is re-derived from ``index`` at the default ``max_gap``
+        rather than stored, so an artifact saved with a non-default ``max_gap``
+        comes back with the default one.
+        """
         return WindowedSequenceDataset(
             self.features,
             self.targets,
@@ -350,7 +497,13 @@ class WindowedSequenceDatasetMeta:
         )
 
     def save(self, path: str | Path) -> None:
-        """Save base arrays and metadata without dense sequence materialization."""
+        """Save base arrays and metadata without dense sequence materialization.
+
+        Writes ``path`` as a directory holding ``windowed_sequences.npz`` (the
+        ``float32`` base arrays, the windowing parameters and a
+        ``format_version`` stamp), ``feature_names.csv`` and, when an index is
+        set, ``index.csv``. Read back by :meth:`load`.
+        """
         p = Path(path)
         p.mkdir(parents=True, exist_ok=True)
         np.savez(
@@ -370,7 +523,12 @@ class WindowedSequenceDatasetMeta:
 
     @classmethod
     def load(cls, path: str | Path) -> WindowedSequenceDatasetMeta:
-        """Load a saved lazy sequence dataset."""
+        """Load a directory written by :meth:`save`.
+
+        Both sidecars are optional, so an artifact saved without feature names
+        or without timestamps loads back with those fields empty rather than
+        failing.
+        """
         p = Path(path)
         data = np.load(p / "windowed_sequences.npz")
         features = data["X_base"]

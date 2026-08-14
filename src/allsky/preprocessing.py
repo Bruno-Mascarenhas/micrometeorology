@@ -87,6 +87,12 @@ def load_mask(path: str | Path, *, threshold: float | None = None) -> np.ndarray
     :data:`_DEFAULT_MASK_THRESHOLD`): pixels strictly above the threshold are
     kept.  Any PIL-readable format works; the ``.png`` convention is a naming
     hint only.
+
+    Returns
+    -------
+    numpy.ndarray
+        Keep-array of shape ``(H, W)``, ``bool``, in image (row, column)
+        coordinates matching the frames it will be applied to.
     """
     from PIL import Image
 
@@ -106,6 +112,22 @@ def estimate_circular_mask(
 
     A disc of radius ``radius_fraction * min(H, W) / 2`` centred on the image
     (or on *center* ``(row, col)``) is kept; everything outside is dropped.
+
+    Parameters
+    ----------
+    shape:
+        Image shape; only the leading ``(H, W)`` entries are read, so a
+        ``(H, W, 3)`` frame shape can be passed straight through.
+    radius_fraction:
+        Disc radius as a fraction of half the shorter image dimension.
+    center:
+        Disc centre in image ``(row, col)`` pixel coordinates; the image
+        centre when None.
+
+    Returns
+    -------
+    numpy.ndarray
+        Keep-array of shape ``(H, W)``, ``bool``.
 
     Limitation
     ----------
@@ -144,6 +166,13 @@ def apply_static_mask(
         Grayscale binarization threshold forwarded to :func:`load_mask` when
         *mask* is a path (ignored otherwise).
 
+    Returns
+    -------
+    numpy.ndarray
+        Masked copy of the frame, shape ``(H, W, 3)``, ``uint8``, with every
+        dropped pixel set to 0 in all three channels.  The input is not
+        modified.
+
     Raises
     ------
     ValueError
@@ -173,6 +202,19 @@ def center_crop(image: np.ndarray, crop: CropConfig) -> np.ndarray:
     ``crop.left`` shift that centred box by the given pixel offsets — useful when
     the sky disc is not centred — and the result is clipped to stay inside the
     frame.
+
+    Parameters
+    ----------
+    image:
+        ``(H, W, 3)`` ``uint8`` RGB frame.
+    crop:
+        Crop box description; ``crop.enabled`` False returns the frame as-is.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(crop_h, crop_w, 3)`` ``uint8`` view of the input — a slice, not a
+        copy, so it shares the caller's buffer.
     """
     arr = _as_rgb_uint8(image)
     if not crop.enabled:
@@ -192,6 +234,20 @@ def resize_image(image: np.ndarray, size: int | tuple[int, int]) -> np.ndarray:
 
     Mirrors the PIL recipe used by :func:`allsky.video.extract_frames` so a
     frame resized here is byte-identical to one resized at extraction time.
+
+    Parameters
+    ----------
+    image:
+        ``(H, W, 3)`` ``uint8`` RGB frame.
+    size:
+        Target size in pixels: an ``int`` for a square, otherwise a
+        ``(width, height)`` pair — PIL's axis order, the transpose of the
+        array's ``(H, W)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Resized frame, shape ``(height, width, 3)``, ``uint8``.
     """
     from PIL import Image
 
@@ -221,6 +277,24 @@ def visual_qc(
     The thresholds default to the module-level constants
     (:data:`DARK_LUMINANCE_THRESHOLD`, :data:`SATURATED_FRACTION_THRESHOLD`,
     :data:`SATURATED_LEVEL`) and may be overridden per call.
+
+    Parameters
+    ----------
+    image:
+        ``(H, W, 3)`` ``uint8`` RGB frame, on the native 0-255 scale (this
+        runs before any float normalization).
+    dark_threshold:
+        Mean-luminance floor on the same 0-255 scale.
+    saturated_fraction_threshold:
+        Ceiling on the fraction of clipped pixels, in [0, 1].
+    saturated_level:
+        Per-channel level at or above which a pixel counts as clipped, 0-255.
+
+    Returns
+    -------
+    set of QCFlag
+        Possibly empty; a clean frame flags nothing. The flags describe
+        radiometric usability only — geometry (mask, crop) is not checked here.
     """
     arr = _as_rgb_uint8(image)
     flags: set[QCFlag] = set()
@@ -252,9 +326,13 @@ def _needs_preprocessing(cfg: PrepareConfig) -> bool:
 def resolve_mask(cfg: PrepareConfig) -> np.ndarray | None:
     """Decode *cfg*'s static mask once, for reuse across every frame of a run.
 
-    Returns ``None`` when no ``cfg.mask.path`` is configured, else the read-only
-    keep-array :func:`load_mask` produces — read-only because the same buffer is
-    then shared by every :func:`process_frame` call in the loop.
+    Returns
+    -------
+    numpy.ndarray or None
+        None when no ``cfg.mask.path`` is configured, else the keep-array
+        :func:`load_mask` produces, shape ``(H, W)``, ``bool``. The buffer is
+        marked read-only because every :func:`process_frame` call in the loop
+        shares it.
     """
     if cfg.mask.path is None:
         return None
@@ -279,6 +357,23 @@ def process_frame(
     skips the per-frame PNG decode and yields the same pixels.  ``mask=None``
     falls back to decoding ``cfg.mask.path`` — it never means "estimate a
     circular mask", which is why the two branches stay explicit here.
+
+    Parameters
+    ----------
+    image:
+        ``(H, W, 3)`` ``uint8`` RGB frame as decoded from the video.
+    cfg:
+        Prepare config supplying ``mask``, ``crop`` and ``resize``.
+    mask:
+        Keep-array of shape ``(H, W)``, ``bool``, decoded once by
+        :func:`resolve_mask` and shared across the run.
+
+    Returns
+    -------
+    numpy.ndarray
+        Analysis-ready frame, ``(H', W', 3)`` ``uint8``, still on the 0-255
+        scale — normalization belongs to the model's own transform. With every
+        stage unset the input array is returned unchanged.
     """
     out = image
     if mask is not None:
