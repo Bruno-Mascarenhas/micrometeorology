@@ -141,8 +141,9 @@ class UnitResult:
         The domain this unit publishes under, derived from its filename so it is
         known even when the unit never managed to open the file.
     missing_variables:
-        Output variable ids the unit requested but the wrfout does not carry, so
-        the manifest can say "no steps this run" instead of leaving the previous
+        Output variable ids the unit published nothing under — because the
+        wrfout does not carry the variable, or because the unit failed — so the
+        manifest can say "no steps this run" instead of leaving the previous
         run's files silently vouched for under the freshly bumped version.
     """
 
@@ -724,6 +725,26 @@ def _unit_domain(unit: WorkUnit) -> str | None:
     return level.value if level is not None else None
 
 
+def _unit_output_ids(unit: WorkUnit) -> tuple[str, ...]:
+    """The output file ids a unit publishes under, from the unit alone.
+
+    Never raises: this runs on the failure path, where the unit's own variable
+    name may be what raised. A name no height parses out of owns no id, and
+    guessing one advertises a variable nothing ever wrote.
+    """
+    if unit.kind == "values_json":
+        return (VARIABLE_NETCDF_MAP.get(unit.variable, unit.variable.upper()),)
+    if unit.kind == "poteolico":
+        try:
+            heights = parse_poteolico_heights(unit.variable)
+        except ValueError:
+            return ()
+        return tuple(f"POT_EOLICO_{height}M" for height in heights)
+    if unit.kind == "wind_vectors":
+        return ("WIND_VECTORS",)
+    return ()
+
+
 def process_unit(unit: WorkUnit) -> UnitResult:
     """Execute one work unit. Runs in a worker process; never raises.
 
@@ -768,6 +789,7 @@ def process_unit(unit: WorkUnit) -> UnitResult:
             seconds=time.perf_counter() - t0,
             error=f"{type(exc).__name__}: {exc}",
             domain=_unit_domain(unit),
+            missing_variables=_unit_output_ids(unit),
         )
 
 
@@ -945,6 +967,7 @@ def execute_units(
                 kind=unit.kind,
                 error="worker crashed while processing this unit (possible OOM kill)",
                 domain=_unit_domain(unit),
+                missing_variables=_unit_output_ids(unit),
             )
         results.append(result)
         status = f"✗ {result.error}" if result.error else f"{len(result.files)} files"

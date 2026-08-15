@@ -710,6 +710,101 @@ def test_manifest_publishes_a_variable_the_wrfout_does_not_carry_as_empty(tmp_pa
     assert manifest["index_max"] == NT - 1
 
 
+def test_a_domain_whose_unit_failed_is_not_covered_by_the_surviving_domain_range(tmp_path):
+    """D02's temperature unit died; D01's wrote every step of the same variable.
+
+    ``availability`` has no domain axis, so an omitted key reads as "full
+    range" for every advertised domain. D02 is still advertised (its grid unit
+    succeeded) and its fixed-name ``D02_TEMP_nnn.json`` still hold the PREVIOUS
+    run's forecast, which the site would then fetch under this run's version.
+    """
+    json_dir = tmp_path / "json"
+    json_dir.mkdir()
+    survived = jobs.UnitResult(
+        label="wrfout_d01:temperature",
+        kind="values_json",
+        files=tuple(str(json_dir / f"D01_TEMP_{i:03d}.json") for i in range(NT)),
+        domain="D01",
+        n_steps=NT,
+    )
+    crashed = jobs.process_unit(
+        jobs.WorkUnit(
+            kind="values_json",
+            wrf_path=str(tmp_path / "wrfout_d02_never_written.nc"),
+            variable="temperature",
+            json_dir=str(json_dir),
+            geojson_dir=str(tmp_path / "geo"),
+        )
+    )
+    grid = jobs.UnitResult(label="wrfout_d02:grid_geojson", kind="grid_geojson", domain="D02")
+
+    manifest_path = jobs.write_run_manifest(
+        json_dir, [survived, crashed, grid], ["temperature"], covers_every_variable=False
+    )
+
+    assert manifest_path is not None
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    assert manifest["domains"] == ["D01", "D02"]
+    assert manifest["availability"] == {"TEMP": []}
+
+
+@pytest.mark.parametrize(
+    ("kind", "variable", "output_ids"),
+    [
+        ("values_json", "temperature", ("TEMP",)),
+        ("values_json", "T2", ("T2",)),
+        ("poteolico", "poteolico", ("POT_EOLICO_50M", "POT_EOLICO_100M", "POT_EOLICO_150M")),
+        ("poteolico", "poteolico100", ("POT_EOLICO_100M",)),
+        ("poteolico", "poteolico99", ()),
+        ("wind_vectors", "wind_vectors", ("WIND_VECTORS",)),
+        ("grid_geojson", "", ()),
+    ],
+)
+def test_a_failed_unit_declares_the_output_ids_it_never_wrote(tmp_path, kind, variable, output_ids):
+    """The unparseable height owns no id, and claiming one is worse than none."""
+    unit = jobs.WorkUnit(
+        kind=kind,
+        wrf_path=str(tmp_path / "wrfout_d02_never_written.nc"),
+        variable=variable,
+        json_dir=str(tmp_path),
+        geojson_dir=str(tmp_path),
+    )
+
+    result = jobs.process_unit(unit)
+
+    assert result.error is not None
+    assert result.missing_variables == output_ids
+
+
+def test_a_unit_lost_to_a_broken_pool_declares_the_output_ids_it_never_wrote(monkeypatch, tmp_path):
+    unit = jobs.WorkUnit(
+        kind="values_json",
+        wrf_path=str(tmp_path / "wrfout_d02_oom.nc"),
+        variable="clearness_index",
+        json_dir=str(tmp_path),
+        geojson_dir=str(tmp_path),
+    )
+
+    class _AlwaysBrokenExecutor:
+        def __init__(self, max_workers=None, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def submit(self, *_args):
+            return _FakeFuture(exc=BrokenProcessPool("worker died"))
+
+    monkeypatch.setattr(jobs, "ProcessPoolExecutor", _AlwaysBrokenExecutor)
+    monkeypatch.setattr(jobs, "as_completed", lambda futures: list(futures))
+    results = jobs.execute_units([unit, unit], workers=2, echo=lambda _msg: None)
+
+    assert {r.missing_variables for r in results} == {("KT",)}
+
+
 def test_atomic_json_dump_writes_exactly_the_compact_encoder_bytes(tmp_path):
     """The atomic writer must emit exactly the compact-encoder bytes."""
     payload = {
