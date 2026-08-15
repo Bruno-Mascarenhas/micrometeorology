@@ -244,7 +244,9 @@ class TestResumeCompatibility:
                 config_sha256="cfg-2",
             )
 
-    def test_a_meta_carrying_the_legacy_digest_resumes_and_is_restamped(self, tmp_path: Path):
+    def test_a_meta_carrying_the_legacy_digest_and_the_same_pixel_config_resumes(
+        self, tmp_path: Path
+    ):
         manifest = _make_dataset(tmp_path, n=4)
         out = tmp_path / "emb"
         extract_embeddings(
@@ -255,6 +257,7 @@ class TestResumeCompatibility:
             batch_size=4,
             shard_size=4,
             config_sha256="legacy-cfg",
+            pixel_config_sha256="pixels-1",
         )
 
         summary = extract_embeddings(
@@ -266,6 +269,7 @@ class TestResumeCompatibility:
             shard_size=4,
             config_sha256="widened-cfg",
             legacy_config_sha256="legacy-cfg",
+            pixel_config_sha256="pixels-1",
         )
 
         assert summary["skipped"] == 4
@@ -284,6 +288,7 @@ class TestResumeCompatibility:
             batch_size=4,
             shard_size=4,
             config_sha256="legacy-cfg",
+            pixel_config_sha256="pixels-1",
         )
 
         with caplog.at_level(logging.WARNING, logger="allsky.embeddings.extract"):
@@ -296,11 +301,100 @@ class TestResumeCompatibility:
                 shard_size=4,
                 config_sha256="widened-cfg",
                 legacy_config_sha256="legacy-cfg",
+                pixel_config_sha256="pixels-1",
             )
 
         assert "mask" in caplog.text
         assert "crop" in caplog.text
         assert "resize" in caplog.text
+
+    def test_a_legacy_digest_store_that_records_no_pixel_config_refuses_resume(
+        self, tmp_path: Path
+    ):
+        # Every store a pre-migration release wrote: the legacy digest covered
+        # the embeddings section alone, so nothing on disk says which mask /
+        # crop / resize / clock shaped the pixels behind these vectors.
+        manifest = _make_dataset(tmp_path, n=4)
+        out = tmp_path / "emb"
+        extract_embeddings(
+            manifest,
+            FakeBackbone(dim=8),
+            out,
+            data_root=tmp_path,
+            batch_size=4,
+            shard_size=4,
+            config_sha256="legacy-cfg",
+        )
+
+        with pytest.raises(RuntimeError, match="--no-resume"):
+            extract_embeddings(
+                manifest,
+                FakeBackbone(dim=8),
+                out,
+                data_root=tmp_path,
+                batch_size=4,
+                shard_size=4,
+                config_sha256="widened-cfg",
+                legacy_config_sha256="legacy-cfg",
+                pixel_config_sha256="pixels-1",
+            )
+
+    def test_a_legacy_digest_store_whose_pixel_config_moved_refuses_resume(self, tmp_path: Path):
+        # horizon_v1.png -> horizon_v2.png: the legacy digest stays equal while
+        # every encoded pixel changes.
+        manifest = _make_dataset(tmp_path, n=4)
+        out = tmp_path / "emb"
+        extract_embeddings(
+            manifest,
+            FakeBackbone(dim=8),
+            out,
+            data_root=tmp_path,
+            batch_size=4,
+            shard_size=4,
+            config_sha256="legacy-cfg",
+            pixel_config_sha256="pixels-1",
+        )
+
+        with pytest.raises(RuntimeError, match="--no-resume"):
+            extract_embeddings(
+                manifest,
+                FakeBackbone(dim=8),
+                out,
+                data_root=tmp_path,
+                batch_size=4,
+                shard_size=4,
+                config_sha256="widened-cfg",
+                legacy_config_sha256="legacy-cfg",
+                pixel_config_sha256="pixels-2",
+            )
+
+    def test_a_refused_legacy_store_keeps_its_original_stamp(self, tmp_path: Path):
+        manifest = _make_dataset(tmp_path, n=4)
+        out = tmp_path / "emb"
+        extract_embeddings(
+            manifest,
+            FakeBackbone(dim=8),
+            out,
+            data_root=tmp_path,
+            batch_size=4,
+            shard_size=4,
+            config_sha256="legacy-cfg",
+        )
+
+        with pytest.raises(RuntimeError):
+            extract_embeddings(
+                manifest,
+                FakeBackbone(dim=8),
+                out,
+                data_root=tmp_path,
+                batch_size=4,
+                shard_size=4,
+                config_sha256="widened-cfg",
+                legacy_config_sha256="legacy-cfg",
+                pixel_config_sha256="pixels-1",
+            )
+
+        assert read_meta(out)["config_sha256"] == "legacy-cfg"
 
     def test_a_legacy_digest_with_a_changed_pooling_still_refuses_resume(self, tmp_path: Path):
         manifest = _make_dataset(tmp_path, n=4)

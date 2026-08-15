@@ -6,6 +6,8 @@ good and a broken manifest; ``export-colab-bundle`` produces a bundle that
 :func:`allsky.bundle.validate_bundle` accepts. CliRunner only, tmp_path only.
 """
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -426,3 +428,22 @@ class TestExportColabBundle:
         assert result.exit_code == 0, result.output
         members = validate_bundle(out)["members"]
         assert "allsky_bundle/frames/allsky-20250321-1200.jpg" in members
+
+
+def test_importing_the_prepare_command_module_does_not_pull_pandas():
+    """The module docstring promises a torch-free, pandas-free ``allsky --help``."""
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, allsky.cli.prepare;"
+                "print(sorted(m for m in sys.modules if m.split('.')[0] == 'pandas'))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert probe.stdout.strip() == "[]"
