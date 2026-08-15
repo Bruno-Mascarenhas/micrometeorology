@@ -16,9 +16,11 @@ device helper remains usable in a torch-free environment.
 from typing import Any
 
 from allsky.training.device import resolve_device
+from allsky.training.errors import TrainingError
 
 __all__ = [
     "MultitaskLoss",
+    "TrainingError",
     "capture_rng_state",
     "load_checkpoint",
     "resolve_device",

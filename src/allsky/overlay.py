@@ -543,6 +543,22 @@ def _timestamp_flags(reading: OverlayReading) -> int:
     return bits
 
 
+def _sweep_orphaned_staging(out_path: Path) -> None:
+    """Remove staging directories a killed extraction left in *out_path*.
+
+    The staging directory is named uniquely per run and removed in a ``finally``,
+    which covers an exception but not a ``SIGKILL`` or a host reset — and a
+    unique name means nothing ever collects what those leave behind, so a
+    directory extracted repeatedly accumulates a full frame set of debris per
+    kill.  Sweeping on entry is safe because two extractions into one output
+    directory would already collide on the frame filenames themselves.
+    """
+    for orphan in sorted(out_path.glob(f"{STAGING_DIR_PREFIX}*")):
+        if orphan.is_dir():
+            shutil.rmtree(orphan, ignore_errors=True)
+            logger.info("removed staging debris from an interrupted extraction: %s", orphan)
+
+
 def extract_frames_with_overlay_timestamps(
     path: str | Path,
     out_dir: str | Path,
@@ -608,6 +624,7 @@ def extract_frames_with_overlay_timestamps(
     rows: list[dict[str, object]] = []
     written: set[str] = set()
     collisions = 0
+    _sweep_orphaned_staging(out_path)
     staging = Path(tempfile.mkdtemp(dir=out_path, prefix=STAGING_DIR_PREFIX))
     try:
         readings: list[OverlayReading] = []

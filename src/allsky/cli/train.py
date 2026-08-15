@@ -113,17 +113,25 @@ def train(
         resume_arg = resume
 
     require("torch", "allsky")
-    from allsky.training import run_experiment  # lazy: pulls torch at run time
+    from allsky.training import TrainingError, run_experiment  # lazy: pulls torch at run time
 
-    summary = run_experiment(
-        exp_cfg,
-        data_root=data_root,
-        output_dir=out_dir,
-        device=str(device) if device is not None else None,
-        amp=amp,
-        resume=resume_arg,
-        trust_checkpoint=trust_checkpoint,
-    )
+    try:
+        summary = run_experiment(
+            exp_cfg,
+            data_root=data_root,
+            output_dir=out_dir,
+            device=str(device) if device is not None else None,
+            amp=amp,
+            resume=resume_arg,
+            trust_checkpoint=trust_checkpoint,
+        )
+    except TrainingError as exc:
+        # Every TrainingError names the knob to change. A traceback through the
+        # engine's internals buries that message under frames the operator has no
+        # use for, and a run that diverged is the one time they most need to read
+        # it.
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     typer.echo(json.dumps(summary, indent=2, default=str))
 
 

@@ -246,6 +246,18 @@ def _screened_for_plausibility(row: pd.DataFrame) -> pd.DataFrame:
     # radiometry, every one of them a FORBIDDEN_FEATURES column no feature set
     # can read. Raw and calibrated coincide for the channels served here.
     declared = [str(limit["column"]) for limit in limits if limit["column"] in row.columns]
+    ungated = [
+        column
+        for column in row.columns
+        if column not in declared and bool(row[column].notna().to_numpy()[0])
+    ]
+    if ungated:
+        logger.warning(
+            "the sensor export measures %s, which sensor_limits declares no gate for — "
+            "imputing them at the training mean rather than serving unscreened readings; "
+            "declare their bounds in configs/micromet/default.yaml to use them",
+            ", ".join(str(column) for column in ungated),
+        )
     measured = row.loc[:, declared].copy()
     was_measured = measured.notna().to_numpy()[0]
     screened = apply_physical_limits(measured, limits)

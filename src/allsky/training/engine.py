@@ -78,6 +78,7 @@ from allsky.training.checkpointing import (
     restore_rng_state,
     save_checkpoint,
 )
+from allsky.training.errors import TrainingError
 from solrad_correction.utils.seeds import set_global_seed
 
 logger = logging.getLogger(__name__)
@@ -116,7 +117,7 @@ def resolve_run_device(requested: str) -> str:
 
     device = resolve_device(requested)
     if device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError(
+        raise TrainingError(
             "device 'cuda' was requested but no CUDA device is available; "
             "use device='cpu' or device='auto'"
         )
@@ -472,7 +473,7 @@ def run_experiment(
         finally:
             writer.close()
         if epochs_ran and best_value is None:
-            raise RuntimeError(
+            raise TrainingError(
                 f"no best checkpoint: {monitor_key} was non-finite in every one of the "
                 f"{epochs_ran} epoch(s) that ran, so no epoch was ever a candidate for "
                 f"{BEST_CHECKPOINT}. The metrics and the diverged weights are in {run_dir} "
@@ -688,7 +689,7 @@ def _default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Calla
             backbone = build_backbone(name, pooling=_backbone_pooling(pooling), device=device)
             return coerce_image_backbone(backbone, pooling=pooling)
         except Exception as exc:
-            raise RuntimeError(
+            raise TrainingError(
                 "failed to construct the default image backbone for input_mode='image' "
                 f"(model.backbone={name!r}, model.backbone_pooling={pooling!r}, "
                 f"train.device={device!r}); fix those config knobs or inject an "
@@ -825,10 +826,10 @@ def _build_amp(amp_enabled: bool, dtype: str, device: str) -> tuple[str | None, 
         return None, None, None
     if dtype == "fp16":
         if device != "cuda":
-            raise RuntimeError("amp dtype 'fp16' requires a CUDA device; use 'bf16' on CPU")
+            raise TrainingError("amp dtype 'fp16' requires a CUDA device; use 'bf16' on CPU")
         return "cuda", torch.float16, torch.amp.GradScaler("cuda")
     if not torch.amp.is_autocast_available(device):
-        raise RuntimeError(
+        raise TrainingError(
             f"amp has no autocast for device {device!r}; set train.amp.enabled=false "
             "or run on a device torch can autocast"
         )
@@ -1189,7 +1190,7 @@ def _check_resume_provenance(
             f"feature_columns: checkpoint {list(stored_columns)} vs current {feature_columns}"
         )
     if mismatches:
-        raise RuntimeError(
+        raise TrainingError(
             f"refusing to resume from {path}: it was trained against a different dataset "
             + "; ".join(mismatches)
             + ". Run without --resume (or point --out-dir at a fresh run directory) to "
