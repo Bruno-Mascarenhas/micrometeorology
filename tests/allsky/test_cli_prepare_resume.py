@@ -25,8 +25,10 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from allsky.cli import app
-from allsky.cli.prepare import _apply_frame_qc
+from allsky.cli.prepare import _apply_frame_qc, _frames_inputs_sha256
+from allsky.config import VIDEO_TIME_FIELDS, PrepareConfig
 from allsky.data.contracts import QCFlag
+from allsky.provenance import config_subset_sha256
 from tests.allsky._archive_fake import write_overlay_video
 from tests.allsky.test_cli_prepare import _write_config
 
@@ -270,3 +272,59 @@ def test_switching_the_timestamp_source_re_extracts_instead_of_resuming(
         "2026-01-01 06:01:00",
         "2026-01-01 06:02:00",
     ]
+
+
+def _write_mask(path: Path, *, blacked_rows: int, size: int = 64) -> Path:
+    keep = np.full((size, size), 255, dtype=np.uint8)
+    keep[:blacked_rows] = 0
+    iio.imwrite(path, keep)
+    return path
+
+
+class TestMaskBytesAreInTheFrameProvenanceHash:
+    def test_rewriting_the_mask_png_in_place_moves_the_hash(self, tmp_path: Path):
+        mask = _write_mask(tmp_path / "horizon.png", blacked_rows=0)
+        cfg = PrepareConfig.model_validate({"mask": {"path": str(mask)}})
+        before = _frames_inputs_sha256(cfg)
+
+        _write_mask(mask, blacked_rows=8)
+
+        assert _frames_inputs_sha256(cfg) != before
+
+    def test_an_embeddings_edit_leaves_the_hash_alone(self, tmp_path: Path):
+        mask = _write_mask(tmp_path / "horizon.png", blacked_rows=0)
+        base = _frames_inputs_sha256(PrepareConfig.model_validate({"mask": {"path": str(mask)}}))
+
+        tuned = PrepareConfig.model_validate(
+            {"mask": {"path": str(mask)}, "embeddings": {"batch_size": 8}}
+        )
+
+        assert _frames_inputs_sha256(tuned) == base
+
+    def test_a_maskless_config_hashes_as_before_the_mask_bytes_were_folded_in(self):
+        assert _frames_inputs_sha256(PrepareConfig()) == config_subset_sha256(
+            PrepareConfig(),
+            sections=("mask", "crop", "resize"),
+            nested_fields={"video": VIDEO_TIME_FIELDS},
+            subject="the frame provenance hash",
+        )
+
+
+def test_rewriting_the_mask_png_in_place_re_extracts_instead_of_resuming(
+    tmp_path: Path, dark_video: Path, synthetic_dat: Path
+):
+    config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
+    mask = _write_mask(tmp_path / "horizon.png", blacked_rows=0)
+    config.write_text(config.read_text() + f"mask:\n  path: '{mask}'\n", encoding="utf-8")
+    assert _prepare(config).exit_code == 0
+
+    _write_mask(mask, blacked_rows=32)
+    result = _prepare(config)
+
+    assert result.exit_code == 0, result.output
+    assert "re-extracting" in result.output
+    shipped = [
+        iio.imread(jpeg) for jpeg in (dataset_dir / "frames" / "allsky-20260101").glob("*.jpg")
+    ]
+    assert shipped
+    assert all(not frame[:32].any() for frame in shipped)

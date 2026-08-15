@@ -14,6 +14,7 @@ Heavy dependencies (torch, safetensors, the backbone model) are imported lazily
 inside the command, so importing :mod:`allsky.cli` never pulls them.
 """
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -51,13 +52,37 @@ def _config_sha256(cfg: PrepareConfig) -> str:
     :data:`~allsky.config.VIDEO_TIME_FIELDS` decides which capture a
     ``sample_id`` names.  Without them a re-prepared dataset resumes onto
     vectors of the old pixels, every id already being in the index.
+
+    The mask **section** is only ``{path, threshold}``, so the mask file's own
+    content hash is folded in as well: a horizon PNG redrawn in place at the
+    same path changes every masked pixel the backbone sees while leaving the
+    section byte-identical, which is precisely a resume onto vectors of the old
+    pixels.  The frame gate in :func:`allsky.cli.prepare._frames_inputs_sha256`
+    folds the same bytes in, so both stages invalidate together.
     """
     return config_subset_sha256(
         cfg,
         sections=_EMBEDDING_CONFIG_SECTIONS,
         nested_fields={"video": VIDEO_TIME_FIELDS},
+        content_files=() if cfg.mask.path is None else (cfg.mask.path,),
         subject="the embedding resume hash",
     )
+
+
+def _legacy_config_sha256(cfg: PrepareConfig) -> str:
+    """The resume digest under the formula every store on disk was stamped with.
+
+    :func:`_config_sha256` widened both the covered sections and the JSON
+    encoding, so every previously extracted store records a digest no current
+    config can reproduce and would be refused on resume — a full re-encode of a
+    dataset in which neither the encoder nor a single JPEG changed.  This
+    reproduces the old formula verbatim (python-mode dump, ``default=str``,
+    default separators) so
+    :func:`allsky.embeddings.extract._check_resume_compatible` can recognise
+    such a store and migrate it in place.
+    """
+    canonical = json.dumps(cfg.embeddings.model_dump(), sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def precompute_embeddings(
@@ -165,6 +190,7 @@ def precompute_embeddings(
             resume=resume,
             dry_run=dry_run,
             config_sha256=_config_sha256(cfg),
+            legacy_config_sha256=_legacy_config_sha256(cfg),
         )
     except Exception as exc:  # surface any failure as a non-zero exit
         typer.echo(f"error: embedding extraction failed: {exc}", err=True)

@@ -105,11 +105,17 @@ def _frames_inputs_sha256(cfg: PrepareConfig) -> str:
     JPEG, so a change to any of them makes the frames on disk a different
     artifact — one the manifest would otherwise be rebuilt from under
     provenance describing the new config.
+
+    The mask **section** is only ``{path, threshold}``, so a horizon PNG redrawn
+    in place at the same path leaves it byte-identical while every extracted
+    JPEG keeps the old obstruction map; the file's own content hash is folded in
+    so that edit re-extracts too.
     """
     return config_subset_sha256(
         cfg,
         sections=_FRAME_CONFIG_SECTIONS,
         nested_fields={"video": VIDEO_TIME_FIELDS},
+        content_files=() if cfg.mask.path is None else (cfg.mask.path,),
         subject="the frame provenance hash",
     )
 

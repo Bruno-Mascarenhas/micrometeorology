@@ -22,6 +22,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from importlib import metadata as importlib_metadata
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -79,11 +80,20 @@ def content_sha256(manifest: pd.DataFrame) -> str:
     return digest.hexdigest()
 
 
+def _file_content_sha256(path: Path) -> str:
+    """Content hash of *path*, or a stable marker naming it when it is absent."""
+    if not path.is_file():
+        return f"absent:{path}"
+    with open(path, "rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
 def config_subset_sha256(
     config: BaseModel,
     *,
     sections: Sequence[str],
     nested_fields: Mapping[str, Sequence[str]] | None = None,
+    content_files: Sequence[str | Path] = (),
     subject: str,
 ) -> str:
     """Order-independent content hash of a chosen subset of a config model.
@@ -94,6 +104,13 @@ def config_subset_sha256(
     parents taken field by field (a section whose siblings must not invalidate
     the artifact, such as a glob that only widens the day set).
 
+    A config value that only *points* at a file leaves the digest blind to that
+    file's bytes — a mask PNG rewritten in place at the same path keeps a
+    ``{path, threshold}`` section byte-identical while changing every pixel the
+    stage produces — so *content_files* folds those bytes in.  An empty
+    *content_files* leaves the digest exactly where it was without them, so a
+    stage that references no file keeps resuming onto its existing artifacts.
+
     Parameters
     ----------
     config:
@@ -102,14 +119,19 @@ def config_subset_sha256(
         Top-level field names of *config*, each dumped whole.
     nested_fields:
         ``{parent: (field, ...)}`` for parents dumped field by field.
+    content_files:
+        Paths, in a caller-fixed order, whose bytes shape the artifact as much
+        as the config does.  A missing file hashes to a stable marker, so its
+        later appearance moves the digest.
     subject:
         What the digest gates, named in the error message below.
 
     Returns
     -------
     str
-        Hex sha256 over the canonical JSON of the subset, so two configs
-        agreeing on it hash alike whatever the key order in their YAML.
+        Hex sha256 over the canonical JSON of the subset followed by the content
+        hash of each entry of *content_files*, so two configs agreeing on both
+        hash alike whatever the key order in their YAML.
 
     Raises
     ------
@@ -135,4 +157,7 @@ def config_subset_sha256(
     canonical = json.dumps(
         config.model_dump(mode="json", include=include), sort_keys=True, separators=(",", ":")
     )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(canonical.encode("utf-8"))
+    for file in content_files:
+        digest.update(_file_content_sha256(Path(file)).encode("utf-8"))
+    return digest.hexdigest()
