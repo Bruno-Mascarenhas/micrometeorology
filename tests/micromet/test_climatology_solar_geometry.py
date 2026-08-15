@@ -114,3 +114,35 @@ def test_an_hour_that_begins_with_the_sun_up_is_not_a_night_sample() -> None:
     sample, _atoms = _observed_sample("net_radiation_night", frame)
 
     assert sample.size == 0
+
+
+def test_an_hour_the_sun_rises_in_after_the_midpoint_is_not_a_night_sample() -> None:
+    """At 05:00 the sun is at -6,92 deg and still -0,02 deg at the midpoint.
+
+    It clears the horizon at roughly +31 min and reaches +6,95 deg by the end of
+    the hour, so a bracket spanning only the two per-source geometry offsets reads
+    the whole hour as night and averages some 29 min of daylight into the
+    nocturnal distribution.
+    """
+    frame = _hourly(
+        OBSERVED_COLUMN["net_radiation_night"],
+        [-30.0],
+        ["2024-01-31 05:00"],
+    )
+
+    sample, _atoms = _observed_sample("net_radiation_night", frame)
+
+    assert sample.size == 0
+
+
+def test_a_wholly_dark_hour_is_still_a_night_sample() -> None:
+    """02:00 on the same day: the sun stays below the horizon for the whole hour."""
+    frame = _hourly(
+        OBSERVED_COLUMN["net_radiation_night"],
+        [-30.0],
+        ["2024-01-31 02:00"],
+    )
+
+    sample, _atoms = _observed_sample("net_radiation_night", frame)
+
+    assert sample.size == 1

@@ -369,9 +369,11 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
     """Write every timestep JSON of one values variable.
 
     Returns the files written, the warnings, and the output variable ids this
-    wrfout does not carry — the only "no files" case that leaves the previous
-    run's files newest on disk, unlike the legitimately empty ones (an
-    all-night SWDOWN window, ``--skip-first``).
+    wrfout does not carry, and any variable that published no step at all — both
+    leave the previous run's fixed output names newest on disk, which is what
+    the manifest must not vouch for.  An all-night SWDOWN window and
+    ``--skip-first`` reach the second case: legitimately empty for this run, and
+    still not evidence for last run's matrix.
     """
     written_files: list[str] = []
     unit_warnings: list[str] = []
@@ -426,6 +428,19 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
                 output_variable_id,
             )
         )
+    if not written_files:
+        # Found the variable and still published nothing: every step was skipped,
+        # gated out or all-non-finite (a wrfout window lying entirely outside the
+        # daylight hours does this to SWDOWN/SWUP/SWNET/clearness_index). The
+        # previous run's fixed output names are then the newest on disk, which is
+        # the same state a variable the wrfout does not carry leaves behind — so
+        # it is reported the same way, or the directory-wide series descriptor
+        # would vouch for that matrix under THIS run's step count.
+        unit_warnings.append(
+            f"Variable {unit.variable.upper()} published no step in this window — "
+            "its previous artifacts are not vouched for"
+        )
+        return written_files, unit_warnings, [output_variable_id]
     return written_files, unit_warnings, []
 
 

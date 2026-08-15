@@ -144,6 +144,19 @@ GEOMETRY_OFFSET: dict[GeometrySource, pd.Timedelta] = {
     "wrf": pd.Timedelta(0),
 }
 
+# Instants the SHARED daylight gates bracket the sun over: the averaging window's
+# own endpoints, not the per-source offsets above. Those two answer "where in its
+# stamp does each source's VALUE live"; a gate on an hourly mean has to answer
+# "does this hour contain sunlight at all", and the widest thing either published
+# quantity covers is [T, T+1h). Bracketing the offsets alone called an hour night
+# whenever sunrise fell after T+30min, averaging a sunlit stretch into a
+# distribution published as the nocturnal regime.
+SELECTION_BRACKET_OFFSETS: tuple[pd.Timedelta, ...] = (
+    pd.Timedelta(0),
+    pd.Timedelta(minutes=30),
+    pd.Timedelta(minutes=60),
+)
+
 # Solar elevation above which a shortwave sample counts as daytime: below it the
 # airmass is extreme and relative error swamps the signal, so the clearness index
 # and every shortwave distribution are gated on it.
@@ -270,7 +283,13 @@ def _elevation(frame: pd.DataFrame, source: GeometrySource) -> np.ndarray:
 
 
 def _selection_elevation_bounds(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    """Lowest and highest solar elevation over the instants ANY source evaluates.
+    """Lowest and highest solar elevation over the hour each row averages.
+
+    The bracket spans :data:`SELECTION_BRACKET_OFFSETS` — the averaging window
+    ``[T, T+1h]`` — rather than the two per-source geometry offsets.  Solar
+    elevation has at most one turning point inside an hour, and the only one that
+    can fall in a window either gate is deciding is solar midnight (a minimum), so
+    sampling the endpoints and the midpoint brackets the window.
 
     Parameters
     ----------
@@ -280,10 +299,16 @@ def _selection_elevation_bounds(frame: pd.DataFrame) -> tuple[np.ndarray, np.nda
     Returns
     -------
     tuple of numpy.ndarray
-        Minimum and maximum solar elevation in degrees, ``(N,)`` each, over the
-        instants in :data:`GEOMETRY_OFFSET`, in the frame's own row order.
+        Minimum and maximum solar elevation in degrees, ``(N,)`` each, in the
+        frame's own row order.
     """
-    elevations = np.stack([_elevation(frame, source) for source in GEOMETRY_OFFSET])
+    times = _times(frame)
+    elevations = np.stack(
+        [
+            solar_elevation_deg(times + offset, SITE, UTC_OFFSET_HOURS)
+            for offset in SELECTION_BRACKET_OFFSETS
+        ]
+    )
     minimum: np.ndarray = elevations.min(axis=0)
     maximum: np.ndarray = elevations.max(axis=0)
     return minimum, maximum
@@ -296,9 +321,9 @@ def _daytime_selection(frame: pd.DataFrame) -> np.ndarray:
     the offsets differ by half an hour, so near the terminators the two sides
     would admit different hours — around one row per day per terminator — and the
     paired histograms this artifact exists for would be conditional on different
-    events. The hour is daytime only when the sun clears the floor at every
-    instant either source evaluates, which also keeps each side's own
-    extraterrestrial denominator away from zero.
+    events. The hour is daytime only when the sun clears the floor throughout the
+    hour the row averages, which also keeps each side's own extraterrestrial
+    denominator away from zero.
 
     Parameters
     ----------
@@ -316,11 +341,13 @@ def _daytime_selection(frame: pd.DataFrame) -> np.ndarray:
 
 
 def _nighttime_selection(frame: pd.DataFrame) -> np.ndarray:
-    """Which hours carry no sunlight at any instant either source evaluates.
+    """Which hours carry no sunlight at any instant inside the hour they average.
 
     The mirror of :func:`_daytime_selection`, and for an hourly MEAN the stricter
     reading of "night": an hour the sun rises or sets inside averages a sunlit
-    half into a quantity published as the nocturnal regime.
+    half into a quantity published as the nocturnal regime, so the bracket has to
+    span ``[T, T+1h]`` and not merely the instants the two sources' own values
+    are evaluated at.
 
     Parameters
     ----------

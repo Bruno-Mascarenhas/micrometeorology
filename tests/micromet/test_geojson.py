@@ -7,6 +7,7 @@ Covers:
 - ``create_wind_vectors_json`` → standalone wind vector file schema
 """
 
+import errno
 import inspect
 import json
 import re
@@ -167,6 +168,55 @@ class TestCreateValuesJson:
 # ---------------------------------------------------------------------------
 # write_grid_compact_json_stream — compact companion for the site front-end
 # ---------------------------------------------------------------------------
+
+
+class TestPublishedGridsAreWrittenAtomically:
+    """A failed grid write must leave the file the site is serving untouched."""
+
+    @pytest.mark.parametrize(
+        ("writer", "name"),
+        [
+            (write_grid_geojson_stream, "grid.geojson"),
+            (write_grid_compact_json_stream, "grid.grid.json"),
+        ],
+    )
+    def test_a_write_that_dies_partway_leaves_the_previous_grid_in_place(
+        self, tmp_path, sample_grid, monkeypatch, writer, name
+    ):
+        lon, lat = sample_grid
+        published = tmp_path / name
+        writer(published, lon, lat, 1000.0, 2000.0)
+        intact = published.read_bytes()
+
+        def _die(*_args, **_kwargs):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("micrometeorology.wrf.geojson.json.dump", _die)
+        with pytest.raises(OSError, match="No space left on device"):
+            writer(published, lon, lat, 1000.0, 2000.0)
+
+        assert published.read_bytes() == intact
+
+    @pytest.mark.parametrize(
+        ("writer", "name"),
+        [
+            (write_grid_geojson_stream, "grid.geojson"),
+            (write_grid_compact_json_stream, "grid.grid.json"),
+        ],
+    )
+    def test_a_failed_write_leaves_no_temporary_file_behind(
+        self, tmp_path, sample_grid, monkeypatch, writer, name
+    ):
+        lon, lat = sample_grid
+
+        def _die(*_args, **_kwargs):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("micrometeorology.wrf.geojson.json.dump", _die)
+        with pytest.raises(OSError, match="No space left on device"):
+            writer(tmp_path / name, lon, lat, 1000.0, 2000.0)
+
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestWriteGridCompactJsonStream:
