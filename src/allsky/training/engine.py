@@ -82,6 +82,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["resolve_run_device", "run_experiment"]
 
+MONITOR_CHANGE_SUFFIX = ".stale-monitor"
+
 
 def resolve_run_device(requested: str) -> str:
     """Resolve *requested* to a concrete device, erroring on unavailable cuda.
@@ -272,6 +274,7 @@ def run_experiment(
             feature_columns=feature_columns,
             cfg=cfg,
         )
+        _refuse_diverged_weights(checkpoint, path=resume_path, run_dir=run_dir)
         _warn_optimizer_knob_drift(checkpoint, cfg)
         stored_monitor = (checkpoint.get("best_metric") or {}).get("name")
         monitor_changed = stored_monitor is not None and str(stored_monitor) != monitor_key
@@ -996,6 +999,13 @@ class _MetricAccumulator:
         A loss component with no entry in :data:`_COMPONENT_TARGET_COLUMNS` — an
         unrecognised, later-added head — falls back to being weighted by the
         batch row count.
+
+        A head with no labelled row in this batch is dropped from both the sum and
+        the count, whatever its loss value: that loss is a masked ``(pred * 0)``
+        reduction, so an overflowed activation makes it NaN, and weighting it by a
+        zero count would carry that NaN into every later batch of the head.  A
+        non-finite loss on a head that *does* have rows is a real divergence and
+        still propagates.
         """
         size = int(batch["features"].shape[0])
         for key, value in losses.items():
@@ -1007,7 +1017,11 @@ class _MetricAccumulator:
                 if column is not None
                 else torch.full((), size, dtype=torch.long, device=value.device)
             )
-            weighted = value.detach().to(_accumulation_dtype(value)) * count
+            scaled = value.detach().to(_accumulation_dtype(value)) * count
+            # Dropped with ``where`` rather than by a Python ``if count == 0``:
+            # branching on the count would read it back to the host, one device
+            # sync per head per batch.
+            weighted = torch.where(count > 0, scaled, torch.zeros_like(scaled))
             self._component_sums[key] = _fold(self._component_sums.get(key), weighted)
             self._component_counts[key] = _fold(self._component_counts.get(key), count)
         if "dhi" in outputs:
@@ -1204,6 +1218,37 @@ def _warn_optimizer_knob_drift(checkpoint: Mapping[str, Any], cfg: ExperimentCon
             )
 
 
+def _refuse_diverged_weights(checkpoint: Mapping[str, Any], *, path: Path, run_dir: Path) -> None:
+    """Refuse a resume whose stored model weights are not all finite.
+
+    ``last.ckpt`` is written at the end of every epoch, a diverged one included —
+    that is what "last" means — so ``resume='auto'`` would reload NaN weights and
+    burn the rest of the budget on a dead run without a single error.  The scan
+    belongs here rather than at the write side because the weights and the monitor
+    diverge independently: an epoch can leave NaN parameters behind while its own
+    monitor value is still finite, and neither :func:`_check_resume_provenance` nor
+    :func:`_restore` looks at the tensors.
+
+    Only floating-point entries are scanned, and the first offending one ends the
+    scan, so a healthy resume pays one reduction per parameter tensor.
+
+    Raises
+    ------
+    RuntimeError
+        If any floating-point tensor in ``model_state`` holds a NaN or an inf.
+    """
+    for name, tensor in (checkpoint.get("model_state") or {}).items():
+        if not isinstance(tensor, Tensor) or not tensor.is_floating_point():
+            continue
+        if not bool(torch.isfinite(tensor).all()):
+            raise RuntimeError(
+                f"{path} stores non-finite weights (model_state[{name!r}]): the run that "
+                "wrote it diverged, and resuming from it would continue training NaN. "
+                f"Resume from the last converged epoch instead: --resume "
+                f"{run_dir / BEST_CHECKPOINT}"
+            )
+
+
 def _restore(
     checkpoint: Mapping[str, Any],
     model: nn.Module,
@@ -1296,11 +1341,16 @@ def _rotate_stale_best(run_dir: Path) -> None:
     first resumed epoch unconditionally improves on ``None`` and rewrites
     ``best.ckpt``, which would destroy the previous monitor's best weights with no
     record of them.
+
+    The destination is ``best.ckpt.stale-monitor``, distinct from the
+    ``best.ckpt.stale`` a fresh run into the same directory writes: sharing one
+    name would let that fresh run replace the only surviving copy of the previous
+    monitor's weights, the one artifact in the run directory nothing can recompute.
     """
     path = run_dir / BEST_CHECKPOINT
     if not path.exists():
         return
-    backup = path.with_name(f"{BEST_CHECKPOINT}.stale")
+    backup = path.with_name(f"{BEST_CHECKPOINT}{MONITOR_CHANGE_SUFFIX}")
     os.replace(path, backup)
     logger.warning(
         "resume: rotated %s aside to %s (it was selected under the previous monitor)",
@@ -1522,6 +1572,10 @@ def _reset_stale_run_artifacts(run_dir: Path) -> None:
     of epoch 1 and ``best.ckpt`` with it (a fresh run starts with no best, so the
     first epoch always improves), which would leave the preserved metrics
     describing weights that no longer exist anywhere.
+
+    Only these four names are rotated, and only onto their own ``.stale``
+    destination: the ``best.ckpt.stale-monitor`` :func:`_rotate_stale_best` wrote
+    under an earlier monitor is left untouched.
     """
     for name in ("metrics.csv", "metrics.json", LAST_CHECKPOINT, BEST_CHECKPOINT):
         path = run_dir / name

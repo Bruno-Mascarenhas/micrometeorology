@@ -490,7 +490,37 @@ class TestResumeMonitorChange:
         assert summary["best_metric"]["value"] <= 1.0
         assert summary["best_metric"]["epoch"] > 2
         # The previous monitor's best weights were preserved, not overwritten.
-        assert load_checkpoint(run_dir / "best.ckpt.stale")["best_metric"] == stale_best
+        assert load_checkpoint(run_dir / "best.ckpt.stale-monitor")["best_metric"] == stale_best
+
+    def test_a_later_fresh_run_does_not_overwrite_the_previous_monitor_s_best(self, tmp_path: Path):
+        root, manifest, _ = _make_dataset(tmp_path)
+        reader = _reader(manifest)
+        run_dir = tmp_path / "run"
+        run_experiment(
+            _cfg(root, epochs=2, monitor="val_dhi_mae"),
+            data_root=root,
+            output_dir=run_dir,
+            embedding_reader=reader,
+        )
+        run_experiment(
+            _cfg(root, epochs=4, monitor="val_sky_acc", patience=2),
+            data_root=root,
+            output_dir=run_dir,
+            resume="auto",
+            embedding_reader=reader,
+        )
+        sky_best = load_checkpoint(run_dir / "best.ckpt")["best_metric"]
+
+        run_experiment(
+            _cfg(root, epochs=1, monitor="val_sky_acc"),
+            data_root=root,
+            output_dir=run_dir,
+            embedding_reader=reader,
+        )
+
+        preserved = load_checkpoint(run_dir / "best.ckpt.stale-monitor")["best_metric"]
+        assert preserved["name"] == "dhi_mae"
+        assert load_checkpoint(run_dir / "best.ckpt.stale")["best_metric"] == sky_best
 
     @pytest.mark.parametrize(
         ("skip_scheduler_state", "expected_mode"), [(True, "max"), (False, "min")]

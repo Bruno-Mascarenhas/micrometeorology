@@ -150,3 +150,76 @@ def test_a_fresh_run_into_a_reused_dir_rotates_the_previous_checkpoint_aside(
     )
 
     assert load_checkpoint(run_dir / f"{name}.stale")["epoch"] == preserved_epoch
+
+
+@pytest.mark.parametrize("poisoned", [math.inf, math.nan])
+def test_a_labelless_batch_of_a_head_cannot_poison_that_head_s_epoch_mean(poisoned: float):
+    accumulator = _MetricAccumulator((0.0, 1.0, 0.0, 1.0), {"loss_dhi": 1.0})
+    no_rows = {"features": torch.zeros(4, 3), "dhi": torch.full((4,), math.nan)}
+    with_rows = {"features": torch.zeros(4, 3), "dhi": torch.tensor([1.0, 2.0, 3.0, 4.0])}
+
+    accumulator.update({}, no_rows, {"loss_dhi": torch.tensor(poisoned)})
+    accumulator.update({}, with_rows, {"loss_dhi": torch.tensor(0.5)})
+
+    assert accumulator.result() == {"loss": pytest.approx(0.5), "loss_dhi": pytest.approx(0.5)}
+
+
+def test_a_non_finite_loss_on_a_head_that_has_rows_still_reaches_the_epoch_metrics():
+    accumulator = _MetricAccumulator((0.0, 1.0, 0.0, 1.0), {"loss_dhi": 1.0})
+    batch = {"features": torch.zeros(4, 3), "dhi": torch.tensor([1.0, 2.0, 3.0, 4.0])}
+
+    accumulator.update({}, batch, {"loss_dhi": torch.tensor(math.nan)})
+
+    assert math.isnan(accumulator.result()["loss_dhi"])
+
+
+def _poison_first_weight(path: Path) -> None:
+    """Write a NaN into the first floating-point parameter of the checkpoint at *path*."""
+    payload = load_checkpoint(path)
+    tensor = next(
+        value
+        for value in payload["model_state"].values()
+        if isinstance(value, torch.Tensor) and value.is_floating_point() and value.numel()
+    )
+    tensor.reshape(-1)[0] = math.nan
+    torch.save(payload, path)
+
+
+def test_resuming_from_a_checkpoint_whose_weights_diverged_is_refused(tmp_path: Path):
+    root, manifest, _ = _make_dataset(tmp_path)
+    reader = _reader(manifest)
+    run_dir = tmp_path / "run"
+    run_experiment(
+        _cfg(root, epochs=1), data_root=root, output_dir=run_dir, embedding_reader=reader
+    )
+    _poison_first_weight(run_dir / "last.ckpt")
+
+    with pytest.raises(RuntimeError, match=r"last\.ckpt") as excinfo:
+        run_experiment(
+            _cfg(root, epochs=2),
+            data_root=root,
+            output_dir=run_dir,
+            resume="auto",
+            embedding_reader=reader,
+        )
+
+    assert "best.ckpt" in str(excinfo.value)
+
+
+def test_a_checkpoint_with_finite_weights_still_resumes(tmp_path: Path):
+    root, manifest, _ = _make_dataset(tmp_path)
+    reader = _reader(manifest)
+    run_dir = tmp_path / "run"
+    run_experiment(
+        _cfg(root, epochs=1), data_root=root, output_dir=run_dir, embedding_reader=reader
+    )
+
+    summary = run_experiment(
+        _cfg(root, epochs=2),
+        data_root=root,
+        output_dir=run_dir,
+        resume="auto",
+        embedding_reader=reader,
+    )
+
+    assert summary["epoch"] == 2
