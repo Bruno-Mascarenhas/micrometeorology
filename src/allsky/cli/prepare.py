@@ -18,6 +18,7 @@ lazily inside each command so ``allsky --help`` stays light and torch-free.
 import hashlib
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -25,7 +26,6 @@ import typer
 
 from allsky.atomic import atomic_write, atomic_write_json
 from allsky.config import VIDEO_TIME_FIELDS, PrepareConfig, load_prepare_config
-from allsky.provenance import config_subset_sha256
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +111,8 @@ def _frames_inputs_sha256(cfg: PrepareConfig) -> str:
     JPEG keeps the old obstruction map; the file's own content hash is folded in
     so that edit re-extracts too.
     """
+    from allsky.provenance import config_subset_sha256
+
     return config_subset_sha256(
         cfg,
         sections=_FRAME_CONFIG_SECTIONS,
@@ -127,7 +129,7 @@ def _read_frames_key(video_dir: Path) -> str | None:
         return None
     try:
         recorded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         logger.warning("frame provenance %s is unreadable (%s); treating it as absent", path, exc)
         return None
     stored = recorded.get("frames_sha256") if isinstance(recorded, dict) else None
@@ -137,6 +139,37 @@ def _read_frames_key(video_dir: Path) -> str | None:
 def _write_frames_key(video_dir: Path, frames_sha: str) -> None:
     """Record the config the frames just written were extracted under."""
     atomic_write_json(video_dir / _FRAMES_META_NAME, {"frames_sha256": frames_sha})
+
+
+def _require_frames_key(video_dir: Path, stem: str, *, frames_key: str, force: bool) -> None:
+    """Abort when frames the manifest is about to be built from predate *frames_key*.
+
+    ``--steps build-manifest`` is a supported entry point that runs no extraction,
+    so the only check standing between frames of one config and a manifest stamped
+    with another is this one: the manifest's own provenance records the config of
+    the run that built it, which would then assert a preprocessing the JPEGs on
+    disk never went through.  Nothing can be re-extracted from here — the step
+    that does was not requested — so the run stops instead.
+
+    Raises
+    ------
+    typer.Exit
+        Code 1 when the recorded frame-provenance hash is missing or differs.
+    """
+    if force:
+        return
+    recorded = _read_frames_key(video_dir)
+    if recorded == frames_key:
+        return
+    typer.echo(
+        f"ERROR: the frames for {stem} in {video_dir} were extracted under "
+        + ("no recorded" if recorded is None else "a different")
+        + " video/mask/crop/resize config, so build-manifest would stamp the manifest with a "
+        "config that did not produce them.\n"
+        "Re-run with the extract-frames step included (or --force to build from them as they "
+        "are)."
+    )
+    raise typer.Exit(1)
 
 
 def _file_sha256(path: Path) -> str:
@@ -338,6 +371,7 @@ def prepare_local(
         videos=videos,
         frames_root=frames_root,
         run_extract="extract-frames" in step_set,
+        build_manifest="build-manifest" in step_set,
         force=force,
     )
 
@@ -438,12 +472,18 @@ def _run_extract_step(
     videos: list[str],
     frames_root: Path,
     run_extract: bool,
+    build_manifest: bool,
     force: bool,
 ) -> list[PandasDataFrame]:
     """Extract (or resume) per-video frames; return the per-video frame manifests.
 
     When *run_extract* is False the existing per-video manifests are loaded so a
-    later ``build-manifest`` step can proceed on a previously extracted dataset.
+    later ``build-manifest`` step can proceed on a previously extracted dataset —
+    but only while their recorded frame provenance matches the current config,
+    since no re-extraction can happen from there (see :func:`_require_frames_key`).
+    That demand is made only when *build_manifest* is set: a ``--steps splits``
+    run reads the persisted manifest and ``cfg.splits`` alone, discarding what
+    this function returns, so frame provenance it never consults must not stop it.
 
     Resume keys on a **complete** per-video manifest, never on the mere existence
     of the file: :func:`allsky.video.extract_frames` publishes
@@ -491,6 +531,8 @@ def _run_extract_step(
                         f"WARNING: skipping {stem}: frame manifest {video_manifest} is unreadable"
                     )
                 continue
+            if build_manifest:
+                _require_frames_key(video_dir, stem, frames_key=frames_key, force=force)
             if not qc_complete:
                 typer.echo(
                     f"WARNING: frame manifest {video_manifest} has no qc_frame_flags; FRAME_DARK/"
@@ -517,7 +559,7 @@ def _run_extract_step(
                 "re-extracting"
             )
         try:
-            frame_manifest = _extract_and_qc(video, video_dir, cfg)
+            frame_manifest = _extract_replacing_frames(video, video_dir, cfg)
         except OverlayTimestampError as exc:
             unusable.append(stem)
             typer.echo(f"WARNING: skipping {stem}: {exc}")
@@ -655,6 +697,46 @@ def _extract_and_qc(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDa
         existing | np.asarray(qc_flags, dtype="int64"), dtype="int64"
     )
     return result
+
+
+def _extract_replacing_frames(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDataFrame:
+    """Extract *video* into a staging directory, then swap it in for *video_dir*.
+
+    Frames are named after their own timestamp, so a re-extraction under a
+    changed clock writes a different file set: on the 2026-06-25 archive video an
+    overlay run wrote 1366 JPEGs and the modelled re-run added 1434 beside them,
+    leaving 68 orphans that the frame manifest does not list and nothing removes.
+    Consumers that read the directory rather than the manifest — the archive
+    uploader does — then see two clocks at once.
+
+    The replacement is produced whole before anything is removed and the previous
+    directory is moved aside rather than deleted, so a failure at any point
+    leaves the earlier extraction intact.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The frame manifest of :func:`_extract_and_qc`, with ``frame_path``
+        rewritten from the staging directory onto the final *video_dir*.
+    """
+    staging = video_dir.with_name(f"{video_dir.name}.incoming")
+    superseded = video_dir.with_name(f"{video_dir.name}.superseded")
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        frame_manifest = _extract_and_qc(video, staging, cfg)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    shutil.rmtree(superseded, ignore_errors=True)
+    if video_dir.exists():
+        video_dir.rename(superseded)
+    staging.rename(video_dir)
+    shutil.rmtree(superseded, ignore_errors=True)
+    replaced = frame_manifest.copy()
+    replaced["frame_path"] = [
+        str(video_dir / Path(str(frame_path)).name) for frame_path in frame_manifest["frame_path"]
+    ]
+    return replaced
 
 
 def _run_build_manifest_step(

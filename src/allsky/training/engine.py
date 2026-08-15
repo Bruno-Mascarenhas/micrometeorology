@@ -22,7 +22,9 @@
    target for, and the reported ``loss`` is the configured weighted sum of those
    means, so the monitored quantity does not move with ``train.batch_size``;
 #. checkpoint ``last.ckpt`` every epoch and ``best.ckpt`` on monitor improvement
-   (resume-safe best seeding), with early stopping;
+   (resume-safe best seeding), with early stopping.  A run in which every epoch
+   left the monitor non-finite writes no ``best.ckpt`` and raises rather than
+   returning a summary naming an artifact that was never written;
 #. resume fully from ``last.ckpt`` (``resume="auto"`` or a path), restoring
    model / optimizer / scheduler / scaler / epoch / global_step / best / RNG —
    but only after the checkpoint's dataset provenance matches this run (a rebuilt
@@ -83,6 +85,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["resolve_run_device", "run_experiment"]
 
 MONITOR_CHANGE_SUFFIX = ".stale-monitor"
+STALE_RUN_SUFFIX = ".stale"
 
 
 def resolve_run_device(requested: str) -> str:
@@ -177,6 +180,16 @@ def run_experiment(
     dict
         ``{best_metric, epochs_ran, epoch, global_step, final_val_metrics,
         output_dir, checkpoint_last, checkpoint_best, wall_seconds}``.
+        ``checkpoint_best`` is the path only when that file exists on disk and
+        ``None`` otherwise (a resume that trained nothing into a new run
+        directory), so the summary never names an artifact a caller cannot read.
+
+    Raises
+    ------
+    RuntimeError
+        If epochs ran and every one of them left the monitor non-finite: no
+        ``best.ckpt`` exists, and the run reports the divergence instead of
+        exiting as a success.
     """
     started = time.monotonic()
     set_global_seed(cfg.seed)
@@ -274,7 +287,6 @@ def run_experiment(
             feature_columns=feature_columns,
             cfg=cfg,
         )
-        _refuse_diverged_weights(checkpoint, path=resume_path, run_dir=run_dir)
         _warn_optimizer_knob_drift(checkpoint, cfg)
         stored_monitor = (checkpoint.get("best_metric") or {}).get("name")
         monitor_changed = stored_monitor is not None and str(stored_monitor) != monitor_key
@@ -315,6 +327,7 @@ def run_experiment(
         )
     else:
         _reset_stale_run_artifacts(run_dir)
+    superseded_best_pending = resume_path is None and (run_dir / BEST_CHECKPOINT).exists()
 
     from torch.utils.tensorboard import SummaryWriter
 
@@ -424,6 +437,9 @@ def run_experiment(
                     **common,
                 )
                 if improved:
+                    if superseded_best_pending:
+                        _rotate_superseded_best(run_dir)
+                        superseded_best_pending = False
                     save_checkpoint(
                         run_dir / BEST_CHECKPOINT,
                         epoch=epoch + 1,
@@ -455,7 +471,16 @@ def run_experiment(
                     break
         finally:
             writer.close()
+        if epochs_ran and best_value is None:
+            raise RuntimeError(
+                f"no best checkpoint: {monitor_key} was non-finite in every one of the "
+                f"{epochs_ran} epoch(s) that ran, so no epoch was ever a candidate for "
+                f"{BEST_CHECKPOINT}. The metrics and the diverged weights are in {run_dir} "
+                f"({LAST_CHECKPOINT}); lower train.lr, enable train.grad_clip_norm or turn "
+                "AMP off before re-running"
+            )
 
+    best_checkpoint = run_dir / BEST_CHECKPOINT
     return {
         "best_metric": {"name": monitor_key, "value": best_value, "epoch": best_epoch},
         "epochs_ran": epochs_ran,
@@ -464,7 +489,7 @@ def run_experiment(
         "final_val_metrics": last_val_metrics,
         "output_dir": str(run_dir),
         "checkpoint_last": str(run_dir / LAST_CHECKPOINT),
-        "checkpoint_best": str(run_dir / BEST_CHECKPOINT),
+        "checkpoint_best": str(best_checkpoint) if best_checkpoint.exists() else None,
         "wall_seconds": time.monotonic() - started,
     }
 
@@ -1218,37 +1243,6 @@ def _warn_optimizer_knob_drift(checkpoint: Mapping[str, Any], cfg: ExperimentCon
             )
 
 
-def _refuse_diverged_weights(checkpoint: Mapping[str, Any], *, path: Path, run_dir: Path) -> None:
-    """Refuse a resume whose stored model weights are not all finite.
-
-    ``last.ckpt`` is written at the end of every epoch, a diverged one included —
-    that is what "last" means — so ``resume='auto'`` would reload NaN weights and
-    burn the rest of the budget on a dead run without a single error.  The scan
-    belongs here rather than at the write side because the weights and the monitor
-    diverge independently: an epoch can leave NaN parameters behind while its own
-    monitor value is still finite, and neither :func:`_check_resume_provenance` nor
-    :func:`_restore` looks at the tensors.
-
-    Only floating-point entries are scanned, and the first offending one ends the
-    scan, so a healthy resume pays one reduction per parameter tensor.
-
-    Raises
-    ------
-    RuntimeError
-        If any floating-point tensor in ``model_state`` holds a NaN or an inf.
-    """
-    for name, tensor in (checkpoint.get("model_state") or {}).items():
-        if not isinstance(tensor, Tensor) or not tensor.is_floating_point():
-            continue
-        if not bool(torch.isfinite(tensor).all()):
-            raise RuntimeError(
-                f"{path} stores non-finite weights (model_state[{name!r}]): the run that "
-                "wrote it diverged, and resuming from it would continue training NaN. "
-                f"Resume from the last converged epoch instead: --resume "
-                f"{run_dir / BEST_CHECKPOINT}"
-            )
-
-
 def _restore(
     checkpoint: Mapping[str, Any],
     model: nn.Module,
@@ -1346,16 +1340,48 @@ def _rotate_stale_best(run_dir: Path) -> None:
     ``best.ckpt.stale`` a fresh run into the same directory writes: sharing one
     name would let that fresh run replace the only surviving copy of the previous
     monitor's weights, the one artifact in the run directory nothing can recompute.
+    A second monitor change gets its own numbered destination for the same reason:
+    every monitor a run directory has been through keeps its own best.
     """
     path = run_dir / BEST_CHECKPOINT
     if not path.exists():
         return
-    backup = path.with_name(f"{BEST_CHECKPOINT}{MONITOR_CHANGE_SUFFIX}")
+    backup = _free_rotation_destination(path.with_name(f"{BEST_CHECKPOINT}{MONITOR_CHANGE_SUFFIX}"))
     os.replace(path, backup)
     logger.warning(
         "resume: rotated %s aside to %s (it was selected under the previous monitor)",
         path,
         backup.name,
+    )
+
+
+def _free_rotation_destination(preferred: Path) -> Path:
+    """*preferred* if free, else the first ``<preferred>.<n>`` (n from 2) that is.
+
+    A rotation destination is never overwritten: the weights it holds were selected
+    under a monitor no later run recomputes.
+    """
+    destination = preferred
+    ordinal = 2
+    while destination.exists():
+        destination = preferred.with_name(f"{preferred.name}.{ordinal}")
+        ordinal += 1
+    return destination
+
+
+def _rotate_superseded_best(run_dir: Path) -> None:
+    """Move the previous run's ``best.ckpt`` aside now that a fresh one replaces it.
+
+    Deferred from :func:`_reset_stale_run_artifacts` to the first epoch that
+    actually improves: rotating at the start of a fresh run leaves the directory
+    with no ``best.ckpt`` at all for a run that then dies (an unresolvable monitor,
+    a divergent first epoch), which is when the previous best matters most.
+    """
+    path = run_dir / BEST_CHECKPOINT
+    backup = path.with_name(f"{BEST_CHECKPOINT}{STALE_RUN_SUFFIX}")
+    os.replace(path, backup)
+    logger.warning(
+        "fresh run: rotated stale %s aside to %s (a previous run wrote it)", path, backup.name
     )
 
 
@@ -1568,19 +1594,21 @@ def _reset_stale_run_artifacts(run_dir: Path) -> None:
     run's numbers are still recoverable; the fresh run then re-creates the files
     from scratch.
 
-    The checkpoints are rotated with them: ``last.ckpt`` is overwritten at the end
-    of epoch 1 and ``best.ckpt`` with it (a fresh run starts with no best, so the
-    first epoch always improves), which would leave the preserved metrics
-    describing weights that no longer exist anywhere.
+    ``last.ckpt`` is rotated with them: it is overwritten at the end of epoch 1,
+    which would leave the preserved metrics describing weights that no longer
+    exist anywhere.  ``best.ckpt`` is *not* rotated here —
+    :func:`_rotate_superseded_best` does it at the first epoch that improves, so a
+    fresh run that dies before producing a replacement leaves the previous best
+    where it is instead of emptying the directory.
 
-    Only these four names are rotated, and only onto their own ``.stale``
+    Only these three names are rotated, and only onto their own ``.stale``
     destination: the ``best.ckpt.stale-monitor`` :func:`_rotate_stale_best` wrote
     under an earlier monitor is left untouched.
     """
-    for name in ("metrics.csv", "metrics.json", LAST_CHECKPOINT, BEST_CHECKPOINT):
+    for name in ("metrics.csv", "metrics.json", LAST_CHECKPOINT):
         path = run_dir / name
         if path.exists():
-            backup = path.with_name(f"{name}.stale")
+            backup = path.with_name(f"{name}{STALE_RUN_SUFFIX}")
             os.replace(path, backup)
             logger.warning(
                 "fresh run: rotated stale %s aside to %s (a previous run wrote it)",

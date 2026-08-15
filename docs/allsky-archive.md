@@ -257,6 +257,22 @@ Live frame, with a prediction:
   --sensor-csv data/processed/station-latest.csv
 ```
 
+The `--sensor-csv` file is the **processed** station export, in the published
+physical units and with a time column the reader recognises; what it must look
+like, and what happens to a reading it cannot screen, is in *The snapshot
+prediction caveat* below.
+
+An **embedding-mode** checkpoint carries no backbone of its own: the live frame is
+encoded through the recipe recorded in the embedding store it was trained
+against, and the path to that store is the absolute one baked in by the machine
+that trained. `--embeddings-dir` overrides it, for a checkpoint copied off that
+machine with its store shipped beside it. The store's `embeddings.meta.json` has
+to name the whole recipe — backbone, revision, pooling, dim and storage dtype —
+and a backbone that cannot reproduce it (a different pinned revision, a different
+width, a different transform) fails the command instead of encoding the frame
+differently from the vectors the model was fitted on. The flag is rejected for an
+image-mode checkpoint, which reads no store at all.
+
 ## Feeding the sensor side: what `prepare-local` needs before it runs
 
 The multimodal models read a sky image **and** the engineered sensor vector, so
@@ -351,9 +367,27 @@ sin/cos — come from the timestamp and site, so a live frame always has them
 exactly. The rest (air temperature, dew point, humidity, pressure, wind) come
 from the station logger, which the camera does not publish.
 
-`--sensor-csv` supplies them from a time-indexed logger export; the row nearest
-the capture time within `--tolerance-minutes` (default 15) is used, and a row
-outside that window is refused rather than passed off as current conditions.
+`--sensor-csv` supplies them from a time-indexed station export whose time column
+is named `timestamp`, `TIMESTAMP`, `datetime` or `time`, and whose values carry
+the **published physical units of the processed export** — °C, %, mbar, m s⁻¹,
+degrees, W m⁻² — at whatever averaging interval it was written on, not the
+logger's raw pre-calibration signal and not necessarily a 5-minute grid. The row
+nearest the capture time within `--tolerance-minutes` (default 15) is used, and a
+row outside that window is refused rather than passed off as current conditions.
+
+That row is then screened against the physical gates `sensor_limits` declares in
+`configs/micromet/default.yaml` — the same gates the archive build applies — and
+no longer against the raw-unit sentinel table: an hour that railed for only part
+of its samples averages to a finite number no sentinel literal matches, and would
+otherwise pass the finiteness screen and be served as a measurement. A value
+outside its gate is dropped and imputed, and every column that happened to is
+named in a warning. A column the configuration declares no gate for is dropped
+for the same reason — a reading nothing can screen is not one a prediction should
+be built on — and is imputed like any other missing column. If the configuration
+declares **no** `sensor_limits` at all, there is nothing to screen a live reading
+against and the command fails (exit 1) rather than serving the row: restore
+`configs/micromet/default.yaml`, or predict without `--sensor-csv`.
+
 Without the option, each missing column is imputed at its **training mean** (so
 the standardized value is exactly 0), the prediction is still produced, and the
 imputed column names are written into `<stem>.prediction.json` under

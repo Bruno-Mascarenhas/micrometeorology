@@ -48,6 +48,8 @@ HDF5_LOCKING_ENV = "LABMIM_HDF5_FILE_LOCKING"
 
 POTEOLICO_ALL_HEIGHTS: tuple[int, ...] = (50, 100, 150)
 
+WIND_VECTORS_VARIABLE = "wind_vectors"
+
 #: Casefolded request spelling -> the canonical name every downstream lookup
 #: compares against.  Both the JSON export and the figure renderer fold through
 #: this before choosing a daylight gate, a colormap or an output filename, so a
@@ -55,16 +57,39 @@ POTEOLICO_ALL_HEIGHTS: tuple[int, ...] = (50, 100, 150)
 CANONICAL_VARIABLES: dict[str, str] = {
     **{variable.value.casefold(): variable.value for variable in WRFVariable},
     **{f"poteolico{height}": f"poteolico{height}" for height in POTEOLICO_ALL_HEIGHTS},
-    "wind_vectors": "wind_vectors",
+    WIND_VECTORS_VARIABLE: WIND_VECTORS_VARIABLE,
 }
 
-# Requested names that publish every step under a single ``{D}_{ID}_{NNN}.json``
-# id, so the manifest can advertise "no steps this run" for one that wrote
-# nothing. Everything outside this set and VARIABLE_NETCDF_MAP fans out to
-# several ids (wind potential per height, the vector overlay per stem).
-_SINGLE_ID_VARIABLES = frozenset(
-    variable.value for variable in WRFVariable if variable.value != "poteolico"
-)
+WIND_VECTORS_OUTPUT_ID = "WIND_VECTORS"
+
+
+def values_output_id(variable: str) -> str:
+    """The ``{D}_{ID}_{NNN}.json`` id one values variable publishes under.
+
+    The single definition the writer, the manifest seeding and the failed-unit
+    report all spell it with: a request the enum does not name still publishes
+    under its uppercased self, and a second spelling of that rule would let the
+    manifest advertise an id no file was ever written under.
+    """
+    return VARIABLE_NETCDF_MAP.get(variable, variable.upper())
+
+
+def poteolico_output_id(height: int) -> str:
+    """The ``{D}_{ID}_{NNN}.json`` id one wind-potential target height publishes under."""
+    return f"POT_EOLICO_{height}M"
+
+
+def unit_kind_for(variable: str) -> UnitKind:
+    """The pipeline a requested variable name runs through.
+
+    The single definition of the rule, so the manifest cannot classify a name
+    one way while the unit that publishes it ran the other.
+    """
+    if variable.startswith(WRFVariable.WIND_POTENTIAL):
+        return "poteolico"
+    if variable == WIND_VECTORS_VARIABLE:
+        return "wind_vectors"
+    return "values_json"
 
 
 def parse_poteolico_heights(variable: str) -> tuple[int, ...]:
@@ -351,7 +376,7 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
     written_files: list[str] = []
     unit_warnings: list[str] = []
     grid_level = dataset.grid_level.value
-    output_variable_id = VARIABLE_NETCDF_MAP.get(unit.variable, unit.variable.upper())
+    output_variable_id = values_output_id(unit.variable)
     time_step_metadata = dataset.build_date_metadata(skip_first_n=unit.skip_first)
 
     frame_source = build_value_frame_source(dataset, unit.variable)
@@ -417,7 +442,7 @@ def _run_poteolico_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str],
     series = variables.stream_wind_at_heights(dataset, targets)
 
     for height_series in series:
-        suffix = f"POT_EOLICO_{height_series.target}M"
+        suffix = poteolico_output_id(height_series.target)
         accumulator = (
             _SiteArtifactAccumulator(dataset.n_time_steps) if unit.site_artifacts else None
         )
@@ -466,7 +491,9 @@ def _run_wind_vectors_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[st
         payload = create_wind_vectors_json(
             u, v, date_time=step_metadata["datetime_local"], downsampling=4
         )
-        output_path = Path(unit.json_dir) / f"{grid_level}_WIND_VECTORS_{step_index:03d}.json"
+        output_path = (
+            Path(unit.json_dir) / f"{grid_level}_{WIND_VECTORS_OUTPUT_ID}_{step_index:03d}.json"
+        )
         files.append(_atomic_json_dump(output_path, payload))
     return files, []
 
@@ -635,15 +662,13 @@ def write_run_manifest(
         # A requested variable that wrote nothing gets an empty set: an omitted
         # key reads as "full range" to the page, which then serves the PREVIOUS
         # run's frames (fixed names, still on disk) under the new version.
-        # Only names that publish under ONE output id. Wind potential writes a
-        # file per target height (POT_EOLICO_50M, ...) and the vector overlay
-        # writes its own stems, so no id derived from the requested name exists
-        # for them, and seeding a guess advertises a variable nothing ever wrote.
+        # Only the values pipeline, whose request maps to ONE output id. Wind
+        # potential fans out over target heights the run may not all have been
+        # asked for, and the vector overlay writes its own stems, so seeding
+        # from their requested name advertises ids nothing ever wrote.
         for requested in requested_variables:
-            if requested in VARIABLE_NETCDF_MAP:
-                per_variable.setdefault(VARIABLE_NETCDF_MAP[requested], [set()])
-            elif requested in _SINGLE_ID_VARIABLES:
-                per_variable.setdefault(requested.upper(), [set()])
+            if unit_kind_for(requested) == "values_json":
+                per_variable.setdefault(values_output_id(requested), [set()])
         availability = {
             var: _compress_index_ranges(shared)
             for var, shared in sorted(
@@ -743,15 +768,15 @@ def _unit_output_ids(unit: WorkUnit) -> tuple[str, ...]:
     guessing one advertises a variable nothing ever wrote.
     """
     if unit.kind == "values_json":
-        return (VARIABLE_NETCDF_MAP.get(unit.variable, unit.variable.upper()),)
+        return (values_output_id(unit.variable),)
     if unit.kind == "poteolico":
         try:
             heights = parse_poteolico_heights(unit.variable)
         except ValueError:
             return ()
-        return tuple(f"POT_EOLICO_{height}M" for height in heights)
+        return tuple(poteolico_output_id(height) for height in heights)
     if unit.kind == "wind_vectors":
-        return ("WIND_VECTORS",)
+        return (WIND_VECTORS_OUTPUT_ID,)
     return ()
 
 
@@ -866,24 +891,18 @@ def build_units(
                 site_artifacts=site_artifacts,
             )
         )
-        for var_name in variables:
-            if var_name.startswith(WRFVariable.WIND_POTENTIAL):
-                kind: UnitKind = "poteolico"
-            elif var_name == "wind_vectors":
-                kind = "wind_vectors"
-            else:
-                kind = "values_json"
-            units.append(
-                WorkUnit(
-                    kind=kind,
-                    wrf_path=str(path),
-                    variable=var_name,
-                    json_dir=str(json_dir),
-                    geojson_dir=str(geojson_dir),
-                    skip_first=skip_first,
-                    site_artifacts=site_artifacts,
-                )
+        units.extend(
+            WorkUnit(
+                kind=unit_kind_for(var_name),
+                wrf_path=str(path),
+                variable=var_name,
+                json_dir=str(json_dir),
+                geojson_dir=str(geojson_dir),
+                skip_first=skip_first,
+                site_artifacts=site_artifacts,
             )
+            for var_name in variables
+        )
     return units
 
 

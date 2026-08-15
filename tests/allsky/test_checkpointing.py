@@ -5,6 +5,7 @@ injected failure, a full state round-trip, the ``_orig_mod.`` compile-prefix
 strip on load and the restricted unpickler that refuses a poisoned checkpoint.
 """
 
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -232,6 +233,47 @@ class TestRestrictedUnpickler:
         restore_rng_state(ckpt["rng_state"])
         assert ckpt["epoch"] == 2
         assert ckpt["rng_state"]["numpy"][0] == "MT19937"
+
+
+class TestDivergedWeights:
+    """Every reader of a checkpoint shares ``load_checkpoint``: the scan belongs there."""
+
+    @staticmethod
+    def _poison(path: Path, value: float) -> None:
+        payload = torch.load(path, weights_only=False)
+        payload["model_state"]["weight"].reshape(-1)[0] = value
+        torch.save(payload, path)
+
+    @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+    def test_a_checkpoint_with_non_finite_weights_is_refused(self, tmp_path: Path, value: float):
+        model, optimizer, scheduler = _tiny_state()
+        path = _save(tmp_path / "last.ckpt", model, optimizer, scheduler)
+        self._poison(path, value)
+
+        with pytest.raises(RuntimeError, match="non-finite weights"):
+            load_checkpoint(path)
+
+    def test_the_refusal_names_the_offending_parameter(self, tmp_path: Path):
+        model, optimizer, scheduler = _tiny_state()
+        path = _save(tmp_path / "last.ckpt", model, optimizer, scheduler)
+        self._poison(path, math.nan)
+
+        with pytest.raises(RuntimeError, match="'weight'"):
+            load_checkpoint(path)
+
+    def test_the_trusted_reader_does_not_bypass_the_refusal(self, tmp_path: Path):
+        model, optimizer, scheduler = _tiny_state()
+        path = _save(tmp_path / "last.ckpt", model, optimizer, scheduler)
+        self._poison(path, math.nan)
+
+        with pytest.raises(RuntimeError, match="non-finite weights"):
+            load_checkpoint(path, trust_pickle=True)
+
+    def test_a_converged_checkpoint_still_loads(self, tmp_path: Path):
+        model, optimizer, scheduler = _tiny_state()
+        path = _save(tmp_path / "last.ckpt", model, optimizer, scheduler)
+
+        assert load_checkpoint(path)["epoch"] == 2
 
 
 class TestRngState:

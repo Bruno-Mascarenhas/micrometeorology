@@ -127,7 +127,9 @@ ERA_SPLIT = pd.Timestamp("2019-03-15")
 # 15 deg of north in the whole of 2021. Kept in the database, excluded here.
 INVALID_DIRECTION = (pd.Timestamp("2019-05-31"), pd.Timestamp("2023-02-20 13:30"))
 
-# Where inside its own stamp each source's row lives, for the solar geometry only.
+# Where inside its own stamp each source's row lives, for the VALUES each source
+# computes — the clearness index and the extraterrestrial mixture, never the
+# daylight selection, which is shared (see _daytime_selection).
 # The observed rows are MEANS over [T, T+1h) — sensors.aggregation.aggregate_to_hourly
 # resamples on pandas' defaults, which label a window by its start — and
 # docs/arqueologia/qc/lit-radiation-qc.md prescribes the correction: "If
@@ -267,13 +269,80 @@ def _elevation(frame: pd.DataFrame, source: GeometrySource) -> np.ndarray:
     return elevation
 
 
+def _selection_elevation_bounds(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Lowest and highest solar elevation over the instants ANY source evaluates.
+
+    Parameters
+    ----------
+    frame:
+        Block indexed by naive station-local (UTC-03) stamps, ``(N,)``.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Minimum and maximum solar elevation in degrees, ``(N,)`` each, over the
+        instants in :data:`GEOMETRY_OFFSET`, in the frame's own row order.
+    """
+    elevations = np.stack([_elevation(frame, source) for source in GEOMETRY_OFFSET])
+    minimum: np.ndarray = elevations.min(axis=0)
+    maximum: np.ndarray = elevations.max(axis=0)
+    return minimum, maximum
+
+
+def _daytime_selection(frame: pd.DataFrame) -> np.ndarray:
+    """Which hours count as daytime, on one rule both sources share.
+
+    Deliberate deviation from evaluating each source's gate at its own instant:
+    the offsets differ by half an hour, so near the terminators the two sides
+    would admit different hours — around one row per day per terminator — and the
+    paired histograms this artifact exists for would be conditional on different
+    events. The hour is daytime only when the sun clears the floor at every
+    instant either source evaluates, which also keeps each side's own
+    extraterrestrial denominator away from zero.
+
+    Parameters
+    ----------
+    frame:
+        Block indexed by naive station-local (UTC-03) stamps, ``(N,)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean mask, ``(N,)``, in the frame's own row order.
+    """
+    lowest, _highest = _selection_elevation_bounds(frame)
+    daytime: np.ndarray = lowest > MIN_SOLAR_ELEVATION_DEG
+    return daytime
+
+
+def _nighttime_selection(frame: pd.DataFrame) -> np.ndarray:
+    """Which hours carry no sunlight at any instant either source evaluates.
+
+    The mirror of :func:`_daytime_selection`, and for an hourly MEAN the stricter
+    reading of "night": an hour the sun rises or sets inside averages a sunlit
+    half into a quantity published as the nocturnal regime.
+
+    Parameters
+    ----------
+    frame:
+        Block indexed by naive station-local (UTC-03) stamps, ``(N,)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean mask, ``(N,)``, in the frame's own row order.
+    """
+    _lowest, highest = _selection_elevation_bounds(frame)
+    nighttime: np.ndarray = highest < 0.0
+    return nighttime
+
+
 def _clearness(frame: pd.DataFrame, column: str, source: GeometrySource) -> pd.Series:
     """Clearness index from measured global irradiance, gated on solar elevation."""
     if column not in frame.columns:
         return pd.Series(dtype=float)
-    elevation = _elevation(frame, source)
     extraterrestrial = extraterrestrial_ghi(_geometry_times(frame, source), SITE, UTC_OFFSET_HOURS)
-    daylight = (elevation > MIN_SOLAR_ELEVATION_DEG) & (extraterrestrial > 0)
+    daylight = _daytime_selection(frame) & (extraterrestrial > 0)
     with np.errstate(invalid="ignore", divide="ignore"):
         kt = frame[column].to_numpy() / extraterrestrial
     return pd.Series(np.where(daylight, kt, np.nan), index=frame.index).dropna()
@@ -362,9 +431,9 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
     series = frame[column]
 
     if spec_id in DAYTIME_ONLY:
-        series = series.loc[_elevation(frame, "observed") > MIN_SOLAR_ELEVATION_DEG]
+        series = series.loc[_daytime_selection(frame)]
     elif spec_id in NIGHTTIME_ONLY:
-        series = series.loc[_elevation(frame, "observed") < 0.0]
+        series = series.loc[_nighttime_selection(frame)]
     series = series.dropna()
 
     if spec_id == "par_early":
@@ -456,12 +525,13 @@ def _wrf_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Ato
     if column not in frame.columns:
         return np.array([]), []
     series = frame[column]
-    # The SAME solar gate and de-atomisation as the observed side: conditioning the
-    # two histograms on different events makes the comparison meaningless.
+    # The SAME solar gate and de-atomisation as the observed side — the gate is
+    # source-independent by construction — since conditioning the two histograms on
+    # different events makes the comparison meaningless.
     if spec_id in DAYTIME_ONLY:
-        series = series.loc[_elevation(frame, "wrf") > MIN_SOLAR_ELEVATION_DEG]
+        series = series.loc[_daytime_selection(frame)]
     elif spec_id in NIGHTTIME_ONLY:
-        series = series.loc[_elevation(frame, "wrf") < 0.0]
+        series = series.loc[_nighttime_selection(frame)]
     series = series.dropna()
     return _strip_atoms(
         spec_id, series, _paired_speed(spec_id, frame, series, WRF_COLUMN["wind_speed"])
@@ -560,7 +630,7 @@ def _induced_options(
     if not np.isfinite(parent.params.get("lambda", np.nan)):
         return None
 
-    daylight = frame.loc[_elevation(frame, source) > MIN_SOLAR_ELEVATION_DEG]
+    daylight = frame.loc[_daytime_selection(frame)]
     if spec_id in ("par_late", "shortwave_up"):
         daylight = daylight.loc[daylight.index >= ERA_SPLIT]
     elif spec_id == "par_early":

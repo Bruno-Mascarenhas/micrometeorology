@@ -241,9 +241,16 @@ def write_grid_geojson_stream(
     Raises
     ------
     ValueError
-        When the grids disagree in shape, are not 2-D, or are smaller than 2x2.
+        When the grids disagree in shape, are not 2-D, are smaller than 2x2, or
+        carry a non-finite coordinate or resolution.
     """
-    n_rows, n_cols = _validate_grid(lon, lat, context=f"streamed GeoJSON grid for {output_path}")
+    n_rows, n_cols = _validate_grid(
+        lon,
+        lat,
+        resolution_x=resolution_x,
+        resolution_y=resolution_y,
+        context=f"streamed GeoJSON grid for {output_path}",
+    )
     metadata = {"resolucao_m": [float(resolution_x), float(resolution_y)]}
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -253,7 +260,7 @@ def write_grid_geojson_stream(
 
     with open(out, "w", encoding="utf-8") as f:
         f.write('{"type":"FeatureCollection","metadata":')
-        json.dump(metadata, f, separators=(",", ":"), ensure_ascii=False)
+        json.dump(metadata, f, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
         f.write(',"features":[')
         for start in range(0, n_cells, GEOJSON_FEATURE_CHUNK_SIZE):
             stop = min(start + GEOJSON_FEATURE_CHUNK_SIZE, n_cells)
@@ -309,8 +316,20 @@ def write_grid_compact_json_stream(
 
     - ``grid-bounds-v1`` — fallback for non-separable (curvilinear) grids:
       per-cell ``[lon_left, lat_bottom, lon_right, lat_top]``.
+
+    Raises
+    ------
+    ValueError
+        When the grids disagree in shape, are not 2-D, are smaller than 2x2, or
+        carry a non-finite coordinate or resolution.
     """
-    n_rows, n_cols = _validate_grid(lon, lat, context=f"compact grid JSON for {output_path}")
+    n_rows, n_cols = _validate_grid(
+        lon,
+        lat,
+        resolution_x=resolution_x,
+        resolution_y=resolution_y,
+        context=f"compact grid JSON for {output_path}",
+    )
     lon_left, lon_right, lat_top, lat_bottom = _grid_cell_corner_arrays(lon, lat)
 
     payload: dict[str, Any] = {}
@@ -338,7 +357,7 @@ def write_grid_compact_json_stream(
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
-        json.dump(payload, f, separators=(",", ":"), ensure_ascii=False)
+        json.dump(payload, f, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     logger.info("Saved compact grid JSON: %s (%s)", out, payload["format"])
     return out
 
@@ -429,11 +448,24 @@ def _rounded_coordinate_list(arr: NDArray) -> list[float]:
     return [round(v, 10) for v in np.asarray(arr).ravel().tolist()]
 
 
-def _validate_grid(lon: NDArray, lat: NDArray, *, context: str) -> tuple[int, int]:
-    """Check a coordinate grid pair and return its ``(n_rows, n_cols)``.
+def _validate_grid(
+    lon: NDArray,
+    lat: NDArray,
+    *,
+    resolution_x: float,
+    resolution_y: float,
+    context: str,
+) -> tuple[int, int]:
+    """Check a grid's shape and geometry finiteness and return its ``(n_rows, n_cols)``.
 
     The 2x2 floor is what the corner arithmetic needs: the edge cells take their
     outer half-width from the neighbour, which a single row or column has none of.
+
+    Non-finite geometry is refused rather than published as ``null``: a cell
+    centre or a grid spacing is never legitimately absent, so a null coordinate
+    would draw a broken polygon instead of failing. Refusing here is also the
+    only defense for the GeoJSON feature text, which is assembled by f-string
+    and would emit a lowercase ``nan``/``inf`` that no encoder setting can catch.
     """
     if lon.shape != lat.shape:
         raise ValueError(f"lon/lat grid shapes differ: {lon.shape!r} vs {lat.shape!r}")
@@ -448,6 +480,21 @@ def _validate_grid(lon: NDArray, lat: NDArray, *, context: str) -> tuple[int, in
         context=context,
         multiplier=4.0,
     )
+    if not (np.isfinite(resolution_x) and np.isfinite(resolution_y)):
+        raise ValueError(
+            f"Non-finite grid resolution ({resolution_x!r}, {resolution_y!r}) for {context}"
+        )
+    for name, grid in (("lon", lon), ("lat", lat)):
+        # np.asarray: WRF readers hand back MaskedArrays, whose ``isfinite``
+        # skips masked cells — but the corner arithmetic reads the underlying
+        # data, so it is the data that has to be finite.
+        values = np.asarray(grid)
+        if not np.isfinite(values).all():
+            bad = int((~np.isfinite(values)).sum())
+            raise ValueError(
+                f"Non-finite {name} values in {bad} of {values.size} cells for {context}: "
+                "a grid coordinate is never legitimately absent"
+            )
     return int(n_rows), int(n_cols)
 
 

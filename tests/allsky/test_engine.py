@@ -522,6 +522,37 @@ class TestResumeMonitorChange:
         assert preserved["name"] == "dhi_mae"
         assert load_checkpoint(run_dir / "best.ckpt.stale")["best_metric"] == sky_best
 
+    def _three_monitors(self, tmp_path: Path) -> Path:
+        """Run a directory through dhi_mae -> sky_acc -> loss, one resume per monitor."""
+        root, manifest, _ = _make_dataset(tmp_path)
+        reader = _reader(manifest)
+        run_dir = tmp_path / "run"
+        for monitor, epochs in (("val_dhi_mae", 2), ("val_sky_acc", 4), ("val_loss", 6)):
+            run_experiment(
+                _cfg(root, epochs=epochs, monitor=monitor, patience=2),
+                data_root=root,
+                output_dir=run_dir,
+                resume="auto" if monitor != "val_dhi_mae" else None,
+                embedding_reader=reader,
+            )
+        return run_dir
+
+    def test_a_second_monitor_change_does_not_destroy_the_first_monitor_s_best(
+        self, tmp_path: Path
+    ):
+        run_dir = self._three_monitors(tmp_path)
+
+        first = load_checkpoint(run_dir / "best.ckpt.stale-monitor")["best_metric"]
+
+        assert first["name"] == "dhi_mae"
+
+    def test_a_second_monitor_change_rotates_onto_its_own_destination(self, tmp_path: Path):
+        run_dir = self._three_monitors(tmp_path)
+
+        second = load_checkpoint(run_dir / "best.ckpt.stale-monitor.2")["best_metric"]
+
+        assert second["name"] == "sky_acc"
+
     @pytest.mark.parametrize(
         ("skip_scheduler_state", "expected_mode"), [(True, "max"), (False, "min")]
     )

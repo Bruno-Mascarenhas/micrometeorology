@@ -13,10 +13,12 @@ attacker would answer the plaintext fetch with.
 """
 
 import hashlib
+import http.client
 import json
 import ssl
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -179,6 +181,64 @@ def test_download_raises_when_the_server_sends_fewer_bytes_than_it_announced(
         client.download(entry, destination)
 
     assert list(destination.iterdir()) == []
+
+
+def test_a_truncated_re_download_leaves_the_valid_video_it_failed_to_replace(
+    mirror: fake.ArchiveMirror, client: ArchiveClient, tmp_path: Path
+):
+    entry = client.list_videos()[1]
+    destination = tmp_path / "videos"
+    client.download(entry, destination)
+    mirror.truncate[mirror.video_url_path(entry.filename)] = 100
+
+    with pytest.raises(ArchiveError, match="truncated"):
+        client.download(entry, destination)
+
+    assert (destination / entry.filename).read_bytes() == PAYLOAD_NEW
+
+
+class _BodyDiesMidStream:
+    """A response whose headers arrive whole and whose body raises on the first read."""
+
+    def __init__(self, response: Any) -> None:
+        self._response = response
+        self.headers = response.headers
+
+    def read(self, *_size: int) -> bytes:
+        raise http.client.IncompleteRead(b"", len(PAYLOAD_NEW))
+
+    def close(self) -> None:
+        self._response.close()
+
+
+def _break_the_first_video_body(client: ArchiveClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    opener = client._opener
+    original = opener.open
+    broken: list[str] = []
+
+    def open_and_break_the_first_video(url: str, timeout: float | None = None) -> Any:
+        response = original(url, timeout=timeout)
+        if url.endswith(".mp4") and not broken:
+            broken.append(url)
+            return _BodyDiesMidStream(response)
+        return response
+
+    monkeypatch.setattr(opener, "open", open_and_break_the_first_video)
+
+
+def test_a_body_that_dies_mid_stream_is_retried_rather_than_failing_the_download(
+    mirror: fake.ArchiveMirror, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    client = ArchiveClient(
+        mirror.base_url, allow_plaintext=True, retries=2, backoff=0.0, delay=0.0, timeout=10.0
+    )
+    entry = client.list_videos()[1]
+    _break_the_first_video_body(client, monkeypatch)
+
+    result = client.download(entry, tmp_path / "videos")
+
+    assert result.path.read_bytes() == PAYLOAD_NEW
+    assert result.sha256 == hashlib.sha256(PAYLOAD_NEW).hexdigest()
 
 
 def test_download_of_a_day_the_server_no_longer_serves_fails_loudly(

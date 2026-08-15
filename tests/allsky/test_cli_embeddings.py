@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import imageio.v3 as iio
@@ -32,7 +34,9 @@ def _build_dataset(dataset_dir: Path, n: int = 4, size: int = 16) -> None:
     pd.DataFrame(rows).to_parquet(dataset_dir / "manifest.parquet", index=False)
 
 
-def _write_config(tmp_path: Path, dataset_dir: Path, backbone: str = "fake") -> Path:
+def _write_config(
+    tmp_path: Path, dataset_dir: Path, backbone: str = "fake", mask: Path | None = None
+) -> Path:
     config = tmp_path / "prepare.yaml"
     config.write_text(
         "output:\n"
@@ -40,7 +44,7 @@ def _write_config(tmp_path: Path, dataset_dir: Path, backbone: str = "fake") -> 
         "embeddings:\n"
         f"  backbone: {backbone}\n"
         "  batch_size: 2\n"
-        "  shard_size: 3\n",
+        "  shard_size: 3\n" + ("" if mask is None else f"mask:\n  path: '{mask}'\n"),
         encoding="utf-8",
     )
     return config
@@ -154,6 +158,7 @@ def test_missing_manifest_errors(tmp_path: Path):
         {"crop": {"enabled": True, "top": 40}},
         {"resize": 224},
         {"video": {"timestamps": "modelled"}},
+        {"video": {"filename_date_format": "allsky_%Y%m%d"}},
     ],
 )
 def test_a_config_edit_that_changes_the_encoded_pixels_changes_the_resume_hash(patch: dict):
@@ -211,7 +216,16 @@ def _restamp(dataset_dir: Path, config_sha256: str) -> None:
     _meta_path(dataset_dir).write_text(json.dumps(meta), encoding="utf-8")
 
 
-def test_a_store_stamped_by_the_old_formula_resumes_and_is_restamped(tmp_path: Path):
+def _drop_pixel_provenance(dataset_dir: Path) -> None:
+    """Reduce the meta to what a pre-migration release actually wrote."""
+    meta = json.loads(_meta_path(dataset_dir).read_text(encoding="utf-8"))
+    del meta["pixel_config_sha256"]
+    _meta_path(dataset_dir).write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_a_store_stamped_by_the_old_formula_resumes_when_its_pixel_config_is_unchanged(
+    tmp_path: Path,
+):
     pytest.importorskip("torch")
     dataset_dir = tmp_path / "dataset"
     _build_dataset(dataset_dir, n=4)
@@ -227,6 +241,60 @@ def test_a_store_stamped_by_the_old_formula_resumes_and_is_restamped(tmp_path: P
     assert json.loads(_meta_path(dataset_dir).read_text(encoding="utf-8"))[
         "config_sha256"
     ] == _config_sha256(cfg)
+
+
+def test_a_store_stamped_by_the_old_formula_with_no_pixel_provenance_refuses_to_resume(
+    tmp_path: Path,
+):
+    pytest.importorskip("torch")
+    dataset_dir = tmp_path / "dataset"
+    _build_dataset(dataset_dir, n=4)
+    config = _write_config(tmp_path, dataset_dir)
+    assert runner.invoke(app, ["precompute-embeddings", "--config", str(config)]).exit_code == 0
+    _restamp(dataset_dir, _pre_migration_config_sha256(load_prepare_config(config)))
+    _drop_pixel_provenance(dataset_dir)
+
+    result = runner.invoke(app, ["precompute-embeddings", "--config", str(config)])
+
+    assert result.exit_code == 1, result.output
+    assert "--no-resume" in result.output
+
+
+def test_redrawing_the_mask_under_an_old_formula_store_refuses_to_resume(tmp_path: Path):
+    pytest.importorskip("torch")
+    dataset_dir = tmp_path / "dataset"
+    _build_dataset(dataset_dir, n=4)
+    mask = _write_mask(tmp_path / "horizon.png", blacked_rows=0)
+    config = _write_config(tmp_path, dataset_dir, mask=mask)
+    assert runner.invoke(app, ["precompute-embeddings", "--config", str(config)]).exit_code == 0
+    _restamp(dataset_dir, _pre_migration_config_sha256(load_prepare_config(config)))
+
+    # The legacy digest covers the encoder section alone, so a redrawn horizon
+    # leaves it equal while every encoded pixel behind the store changes.
+    _write_mask(mask, blacked_rows=8)
+    result = runner.invoke(app, ["precompute-embeddings", "--config", str(config)])
+
+    assert result.exit_code == 1, result.output
+    assert "--no-resume" in result.output
+
+
+def test_importing_the_embeddings_command_module_does_not_pull_pandas():
+    """The module docstring promises the heavy dependencies stay inside the command."""
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, allsky.cli.embeddings;"
+                "print(sorted(m for m in sys.modules if m.split('.')[0] == 'pandas'))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert probe.stdout.strip() == "[]"
 
 
 def test_a_store_stamped_with_an_unrelated_digest_still_refuses_to_resume(tmp_path: Path):

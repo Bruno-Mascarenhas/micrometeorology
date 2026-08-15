@@ -23,7 +23,6 @@ from typing import Annotated
 import typer
 
 from allsky.config import VIDEO_TIME_FIELDS, PrepareConfig
-from allsky.provenance import config_subset_sha256
 
 logger = logging.getLogger("allsky.embeddings")
 
@@ -38,9 +37,40 @@ def _configure_logging() -> None:
     root.setLevel(logging.INFO)
 
 
+#: Sections deciding the pixels a stored vector was computed from, as opposed to
+#: the encoder that computed it: what ``prepare-local`` bakes into the JPEG.
+_PIXEL_CONFIG_SECTIONS = ("mask", "crop", "resize")
+
 #: Sections a stored vector depends on whole: the encoder itself and the
 #: preprocessing ``prepare-local`` bakes into the JPEG the encoder reads.
-_EMBEDDING_CONFIG_SECTIONS = ("embeddings", "mask", "crop", "resize")
+_EMBEDDING_CONFIG_SECTIONS = ("embeddings", *_PIXEL_CONFIG_SECTIONS)
+
+
+def _mask_content_files(cfg: PrepareConfig) -> tuple[str, ...]:
+    """The files whose bytes shape the encoded pixels without being config values."""
+    return () if cfg.mask.path is None else (cfg.mask.path,)
+
+
+def _pixel_config_sha256(cfg: PrepareConfig) -> str:
+    """Content hash of the config deciding which pixels a stored vector encodes.
+
+    Recorded in ``embeddings.meta.json`` beside the full resume digest, because
+    the two answer different questions.  The full digest moves whenever its own
+    formula widens, which says nothing about whether a single pixel changed; this
+    one moves only when the frames themselves would.  That is what lets
+    :func:`allsky.embeddings.extract._check_resume_compatible` migrate a store
+    across a formula change without having to take the encoder's word for the
+    preprocessing behind it.
+    """
+    from allsky.provenance import config_subset_sha256
+
+    return config_subset_sha256(
+        cfg,
+        sections=_PIXEL_CONFIG_SECTIONS,
+        nested_fields={"video": VIDEO_TIME_FIELDS},
+        content_files=_mask_content_files(cfg),
+        subject="the embedding pixel provenance hash",
+    )
 
 
 def _config_sha256(cfg: PrepareConfig) -> str:
@@ -60,11 +90,13 @@ def _config_sha256(cfg: PrepareConfig) -> str:
     pixels.  The frame gate in :func:`allsky.cli.prepare._frames_inputs_sha256`
     folds the same bytes in, so both stages invalidate together.
     """
+    from allsky.provenance import config_subset_sha256
+
     return config_subset_sha256(
         cfg,
         sections=_EMBEDDING_CONFIG_SECTIONS,
         nested_fields={"video": VIDEO_TIME_FIELDS},
-        content_files=() if cfg.mask.path is None else (cfg.mask.path,),
+        content_files=_mask_content_files(cfg),
         subject="the embedding resume hash",
     )
 
@@ -79,7 +111,8 @@ def _legacy_config_sha256(cfg: PrepareConfig) -> str:
     reproduces the old formula verbatim (python-mode dump, ``default=str``,
     default separators) so
     :func:`allsky.embeddings.extract._check_resume_compatible` can recognise
-    such a store and migrate it in place.
+    such a store — and migrate it in place when, and only when, the store also
+    records the pixel provenance that formula never covered.
     """
     canonical = json.dumps(cfg.embeddings.model_dump(), sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -191,6 +224,7 @@ def precompute_embeddings(
             dry_run=dry_run,
             config_sha256=_config_sha256(cfg),
             legacy_config_sha256=_legacy_config_sha256(cfg),
+            pixel_config_sha256=_pixel_config_sha256(cfg),
         )
     except Exception as exc:  # surface any failure as a non-zero exit
         typer.echo(f"error: embedding extraction failed: {exc}", err=True)

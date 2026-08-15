@@ -37,6 +37,10 @@ from micrometeorology.sensors.calibration import (
 
 TOA5_METADATA = '"TOA5","CR5000","CR5000","2754","CR5000.Std.06","TEST","1","LBM_test"'
 
+CALIBRATIONS_YAML = (
+    Path(__file__).resolve().parents[2] / "configs" / "micromet" / "calibrations.yaml"
+)
+
 
 def write_toa5(path, columns, rows) -> None:
     """Write a minimal but structurally faithful TOA5 table."""
@@ -630,7 +634,7 @@ def test_a_perihelion_enhancement_burst_survives_the_ceiling_it_is_under() -> No
 
 
 def test_the_diffuse_eras_mirror_the_calibration_map() -> None:
-    switches = load_sensor_switches(Path("configs/micromet/calibrations.yaml"))
+    switches = load_sensor_switches(CALIBRATIONS_YAML)
     published = [
         (mapping["column"], mapping["start_date"], mapping["end_date"])
         for switch in switches
@@ -651,6 +655,15 @@ def test_the_diffuse_eras_mirror_the_calibration_map() -> None:
         ]
 
     assert bounds(archive.DIFFUSE_CHANNEL_ERAS) == bounds(published)
+
+
+def test_the_era_mirror_reads_the_shipped_map_from_any_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pytest may be launched from anywhere; a relative fixture path then vanishes."""
+    monkeypatch.chdir(tmp_path)
+
+    test_the_diffuse_eras_mirror_the_calibration_map()
 
 
 def test_a_frame_without_a_datetime_index_is_refused_rather_than_reported_clean() -> None:

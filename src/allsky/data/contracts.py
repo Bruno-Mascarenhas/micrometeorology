@@ -107,10 +107,11 @@ class QCFlag(IntFlag):
 
     Flags are additive: a single ``int64`` column carries any combination.
     ``LOW_SUN``/``SENSOR_GAP``/``ALIGNMENT_FAR``/``KT_ARTIFACT`` are set by the
-    manifest builder. ``FRAME_DARK``/``FRAME_SATURATED`` come from the visual QC
-    pass, and ``TIMESTAMP_INTERPOLATED``/``TIMESTAMP_CORRECTED`` from the overlay
-    reader, so a sample whose capture time was manufactured rather than read
-    stays identifiable after the frame manifest is folded into the dataset.
+    manifest builder. ``FRAME_DARK``/``FRAME_SATURATED``/``FRAME_UNREADABLE``
+    come from the visual QC pass, and
+    ``TIMESTAMP_INTERPOLATED``/``TIMESTAMP_CORRECTED`` from the overlay reader,
+    so a sample whose capture time was manufactured rather than read stays
+    identifiable after the frame manifest is folded into the dataset.
     """
 
     NONE = 0
@@ -131,6 +132,9 @@ class QCFlag(IntFlag):
     #: Capture time re-decided from the capture sequence because the glyphs
     #: this frame carries did not settle a digit on their own.
     TIMESTAMP_CORRECTED = 128
+    #: Frame carries no pixels (a truncated decode), so no radiometric quantity
+    #: could be measured on it at all.
+    FRAME_UNREADABLE = 256
 
 
 #: Sky-condition classes I..IV, ordered by increasing clearness index so the

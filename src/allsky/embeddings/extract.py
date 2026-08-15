@@ -106,6 +106,7 @@ def extract_embeddings(
     dry_run: bool = False,
     config_sha256: str | None = None,
     legacy_config_sha256: str | None = None,
+    pixel_config_sha256: str | None = None,
     decode_workers: int = 4,
 ) -> dict[str, Any]:
     """Extract visual embeddings for every manifest sample into sharded storage.
@@ -139,8 +140,13 @@ def extract_embeddings(
         Optional content hash of the embeddings config, stored in the meta.
     legacy_config_sha256:
         Optional digest of the same config under a superseded formula.  A store
-        whose meta records it resumes (and is restamped with *config_sha256*)
+        whose meta records it may resume (and be restamped with *config_sha256*)
         instead of being refused; see :func:`_check_resume_compatible`.
+    pixel_config_sha256:
+        Optional digest of the config deciding which pixels are encoded (mask
+        including its file's bytes, crop, resize, the video time fields), stored
+        in the meta.  It is what the legacy-digest migration verifies, since the
+        superseded formula covered none of it.
     decode_workers:
         Threads used to decode each batch's JPEGs (>= 1, capped at the CPU
         count).  Decode order — and therefore every shard, row and index entry —
@@ -182,7 +188,14 @@ def extract_embeddings(
     # Resume must not silently mix incompatible embeddings into one store: if a
     # prior meta exists, the incoming backbone/config must match it exactly.
     if resume:
-        _check_resume_compatible(out, backbone, pooling, config_sha256, legacy_config_sha256)
+        _check_resume_compatible(
+            out,
+            backbone,
+            pooling,
+            config_sha256,
+            legacy_config_sha256,
+            pixel_config_sha256,
+        )
 
     # Resume bookkeeping: the index (consolidated + any un-consolidated parts from
     # an interrupted run) is the source of truth for done work.  A non-resume run
@@ -245,7 +258,15 @@ def extract_embeddings(
             # Consolidate any parts left by an interrupted prior run into
             # index.parquet, and refresh provenance for this backbone/config.
             _consolidate_index(out, index_rows)
-            _write_meta(out, backbone, pooling, dtype, config_sha256, prior_rows)
+            _write_meta(
+                out,
+                backbone,
+                pooling,
+                dtype,
+                config_sha256,
+                prior_rows,
+                pixel_config_sha256=pixel_config_sha256,
+            )
         return summary
 
     out.mkdir(parents=True, exist_ok=True)
@@ -261,7 +282,15 @@ def extract_embeddings(
     # _check_resume_compatible (which short-circuits on a missing meta) and append
     # a different backbone's vectors onto these shards.  The final _write_meta
     # only corrects ``count``.
-    _write_meta(out, backbone, pooling, dtype, config_sha256, prior_rows)
+    _write_meta(
+        out,
+        backbone,
+        pooling,
+        dtype,
+        config_sha256,
+        prior_rows,
+        pixel_config_sha256=pixel_config_sha256,
+    )
 
     buffer: np.ndarray | None = None
     buffer_ids: list[str] = []
@@ -323,7 +352,15 @@ def extract_embeddings(
     # Consolidate all parts (+ prior rows) into a single index.parquet atomically,
     # then remove the parts. index.parquet is the source of truth for the reader.
     _consolidate_index(out, index_rows)
-    _write_meta(out, backbone, pooling, dtype, config_sha256, prior_rows + encoded)
+    _write_meta(
+        out,
+        backbone,
+        pooling,
+        dtype,
+        config_sha256,
+        prior_rows + encoded,
+        pixel_config_sha256=pixel_config_sha256,
+    )
 
     summary["encoded"] = encoded
     summary["shards_written"] = shards_written
@@ -343,6 +380,7 @@ def _check_resume_compatible(
     pooling: str,
     config_sha256: str | None,
     legacy_config_sha256: str | None = None,
+    pixel_config_sha256: str | None = None,
 ) -> None:
     """Refuse to resume into a store built with a different backbone/config.
 
@@ -358,14 +396,21 @@ def _check_resume_compatible(
 
     One mismatch is accepted, and only one: ``config_sha256`` alone differing
     while the recorded value equals *legacy_config_sha256*, the same config's
-    digest under the superseded formula.  That equality proves the encoder
-    section did not move, and the sections the new formula added were never
-    covered for this store, so resuming is no worse than the release that wrote
-    it — whereas refusing would demand a full re-encode of a dataset in which
-    nothing changed.  The gap is logged at WARNING, and the store is restamped
-    with the new digest by the ``_write_meta`` call every non-dry-run path makes,
-    so a later run of the same config compares equal outright and the migration
-    is announced exactly once.
+    digest under the superseded formula, **and** the store's recorded
+    ``pixel_config_sha256`` equals the incoming one.  The legacy equality proves
+    only that the encoder section did not move; the superseded formula covered
+    neither mask (nor its file's bytes) nor crop, resize or the video time
+    fields, so on its own it says nothing about the pixels behind the stored
+    vectors — swapping ``mask.path`` from one horizon PNG to another leaves it
+    equal.  The pixel digest is the part that has to agree, and a store recording
+    none cannot be vouched for at all: both cases refuse, because the alternative
+    is appending vectors of newly preprocessed frames to a store of the old ones
+    and then restamping it so no later run can detect the difference.
+
+    An accepted migration is logged at WARNING, and the store is restamped with
+    the new digest by the ``_write_meta`` call every non-dry-run path makes, so a
+    later run of the same config compares equal outright and the migration is
+    announced exactly once.
 
     Raises
     ------
@@ -401,13 +446,13 @@ def _check_resume_compatible(
         and legacy_config_sha256 is not None
         and prior.get("config_sha256") == legacy_config_sha256
     ):
+        _check_pixel_config_unchanged(out, prior, pixel_config_sha256)
         logger.warning(
             "resuming embedding store %s whose config_sha256 was written by the superseded "
-            "digest formula: the encoder config is unchanged, but that formula covered none of "
-            "mask / crop / resize / the video time fields / the mask file's own bytes, so "
-            "vectors of differently preprocessed frames cannot be ruled out for this store. "
-            "Restamping it as %s (once); rerun with --no-resume to re-encode from scratch "
-            "instead.",
+            "digest formula: the encoder config is unchanged and the recorded pixel provenance "
+            "(mask / crop / resize / the video time fields / the mask file's own bytes) still "
+            "matches, so the stored vectors describe the frames this run would produce. "
+            "Restamping it as %s (once).",
             out,
             config_sha256,
         )
@@ -420,6 +465,41 @@ def _check_resume_compatible(
         f"embeddings.meta.json is incompatible with the requested backbone/config "
         f"({joined}). Rerun with --no-resume (resume=False) to overwrite, or point "
         f"at a fresh output directory."
+    )
+
+
+def _check_pixel_config_unchanged(
+    out: Path, prior: dict[str, Any], pixel_config_sha256: str | None
+) -> None:
+    """Let the legacy-digest migration through only for unchanged pixel shaping.
+
+    The superseded digest formula covered the ``embeddings`` section alone, so it
+    is equal across a changed mask, crop, resize or video clock.  Migrating on
+    that equality alone appends vectors of the new preprocessing to a store of
+    the old, and the restamp that follows erases the evidence, so the migration
+    is allowed only when the store itself records the pixel provenance and it
+    still matches.
+
+    Raises
+    ------
+    RuntimeError
+        When the store records no ``pixel_config_sha256``, when the caller
+        supplied none to compare against, or when the two differ.
+    """
+    recorded = prior.get("pixel_config_sha256")
+    if recorded is not None and recorded == pixel_config_sha256:
+        return
+    unverifiable = (
+        "records no pixel provenance"
+        if recorded is None
+        else f"records pixel provenance {recorded!r}, not {pixel_config_sha256!r}"
+    )
+    raise RuntimeError(
+        f"cannot resume embedding extraction into {out}: its config_sha256 was written by the "
+        f"superseded digest formula, which covered the encoder section alone, and the store "
+        f"{unverifiable} — so the mask (including its file's bytes), crop, resize and video time "
+        f"fields behind the stored vectors cannot be shown to be the ones in this config. Rerun "
+        f"with --no-resume (resume=False) to re-encode, or point at a fresh output directory."
     )
 
 
@@ -488,6 +568,8 @@ def _write_meta(
     dtype: str,
     config_sha256: str | None,
     count: int,
+    *,
+    pixel_config_sha256: str | None,
 ) -> None:
     """Write the provenance meta sidecar for the embeddings directory."""
     meta = {
@@ -497,6 +579,7 @@ def _write_meta(
         "dim": int(backbone.dim),
         "transform": getattr(backbone, "transform_description", ""),
         "config_sha256": config_sha256,
+        "pixel_config_sha256": pixel_config_sha256,
         "count": count,
         "dtype": dtype,
     }

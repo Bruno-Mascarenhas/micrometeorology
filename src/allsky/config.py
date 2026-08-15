@@ -55,8 +55,15 @@ class VideoConfig(BaseModel):
 #: as opposed to which days are in scope.  Every resume gate that must survive a
 #: day being added to ``pattern`` — but not a clock change — hashes exactly
 #: these, so the frame extractor and the embedding store cannot drift apart on
-#: what makes a frame a different artifact.
-VIDEO_TIME_FIELDS = ("timestamps", "start_time", "minutes_per_frame")
+#: what makes a frame a different artifact.  ``filename_date_format`` belongs
+#: here because it decides which day a video file covers, and therefore the date
+#: half of every frame's timestamp and filename under both clocks.
+VIDEO_TIME_FIELDS = (
+    "timestamps",
+    "filename_date_format",
+    "start_time",
+    "minutes_per_frame",
+)
 
 
 class SiteConfig(BaseModel):

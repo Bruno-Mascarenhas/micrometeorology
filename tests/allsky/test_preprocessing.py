@@ -3,7 +3,6 @@
 Pure numpy/PIL: no torch, no network, synthetic arrays only.
 """
 
-import logging
 import tracemalloc
 from pathlib import Path
 
@@ -146,14 +145,10 @@ class TestVisualQC:
         image[:2, :] = 255  # 20% saturated
         assert QCFlag.FRAME_SATURATED in visual_qc(image, saturated_fraction_threshold=0.1)
 
-    def test_zero_pixel_frame_is_not_flagged(self):
-        flags = visual_qc(np.zeros((0, 0, 3), dtype=np.uint8))
-        assert flags == set()
-
-    def test_zero_pixel_frame_warns(self, caplog: pytest.LogCaptureFixture):
-        with caplog.at_level(logging.WARNING, logger="allsky.preprocessing"):
-            visual_qc(np.zeros((0, 0, 3), dtype=np.uint8))
-        assert [record for record in caplog.records if record.levelno == logging.WARNING]
+    @pytest.mark.parametrize("shape", [(0, 0, 3), (0, 4, 3), (4, 0, 3)])
+    def test_pixelless_frame_is_flagged_unreadable_not_clean(self, shape: tuple[int, int, int]):
+        flags = visual_qc(np.zeros(shape, dtype=np.uint8))
+        assert flags == {QCFlag.FRAME_UNREADABLE}
 
     @pytest.mark.parametrize("saturated_level", [0, 1, 128, 200, 254, 255])
     @pytest.mark.parametrize("saturated_rows", [0, 1, 2, 3, 5, 10])

@@ -4,9 +4,14 @@ Every row of ``station_hourly.parquet`` is an average over ``[T, T+1h)`` --
 ``sensors.aggregation.aggregate_to_hourly`` resamples on pandas' defaults, which
 label a window by its start. Dividing such a mean by an extraterrestrial flux
 evaluated instantaneously at ``T`` inflates the clearness index all morning and
-deflates it all afternoon, and lets an hour that is mostly twilight through the
-daylight gate. The WRF point extraction writes instantaneous values at the
-stamped hour, so the model branch must keep reading the geometry at the label.
+deflates it all afternoon. The WRF point extraction writes instantaneous values at
+the stamped hour, so the model branch must keep reading the geometry at the label
+for the values it computes.
+
+The daylight SELECTION is the one thing the two sides share: an hour the sun
+crosses the floor inside belongs to neither sample, since a gate read at each
+source's own instant admits different hours around sunrise and sunset and the
+paired histograms would then be conditional on different events.
 """
 
 import pandas as pd
@@ -23,6 +28,10 @@ from micrometeorology.cli.export_climatology import (
 )
 
 AVERAGING_WINDOW_MIDPOINT = pd.Timedelta(minutes=30)
+
+# Two hours of 2024-03-20 the 10 deg floor falls inside: at 06:00 the sun is at
+# 4,43 deg and at 11,73 deg half an hour later, at 17:00 at 10,18 deg and 2,87 deg.
+TERMINATOR_HOURS = ("2024-03-20 06:00", "2024-03-20 17:00")
 
 
 def _hourly(column: str, values: list[float], labels: list[str]) -> pd.DataFrame:
@@ -66,3 +75,42 @@ def test_the_model_series_reads_the_geometry_at_the_stamp_it_carries() -> None:
 
     stamp = pd.DatetimeIndex([pd.Timestamp(label)])
     assert sample == pytest.approx(430.0 / extraterrestrial_ghi(stamp, SITE, UTC_OFFSET_HOURS))
+
+
+@pytest.mark.parametrize("label", TERMINATOR_HOURS)
+def test_an_hour_the_sun_crosses_the_floor_inside_is_daytime_for_neither_source(
+    label: str,
+) -> None:
+    observed = _hourly(OBSERVED_COLUMN["shortwave_down"], [120.0], [label])
+    model = _hourly(WRF_COLUMN["shortwave_down"], [120.0], [label])
+
+    observed_sample, _observed_atoms = _observed_sample("shortwave_down", observed)
+    model_sample, _model_atoms = _wrf_sample("shortwave_down", model)
+
+    assert observed_sample.size == 0
+    assert model_sample.size == 0
+
+
+@pytest.mark.parametrize("label", TERMINATOR_HOURS)
+def test_the_clearness_gate_admits_the_terminator_hour_for_neither_source(label: str) -> None:
+    observed = _hourly(OBSERVED_COLUMN["clearness_index"], [120.0], [label])
+    model = _hourly(WRF_COLUMN["clearness_index"], [120.0], [label])
+
+    observed_sample, _observed_atoms = _observed_sample("clearness_index", observed)
+    model_sample, _model_atoms = _wrf_sample("clearness_index", model)
+
+    assert observed_sample.size == 0
+    assert model_sample.size == 0
+
+
+def test_an_hour_that_begins_with_the_sun_up_is_not_a_night_sample() -> None:
+    """At 18:00 the sun sits at +0,07 deg and sets inside the hour it labels."""
+    frame = _hourly(
+        OBSERVED_COLUMN["net_radiation_night"],
+        [-30.0],
+        ["2024-01-03 18:00"],
+    )
+
+    sample, _atoms = _observed_sample("net_radiation_night", frame)
+
+    assert sample.size == 0

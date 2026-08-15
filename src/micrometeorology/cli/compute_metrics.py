@@ -19,6 +19,7 @@ import typer
 
 from micrometeorology.common.cli_options import parse_csv
 from micrometeorology.common.logging import setup_logging
+from micrometeorology.common.paths import ensure_dir
 from micrometeorology.stats.comparison import read_dataset
 from micrometeorology.stats.metrics import compute_all, is_circular_column, valid_pairs
 
@@ -166,6 +167,7 @@ def run(
     typer.echo(f"{'=' * 60}")
 
     if output:
+        ensure_dir(output.parent)
         metrics_df.to_csv(output)
         typer.echo(f"\n>> Saved to {output}")
 

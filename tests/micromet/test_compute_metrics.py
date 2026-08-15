@@ -63,6 +63,23 @@ def test_positional_alignment_is_announced_when_no_file_carries_a_time_index(
     assert "rows are aligned by position, not by time" in result.output
 
 
+def test_the_metrics_table_is_written_under_an_output_directory_that_does_not_exist_yet(
+    tmp_path: Path,
+) -> None:
+    """The whole computation is discarded if ``-o`` cannot create its own directory."""
+    dataset_a = _hourly_csv(tmp_path / "a.csv", 0.0)
+    dataset_b = _hourly_csv(tmp_path / "b.csv", 1.0)
+    output = tmp_path / "out" / "metrics" / "table.csv"
+
+    result = CliRunner().invoke(
+        compute_metrics.app,
+        ["-a", str(dataset_a), "-b", str(dataset_b), "-o", str(output)],
+    )
+
+    assert result.exit_code == 0, result.exception or result.output
+    assert sorted(pd.read_csv(output, index_col=0).columns) == ["RH", "T2"]
+
+
 def test_a_datetime_indexed_pair_is_not_warned_about(tmp_path: Path) -> None:
     dataset_a = _hourly_csv(tmp_path / "a.csv", 0.0)
     dataset_b = _hourly_csv(tmp_path / "b.csv", 1.0)

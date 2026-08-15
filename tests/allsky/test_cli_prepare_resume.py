@@ -25,7 +25,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from allsky.cli import app
-from allsky.cli.prepare import _apply_frame_qc, _frames_inputs_sha256
+from allsky.cli.prepare import _apply_frame_qc, _frames_inputs_sha256, _read_frames_key
 from allsky.config import VIDEO_TIME_FIELDS, PrepareConfig
 from allsky.data.contracts import QCFlag
 from allsky.provenance import config_subset_sha256
@@ -272,6 +272,114 @@ def test_switching_the_timestamp_source_re_extracts_instead_of_resuming(
         "2026-01-01 06:01:00",
         "2026-01-01 06:02:00",
     ]
+
+
+def test_re_extraction_replaces_the_previous_clocks_jpegs_on_disk(
+    tmp_path: Path, synthetic_dat: Path
+):
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    write_overlay_video(
+        videos / "allsky-20260101.mp4", [f"2026010112{minute:02d}30" for minute in range(3)]
+    )
+    dataset_dir = tmp_path / "dataset"
+    config = _config_with_timestamps(
+        tmp_path / "c.yaml",
+        videos=videos,
+        dat=synthetic_dat,
+        dataset_dir=dataset_dir,
+        source="overlay",
+    )
+    assert _extract_only(config).exit_code == 0
+
+    _config_with_timestamps(
+        config, videos=videos, dat=synthetic_dat, dataset_dir=dataset_dir, source="modelled"
+    )
+    result = _extract_only(config)
+
+    assert result.exit_code == 0, result.output
+    video_dir = dataset_dir / "frames" / "allsky-20260101"
+    frames = pd.read_parquet(video_dir / "manifest.parquet")
+    assert sorted(p.name for p in video_dir.glob("*.jpg")) == sorted(
+        Path(str(value)).name for value in frames["frame_path"]
+    )
+
+
+def test_a_failed_re_extraction_leaves_the_previous_frames_in_place(
+    tmp_path: Path, synthetic_dat: Path, monkeypatch: pytest.MonkeyPatch
+):
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    write_overlay_video(
+        videos / "allsky-20260101.mp4", [f"2026010112{minute:02d}30" for minute in range(3)]
+    )
+    dataset_dir = tmp_path / "dataset"
+    config = _config_with_timestamps(
+        tmp_path / "c.yaml",
+        videos=videos,
+        dat=synthetic_dat,
+        dataset_dir=dataset_dir,
+        source="overlay",
+    )
+    assert _extract_only(config).exit_code == 0
+    video_dir = dataset_dir / "frames" / "allsky-20260101"
+    before = sorted(p.name for p in video_dir.glob("*.jpg"))
+
+    def _die(video: str, video_dir: Path, cfg: object) -> pd.DataFrame:
+        raise OSError(f"disk full halfway through re-extracting {video} into {video_dir} ({cfg})")
+
+    monkeypatch.setattr("allsky.cli.prepare._extract_and_qc", _die)
+    _config_with_timestamps(
+        config, videos=videos, dat=synthetic_dat, dataset_dir=dataset_dir, source="modelled"
+    )
+    result = _extract_only(config)
+
+    assert result.exit_code != 0
+    assert sorted(p.name for p in video_dir.glob("*.jpg")) == before
+
+
+def test_build_manifest_alone_refuses_frames_extracted_under_another_config(
+    tmp_path: Path, dark_video: Path, synthetic_dat: Path
+):
+    config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
+    assert _extract_only(config).exit_code == 0
+    config.write_text(config.read_text() + "crop:\n  enabled: true\n  top: 8\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app, ["prepare-local", "--config", str(config), "--steps", "build-manifest"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "allsky-20260101" in result.output
+    assert not (dataset_dir / "manifest.parquet").exists()
+
+
+def test_build_manifest_alone_still_runs_on_frames_from_the_same_config(
+    tmp_path: Path, dark_video: Path, synthetic_dat: Path
+):
+    config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
+    assert _extract_only(config).exit_code == 0
+
+    result = runner.invoke(
+        app, ["prepare-local", "--config", str(config), "--steps", "build-manifest"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(pd.read_parquet(dataset_dir / "manifest.parquet")) > 0
+
+
+def test_a_non_utf8_frame_provenance_is_read_as_absent(tmp_path: Path):
+    video_dir = tmp_path / "allsky-20260101"
+    video_dir.mkdir()
+    (video_dir / "frames.meta.json").write_bytes(b'{"frames_sha256": "\xff\xfe"}')
+
+    assert _read_frames_key(video_dir) is None
+
+
+def test_a_changed_video_filename_date_format_moves_the_frame_provenance_hash():
+    renamed = PrepareConfig.model_validate({"video": {"filename_date_format": "allsky_%Y%m%d"}})
+
+    assert _frames_inputs_sha256(renamed) != _frames_inputs_sha256(PrepareConfig())
 
 
 def _write_mask(path: Path, *, blacked_rows: int, size: int = 64) -> Path:

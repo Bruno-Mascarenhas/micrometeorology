@@ -29,7 +29,8 @@ reads under torch's restricted unpickler (``weights_only=True``) extended with
 legitimately contains — and only unpickles freely when the caller opts in with
 ``trust_pickle=True``.  ``torch.compile``'s ``_orig_mod.`` key prefixes are
 stripped on load so a compiled-then-checkpointed model loads back into a plain
-module.
+module, and weights that diverged are refused on load — the boundary every
+reader of a checkpoint goes through.
 """
 
 import random
@@ -251,6 +252,12 @@ def load_checkpoint(
     produced yourself.  Any ``_orig_mod.`` compile prefixes are stripped from the
     model state so it loads into a plain module.
 
+    The stored weights are scanned for NaN/inf before the payload is handed back:
+    a diverged checkpoint is refused here, at the boundary every reader shares
+    (``allsky train --resume``, ``evaluate_checkpoint``, ``predict_snapshot``),
+    rather than resuming a dead run, scoring rmse/skill over zero finite pairs or
+    serving NaN predictions.
+
     Parameters
     ----------
     path:
@@ -270,6 +277,8 @@ def load_checkpoint(
     ValueError
         If the payload carries a Python object outside the allowlist; it is
         refused rather than unpickled.
+    RuntimeError
+        If any floating-point tensor in ``model_state`` holds a NaN or an inf.
     """
     import pickle
 
@@ -290,7 +299,41 @@ def load_checkpoint(
     model_state = checkpoint.get("model_state")
     if isinstance(model_state, dict):
         checkpoint["model_state"] = _strip_compiled_prefix(model_state)
+    _refuse_diverged_weights(checkpoint, path=Path(path))
     return checkpoint
+
+
+def _refuse_diverged_weights(checkpoint: Mapping[str, Any], *, path: Path) -> None:
+    """Refuse a checkpoint whose stored model weights are not all finite.
+
+    ``last.ckpt`` is written at the end of every epoch, a diverged one included —
+    that is what "last" means — so a reader would otherwise reload NaN weights and
+    resume, evaluate or serve from them without a single error.  The scan lives on
+    the load path rather than the write side because the weights and the monitor
+    diverge independently: an epoch can leave NaN parameters behind while its own
+    monitor value is still finite.
+
+    Only floating-point entries are scanned, and the first offending one ends the
+    scan, so a healthy load pays one reduction per parameter tensor.
+
+    Raises
+    ------
+    RuntimeError
+        If any floating-point tensor in ``model_state`` holds a NaN or an inf.
+    """
+    import torch
+
+    for name, tensor in (checkpoint.get("model_state") or {}).items():
+        if not isinstance(tensor, torch.Tensor) or not tensor.is_floating_point():
+            continue
+        if not bool(torch.isfinite(tensor).all()):
+            raise RuntimeError(
+                f"{path} stores non-finite weights (model_state[{name!r}]): the run that "
+                "wrote it diverged, and resuming, evaluating or serving from it would carry "
+                f"NaN into every output. Load a converged checkpoint instead — "
+                f"{BEST_CHECKPOINT} in the same run directory holds the last epoch that "
+                "improved."
+            )
 
 
 def _atomic_torch_save(payload: dict[str, Any], out: Path) -> None:

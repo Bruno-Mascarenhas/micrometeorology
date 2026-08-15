@@ -242,6 +242,31 @@ class TestSplitLabelsSurviveARebuild:
         assert forced.exit_code == 0, forced.output
 
 
+def test_the_splits_step_alone_ignores_the_frame_provenance(
+    tmp_path: Path,
+    two_day_videos: Path,
+    multi_day_dat: Path,
+):
+    # `--steps splits` reads manifest.parquet and cfg.splits and nothing else,
+    # so a frame-shaping edit it never consults must not stop it.
+    for day in ("20260102", "20260103", "20260104"):
+        shutil.copy(two_day_videos / "allsky-20260101.mp4", two_day_videos / f"allsky-{day}.mp4")
+    dataset_dir = tmp_path / "dataset"
+    config = _write_config(
+        tmp_path / "c.yaml",
+        dataset_dir=dataset_dir,
+        video_pattern=f"{two_day_videos}/allsky-*.mp4",
+        dat_path=multi_day_dat,
+    )
+    assert _prepare(config).exit_code == 0
+    config.write_text(config.read_text() + "resize: 32\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["prepare-local", "--config", str(config), "--steps", "splits"])
+
+    assert result.exit_code == 0, result.output
+    assert (dataset_dir / "splits.json").exists()
+
+
 class TestInputsHashContents:
     @staticmethod
     def _frames(paths: list[str]) -> pd.DataFrame:

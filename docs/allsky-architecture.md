@@ -140,7 +140,9 @@ artifact with different content requires `force=True`, else `SplitExistsError`.
 - `embeddings-{i:05d}.safetensors` — one fp16 tensor per shard.
 - `index.parquet` — `sample_id → (shard, row)`.
 - `embeddings.meta.json` — backbone, revision, pooling, dim, transform,
-  `config_sha256`, count, storage `dtype` (`fp16`).
+  `config_sha256`, `pixel_config_sha256` (the digest of the mask — its file's
+  bytes included — crop, resize and video time fields that decide which pixels
+  were encoded), count, storage `dtype` (`fp16`).
 
 `SafetensorsEmbeddingReader` resolves a `sample_id` to its vector lazily.
 Extraction is resumable — the index is the source of truth, so every `sample_id`
@@ -149,7 +151,13 @@ together atomically, so a crash leaves a consistent, possibly shorter index). It
 **refuses to resume** into a store whose `embeddings.meta.json` records a
 different backbone / revision / pooling / dim / config, rather than silently
 mixing two encoders' vectors — rerun with `--no-resume` (or a fresh out dir) to
-overwrite.
+overwrite. One mismatch is still migrated in place: a `config_sha256` written by
+the superseded digest formula, which covered the `embeddings` section alone. That
+equality proves only that the encoder did not move, so the migration now goes
+through **only if the store also records a `pixel_config_sha256` equal to this
+run's** — a store whose pixel provenance is absent, or has moved (a swapped
+horizon mask leaves the legacy digest equal), is refused instead of being
+appended to and then restamped past the difference.
 
 ### Checkpoint payload (`last.ckpt` / `best.ckpt`)
 

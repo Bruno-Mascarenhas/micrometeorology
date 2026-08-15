@@ -82,8 +82,12 @@ _KINDEX_EDGES: tuple[float, ...] = (
     np.inf,
 )
 #: Stratum keys in the published metrics table, so their spelling is a report
-#: contract rather than a restatement of the edges above.
-_KINDEX_LABELS: tuple[str, ...] = ("overcast_lt0.35", "partial_0.35-0.65", "clear_ge0.65")
+#: contract rather than a restatement of the edges above.  The upper edge of a
+#: band is closed, as the bounds are published (Escobedo et al. 2009, sec. 3.1)
+#: and as :func:`allsky.data.manifest._classify_sky` labels ``sky_class``, so a
+#: Kt sitting exactly on a bound is not cloudy in one stratum and partly cloudy
+#: in another.
+_KINDEX_LABELS: tuple[str, ...] = ("overcast_le0.35", "partial_0.35-0.65", "clear_gt0.65")
 
 #: Prefix of the per-reference pair count reported for its own metric rows.
 _REFERENCE_COUNT_PREFIX = "n_"
@@ -118,7 +122,8 @@ class EvaluationResult:
     stratified:
         Long-form breakdown DataFrame with columns ``target``, ``stratum_kind``,
         ``stratum``, ``metric``, ``value``, ``n`` (an ``overall`` kind holds the
-        global rows).
+        global rows).  Every row carries ``n > 0``: a metric with no pair behind
+        it is absent from the table rather than published over an empty count.
     confusion:
         ``{"labels": [...], "matrix": [[...]]}`` for the sky head, or ``None``.
     predictions:
@@ -677,7 +682,7 @@ def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame) -> None:
     if "target_kt" in split_df.columns:
         kt = split_df["target_kt"].to_numpy(dtype=np.float64)
         frame["kindex_band"] = pd.cut(
-            kt, bins=list(_KINDEX_EDGES), labels=list(_KINDEX_LABELS), right=False
+            kt, bins=list(_KINDEX_EDGES), labels=list(_KINDEX_LABELS), right=True
         ).astype("object")
 
 
@@ -846,7 +851,16 @@ def _stratified_metrics(
 def _metric_rows(
     target: str, stratum_kind: str, stratum: str, metrics: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
-    """Expand a metric dict into long-form rows (dropping the counts and the confusion)."""
+    """Expand a metric dict into long-form rows (dropping the counts and the confusion).
+
+    A metric measured over no pair at all is not published: a reference the split
+    could not resolve, or one that paired no row of this stratum (every row of an
+    hour that only ever opens a day has no persistence predecessor), would
+    otherwise put a ``NaN`` beside ``n = 0`` next to the model's own error and its
+    real denominator, in the same stratum of the same table.  ``metrics.json``
+    keeps the whole key set, ``NaN`` next to its ``n_<reference>`` count, so the
+    absence is readable there.
+    """
     skipped = {
         "n",
         "confusion",
@@ -856,6 +870,9 @@ def _metric_rows(
     for metric, value in metrics.items():
         if metric in skipped:
             continue
+        count = _row_count(metric, metrics)
+        if count is None:
+            continue
         rows.append(
             {
                 "target": target,
@@ -863,15 +880,22 @@ def _metric_rows(
                 "stratum": stratum,
                 "metric": metric,
                 "value": float(value),
-                "n": _row_count(metric, metrics),
+                "n": count,
             }
         )
     return rows
 
 
-def _row_count(metric: str, metrics: Mapping[str, Any]) -> int:
-    """Pairs *metric* was computed over: a reference's own count, else the model's."""
+def _row_count(metric: str, metrics: Mapping[str, Any]) -> int | None:
+    """Pairs *metric* was computed over: a reference's own count, else the model's.
+
+    ``None`` when that count is zero, which marks the metric as absent rather
+    than measured.
+    """
+    counted = metrics.get("n", 0)
     for label in REFERENCE_LABELS:
         if metric.endswith(f"_{label}"):
-            return int(metrics.get(f"{_REFERENCE_COUNT_PREFIX}{label}", 0))
-    return int(metrics.get("n", 0))
+            counted = metrics.get(f"{_REFERENCE_COUNT_PREFIX}{label}", 0)
+            break
+    paired = int(counted)
+    return paired if paired > 0 else None

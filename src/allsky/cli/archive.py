@@ -1,7 +1,9 @@
 """Archive-mirroring CLI commands: ``sync-archive`` and ``snapshot``."""
 
 import datetime as dt
+import http.client
 import logging
+import shutil
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -54,10 +56,13 @@ class TimestampSource(StrEnum):
     """Where a frame's wall-clock time comes from.
 
     ``overlay`` reads the stamp the camera burns into the frame, which is what
-    this camera's varying capture cadence requires; ``config`` places frame N at
-    ``start_time + N x minutes_per_frame`` from the :class:`PrepareConfig` video
-    section, a constant-cadence model this camera does not follow (selecting it
-    logs a warning; see ``docs/allsky-archive.md``).
+    this camera's varying capture cadence requires; ``config`` hands the choice
+    to the ``video`` section of the :class:`PrepareConfig` YAML, which names
+    either that same overlay reader or the modelled cadence that places frame N
+    at ``start_time + N x minutes_per_frame`` — a constant interval this camera
+    does not follow (selecting it logs a warning; see
+    ``docs/allsky-archive.md``).  The ledger records the clock the config
+    resolved to, never this flag.
     """
 
     overlay = "overlay"
@@ -238,7 +243,7 @@ def sync_archive(
         typer.Option(
             help=(
                 "Frame timestamps: 'overlay' reads the stamp the camera burns into each "
-                "frame; 'config' uses the PrepareConfig start_time/minutes_per_frame model."
+                "frame; 'config' uses whichever clock the PrepareConfig video section names."
             )
         ),
     ] = TimestampSource.overlay,
@@ -333,6 +338,8 @@ def sync_archive(
         raise typer.Exit(code=1) from exc
 
     selected = _select(published, since=since_date, until=until_date)
+    video_config = _video_config(timestamps, config)
+    clock = _clock(video_config)
     failures = 0
     with ledger_lock(state_dir / LEDGER_FILENAME):
         ledger = Ledger.load(state_dir / LEDGER_FILENAME)
@@ -347,7 +354,7 @@ def sync_archive(
                     extract=extract,
                     step=step,
                     resize=resize,
-                    timestamps=timestamps,
+                    timestamps=clock,
                     upload=upload,
                 )
                 for entry in selected
@@ -381,7 +388,6 @@ def sync_archive(
                 logger.error("%s", exc)
                 raise typer.Exit(code=1) from exc
 
-        video_config = _video_config(timestamps, config)
         processed = 0
         for plan in plans:
             try:
@@ -399,7 +405,13 @@ def sync_archive(
                     prune_uploaded=prune_uploaded,
                 )
                 processed += 1
-            except (ArchiveError, RcloneError, OSError, ValueError) as exc:
+            except (
+                ArchiveError,
+                RcloneError,
+                OSError,
+                ValueError,
+                http.client.HTTPException,
+            ) as exc:
                 failures += 1
                 logger.error("%s failed: %s", plan.entry.filename, exc)
             finally:
@@ -411,28 +423,37 @@ def sync_archive(
         raise typer.Exit(code=1)
 
 
-def _video_config(timestamps: TimestampSource, config: Path | None) -> Any | None:
-    """Resolve the video section driving frame timestamps, or None for overlay mode.
+def _video_config(timestamps: TimestampSource, config: Path | None) -> Any:
+    """Resolve the video section that drives frame timestamps into a ``VideoConfig``.
 
-    Choosing the modelled cadence is warned about at resolution time rather than
-    per video, because the constant interval it assumes is not the one this
-    camera records with.
+    ``--timestamps overlay`` is the built-in default section, so ``--config``
+    carries nothing on that path; ``--timestamps config`` defers the whole clock
+    decision to the YAML, including the case where the YAML names the overlay.
+    Which clock the resolved section selects — and the warning the modelled
+    cadence earns — is :func:`allsky.overlay.extract_frames_for`'s to state, so
+    this returns a section rather than a verdict.
     """
+    from allsky.config import PrepareConfig, VideoConfig, load_prepare_config
+
     if timestamps is TimestampSource.overlay:
         if config is not None:
             logger.warning("--config is ignored with --timestamps overlay")
-        return None
-    from allsky.config import PrepareConfig, load_prepare_config
-
+        return VideoConfig()
     cfg = PrepareConfig() if config is None else load_prepare_config(config)
-    logger.warning(
-        "--timestamps config maps frame N to %s + N x %s min, a model this camera does not "
-        "follow: its capture interval changes between day and night and its videos do not all "
-        "start at the same hour",
-        cfg.video.start_time,
-        cfg.video.minutes_per_frame,
-    )
     return cfg.video
+
+
+def _clock(video_config: Any) -> TimestampSource:
+    """The timestamp source *video_config* selects, in the ledger's vocabulary.
+
+    The ledger and the resume gate speak the flag's names, the config speaks
+    ``overlay``/``modelled``; recording the clock the extraction actually used —
+    rather than the flag that was typed — is what keeps a day extracted through a
+    config naming the overlay from being extracted again on every run.
+    """
+    return (
+        TimestampSource.overlay if video_config.timestamps == "overlay" else TimestampSource.config
+    )
 
 
 def _process_day(
@@ -443,7 +464,7 @@ def _process_day(
     root: Path,
     videos_dir: Path,
     frames_root: Path,
-    video_config: Any | None,
+    video_config: Any,
     step: int,
     resize: int | None,
     uploader: RcloneUploader | None,
@@ -451,25 +472,28 @@ def _process_day(
 ) -> None:
     """Execute one :class:`DayPlan`, recording each completed step in the ledger.
 
-    The ledger is updated as each transfer lands, so an interruption leaves the
-    work already done visible to the next run.  With *prune_uploaded* the local
-    mp4 is deleted only after the ledger confirms the upload.  Extraction drops
-    the day's previous frame record and JPEGs before it writes any, so a day
-    never holds two extractions at once and a failed one leaves no record
-    claiming frames that were discarded.
+    The ledger is written to disk as each transfer lands, so an interruption —
+    including one that never reaches the caller's ``finally`` — leaves the work
+    already done visible to the next run.  With *prune_uploaded* the local mp4 is
+    deleted only after the ledger confirms the upload.  A re-extraction produces
+    its new frame set beside the day's previous one and only replaces it once the
+    new set exists, so a failure keeps the previous frames and the record that
+    describes them: some days carry a fault in the video bytes that no rerun can
+    get past, and their frames are unrecoverable once deleted.
     """
     entry = plan.entry
     video_path = ledger.video_path(entry.key, root=root) or videos_dir / entry.filename
     if plan.download:
         result = client.download(entry, videos_dir)
         ledger.record_video(result, root=root)
+        ledger.save()
         video_path = result.path
 
     frames_dir = frames_root / entry.key
     if plan.extract:
-        ledger.entry(entry.key).pop("frames", None)
-        _discard_previous_frames(frames_dir)
-        manifest = _extract(video_path, frames_dir, video_config, step=step, resize=resize)
+        manifest = _extract_replacing_previous_frames(
+            video_path, frames_dir, video_config, step=step, resize=resize
+        )
         ledger.record_frames(
             entry.key,
             directory=frames_dir.relative_to(root)
@@ -478,8 +502,9 @@ def _process_day(
             count=len(manifest),
             step=step,
             resize=resize,
-            timestamps="config" if video_config is not None else "overlay",
+            timestamps=_clock(video_config).value,
         )
+        ledger.save()
 
     if uploader is None:
         return
@@ -494,6 +519,7 @@ def _process_day(
             size=record.get("size"),
             sha256=record.get("sha256"),
         )
+        ledger.save()
 
     if plan.upload_frames:
         recorded = ledger.frames(entry.key) or {}
@@ -502,12 +528,14 @@ def _process_day(
         ledger.record_upload(
             entry.key, destination, kind="frames", count=recorded.get("count"), step=step
         )
+        ledger.save()
 
     if prune_uploaded and ledger.uploaded(
         entry.key, uploader.target.path(REMOTE_VIDEOS, entry.filename)
     ):
         video_path.unlink(missing_ok=True)
         ledger.mark_pruned(entry.key)
+        ledger.save()
         logger.info("pruned local %s (kept on Drive)", video_path.name)
 
 
@@ -530,18 +558,44 @@ def _discard_previous_frames(frames_dir: Path) -> None:
         )
 
 
-def _extract(
-    video_path: Path, frames_dir: Path, video_config: Any | None, *, step: int, resize: int | None
+def _extract_replacing_previous_frames(
+    video_path: Path, frames_dir: Path, video_config: Any, *, step: int, resize: int | None
 ) -> Any:
-    if video_config is None:
-        from allsky.overlay import extract_frames_with_overlay_timestamps
+    """Extract *video_path* into a staging sibling, then swap it over *frames_dir*.
 
-        return extract_frames_with_overlay_timestamps(
-            video_path, frames_dir, step=step, resize=resize
+    Extraction fails for whole days — a video whose burned-in stamps cannot be
+    read is refused every time it is tried — so the frames a previous run left
+    are only removed once a full replacement set exists beside them.  The staging
+    directory is named after the day and cleared on entry rather than made unique
+    per process: the ledger lock already serialises runs, and a unique name would
+    turn every crash into debris nothing ever collects.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The frame manifest, with ``frame_path`` pointing at the frames where they
+        now live rather than at the staging directory they were written in.
+    """
+    from allsky.atomic import atomic_write
+    from allsky.overlay import MANIFEST_FILENAME, extract_frames_for
+
+    staging = frames_dir.with_name(f".{frames_dir.name}.incoming")
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        manifest = extract_frames_for(video_path, staging, video_config, step=step, resize=resize)
+        _discard_previous_frames(frames_dir)
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        for frame in sorted(staging.glob(FRAME_PATTERN)):
+            frame.replace(frames_dir / frame.name)
+        manifest["frame_path"] = [
+            str(frames_dir / Path(written).name) for written in manifest["frame_path"]
+        ]
+        atomic_write(
+            frames_dir / MANIFEST_FILENAME, lambda tmp: manifest.to_parquet(tmp, index=False)
         )
-    from allsky.video import extract_frames
-
-    return extract_frames(video_path, frames_dir, video_config, step=step, resize=resize)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return manifest
 
 
 def snapshot(
@@ -557,6 +611,16 @@ def snapshot(
             help="Trained checkpoint; supplying it runs a prediction on the frame.",
             exists=True,
             dir_okay=False,
+        ),
+    ] = None,
+    embeddings_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--embeddings-dir",
+            help="Embedding store to encode against, for a checkpoint moved off its "
+            "training machine (embedding-mode checkpoints only).",
+            exists=True,
+            file_okay=False,
         ),
     ] = None,
     sensor_csv: Annotated[
@@ -602,7 +666,9 @@ def snapshot(
     it adds ``<image>.prediction.json``.  Meteorological features come from
     ``--sensor-csv`` when a row falls within ``--tolerance-minutes`` of the
     capture, and any feature without one is imputed at its training mean and
-    named in the warning the command prints.
+    named in the warning the command prints.  ``--embeddings-dir`` names the
+    store the live frame is encoded against, for an embedding-mode checkpoint
+    copied away from the machine whose absolute path it carries.
 
     Raises
     ------
@@ -625,7 +691,7 @@ def snapshot(
             delay=0.0,
         )
         captured = capture_snapshot(client, out_dir)
-    except (ArchiveError, ValueError) as exc:
+    except (ArchiveError, ValueError, OSError, http.client.HTTPException) as exc:
         logger.error("%s", exc)
         raise typer.Exit(code=1) from exc
 
@@ -640,6 +706,7 @@ def snapshot(
             tolerance_minutes=tolerance_minutes,
             device=device,
             trust_checkpoint=trust_checkpoint,
+            embeddings_dir=embeddings_dir,
         )
         if checkpoint is not None
         else None
@@ -668,16 +735,20 @@ def _predict_snapshot(
     tolerance_minutes: float,
     device: str,
     trust_checkpoint: bool,
+    embeddings_dir: Path | None,
 ) -> Path:
     """Predict on the captured frame and write ``<image>.prediction.json``.
 
     Any feature the sensor export could not supply within *tolerance_minutes* is
     imputed at its training mean, and those names are echoed as a warning so a
-    prediction is never read as fully informed when it is not.
+    prediction is never read as fully informed when it is not.  The payload is
+    written through the strict JSON writer, so a non-finite prediction fails the
+    command instead of landing on disk as a bare ``NaN`` token that every strict
+    reader of the file rejects wholesale.
     """
     import pandas as pd
 
-    from allsky.atomic import atomic_write_json
+    from allsky.atomic import atomic_write_strict_json
     from allsky.snapshot import predict_snapshot
 
     try:
@@ -689,12 +760,19 @@ def _predict_snapshot(
             tolerance=pd.Timedelta(minutes=tolerance_minutes),
             device=device,
             trust_checkpoint=trust_checkpoint,
+            embeddings_dir=embeddings_dir,
         )
     except (ValueError, KeyError, RuntimeError, OSError) as exc:
         logger.error("prediction failed: %s", exc)
         raise typer.Exit(code=1) from exc
 
-    path = atomic_write_json(captured.image_path.with_suffix(".prediction.json"), prediction)
+    try:
+        path = atomic_write_strict_json(
+            captured.image_path.with_suffix(".prediction.json"), prediction
+        )
+    except ValueError as exc:
+        logger.error("prediction is not publishable: %s", exc)
+        raise typer.Exit(code=1) from exc
     typer.echo(f"  prediction: {path}")
     for name, value in prediction["predictions"].items():
         typer.echo(f"    {name}: {value}")

@@ -77,8 +77,8 @@ def test_bf16_amp_autocasts_on_the_run_device_and_not_on_the_cpu():
     assert autocast_device == "mps"
 
 
-def test_amp_on_a_device_torch_cannot_autocast_is_refused():
-    with pytest.raises(RuntimeError, match="meta"):
+def test_amp_on_a_device_torch_cannot_autocast_is_refused_by_the_engine_and_not_by_torch():
+    with pytest.raises(RuntimeError, match="amp has no autocast for device 'meta'"):
         _build_amp(True, "bf16", "meta")
 
 
@@ -99,9 +99,22 @@ class _HostReadCountingTensor(torch.Tensor):
         type(self).host_reads += 1
         return super().__bool__()
 
+    def item(self) -> float | int | bool:
+        type(self).host_reads += 1
+        return super().item()
+
 
 def _counted(values: torch.Tensor) -> torch.Tensor:
     return values.as_subclass(_HostReadCountingTensor)
+
+
+def test_the_host_read_counter_sees_a_scalar_read_taken_through_item():
+    tensor = _counted(torch.zeros(4))
+    _HostReadCountingTensor.host_reads = 0
+
+    tensor.sum().item()
+
+    assert _HostReadCountingTensor.host_reads == 1
 
 
 def test_folding_a_batch_into_the_epoch_metrics_reads_no_scalar_back_to_the_host():
@@ -223,3 +236,88 @@ def test_a_checkpoint_with_finite_weights_still_resumes(tmp_path: Path):
     )
 
     assert summary["epoch"] == 2
+
+
+def _diverging_cfg(root: Path, *, epochs: int = 2) -> ExperimentConfig:
+    """A config whose learning rate blows every epoch's monitor up to NaN."""
+    cfg = _cfg(root, epochs=epochs)
+    cfg.train.lr = 1e30
+    return cfg
+
+
+def test_a_run_whose_every_epoch_diverged_fails_instead_of_reporting_a_best_checkpoint(
+    tmp_path: Path,
+):
+    root, manifest, _ = _make_dataset(tmp_path)
+    reader = _reader(manifest)
+    run_dir = tmp_path / "run"
+
+    with pytest.raises(RuntimeError, match="no best checkpoint"):
+        run_experiment(
+            _diverging_cfg(root),
+            data_root=root,
+            output_dir=run_dir,
+            embedding_reader=reader,
+        )
+
+    assert not (run_dir / "best.ckpt").exists()
+
+
+def test_a_run_that_trained_nothing_reports_no_best_checkpoint_rather_than_a_missing_path(
+    tmp_path: Path,
+):
+    root, manifest, _ = _make_dataset(tmp_path)
+    reader = _reader(manifest)
+    trained_dir = tmp_path / "trained"
+    run_experiment(
+        _cfg(root, model="climatology", epochs=8, patience=1),
+        data_root=root,
+        output_dir=trained_dir,
+        embedding_reader=reader,
+    )
+    fresh_dir = tmp_path / "fresh"
+
+    summary = run_experiment(
+        _cfg(root, model="climatology", epochs=8, patience=1),
+        data_root=root,
+        output_dir=fresh_dir,
+        resume=str(trained_dir / "last.ckpt"),
+        embedding_reader=reader,
+    )
+
+    assert summary["epochs_ran"] == 0
+    assert summary["checkpoint_best"] is None
+
+
+def test_a_converged_run_still_reports_the_best_checkpoint_it_wrote(tmp_path: Path):
+    root, manifest, _ = _make_dataset(tmp_path)
+    reader = _reader(manifest)
+    run_dir = tmp_path / "run"
+
+    summary = run_experiment(
+        _cfg(root, epochs=2), data_root=root, output_dir=run_dir, embedding_reader=reader
+    )
+
+    assert Path(summary["checkpoint_best"]).exists()
+
+
+def test_a_fresh_run_that_dies_before_its_first_best_leaves_the_previous_one_in_place(
+    tmp_path: Path,
+):
+    root, manifest, _ = _make_dataset(tmp_path)
+    reader = _reader(manifest)
+    run_dir = tmp_path / "run"
+    run_experiment(
+        _cfg(root, epochs=2), data_root=root, output_dir=run_dir, embedding_reader=reader
+    )
+    preserved_epoch = load_checkpoint(run_dir / "best.ckpt")["epoch"]
+
+    with pytest.raises(KeyError, match="typo_metric"):
+        run_experiment(
+            _cfg(root, epochs=2, monitor="val_typo_metric"),
+            data_root=root,
+            output_dir=run_dir,
+            embedding_reader=reader,
+        )
+
+    assert load_checkpoint(run_dir / "best.ckpt")["epoch"] == preserved_epoch
