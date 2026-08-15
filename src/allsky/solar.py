@@ -301,7 +301,9 @@ def solar_azimuth_deg(
     Formula
     -------
     NOAA "deg cw from N" convention.  With zenith ``theta_z``, declination
-    ``decl``, latitude ``phi`` and hour angle ``ha``::
+    ``decl``, latitude ``phi`` and the hour angle ``ha`` wrapped to
+    ``[-180, 180)`` (:func:`hour_angle_deg` returns it unwrapped, and rows
+    past lower transit carry ``ha > 180``)::
 
         c = (sin(phi) cos(theta_z) - sin(decl)) / (cos(phi) sin(theta_z))
         A = arccos(clip(c, -1, 1))
@@ -344,6 +346,7 @@ def solar_azimuth_deg(
     cosz = cos_zenith(times, site, utc_offset_hours)
     sinz = np.sin(np.arccos(cosz))
     ha = hour_angle_deg(times, site.longitude, utc_offset_hours)
+    ha_wrapped_deg = (ha + 180.0) % 360.0 - 180.0
 
     denominator = np.cos(lat) * sinz
     off_zenith = np.abs(denominator) > 1e-12
@@ -354,7 +357,7 @@ def solar_azimuth_deg(
         where=off_zenith,
     )
     acos_deg = np.rad2deg(np.arccos(np.clip(ratio, -1.0, 1.0)))
-    azimuth = np.where(ha > 0.0, acos_deg + 180.0, 540.0 - acos_deg)
+    azimuth = np.where(ha_wrapped_deg > 0.0, acos_deg + 180.0, 540.0 - acos_deg)
     wrapped: np.ndarray = np.mod(azimuth, 360.0)
     return wrapped
 

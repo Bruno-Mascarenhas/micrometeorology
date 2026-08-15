@@ -140,6 +140,28 @@ class TestSolarAzimuth:
             solar.solar_azimuth_deg(times, site)
 
 
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2025-01-05 23:59:00",
+        "2025-03-21 23:55:00",
+        "2025-06-25 23:50:00",
+        "2025-09-15 23:52:00",
+        "2025-12-21 23:45:00",
+    ],
+)
+def test_azimuth_after_lower_transit_stays_on_the_eastern_side_of_the_meridian(
+    site: SiteConfig, timestamp: str
+):
+    times = pd.DatetimeIndex([timestamp])
+
+    azimuth = solar.solar_azimuth_deg(times, site)[0]
+
+    hour_angle = solar.hour_angle_deg(times, site.longitude)[0]
+    assert (hour_angle + 180.0) % 360.0 - 180.0 < 0.0
+    assert 0.0 <= azimuth < 180.0
+
+
 # ---------------------------------------------------------------------------
 # erbs.py
 # ---------------------------------------------------------------------------
