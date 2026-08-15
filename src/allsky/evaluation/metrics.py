@@ -66,9 +66,16 @@ REGRESSION_METRIC_KEYS: tuple[str, ...] = (
 #: a baseline cannot be published under a label nothing scores.
 REFERENCE_LABELS: tuple[str, ...] = ("persistence", "clearsky")
 
-#: Skill entries appended to a regression target's metrics, one per reference.
+#: Skill entries appended to a regression target's metrics, one triple per
+#: reference: the reference's RMSE, the model's RMSE **over the rows paired with
+#: that reference**, and the skill score.  The numerator is published because it
+#: is not the whole-split ``rmse``: a reference drops the rows it cannot cover
+#: (persistence has no predecessor on a day's first frame), so only these two
+#: keys reconcile to ``skill_<label>``.
 SKILL_METRIC_KEYS: tuple[str, ...] = tuple(
-    f"{statistic}_{label}" for label in REFERENCE_LABELS for statistic in ("rmse", "skill")
+    f"{statistic}_{label}"
+    for label in REFERENCE_LABELS
+    for statistic in ("rmse", "rmse_model", "skill")
 )
 
 
