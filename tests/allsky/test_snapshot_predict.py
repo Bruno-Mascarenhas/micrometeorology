@@ -20,7 +20,9 @@ two array shapes apart — :func:`test_the_backbone_is_fed_the_layout_its_transf
 pins the helper's contract instead.
 """
 
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -74,6 +76,8 @@ def embedding_checkpoint(tmp_path: Path) -> Path:
     """Train one epoch of an embedding-mode model on the fake backbone's width."""
     root, manifest, _ = synthetic.make_dataset(tmp_path)
     _write_embeddings(root, manifest, dim=32)
+    store = root / "emb"
+    write_meta(store, {**read_meta(store), "revision": "fake-v1", "dtype": "fp32"})
     run_dir = tmp_path / "run"
     config = tmp_path / "probe.yaml"
     config.write_text(
@@ -155,6 +159,71 @@ def test_a_railed_logger_channel_is_imputed_instead_of_fed_as_a_measurement(
     assert float(values[0]) == pytest.approx(1014.93)
 
 
+@pytest.mark.parametrize(
+    ("column", "exported_value", "feature"),
+    [
+        # An hour in which the Gill railed at 1000 degC for most of its samples
+        # averages to a finite number no sentinel literal matches.
+        ("AirT1_C_Avg", 525.0, "air_temp_c"),
+        # The logger's 7999 rail on the anemometer spelling the feature policy
+        # reads; SENTINEL_VALUES names only WS_ms_S_WVT.
+        ("WS_ms", 7999.0, "wind_speed_ms"),
+    ],
+)
+def test_an_implausible_exported_value_is_refused_instead_of_served_as_a_measurement(
+    tmp_path: Path, column: str, exported_value: float, feature: str
+) -> None:
+    sensor_csv = tmp_path / "station-hourly.csv"
+    sensor_csv.write_text(
+        f"timestamp,{column}\n2026-08-14 12:00:00,{exported_value}\n", encoding="utf-8"
+    )
+
+    values, imputed = _feature_vector(
+        pd.Timestamp("2026-08-14 12:00:00"),
+        feature_columns=[feature],
+        feature_set="safe",
+        site=SiteConfig(),
+        sensor_csv=sensor_csv,
+        tolerance=DEFAULT_SENSOR_TOLERANCE,
+        training_means=np.array([3.7], dtype=np.float32),
+    )
+
+    assert imputed == [feature]
+    assert float(values[0]) == pytest.approx(3.7)
+
+
+def test_a_plausible_exported_value_is_served_as_measured(tmp_path: Path) -> None:
+    sensor_csv = tmp_path / "station-hourly.csv"
+    sensor_csv.write_text("timestamp,AirT1_C_Avg\n2026-08-14 12:00:00,27.4\n", encoding="utf-8")
+
+    values, imputed = _feature_vector(
+        pd.Timestamp("2026-08-14 12:00:00"),
+        feature_columns=["air_temp_c"],
+        feature_set="safe",
+        site=SiteConfig(),
+        sensor_csv=sensor_csv,
+        tolerance=DEFAULT_SENSOR_TOLERANCE,
+        training_means=np.array([25.0], dtype=np.float32),
+    )
+
+    assert imputed == []
+    assert float(values[0]) == pytest.approx(27.4)
+
+
+def test_a_configuration_declaring_no_plausibility_gate_refuses_to_serve_a_sensor_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sensor_csv = tmp_path / "station-hourly.csv"
+    sensor_csv.write_text("timestamp,AirT1_C_Avg\n2026-08-14 12:00:00,27.4\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "micrometeorology.common.config.get_settings",
+        lambda: SimpleNamespace(sensor_limits=[]),
+    )
+
+    with pytest.raises(ValueError, match="sensor_limits"):
+        _sensor_row_near(sensor_csv, pd.Timestamp("2026-08-14 12:00:00"), DEFAULT_SENSOR_TOLERANCE)
+
+
 def test_an_offset_carrying_sensor_export_is_matched_on_site_local_wall_clock(
     tmp_path: Path,
 ) -> None:
@@ -233,3 +302,78 @@ def test_an_unreachable_embedding_store_refuses_to_guess_how_the_frame_was_encod
             timestamp=pd.Timestamp("2026-01-01 12:00:00"),
             trust_checkpoint=True,
         )
+
+
+def test_the_live_frame_is_embedded_at_the_precision_its_training_store_recorded(
+    embedding_checkpoint: Path, sky_image: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _embedding_store_of(embedding_checkpoint)
+    write_meta(store, {**read_meta(store), "dtype": "fp32"})
+    seen: dict[str, Any] = {}
+    real_build_backbone = backbone_module.build_backbone
+
+    def recording_build_backbone(name: str, **kwargs: Any) -> Any:
+        seen.update({"name": name, **kwargs})
+        return real_build_backbone(name, **kwargs)
+
+    monkeypatch.setattr(backbone_module, "build_backbone", recording_build_backbone)
+    predict_snapshot(
+        sky_image,
+        embedding_checkpoint,
+        timestamp=pd.Timestamp("2026-01-01 12:00:00"),
+        trust_checkpoint=True,
+    )
+
+    assert seen.get("dtype") == "fp32"
+
+
+def test_a_store_encoded_under_a_superseded_backbone_revision_refuses_to_predict(
+    embedding_checkpoint: Path, sky_image: Path
+) -> None:
+    store = _embedding_store_of(embedding_checkpoint)
+    write_meta(store, {**read_meta(store), "revision": "fake-v0"})
+
+    with pytest.raises(ValueError, match="revision"):
+        predict_snapshot(
+            sky_image,
+            embedding_checkpoint,
+            timestamp=pd.Timestamp("2026-01-01 12:00:00"),
+            trust_checkpoint=True,
+        )
+
+
+@pytest.mark.parametrize("absent", ["revision", "dim", "dtype"])
+def test_a_store_sidecar_missing_part_of_the_encoding_recipe_refuses_to_predict(
+    embedding_checkpoint: Path, sky_image: Path, absent: str
+) -> None:
+    store = _embedding_store_of(embedding_checkpoint)
+    meta = read_meta(store)
+    del meta[absent]
+    write_meta(store, meta)
+
+    with pytest.raises(ValueError, match=absent):
+        predict_snapshot(
+            sky_image,
+            embedding_checkpoint,
+            timestamp=pd.Timestamp("2026-01-01 12:00:00"),
+            trust_checkpoint=True,
+        )
+
+
+def test_a_moved_checkpoint_predicts_against_the_store_it_is_pointed_at(
+    tmp_path: Path, embedding_checkpoint: Path, sky_image: Path
+) -> None:
+    store = _embedding_store_of(embedding_checkpoint)
+    shipped_beside_checkpoint = tmp_path / "shipped" / "emb"
+    shutil.copytree(store, shipped_beside_checkpoint)
+    shutil.rmtree(store)
+
+    prediction = predict_snapshot(
+        sky_image,
+        embedding_checkpoint,
+        timestamp=pd.Timestamp("2026-01-01 12:00:00"),
+        trust_checkpoint=True,
+        embeddings_dir=shipped_beside_checkpoint,
+    )
+
+    assert np.isfinite(prediction["predictions"]["dhi"])

@@ -14,7 +14,7 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, TypeIs, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeIs, runtime_checkable
 
 import numpy as np
 import pandas as pd
@@ -22,6 +22,9 @@ import pandas as pd
 from allsky.atomic import atomic_write, atomic_write_json
 from allsky.config import SITE_TZ, SITE_UTC_OFFSET_HOURS, ExperimentConfig, SiteConfig
 from allsky.provenance import code_version
+
+if TYPE_CHECKING:
+    from allsky.embeddings.backbone import VisualBackbone
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,8 @@ DEFAULT_SENSOR_TOLERANCE = pd.Timedelta(minutes=15)
 HTTP_DATE_FORMAT = "%a, %d %b %Y %H:%M:%S %Z"
 SENSOR_TIME_COLUMNS = ("timestamp", "TIMESTAMP", "datetime", "time")
 LIVE_FRAME_MAX_AGE = pd.Timedelta(minutes=10)
+STORE_RECIPE_KEYS = ("backbone", "pooling", "revision", "dim", "dtype")
+EMBEDDING_STORE_DTYPES = ("fp16", "fp32")
 
 
 @runtime_checkable
@@ -200,6 +205,66 @@ def capture_snapshot(
     )
 
 
+def _screened_for_plausibility(row: pd.DataFrame) -> pd.DataFrame:
+    """Narrow *row* to the columns with a declared plausibility gate, NaN-ing what fails it.
+
+    Parameters
+    ----------
+    row:
+        One-row frame taken from the operator's station export, carrying that
+        export's own published units — degC, %, mbar, m s-1, degrees, W m-2 —
+        at whatever averaging interval it was written on.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The row narrowed to the columns ``sensor_limits`` declares, every
+        sample outside its gate replaced by ``NaN``. A column with no declared
+        gate is dropped rather than served: :func:`_feature_vector` then imputes
+        it at the training mean and names it in ``features.imputed``.
+
+    Raises
+    ------
+    ValueError
+        If the shipped configuration declares no ``sensor_limits``, leaving
+        nothing to screen a live reading against.
+    """
+    from micrometeorology.common.config import get_settings
+    from micrometeorology.sensors.ingestion import apply_physical_limits
+
+    limits = get_settings().sensor_limits
+    if not limits:
+        raise ValueError(
+            "the shipped configuration declares no sensor_limits, so a live sensor reading "
+            "cannot be screened for plausibility; restore configs/micromet/default.yaml or "
+            "predict without --sensor-csv, which imputes every sensor feature"
+        )
+    # apply_physical_limits declares its bounds in the logger's raw units and runs
+    # ahead of calibration in the archive build. They hold for the calibrated
+    # export too because configs/micromet/calibrations.yaml factors only
+    # CMP21_Wm2_Avg, CM3Up_Wm2_Avg, PSP1_Wm2_Avg and PSP_Wm2_Avg — broadband
+    # radiometry, every one of them a FORBIDDEN_FEATURES column no feature set
+    # can read. Raw and calibrated coincide for the channels served here.
+    declared = [str(limit["column"]) for limit in limits if limit["column"] in row.columns]
+    measured = row.loc[:, declared].copy()
+    was_measured = measured.notna().to_numpy()[0]
+    screened = apply_physical_limits(measured, limits)
+    refused = [
+        column
+        for column, before, after in zip(
+            declared, was_measured, screened.notna().to_numpy()[0], strict=True
+        )
+        if before and not after
+    ]
+    if refused:
+        logger.warning(
+            "sensor export reads outside the declared plausible range on %s — "
+            "imputing those instead of serving them as measurements",
+            ", ".join(refused),
+        )
+    return screened
+
+
 def _sensor_row_near(
     sensor_csv: str | Path, timestamp: pd.Timestamp, tolerance: pd.Timedelta
 ) -> pd.DataFrame:
@@ -208,13 +273,14 @@ def _sensor_row_near(
     The export is read on the same two contracts the training path holds it to.
     Its clock is the logger's, i.e. naive site-local, so an export that does
     carry an offset is converted into that zone rather than merely stripped of
-    it. Its values then go through the archive's own sentinel table: an
-    instrument rail is a finite number, so without masking it would pass the
-    ``np.isfinite`` screen in :func:`_feature_vector` and be served as a
-    measurement.
+    it. Its values are then screened by :func:`_screened_for_plausibility`,
+    which assumes the published physical units of the processed station export
+    the snapshot command documents — not the logger's raw pre-calibration
+    values, and not a 5-minute grid: an hour that railed for part of its
+    samples averages to a finite number no sentinel literal matches, and would
+    otherwise pass the ``np.isfinite`` screen in :func:`_feature_vector` and be
+    served as a measurement.
     """
-    from micrometeorology.sensors.archive import mask_sentinels
-
     frame = pd.read_csv(sensor_csv)
     time_column = next((name for name in SENSOR_TIME_COLUMNS if name in frame.columns), None)
     if time_column is None:
@@ -240,9 +306,9 @@ def _sensor_row_near(
             tolerance,
         )
         return frame.iloc[0:0]
-    # Masked after the row is chosen, not before: every sentinel rule is row-wise,
-    # so the outcome is identical, and the nearest-row lookup reads the index only.
-    row, _removed = mask_sentinels(frame.iloc[[position]].copy())
+    # Screened after the row is chosen, not before: every gate is row-wise, so
+    # the outcome is identical, and the nearest-row lookup reads the index only.
+    row = _screened_for_plausibility(frame.iloc[[position]])
     row.index = pd.DatetimeIndex([timestamp])
     return row
 
@@ -328,8 +394,10 @@ def _image_as_chw(image_path: str | Path, size: int) -> np.ndarray:
     return np.ascontiguousarray(scaled.transpose(2, 0, 1))
 
 
-def _embedding_store_meta(cfg: ExperimentConfig) -> dict[str, Any]:
-    """Provenance sidecar of the embedding store *cfg* was trained against.
+def _embedding_store_meta(
+    cfg: ExperimentConfig, embeddings_dir: str | Path | None
+) -> tuple[Path, dict[str, Any]]:
+    """Embedding store to encode against, and its provenance sidecar.
 
     Embedding-mode training never reads ``model.backbone`` /
     ``model.backbone_pooling``: the representation is whatever
@@ -339,30 +407,95 @@ def _embedding_store_meta(cfg: ExperimentConfig) -> dict[str, Any]:
     ``mean`` pooling are both 384-dimensional, so a mismatch survives
     ``load_state_dict`` and comes out as a plausible number.
 
+    Parameters
+    ----------
+    cfg:
+        Config carried by the checkpoint. Its ``data.embeddings_dir`` is
+        resolved against ``data.data_root``, which training bakes in as the
+        absolute path of the machine that trained — unusable once the
+        checkpoint is copied anywhere else.
+    embeddings_dir:
+        Store to read instead, for exactly that case; None keeps the baked
+        path.
+
     Raises
     ------
     ValueError
-        If the checkpoint names no embeddings directory, if the sidecar is not
-        readable there, or if it records no backbone or pooling.
+        If no embeddings directory is named at all, if the sidecar is not
+        readable there, if it omits any part of the encoding recipe, or if it
+        records a storage dtype no backbone can be built at.
     """
     from allsky.data.loading import resolve_against_root
     from allsky.embeddings.storage import META_FILENAME, read_meta
 
-    if cfg.data.embeddings_dir is None:
+    if embeddings_dir is not None:
+        store = Path(embeddings_dir)
+    elif cfg.data.embeddings_dir is not None:
+        store = resolve_against_root(cfg.data.embeddings_dir, Path(cfg.data.data_root))
+    else:
         raise ValueError("input_mode='embedding' checkpoint carries no data.embeddings_dir")
-    store = resolve_against_root(cfg.data.embeddings_dir, Path(cfg.data.data_root))
     try:
         meta = read_meta(store)
     except FileNotFoundError as exc:
         raise ValueError(
             f"no {META_FILENAME} under {store}: an embedding-mode checkpoint records no "
             "backbone of its own, so without the store's sidecar there is no way to encode "
-            "the live frame the way the model was fitted"
+            "the live frame the way the model was fitted. Point predict_snapshot at the "
+            "store that ships with the checkpoint if the trained-on path has moved"
         ) from exc
-    absent = sorted(key for key in ("backbone", "pooling") if meta.get(key) is None)
+    absent = sorted(key for key in STORE_RECIPE_KEYS if meta.get(key) is None)
     if absent:
         raise ValueError(f"{store / META_FILENAME} records no {', '.join(absent)}")
-    return meta
+    if meta["dtype"] not in EMBEDDING_STORE_DTYPES:
+        raise ValueError(
+            f"{store / META_FILENAME} records dtype {meta['dtype']!r}; a backbone can only "
+            f"be built at one of {', '.join(EMBEDDING_STORE_DTYPES)}"
+        )
+    return store, meta
+
+
+def _backbone_matching_store(store: Path, meta: dict[str, Any], device: str) -> VisualBackbone:
+    """Backbone built to *meta*'s recipe, refusing anything it cannot reproduce.
+
+    ``build_backbone`` takes the pooling, the storage dtype and the fake
+    backbone's width, so those are forwarded; the pinned revision and the
+    embedding width are properties of the built backbone instead, so they are
+    compared against what the store recorded and a difference is fatal. Both
+    would otherwise re-encode the live frame under a recipe the model was never
+    fitted on and still produce a vector of the width ``load_state_dict``
+    accepts.
+    """
+    from allsky.embeddings.backbone import build_backbone
+    from allsky.embeddings.storage import META_FILENAME
+
+    backbone = build_backbone(
+        meta["backbone"],
+        device=device,
+        pooling=meta["pooling"],
+        dtype=meta["dtype"],
+        fake_dim=int(meta["dim"]),
+    )
+    recorded_transform = meta.get("transform")
+    built_transform = getattr(backbone, "transform_description", "")
+    mismatched: dict[str, tuple[Any, Any]] = {
+        "revision": (meta["revision"], backbone.revision),
+        "dim": (int(meta["dim"]), int(backbone.dim)),
+    }
+    if recorded_transform and built_transform:
+        mismatched["transform"] = (recorded_transform, built_transform)
+    differing = {key: pair for key, pair in mismatched.items() if pair[0] != pair[1]}
+    if differing:
+        detail = "; ".join(
+            f"{key}: store={recorded!r} live={built!r}"
+            for key, (recorded, built) in differing.items()
+        )
+        raise ValueError(
+            f"the live backbone cannot reproduce the recipe {store / META_FILENAME} records "
+            f"({detail}), so the frame would be encoded differently from the vectors the "
+            "model was fitted on; re-extract the store with this code, or predict with the "
+            "checkpoint trained against it"
+        )
+    return backbone
 
 
 def predict_snapshot(
@@ -375,6 +508,7 @@ def predict_snapshot(
     site: SiteConfig | None = None,
     device: str = "cpu",
     trust_checkpoint: bool = False,
+    embeddings_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run a trained checkpoint over one sky image and return physical-unit predictions.
 
@@ -410,6 +544,12 @@ def predict_snapshot(
     trust_checkpoint:
         Allow unpickling a checkpoint that is not weights-only. Leave False for
         any checkpoint whose origin is not your own training run.
+    embeddings_dir:
+        Embedding store whose sidecar describes how the live frame must be
+        encoded, overriding the absolute ``data.data_root`` the training run
+        baked into the checkpoint. Point it at the store shipped beside a
+        checkpoint that has been copied off the machine it was trained on.
+        Rejected for an image-mode checkpoint, which encodes nothing.
 
     Returns
     -------
@@ -425,8 +565,10 @@ def predict_snapshot(
     ------
     ValueError
         If the checkpoint expects a feature column its configured feature set
-        does not produce, or — in embedding mode — if the store it was trained
-        against cannot be read for the backbone and pooling that encoded it.
+        does not produce, if *embeddings_dir* is given for an image-mode
+        checkpoint, or — in embedding mode — if the store it was trained
+        against cannot be read for the recipe that encoded it, or the live
+        backbone cannot reproduce that recipe.
     """
     import torch
 
@@ -440,6 +582,11 @@ def predict_snapshot(
         checkpoint_path, map_location=device, trust_pickle=trust_checkpoint
     )
     cfg = ExperimentConfig.model_validate(checkpoint["config"])
+    if embeddings_dir is not None and cfg.data.input_mode != "embedding":
+        raise ValueError(
+            f"embeddings_dir was given for an input_mode={cfg.data.input_mode!r} checkpoint, "
+            "which encodes the live frame with its own backbone and reads no embedding store"
+        )
     feature_columns: list[str] = list(checkpoint["feature_columns"])
     normalizers = checkpoint["normalizers"]
     feature_normalizer = FeatureNormalizer.from_dict(normalizers["feature_normalizer"])
@@ -469,12 +616,8 @@ def predict_snapshot(
             torch.from_numpy(_image_as_chw(image_path, image_size)).unsqueeze(0).to(device)
         )
     else:
-        from allsky.embeddings.backbone import build_backbone
-
-        store_meta = _embedding_store_meta(cfg)
-        backbone = build_backbone(
-            store_meta["backbone"], device=device, pooling=store_meta["pooling"]
-        )
+        store, store_meta = _embedding_store_meta(cfg, embeddings_dir)
+        backbone = _backbone_matching_store(store, store_meta, device)
         # Through transform(), never straight into encode(): the backbone's
         # contract takes a SEQUENCE of (H, W, 3) uint8 HWC frames and does its
         # own resize, ImageNet normalisation and stacking, and that is the
