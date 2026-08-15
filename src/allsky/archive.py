@@ -66,7 +66,7 @@ class ArchiveError(RuntimeError):
     """A request against the all-sky archive failed after every retry."""
 
 
-class _TransportFailure(Exception):
+class _TransportError(Exception):
     """The connection, not the local machine, is what broke — so the request is worth retrying.
 
     Reading a response body and writing it to disk raise the same
@@ -78,7 +78,7 @@ class _TransportFailure(Exception):
 
 
 def _read_response(response: Any, size: int | None = None) -> bytes:
-    """Read from an open response, marking a broken transport as :class:`_TransportFailure`.
+    """Read from an open response, marking a broken transport as :class:`_TransportError`.
 
     With *size* the read is one chunk of at most that many bytes and an empty
     result means the body ended; without it the whole remaining body is read and
@@ -87,7 +87,7 @@ def _read_response(response: Any, size: int | None = None) -> bytes:
     try:
         return bytes(response.read() if size is None else response.read(size))
     except (http.client.HTTPException, urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise _TransportFailure(str(exc)) from exc
+        raise _TransportError(str(exc)) from exc
 
 
 def _https_only_opener(
@@ -308,7 +308,7 @@ class ArchiveClient:
 
         Only failures of the transport are retried.  A consumer reads through
         :func:`_read_response`, which marks read-side faults as
-        :class:`_TransportFailure`; anything else it raises is the local machine
+        :class:`_TransportError`; anything else it raises is the local machine
         failing — a full disk, a read-only destination — and surfaces at once
         rather than costing another full GET to fail the same way.
         """
@@ -328,7 +328,7 @@ class ArchiveClient:
             else:
                 try:
                     return consume(response)
-                except _TransportFailure as exc:
+                except _TransportError as exc:
                     last = exc.__cause__ or exc
                 finally:
                     response.close()
@@ -447,7 +447,7 @@ class ArchiveClient:
                     # early instead of raising IncompleteRead, so a connection
                     # dropped mid-video reaches here as a silent short read. It is
                     # a broken transport like any other and gets the same retry.
-                    raise _TransportFailure(
+                    raise _TransportError(
                         f"{entry.filename} truncated: got {written} bytes, "
                         f"server announced {declared}"
                     )

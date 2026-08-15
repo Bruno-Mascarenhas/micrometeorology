@@ -248,6 +248,20 @@ def test_kindex_band_is_absent_for_a_manifest_built_before_target_kt() -> None:
     assert "kindex_band" not in frame.columns
 
 
+def test_a_manifest_built_before_target_kt_warns_that_it_loses_the_kindex_breakdown(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    split_df = _manifest_rows(pd.date_range("2025-03-20 12:00", periods=2, freq="10min")).drop(
+        columns=["target_kt"]
+    )
+    frame = pd.DataFrame({"sample_id": split_df["sample_id"]})
+
+    with caplog.at_level(logging.WARNING, logger="allsky.evaluation.evaluator"):
+        _add_strata(frame, split_df)
+
+    assert any("kindex_band breakdown is absent" in record.message for record in caplog.records)
+
+
 def test_a_manifest_with_no_recorded_kindex_kind_warns_that_it_loses_the_clearsky_baseline(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

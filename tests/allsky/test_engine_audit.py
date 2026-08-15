@@ -11,12 +11,12 @@ from pathlib import Path
 
 import pytest
 import torch
+from pydantic import ValidationError
 
 from allsky.config import ExperimentConfig
 from allsky.training.checkpointing import load_checkpoint
 from allsky.training.engine import (
     _build_amp,
-    _build_optimizer,
     _improved,
     _MetricAccumulator,
     run_experiment,
@@ -63,12 +63,9 @@ def test_resume_warns_that_an_edited_learning_rate_loses_to_the_checkpoint(
     assert any("train.lr" in record.getMessage() for record in caplog.records)
 
 
-def test_an_optimizer_the_engine_cannot_build_is_refused_instead_of_run_as_adamw():
-    cfg = ExperimentConfig.model_validate({"train": {"optimizer": "sgd", "device": "cpu"}})
-    model = torch.nn.Linear(3, 1)
-
-    with pytest.raises(ValueError, match="sgd"):
-        _build_optimizer(model, cfg)
+def test_an_optimizer_the_engine_cannot_build_is_refused_before_a_run_starts():
+    with pytest.raises(ValidationError, match="optimizer"):
+        ExperimentConfig.model_validate({"train": {"optimizer": "sgd", "device": "cpu"}})
 
 
 def test_bf16_amp_autocasts_on_the_run_device_and_not_on_the_cpu():

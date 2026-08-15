@@ -394,7 +394,7 @@ def _image_as_chw(image_path: str | Path, size: int) -> np.ndarray:
     return np.ascontiguousarray(scaled.transpose(2, 0, 1))
 
 
-class _EmbeddingStoreUnreachable(ValueError):
+class _EmbeddingStoreUnreachableError(ValueError):
     """The embedding store a checkpoint names is not on this machine at all.
 
     Distinct from a store that is present but unusable: one is a checkpoint that
@@ -424,7 +424,7 @@ def embedding_recipe_of(store: str | Path) -> dict[str, Any] | None:
 
     try:
         meta = read_meta(store)
-    except (FileNotFoundError, OSError, ValueError):
+    except FileNotFoundError, OSError, ValueError:
         return None
     if any(meta.get(key) is None for key in STORE_RECIPE_KEYS):
         return None
@@ -477,7 +477,7 @@ def _embedding_store_meta(
     try:
         meta = read_meta(store)
     except FileNotFoundError as exc:
-        raise _EmbeddingStoreUnreachable(
+        raise _EmbeddingStoreUnreachableError(
             f"no {META_FILENAME} under {store}: an embedding-mode checkpoint records no "
             "backbone of its own, so without the store's sidecar there is no way to encode "
             "the live frame the way the model was fitted. Point predict_snapshot at the "
@@ -663,7 +663,7 @@ def predict_snapshot(
         try:
             store, store_meta = _embedding_store_meta(cfg, embeddings_dir)
             source = str(store / META_FILENAME)
-        except _EmbeddingStoreUnreachable:
+        except _EmbeddingStoreUnreachableError:
             # The store the run trained against is not on this machine. The
             # checkpoint's own copy of its recipe is the only other record of how
             # those vectors were encoded, and a checkpoint written before that

@@ -145,6 +145,13 @@ def test_extra_forbid_rejects_nested_typo(tmp_path):
         load_experiment_config(path)
 
 
+def test_an_optimizer_the_engine_cannot_build_is_rejected_when_the_config_loads(tmp_path):
+    path = tmp_path / "exp.yaml"
+    path.write_text("experiment: true\ntrain:\n  optimizer: adam\n", encoding="utf-8")
+    with pytest.raises(ValidationError, match="optimizer"):
+        load_experiment_config(path)
+
+
 def test_prepare_extra_forbid_rejects_typo(tmp_path):
     path = tmp_path / "prep.yaml"
     path.write_text("embeddings:\n  poolng: cls\n", encoding="utf-8")

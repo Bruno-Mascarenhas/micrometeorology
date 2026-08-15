@@ -750,14 +750,11 @@ def _build_optimizer(
     :meth:`MultimodalModel.param_groups` sets it on); everything else runs at
     ``train.lr`` and is labelled ``lr``.
 
-    ``train.optimizer`` is validated here rather than honoured: AdamW is the only
-    algorithm this engine builds, and a config naming another one used to train as
-    AdamW anyway while the checkpoint recorded the name it asked for.
+    ``train.optimizer`` is not read: AdamW is the only algorithm this engine
+    builds, and :class:`~allsky.config.TrainConfig` declares the field as that one
+    literal, so a config naming another one is refused when it is loaded rather
+    than after a run has already seeded, loaded its dataset and built its model.
     """
-    if cfg.train.optimizer != "adamw":
-        raise ValueError(
-            f"unknown optimizer {cfg.train.optimizer!r}; this engine builds 'adamw' only"
-        )
     param_groups_fn = getattr(model, "param_groups", None)
     if callable(param_groups_fn):
         params: Any = param_groups_fn(cfg.train.backbone_lr)
@@ -1376,9 +1373,14 @@ def _rotate_superseded_best(run_dir: Path) -> None:
     actually improves: rotating at the start of a fresh run leaves the directory
     with no ``best.ckpt`` at all for a run that then dies (an unresolvable monitor,
     a divergent first epoch), which is when the previous best matters most.
+
+    The destination is taken through :func:`_free_rotation_destination` for the
+    same reason a monitor change is: two fresh runs in one directory would
+    otherwise rotate onto the same name, and the second would delete the weights
+    the first preserved.
     """
     path = run_dir / BEST_CHECKPOINT
-    backup = path.with_name(f"{BEST_CHECKPOINT}{STALE_RUN_SUFFIX}")
+    backup = _free_rotation_destination(path.with_name(f"{BEST_CHECKPOINT}{STALE_RUN_SUFFIX}"))
     os.replace(path, backup)
     logger.warning(
         "fresh run: rotated stale %s aside to %s (a previous run wrote it)", path, backup.name

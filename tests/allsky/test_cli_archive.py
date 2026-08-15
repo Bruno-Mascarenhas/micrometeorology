@@ -669,9 +669,10 @@ def test_a_day_whose_overlay_can_never_be_read_is_recorded_and_not_decoded_again
     data = tmp_path / "data"
     _fail_re_extracting_a_day_whose_overlay_cannot_be_read(data, mirror, tmp_path)
 
-    assert _reload(data).extraction_faulted(
-        DAY_LATER, step=1, resize=None, timestamps="overlay"
-    ) is not None
+    assert (
+        _reload(data).extraction_faulted(DAY_LATER, step=1, resize=None, timestamps="overlay")
+        is not None
+    )
 
     again = _sync(data, mirror, "--extract", "--since", "2026-08-11")
 
@@ -688,7 +689,7 @@ def test_a_video_that_decodes_to_no_frame_keeps_the_frames_the_previous_run_left
     before = sorted(path.name for path in frames_dir.glob("*.jpg"))
     assert before
 
-    monkeypatch.setattr("allsky.overlay._sampled_reads", lambda *args, **kwargs: iter(()))
+    monkeypatch.setattr("allsky.overlay._sampled_reads", lambda *_args, **_kwargs: iter(()))
     empty = _sync(data, mirror, "--extract", "--step", "2", "--since", "2026-08-10")
 
     assert empty.exit_code == 0, empty.output

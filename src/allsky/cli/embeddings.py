@@ -14,7 +14,6 @@ Heavy dependencies (torch, safetensors, the backbone model) are imported lazily
 inside the command, so importing :mod:`allsky.cli` never pulls them.
 """
 
-import hashlib
 import json
 import logging
 from pathlib import Path
@@ -99,23 +98,6 @@ def _config_sha256(cfg: PrepareConfig) -> str:
         content_files=_mask_content_files(cfg),
         subject="the embedding resume hash",
     )
-
-
-def _legacy_config_sha256(cfg: PrepareConfig) -> str:
-    """The resume digest under the formula every store on disk was stamped with.
-
-    :func:`_config_sha256` widened both the covered sections and the JSON
-    encoding, so every previously extracted store records a digest no current
-    config can reproduce and would be refused on resume — a full re-encode of a
-    dataset in which neither the encoder nor a single JPEG changed.  This
-    reproduces the old formula verbatim (python-mode dump, ``default=str``,
-    default separators) so
-    :func:`allsky.embeddings.extract._check_resume_compatible` can recognise
-    such a store — and migrate it in place when, and only when, the store also
-    records the pixel provenance that formula never covered.
-    """
-    canonical = json.dumps(cfg.embeddings.model_dump(), sort_keys=True, default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def precompute_embeddings(
@@ -223,7 +205,6 @@ def precompute_embeddings(
             resume=resume,
             dry_run=dry_run,
             config_sha256=_config_sha256(cfg),
-            legacy_config_sha256=_legacy_config_sha256(cfg),
             pixel_config_sha256=_pixel_config_sha256(cfg),
         )
     except Exception as exc:  # surface any failure as a non-zero exit

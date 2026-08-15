@@ -553,6 +553,23 @@ class TestResumeMonitorChange:
 
         assert second["name"] == "sky_acc"
 
+    def test_a_second_fresh_run_does_not_destroy_the_best_the_first_one_rotated_aside(
+        self, tmp_path: Path
+    ):
+        root, manifest, _ = _make_dataset(tmp_path)
+        reader = _reader(manifest)
+        run_dir = tmp_path / "run"
+        for epochs in (2, 3, 4):
+            run_experiment(
+                _cfg(root, epochs=epochs, monitor="val_dhi_mae"),
+                data_root=root,
+                output_dir=run_dir,
+                embedding_reader=reader,
+            )
+
+        assert (run_dir / "best.ckpt.stale").is_file()
+        assert (run_dir / "best.ckpt.stale.2").is_file()
+
     @pytest.mark.parametrize(
         ("skip_scheduler_state", "expected_mode"), [(True, "max"), (False, "min")]
     )

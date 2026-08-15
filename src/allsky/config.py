@@ -293,7 +293,10 @@ class ExperimentTrainConfig(BaseModel):
     lr: float = 3e-4
     backbone_lr: float | None = None
     weight_decay: float = 1e-4
-    optimizer: str = "adamw"
+    # AdamW is the only algorithm allsky.training.engine builds. Declared as the
+    # literal so a config naming another one is refused when it is loaded, rather
+    # than after the seed, the dataset and the model of a whole run.
+    optimizer: Literal["adamw"] = "adamw"
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     amp: AMPConfig = Field(default_factory=AMPConfig)
     grad_accum_steps: int = 1
