@@ -35,7 +35,7 @@ from micrometeorology.common.types import (
     VARIABLE_NETCDF_MAP,
     WRFVariable,
 )
-from micrometeorology.wrf import reader
+from micrometeorology.wrf import jobs, reader
 from micrometeorology.wrf import variables as vmod
 from micrometeorology.wrf.batch import (
     FigureTask,
@@ -86,12 +86,10 @@ def _normalize_var_list(var_list: list[str]) -> list[str]:
     Collapses ``poteolico50``, ``poteolico100``, ``poteolico150`` into
     a single ``poteolico`` entry (deduplicating).
     """
-    from micrometeorology.cli.export_wrf_geojson import _CANONICAL_VARIABLES
-
     normalized: list[str] = []
     seen: set[str] = set()
     for requested in var_list:
-        name = _CANONICAL_VARIABLES.get(requested.casefold(), requested)
+        name = jobs.CANONICAL_VARIABLES.get(requested.casefold(), requested)
         if name.startswith("poteolico") and name != "poteolico":
             name = "poteolico"
         if name not in seen:

@@ -24,7 +24,7 @@ import typer
 
 from micrometeorology.common.cli_options import parse_csv, parse_int_csv
 from micrometeorology.common.logging import setup_logging
-from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
+from micrometeorology.common.types import VARIABLE_NETCDF_MAP
 from micrometeorology.wrf import jobs
 from micrometeorology.wrf.batch import default_workers
 from micrometeorology.wrf.reader import resolve_wrfout_paths
@@ -58,12 +58,6 @@ DEFAULT_VARS = [
 
 _WRFOUT_DOMAIN_RE = re.compile(r"^wrfout_(d\d+)_", re.IGNORECASE)
 
-_CANONICAL_VARIABLES: dict[str, str] = {
-    **{variable.value.casefold(): variable.value for variable in WRFVariable},
-    **{f"poteolico{height}": f"poteolico{height}" for height in jobs.POTEOLICO_ALL_HEIGHTS},
-    "wind_vectors": "wind_vectors",
-}
-
 # Output file ids whose input spelling is a DIFFERENT word. Passing one of
 # these as ``-v`` reaches the raw-NetCDF passthrough and publishes unconverted
 # values into the files the derived variable owns.
@@ -84,7 +78,7 @@ def _normalize_var_list(var_list: list[str]) -> list[str]:
     known variable are left untouched — raw NetCDF fields such as ``T2`` are a
     supported passthrough.
     """
-    var_list = [_CANONICAL_VARIABLES.get(v.casefold(), v) for v in var_list]
+    var_list = [jobs.CANONICAL_VARIABLES.get(v.casefold(), v) for v in var_list]
     if "poteolico" in var_list:
         var_list = [v for v in var_list if not (v.startswith("poteolico") and v != "poteolico")]
     normalized: list[str] = []

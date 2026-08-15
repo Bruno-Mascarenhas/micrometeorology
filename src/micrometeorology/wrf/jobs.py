@@ -48,6 +48,16 @@ HDF5_LOCKING_ENV = "LABMIM_HDF5_FILE_LOCKING"
 
 POTEOLICO_ALL_HEIGHTS: tuple[int, ...] = (50, 100, 150)
 
+#: Casefolded request spelling -> the canonical name every downstream lookup
+#: compares against.  Both the JSON export and the figure renderer fold through
+#: this before choosing a daylight gate, a colormap or an output filename, so a
+#: mis-cased ``-v swdown`` cannot reach one of them canonical and the other raw.
+CANONICAL_VARIABLES: dict[str, str] = {
+    **{variable.value.casefold(): variable.value for variable in WRFVariable},
+    **{f"poteolico{height}": f"poteolico{height}" for height in POTEOLICO_ALL_HEIGHTS},
+    "wind_vectors": "wind_vectors",
+}
+
 # Requested names that publish every step under a single ``{D}_{ID}_{NNN}.json``
 # id, so the manifest can advertise "no steps this run" for one that wrote
 # nothing. Everything outside this set and VARIABLE_NETCDF_MAP fans out to
