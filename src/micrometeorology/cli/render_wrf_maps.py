@@ -75,14 +75,23 @@ _VARIABLES_WITHOUT_FIGURE_RENDERER = {"poteolico", "weibull"}
 
 
 def _normalize_var_list(var_list: list[str]) -> list[str]:
-    """Normalize legacy variable names.
+    """Canonicalize spelling and normalize legacy variable names.
 
+    Case is folded to the canonical spelling first, exactly as the JSON export
+    does: the decoration lookups and :func:`publishes_step` all compare against
+    ``WRFVariable`` values, so a mis-cased ``-v swdown`` would lose its daylight
+    gate and its colormap while still writing the canonical
+    ``SWDOWN_D0X_nnn.png`` names. Tokens that name no known variable are left
+    untouched — raw NetCDF fields such as ``T2`` are a supported passthrough.
     Collapses ``poteolico50``, ``poteolico100``, ``poteolico150`` into
     a single ``poteolico`` entry (deduplicating).
     """
+    from micrometeorology.cli.export_wrf_geojson import _CANONICAL_VARIABLES
+
     normalized: list[str] = []
     seen: set[str] = set()
-    for name in var_list:
+    for requested in var_list:
+        name = _CANONICAL_VARIABLES.get(requested.casefold(), requested)
         if name.startswith("poteolico") and name != "poteolico":
             name = "poteolico"
         if name not in seen:
