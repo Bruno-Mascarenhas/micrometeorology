@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from allsky.config import VideoConfig
 from allsky.data.contracts import QCFlag
 from allsky.overlay import (
     DIGIT_CELL_LEFT_EDGES,
@@ -25,6 +26,7 @@ from allsky.overlay import (
     OverlayReading,
     OverlayTimestampError,
     _correct_against_neighbours,
+    extract_frames_for,
     extract_frames_with_overlay_timestamps,
     read_frame_timestamp,
     read_video_timestamps,
@@ -349,6 +351,31 @@ def test_a_manufactured_timestamp_is_flagged_in_the_frame_manifest(tmp_path: Pat
     flags = manifest.set_index("index")["qc_frame_flags"]
     assert flags.loc[2] & int(QCFlag.TIMESTAMP_INTERPOLATED)
     assert not (flags.drop(index=2) & int(QCFlag.TIMESTAMP_INTERPOLATED)).any()
+
+
+def test_the_configured_filename_date_format_decides_which_day_the_overlay_is_judged_against(
+    tmp_path: Path,
+):
+    video = fake.write_overlay_video(tmp_path / "skycam_20260810.mp4", MINUTE_APART)
+    config = VideoConfig(filename_date_format="skycam_%Y%m%d")
+
+    manifest = extract_frames_for(video, tmp_path / "frames", config)
+
+    assert list(manifest["timestamp"]) == [
+        pd.Timestamp(_naive(f"2026-08-10 12:0{n}")) for n in "012"
+    ]
+
+
+def test_a_name_the_configured_format_does_not_describe_falls_back_to_the_allsky_naming(
+    tmp_path: Path,
+):
+    config = VideoConfig(filename_date_format="skycam_%Y%m%d")
+
+    manifest = extract_frames_for(_video(tmp_path, MINUTE_APART), tmp_path / "frames", config)
+
+    assert list(manifest["timestamp"]) == [
+        pd.Timestamp(_naive(f"2026-08-10 12:0{n}")) for n in "012"
+    ]
 
 
 def test_a_read_timestamp_carries_no_provenance_flag(tmp_path: Path):

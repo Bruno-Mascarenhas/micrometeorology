@@ -558,11 +558,12 @@ class Ledger:
 
         Frames extracted under a different *step* or *resize* are a different
         artifact, so they do not count as done and the day is re-extracted.  So
-        are frames stamped by a different clock: overlay frames and
-        modelled-cadence frames occupy the same filenames while describing
-        different capture times.  A record filed without a timestamp source
-        counts as a mismatch — its clock is unknown, and re-extracting is the
-        only way to learn it.
+        are frames stamped by a different clock: each writer names a frame after
+        that frame's own capture time, so the two clocks produce different
+        filenames for the same day and both sets would otherwise survive in the
+        directory — the stale set is discarded before the day is extracted again.
+        A record filed without a timestamp source counts as a mismatch — its
+        clock is unknown, and re-extracting is the only way to learn it.
         """
         stored = self.frames(key)
         if stored is None:

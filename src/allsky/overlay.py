@@ -516,6 +516,7 @@ def extract_frames_with_overlay_timestamps(
     *,
     step: int = 1,
     resize: int | tuple[int, int] | None = None,
+    video_date: dt.date | None = None,
 ) -> pd.DataFrame:
     """Extract JPEG frames named by the timestamp burned into each frame.
 
@@ -528,7 +529,8 @@ def extract_frames_with_overlay_timestamps(
     Parameters
     ----------
     path:
-        One-day timelapse video named ``allsky-YYYYMMDD``.
+        One-day timelapse video, named ``allsky-YYYYMMDD`` when *video_date* is
+        not given.
     out_dir:
         Output directory, created if missing. The manifest is overwritten on
         every call, so use one directory per video.
@@ -538,6 +540,9 @@ def extract_frames_with_overlay_timestamps(
         Output size in pixels — ``int`` for square, ``(width, height)``
         otherwise. ``None`` keeps the native resolution. The overlay is always
         read at native resolution first.
+    video_date:
+        Local calendar day the video covers, against which a stamp is judged
+        plausible; parsed from the ``allsky-YYYYMMDD`` filename when None.
 
     Returns
     -------
@@ -560,7 +565,7 @@ def extract_frames_with_overlay_timestamps(
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     video_name = Path(path).name
-    readings = read_video_timestamps(path, step=step)
+    readings = read_video_timestamps(path, step=step, video_date=video_date)
 
     rows: list[dict[str, object]] = []
     written: set[str] = set()
@@ -611,6 +616,21 @@ def extract_frames_with_overlay_timestamps(
     return manifest
 
 
+def _configured_video_date(video: str | Path, video_config: VideoConfig) -> dt.date | None:
+    """The day *video* covers per ``filename_date_format``, or None when it does not match.
+
+    Returning None hands the reading back to :func:`_video_date_from_name`, so a
+    file whose name the configured format does not describe still extracts under
+    the ``allsky-YYYYMMDD`` naming instead of being refused for it.
+    """
+    from allsky.video import video_date
+
+    try:
+        return video_date(video, video_config)
+    except ValueError:
+        return None
+
+
 def extract_frames_for(
     video: str | Path,
     out_dir: str | Path,
@@ -632,8 +652,9 @@ def extract_frames_for(
     out_dir:
         Directory the JPEGs and their ``manifest.parquet`` are written to.
     video_config:
-        Supplies ``timestamps`` (the clock) and, for the modelled mapping, the
-        ``start_time`` / ``minutes_per_frame`` pair it places frames with.
+        Supplies ``timestamps`` (the clock), ``filename_date_format`` (which day
+        the file covers) and, for the modelled mapping, the ``start_time`` /
+        ``minutes_per_frame`` pair it places frames with.
     step:
         Keep every *step*-th frame.
     resize:
@@ -653,7 +674,13 @@ def extract_frames_for(
         exits non-zero.
     """
     if video_config.timestamps == "overlay":
-        return extract_frames_with_overlay_timestamps(video, out_dir, step=step, resize=resize)
+        return extract_frames_with_overlay_timestamps(
+            video,
+            out_dir,
+            step=step,
+            resize=resize,
+            video_date=_configured_video_date(video, video_config),
+        )
 
     from allsky.video import extract_frames
 
