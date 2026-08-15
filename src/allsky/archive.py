@@ -27,6 +27,7 @@ from allsky.atomic import atomic_write, atomic_write_json
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "AIA_INTERMEDIATE_SHA256",
     "AIA_INTERMEDIATE_URL",
     "ARCHIVE_BASE_URL",
     "LEDGER_FILENAME",
@@ -45,6 +46,11 @@ ARCHIVE_BASE_URL = "https://allsky.planetario.ufba.br/"
 VIDEO_PATH = "videos/"
 LIVE_IMAGE_PATH = "image.jpg"
 AIA_INTERMEDIATE_URL = "http://secure.globalsign.com/cacert/rnpicpedugr46ovtlsca2025.crt"
+# SHA-256 over the DER of "RNP ICPEdu GR46 OV TLS CA 2025", serial
+# 84AC371369F2B3896C10759C657E0FD1, issued by GlobalSign Root R46: the certificate
+# AIA_INTERMEDIATE_URL served on 2026-08-14, verified against the system trust store
+# and against the archive leaf it issues.
+AIA_INTERMEDIATE_SHA256 = "e10747d4da7bab09cba9952f019d3534cb9fba070bf13d8791b1699cd2ff59dd"
 INTERMEDIATE_CACHE_FILENAME = "rnp-icpedu-gr46-2025.pem"
 USER_AGENT = "labmim-allsky-archive/1.0 (LabMiM/UFBA; +https://labmim.if.ufba.br)"
 LEDGER_FILENAME = "archive-ledger.json"
@@ -83,9 +89,27 @@ def _fetch_aia_intermediate(url: str, *, timeout: float) -> bytes:
             f"could not fetch the CA intermediate from {url}: {exc}. Without it the archive's "
             "TLS chain cannot be verified; pass --ca-file with a PEM copy, or --insecure."
         ) from exc
-    if b"BEGIN CERTIFICATE" in payload:
-        return payload
-    return ssl.DER_cert_to_PEM_cert(payload).encode("ascii")
+    return _pinned_intermediate_pem(payload, origin=url)
+
+
+def _pinned_intermediate_pem(payload: bytes, *, origin: str) -> bytes:
+    try:
+        der = (
+            ssl.PEM_cert_to_DER_cert(payload.decode("ascii"))
+            if b"BEGIN CERTIFICATE" in payload
+            else payload
+        )
+    except ValueError as exc:
+        raise ArchiveError(f"the CA intermediate at {origin} is not a certificate: {exc}") from exc
+    digest = hashlib.sha256(der).hexdigest()
+    if digest != AIA_INTERMEDIATE_SHA256:
+        raise ArchiveError(
+            f"the CA intermediate at {origin} hashes to sha256 {digest}, not the pinned "
+            f"{AIA_INTERMEDIATE_SHA256}. It would be trusted to verify the archive, and it "
+            "travels over plaintext HTTP, so it is refused: delete the cached copy if it is "
+            "stale, or pass --ca-file with a PEM bundle you trust."
+        )
+    return ssl.DER_cert_to_PEM_cert(der).encode("ascii")
 
 
 def build_ssl_context(
@@ -100,7 +124,10 @@ def build_ssl_context(
     The host omits its CA intermediate, so the certificate cannot be verified
     against the system store alone. The intermediate is fetched from the pinned
     :data:`AIA_INTERMEDIATE_URL` and cached under *state_dir*, after which no
-    network call is needed to build a context.
+    network call is needed to build a context. That fetch is plaintext HTTP, so
+    the bytes only become a verification root once they hash to
+    :data:`AIA_INTERMEDIATE_SHA256`; the cached copy is checked against the same
+    pin on every later build.
 
     Parameters
     ----------
@@ -118,7 +145,8 @@ def build_ssl_context(
     Raises
     ------
     ArchiveError
-        If the intermediate cannot be fetched and no *ca_file* was given.
+        If the intermediate cannot be fetched and no *ca_file* was given, or if
+        the fetched or cached intermediate does not match the pinned digest.
     """
     context = ssl.create_default_context()
     if insecure:
@@ -131,7 +159,7 @@ def build_ssl_context(
 
     cache = Path(state_dir) / INTERMEDIATE_CACHE_FILENAME if state_dir is not None else None
     if cache is not None and cache.is_file():
-        pem = cache.read_bytes()
+        pem = _pinned_intermediate_pem(cache.read_bytes(), origin=str(cache))
     else:
         pem = _fetch_aia_intermediate(AIA_INTERMEDIATE_URL, timeout=timeout)
         if cache is not None:
