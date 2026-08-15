@@ -9,7 +9,7 @@ trunk output:
 - :class:`DHIHeteroscedasticHead` — mean and log-variance (clamped to
   ``[-10, 10]``) for a Gaussian NLL loss.
 - :class:`KIndexHead` — a single normalized k-index value.
-- :class:`SkyHead` — three class logits.
+- :class:`SkyHead` — ``SKY_CLASS_COUNT`` class logits.
 - :class:`CloudFractionHead` — a sigmoid-bounded fraction in ``[0, 1]``.
 
 :class:`Heads` assembles exactly the heads enabled by a
@@ -215,14 +215,16 @@ class KIndexHead(nn.Module):
 
 
 class SkyHead(nn.Module):
-    """Sky-condition classification head (three logits).
+    """Sky-condition classification head (``SKY_CLASS_COUNT`` logits).
 
     Parameters
     ----------
     in_dim:
         Width of the trunk embedding this head reads.
     n_classes:
-        Number of sky classes (clear / partially_cloudy / overcast).
+        Number of sky classes; defaults to
+        :data:`allsky.data.contracts.SKY_CLASS_COUNT`, the Escobedo binning
+        (cloudy / partly_cloudy_diffuse / partly_cloudy_clear / clear).
     """
 
     def __init__(self, in_dim: int, n_classes: int = SKY_CLASS_COUNT) -> None:

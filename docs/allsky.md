@@ -152,13 +152,18 @@ Setting `targets.diffuse_column: null` switches to **Erbs pseudo-targets**: the 
 
 ### Weak sky-condition labels
 
-| Condition | k-index bin (defaults) | Class |
-|---|---|---|
-| Clear | `kindex >= targets.class_clear` (0.65) | 0 |
-| Partially cloudy | `targets.class_overcast <= kindex < class_clear` | 1 |
-| Overcast | `kindex < targets.class_overcast` (0.35) | 2 |
+The four conditions of Escobedo, Gomes, Oliveira & Soares (2009), *Applied Energy* 86(3):299–309, sec. 3.1, binned on the clearness index **Kt** — the index those bounds are published on. The bounds are not configurable: they are the reference's.
 
-These are *weak* labels: the k-index conflates cloudiness with turbidity and calibration drift, and thin cirrus can still reach "clear" values. The sky-class head is off by default and enabled per experiment via `targets.sky.enabled`.
+| Condition | Kt bin | Class | Portuguese |
+|---|---|---|---|
+| Cloudy | `Kt <= 0.35` | 0 | nebuloso |
+| Partly cloudy, diffuse-dominated | `0.35 < Kt <= 0.55` | 1 | parcialmente nebuloso com dominância para o difuso |
+| Partly cloudy, clear-dominated | `0.55 < Kt <= 0.65` | 2 | parcialmente nebuloso com dominância para o claro |
+| Clear | `Kt > 0.65` | 3 | claro |
+
+Rows whose solar elevation is below `min_elevation_deg` (10°) are labelled `-1` (`SKY_CLASS_MISSING`) rather than binned, because Kt's denominator collapses near the horizon.
+
+These are *weak* labels: Kt conflates cloudiness with turbidity and calibration drift, and thin cirrus can still reach "clear" values. The sky-class head is off by default and enabled per experiment via `targets.sky.enabled`.
 
 ---
 
