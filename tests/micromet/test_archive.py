@@ -10,6 +10,8 @@ loud failure when an entry is missing. The audited row counts are verified by
 reproduce.
 """
 
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -26,7 +28,11 @@ from micrometeorology.sensors.archive import (
     stage_archive,
     verify_frame,
 )
-from micrometeorology.sensors.calibration import resolve_mapping_windows, unify_sensor_columns
+from micrometeorology.sensors.calibration import (
+    load_sensor_switches,
+    resolve_mapping_windows,
+    unify_sensor_columns,
+)
 
 TOA5_METADATA = '"TOA5","CR5000","CR5000","2754","CR5000.Std.06","TEST","1","LBM_test"'
 
@@ -620,3 +626,27 @@ def test_a_perihelion_enhancement_burst_survives_the_ceiling_it_is_under() -> No
 
     assert masked["Sw_dw"].iloc[0] == pytest.approx(1976.0)
     assert removed == {}
+
+
+def test_the_diffuse_eras_mirror_the_calibration_map() -> None:
+    switches = load_sensor_switches(Path("configs/micromet/calibrations.yaml"))
+    published = [
+        (mapping["column"], mapping["start_date"], mapping["end_date"])
+        for switch in switches
+        if switch["unified_name"] == "Sw_dif"
+        for mapping in switch["mappings"]
+    ]
+
+    def bounds(
+        windows: Sequence[tuple[str, str | None, str | None]],
+    ) -> list[tuple[str, pd.Timestamp | None, pd.Timestamp | None]]:
+        return [
+            (
+                column,
+                None if first is None else pd.Timestamp(first),
+                None if last is None else pd.Timestamp(last),
+            )
+            for column, first, last in windows
+        ]
+
+    assert bounds(archive.DIFFUSE_CHANNEL_ERAS) == bounds(published)

@@ -585,7 +585,10 @@ DIFFUSE_RATIO_CERTAIN = 0.85
 DIFFUSE_MIN_EPISODE_DAYS = 3
 
 # ``(column, first, last)`` per era, mirroring the ``Sw_dif`` map in
-# configs/micromet/calibrations.yaml: the check must follow the diffuse ROLE,
+# configs/micromet/calibrations.yaml window for window (pinned by
+# test_the_diffuse_eras_mirror_the_calibration_map, because a merged window here
+# would hide exactly the unshaded episode the YAML splits it around): the check
+# must follow the diffuse ROLE,
 # which has moved between three columns, and not one column, which mask_sentinels
 # blanks end to end once its instrument retires. Scoped to the era because
 # outside its own the same column is a different measurement — the PSP stands
@@ -594,7 +597,8 @@ DIFFUSE_MIN_EPISODE_DAYS = 3
 DIFFUSE_CHANNEL_ERAS: tuple[tuple[str, str | None, str | None], ...] = (
     ("PSP1_Wm2_Avg", "2018-11-13 00:00", "2019-02-26 09:30"),
     ("PSP_Wm2_Avg", "2019-03-18 12:55", "2019-08-31 23:55"),
-    ("CMP21_Wm2_Avg", "2019-10-01 00:00", "2025-03-12 13:20"),
+    ("CMP21_Wm2_Avg", "2019-10-01 00:00", "2020-03-06 10:55"),
+    ("CMP21_Wm2_Avg", "2020-06-01 00:00", "2025-03-12 13:20"),
     ("PSP_Wm2_Avg", "2025-05-14 15:25", None),
 )
 
