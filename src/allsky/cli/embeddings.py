@@ -14,15 +14,15 @@ Heavy dependencies (torch, safetensors, the backbone model) are imported lazily
 inside the command, so importing :mod:`allsky.cli` never pulls them.
 """
 
-import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import typer
 
-from allsky.config import PrepareConfig, VideoConfig
+from allsky.config import VIDEO_TIME_FIELDS, PrepareConfig
+from allsky.provenance import config_subset_sha256
 
 logger = logging.getLogger("allsky.embeddings")
 
@@ -41,12 +41,6 @@ def _configure_logging() -> None:
 #: preprocessing ``prepare-local`` bakes into the JPEG the encoder reads.
 _EMBEDDING_CONFIG_SECTIONS = ("embeddings", "mask", "crop", "resize")
 
-#: ``video`` reaches the hash by field, not whole: the clock decides which
-#: capture ends up under a given ``sample_id``, while ``pattern`` only widens the
-#: day set — and a day added to the glob must still resume, since growing the
-#: dataset one day at a time is how this store is filled.
-_EMBEDDING_VIDEO_FIELDS = ("timestamps", "start_time", "minutes_per_frame")
-
 
 def _config_sha256(cfg: PrepareConfig) -> str:
     """Content hash of the config the stored vectors depend on (order-independent).
@@ -54,31 +48,16 @@ def _config_sha256(cfg: PrepareConfig) -> str:
     This is the only content gate on resume, so it covers the encoder section
     together with everything that decides the pixels it encodes: ``mask``,
     ``crop`` and ``resize`` are written into the frame on disk, and
-    ``video.timestamps`` (with the pair the modelled mapping reads) decides which
-    capture a ``sample_id`` names.  Without them a re-prepared dataset resumes
-    onto vectors of the old pixels, every id already being in the index.
-
-    Raises
-    ------
-    RuntimeError
-        When a name here is not a config field: pydantic drops unknown include
-        keys silently, which would shrink the hash without any sign of it.
+    :data:`~allsky.config.VIDEO_TIME_FIELDS` decides which capture a
+    ``sample_id`` names.  Without them a re-prepared dataset resumes onto
+    vectors of the old pixels, every id already being in the index.
     """
-    unknown = [
-        name for name in _EMBEDDING_CONFIG_SECTIONS if name not in PrepareConfig.model_fields
-    ]
-    unknown += [
-        f"video.{name}" for name in _EMBEDDING_VIDEO_FIELDS if name not in VideoConfig.model_fields
-    ]
-    if unknown:
-        raise RuntimeError(
-            f"PrepareConfig has no field(s) {unknown}; the resume hash would stop covering them"
-        )
-    include: dict[str, Any] = dict.fromkeys(_EMBEDDING_CONFIG_SECTIONS, True)
-    include["video"] = set(_EMBEDDING_VIDEO_FIELDS)
-    sections = cfg.model_dump(mode="json", include=include)
-    canonical = json.dumps(sections, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return config_subset_sha256(
+        cfg,
+        sections=_EMBEDDING_CONFIG_SECTIONS,
+        nested_fields={"video": VIDEO_TIME_FIELDS},
+        subject="the embedding resume hash",
+    )
 
 
 def precompute_embeddings(

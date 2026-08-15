@@ -24,7 +24,8 @@ from typing import Annotated, Any
 import typer
 
 from allsky.atomic import atomic_write, atomic_write_json
-from allsky.config import PrepareConfig, VideoConfig, load_prepare_config
+from allsky.config import VIDEO_TIME_FIELDS, PrepareConfig, load_prepare_config
+from allsky.provenance import config_subset_sha256
 
 logger = logging.getLogger(__name__)
 
@@ -93,42 +94,24 @@ _MANIFEST_CONFIG_SECTIONS = (
 #: :func:`_extract_and_qc`.
 _FRAME_CONFIG_SECTIONS = ("mask", "crop", "resize")
 
-#: The ``video`` fields that decide a frame's time.  ``pattern`` is left out on
-#: purpose: adding a day to the glob must not re-extract the days already done.
-_FRAME_VIDEO_FIELDS = ("timestamps", "start_time", "minutes_per_frame")
-
 
 def _frames_inputs_sha256(cfg: PrepareConfig) -> str:
     """Content hash of the config that decides what an extracted frame is.
 
     Recorded beside each per-video frame manifest, so the resume check can tell
     frames produced under the current config from frames that merely exist.
-    ``video.timestamps`` (with the pair the modelled mapping reads) fixes the
-    clock every frame is named and stamped by, and ``mask``/``crop``/``resize``
-    are written into the JPEG, so a change to any of them makes the frames on
-    disk a different artifact — one the manifest would otherwise be rebuilt from
-    under provenance describing the new config.
-
-    Raises
-    ------
-    RuntimeError
-        When a name here is not a config field: pydantic drops unknown include
-        keys silently, which would shrink the hash without any sign of it.
+    :data:`~allsky.config.VIDEO_TIME_FIELDS` fixes the clock every frame is
+    named and stamped by, and ``mask``/``crop``/``resize`` are written into the
+    JPEG, so a change to any of them makes the frames on disk a different
+    artifact — one the manifest would otherwise be rebuilt from under
+    provenance describing the new config.
     """
-    unknown = [name for name in _FRAME_CONFIG_SECTIONS if name not in PrepareConfig.model_fields]
-    unknown += [
-        f"video.{name}" for name in _FRAME_VIDEO_FIELDS if name not in VideoConfig.model_fields
-    ]
-    if unknown:
-        raise RuntimeError(
-            f"PrepareConfig has no field(s) {unknown}; the frame provenance hash would stop "
-            "covering them"
-        )
-    include: dict[str, Any] = dict.fromkeys(_FRAME_CONFIG_SECTIONS, True)
-    include["video"] = set(_FRAME_VIDEO_FIELDS)
-    sections = cfg.model_dump(mode="json", include=include)
-    canonical = json.dumps(sections, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return config_subset_sha256(
+        cfg,
+        sections=_FRAME_CONFIG_SECTIONS,
+        nested_fields={"video": VIDEO_TIME_FIELDS},
+        subject="the frame provenance hash",
+    )
 
 
 def _read_frames_key(video_dir: Path) -> str | None:
@@ -624,24 +607,6 @@ def _check_sensor_coverage(cfg: PrepareConfig, videos: list[str]) -> None:
         )
 
 
-def _extract_frames_for(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDataFrame:
-    """Extract every frame, timestamped per ``cfg.video.timestamps``."""
-    if cfg.video.timestamps == "overlay":
-        from allsky.overlay import extract_frames_with_overlay_timestamps
-
-        return extract_frames_with_overlay_timestamps(video, video_dir, step=1, resize=None)
-
-    from allsky.video import extract_frames
-
-    logger.warning(
-        "video.timestamps is 'modelled': frame N is placed at %s + N x %s min, a cadence this "
-        "camera does not follow (see docs/allsky-archive.md)",
-        cfg.video.start_time,
-        cfg.video.minutes_per_frame,
-    )
-    return extract_frames(video, video_dir, cfg.video, step=1, resize=None)
-
-
 def _extract_and_qc(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDataFrame:
     """Extract native frames then read them back for visual QC + preprocessing.
 
@@ -656,10 +621,11 @@ def _extract_and_qc(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDa
     import numpy as np
     import pandas as pd
 
+    from allsky.overlay import extract_frames_for
     from allsky.preprocessing import _needs_preprocessing, process_frame, resolve_mask, visual_qc
     from allsky.video import JPEG_QUALITY
 
-    frame_manifest = _extract_frames_for(video, video_dir, cfg)
+    frame_manifest = extract_frames_for(video, video_dir, cfg.video)
     needs = _needs_preprocessing(cfg)
     mask = resolve_mask(cfg) if needs else None
 

@@ -51,6 +51,14 @@ class VideoConfig(BaseModel):
     minutes_per_frame: float = 1.0
 
 
+#: The :class:`VideoConfig` fields that decide *which capture* a given frame is,
+#: as opposed to which days are in scope.  Every resume gate that must survive a
+#: day being added to ``pattern`` — but not a clock change — hashes exactly
+#: these, so the frame extractor and the embedding store cannot drift apart on
+#: what makes a frame a different artifact.
+VIDEO_TIME_FIELDS = ("timestamps", "start_time", "minutes_per_frame")
+
+
 class SiteConfig(BaseModel):
     """Observation site (LabMiM/UFBA, Salvador-BA by default)."""
 
