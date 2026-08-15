@@ -9,6 +9,8 @@ warnings to errors.  Covered failure modes:
 - duplicate ``sample_id`` / ``timestamp_utc``;
 - ``timestamp_utc`` not tz-aware;
 - NaN/inf in any feature column;
+- a sidecar meta declaring no ``feature_columns`` (warning: the two checks that
+  walk that list then have nothing to inspect);
 - solar elevation below a hard floor (night frames should not be in a dataset);
 - invalid targets (``target_dhi`` < 0, ``target_kindex`` out of range,
   ``sky_class`` outside ``{-1, 0, 1, 2}``);
@@ -129,6 +131,11 @@ def validate_manifest(
     """
     report = ValidationReport()
     feature_columns: Sequence[str] = list(meta.get("feature_columns", []))
+    if not feature_columns:
+        report.add_warning(
+            "meta declares no 'feature_columns'; the NaN/inf feature check and the "
+            "declared-leaky-feature check were skipped"
+        )
 
     _check_dataset_version(meta, report)
     _check_required_columns(manifest, report)
