@@ -390,9 +390,9 @@ def read_video_timestamps(
     ValueError
         If *step* is below 1.
     OverlayTimestampError
-        If the filename encodes no date, if more than
-        :data:`MAX_UNREADABLE_FRACTION` of the sampled frames are unreadable, or
-        if the recovered timestamps run backwards.
+        If the filename encodes no date, if the video decodes to no frame at
+        all, if more than :data:`MAX_UNREADABLE_FRACTION` of the sampled frames
+        are unreadable, or if the recovered timestamps run backwards.
     """
     if step < 1:
         raise ValueError(f"step must be >= 1, got {step}")
@@ -449,8 +449,12 @@ def _settle_readings(
     """Re-decide contested reads, interpolate the failures, and vouch for the order."""
     readings = _correct_against_neighbours(readings, alternatives)
 
+    if not readings:
+        raise OverlayTimestampError(
+            f"no frame of {name} could be decoded — refusing to describe the day as empty"
+        )
     unreadable = sum(1 for item in readings if item.timestamp is None)
-    if readings and unreadable / len(readings) > MAX_UNREADABLE_FRACTION:
+    if unreadable / len(readings) > MAX_UNREADABLE_FRACTION:
         raise OverlayTimestampError(
             f"{unreadable} of {len(readings)} frames in {name} have an unreadable "
             "timestamp overlay — refusing to timestamp this video from a guess"

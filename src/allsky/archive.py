@@ -596,6 +596,52 @@ class Ledger:
             and stored.get("timestamps") == timestamps
         )
 
+    def record_extraction_fault(
+        self, key: str, *, reason: str, step: int, resize: int | None, timestamps: str
+    ) -> None:
+        """File a day whose own bytes cannot be timestamped, so it is not decoded again.
+
+        The fault is stored against the extraction parameters that hit it and
+        against the digest of the video that carried it, because both can change
+        what the overlay reader sees: a re-download that brings different bytes,
+        or a different *step*, is a different question and clears the record.
+        """
+        stored = self.video(key) or {}
+        self.entry(key)["extraction_fault"] = {
+            "reason": reason,
+            "step": step,
+            "resize": resize,
+            "timestamps": timestamps,
+            "video_sha256": stored.get("sha256", ""),
+            "recorded_at": _utc_now(),
+        }
+
+    def extraction_faulted(
+        self, key: str, *, step: int, resize: int | None, timestamps: str
+    ) -> str | None:
+        """The recorded reason *key* cannot be extracted under these parameters, or None."""
+        record = self.entries.get(key)
+        if not isinstance(record, dict):
+            return None
+        stored = record.get("extraction_fault")
+        if not isinstance(stored, dict):
+            return None
+        video = self.video(key) or {}
+        matches = (
+            stored.get("step") == step
+            and stored.get("resize") == resize
+            and stored.get("timestamps") == timestamps
+            and stored.get("video_sha256") == video.get("sha256", "")
+        )
+        reason: str | None = stored.get("reason") if matches else None
+        return reason
+
+    def clear_extraction_fault(self, key: str) -> None:
+        """Forget a recorded extraction fault, after an extraction of *key* succeeded."""
+        record = self.entries.get(key)
+        if isinstance(record, dict):
+            record.pop("extraction_fault", None)
+
     def last_modified(self, key: str) -> str | None:
         """The ``Last-Modified`` header stored for day *key*'s video, if any."""
         stored = self.video(key)
@@ -641,7 +687,15 @@ class Ledger:
         resize: int | None,
         timestamps: str,
     ) -> None:
-        """File a frame extraction, including the parameters :meth:`frames_match` tests."""
+        """File a frame extraction, including the parameters :meth:`frames_match` tests.
+
+        Any frame upload already on file for *key* is dropped: the destination is
+        keyed by the day, so the record describes a set this extraction has just
+        replaced, and leaving it would answer :meth:`uploaded` for frames that are
+        no longer on disk.  The video's own upload record is untouched, and any
+        extraction fault on file is forgotten: this run just disproved it.
+        """
+        self.clear_extraction_fault(key)
         self.entry(key)["frames"] = {
             "dir": Path(directory).as_posix(),
             "count": count,
@@ -650,6 +704,11 @@ class Ledger:
             "timestamps": timestamps,
             "extracted_at": _utc_now(),
         }
+        uploads: dict[str, Any] = self.entry(key).get("uploads", {})
+        for destination in [
+            name for name, record in uploads.items() if record.get("kind") == "frames"
+        ]:
+            del uploads[destination]
 
     def record_upload(self, key: str, destination: str, **details: Any) -> None:
         """File an upload under its remote destination, which :meth:`uploaded` tests."""

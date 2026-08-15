@@ -623,7 +623,7 @@ def _fail_re_extracting_a_day_whose_overlay_cannot_be_read(
 
     failed = _sync(data, mirror, "--extract", "--since", "2026-08-11")
 
-    assert failed.exit_code == 1
+    assert failed.exit_code == 0, failed.output
     return data / FRAMES_SUBDIR / DAY_LATER
 
 
@@ -661,6 +661,76 @@ def test_a_re_extraction_that_fails_leaves_no_half_written_frame_set_behind(
     frames_dir = _fail_re_extracting_a_day_whose_overlay_cannot_be_read(data, mirror, tmp_path)
 
     assert [path.name for path in frames_dir.parent.iterdir()] == [DAY_LATER]
+
+
+def test_a_day_whose_overlay_can_never_be_read_is_recorded_and_not_decoded_again(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    _fail_re_extracting_a_day_whose_overlay_cannot_be_read(data, mirror, tmp_path)
+
+    assert _reload(data).extraction_faulted(
+        DAY_LATER, step=1, resize=None, timestamps="overlay"
+    ) is not None
+
+    again = _sync(data, mirror, "--extract", "--since", "2026-08-11")
+
+    assert again.exit_code == 0, again.output
+    assert "nothing to do" in again.output
+
+
+def test_a_video_that_decodes_to_no_frame_keeps_the_frames_the_previous_run_left(
+    mirror: fake.ArchiveMirror, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    data = tmp_path / "data"
+    assert _sync(data, mirror, "--extract", "--since", "2026-08-10").exit_code == 0
+    frames_dir = data / FRAMES_SUBDIR / DAY_NEW
+    before = sorted(path.name for path in frames_dir.glob("*.jpg"))
+    assert before
+
+    monkeypatch.setattr("allsky.overlay._sampled_reads", lambda *args, **kwargs: iter(()))
+    empty = _sync(data, mirror, "--extract", "--step", "2", "--since", "2026-08-10")
+
+    assert empty.exit_code == 0, empty.output
+    assert sorted(path.name for path in frames_dir.glob("*.jpg")) == before
+
+
+def test_re_extracting_a_day_queues_its_frames_for_upload_again(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    _mark_fully_mirrored(ledger, tmp_path, entry)
+
+    plan = _plan(
+        entry,
+        ledger,
+        tmp_path,
+        target=TARGET,
+        extract=True,
+        timestamps=TimestampSource.config,
+        upload=UploadChoice.frames,
+    )
+
+    assert (plan.extract, plan.upload_frames) == (True, True)
+
+
+def test_recording_a_new_frame_set_forgets_the_upload_of_the_one_it_replaced(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    _mark_fully_mirrored(ledger, tmp_path, entry)
+    frames_destination = TARGET.path(REMOTE_FRAMES, entry.key)
+    assert ledger.uploaded(entry.key, frames_destination) is True
+
+    ledger.record_frames(
+        entry.key,
+        directory=f"{FRAMES_SUBDIR}/{entry.key}",
+        count=4,
+        step=1,
+        resize=None,
+        timestamps="config",
+    )
+
+    assert ledger.uploaded(entry.key, frames_destination) is False
+    assert ledger.uploaded(entry.key, TARGET.path(REMOTE_VIDEOS, entry.filename)) is True
 
 
 def test_changing_the_step_re_extracts_without_asking_the_server_for_the_video_again(
