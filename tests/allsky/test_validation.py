@@ -8,7 +8,7 @@ import pytest
 
 from allsky import solar
 from allsky.config import SiteConfig
-from allsky.data.contracts import TARGET_COLUMNS
+from allsky.data.contracts import DEGRADABLE_TARGET_COLUMNS, TARGET_COLUMNS
 from allsky.data.manifest import build_manifest, write_manifest_parquet
 from allsky.data.validation import (
     ManifestValidationError,
@@ -263,7 +263,9 @@ class TestProvenanceAndSplitColumn:
         assert any("alignment_id column" in e and "does not match meta" in e for e in report.errors)
 
 
-@pytest.mark.parametrize("column", list(TARGET_COLUMNS))
+@pytest.mark.parametrize(
+    "column", [name for name in TARGET_COLUMNS if name not in DEGRADABLE_TARGET_COLUMNS]
+)
 def test_a_manifest_missing_a_declared_target_column_fails_validation(
     site: SiteConfig, tmp_path: Path, column: str
 ):
@@ -274,6 +276,20 @@ def test_a_manifest_missing_a_declared_target_column_fails_validation(
     )
 
     assert any(f"missing required column {column!r}" in error for error in report.errors)
+
+
+@pytest.mark.parametrize("column", list(DEGRADABLE_TARGET_COLUMNS))
+def test_a_manifest_predating_a_target_column_warns_instead_of_failing(
+    site: SiteConfig, tmp_path: Path, column: str
+):
+    manifest, meta = _clean_manifest(site, tmp_path)
+
+    report = validate_manifest(
+        manifest.drop(columns=[column]), meta, data_root=tmp_path, check_files=False
+    )
+
+    assert any(f"predates column {column!r}" in warning for warning in report.warnings)
+    assert not any(column in error for error in report.errors)
 
 
 def test_meta_without_feature_columns_warns_that_the_finiteness_check_was_skipped(

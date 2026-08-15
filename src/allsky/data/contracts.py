@@ -88,6 +88,19 @@ TARGET_COLUMNS: Mapping[str, str] = {
     "qc_flags": "int64",
 }
 
+#: Target columns that joined :data:`TARGET_COLUMNS` after the v2 layout was
+#: first published.  A manifest built before them is structurally sound and both
+#: trains and evaluates; each consumer degrades on its own — the evaluator drops
+#: the ``kindex_band`` stratum without ``target_kt``, and the k-index clear-sky
+#: baseline is unresolvable without ``kindex_kind`` — so validation reports them
+#: as warnings rather than refusing a dataset that works.
+DEGRADABLE_TARGET_COLUMNS: tuple[str, ...] = (
+    "target_source",
+    "kindex_kind",
+    "target_kt",
+    "cloud_fraction",
+)
+
 #: Name of the (nullable) split-label column: empty at build, filled in place by
 #: :func:`allsky.data.manifest.attach_split_column` from a day-level split.
 SPLIT_COLUMN = "split"

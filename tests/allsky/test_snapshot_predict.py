@@ -260,6 +260,15 @@ def test_solar_geometry_is_built_on_the_pinned_site_offset_the_manifest_trains_w
     assert float(values[0]) == pytest.approx(float(trained_on[0]), abs=1e-3)
 
 
+def _forget_the_recorded_recipe(checkpoint_path: Path) -> None:
+    """Rewrite the checkpoint as a release predating the portable encoding recipe wrote it."""
+    import torch
+
+    payload = load_checkpoint(checkpoint_path, map_location="cpu", trust_pickle=True)
+    payload["backbone"] = None
+    torch.save(payload, checkpoint_path)
+
+
 def _embedding_store_of(checkpoint_path: Path) -> Path:
     payload = load_checkpoint(checkpoint_path, map_location="cpu", trust_pickle=True)
     cfg = ExperimentConfig.model_validate(payload["config"])
@@ -290,10 +299,11 @@ def test_the_live_frame_is_embedded_with_the_pooling_its_training_store_recorded
     assert seen["pooling"] == "mean"
 
 
-def test_an_unreachable_embedding_store_refuses_to_guess_how_the_frame_was_encoded(
+def test_a_checkpoint_recording_no_recipe_refuses_to_guess_when_its_store_is_unreachable(
     embedding_checkpoint: Path, sky_image: Path
 ) -> None:
     (_embedding_store_of(embedding_checkpoint) / META_FILENAME).unlink()
+    _forget_the_recorded_recipe(embedding_checkpoint)
 
     with pytest.raises(ValueError, match=META_FILENAME):
         predict_snapshot(
@@ -302,6 +312,35 @@ def test_an_unreachable_embedding_store_refuses_to_guess_how_the_frame_was_encod
             timestamp=pd.Timestamp("2026-01-01 12:00:00"),
             trust_checkpoint=True,
         )
+
+
+def test_a_checkpoint_carrying_its_own_recipe_predicts_with_the_store_gone(
+    embedding_checkpoint: Path, sky_image: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _embedding_store_of(embedding_checkpoint)
+    recorded = read_meta(store)
+    shutil.rmtree(store)
+    seen: dict[str, Any] = {}
+    real_build_backbone = backbone_module.build_backbone
+
+    def recording_build_backbone(name: str, **kwargs: Any) -> Any:
+        seen.update({"name": name, **kwargs})
+        return real_build_backbone(name, **kwargs)
+
+    monkeypatch.setattr(backbone_module, "build_backbone", recording_build_backbone)
+    prediction = predict_snapshot(
+        sky_image,
+        embedding_checkpoint,
+        timestamp=pd.Timestamp("2026-01-01 12:00:00"),
+        trust_checkpoint=True,
+    )
+
+    assert prediction["predictions"]
+    assert (seen["name"], seen["pooling"], seen["dtype"]) == (
+        recorded["backbone"],
+        recorded["pooling"],
+        recorded["dtype"],
+    )
 
 
 def test_the_live_frame_is_embedded_at_the_precision_its_training_store_recorded(

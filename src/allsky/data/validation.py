@@ -36,6 +36,7 @@ import pandas as pd
 
 from allsky.data.contracts import (
     DATASET_VERSION,
+    DEGRADABLE_TARGET_COLUMNS,
     META_COLUMNS,
     SKY_CLASS_MISSING,
     SKY_CLASS_VALUES,
@@ -169,19 +170,29 @@ def _check_dataset_version(meta: dict[str, Any], report: ValidationReport) -> No
 
 
 def _check_required_columns(manifest: pd.DataFrame, report: ValidationReport) -> None:
-    """Every column the v2 contract declares must be present.
+    """Every column the v2 contract declares must be present, or be one that degrades.
 
     A manifest may carry only part of :data:`~allsky.data.contracts.TARGET_COLUMNS`
     and still be structurally sound row by row, which is why the missing ones used
     to pass unnoticed: the consumers degrade instead of failing.  Without
     ``target_kt`` the evaluator drops the ``kindex_band`` stratum from
     ``stratified.csv``; without ``kindex_kind`` the k-index clear-sky baseline is
-    unresolvable and ``rmse_clearsky`` / ``skill_clearsky`` stay ``NaN``.  Both
-    surface as a quieter report rather than an error, so the check belongs here,
-    at validate-dataset time, where the missing column can still be rebuilt.
+    unresolvable and ``rmse_clearsky`` / ``skill_clearsky`` stay ``NaN``.
+
+    Those are reported here, at validate-dataset time, where the column can still
+    be rebuilt — but as warnings, because failing them would refuse every
+    manifest built before
+    :data:`~allsky.data.contracts.DEGRADABLE_TARGET_COLUMNS` joined the schema,
+    including ones that train and evaluate today.
     """
     for column in (*META_COLUMNS, *TARGET_COLUMNS):
-        if column not in manifest.columns:
+        if column in manifest.columns:
+            continue
+        if column in DEGRADABLE_TARGET_COLUMNS:
+            report.add_warning(
+                f"manifest predates column {column!r}; the consumers that read it degrade"
+            )
+        else:
             report.add_error(f"manifest is missing required column {column!r}")
 
 

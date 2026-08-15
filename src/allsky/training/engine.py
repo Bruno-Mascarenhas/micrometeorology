@@ -1413,6 +1413,8 @@ def _checkpoint_common(
             "dim": getattr(image_backbone, "dim", None),
             "frozen": bool(_model_param(cfg, "backbone_frozen", False)),
         }
+    elif cfg.data.input_mode == "embedding":
+        backbone_info = _embedding_recipe(cfg)
     return {
         "model": model,
         "optimizer": optimizer,
@@ -1428,6 +1430,26 @@ def _checkpoint_common(
         "backbone_info": backbone_info,
         "code_version_info": code_version(),
     }
+
+
+def _embedding_recipe(cfg: ExperimentConfig) -> dict[str, Any] | None:
+    """The encoding recipe of the store this embedding-mode run reads, if it can be read.
+
+    Embedding-mode training never builds a backbone, so without this the
+    checkpoint records no encoder identity at all and predicting a live frame
+    from it needs the training machine's store still mounted at the path baked
+    into ``data.data_root``.  Copying the recipe in at save time makes the
+    checkpoint portable; None when the store cannot be read, which leaves
+    prediction to fall back on the store exactly as before rather than on a
+    guess.
+    """
+    from allsky.data.loading import resolve_against_root
+    from allsky.snapshot import embedding_recipe_of
+
+    if cfg.data.embeddings_dir is None:
+        return None
+    store = resolve_against_root(cfg.data.embeddings_dir, Path(cfg.data.data_root))
+    return embedding_recipe_of(store)
 
 
 def _dataset_version(meta: Mapping[str, Any]) -> str:

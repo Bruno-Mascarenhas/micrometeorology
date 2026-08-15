@@ -142,29 +142,38 @@ def _write_frames_key(video_dir: Path, frames_sha: str) -> None:
 
 
 def _require_frames_key(video_dir: Path, stem: str, *, frames_key: str, force: bool) -> None:
-    """Abort when frames the manifest is about to be built from predate *frames_key*.
+    """Abort when frames the manifest is about to be built from contradict *frames_key*.
 
     ``--steps build-manifest`` is a supported entry point that runs no extraction,
     so the only check standing between frames of one config and a manifest stamped
     with another is this one: the manifest's own provenance records the config of
     the run that built it, which would then assert a preprocessing the JPEGs on
     disk never went through.  Nothing can be re-extracted from here — the step
-    that does was not requested — so the run stops instead.
+    that does was not requested — so a recorded hash that DIFFERS stops the run.
 
-    Raises
-    ------
-    typer.Exit
-        Code 1 when the recorded frame-provenance hash is missing or differs.
+    A video directory with no hash recorded at all is a different statement: it
+    predates the sidecar, which only :func:`_write_frames_key` writes and which no
+    step backfills for frames already extracted.  Refusing it would make
+    ``--steps build-manifest`` impossible on every dataset prepared before this
+    check existed, with only ``--force`` — which skips the comparison entirely —
+    as a way through.  It warns and proceeds instead: the frames may well match,
+    and the manifest's own provenance still records the config that built it.
     """
     if force:
         return
     recorded = _read_frames_key(video_dir)
     if recorded == frames_key:
         return
+    if recorded is None:
+        typer.echo(
+            f"WARNING: the frames for {stem} in {video_dir} record no video/mask/crop/resize "
+            "config, so build-manifest cannot confirm they went through the one it is about to "
+            "stamp the manifest with. Re-run with the extract-frames step included to settle it."
+        )
+        return
     typer.echo(
-        f"ERROR: the frames for {stem} in {video_dir} were extracted under "
-        + ("no recorded" if recorded is None else "a different")
-        + " video/mask/crop/resize config, so build-manifest would stamp the manifest with a "
+        f"ERROR: the frames for {stem} in {video_dir} were extracted under a different "
+        "video/mask/crop/resize config, so build-manifest would stamp the manifest with a "
         "config that did not produce them.\n"
         "Re-run with the extract-frames step included (or --force to build from them as they "
         "are)."
