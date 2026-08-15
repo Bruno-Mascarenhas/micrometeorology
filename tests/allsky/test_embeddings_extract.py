@@ -4,6 +4,7 @@ FakeBackbone.encode is the only torch touch-point, so the whole module is gated
 on torch; no DINOv2 / network is ever exercised.
 """
 
+import logging
 from pathlib import Path
 
 import imageio.v3 as iio
@@ -241,6 +242,91 @@ class TestResumeCompatibility:
                 batch_size=4,
                 shard_size=4,
                 config_sha256="cfg-2",
+            )
+
+    def test_a_meta_carrying_the_legacy_digest_resumes_and_is_restamped(self, tmp_path: Path):
+        manifest = _make_dataset(tmp_path, n=4)
+        out = tmp_path / "emb"
+        extract_embeddings(
+            manifest,
+            FakeBackbone(dim=8),
+            out,
+            data_root=tmp_path,
+            batch_size=4,
+            shard_size=4,
+            config_sha256="legacy-cfg",
+        )
+
+        summary = extract_embeddings(
+            manifest,
+            FakeBackbone(dim=8),
+            out,
+            data_root=tmp_path,
+            batch_size=4,
+            shard_size=4,
+            config_sha256="widened-cfg",
+            legacy_config_sha256="legacy-cfg",
+        )
+
+        assert summary["skipped"] == 4
+        assert read_meta(out)["config_sha256"] == "widened-cfg"
+
+    def test_the_legacy_digest_migration_names_the_sections_the_old_gate_never_covered(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        manifest = _make_dataset(tmp_path, n=4)
+        out = tmp_path / "emb"
+        extract_embeddings(
+            manifest,
+            FakeBackbone(dim=8),
+            out,
+            data_root=tmp_path,
+            batch_size=4,
+            shard_size=4,
+            config_sha256="legacy-cfg",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="allsky.embeddings.extract"):
+            extract_embeddings(
+                manifest,
+                FakeBackbone(dim=8),
+                out,
+                data_root=tmp_path,
+                batch_size=4,
+                shard_size=4,
+                config_sha256="widened-cfg",
+                legacy_config_sha256="legacy-cfg",
+            )
+
+        assert "mask" in caplog.text
+        assert "crop" in caplog.text
+        assert "resize" in caplog.text
+
+    def test_a_legacy_digest_with_a_changed_pooling_still_refuses_resume(self, tmp_path: Path):
+        manifest = _make_dataset(tmp_path, n=4)
+        out = tmp_path / "emb"
+        extract_embeddings(
+            manifest,
+            FakeBackbone(dim=8),
+            out,
+            data_root=tmp_path,
+            batch_size=4,
+            shard_size=4,
+            config_sha256="legacy-cfg",
+        )
+        changed = FakeBackbone(dim=8)
+        changed.pooling = "other-pooling"
+
+        with pytest.raises(RuntimeError, match="incompatible"):
+            extract_embeddings(
+                manifest,
+                changed,
+                out,
+                data_root=tmp_path,
+                batch_size=4,
+                shard_size=4,
+                config_sha256="widened-cfg",
+                legacy_config_sha256="legacy-cfg",
             )
 
     def test_incompatible_meta_can_be_overwritten_with_no_resume(self, tmp_path: Path):

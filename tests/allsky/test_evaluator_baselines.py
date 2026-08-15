@@ -12,8 +12,19 @@ Three defects with one root — which k-index a number is measured against:
   a day away, and the reference RMSE was divided into a model RMSE measured over
   a different set of rows.
 
+A later round of review added three more, with the same root:
+
+- ``kindex_band`` moved to ``target_kt``, a column older manifests do not carry,
+  so evaluating one died with ``KeyError: 'target_kt'`` after full inference;
+- a manifest without a ``.meta.json`` sidecar lost its k-index clear-sky
+  baseline without a word;
+- the skill score published a reference RMSE and a whole-split model RMSE that
+  do not reconcile to it, because the numerator is measured over the paired rows.
+
 Torch-free: the helpers run over hand-built manifest rows.
 """
+
+import logging
 
 import numpy as np
 import pandas as pd
@@ -190,3 +201,106 @@ def test_skill_scores_model_and_reference_over_the_same_rows() -> None:
     metrics = _target_metrics(frame, "dhi")
 
     assert metrics["skill_persistence"] == pytest.approx(0.5)
+
+
+def test_kindex_band_is_absent_for_a_manifest_built_before_target_kt() -> None:
+    split_df = _manifest_rows(pd.date_range("2025-03-20 12:00", periods=2, freq="10min")).drop(
+        columns=["target_kt"]
+    )
+    frame = pd.DataFrame({"sample_id": split_df["sample_id"]})
+
+    _add_strata(frame, split_df)
+
+    assert "kindex_band" not in frame.columns
+
+
+def test_a_manifest_with_no_recorded_kindex_kind_warns_that_it_loses_the_clearsky_baseline(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    local_times = pd.date_range("2025-03-20 08:00", periods=5, freq="1h")
+    split_df = _manifest_rows(local_times)
+
+    with caplog.at_level(logging.WARNING, logger="allsky.evaluation.evaluator"):
+        _build_predictions_frame(
+            split_df, {"kindex": np.full(len(local_times), 0.7)}, ["kindex"], kindex_kind=None
+        )
+
+    assert [record.getMessage() for record in caplog.records if "kindex_kind" in record.msg] != []
+
+
+def test_the_lost_clearsky_baseline_is_reported_once_not_once_per_row(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    local_times = pd.date_range("2025-03-20 08:00", periods=5, freq="1h")
+    split_df = _manifest_rows(local_times)
+
+    with caplog.at_level(logging.WARNING, logger="allsky.evaluation.evaluator"):
+        _build_predictions_frame(
+            split_df, {"kindex": np.full(len(local_times), 0.7)}, ["kindex"], kindex_kind=None
+        )
+
+    assert len([record for record in caplog.records if "kindex_kind" in record.msg]) == 1
+
+
+def test_a_known_kindex_kind_scores_its_clearsky_baseline_without_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    local_times = pd.date_range("2025-03-20 08:00", periods=5, freq="1h")
+    split_df = _manifest_rows(local_times)
+
+    with caplog.at_level(logging.WARNING, logger="allsky.evaluation.evaluator"):
+        _build_predictions_frame(
+            split_df, {"kindex": np.full(len(local_times), 0.7)}, ["kindex"], kindex_kind="kstar"
+        )
+
+    assert [record for record in caplog.records if "kindex_kind" in record.msg] == []
+
+
+def _two_days_with_a_dropped_persistence_row() -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    """A 4-row split whose two day-opening rows have no persistence predecessor."""
+    local_times = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2025-03-20 12:00"),
+            pd.Timestamp("2025-03-20 12:10"),
+            pd.Timestamp("2025-03-21 12:00"),
+            pd.Timestamp("2025-03-21 12:10"),
+        ]
+    )
+    observed = np.array([100.0, 110.0, 500.0, 510.0])
+    predicted = np.array([420.0, 320.0, 380.0, 690.0])
+    return _manifest_rows(local_times, target_dhi=observed), observed, predicted
+
+
+def test_published_model_rmse_is_measured_over_the_rows_paired_with_persistence() -> None:
+    split_df, observed, predicted = _two_days_with_a_dropped_persistence_row()
+    frame = _build_predictions_frame(split_df, {"dhi": predicted}, ["dhi"], kindex_kind="kstar")
+    paired = np.array([False, True, False, True])
+
+    metrics = _target_metrics(frame, "dhi")
+
+    assert metrics["rmse_model_persistence"] == pytest.approx(
+        float(np.sqrt(np.mean((predicted[paired] - observed[paired]) ** 2)))
+    )
+
+
+def test_persistence_skill_reconciles_from_the_two_published_rmses() -> None:
+    split_df, _observed, predicted = _two_days_with_a_dropped_persistence_row()
+    frame = _build_predictions_frame(split_df, {"dhi": predicted}, ["dhi"], kindex_kind="kstar")
+
+    metrics = _target_metrics(frame, "dhi")
+
+    assert metrics["skill_persistence"] == pytest.approx(
+        1.0 - metrics["rmse_model_persistence"] / metrics["rmse_persistence"], abs=1e-12
+    )
+
+
+def test_the_paired_model_rmse_row_counts_the_pairs_not_the_whole_split() -> None:
+    split_df, _observed, predicted = _two_days_with_a_dropped_persistence_row()
+    frame = _build_predictions_frame(split_df, {"dhi": predicted}, ["dhi"], kindex_kind="kstar")
+
+    stratified = _stratified_metrics(frame, ["dhi"], {"dhi": _target_metrics(frame, "dhi")})
+
+    row = _stratified_row(
+        stratified, stratum_kind="overall", stratum="all", metric="rmse_model_persistence"
+    )
+    assert int(row["n"]) == 2

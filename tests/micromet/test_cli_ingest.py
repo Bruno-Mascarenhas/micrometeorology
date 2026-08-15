@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from micrometeorology.cli import ingest_sensor_data
 from micrometeorology.common.config import Settings, get_settings
+from micrometeorology.sensors.export import export_csv
 from tests.micromet.test_ingestion import _write_toa5
 
 runner = CliRunner()
@@ -126,6 +127,64 @@ def test_cli_aggregation_honours_the_config_layer_not_just_default_yaml(
     assert pd.isna(exported["Temp1"].iloc[0]), "overridden QC range must NaN 25 degC"
     assert exported["custom_Tot"].iloc[0] == pytest.approx(6.0), "12 x 0.5 summed"
     assert exported["WD_custom"].iloc[0] % 360 == pytest.approx(0.0, abs=1e-6)
+
+
+class TestDatetimeColumnsGuard:
+    """``--datetime-columns`` is the CLI's last stage, so its refusals must be legible.
+
+    Both the misdiagnosed label and the end-of-pipeline traceback reach the
+    operator only after read -> merge -> QC -> calibrate -> aggregate has run.
+    """
+
+    def test_a_missing_label_is_reported_as_missing_not_as_sub_hourly(self, tmp_path: Path) -> None:
+        index = pd.DatetimeIndex(["2025-06-25 12:00", pd.NaT, "2025-06-25 13:00"])
+        frame = pd.DataFrame({"Temp1": [25.0, 26.0, 27.0]}, index=index)
+
+        with pytest.raises(ValueError, match="missing timestamp"):
+            export_csv(frame, tmp_path / "with_nat.csv", include_datetime_columns=True)
+
+    def test_a_sub_hourly_index_is_still_refused_for_losing_its_minute(
+        self, tmp_path: Path
+    ) -> None:
+        index = pd.date_range("2025-06-25 12:00", periods=3, freq="30min")
+        frame = pd.DataFrame({"Temp1": [25.0, 26.0, 27.0]}, index=index)
+
+        with pytest.raises(ValueError, match="year/month/day/hour"):
+            export_csv(frame, tmp_path / "sub_hourly.csv", include_datetime_columns=True)
+
+    @pytest.mark.parametrize("freq", ["30min", "90min"])
+    def test_a_freq_that_opens_windows_off_the_hour_is_rejected_before_any_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, freq: str
+    ) -> None:
+        raw_dir = tmp_path / "raw"
+        raw_dir.mkdir()
+        _write_one_hour_of_samples(raw_dir)
+        output_path = tmp_path / "out.csv"
+
+        def _refuse_to_read(*_args: object, **_kwargs: object) -> pd.DataFrame:
+            raise AssertionError("incompatible flags must be caught before ingestion")
+
+        monkeypatch.setattr(ingest_sensor_data, "merge_dat_files", _refuse_to_read)
+
+        result = runner.invoke(
+            ingest_sensor_data.app,
+            [
+                "-i",
+                str(raw_dir),
+                "-o",
+                str(output_path),
+                "--freq",
+                freq,
+                "--datetime-columns",
+                "--log-level",
+                "WARNING",
+            ],
+        )
+
+        assert result.exit_code == 2, result.output
+        assert "--datetime-columns" in result.output
+        assert "--freq" in result.output
+        assert not output_path.exists()
 
 
 def test_cli_min_samples_falls_back_to_the_configured_value(

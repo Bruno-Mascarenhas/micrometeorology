@@ -30,6 +30,7 @@ STATE_SUBDIR = ".state"
 REMOTE_VIDEOS = "videos"
 REMOTE_FRAMES = "frames"
 REMOTE_SNAPSHOTS = "snapshots"
+FRAME_PATTERN = "*.jpg"
 
 
 class UploadChoice(StrEnum):
@@ -452,7 +453,10 @@ def _process_day(
 
     The ledger is updated as each transfer lands, so an interruption leaves the
     work already done visible to the next run.  With *prune_uploaded* the local
-    mp4 is deleted only after the ledger confirms the upload.
+    mp4 is deleted only after the ledger confirms the upload.  Extraction drops
+    the day's previous frame record and JPEGs before it writes any, so a day
+    never holds two extractions at once and a failed one leaves no record
+    claiming frames that were discarded.
     """
     entry = plan.entry
     video_path = ledger.video_path(entry.key, root=root) or videos_dir / entry.filename
@@ -463,6 +467,8 @@ def _process_day(
 
     frames_dir = frames_root / entry.key
     if plan.extract:
+        ledger.entry(entry.key).pop("frames", None)
+        _discard_previous_frames(frames_dir)
         manifest = _extract(video_path, frames_dir, video_config, step=step, resize=resize)
         ledger.record_frames(
             entry.key,
@@ -492,7 +498,7 @@ def _process_day(
     if plan.upload_frames:
         recorded = ledger.frames(entry.key) or {}
         source = ledger.frames_dir(entry.key, root=root) or frames_dir
-        destination = uploader.upload_dir(source, REMOTE_FRAMES, entry.key, pattern="*.jpg")
+        destination = uploader.upload_dir(source, REMOTE_FRAMES, entry.key, pattern=FRAME_PATTERN)
         ledger.record_upload(
             entry.key, destination, kind="frames", count=recorded.get("count"), step=step
         )
@@ -503,6 +509,25 @@ def _process_day(
         video_path.unlink(missing_ok=True)
         ledger.mark_pruned(entry.key)
         logger.info("pruned local %s (kept on Drive)", video_path.name)
+
+
+def _discard_previous_frames(frames_dir: Path) -> None:
+    """Delete the JPEGs an earlier extraction of this day left in *frames_dir*.
+
+    Both extraction paths name a frame after that frame's own capture time, so a
+    re-extraction under a different clock, step or size writes new filenames
+    beside the old ones instead of replacing them.  The two sets describe the
+    same day with different times, and the ledger count and the Drive upload
+    would carry both.  Only :data:`FRAME_PATTERN` — what the uploader mirrors —
+    is removed, never the directory itself nor anything else it holds.
+    """
+    discarded = [path for path in sorted(frames_dir.glob(FRAME_PATTERN)) if path.is_file()]
+    for path in discarded:
+        path.unlink()
+    if discarded:
+        logger.info(
+            "discarded %d frame(s) from an earlier extraction in %s", len(discarded), frames_dir
+        )
 
 
 def _extract(

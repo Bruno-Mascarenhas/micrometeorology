@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from allsky import solar
 from micrometeorology.sensors import archive
 from micrometeorology.sensors.archive import (
     ARCHIVE_END,
@@ -602,9 +603,9 @@ def test_the_psp_reading_global_outside_its_diffuse_era_is_not_a_shade_ring_faul
 def test_the_bsrn_ceiling_falls_with_the_earth_sun_distance_at_aphelion() -> None:
     """Sa is the solar constant at the Earth's actual distance, 3.4% below S0 in July.
 
-    On 2026-07-05 09:00 (mu0 = 0.6045) the BSRN ceiling is 1183.4 W/m2, so a
+    On 2026-07-05 09:00 (mu0 = 0.6045) the BSRN ceiling is 1178.6 W/m2, so a
     1200 W/m2 sample — the milder residue of a slipped clock — is impossible
-    where a fixed 1367 W/m2 would let it through at 1220.8.
+    where an uncorrected 1361 W/m2 would let it through at 1215.9.
     """
     frame = pd.DataFrame({"Sw_dw": [1200.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
 
@@ -615,10 +616,10 @@ def test_the_bsrn_ceiling_falls_with_the_earth_sun_distance_at_aphelion() -> Non
 
 
 def test_a_perihelion_enhancement_burst_survives_the_ceiling_it_is_under() -> None:
-    """In January the Earth is closer and the ceiling rises with it, to 2001.5 W/m2.
+    """In January the Earth is closer and the ceiling rises with it, to 1993.2 W/m2.
 
     Tropical cloud enhancement genuinely reaches 1976 W/m2 here; a ceiling built
-    on a fixed 1367 W/m2 stops at 1942.9 and deletes the measurement.
+    on an uncorrected 1361 W/m2 stops at 1934.9 and deletes the measurement.
     """
     frame = pd.DataFrame({"Sw_dw": [1976.0]}, index=pd.DatetimeIndex(["2026-01-28 10:10"]))
 
@@ -650,3 +651,61 @@ def test_the_diffuse_eras_mirror_the_calibration_map() -> None:
         ]
 
     assert bounds(archive.DIFFUSE_CHANNEL_ERAS) == bounds(published)
+
+
+def test_a_frame_without_a_datetime_index_is_refused_rather_than_reported_clean() -> None:
+    """Label slicing an integer index returns an empty frame instead of raising.
+
+    Every era would then find nothing, the check would report no offending day
+    and ``--strict`` would ship global irradiance published as diffuse.
+    """
+    frame = _clear_sky_days(["2025-07-01"], "PSP_Wm2_Avg", 0.90, {}).reset_index(drop=True)
+
+    with pytest.raises(TypeError, match="RangeIndex"):
+        archive.unshaded_diffuse_days(frame)
+
+
+def test_an_unsorted_datetime_index_is_refused_rather_than_silently_truncated() -> None:
+    """Label slicing needs monotonicity; out of order the era windows lose days."""
+    frame = _clear_sky_days(["2025-07-01", "2025-07-02", "2025-07-03"], "PSP_Wm2_Avg", 0.90, {})
+    shuffled = frame.iloc[::-1]
+
+    with pytest.raises(ValueError, match="monotonic"):
+        archive.unshaded_diffuse_days(shuffled)
+
+
+def test_the_ceiling_coefficient_is_the_cited_methods_not_the_tsi() -> None:
+    """Long & Shi prescribe ``Sa = 1367 * E0``; allsky's S0 is a different quantity.
+
+    They shared a name once, which is the defect. They must not share a value:
+    1367 is a coefficient of the cited QC formula, while allsky's constant is the
+    Kopp & Lean TSI that scales extraterrestrial irradiance and the clearness
+    index. Re-pointing the ceiling at the TSI silently edits a published method.
+    """
+    assert pytest.approx(1367.0) == archive.BSRN_CEILING_SOLAR_CONSTANT_WM2
+    assert archive.BSRN_CEILING_SOLAR_CONSTANT_WM2 != solar.SOLAR_CONSTANT_WM2
+
+
+def test_a_sample_between_the_two_constants_ceilings_survives() -> None:
+    """At 2026-07-05 09:00 (mu0 = 0.60450, E0 = 0.966588) the ceiling is 1183.4 W/m2.
+
+    Scaling the Kopp & Lean TSI instead would put it at 1178.6, so this 1181 W/m2
+    sample is exactly the real cloud-enhancement reading that the wrong constant
+    would delete as physically impossible.
+    """
+    frame = pd.DataFrame({"Sw_dw": [1181.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert masked["Sw_dw"].iloc[0] == pytest.approx(1181.0)
+    assert removed == {}
+
+
+def test_a_sample_above_the_cited_ceiling_is_still_masked() -> None:
+    """The ceiling still bites: 1185 W/m2 at the same instant is above 1183.4."""
+    frame = pd.DataFrame({"Sw_dw": [1185.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert np.isnan(masked["Sw_dw"].iloc[0])
+    assert removed == {"Sw_dw": 1}

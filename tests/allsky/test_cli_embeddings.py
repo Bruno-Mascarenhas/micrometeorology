@@ -1,5 +1,6 @@
 """Tests for the ``precompute-embeddings`` CLI (dry-run, fake run, resume, errors)."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from typer.testing import CliRunner
 
 from allsky.cli import app
 from allsky.cli.embeddings import _config_sha256
-from allsky.config import PrepareConfig
+from allsky.config import PrepareConfig, load_prepare_config
 
 runner = CliRunner()
 
@@ -166,3 +167,77 @@ def test_widening_the_video_pattern_leaves_the_resume_hash_alone():
     grown = PrepareConfig.model_validate({"video": {"pattern": "data/all-sky/allsky-2026*.mp4"}})
 
     assert _config_sha256(grown) == base
+
+
+def _write_mask(path: Path, *, blacked_rows: int, size: int = 16) -> Path:
+    keep = np.full((size, size), 255, dtype=np.uint8)
+    keep[:blacked_rows] = 0
+    iio.imwrite(path, keep)
+    return path
+
+
+def test_rewriting_the_mask_png_in_place_changes_the_resume_hash(tmp_path: Path):
+    mask = _write_mask(tmp_path / "horizon.png", blacked_rows=0)
+    cfg = PrepareConfig.model_validate({"mask": {"path": str(mask)}})
+    before = _config_sha256(cfg)
+
+    _write_mask(mask, blacked_rows=4)
+
+    assert _config_sha256(cfg) != before
+
+
+def test_a_splits_edit_leaves_the_resume_hash_alone(tmp_path: Path):
+    mask = _write_mask(tmp_path / "horizon.png", blacked_rows=0)
+    base = _config_sha256(PrepareConfig.model_validate({"mask": {"path": str(mask)}}))
+
+    redrawn = PrepareConfig.model_validate({"mask": {"path": str(mask)}, "splits": {"seed": 7}})
+
+    assert _config_sha256(redrawn) == base
+
+
+def _pre_migration_config_sha256(cfg: PrepareConfig) -> str:
+    """The digest formula every embedding store on disk was stamped with."""
+    canonical = json.dumps(cfg.embeddings.model_dump(), sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _meta_path(dataset_dir: Path) -> Path:
+    return dataset_dir / "embeddings" / "embeddings.meta.json"
+
+
+def _restamp(dataset_dir: Path, config_sha256: str) -> None:
+    meta = json.loads(_meta_path(dataset_dir).read_text(encoding="utf-8"))
+    meta["config_sha256"] = config_sha256
+    _meta_path(dataset_dir).write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_a_store_stamped_by_the_old_formula_resumes_and_is_restamped(tmp_path: Path):
+    pytest.importorskip("torch")
+    dataset_dir = tmp_path / "dataset"
+    _build_dataset(dataset_dir, n=4)
+    config = _write_config(tmp_path, dataset_dir)
+    assert runner.invoke(app, ["precompute-embeddings", "--config", str(config)]).exit_code == 0
+    cfg = load_prepare_config(config)
+    _restamp(dataset_dir, _pre_migration_config_sha256(cfg))
+
+    result = runner.invoke(app, ["precompute-embeddings", "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    assert _summary(result.output)["encoded"] == 0
+    assert json.loads(_meta_path(dataset_dir).read_text(encoding="utf-8"))[
+        "config_sha256"
+    ] == _config_sha256(cfg)
+
+
+def test_a_store_stamped_with_an_unrelated_digest_still_refuses_to_resume(tmp_path: Path):
+    pytest.importorskip("torch")
+    dataset_dir = tmp_path / "dataset"
+    _build_dataset(dataset_dir, n=4)
+    config = _write_config(tmp_path, dataset_dir)
+    assert runner.invoke(app, ["precompute-embeddings", "--config", str(config)]).exit_code == 0
+    _restamp(dataset_dir, "0" * 64)
+
+    result = runner.invoke(app, ["precompute-embeddings", "--config", str(config)])
+
+    assert result.exit_code == 1
+    assert "cannot resume" in result.output

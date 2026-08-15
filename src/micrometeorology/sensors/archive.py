@@ -633,7 +633,21 @@ def unshaded_diffuse_days(
         The ratio is dimensionless, diffuse over global, taken over the samples
         above :data:`DIFFUSE_CLEAR_SKY_FLOOR` only. Empty for the archive as
         shipped: every episode it detects is masked.
+
+    Raises
+    ------
+    TypeError
+        If *frame* is not indexed by a :class:`~pandas.DatetimeIndex`. Label
+        slicing any other index yields an empty era rather than an error, so
+        every check would pass by finding nothing.
+    ValueError
+        If that index is not monotonic increasing, which label slicing needs.
     """
+    index = frame.index
+    if not isinstance(index, pd.DatetimeIndex):
+        raise TypeError(f"the diffuse check requires a DatetimeIndex, got {type(index).__name__}")
+    if not index.is_monotonic_increasing:
+        raise ValueError("the diffuse check requires a monotonic increasing DatetimeIndex")
     flagged: list[tuple[str, float]] = []
     for column, first, last in eras:
         flagged.extend(_unshaded_diffuse_days_in_era(frame.loc[first:last], column))
@@ -718,10 +732,16 @@ NIGHT_CORRUPTION_CHANNELS = (*NIGHT_CORRUPTION_COLUMNS, "Net_CNR1")
 # the milder residue of the same fault: an afternoon that declines plausibly an
 # hour or two out of place.
 #
-# Sa is the constant AT THE EARTH'S ACTUAL DISTANCE, S0 scaled by the
-# eccentricity correction: over the year it spans 1321 to 1415 W/m2, so a fixed
-# S0 would run the ceiling 3.4% high in July and 3.4% low in January.
-SOLAR_CONSTANT_WM2 = 1367.0
+# Sa is the constant AT THE EARTH'S ACTUAL DISTANCE, the coefficient below scaled
+# by the eccentricity correction: over the year it spans 1321.3 to 1415.0 W/m2, so
+# a fixed value would run the ceiling 3.4% high in July and 3.4% low in January.
+#
+# 1367 is the coefficient the cited method prescribes ("Let Sa = 1367 * E0", Long
+# & Shi 2008 pp. 24-25, transcribed in docs/arqueologia/qc/lit-statistical-methods.md),
+# NOT a physical constant this repo is free to update: it is deliberately distinct
+# from ``allsky.solar.SOLAR_CONSTANT_WM2``, the Kopp & Lean TSI that scales
+# extraterrestrial irradiance and the clearness index. Two quantities, two names.
+BSRN_CEILING_SOLAR_CONSTANT_WM2 = 1367.0
 IMPOSSIBLE_SHORTWAVE_CHANNELS = ("Sw_dw", "Net_CNR1")
 
 
@@ -779,7 +799,9 @@ def mask_impossible_shortwave(
         return frame, removed
     index = pd.DatetimeIndex(frame.index)
     mu0 = np.clip(cos_zenith(index, STATION_SITE, STATION_UTC_OFFSET_HOURS), 0.0, None)
-    ceiling = SOLAR_CONSTANT_WM2 * eccentricity_correction(index) * 1.5 * mu0**1.2 + 100.0
+    ceiling = (
+        BSRN_CEILING_SOLAR_CONSTANT_WM2 * eccentricity_correction(index) * 1.5 * mu0**1.2 + 100.0
+    )
     global_flux = frame["Sw_dw"]
     impossible = (global_flux.notna() & (global_flux > ceiling)).to_numpy()
     if not impossible.any():

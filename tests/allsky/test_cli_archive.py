@@ -447,6 +447,59 @@ def test_the_config_timestamp_model_names_frames_from_a_fixed_start_time_instead
     assert recorded["timestamps"] == "config"
 
 
+def _re_extract_under_the_config_clock(data: Path, mirror: fake.ArchiveMirror) -> Path:
+    assert _sync(data, mirror, "--extract", "--since", "2026-08-10").exit_code == 0
+    second = _sync(data, mirror, "--extract", "--timestamps", "config", "--since", "2026-08-10")
+    assert second.exit_code == 0, second.output
+    return data / FRAMES_SUBDIR / DAY_NEW
+
+
+def test_re_extracting_a_day_under_the_other_clock_leaves_none_of_the_first_clocks_frames(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+
+    frames_dir = _re_extract_under_the_config_clock(data, mirror)
+
+    assert sorted(path.name for path in frames_dir.glob("*.jpg")) == [
+        f"allsky-{DAY_NEW}-0600.jpg",
+        f"allsky-{DAY_NEW}-0601.jpg",
+        f"allsky-{DAY_NEW}-0602.jpg",
+    ]
+
+
+def test_the_recorded_frame_count_matches_what_a_re_extraction_left_on_disk(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+
+    frames_dir = _re_extract_under_the_config_clock(data, mirror)
+
+    recorded = _reload(data).frames(DAY_NEW)
+    assert recorded is not None
+    assert recorded["count"] == len(list(frames_dir.glob("*.jpg")))
+
+
+def test_a_re_extraction_that_fails_leaves_no_record_of_the_frames_it_discarded(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    mislabelled = fake.write_overlay_video(
+        tmp_path / "staging" / f"allsky-{DAY_LATER}.mp4",
+        STAMPS[DAY_OLD],
+        height=FRAME_HEIGHT,
+        width=FRAME_WIDTH,
+    )
+    mirror.publish_video_file(mislabelled)
+    data = tmp_path / "data"
+    modelled = _sync(data, mirror, "--extract", "--timestamps", "config", "--since", "2026-08-11")
+    assert modelled.exit_code == 0, modelled.output
+
+    failed = _sync(data, mirror, "--extract", "--since", "2026-08-11")
+
+    assert failed.exit_code == 1
+    assert _reload(data).frames(DAY_LATER) is None
+
+
 def test_changing_the_step_re_extracts_without_asking_the_server_for_the_video_again(
     mirror: fake.ArchiveMirror, tmp_path: Path
 ):

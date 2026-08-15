@@ -105,6 +105,7 @@ def extract_embeddings(
     resume: bool = True,
     dry_run: bool = False,
     config_sha256: str | None = None,
+    legacy_config_sha256: str | None = None,
     decode_workers: int = 4,
 ) -> dict[str, Any]:
     """Extract visual embeddings for every manifest sample into sharded storage.
@@ -136,6 +137,10 @@ def extract_embeddings(
         shards, index or meta are created).
     config_sha256:
         Optional content hash of the embeddings config, stored in the meta.
+    legacy_config_sha256:
+        Optional digest of the same config under a superseded formula.  A store
+        whose meta records it resumes (and is restamped with *config_sha256*)
+        instead of being refused; see :func:`_check_resume_compatible`.
     decode_workers:
         Threads used to decode each batch's JPEGs (>= 1, capped at the CPU
         count).  Decode order — and therefore every shard, row and index entry —
@@ -177,7 +182,7 @@ def extract_embeddings(
     # Resume must not silently mix incompatible embeddings into one store: if a
     # prior meta exists, the incoming backbone/config must match it exactly.
     if resume:
-        _check_resume_compatible(out, backbone, pooling, config_sha256)
+        _check_resume_compatible(out, backbone, pooling, config_sha256, legacy_config_sha256)
 
     # Resume bookkeeping: the index (consolidated + any un-consolidated parts from
     # an interrupted run) is the source of truth for done work.  A non-resume run
@@ -337,6 +342,7 @@ def _check_resume_compatible(
     backbone: VisualBackbone,
     pooling: str,
     config_sha256: str | None,
+    legacy_config_sha256: str | None = None,
 ) -> None:
     """Refuse to resume into a store built with a different backbone/config.
 
@@ -350,12 +356,24 @@ def _check_resume_compatible(
     come from a version that wrote the meta at completion, so there is nothing to
     check the incoming backbone against.
 
+    One mismatch is accepted, and only one: ``config_sha256`` alone differing
+    while the recorded value equals *legacy_config_sha256*, the same config's
+    digest under the superseded formula.  That equality proves the encoder
+    section did not move, and the sections the new formula added were never
+    covered for this store, so resuming is no worse than the release that wrote
+    it — whereas refusing would demand a full re-encode of a dataset in which
+    nothing changed.  The gap is logged at WARNING, and the store is restamped
+    with the new digest by the ``_write_meta`` call every non-dry-run path makes,
+    so a later run of the same config compares equal outright and the migration
+    is announced exactly once.
+
     Raises
     ------
     RuntimeError
         If any of ``backbone``/``revision``/``pooling``/``dim``/``config_sha256``
-        in the existing meta differs from the incoming values, or the store has an
-        index but no ``embeddings.meta.json``.
+        in the existing meta differs from the incoming values (bar the accepted
+        legacy-digest migration above), or the store has an index but no
+        ``embeddings.meta.json``.
     """
     if not (out / META_FILENAME).exists():
         if read_index(out) is None and not _index_parts(out):
@@ -375,19 +393,34 @@ def _check_resume_compatible(
         "dim": int(backbone.dim),
         "config_sha256": config_sha256,
     }
-    mismatches = [
-        f"{key}: existing={prior.get(key)!r} incoming={value!r}"
-        for key, value in incoming.items()
-        if prior.get(key) != value
-    ]
-    if mismatches:
-        joined = "; ".join(mismatches)
-        raise RuntimeError(
-            f"cannot resume embedding extraction into {out}: the existing "
-            f"embeddings.meta.json is incompatible with the requested backbone/config "
-            f"({joined}). Rerun with --no-resume (resume=False) to overwrite, or point "
-            f"at a fresh output directory."
+    mismatched = [key for key, value in incoming.items() if prior.get(key) != value]
+    if not mismatched:
+        return
+    if (
+        mismatched == ["config_sha256"]
+        and legacy_config_sha256 is not None
+        and prior.get("config_sha256") == legacy_config_sha256
+    ):
+        logger.warning(
+            "resuming embedding store %s whose config_sha256 was written by the superseded "
+            "digest formula: the encoder config is unchanged, but that formula covered none of "
+            "mask / crop / resize / the video time fields / the mask file's own bytes, so "
+            "vectors of differently preprocessed frames cannot be ruled out for this store. "
+            "Restamping it as %s (once); rerun with --no-resume to re-encode from scratch "
+            "instead.",
+            out,
+            config_sha256,
         )
+        return
+    joined = "; ".join(
+        f"{key}: existing={prior.get(key)!r} incoming={incoming[key]!r}" for key in mismatched
+    )
+    raise RuntimeError(
+        f"cannot resume embedding extraction into {out}: the existing "
+        f"embeddings.meta.json is incompatible with the requested backbone/config "
+        f"({joined}). Rerun with --no-resume (resume=False) to overwrite, or point "
+        f"at a fresh output directory."
+    )
 
 
 def _index_frame(index_rows: list[dict[str, Any]]) -> pd.DataFrame:

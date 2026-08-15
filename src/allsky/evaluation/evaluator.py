@@ -603,7 +603,10 @@ def _attach_reference_columns(
     that are hours or days apart (``sky_class`` and ``qc`` members are not even
     contiguous in time), which inflates the reference error and flatters the
     model's skill.  A reference is absent — and its skill stays ``NaN`` — when
-    the split does not carry what it needs.
+    the split does not carry what it needs; the k-index clear-sky reference lost
+    to an unrecorded ``kindex_kind`` says so once, at WARNING, because the
+    evaluation otherwise still succeeds with one baseline fewer than it scored
+    before.
     """
     times = pd.to_datetime(frame["timestamp_utc"], utc=True)
     clearsky_pair = _clearsky_ghi_and_kt(frame, times) if "solar_zenith" in frame.columns else None
@@ -616,6 +619,14 @@ def _attach_reference_columns(
         clearsky = _clearsky_reference(frame, name, kindex_kind=kindex_kind, clearsky=clearsky_pair)
         if clearsky is not None:
             frame[f"clearsky_{name}"] = clearsky
+        elif name == "kindex" and kindex_kind is None:
+            logger.warning(
+                "no kindex_kind recorded for this manifest, so the k-index target has no "
+                "clear-sky reference: its rmse_clearsky and skill_clearsky are not scored "
+                "(k* is 1 under a cloudless sky, k_t is not, and guessing would mislabel "
+                "the baseline); write the manifest's .meta.json sidecar with kindex_kind "
+                "to restore it"
+            )
 
 
 def _previous_observation_same_day(
@@ -638,7 +649,13 @@ def _previous_observation_same_day(
 
 
 def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame) -> None:
-    """Attach the stratification columns to *frame* from *split_df*."""
+    """Attach the stratification columns to *frame* from *split_df*.
+
+    ``solar_zenith`` and ``kindex_band`` are attached only when the manifest
+    carries the column they read: a manifest built before ``target_kt`` joined
+    the schema still validates, and it loses that one breakdown rather than the
+    whole evaluation (:func:`_stratified_metrics` skips an absent column).
+    """
     local = pd.to_datetime(split_df["timestamp_utc"], utc=True).dt.tz_convert(_LOCAL_TZ)
     frame["hour"] = local.dt.hour.to_numpy(dtype=np.int64)
     if "solar_zenith" in split_df.columns:
@@ -657,10 +674,11 @@ def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame) -> None:
         elevation, bins=list(_ELEVATION_EDGES), labels=elevation_labels, include_lowest=True
     ).astype("object")
 
-    kt = split_df["target_kt"].to_numpy(dtype=np.float64)
-    frame["kindex_band"] = pd.cut(
-        kt, bins=list(_KINDEX_EDGES), labels=list(_KINDEX_LABELS), right=False
-    ).astype("object")
+    if "target_kt" in split_df.columns:
+        kt = split_df["target_kt"].to_numpy(dtype=np.float64)
+        frame["kindex_band"] = pd.cut(
+            kt, bins=list(_KINDEX_EDGES), labels=list(_KINDEX_LABELS), right=False
+        ).astype("object")
 
 
 #: Stratification column -> the ``stratum_kind`` label reported in the long table.
@@ -712,7 +730,11 @@ def _skill_against_references(
     prediction and that reference are all finite, so the ratio never divides
     errors measured on different samples; ``n_<reference>`` carries that shared
     pair count, which the earliest row of a day never joins (persistence has no
-    predecessor there).
+    predecessor there).  The numerator is published as
+    ``rmse_model_<reference>`` alongside the reference's own ``rmse_<reference>``
+    so ``skill_<reference> == 1 - rmse_model_<reference> / rmse_<reference>``
+    reconciles from the report; the whole-split ``rmse`` does not, being measured
+    over rows the reference never covered.
     """
     entries = dict.fromkeys(SKILL_METRIC_KEYS, float("nan"))
     predicted = frame[f"pred_{name}"].to_numpy(dtype=np.float64)
@@ -725,6 +747,7 @@ def _skill_against_references(
         reference_rmse = float(regression_metrics(observed[paired], reference[paired])["rmse"])
         model_rmse = float(regression_metrics(observed[paired], predicted[paired])["rmse"])
         entries[f"rmse_{label}"] = reference_rmse
+        entries[f"rmse_model_{label}"] = model_rmse
         entries[f"skill_{label}"] = skill_score(model_rmse, reference_rmse)
         entries[f"{_REFERENCE_COUNT_PREFIX}{label}"] = float(paired.sum())
     return entries
