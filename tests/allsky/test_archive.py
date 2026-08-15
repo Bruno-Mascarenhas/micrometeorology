@@ -232,7 +232,7 @@ def test_a_ledger_round_trips_through_save_and_load(tmp_path: Path):
     assert stored == ledger.video(DAY_NEW)
     assert stored is not None
     assert stored["sha256"] == result.sha256
-    assert reloaded.frames_match(DAY_NEW, step=3, resize=224) is True
+    assert reloaded.frames_match(DAY_NEW, step=3, resize=224, timestamps="overlay") is True
     assert reloaded.uploaded(DAY_NEW, "gd:LabMiM/allsky/videos/x.mp4") is True
     assert reloaded.last_modified(DAY_NEW) == fake.LAST_MODIFIED
 
@@ -290,13 +290,24 @@ def test_frames_match_is_false_whenever_step_or_resize_differ_from_the_record(
     ledger.record_frames(
         DAY_NEW, directory="frames/20260810", count=4, step=3, resize=224, timestamps="overlay"
     )
-    assert ledger.frames_match(DAY_NEW, step=3, resize=224) is True
-    assert ledger.frames_match(DAY_NEW, step=step, resize=resize) is False
+    assert ledger.frames_match(DAY_NEW, step=3, resize=224, timestamps="overlay") is True
+    assert ledger.frames_match(DAY_NEW, step=step, resize=resize, timestamps="overlay") is False
+
+
+def test_frames_match_is_false_when_another_clock_stamped_the_record(tmp_path: Path):
+    ledger = Ledger(tmp_path / "ledger.json")
+    ledger.record_frames(
+        DAY_NEW, directory="frames/20260810", count=4, step=3, resize=224, timestamps="overlay"
+    )
+
+    matched = ledger.frames_match(DAY_NEW, step=3, resize=224, timestamps="config")
+
+    assert matched is False
 
 
 def test_frames_match_is_false_for_a_day_that_was_never_extracted(tmp_path: Path):
     ledger = Ledger(tmp_path / "ledger.json")
-    assert ledger.frames_match(DAY_NEW, step=1, resize=None) is False
+    assert ledger.frames_match(DAY_NEW, step=1, resize=None, timestamps="overlay") is False
 
 
 def test_uploaded_tracks_each_destination_on_its_own(tmp_path: Path):

@@ -553,16 +553,25 @@ class Ledger:
         path = _resolved(Path(stored.get("path", "")), local_root)
         return path.is_file() and path.stat().st_size == stored.get("size", -1)
 
-    def frames_match(self, key: str, *, step: int, resize: int | None) -> bool:
+    def frames_match(self, key: str, *, step: int, resize: int | None, timestamps: str) -> bool:
         """True when *key* was already extracted with these very parameters.
 
         Frames extracted under a different *step* or *resize* are a different
-        artifact, so they do not count as done and the day is re-extracted.
+        artifact, so they do not count as done and the day is re-extracted.  So
+        are frames stamped by a different clock: overlay frames and
+        modelled-cadence frames occupy the same filenames while describing
+        different capture times.  A record filed without a timestamp source
+        counts as a mismatch — its clock is unknown, and re-extracting is the
+        only way to learn it.
         """
         stored = self.frames(key)
         if stored is None:
             return False
-        return stored.get("step") == step and stored.get("resize") == resize
+        return (
+            stored.get("step") == step
+            and stored.get("resize") == resize
+            and stored.get("timestamps") == timestamps
+        )
 
     def last_modified(self, key: str) -> str | None:
         """The ``Last-Modified`` header stored for day *key*'s video, if any."""
