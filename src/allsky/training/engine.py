@@ -1025,9 +1025,8 @@ class _MetricAccumulator:
         if "sky_logits" in outputs:
             predicted = outputs["sky_logits"].detach().argmax(dim=-1)
             mask = batch["sky_class"] >= 0
-            self._fold_physical(
-                "sky_acc", (predicted[mask] == batch["sky_class"][mask]).sum(), mask.sum()
-            )
+            hits = (predicted == batch["sky_class"]) & mask
+            self._fold_physical("sky_acc", hits.sum(), mask.sum())
 
     def _fold_physical(self, key: str, summed: Tensor, count: Tensor) -> None:
         """Fold one batch's ``(sum, row count)`` for the physical-unit metric *key*."""
@@ -1071,7 +1070,11 @@ def _mae_terms(pred: Tensor, target: Tensor, mean: float, std: float) -> tuple[T
     physical = pred.detach().float() * std + mean
     truth = target.detach().float()
     mask = torch.isfinite(truth)
-    error = (physical[mask] - truth[mask]).abs()
+    # Masked with ``where`` rather than ``physical[mask]``: boolean-mask indexing
+    # lowers to nonzero/masked_select, whose output shape is data-dependent, so it
+    # synchronizes the device to the host once per head per batch. Zeroing the
+    # excluded rows keeps the shape static and the sum identical.
+    error = torch.where(mask, (physical - truth).abs(), torch.zeros_like(truth))
     return error.to(_accumulation_dtype(error)).sum(), mask.sum()
 
 

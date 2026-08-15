@@ -229,7 +229,6 @@ def _sensor_row_near(
     index = frame.index
     if isinstance(index, pd.DatetimeIndex) and index.tz is not None:
         frame.index = index.tz_convert(SITE_TZ).tz_localize(None)
-    frame, _removed = mask_sentinels(frame)
     position = int(frame.index.get_indexer(pd.DatetimeIndex([timestamp]), method="nearest")[0])
     if position < 0:
         return frame.iloc[0:0]
@@ -241,7 +240,9 @@ def _sensor_row_near(
             tolerance,
         )
         return frame.iloc[0:0]
-    row = frame.iloc[[position]].copy()
+    # Masked after the row is chosen, not before: every sentinel rule is row-wise,
+    # so the outcome is identical, and the nearest-row lookup reads the index only.
+    row, _removed = mask_sentinels(frame.iloc[[position]].copy())
     row.index = pd.DatetimeIndex([timestamp])
     return row
 
