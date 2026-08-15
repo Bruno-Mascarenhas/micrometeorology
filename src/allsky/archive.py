@@ -15,7 +15,7 @@ import ssl
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,6 +58,8 @@ LEDGER_VERSION = 1
 
 _VIDEO_FILENAME_RE = re.compile(r"allsky-(\d{8})\.mp4")
 _DOWNLOAD_CHUNK_BYTES = 1 << 20
+
+type _Consumer[T] = Callable[[Any], T]
 
 
 class ArchiveError(RuntimeError):
@@ -246,10 +248,11 @@ class ArchiveClient:
 
     The opener carries no plaintext HTTP handler unless *allow_plaintext* is
     set, so a redirect to ``http://`` fails rather than silently downgrading.
-    A failed request is retried *retries* times with a linear ``backoff *
-    attempt`` pause, but only when it is worth retrying: a 5xx, a 429 or a
-    transport error. Any other 4xx is final. *delay* seconds are slept after
-    each completed download to stay polite to a university host.
+    A failed transfer is retried *retries* times with a linear ``backoff *
+    attempt`` pause, but only when it is worth retrying: a 5xx, a 429, or a
+    transport error raised while the request is made **or while its body is
+    read**. Any other 4xx is final. *delay* seconds are slept after each
+    completed download to stay polite to a university host.
     """
 
     def __init__(
@@ -270,8 +273,15 @@ class ArchiveClient:
         self.delay = delay
         self._opener = _https_only_opener(context, allow_plaintext=allow_plaintext)
 
-    @contextmanager
-    def _open(self, url: str, headers: dict[str, str] | None = None) -> Generator[Any]:
+    def _fetch[T](self, url: str, headers: dict[str, str] | None, consume: _Consumer[T]) -> T:
+        """Run *consume* over the response to *url*, retrying the body read too.
+
+        *consume* is called inside the attempt loop rather than after it, so a
+        connection that dies while the body is being read — the failure mode this
+        university host actually shows on a long video — costs one more attempt
+        instead of the whole transfer.  It must therefore be safe to call twice:
+        each attempt has to start its own digest, byte count and output file.
+        """
         self._opener.addheaders = [("User-Agent", USER_AGENT), *(headers or {}).items()]
         last: Exception | None = None
         for attempt in range(1, self.retries + 1):
@@ -279,8 +289,7 @@ class ArchiveClient:
                 response = self._opener.open(url, timeout=self.timeout)
             except urllib.error.HTTPError as exc:
                 if exc.code == http.client.NOT_MODIFIED:
-                    yield exc
-                    return
+                    return consume(exc)
                 last = exc
                 if exc.code < 500 and exc.code != http.client.TOO_MANY_REQUESTS:
                     break
@@ -288,10 +297,16 @@ class ArchiveClient:
                 last = exc
             else:
                 try:
-                    yield response
+                    return consume(response)
+                except (
+                    http.client.HTTPException,
+                    urllib.error.URLError,
+                    TimeoutError,
+                    OSError,
+                ) as exc:
+                    last = exc
                 finally:
                     response.close()
-                return
             if attempt < self.retries:
                 pause = self.backoff * attempt
                 logger.warning(
@@ -312,10 +327,13 @@ class ArchiveClient:
         scraped by regex, and one mis-encoded byte elsewhere on it must not cost
         a whole day's sync.
         """
-        with self._open(urljoin(self.base_url, path)) as response:
+
+        def _decode(response: Any) -> str:
             payload = bytes(response.read())
             charset = response.headers.get_content_charset() or "utf-8"
-        return payload.decode(charset, errors="replace")
+            return payload.decode(charset, errors="replace")
+
+        return self._fetch(urljoin(self.base_url, path), None, _decode)
 
     def fetch_binary(self, path: str) -> tuple[bytes, dict[str, str]]:
         """Fetch *path* whole, returning its bytes and lowercase-keyed headers.
@@ -323,10 +341,12 @@ class ArchiveClient:
         The whole payload is read into memory, so this is for small resources
         (the live frame); a day's video is streamed by :meth:`download` instead.
         """
-        with self._open(urljoin(self.base_url, path)) as response:
+
+        def _read_whole(response: Any) -> tuple[bytes, dict[str, str]]:
             payload = bytes(response.read())
-            headers = {key.lower(): value for key, value in response.headers.items()}
-        return payload, headers
+            return payload, {key.lower(): value for key, value in response.headers.items()}
+
+        return self._fetch(urljoin(self.base_url, path), None, _read_whole)
 
     def list_videos(self) -> tuple[ArchiveEntry, ...]:
         """Every day the archive currently offers, oldest first."""
@@ -343,11 +363,11 @@ class ArchiveClient:
     ) -> DownloadResult:
         """Stream one day's timelapse into *dest_dir*, atomically, verifying its length.
 
-        The body is written to a temp file in *dest_dir* and only renamed into
-        place once it is complete, so an interrupted download never leaves a
-        truncated video where a valid one is expected. When the server announces
-        a ``Content-Length`` that the streamed byte count does not match, the
-        file is deleted rather than kept.
+        The body is written to a temp file in *dest_dir*, its length is checked
+        against the announced ``Content-Length`` while it is still that temp
+        file, and only a body of the right length is renamed into place — so an
+        interrupted download never leaves a truncated video where a valid one is
+        expected, and never replaces a valid one either.
 
         Parameters
         ----------
@@ -372,10 +392,8 @@ class ArchiveClient:
         """
         destination = Path(dest_dir) / entry.filename
         headers = {"If-Modified-Since": if_modified_since} if if_modified_since else None
-        digest = hashlib.sha256()
-        written = 0
 
-        with self._open(entry.url, headers) as response:
+        def _stream_to_destination(response: Any) -> DownloadResult:
             if getattr(response, "code", None) == http.client.NOT_MODIFIED:
                 logger.info("%s unchanged on the server (304)", entry.filename)
                 return DownloadResult(
@@ -389,6 +407,8 @@ class ArchiveClient:
             raw_length = response.headers.get("Content-Length")
             declared = int(raw_length) if raw_length and raw_length.isdigit() else None
             last_modified = response.headers.get("Last-Modified")
+            digest = hashlib.sha256()
+            written = 0
 
             def _stream(tmp: Path) -> None:
                 nonlocal written
@@ -397,25 +417,27 @@ class ArchiveClient:
                         handle.write(chunk)
                         digest.update(chunk)
                         written += len(chunk)
+                if declared is not None and written != declared:
+                    raise ArchiveError(
+                        f"{entry.filename} truncated: got {written} bytes, "
+                        f"server announced {declared}"
+                    )
 
             atomic_write(destination, _stream)
-
-        if declared is not None and written != declared:
-            destination.unlink(missing_ok=True)
-            raise ArchiveError(
-                f"{entry.filename} truncated: got {written} bytes, server announced {declared}"
+            logger.info("downloaded %s (%.1f MiB)", entry.filename, written / (1 << 20))
+            return DownloadResult(
+                entry=entry,
+                path=destination,
+                size=written,
+                sha256=digest.hexdigest(),
+                last_modified=last_modified,
+                downloaded=True,
             )
-        logger.info("downloaded %s (%.1f MiB)", entry.filename, written / (1 << 20))
-        if self.delay:
+
+        result = self._fetch(entry.url, headers, _stream_to_destination)
+        if result.downloaded and self.delay:
             time.sleep(self.delay)
-        return DownloadResult(
-            entry=entry,
-            path=destination,
-            size=written,
-            sha256=digest.hexdigest(),
-            last_modified=last_modified,
-            downloaded=True,
-        )
+        return result
 
     def fetch_live_image(self) -> tuple[bytes, dict[str, str]]:
         """The camera's current frame as JPEG bytes, plus the response headers."""

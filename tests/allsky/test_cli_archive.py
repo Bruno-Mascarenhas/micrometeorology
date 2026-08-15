@@ -6,6 +6,7 @@ chain by fetching the CA intermediate over the network.
 """
 
 import datetime as dt
+import http.client
 import io
 import json
 import os
@@ -18,7 +19,14 @@ import pytest
 from PIL import Image
 from typer.testing import CliRunner, Result
 
-from allsky.archive import LEDGER_FILENAME, ArchiveEntry, ArchiveError, Ledger, ledger_lock
+from allsky.archive import (
+    LEDGER_FILENAME,
+    ArchiveClient,
+    ArchiveEntry,
+    ArchiveError,
+    Ledger,
+    ledger_lock,
+)
 from allsky.cli import app
 from allsky.cli.archive import (
     FRAMES_SUBDIR,
@@ -429,11 +437,28 @@ def test_extraction_names_frames_from_the_overlay_and_a_repeat_run_re_uses_them(
     assert mirror.video_requests() == []
 
 
+def _prepare_config(path: Path, clock: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'video:\n  timestamps: "{clock}"\n', encoding="utf-8")
+    return path
+
+
 def test_the_config_timestamp_model_names_frames_from_a_fixed_start_time_instead(
     mirror: fake.ArchiveMirror, tmp_path: Path
 ):
     data = tmp_path / "data"
-    result = _sync(data, mirror, "--extract", "--timestamps", "config", "--since", "2026-08-10")
+    modelled = _prepare_config(tmp_path / "configs" / "modelled.yaml", "modelled")
+    result = _sync(
+        data,
+        mirror,
+        "--extract",
+        "--timestamps",
+        "config",
+        "-c",
+        str(modelled),
+        "--since",
+        "2026-08-10",
+    )
 
     assert result.exit_code == 0, result.output
     frames_dir = data / FRAMES_SUBDIR / DAY_NEW
@@ -447,9 +472,95 @@ def test_the_config_timestamp_model_names_frames_from_a_fixed_start_time_instead
     assert recorded["timestamps"] == "config"
 
 
+def test_a_config_that_names_the_overlay_clock_extracts_under_the_overlay_clock(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    overlay_config = _prepare_config(tmp_path / "configs" / "overlay.yaml", "overlay")
+
+    result = _sync(
+        data,
+        mirror,
+        "--extract",
+        "--timestamps",
+        "config",
+        "-c",
+        str(overlay_config),
+        "--since",
+        "2026-08-10",
+    )
+
+    assert result.exit_code == 0, result.output
+    frames_dir = data / FRAMES_SUBDIR / DAY_NEW
+    assert sorted(path.name for path in frames_dir.glob("*.jpg")) == [
+        f"allsky-{DAY_NEW}-1200.jpg",
+        f"allsky-{DAY_NEW}-1201.jpg",
+        f"allsky-{DAY_NEW}-1202.jpg",
+    ]
+
+
+def test_the_ledger_records_the_clock_the_config_chose_not_the_flag(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    overlay_config = _prepare_config(tmp_path / "configs" / "overlay.yaml", "overlay")
+
+    result = _sync(
+        data,
+        mirror,
+        "--extract",
+        "--timestamps",
+        "config",
+        "-c",
+        str(overlay_config),
+        "--since",
+        "2026-08-10",
+    )
+
+    assert result.exit_code == 0, result.output
+    recorded = _reload(data).frames(DAY_NEW)
+    assert recorded is not None
+    assert recorded["timestamps"] == "overlay"
+
+
+def test_a_day_extracted_through_a_config_naming_the_overlay_is_not_extracted_again(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    overlay_config = _prepare_config(tmp_path / "configs" / "overlay.yaml", "overlay")
+    first = _sync(
+        data,
+        mirror,
+        "--extract",
+        "--timestamps",
+        "config",
+        "-c",
+        str(overlay_config),
+        "--since",
+        "2026-08-10",
+    )
+    assert first.exit_code == 0, first.output
+
+    second = _sync(data, mirror, "--extract", "--since", "2026-08-10")
+
+    assert second.exit_code == 0, second.output
+    assert "nothing to do" in second.output
+
+
 def _re_extract_under_the_config_clock(data: Path, mirror: fake.ArchiveMirror) -> Path:
     assert _sync(data, mirror, "--extract", "--since", "2026-08-10").exit_code == 0
-    second = _sync(data, mirror, "--extract", "--timestamps", "config", "--since", "2026-08-10")
+    modelled = _prepare_config(data.parent / "configs" / "modelled.yaml", "modelled")
+    second = _sync(
+        data,
+        mirror,
+        "--extract",
+        "--timestamps",
+        "config",
+        "-c",
+        str(modelled),
+        "--since",
+        "2026-08-10",
+    )
     assert second.exit_code == 0, second.output
     return data / FRAMES_SUBDIR / DAY_NEW
 
@@ -480,9 +591,15 @@ def test_the_recorded_frame_count_matches_what_a_re_extraction_left_on_disk(
     assert recorded["count"] == len(list(frames_dir.glob("*.jpg")))
 
 
-def test_a_re_extraction_that_fails_leaves_no_record_of_the_frames_it_discarded(
-    mirror: fake.ArchiveMirror, tmp_path: Path
-):
+def _fail_re_extracting_a_day_whose_overlay_cannot_be_read(
+    data: Path, mirror: fake.ArchiveMirror, tmp_path: Path
+) -> Path:
+    """Extract DAY_LATER under the modelled clock, then fail re-extracting it under the overlay.
+
+    The published video for that day carries another day's burned-in stamps, so
+    the overlay reader refuses it — the permanent, un-retryable fault the frames
+    already on disk must survive.
+    """
     mislabelled = fake.write_overlay_video(
         tmp_path / "staging" / f"allsky-{DAY_LATER}.mp4",
         STAMPS[DAY_OLD],
@@ -490,14 +607,60 @@ def test_a_re_extraction_that_fails_leaves_no_record_of_the_frames_it_discarded(
         width=FRAME_WIDTH,
     )
     mirror.publish_video_file(mislabelled)
-    data = tmp_path / "data"
-    modelled = _sync(data, mirror, "--extract", "--timestamps", "config", "--since", "2026-08-11")
+    modelled_config = _prepare_config(tmp_path / "configs" / "modelled.yaml", "modelled")
+    modelled = _sync(
+        data,
+        mirror,
+        "--extract",
+        "--timestamps",
+        "config",
+        "-c",
+        str(modelled_config),
+        "--since",
+        "2026-08-11",
+    )
     assert modelled.exit_code == 0, modelled.output
 
     failed = _sync(data, mirror, "--extract", "--since", "2026-08-11")
 
     assert failed.exit_code == 1
-    assert _reload(data).frames(DAY_LATER) is None
+    return data / FRAMES_SUBDIR / DAY_LATER
+
+
+def test_a_re_extraction_that_fails_keeps_the_frames_the_previous_one_left(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+
+    frames_dir = _fail_re_extracting_a_day_whose_overlay_cannot_be_read(data, mirror, tmp_path)
+
+    assert sorted(path.name for path in frames_dir.glob("*.jpg")) == [
+        f"allsky-{DAY_LATER}-0600.jpg",
+        f"allsky-{DAY_LATER}-0601.jpg",
+        f"allsky-{DAY_LATER}-0602.jpg",
+    ]
+
+
+def test_a_re_extraction_that_fails_keeps_the_record_of_the_frames_it_could_not_replace(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+
+    _fail_re_extracting_a_day_whose_overlay_cannot_be_read(data, mirror, tmp_path)
+
+    recorded = _reload(data).frames(DAY_LATER)
+    assert recorded is not None
+    assert (recorded["timestamps"], recorded["count"]) == ("config", 3)
+
+
+def test_a_re_extraction_that_fails_leaves_no_half_written_frame_set_behind(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+
+    frames_dir = _fail_re_extracting_a_day_whose_overlay_cannot_be_read(data, mirror, tmp_path)
+
+    assert [path.name for path in frames_dir.parent.iterdir()] == [DAY_LATER]
 
 
 def test_changing_the_step_re_extracts_without_asking_the_server_for_the_video_again(
@@ -668,6 +831,130 @@ def test_snapshot_writes_the_live_frame_and_a_provenance_sidecar(
     assert metadata["content_type"] == "image/jpeg"
     assert metadata["captured_at_source"] == "server-last-modified"
     assert metadata["source_url"].endswith("/image.jpg")
+
+
+def test_a_non_finite_prediction_is_refused_instead_of_published_as_a_bare_nan(
+    mirror: fake.ArchiveMirror, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    def predict_a_diverged_model(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "predictions": {"dhi": float("nan")},
+            "features": {"imputed": []},
+        }
+
+    monkeypatch.setattr("allsky.snapshot.predict_snapshot", predict_a_diverged_model)
+    checkpoint = tmp_path / "diverged.ckpt"
+    checkpoint.write_bytes(b"checkpoint-bytes")
+    out_dir = tmp_path / "snapshots"
+
+    result = runner.invoke(
+        app,
+        [
+            "snapshot",
+            "--out",
+            str(out_dir),
+            "--base-url",
+            mirror.base_url,
+            "--insecure",
+            "--checkpoint",
+            str(checkpoint),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert list(out_dir.glob("*.prediction.json")) == []
+
+
+def _snapshot_recording_prediction_kwargs(
+    mirror: fake.ArchiveMirror,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *extra_options: str,
+) -> tuple[Result, dict[str, object]]:
+    recorded: dict[str, object] = {}
+
+    def predict_recording_its_kwargs(*_args: object, **kwargs: object) -> dict[str, object]:
+        recorded.update(kwargs)
+        return {"predictions": {"dhi": 137.0}, "features": {"imputed": []}}
+
+    monkeypatch.setattr("allsky.snapshot.predict_snapshot", predict_recording_its_kwargs)
+    checkpoint = tmp_path / "moved.ckpt"
+    checkpoint.write_bytes(b"checkpoint-bytes")
+
+    result = runner.invoke(
+        app,
+        [
+            "snapshot",
+            "--out",
+            str(tmp_path / "snapshots"),
+            "--base-url",
+            mirror.base_url,
+            "--insecure",
+            "--checkpoint",
+            str(checkpoint),
+            *extra_options,
+        ],
+    )
+    return result, recorded
+
+
+def test_the_embeddings_dir_flag_overrides_the_store_baked_into_the_checkpoint(
+    mirror: fake.ArchiveMirror, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = tmp_path / "embeddings"
+    store.mkdir()
+
+    result, recorded = _snapshot_recording_prediction_kwargs(
+        mirror, tmp_path, monkeypatch, "--embeddings-dir", str(store)
+    )
+
+    assert result.exit_code == 0, result.output
+    assert recorded["embeddings_dir"] == store
+
+
+def test_a_snapshot_without_the_embeddings_dir_flag_keeps_the_baked_store(
+    mirror: fake.ArchiveMirror, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    result, recorded = _snapshot_recording_prediction_kwargs(mirror, tmp_path, monkeypatch)
+
+    assert result.exit_code == 0, result.output
+    assert recorded["embeddings_dir"] is None
+
+
+def _die_mid_stream(*_args: object, **_kwargs: object) -> None:
+    raise http.client.IncompleteRead(b"first-chunk", 4096)
+
+
+def test_a_day_whose_body_dies_mid_stream_is_one_failed_day_not_an_aborted_run(
+    mirror: fake.ArchiveMirror, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(ArchiveClient, "download", _die_mid_stream)
+
+    result = _sync(tmp_path / "data", mirror)
+
+    assert isinstance(result.exception, SystemExit)
+    assert "0 day(s) processed, 2 failed" in result.output
+
+
+def test_a_snapshot_whose_body_dies_mid_stream_exits_one_instead_of_crashing(
+    mirror: fake.ArchiveMirror, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("allsky.snapshot.capture_snapshot", _die_mid_stream)
+
+    result = runner.invoke(
+        app,
+        [
+            "snapshot",
+            "--out",
+            str(tmp_path / "snapshots"),
+            "--base-url",
+            mirror.base_url,
+            "--insecure",
+        ],
+    )
+
+    assert isinstance(result.exception, SystemExit)
+    assert result.exit_code == 1
 
 
 def test_both_archive_commands_are_registered_on_the_allsky_app():
