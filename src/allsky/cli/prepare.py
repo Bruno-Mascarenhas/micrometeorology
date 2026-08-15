@@ -23,8 +23,8 @@ from typing import Annotated, Any
 
 import typer
 
-from allsky.atomic import atomic_write
-from allsky.config import PrepareConfig, load_prepare_config
+from allsky.atomic import atomic_write, atomic_write_json
+from allsky.config import PrepareConfig, VideoConfig, load_prepare_config
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,7 @@ VALID_STEPS = ("extract-frames", "build-manifest", "splits")
 
 _MANIFEST_NAME = "manifest.parquet"
 _SPLIT_NAME = "splits.json"
+_FRAMES_META_NAME = "frames.meta.json"
 
 ConfigOption = Annotated[
     Path | None,
@@ -86,6 +87,67 @@ _MANIFEST_CONFIG_SECTIONS = (
     "alignment",
     "output",
 )
+
+
+#: :class:`PrepareConfig` sections baked into the extracted JPEG itself by
+#: :func:`_extract_and_qc`.
+_FRAME_CONFIG_SECTIONS = ("mask", "crop", "resize")
+
+#: The ``video`` fields that decide a frame's time.  ``pattern`` is left out on
+#: purpose: adding a day to the glob must not re-extract the days already done.
+_FRAME_VIDEO_FIELDS = ("timestamps", "start_time", "minutes_per_frame")
+
+
+def _frames_inputs_sha256(cfg: PrepareConfig) -> str:
+    """Content hash of the config that decides what an extracted frame is.
+
+    Recorded beside each per-video frame manifest, so the resume check can tell
+    frames produced under the current config from frames that merely exist.
+    ``video.timestamps`` (with the pair the modelled mapping reads) fixes the
+    clock every frame is named and stamped by, and ``mask``/``crop``/``resize``
+    are written into the JPEG, so a change to any of them makes the frames on
+    disk a different artifact — one the manifest would otherwise be rebuilt from
+    under provenance describing the new config.
+
+    Raises
+    ------
+    RuntimeError
+        When a name here is not a config field: pydantic drops unknown include
+        keys silently, which would shrink the hash without any sign of it.
+    """
+    unknown = [name for name in _FRAME_CONFIG_SECTIONS if name not in PrepareConfig.model_fields]
+    unknown += [
+        f"video.{name}" for name in _FRAME_VIDEO_FIELDS if name not in VideoConfig.model_fields
+    ]
+    if unknown:
+        raise RuntimeError(
+            f"PrepareConfig has no field(s) {unknown}; the frame provenance hash would stop "
+            "covering them"
+        )
+    include: dict[str, Any] = dict.fromkeys(_FRAME_CONFIG_SECTIONS, True)
+    include["video"] = set(_FRAME_VIDEO_FIELDS)
+    sections = cfg.model_dump(mode="json", include=include)
+    canonical = json.dumps(sections, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _read_frames_key(video_dir: Path) -> str | None:
+    """The frame-config hash recorded beside a per-video manifest, or None."""
+    path = video_dir / _FRAMES_META_NAME
+    if not path.is_file():
+        return None
+    try:
+        recorded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("frame provenance %s is unreadable (%s); treating it as absent", path, exc)
+        return None
+    stored = recorded.get("frames_sha256") if isinstance(recorded, dict) else None
+    return stored if isinstance(stored, str) else None
+
+
+def _write_frames_key(video_dir: Path, frames_sha: str) -> None:
+    """Record the config the frames just written were extracted under."""
+    atomic_write_json(video_dir / _FRAMES_META_NAME, {"frames_sha256": frames_sha})
 
 
 def _file_sha256(path: Path) -> str:
@@ -238,9 +300,10 @@ def prepare_local(
     """Prepare a local dataset: extract frames, build the manifest and day splits.
 
     Each step resumes on the artifacts already on disk unless ``--force`` is
-    given: a video whose frame manifest is complete is not re-extracted, and the
-    manifest is rebuilt only when the inputs it is derived from changed (see
-    :func:`_manifest_inputs_sha256`).
+    given: a video whose frame manifest is complete and whose frames were
+    extracted under the current config is not re-extracted (see
+    :func:`_frames_inputs_sha256`), and the manifest is rebuilt only when the
+    inputs it is derived from changed (see :func:`_manifest_inputs_sha256`).
 
     Raises
     ------
@@ -400,6 +463,15 @@ def _run_extract_step(
     (every FRAME_DARK / FRAME_SATURATED bit silently lost) and an interrupted
     write leaves one that cannot be read at all.  Both are re-extracted.
 
+    It keys on :func:`_frames_inputs_sha256` as well, recorded in each video
+    directory when its frames were written.  The frames themselves carry no trace
+    of the config that produced them, so without that record a changed
+    ``video.timestamps`` / ``mask`` / ``crop`` / ``resize`` resumed onto the old
+    JPEGs while the manifest — whose own key does cover those sections — was
+    rebuilt from them and stamped with the new config's hash, asserting a build
+    that never ran.  Frames with no record are re-extracted for the same reason:
+    the config behind them is unknown.
+
     A video whose own timestamps are unusable is skipped, not fatal, and every
     skip is named again on the next run.  The overlay reader refuses a day it
     cannot timestamp — the 2026-06-04 archive video steps its clock 7 s backwards
@@ -413,6 +485,7 @@ def _run_extract_step(
     """
     from allsky.overlay import OverlayTimestampError
 
+    frames_key = _frames_inputs_sha256(cfg)
     per_video: list[PandasDataFrame] = []
     unusable: list[str] = []
     for video in videos:
@@ -439,10 +512,17 @@ def _run_extract_step(
             continue
 
         if qc_complete and not force:
-            typer.echo(f"resume: skipping extraction for {stem} (frames already present)")
-            per_video.append(existing)
-            continue
-        if video_manifest.exists() and not force:
+            recorded = _read_frames_key(video_dir)
+            if recorded == frames_key:
+                typer.echo(f"resume: skipping extraction for {stem} (frames already present)")
+                per_video.append(existing)
+                continue
+            typer.echo(
+                f"resume: the frames for {stem} were extracted under "
+                + ("no recorded" if recorded is None else "a different")
+                + " video/mask/crop/resize config, re-extracting"
+            )
+        elif video_manifest.exists() and not force:
             typer.echo(
                 f"resume: frame manifest for {stem} is unreadable or predates visual QC, "
                 "re-extracting"
@@ -454,6 +534,7 @@ def _run_extract_step(
             typer.echo(f"WARNING: skipping {stem}: {exc}")
             continue
         _write_frame_manifest(video_manifest, frame_manifest)
+        _write_frames_key(video_dir, frames_key)
         per_video.append(frame_manifest)
         typer.echo(f"extract-frames: {len(frame_manifest)} frames from {stem} -> {video_dir}")
     if unusable:

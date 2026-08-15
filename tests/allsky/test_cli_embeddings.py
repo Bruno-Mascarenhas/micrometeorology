@@ -10,6 +10,8 @@ import pytest
 from typer.testing import CliRunner
 
 from allsky.cli import app
+from allsky.cli.embeddings import _config_sha256
+from allsky.config import PrepareConfig
 
 runner = CliRunner()
 
@@ -142,3 +144,25 @@ def test_missing_manifest_errors(tmp_path: Path):
     result = runner.invoke(app, ["precompute-embeddings", "--config", str(config)])
     assert result.exit_code == 1
     assert "manifest not found" in result.output
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"mask": {"path": "masks/horizon.png"}},
+        {"crop": {"enabled": True, "top": 40}},
+        {"resize": 224},
+        {"video": {"timestamps": "modelled"}},
+    ],
+)
+def test_a_config_edit_that_changes_the_encoded_pixels_changes_the_resume_hash(patch: dict):
+    base = _config_sha256(PrepareConfig())
+
+    assert _config_sha256(PrepareConfig.model_validate(patch)) != base
+
+
+def test_widening_the_video_pattern_leaves_the_resume_hash_alone():
+    base = _config_sha256(PrepareConfig())
+    grown = PrepareConfig.model_validate({"video": {"pattern": "data/all-sky/allsky-2026*.mp4"}})
+
+    assert _config_sha256(grown) == base

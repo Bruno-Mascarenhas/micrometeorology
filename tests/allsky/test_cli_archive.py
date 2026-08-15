@@ -27,6 +27,7 @@ from allsky.cli.archive import (
     STATE_SUBDIR,
     VIDEOS_SUBDIR,
     DayPlan,
+    TimestampSource,
     UploadChoice,
     _plan_day,
 )
@@ -125,6 +126,7 @@ def _plan(
     extract: bool = False,
     step: int = 1,
     resize: int | None = None,
+    timestamps: TimestampSource = TimestampSource.overlay,
     upload: UploadChoice = UploadChoice.none,
 ) -> DayPlan:
     return _plan_day(
@@ -135,6 +137,7 @@ def _plan(
         extract=extract,
         step=step,
         resize=resize,
+        timestamps=timestamps,
         upload=upload,
     )
 
@@ -219,6 +222,25 @@ def test_changing_the_extraction_parameters_replans_extraction_only(
     assert plan.extract is True
     assert plan.download is False
     assert plan.upload_video is False
+
+
+def test_frames_extracted_from_the_other_clock_are_planned_for_extraction_again(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    _mark_fully_mirrored(ledger, tmp_path, entry)
+    plan = _plan(entry, ledger, tmp_path, extract=True, timestamps=TimestampSource.config)
+
+    assert plan.extract is True
+
+
+def test_frames_whose_clock_the_ledger_never_recorded_are_planned_for_extraction_again(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    _mark_fully_mirrored(ledger, tmp_path, entry)
+    del (ledger.frames(entry.key) or {})["timestamps"]
+    plan = _plan(entry, ledger, tmp_path, extract=True)
+
+    assert plan.extract is True
 
 
 def test_frames_are_only_planned_for_upload_once_they_exist_or_are_about_to(

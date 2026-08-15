@@ -76,7 +76,7 @@ class DayPlan:
         its bytes or the ledger has never recorded it.
     extract:
         Run frame extraction for the day (no frames recorded for this
-        ``step``/``resize`` pair yet).
+        ``step``/``resize``/timestamp-source combination yet).
     upload_video:
         Push the mp4 to its Drive destination, which the ledger has not recorded.
     upload_frames:
@@ -165,6 +165,7 @@ def _plan_day(
     extract: bool,
     step: int,
     resize: int | None,
+    timestamps: TimestampSource,
     upload: UploadChoice,
 ) -> DayPlan:
     """Decide what *entry* still needs by asking the ledger what it already holds.
@@ -172,11 +173,13 @@ def _plan_day(
     A day is downloaded when its mp4 is not on disk and either extraction or an
     upload needs the bytes or the ledger never recorded it — so a day already
     uploaded and pruned is not fetched again.  It is extracted when no frame set
-    matches this *step*/*resize* pair, and uploaded when the ledger holds no
-    record of that exact Drive destination.  Frames are only queued for upload
-    once they exist or are about to.
+    matches this *step*/*resize*/*timestamps* combination, and uploaded when the
+    ledger holds no record of that exact Drive destination.  Frames are only
+    queued for upload once they exist or are about to.
     """
-    frames_done = ledger.frames_match(entry.key, step=step, resize=resize)
+    frames_done = _frames_current(
+        ledger, entry.key, step=step, resize=resize, timestamps=timestamps
+    )
     wants_extract = extract and not frames_done
     wants_video_upload = upload.wants_videos and not ledger.uploaded(
         entry.key, _video_destination(target, entry)
@@ -195,6 +198,25 @@ def _plan_day(
         upload_video=wants_video_upload,
         upload_frames=wants_frame_upload,
     )
+
+
+def _frames_current(
+    ledger: Ledger, key: str, *, step: int, resize: int | None, timestamps: TimestampSource
+) -> bool:
+    """Whether *key*'s recorded frames were extracted the way this run would extract them.
+
+    :meth:`Ledger.frames_match` covers ``step`` and ``resize`` only, so the clock
+    that named and stamped the frames is compared here as well: overlay frames
+    and modelled-cadence frames occupy the same filenames while describing
+    different capture times, and a day already extracted from the other source
+    has to be extracted again rather than counted as done.  A record filed
+    without a timestamp source counts as a mismatch — its clock is unknown, and
+    re-extracting is the only way to learn it.
+    """
+    if not ledger.frames_match(key, step=step, resize=resize):
+        return False
+    stored = ledger.frames(key) or {}
+    return bool(stored.get("timestamps") == timestamps)
 
 
 def _video_destination(target: DriveTarget | None, entry: ArchiveEntry) -> str:
@@ -345,6 +367,7 @@ def sync_archive(
                     extract=extract,
                     step=step,
                     resize=resize,
+                    timestamps=timestamps,
                     upload=upload,
                 )
                 for entry in selected
