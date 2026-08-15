@@ -272,6 +272,7 @@ def run_experiment(
             feature_columns=feature_columns,
             cfg=cfg,
         )
+        _warn_optimizer_knob_drift(checkpoint, cfg)
         stored_monitor = (checkpoint.get("best_metric") or {}).get("name")
         monitor_changed = stored_monitor is not None and str(stored_monitor) != monitor_key
         start_epoch, global_step, best_value, best_epoch, restored_no_improve = _restore(
@@ -310,7 +311,7 @@ def run_experiment(
             epochs_no_improve,
         )
     else:
-        _reset_stale_metrics(run_dir)
+        _reset_stale_run_artifacts(run_dir)
 
     from torch.utils.tensorboard import SummaryWriter
 
@@ -375,6 +376,14 @@ def run_experiment(
                 if scheduler is not None:
                     scheduler.step(monitor_value) if scheduler_is_plateau else scheduler.step()
 
+                if not math.isfinite(monitor_value):
+                    logger.warning(
+                        "epoch %d: monitor %s is %s (the epoch diverged); it is not a "
+                        "candidate for best.ckpt and counts as no improvement",
+                        epoch + 1,
+                        monitor_key,
+                        monitor_value,
+                    )
                 improved = _improved(monitor_value, best_value, monitor_mode, min_delta)
                 if improved:
                     best_value, best_epoch, epochs_no_improve = monitor_value, epoch + 1, 0
@@ -712,7 +721,15 @@ def _build_optimizer(
     carrying its own ``lr`` is the image backbone (the only group
     :meth:`MultimodalModel.param_groups` sets it on); everything else runs at
     ``train.lr`` and is labelled ``lr``.
+
+    ``train.optimizer`` is validated here rather than honoured: AdamW is the only
+    algorithm this engine builds, and a config naming another one used to train as
+    AdamW anyway while the checkpoint recorded the name it asked for.
     """
+    if cfg.train.optimizer != "adamw":
+        raise ValueError(
+            f"unknown optimizer {cfg.train.optimizer!r}; this engine builds 'adamw' only"
+        )
     param_groups_fn = getattr(model, "param_groups", None)
     if callable(param_groups_fn):
         params: Any = param_groups_fn(cfg.train.backbone_lr)
@@ -769,9 +786,15 @@ def _build_scheduler(
 def _build_amp(amp_enabled: bool, dtype: str, device: str) -> tuple[str | None, Any, Any | None]:
     """Resolve the autocast device/dtype and GradScaler for the AMP config.
 
-    fp16 requires CUDA and a GradScaler; bf16 uses autocast on CUDA or CPU with
-    no scaler.  Returns ``(autocast_device, autocast_dtype, scaler)``; when AMP is
-    off, ``autocast_device`` is ``None``.
+    fp16 requires CUDA and a GradScaler; bf16 autocasts on the run's own device,
+    with no scaler.  Returns ``(autocast_device, autocast_dtype, scaler)``; when
+    AMP is off, ``autocast_device`` is ``None``.
+
+    Autocast is per device type, so the run's device is passed through rather than
+    folded into ``"cpu"``: a CPU autocast context leaves every op on another
+    device in fp32, i.e. AMP asked for, recorded in the checkpoint's config, and
+    never applied.  A device torch has no autocast for is refused as loudly as
+    fp16 off CUDA.
     """
     if not amp_enabled:
         return None, None, None
@@ -779,8 +802,12 @@ def _build_amp(amp_enabled: bool, dtype: str, device: str) -> tuple[str | None, 
         if device != "cuda":
             raise RuntimeError("amp dtype 'fp16' requires a CUDA device; use 'bf16' on CPU")
         return "cuda", torch.float16, torch.amp.GradScaler("cuda")
-    autocast_device = "cuda" if device == "cuda" else "cpu"
-    return autocast_device, torch.bfloat16, None
+    if not torch.amp.is_autocast_available(device):
+        raise RuntimeError(
+            f"amp has no autocast for device {device!r}; set train.amp.enabled=false "
+            "or run on a device torch can autocast"
+        )
+    return device, torch.bfloat16, None
 
 
 def _autocast(device: str | None, dtype: Any) -> Any:
@@ -898,11 +925,29 @@ def _loss_component_weights(targets: TargetsConfig) -> dict[str, float]:
     }
 
 
-def _present_target_count(batch: Mapping[str, Tensor], column: str) -> int:
-    """Rows of *column* a loss component counted: finite value, or class ``>= 0``."""
+def _present_target_count(batch: Mapping[str, Tensor], column: str) -> Tensor:
+    """Rows of *column* a loss component counted: finite value, or class ``>= 0``.
+
+    A zero-dim ``int64`` tensor on the batch's device, so the count folds into the
+    epoch without reading anything back to the host.
+    """
     target = batch[column]
     mask = target >= 0 if column == "sky_class" else torch.isfinite(target)
-    return int(mask.sum())
+    return mask.sum()
+
+
+def _accumulation_dtype(sample: Tensor) -> torch.dtype:
+    """The dtype an epoch's running sums use for tensors living where *sample* does.
+
+    float64, so summing one term per batch over a whole epoch does not drift the
+    reported metrics; mps has no float64, so there the sums stay float32.
+    """
+    return torch.float32 if sample.device.type == "mps" else torch.float64
+
+
+def _fold(running: Tensor | None, term: Tensor) -> Tensor:
+    """Add *term* to a running total, seeded on *term*'s device by the first batch."""
+    return term if running is None else running + term
 
 
 class _MetricAccumulator:
@@ -925,6 +970,10 @@ class _MetricAccumulator:
     (metrics.csv has a column for it and it is a legal early-stopping monitor)
     with value ``0.0``, contributes nothing to the total, and is named in a
     warning.
+
+    Every running total is a zero-dim tensor on the batch's own device: folding a
+    batch in must not read a scalar back to the host, so the whole epoch costs the
+    handful of device syncs :meth:`result` does at the end.
     """
 
     def __init__(
@@ -934,14 +983,10 @@ class _MetricAccumulator:
     ) -> None:
         self._dhi_mean, self._dhi_std, self._kindex_mean, self._kindex_std = target_stats
         self._component_weights = dict(component_weights)
-        self._component_sums: dict[str, float] = {}
-        self._component_counts: dict[str, int] = {}
-        self._dhi_abs = 0.0
-        self._dhi_n = 0
-        self._kindex_abs = 0.0
-        self._kindex_n = 0
-        self._sky_correct = 0
-        self._sky_n = 0
+        self._component_sums: dict[str, Tensor] = {}
+        self._component_counts: dict[str, Tensor] = {}
+        self._physical_sums: dict[str, Tensor] = {}
+        self._physical_counts: dict[str, Tensor] = {}
 
     def update(
         self, outputs: Mapping[str, Tensor], batch: dict[str, Tensor], losses: Mapping[str, Tensor]
@@ -957,37 +1002,37 @@ class _MetricAccumulator:
             if key == "loss":
                 continue
             column = _COMPONENT_TARGET_COLUMNS.get(key)
-            count = size if column is None else _present_target_count(batch, column)
-            self._component_sums.setdefault(key, 0.0)
-            self._component_counts.setdefault(key, 0)
-            if count == 0:
-                continue
-            self._component_sums[key] += float(value.detach()) * count
-            self._component_counts[key] += count
+            count = (
+                _present_target_count(batch, column)
+                if column is not None
+                else torch.full((), size, dtype=torch.long, device=value.device)
+            )
+            weighted = value.detach().to(_accumulation_dtype(value)) * count
+            self._component_sums[key] = _fold(self._component_sums.get(key), weighted)
+            self._component_counts[key] = _fold(self._component_counts.get(key), count)
         if "dhi" in outputs:
-            self._dhi_abs, self._dhi_n = _mae_accumulate(
-                outputs["dhi"],
-                batch["dhi"],
-                self._dhi_mean,
-                self._dhi_std,
-                self._dhi_abs,
-                self._dhi_n,
+            self._fold_physical(
+                "dhi_mae",
+                *_mae_terms(outputs["dhi"], batch["dhi"], self._dhi_mean, self._dhi_std),
             )
         if "kindex" in outputs:
-            self._kindex_abs, self._kindex_n = _mae_accumulate(
-                outputs["kindex"],
-                batch["kindex"],
-                self._kindex_mean,
-                self._kindex_std,
-                self._kindex_abs,
-                self._kindex_n,
+            self._fold_physical(
+                "kindex_mae",
+                *_mae_terms(
+                    outputs["kindex"], batch["kindex"], self._kindex_mean, self._kindex_std
+                ),
             )
         if "sky_logits" in outputs:
             predicted = outputs["sky_logits"].detach().argmax(dim=-1)
             mask = batch["sky_class"] >= 0
-            if bool(mask.any()):
-                self._sky_correct += int((predicted[mask] == batch["sky_class"][mask]).sum())
-                self._sky_n += int(mask.sum())
+            self._fold_physical(
+                "sky_acc", (predicted[mask] == batch["sky_class"][mask]).sum(), mask.sum()
+            )
+
+    def _fold_physical(self, key: str, summed: Tensor, count: Tensor) -> None:
+        """Fold one batch's ``(sum, row count)`` for the physical-unit metric *key*."""
+        self._physical_sums[key] = _fold(self._physical_sums.get(key), summed)
+        self._physical_counts[key] = _fold(self._physical_counts.get(key), count)
 
     def result(self) -> dict[str, float]:
         """Finalize the epoch: per-head masked means and their weighted total."""
@@ -995,12 +1040,12 @@ class _MetricAccumulator:
         total = 0.0
         heads_without_labels: list[str] = []
         for key, summed in self._component_sums.items():
-            count = self._component_counts[key]
+            count = int(self._component_counts[key])
             if count == 0:
                 components[key] = 0.0
                 heads_without_labels.append(key)
                 continue
-            components[key] = summed / count
+            components[key] = float(summed) / count
             total += self._component_weights.get(key, 1.0) * components[key]
         if heads_without_labels:
             logger.warning(
@@ -1009,26 +1054,25 @@ class _MetricAccumulator:
                 ", ".join(sorted(heads_without_labels)),
             )
         metrics: dict[str, float] = {"loss": total, **components}
-        if self._dhi_n:
-            metrics["dhi_mae"] = self._dhi_abs / self._dhi_n
-        if self._kindex_n:
-            metrics["kindex_mae"] = self._kindex_abs / self._kindex_n
-        if self._sky_n:
-            metrics["sky_acc"] = self._sky_correct / self._sky_n
+        for key, summed in self._physical_sums.items():
+            count = int(self._physical_counts[key])
+            if count:
+                metrics[key] = float(summed) / count
         return metrics
 
 
-def _mae_accumulate(
-    pred: Tensor, target: Tensor, mean: float, std: float, abs_sum: float, count: int
-) -> tuple[float, int]:
-    """Add the physical-unit absolute error of *pred* vs *target* over finite rows."""
+def _mae_terms(pred: Tensor, target: Tensor, mean: float, std: float) -> tuple[Tensor, Tensor]:
+    """One batch's physical-unit absolute-error sum and its finite-target row count.
+
+    Both are zero-dim tensors on *pred*'s device: the sum of
+    ``|pred * std + mean - target|`` over the rows whose target is finite (in
+    :func:`_accumulation_dtype`), and how many rows those were (``int64``).
+    """
     physical = pred.detach().float() * std + mean
     truth = target.detach().float()
     mask = torch.isfinite(truth)
-    if bool(mask.any()):
-        abs_sum += float((physical[mask] - truth[mask]).abs().sum())
-        count += int(mask.sum())
-    return abs_sum, count
+    error = (physical[mask] - truth[mask]).abs()
+    return error.to(_accumulation_dtype(error)).sum(), mask.sum()
 
 
 def _resume_path(resume: str | Path | None, run_dir: Path) -> Path | None:
@@ -1112,6 +1156,49 @@ def _check_resume_provenance(
             + ". Run without --resume (or point --out-dir at a fresh run directory) to "
             "train from scratch on the current dataset."
         )
+
+
+_OPTIMIZER_KNOB_REL_TOL = 1e-12
+
+
+def _knob_differs(stored: float | None, current: float | None) -> bool:
+    """True when an optimizer knob was edited between the two invocations."""
+    if stored is None or current is None:
+        return (stored is None) != (current is None)
+    return not math.isclose(float(stored), float(current), rel_tol=_OPTIMIZER_KNOB_REL_TOL)
+
+
+def _warn_optimizer_knob_drift(checkpoint: Mapping[str, Any], cfg: ExperimentConfig) -> None:
+    """Warn when an edited optimizer knob is about to lose to the restored state.
+
+    ``optimizer.load_state_dict`` rebuilds every parameter group from the stored
+    ``lr`` / ``weight_decay``, which is what continuing a run means — a plateau
+    reduction and a mid-cosine rate both live there, so re-seeding from the config
+    would undo them.  The edit is still discarded, though, and
+    :func:`_checkpoint_common` writes the *edited* config into the new checkpoint,
+    so the drift is named here instead of being absorbed.  A knob the checkpoint
+    does not record is skipped, mirroring :func:`_check_resume_provenance`.
+    """
+    stored_train = (checkpoint.get("config") or {}).get("train") or {}
+    for field, current in (
+        ("lr", cfg.train.lr),
+        ("weight_decay", cfg.train.weight_decay),
+        ("backbone_lr", cfg.train.backbone_lr),
+    ):
+        if field not in stored_train:
+            continue
+        stored = stored_train[field]
+        if _knob_differs(stored, current):
+            logger.warning(
+                "resume: train.%s=%s differs from the checkpoint's %s; the restored "
+                "optimizer state wins, so the resumed epochs train at %s while the new "
+                "checkpoint records %s",
+                field,
+                current,
+                stored,
+                stored,
+                current,
+            )
 
 
 def _restore(
@@ -1202,7 +1289,7 @@ def _reconcile_cosine_horizon(
 def _rotate_stale_best(run_dir: Path) -> None:
     """Move an existing ``best.ckpt`` aside when a monitor change invalidates it.
 
-    Mirrors :func:`_reset_stale_metrics`: once the stored best is discarded the
+    Mirrors :func:`_reset_stale_run_artifacts`: once the stored best is discarded the
     first resumed epoch unconditionally improves on ``None`` and rewrites
     ``best.ckpt``, which would destroy the previous monitor's best weights with no
     record of them.
@@ -1280,8 +1367,18 @@ def _monitor_key(monitor: str) -> str:
 
 
 def _improved(current: float, best: float | None, mode: str, min_delta: float) -> bool:
-    """True when *current* improves on *best* by more than *min_delta*."""
-    if best is None:
+    """True when *current* improves on *best* by more than *min_delta*.
+
+    A non-finite *current* never improves: taken as the best it would pin
+    ``best.ckpt`` to the diverged epoch and, since every later comparison against
+    a NaN best is False, silently starve the patience counter until the run stops
+    looking converged.  A non-finite *best* — restored from a checkpoint written
+    before this guard — is treated as no baseline at all, so the first finite
+    epoch reclaims ``best.ckpt``.
+    """
+    if not math.isfinite(current):
+        return False
+    if best is None or not math.isfinite(best):
         return True
     if mode == "min":
         return current < best - min_delta
@@ -1409,16 +1506,21 @@ def _truncate_metrics(run_dir: Path, fields: list[str], resumed_epoch: int) -> l
     return history
 
 
-def _reset_stale_metrics(run_dir: Path) -> None:
-    """Rotate any pre-existing ``metrics.csv`` / ``metrics.json`` aside on a fresh run.
+def _reset_stale_run_artifacts(run_dir: Path) -> None:
+    """Rotate a previous run's metrics and checkpoints aside on a fresh run.
 
     A fresh (non-resume) run into a reused run directory must not append to the
     previous run's metrics.  Each stale file is renamed to
     ``<name>.stale`` (replacing an older backup) rather than deleted, so the prior
     run's numbers are still recoverable; the fresh run then re-creates the files
     from scratch.
+
+    The checkpoints are rotated with them: ``last.ckpt`` is overwritten at the end
+    of epoch 1 and ``best.ckpt`` with it (a fresh run starts with no best, so the
+    first epoch always improves), which would leave the preserved metrics
+    describing weights that no longer exist anywhere.
     """
-    for name in ("metrics.csv", "metrics.json"):
+    for name in ("metrics.csv", "metrics.json", LAST_CHECKPOINT, BEST_CHECKPOINT):
         path = run_dir / name
         if path.exists():
             backup = path.with_name(f"{name}.stale")
