@@ -66,6 +66,30 @@ class ArchiveError(RuntimeError):
     """A request against the all-sky archive failed after every retry."""
 
 
+class _TransportFailure(Exception):
+    """The connection, not the local machine, is what broke — so the request is worth retrying.
+
+    Reading a response body and writing it to disk raise the same
+    :class:`OSError` family, and retrying a full GET because the destination
+    filesystem is out of space wastes the whole transfer to fail the same way.
+    Only the read side is wrapped in this, so the retry loop can tell a
+    connection that died from a disk that did.
+    """
+
+
+def _read_response(response: Any, size: int | None = None) -> bytes:
+    """Read from an open response, marking a broken transport as :class:`_TransportFailure`.
+
+    With *size* the read is one chunk of at most that many bytes and an empty
+    result means the body ended; without it the whole remaining body is read and
+    a short one raises :class:`http.client.IncompleteRead`.
+    """
+    try:
+        return bytes(response.read() if size is None else response.read(size))
+    except (http.client.HTTPException, urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise _TransportFailure(str(exc)) from exc
+
+
 def _https_only_opener(
     context: ssl.SSLContext | None = None, *, allow_plaintext: bool = False
 ) -> urllib.request.OpenerDirector:
@@ -281,6 +305,12 @@ class ArchiveClient:
         university host actually shows on a long video — costs one more attempt
         instead of the whole transfer.  It must therefore be safe to call twice:
         each attempt has to start its own digest, byte count and output file.
+
+        Only failures of the transport are retried.  A consumer reads through
+        :func:`_read_response`, which marks read-side faults as
+        :class:`_TransportFailure`; anything else it raises is the local machine
+        failing — a full disk, a read-only destination — and surfaces at once
+        rather than costing another full GET to fail the same way.
         """
         self._opener.addheaders = [("User-Agent", USER_AGENT), *(headers or {}).items()]
         last: Exception | None = None
@@ -298,13 +328,8 @@ class ArchiveClient:
             else:
                 try:
                     return consume(response)
-                except (
-                    http.client.HTTPException,
-                    urllib.error.URLError,
-                    TimeoutError,
-                    OSError,
-                ) as exc:
-                    last = exc
+                except _TransportFailure as exc:
+                    last = exc.__cause__ or exc
                 finally:
                     response.close()
             if attempt < self.retries:
@@ -329,7 +354,7 @@ class ArchiveClient:
         """
 
         def _decode(response: Any) -> str:
-            payload = bytes(response.read())
+            payload = _read_response(response)
             charset = response.headers.get_content_charset() or "utf-8"
             return payload.decode(charset, errors="replace")
 
@@ -343,7 +368,7 @@ class ArchiveClient:
         """
 
         def _read_whole(response: Any) -> tuple[bytes, dict[str, str]]:
-            payload = bytes(response.read())
+            payload = _read_response(response)
             return payload, {key.lower(): value for key, value in response.headers.items()}
 
         return self._fetch(urljoin(self.base_url, path), None, _read_whole)
@@ -413,12 +438,16 @@ class ArchiveClient:
             def _stream(tmp: Path) -> None:
                 nonlocal written
                 with open(tmp, "wb") as handle:
-                    while chunk := response.read(_DOWNLOAD_CHUNK_BYTES):
+                    while chunk := _read_response(response, _DOWNLOAD_CHUNK_BYTES):
                         handle.write(chunk)
                         digest.update(chunk)
                         written += len(chunk)
                 if declared is not None and written != declared:
-                    raise ArchiveError(
+                    # ``HTTPResponse.read(amt)`` returns b"" on a body that ends
+                    # early instead of raising IncompleteRead, so a connection
+                    # dropped mid-video reaches here as a silent short read. It is
+                    # a broken transport like any other and gets the same retry.
+                    raise _TransportFailure(
                         f"{entry.filename} truncated: got {written} bytes, "
                         f"server announced {declared}"
                     )
