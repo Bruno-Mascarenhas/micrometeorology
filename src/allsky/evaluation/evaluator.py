@@ -37,7 +37,7 @@ import pandas as pd
 
 from allsky.clearsky import haurwitz_ghi_from_cos_zenith
 from allsky.config import ExperimentConfig
-from allsky.data.contracts import SKY_CLASS_NAMES, sky_class_name
+from allsky.data.contracts import SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES, sky_class_name
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
     default_embedding_reader,
@@ -47,6 +47,7 @@ from allsky.data.loading import (
 )
 from allsky.erbs import pseudo_diffuse
 from allsky.evaluation.metrics import (
+    REFERENCE_LABELS,
     SKILL_METRIC_KEYS,
     classification_metrics,
     regression_metrics,
@@ -74,12 +75,16 @@ _ELEVATION_EDGES: tuple[float, ...] = (10.0, 20.0, 35.0, 50.0, 90.0)
 #: The bounds are published on Kt, so the frozen ``target_kindex`` column is not
 #: what they may be applied to: under ``kindex_kind="kstar"`` it holds k*, whose
 #: clear-sky value is 1 rather than 0.65.
-_KINDEX_EDGES: tuple[float, ...] = (-np.inf, 0.35, 0.65, np.inf)
+_KINDEX_EDGES: tuple[float, ...] = (
+    -np.inf,
+    SKY_CLASS_KT_UPPER_BOUNDS[0],
+    SKY_CLASS_KT_UPPER_BOUNDS[-1],
+    np.inf,
+)
+#: Stratum keys in the published metrics table, so their spelling is a report
+#: contract rather than a restatement of the edges above.
 _KINDEX_LABELS: tuple[str, ...] = ("overcast_lt0.35", "partial_0.35-0.65", "clear_ge0.65")
 
-#: The baselines a regression target is scored against, one per-sample reference
-#: column ``<label>_<target>`` on the predictions frame.
-_REFERENCE_LABELS: tuple[str, ...] = ("persistence", "clearsky")
 #: Prefix of the per-reference pair count reported for its own metric rows.
 _REFERENCE_COUNT_PREFIX = "n_"
 
@@ -600,16 +605,22 @@ def _attach_reference_columns(
     model's skill.  A reference is absent — and its skill stays ``NaN`` — when
     the split does not carry what it needs.
     """
+    times = pd.to_datetime(frame["timestamp_utc"], utc=True)
+    clearsky_pair = _clearsky_ghi_and_kt(frame, times) if "solar_zenith" in frame.columns else None
     for name in enabled_targets:
         if name == "sky":
             continue
-        frame[f"persistence_{name}"] = _previous_observation_same_day(frame, f"obs_{name}")
-        clearsky = _clearsky_reference(frame, name, kindex_kind=kindex_kind)
+        frame[f"persistence_{name}"] = _previous_observation_same_day(
+            frame, f"obs_{name}", times=times
+        )
+        clearsky = _clearsky_reference(frame, name, kindex_kind=kindex_kind, clearsky=clearsky_pair)
         if clearsky is not None:
             frame[f"clearsky_{name}"] = clearsky
 
 
-def _previous_observation_same_day(frame: pd.DataFrame, observed_column: str) -> np.ndarray:
+def _previous_observation_same_day(
+    frame: pd.DataFrame, observed_column: str, *, times: pd.Series
+) -> np.ndarray:
     """The previous observation of the same acquisition day, the no-change forecast.
 
     The shift stops at the ``day_id`` boundary: the night gap between the last
@@ -618,7 +629,7 @@ def _previous_observation_same_day(frame: pd.DataFrame, observed_column: str) ->
     ordered = pd.DataFrame(
         {
             "day_id": frame["day_id"].to_numpy(),
-            "timestamp_utc": pd.to_datetime(frame["timestamp_utc"], utc=True).to_numpy(),
+            "timestamp_utc": times.to_numpy(),
             "observed": frame[observed_column].to_numpy(dtype=np.float64),
         }
     ).sort_values(["day_id", "timestamp_utc"])
@@ -705,7 +716,7 @@ def _skill_against_references(
     """
     entries = dict.fromkeys(SKILL_METRIC_KEYS, float("nan"))
     predicted = frame[f"pred_{name}"].to_numpy(dtype=np.float64)
-    for label in _REFERENCE_LABELS:
+    for label in REFERENCE_LABELS:
         column = f"{label}_{name}"
         if column not in frame.columns:
             continue
@@ -720,7 +731,11 @@ def _skill_against_references(
 
 
 def _clearsky_reference(
-    frame: pd.DataFrame, name: str, *, kindex_kind: str | None
+    frame: pd.DataFrame,
+    name: str,
+    *,
+    kindex_kind: str | None,
+    clearsky: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray | None:
     """What a cloudless sky would have produced for this target.
 
@@ -731,20 +746,33 @@ def _clearsky_reference(
     manifest that records no kind gets no k-index reference rather than a
     guessed one.  ``dhi`` needs the reference itself: Haurwitz clear-sky GHI at
     the sample's own zenith, decomposed by Erbs at the clear-sky clearness index.
+
+    *clearsky* is the ``(ghi_clear, kt_clear)`` pair for the whole frame when the
+    caller has already built it — both targets read the same one, and deriving it
+    reparses every timestamp.  It is computed here when absent.
     """
     if name == "kindex":
         if kindex_kind == "kstar":
             return np.ones(len(frame), dtype=np.float64)
         if kindex_kind != "kt" or "solar_zenith" not in frame.columns:
             return None
-        return _clearsky_ghi_and_kt(frame)[1]
+        return _resolved_clearsky(frame, clearsky)[1]
     if name != "dhi" or "solar_zenith" not in frame.columns:
         return None
-    ghi_clear, kt_clear = _clearsky_ghi_and_kt(frame)
+    ghi_clear, kt_clear = _resolved_clearsky(frame, clearsky)
     return np.asarray(pseudo_diffuse(ghi_clear, kt_clear), dtype=np.float64)
 
 
-def _clearsky_ghi_and_kt(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+def _resolved_clearsky(
+    frame: pd.DataFrame, clearsky: tuple[np.ndarray, np.ndarray] | None
+) -> tuple[np.ndarray, np.ndarray]:
+    """The caller's prebuilt clear-sky pair, or one built from *frame* now."""
+    if clearsky is not None:
+        return clearsky
+    return _clearsky_ghi_and_kt(frame, pd.to_datetime(frame["timestamp_utc"], utc=True))
+
+
+def _clearsky_ghi_and_kt(frame: pd.DataFrame, times: pd.Series) -> tuple[np.ndarray, np.ndarray]:
     """Haurwitz clear-sky GHI (W m-2) and its clearness index, at each row's zenith.
 
     Returns
@@ -757,10 +785,10 @@ def _clearsky_ghi_and_kt(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     """
     cos_zenith_values = np.cos(np.radians(frame["solar_zenith"].to_numpy(dtype=np.float64)))
     ghi_clear = haurwitz_ghi_from_cos_zenith(cos_zenith_values)
-    times = pd.to_datetime(frame["timestamp_utc"], utc=True).dt.tz_convert(_LOCAL_TZ)
+    local = times.dt.tz_convert(_LOCAL_TZ)
     extraterrestrial = (
         SOLAR_CONSTANT_WM2
-        * eccentricity_correction(times.dt.tz_localize(None))
+        * eccentricity_correction(local.dt.tz_localize(None))
         * np.maximum(cos_zenith_values, 0.0)
     )
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -799,7 +827,7 @@ def _metric_rows(
     skipped = {
         "n",
         "confusion",
-        *(f"{_REFERENCE_COUNT_PREFIX}{label}" for label in _REFERENCE_LABELS),
+        *(f"{_REFERENCE_COUNT_PREFIX}{label}" for label in REFERENCE_LABELS),
     }
     rows: list[dict[str, Any]] = []
     for metric, value in metrics.items():
@@ -820,7 +848,7 @@ def _metric_rows(
 
 def _row_count(metric: str, metrics: Mapping[str, Any]) -> int:
     """Pairs *metric* was computed over: a reference's own count, else the model's."""
-    for label in _REFERENCE_LABELS:
+    for label in REFERENCE_LABELS:
         if metric.endswith(f"_{label}"):
             return int(metrics.get(f"{_REFERENCE_COUNT_PREFIX}{label}", 0))
     return int(metrics.get("n", 0))

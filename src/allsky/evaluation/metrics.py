@@ -27,6 +27,7 @@ from solrad_correction.evaluation.metrics import compute_regression_metrics
 
 __all__ = [
     "CLASSIFICATION_METRIC_KEYS",
+    "REFERENCE_LABELS",
     "REGRESSION_METRIC_KEYS",
     "SKILL_METRIC_KEYS",
     "classification_metrics",
@@ -60,12 +61,14 @@ REGRESSION_METRIC_KEYS: tuple[str, ...] = (
     "n",
 )
 
+#: The baselines every regression target is scored against.  The evaluator names
+#: its per-sample reference columns ``<label>_<target>`` from this same tuple, so
+#: a baseline cannot be published under a label nothing scores.
+REFERENCE_LABELS: tuple[str, ...] = ("persistence", "clearsky")
+
 #: Skill entries appended to a regression target's metrics, one per reference.
-SKILL_METRIC_KEYS: tuple[str, ...] = (
-    "rmse_persistence",
-    "skill_persistence",
-    "rmse_clearsky",
-    "skill_clearsky",
+SKILL_METRIC_KEYS: tuple[str, ...] = tuple(
+    f"{statistic}_{label}" for label in REFERENCE_LABELS for statistic in ("rmse", "skill")
 )
 
 
