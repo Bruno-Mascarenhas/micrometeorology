@@ -401,3 +401,38 @@ class TestTheShippedCaveatsQuoteNoLooseCount:
             "hard-coded hour counts in caveat prose; interpolate with "
             "{{atom:<id>:count}} so the sentence and the panel cannot disagree"
         )
+
+
+class TestTheShippedCaveatsQuoteTheEstimatedScalar:
+    """A curve that estimates one scalar must print THAT scalar, not a copy of it.
+
+    The albedo-scaled curve estimates a single number, and the prose beside the
+    chart is where a reader meets it. Transcribed as a literal it goes stale on
+    the next reprocessing, and the page then ships a sentence contradicting the
+    parameter published in the same file.
+    """
+
+    def test_the_reflected_shortwave_prose_quotes_the_albedo_its_fit_published(self):
+        spec = next(item for item in CLIMATOLOGY_VARIABLES if item.id == "shortwave_up")
+        samples = {"observed_all": np.linspace(5.0, 200.0, 512)}
+        # Deliberately not the archive's albedo: a literal transcribed into the
+        # prose is the regression this test exists to catch, and a sentinel equal
+        # to the production value would let that literal satisfy the assertion.
+        options = {
+            "observed_all": {
+                "lam": 3.5,
+                "kt_max": 0.82,
+                "scales": [420.0, 910.0],
+                "weights": [0.5, 0.5],
+                "gain": 0.4321,
+            }
+        }
+
+        payload = build_variable_payload(spec, samples, version="v1", options=options)
+
+        albedo = payload["subsets"]["observed_all"]["fit"]["params"]["gain"]
+        printed = f"{albedo:.4f}".replace(".", ",")
+        assert any(printed in caveat for caveat in payload["caveats"]), (
+            f"no caveat quotes the published albedo {printed}; interpolate it with "
+            "{{param:gain:4}} so the sentence and the fit cannot disagree"
+        )

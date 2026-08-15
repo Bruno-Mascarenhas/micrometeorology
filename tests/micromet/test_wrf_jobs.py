@@ -748,6 +748,31 @@ def test_a_domain_whose_unit_failed_is_not_covered_by_the_surviving_domain_range
     assert manifest["availability"] == {"TEMP": []}
 
 
+def test_a_raw_netcdf_request_that_published_no_step_is_advertised_as_empty(tmp_path):
+    """``T2`` is not an enum member, yet it publishes under a fixed
+    ``{D}_T2_nnn.json`` id all the same. A run whose every step was withheld
+    must say so: an omitted ``availability`` key reads as "full range" and sends
+    the site to the PREVIOUS run's files under this run's version stamp."""
+    json_dir = tmp_path / "json"
+    json_dir.mkdir()
+    published = jobs.UnitResult(
+        label="wrfout_d01:temperature",
+        kind="values_json",
+        files=tuple(str(json_dir / f"D01_TEMP_{i:03d}.json") for i in range(NT)),
+        domain="D01",
+        n_steps=NT,
+    )
+    withheld = jobs.UnitResult(label="wrfout_d01:T2", kind="values_json", domain="D01", n_steps=NT)
+
+    manifest_path = jobs.write_run_manifest(
+        json_dir, [published, withheld], ["temperature", "T2"], covers_every_variable=False
+    )
+
+    assert manifest_path is not None
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    assert manifest["availability"] == {"T2": []}
+
+
 @pytest.mark.parametrize(
     ("kind", "variable", "output_ids"),
     [
@@ -776,11 +801,24 @@ def test_a_failed_unit_declares_the_output_ids_it_never_wrote(tmp_path, kind, va
     assert result.missing_variables == output_ids
 
 
-def test_a_unit_lost_to_a_broken_pool_declares_the_output_ids_it_never_wrote(monkeypatch, tmp_path):
-    unit = jobs.WorkUnit(
+def test_every_unit_lost_to_a_broken_pool_declares_its_own_output_ids(monkeypatch, tmp_path):
+    """One entry per lost unit, each carrying that unit's own ids.
+
+    Collapsing the results into a set hides both the count and the pairing, so
+    a run that lost two units while advertising one — or that handed a unit its
+    neighbour's ids — would read as correct.
+    """
+    values_unit = jobs.WorkUnit(
         kind="values_json",
         wrf_path=str(tmp_path / "wrfout_d02_oom.nc"),
         variable="clearness_index",
+        json_dir=str(tmp_path),
+        geojson_dir=str(tmp_path),
+    )
+    poteolico_unit = jobs.WorkUnit(
+        kind="poteolico",
+        wrf_path=str(tmp_path / "wrfout_d02_oom.nc"),
+        variable="poteolico100",
         json_dir=str(tmp_path),
         geojson_dir=str(tmp_path),
     )
@@ -800,9 +838,9 @@ def test_a_unit_lost_to_a_broken_pool_declares_the_output_ids_it_never_wrote(mon
 
     monkeypatch.setattr(jobs, "ProcessPoolExecutor", _AlwaysBrokenExecutor)
     monkeypatch.setattr(jobs, "as_completed", lambda futures: list(futures))
-    results = jobs.execute_units([unit, unit], workers=2, echo=lambda _msg: None)
+    results = jobs.execute_units([poteolico_unit, values_unit], workers=2, echo=lambda _msg: None)
 
-    assert {r.missing_variables for r in results} == {("KT",)}
+    assert [r.missing_variables for r in results] == [("POT_EOLICO_100M",), ("KT",)]
 
 
 def test_atomic_json_dump_writes_exactly_the_compact_encoder_bytes(tmp_path):
