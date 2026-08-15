@@ -116,6 +116,56 @@ class TestDailyTotals:
         assert result["rain"].loc["2025-01-02"] == 0.0
 
 
+@pytest.fixture
+def daylight_first_quarter() -> pd.DataFrame:
+    """Hourly Jan-Mar 2025 gated to daylight, so nights and Apr-Dec have no row.
+
+    The shape a solar record takes once it is restricted to hours above the
+    minimum solar elevation: the calendar slots outside the gate are absent
+    rows, not NaN rows.
+    """
+    idx = pd.date_range("2025-01-01", "2025-03-31 23:00", freq="1h")
+    frame = pd.DataFrame({"ghi": np.full(len(idx), 400.0)}, index=idx)
+    return frame.loc[(idx.hour >= 6) & (idx.hour <= 18)]
+
+
+def test_an_hour_the_record_never_covers_is_a_nan_row_not_a_missing_row(
+    daylight_first_quarter,
+):
+    """The published index is the fixed 0..23 day, so the night stays visible.
+
+    A consumer that plots the result positionally against a 24-point hour axis
+    would otherwise read the 06:00 mean as midnight and shift the whole diurnal
+    curve six hours left.
+    """
+    result = diurnal_cycle(daylight_first_quarter, columns=["ghi"])
+
+    assert list(result.index) == list(range(24))
+    assert result["ghi"].loc[0:5].isna().all()
+    assert result["ghi"].loc[19:23].isna().all()
+
+
+def test_a_month_the_record_never_covers_is_a_nan_row_not_a_missing_row(
+    daylight_first_quarter,
+):
+    """The published index is the fixed 1..12 year, so the uncovered months show."""
+    result = monthly_means(daylight_first_quarter, columns=["ghi"])
+
+    assert list(result.index) == list(range(1, 13))
+    assert result["ghi"].loc[4:12].isna().all()
+
+
+@pytest.mark.parametrize("agg", ["total", "Sum", "cumsum", ""])
+def test_an_aggregation_the_helper_does_not_implement_raises(hourly_year, agg):
+    """A mistyped aggregation must not pass silently as a daily mean.
+
+    Falling back would report a day of 24 hourly 1.0 mm tips as 1.0 mm, a
+    twenty-four-fold under-accumulation indistinguishable from a real total.
+    """
+    with pytest.raises(ValueError, match="agg"):
+        daily_totals(hourly_year, columns=["rain"], agg=agg)
+
+
 class TestClearnessIndex:
     def test_basic_ratio(self):
         ghi = pd.Series([0.0, 250.0, 500.0])

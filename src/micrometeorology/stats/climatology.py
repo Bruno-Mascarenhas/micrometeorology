@@ -7,6 +7,8 @@ the average year, or per-season subsets — the summaries the site and reports
 reuse.
 """
 
+from typing import Literal
+
 import pandas as pd
 
 __all__ = [
@@ -78,7 +80,7 @@ def diurnal_cycle(
     """
     index = _datetime_index(df)
     cols = _select_columns(df, columns)
-    return df[cols].groupby(index.hour).mean()
+    return df[cols].groupby(index.hour).mean().reindex(range(24))
 
 
 def monthly_means(
@@ -103,7 +105,7 @@ def monthly_means(
     """
     index = _datetime_index(df)
     cols = _select_columns(df, columns)
-    return df[cols].groupby(index.month).mean()
+    return df[cols].groupby(index.month).mean().reindex(range(1, 13))
 
 
 def seasonal_groups(
@@ -134,7 +136,7 @@ def seasonal_groups(
 def daily_totals(
     df: pd.DataFrame,
     columns: list[str] | None = None,
-    agg: str = "sum",
+    agg: Literal["sum", "mean"] = "sum",
 ) -> pd.DataFrame:
     """Resample to daily resolution with a sum or mean aggregation.
 
@@ -149,7 +151,7 @@ def daily_totals(
         Subset to aggregate; ``None`` uses every column. Missing names are
         ignored.
     agg:
-        ``"sum"`` (default) or ``"mean"``. Any other value falls back to mean.
+        ``"sum"`` (default) or ``"mean"``.
 
     Returns
     -------
@@ -158,6 +160,13 @@ def daily_totals(
         skipped within a day; a day with no valid sample yields NaN for either
         aggregation, so a 24 h outage stays distinguishable from a genuinely
         dry (all-zero) day.
+
+    Raises
+    ------
+    ValueError
+        If ``agg`` is neither ``"sum"`` nor ``"mean"``. A synonym or a typo
+        would otherwise accumulate a rain gauge as a mean, publishing a daily
+        total 24 times too small with nothing to distinguish it from a real one.
     """
     cols = _select_columns(df, columns)
     grouped = df[cols].resample("1D")
@@ -165,4 +174,6 @@ def daily_totals(
         # ``min_count=1`` keeps an all-NaN day out of the totals: plain ``sum()``
         # reports it as 0.0, which reads as a dry day instead of a sensor gap.
         return grouped.sum(min_count=1)
-    return grouped.mean()
+    if agg == "mean":
+        return grouped.mean()
+    raise ValueError(f"daily_totals agg must be 'sum' or 'mean', got {agg!r}")
