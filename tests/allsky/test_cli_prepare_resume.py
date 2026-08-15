@@ -27,6 +27,7 @@ from typer.testing import CliRunner, Result
 from allsky.cli import app
 from allsky.cli.prepare import _apply_frame_qc
 from allsky.data.contracts import QCFlag
+from tests.allsky._archive_fake import write_overlay_video
 from tests.allsky.test_cli_prepare import _write_config
 
 runner = CliRunner()
@@ -198,3 +199,74 @@ class TestApplyFrameQC:
             int(QCFlag.LOW_SUN),
         ]
         assert "no visual QC for video(s) ['allsky-20260102.mp4']" in capsys.readouterr().out
+
+
+def _extract_only(config: Path) -> Result:
+    return runner.invoke(
+        app, ["prepare-local", "--config", str(config), "--steps", "extract-frames"]
+    )
+
+
+def _config_with_timestamps(
+    path: Path, *, videos: Path, dat: Path, dataset_dir: Path, source: str
+) -> Path:
+    path.write_text(
+        "video:\n"
+        f"  pattern: '{videos}/allsky-*.mp4'\n"
+        f"  timestamps: '{source}'\n"
+        "sensor:\n"
+        f"  paths: ['{dat}']\n"
+        "output:\n"
+        f"  dataset_dir: '{dataset_dir}'\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_changed_preprocessing_section_re_extracts_instead_of_resuming(
+    tmp_path: Path, dark_video: Path, synthetic_dat: Path
+):
+    config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
+    assert _prepare(config).exit_code == 0
+    config.write_text(config.read_text() + "resize: 32\n", encoding="utf-8")
+
+    result = _prepare(config)
+
+    assert result.exit_code == 0, result.output
+    shipped = {
+        iio.imread(jpeg).shape[:2]
+        for jpeg in (dataset_dir / "frames" / "allsky-20260101").glob("*.jpg")
+    }
+    assert shipped == {(32, 32)}
+
+
+def test_switching_the_timestamp_source_re_extracts_instead_of_resuming(
+    tmp_path: Path, synthetic_dat: Path
+):
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    write_overlay_video(
+        videos / "allsky-20260101.mp4", [f"2026010112{minute:02d}30" for minute in range(3)]
+    )
+    dataset_dir = tmp_path / "dataset"
+    config = _config_with_timestamps(
+        tmp_path / "c.yaml",
+        videos=videos,
+        dat=synthetic_dat,
+        dataset_dir=dataset_dir,
+        source="overlay",
+    )
+    assert _extract_only(config).exit_code == 0
+
+    _config_with_timestamps(
+        config, videos=videos, dat=synthetic_dat, dataset_dir=dataset_dir, source="modelled"
+    )
+    result = _extract_only(config)
+
+    assert result.exit_code == 0, result.output
+    frames = pd.read_parquet(dataset_dir / "frames" / "allsky-20260101" / "manifest.parquet")
+    assert sorted(str(value) for value in frames["timestamp"]) == [
+        "2026-01-01 06:00:00",
+        "2026-01-01 06:01:00",
+        "2026-01-01 06:02:00",
+    ]

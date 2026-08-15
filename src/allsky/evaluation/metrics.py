@@ -22,10 +22,12 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from allsky.data.contracts import SKY_CLASS_COUNT
 from solrad_correction.evaluation.metrics import compute_regression_metrics
 
 __all__ = [
     "CLASSIFICATION_METRIC_KEYS",
+    "REFERENCE_LABELS",
     "REGRESSION_METRIC_KEYS",
     "SKILL_METRIC_KEYS",
     "classification_metrics",
@@ -59,12 +61,14 @@ REGRESSION_METRIC_KEYS: tuple[str, ...] = (
     "n",
 )
 
+#: The baselines every regression target is scored against.  The evaluator names
+#: its per-sample reference columns ``<label>_<target>`` from this same tuple, so
+#: a baseline cannot be published under a label nothing scores.
+REFERENCE_LABELS: tuple[str, ...] = ("persistence", "clearsky")
+
 #: Skill entries appended to a regression target's metrics, one per reference.
-SKILL_METRIC_KEYS: tuple[str, ...] = (
-    "rmse_persistence",
-    "skill_persistence",
-    "rmse_clearsky",
-    "skill_clearsky",
+SKILL_METRIC_KEYS: tuple[str, ...] = tuple(
+    f"{statistic}_{label}" for label in REFERENCE_LABELS for statistic in ("rmse", "skill")
 )
 
 
@@ -161,7 +165,7 @@ def regression_metrics(obs: ArrayLike, pred: ArrayLike) -> dict[str, float]:
 
 
 def classification_metrics(
-    y_true: ArrayLike, y_pred: ArrayLike, n_classes: int = 3
+    y_true: ArrayLike, y_pred: ArrayLike, n_classes: int = SKY_CLASS_COUNT
 ) -> dict[str, Any]:
     """Classification metrics for integer-labelled predictions.
 
@@ -177,7 +181,8 @@ def classification_metrics(
     y_true, y_pred:
         True and predicted class integers.
     n_classes:
-        Number of classes (default 3: clear / partially_cloudy / overcast).
+        Number of classes, defaulting to :data:`~allsky.data.contracts.SKY_CLASS_COUNT`
+        so an absent-column split reports the same confusion shape as a scored one.
 
     Returns
     -------

@@ -37,7 +37,7 @@ import pandas as pd
 
 from allsky.clearsky import haurwitz_ghi_from_cos_zenith
 from allsky.config import ExperimentConfig
-from allsky.data.contracts import SKY_CLASS_NAMES, sky_class_name
+from allsky.data.contracts import SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES, sky_class_name
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
     default_embedding_reader,
@@ -47,6 +47,7 @@ from allsky.data.loading import (
 )
 from allsky.erbs import pseudo_diffuse
 from allsky.evaluation.metrics import (
+    REFERENCE_LABELS,
     SKILL_METRIC_KEYS,
     classification_metrics,
     regression_metrics,
@@ -67,12 +68,25 @@ _LOCAL_TZ = timezone(timedelta(hours=-3))
 #: band and are simply absent from the elevation breakdown.
 _ELEVATION_EDGES: tuple[float, ...] = (10.0, 20.0, 35.0, 50.0, 90.0)
 
-#: k-index band edges used as a **partial-sun proxy**: the continuous target
-#: k-index (k* or k_t, not the pre-binned ``sky_class``) split at the same
-#: clear/overcast thresholds, so the middle band is the partial-cloud regime
-#: where diffuse is hardest to predict.
-_KINDEX_EDGES: tuple[float, ...] = (-np.inf, 0.35, 0.65, np.inf)
+#: k-index band edges used as a **partial-sun proxy**: the continuous clearness
+#: index ``target_kt`` (not the pre-binned ``sky_class``) split at the outer
+#: bounds of :data:`~allsky.data.contracts.SKY_CLASS_KT_UPPER_BOUNDS`, so the
+#: middle band is the partial-cloud regime where diffuse is hardest to predict.
+#: The bounds are published on Kt, so the frozen ``target_kindex`` column is not
+#: what they may be applied to: under ``kindex_kind="kstar"`` it holds k*, whose
+#: clear-sky value is 1 rather than 0.65.
+_KINDEX_EDGES: tuple[float, ...] = (
+    -np.inf,
+    SKY_CLASS_KT_UPPER_BOUNDS[0],
+    SKY_CLASS_KT_UPPER_BOUNDS[-1],
+    np.inf,
+)
+#: Stratum keys in the published metrics table, so their spelling is a report
+#: contract rather than a restatement of the edges above.
 _KINDEX_LABELS: tuple[str, ...] = ("overcast_lt0.35", "partial_0.35-0.65", "clear_ge0.65")
+
+#: Prefix of the per-reference pair count reported for its own metric rows.
+_REFERENCE_COUNT_PREFIX = "n_"
 
 #: The regression targets, keyed by their manifest observation column.
 _REGRESSION_TARGETS: dict[str, str] = {
@@ -108,7 +122,9 @@ class EvaluationResult:
     confusion:
         ``{"labels": [...], "matrix": [[...]]}`` for the sky head, or ``None``.
     predictions:
-        Per-sample DataFrame (identity + strata + observed/predicted columns).
+        Per-sample DataFrame (identity + strata + observed/predicted columns +
+        the ``persistence_`` / ``clearsky_`` baseline references every metric was
+        scored against).
     meta:
         Provenance: experiment ``name``, ``model``, ``feature_set``, ``device``,
         ``split_id`` / ``split_id_ok``, ``manifest_sha256`` / ``manifest_hash_ok``
@@ -240,6 +256,7 @@ def evaluate_checkpoint(
         root=root,
         embedding_reader=embedding_reader,
         image_backbone_builder=image_backbone_builder,
+        kindex_kind=manifest_kind,
     )
 
     global_metrics = _global_metrics(predictions, enabled_targets)
@@ -405,6 +422,7 @@ def _run_inference(
     root: Path,
     embedding_reader: EmbeddingReader | None,
     image_backbone_builder: Any | None,
+    kindex_kind: str | None,
 ) -> pd.DataFrame:
     """Rebuild the model, run a no-grad pass and assemble the predictions frame."""
     import torch
@@ -478,7 +496,7 @@ def _run_inference(
         if name in predicted and name in target_normalizers:
             predicted[name] = np.asarray(target_normalizers[name].denormalize(predicted[name]))
 
-    return _build_predictions_frame(split_df, predicted, enabled_targets)
+    return _build_predictions_frame(split_df, predicted, enabled_targets, kindex_kind=kindex_kind)
 
 
 def _build_split_dataset(
@@ -537,9 +555,18 @@ def _extract_prediction(name: str, outputs: Mapping[str, Any]) -> np.ndarray:
 
 
 def _build_predictions_frame(
-    split_df: pd.DataFrame, predicted: Mapping[str, np.ndarray], enabled_targets: Sequence[str]
+    split_df: pd.DataFrame,
+    predicted: Mapping[str, np.ndarray],
+    enabled_targets: Sequence[str],
+    *,
+    kindex_kind: str | None,
 ) -> pd.DataFrame:
-    """Assemble the per-sample predictions frame (identity + strata + obs/pred)."""
+    """Assemble the per-sample predictions frame (identity + strata + obs/pred).
+
+    *kindex_kind* is the k-index the manifest's ``target_kindex`` column holds
+    (:func:`_manifest_kindex_kind`); it selects the clear-sky reference of the
+    k-index head and is ``None`` for a manifest that does not record it.
+    """
     frame = pd.DataFrame(
         {
             "sample_id": split_df["sample_id"].astype(str).to_numpy(),
@@ -562,7 +589,52 @@ def _build_predictions_frame(
             )
             frame[f"obs_{name}"] = observed
             frame[f"pred_{name}"] = np.asarray(predicted[name], dtype=np.float64)
+    _attach_reference_columns(frame, enabled_targets, kindex_kind=kindex_kind)
     return frame
+
+
+def _attach_reference_columns(
+    frame: pd.DataFrame, enabled_targets: Sequence[str], *, kindex_kind: str | None
+) -> None:
+    """Attach the per-sample baseline references, built over the whole split.
+
+    A stratified metric slices these columns instead of rebuilding a baseline
+    from the stratum's own rows: persistence rebuilt inside a stratum pairs rows
+    that are hours or days apart (``sky_class`` and ``qc`` members are not even
+    contiguous in time), which inflates the reference error and flatters the
+    model's skill.  A reference is absent — and its skill stays ``NaN`` — when
+    the split does not carry what it needs.
+    """
+    times = pd.to_datetime(frame["timestamp_utc"], utc=True)
+    clearsky_pair = _clearsky_ghi_and_kt(frame, times) if "solar_zenith" in frame.columns else None
+    for name in enabled_targets:
+        if name == "sky":
+            continue
+        frame[f"persistence_{name}"] = _previous_observation_same_day(
+            frame, f"obs_{name}", times=times
+        )
+        clearsky = _clearsky_reference(frame, name, kindex_kind=kindex_kind, clearsky=clearsky_pair)
+        if clearsky is not None:
+            frame[f"clearsky_{name}"] = clearsky
+
+
+def _previous_observation_same_day(
+    frame: pd.DataFrame, observed_column: str, *, times: pd.Series
+) -> np.ndarray:
+    """The previous observation of the same acquisition day, the no-change forecast.
+
+    The shift stops at the ``day_id`` boundary: the night gap between the last
+    frame of a day and the first of the next is not a persistence horizon.
+    """
+    ordered = pd.DataFrame(
+        {
+            "day_id": frame["day_id"].to_numpy(),
+            "timestamp_utc": times.to_numpy(),
+            "observed": frame[observed_column].to_numpy(dtype=np.float64),
+        }
+    ).sort_values(["day_id", "timestamp_utc"])
+    shifted = ordered.groupby("day_id", sort=False)["observed"].shift(1)
+    return shifted.sort_index().to_numpy(dtype=np.float64)
 
 
 def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame) -> None:
@@ -585,9 +657,9 @@ def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame) -> None:
         elevation, bins=list(_ELEVATION_EDGES), labels=elevation_labels, include_lowest=True
     ).astype("object")
 
-    kindex = split_df["target_kindex"].to_numpy(dtype=np.float64)
+    kt = split_df["target_kt"].to_numpy(dtype=np.float64)
     frame["kindex_band"] = pd.cut(
-        kindex, bins=list(_KINDEX_EDGES), labels=list(_KINDEX_LABELS), right=False
+        kt, bins=list(_KINDEX_EDGES), labels=list(_KINDEX_LABELS), right=False
     ).astype("object")
 
 
@@ -627,60 +699,101 @@ def _target_metrics(frame: pd.DataFrame, name: str) -> dict[str, Any]:
         return regression_metrics(np.empty(0), np.empty(0))
     observed = frame[obs_col].to_numpy(dtype=np.float64)
     metrics = regression_metrics(observed, frame[pred_col].to_numpy())
-    metrics.update(_skill_against_references(frame, name, observed, float(metrics["rmse"])))
+    metrics.update(_skill_against_references(frame, name, observed))
     return metrics
 
 
 def _skill_against_references(
-    frame: pd.DataFrame, name: str, observed: np.ndarray, model_rmse: float
+    frame: pd.DataFrame, name: str, observed: np.ndarray
 ) -> dict[str, float]:
-    """Skill of the model against persistence and against a clear-sky reference."""
+    """Skill of the model against every reference attached to *frame*.
+
+    Both RMSEs of a skill score are computed over the rows where observation,
+    prediction and that reference are all finite, so the ratio never divides
+    errors measured on different samples; ``n_<reference>`` carries that shared
+    pair count, which the earliest row of a day never joins (persistence has no
+    predecessor there).
+    """
     entries = dict.fromkeys(SKILL_METRIC_KEYS, float("nan"))
-    for label, reference in (
-        ("persistence", _persistence_reference(frame, observed)),
-        ("clearsky", _clearsky_reference(frame, name)),
-    ):
-        if reference is None:
+    predicted = frame[f"pred_{name}"].to_numpy(dtype=np.float64)
+    for label in REFERENCE_LABELS:
+        column = f"{label}_{name}"
+        if column not in frame.columns:
             continue
-        reference_rmse = float(regression_metrics(observed, reference)["rmse"])
+        reference = frame[column].to_numpy(dtype=np.float64)
+        paired = np.isfinite(observed) & np.isfinite(predicted) & np.isfinite(reference)
+        reference_rmse = float(regression_metrics(observed[paired], reference[paired])["rmse"])
+        model_rmse = float(regression_metrics(observed[paired], predicted[paired])["rmse"])
         entries[f"rmse_{label}"] = reference_rmse
         entries[f"skill_{label}"] = skill_score(model_rmse, reference_rmse)
+        entries[f"{_REFERENCE_COUNT_PREFIX}{label}"] = float(paired.sum())
     return entries
 
 
-def _persistence_reference(frame: pd.DataFrame, observed: np.ndarray) -> np.ndarray | None:
-    """The previous observation in time, the no-change forecast."""
-    if "timestamp_utc" not in frame.columns or len(observed) < 2:
-        return None
-    order = np.argsort(pd.to_datetime(frame["timestamp_utc"], utc=True).to_numpy())
-    shifted = np.full(len(observed), np.nan, dtype=np.float64)
-    ordered = observed[order]
-    shifted[order[1:]] = ordered[:-1]
-    return shifted
-
-
-def _clearsky_reference(frame: pd.DataFrame, name: str) -> np.ndarray | None:
+def _clearsky_reference(
+    frame: pd.DataFrame,
+    name: str,
+    *,
+    kindex_kind: str | None,
+    clearsky: tuple[np.ndarray, np.ndarray] | None = None,
+) -> np.ndarray | None:
     """What a cloudless sky would have produced for this target.
 
-    ``kindex`` is a ratio to a clear-sky reference, so a clear sky is exactly
-    ``1``. ``dhi`` needs the reference itself: Haurwitz clear-sky GHI at the
-    sample's own zenith, decomposed by Erbs at the clear-sky clearness index.
+    ``kindex`` is a ratio to a clear-sky reference, but which one depends on the
+    k-index the manifest was built with: k* = GHI / GHI_Haurwitz is exactly ``1``
+    under a cloudless sky, while k_t = GHI / E0h is the clear-sky clearness index
+    (~0.7-0.8), a value no sky exceeds by much and none produces at ``1``.  A
+    manifest that records no kind gets no k-index reference rather than a
+    guessed one.  ``dhi`` needs the reference itself: Haurwitz clear-sky GHI at
+    the sample's own zenith, decomposed by Erbs at the clear-sky clearness index.
+
+    *clearsky* is the ``(ghi_clear, kt_clear)`` pair for the whole frame when the
+    caller has already built it — both targets read the same one, and deriving it
+    reparses every timestamp.  It is computed here when absent.
     """
     if name == "kindex":
-        return np.ones(len(frame), dtype=np.float64)
+        if kindex_kind == "kstar":
+            return np.ones(len(frame), dtype=np.float64)
+        if kindex_kind != "kt" or "solar_zenith" not in frame.columns:
+            return None
+        return _resolved_clearsky(frame, clearsky)[1]
     if name != "dhi" or "solar_zenith" not in frame.columns:
         return None
+    ghi_clear, kt_clear = _resolved_clearsky(frame, clearsky)
+    return np.asarray(pseudo_diffuse(ghi_clear, kt_clear), dtype=np.float64)
+
+
+def _resolved_clearsky(
+    frame: pd.DataFrame, clearsky: tuple[np.ndarray, np.ndarray] | None
+) -> tuple[np.ndarray, np.ndarray]:
+    """The caller's prebuilt clear-sky pair, or one built from *frame* now."""
+    if clearsky is not None:
+        return clearsky
+    return _clearsky_ghi_and_kt(frame, pd.to_datetime(frame["timestamp_utc"], utc=True))
+
+
+def _clearsky_ghi_and_kt(frame: pd.DataFrame, times: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+    """Haurwitz clear-sky GHI (W m-2) and its clearness index, at each row's zenith.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        ``(ghi_clear, kt_clear)``, both shape ``(N,)`` ``float64``: clear-sky
+        global horizontal irradiance in W m-2 and the dimensionless ratio of it
+        to the extraterrestrial horizontal irradiance, ``NaN`` where the sun is
+        down.
+    """
     cos_zenith_values = np.cos(np.radians(frame["solar_zenith"].to_numpy(dtype=np.float64)))
     ghi_clear = haurwitz_ghi_from_cos_zenith(cos_zenith_values)
-    times = pd.to_datetime(frame["timestamp_utc"], utc=True).dt.tz_convert(_LOCAL_TZ)
+    local = times.dt.tz_convert(_LOCAL_TZ)
     extraterrestrial = (
         SOLAR_CONSTANT_WM2
-        * eccentricity_correction(times.dt.tz_localize(None))
+        * eccentricity_correction(local.dt.tz_localize(None))
         * np.maximum(cos_zenith_values, 0.0)
     )
     with np.errstate(divide="ignore", invalid="ignore"):
         kt_clear = np.where(extraterrestrial > 0.0, ghi_clear / extraterrestrial, np.nan)
-    return np.asarray(pseudo_diffuse(ghi_clear, kt_clear), dtype=np.float64)
+    return ghi_clear, np.asarray(kt_clear, dtype=np.float64)
 
 
 def _stratified_metrics(
@@ -710,11 +823,15 @@ def _stratified_metrics(
 def _metric_rows(
     target: str, stratum_kind: str, stratum: str, metrics: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
-    """Expand a metric dict into long-form rows (dropping ``n`` and the confusion)."""
-    count = metrics.get("n", 0)
+    """Expand a metric dict into long-form rows (dropping the counts and the confusion)."""
+    skipped = {
+        "n",
+        "confusion",
+        *(f"{_REFERENCE_COUNT_PREFIX}{label}" for label in REFERENCE_LABELS),
+    }
     rows: list[dict[str, Any]] = []
     for metric, value in metrics.items():
-        if metric in ("n", "confusion"):
+        if metric in skipped:
             continue
         rows.append(
             {
@@ -723,7 +840,15 @@ def _metric_rows(
                 "stratum": stratum,
                 "metric": metric,
                 "value": float(value),
-                "n": int(count),
+                "n": _row_count(metric, metrics),
             }
         )
     return rows
+
+
+def _row_count(metric: str, metrics: Mapping[str, Any]) -> int:
+    """Pairs *metric* was computed over: a reference's own count, else the model's."""
+    for label in REFERENCE_LABELS:
+        if metric.endswith(f"_{label}"):
+            return int(metrics.get(f"{_REFERENCE_COUNT_PREFIX}{label}", 0))
+    return int(metrics.get("n", 0))

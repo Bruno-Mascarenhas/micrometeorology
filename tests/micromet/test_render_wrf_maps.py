@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
+import pytest
 from typer.testing import CliRunner
 
 from micrometeorology.cli import render_wrf_maps
@@ -278,6 +279,41 @@ def _drop_variable(wrf_path: Path, name: str) -> None:
 # ---------------------------------------------------------------------------
 # Duplicate suppression and CLI exit status
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("requested", "canonical"),
+    [
+        (["swdown"], ["SWDOWN"]),
+        (["SwDoWn"], ["SWDOWN"]),
+        (["Temperature"], ["temperature"]),
+        (["POTEOLICO50"], ["poteolico"]),
+        (["T2"], ["T2"]),
+    ],
+)
+def test_a_mis_cased_request_is_folded_to_the_spelling_every_branch_compares_with(
+    requested, canonical
+):
+    """A raw NetCDF field such as ``T2`` names no variable and stays untouched."""
+    assert render_wrf_maps._normalize_var_list(requested) == canonical
+
+
+def test_a_mis_cased_swdown_still_drops_the_night_steps(tmp_path, monkeypatch):
+    """``-v swdown`` writes the same ``SWDOWN_D0X_nnn.png`` names the gated run does.
+
+    Ungated, the night frames are all-zero PNGs published under the canonical
+    names, disagreeing with the JSON step count the same pipeline exports and
+    padding the WebM with hours the site has no data for.
+    """
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_mis_cased.nc"
+    _write_full_wrf_file(wrf, seed=31, start_hour_utc=19)
+
+    tasks = _build_tasks(wrf, render_wrf_maps._normalize_var_list(["swdown"]), tmp_path / "figs")
+
+    assert [Path(task.output_path).name for task in tasks] == [
+        f"SWDOWN_D02_{i:03d}.png" for i in range(3)
+    ]
 
 
 def test_duplicate_variable_requests_do_not_render_the_same_png_twice(tmp_path, monkeypatch):

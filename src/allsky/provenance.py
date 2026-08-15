@@ -11,18 +11,25 @@ there is exactly one implementation of each:
   (``manifest_sha256``) written by
   :func:`allsky.data.manifest.write_manifest_parquet` and re-verified by
   :func:`allsky.bundle.validate_bundle`.
+- :func:`config_subset_sha256` — the resume gate every stage hashes the config
+  subset its artifact depends on with (:mod:`allsky.cli.prepare`,
+  :mod:`allsky.cli.embeddings`).
 
 Pure stdlib + pandas: importing this module never pulls torch.
 """
 
 import hashlib
+import json
+from collections.abc import Mapping, Sequence
 from importlib import metadata as importlib_metadata
+from typing import Any
 
 import pandas as pd
+from pydantic import BaseModel
 
 from micrometeorology.common.git import run_git, source_root
 
-__all__ = ["code_version", "content_sha256", "git_commit"]
+__all__ = ["code_version", "config_subset_sha256", "content_sha256", "git_commit"]
 
 _DISTRIBUTION = "labmim-micrometeorology"
 
@@ -70,3 +77,62 @@ def content_sha256(manifest: pd.DataFrame) -> str:
     # for. "\n" is what Linux already produced, so no recorded digest moves.
     digest.update(manifest.to_csv(index=False, lineterminator="\n").encode("utf-8"))
     return digest.hexdigest()
+
+
+def config_subset_sha256(
+    config: BaseModel,
+    *,
+    sections: Sequence[str],
+    nested_fields: Mapping[str, Sequence[str]] | None = None,
+    subject: str,
+) -> str:
+    """Order-independent content hash of a chosen subset of a config model.
+
+    A pipeline stage resumes onto its own artifacts only while the config that
+    shaped them is unchanged, and each stage depends on a different slice of the
+    tree: *sections* names the sub-models taken whole, *nested_fields* the
+    parents taken field by field (a section whose siblings must not invalidate
+    the artifact, such as a glob that only widens the day set).
+
+    Parameters
+    ----------
+    config:
+        The populated config model to hash a subset of.
+    sections:
+        Top-level field names of *config*, each dumped whole.
+    nested_fields:
+        ``{parent: (field, ...)}`` for parents dumped field by field.
+    subject:
+        What the digest gates, named in the error message below.
+
+    Returns
+    -------
+    str
+        Hex sha256 over the canonical JSON of the subset, so two configs
+        agreeing on it hash alike whatever the key order in their YAML.
+
+    Raises
+    ------
+    RuntimeError
+        When a name is not a field of its model: pydantic drops unknown include
+        keys silently, which would shrink the hash without any sign of it.
+    """
+    nested = dict(nested_fields or {})
+    unknown = [name for name in sections if name not in type(config).model_fields]
+    for parent, names in nested.items():
+        child = getattr(config, parent, None)
+        if not isinstance(child, BaseModel):
+            unknown.append(parent)
+            continue
+        unknown += [f"{parent}.{name}" for name in names if name not in type(child).model_fields]
+    if unknown:
+        raise RuntimeError(
+            f"{type(config).__name__} has no field(s) {unknown}; {subject} would stop covering them"
+        )
+    include: dict[str, Any] = dict.fromkeys(sections, True)
+    for parent, names in nested.items():
+        include[parent] = set(names)
+    canonical = json.dumps(
+        config.model_dump(mode="json", include=include), sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

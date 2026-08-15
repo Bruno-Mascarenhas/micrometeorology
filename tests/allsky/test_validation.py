@@ -260,3 +260,15 @@ class TestProvenanceAndSplitColumn:
         meta = {**meta, "alignment_id": "something_else"}
         report = validate_manifest(manifest, meta, data_root=tmp_path, check_files=False)
         assert any("alignment_id column" in e and "does not match meta" in e for e in report.errors)
+
+
+def test_meta_without_feature_columns_warns_that_the_finiteness_check_was_skipped(
+    site: SiteConfig, tmp_path: Path
+):
+    manifest, meta = _clean_manifest(site, tmp_path)
+    manifest.loc[0, "air_temp_c"] = np.nan
+    truncated_meta = {k: v for k, v in meta.items() if k != "feature_columns"}
+
+    report = validate_manifest(manifest, truncated_meta, data_root=tmp_path, check_files=False)
+
+    assert any("feature_columns" in w for w in report.warnings)

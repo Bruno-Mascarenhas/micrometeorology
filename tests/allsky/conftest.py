@@ -29,6 +29,7 @@ _TORCH_BACKED = (
     "test_configs_repo.py",
     "test_e2e_experiment.py",
     "test_engine.py",
+    "test_engine_audit.py",
     "test_engine_findings.py",
     "test_evaluator.py",
     "test_evaluator_findings.py",

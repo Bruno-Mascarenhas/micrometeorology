@@ -113,6 +113,24 @@ class TestResolveWrfColumn:
         assert resolve_wrf_column(MonitoringSeries("x", "X", "Sw_up"), pd.Index(["Sw_up"])) is None
 
 
+@pytest.mark.parametrize("cumulative_field", ["RAINNC", "RAINC"])
+def test_an_accumulated_wrf_rain_field_is_not_adopted_as_the_precipitation_layer(
+    cumulative_field: str,
+) -> None:
+    """WRF writes RAINC and RAINNC accumulated since the run's initialisation.
+
+    The card's station layers are the rain of each interval, and nothing between
+    the extraction file and the chart differences the model column, so adopting
+    one would draw a run's running total against a per-hour total under the same
+    "mm" label — and withdraw the page's own note that the layer is missing.
+    """
+    precipitation = next(chart for chart in MONITORING_CHARTS if chart.id == "precipitacao")
+
+    resolved = resolve_wrf_column(precipitation.series[0], pd.Index([cumulative_field]))
+
+    assert resolved is None
+
+
 class TestExporter:
     def _payload(self, archive: Path, tmp_path: Path, *args: str) -> dict:
         result = runner.invoke(
@@ -178,8 +196,8 @@ class TestExporter:
         payload = self._payload(archive, tmp_path, "-w", str(self._wrf_dat(tmp_path)))
         charts = {chart["id"]: chart for chart in payload["charts"]}
         candidates = charts["precipitacao"]["wrf_pending"]["precip"]
-        assert "RAINNC" in candidates
         assert "precip" in candidates
+        assert "RAINNC" not in candidates, "an accumulated field is not a per-interval layer"
 
     def test_gaps_serialise_as_null(self, archive: Path, tmp_path: Path) -> None:
         frame = pd.read_parquet(archive / "station_hourly.parquet")

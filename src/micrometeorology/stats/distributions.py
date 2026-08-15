@@ -626,11 +626,21 @@ def _fit_normal(values: NDArray) -> dict[str, float]:
     ``ddof=1`` is the display convention: at the sample sizes this module sees
     it is indistinguishable from the ``1/n`` maximum-likelihood variance, and it
     is the number the descriptive statistics beside it already quote.
+
+    A sample of zero spread yields NaN parameters, as the gamma and beta
+    estimators do: unlike the Weibull, whose shape clamp keeps a degenerate fit
+    drawable, ``sigma = 0`` is the Dirac limit and has no representable density,
+    so every abscissa evaluates to NaN. Reporting it would clear the caller's
+    finite-parameter gate and publish a curveless fit whose quantile gap reads
+    as a perfect zero.
     """
     sample = _clean(values)
     if sample.size < 2:
         return {"mu": float("nan"), "sigma": float("nan")}
-    return {"mu": float(sample.mean()), "sigma": float(sample.std(ddof=1))}
+    spread = float(sample.std(ddof=1))
+    if spread <= 0.0:
+        return {"mu": float("nan"), "sigma": float("nan")}
+    return {"mu": float(sample.mean()), "sigma": spread}
 
 
 def _normal_pdf(x: NDArray, params: Mapping[str, float]) -> NDArray:

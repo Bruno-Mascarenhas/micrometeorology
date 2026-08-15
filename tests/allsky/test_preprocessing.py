@@ -3,6 +3,7 @@
 Pure numpy/PIL: no torch, no network, synthetic arrays only.
 """
 
+import tracemalloc
 from pathlib import Path
 
 import numpy as np
@@ -162,6 +163,30 @@ class TestVisualQC:
                 saturated_fraction_threshold=threshold,
             )
             assert flagged == (expected > threshold)
+
+
+def test_dark_flag_needs_no_float64_copy_of_the_frame():
+    frame = _rgb(1024, 1024, fill=200)
+
+    tracemalloc.start()
+    visual_qc(frame)
+    _, peak_bytes = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert peak_bytes < 2 * frame.nbytes
+
+
+@pytest.mark.parametrize("fill", [0, 3, 9, 10, 11, 128, 255])
+def test_dark_flag_matches_the_float64_luminance_of_the_whole_frame(fill: int):
+    rng = np.random.default_rng(0)
+    frame = _rgb(24, 32, fill=fill)
+    frame[0] = rng.integers(0, 256, (32, 3), dtype=np.uint8)
+    weights = np.array([0.299, 0.587, 0.114], dtype=np.float64)
+    expected = float((frame.astype(np.float64) @ weights).mean())
+
+    for threshold in (expected - 1e-6, expected + 1e-6):
+        flagged = QCFlag.FRAME_DARK in visual_qc(frame, dark_threshold=threshold)
+        assert flagged == (expected < threshold)
 
 
 class TestProcessFrame:

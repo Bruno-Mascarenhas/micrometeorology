@@ -1,8 +1,10 @@
 """``extract-frames`` CLI command.
 
-Extracts timestamped JPEG frames from a single all-sky timelapse video, using
-the ``video`` section of a :class:`allsky.config.PrepareConfig` (built-in
-defaults when ``--config`` is omitted) for the frame -> wall-clock time mapping.
+Extracts timestamped JPEG frames from a single all-sky timelapse video.  The
+``video.timestamps`` field of a :class:`allsky.config.PrepareConfig` (built-in
+defaults when ``--config`` is omitted) selects the frame -> wall-clock time
+mapping, the same way ``prepare-local`` and ``sync-archive`` do: the burned-in
+overlay by default, the ``start_time``/``minutes_per_frame`` model on request.
 This is the low-level, single-video entry point; the full local pipeline
 (extract -> manifest -> splits) lives in ``allsky prepare-local``.
 
@@ -10,6 +12,7 @@ imageio-ffmpeg is imported lazily inside the command so ``allsky --help`` stays
 light and torch-free.
 """
 
+import logging
 from pathlib import Path
 from typing import Annotated
 
@@ -45,11 +48,29 @@ def extract_frames_cmd(
     ] = None,
     config: ConfigOption = None,
 ) -> None:
-    """Extract timestamped JPEG frames from an all-sky video."""
-    cfg = PrepareConfig() if config is None else load_prepare_config(config)
-    from allsky.video import extract_frames  # lazy: needs imageio-ffmpeg
+    """Extract timestamped JPEG frames from an all-sky video.
 
-    manifest = extract_frames(video, out_dir, cfg.video, step=step, resize=resize)
+    ``video.timestamps`` picks the clock: ``overlay`` (the default) reads the
+    time the camera burns into each frame, ``modelled`` places frame N at
+    ``start_time + N x minutes_per_frame``.
+
+    Raises
+    ------
+    typer.Exit
+        Code 1 when the day's burned-in overlays cannot be read.
+    """
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
+    )
+    cfg = PrepareConfig() if config is None else load_prepare_config(config)
+
+    from allsky.overlay import OverlayTimestampError, extract_frames_for
+
+    try:
+        manifest = extract_frames_for(video, out_dir, cfg.video, step=step, resize=resize)
+    except OverlayTimestampError as exc:
+        typer.echo(f"ERROR: {video} cannot be timestamped: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     typer.echo(f"Extracted {len(manifest)} frames from {video} into {out_dir}")
 
 

@@ -14,7 +14,6 @@ Heavy dependencies (torch, safetensors, the backbone model) are imported lazily
 inside the command, so importing :mod:`allsky.cli` never pulls them.
 """
 
-import hashlib
 import json
 import logging
 from pathlib import Path
@@ -22,7 +21,8 @@ from typing import Annotated
 
 import typer
 
-from allsky.config import PrepareConfig
+from allsky.config import VIDEO_TIME_FIELDS, PrepareConfig
+from allsky.provenance import config_subset_sha256
 
 logger = logging.getLogger("allsky.embeddings")
 
@@ -37,10 +37,27 @@ def _configure_logging() -> None:
     root.setLevel(logging.INFO)
 
 
+#: Sections a stored vector depends on whole: the encoder itself and the
+#: preprocessing ``prepare-local`` bakes into the JPEG the encoder reads.
+_EMBEDDING_CONFIG_SECTIONS = ("embeddings", "mask", "crop", "resize")
+
+
 def _config_sha256(cfg: PrepareConfig) -> str:
-    """Content hash of the embeddings config section (stable, order-independent)."""
-    canonical = json.dumps(cfg.embeddings.model_dump(), sort_keys=True, default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    """Content hash of the config the stored vectors depend on (order-independent).
+
+    This is the only content gate on resume, so it covers the encoder section
+    together with everything that decides the pixels it encodes: ``mask``,
+    ``crop`` and ``resize`` are written into the frame on disk, and
+    :data:`~allsky.config.VIDEO_TIME_FIELDS` decides which capture a
+    ``sample_id`` names.  Without them a re-prepared dataset resumes onto
+    vectors of the old pixels, every id already being in the index.
+    """
+    return config_subset_sha256(
+        cfg,
+        sections=_EMBEDDING_CONFIG_SECTIONS,
+        nested_fields={"video": VIDEO_TIME_FIELDS},
+        subject="the embedding resume hash",
+    )
 
 
 def precompute_embeddings(

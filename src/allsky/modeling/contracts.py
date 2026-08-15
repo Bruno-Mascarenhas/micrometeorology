@@ -44,7 +44,9 @@ class ModelOutputs(TypedDict, total=False):
     kindex:
         Clearness/clear-sky index prediction in **normalized** space.
     sky_logits:
-        Raw ``(B, 3)`` class logits (clear / partially_cloudy / overcast).
+        Raw ``(B, SKY_CLASS_COUNT)`` class logits over
+        :data:`allsky.data.contracts.SKY_CLASS_NAMES` (cloudy /
+        partly_cloudy_diffuse / partly_cloudy_clear / clear).
     cloud_fraction:
         Cloud-fraction prediction in ``[0, 1]`` (sigmoid output; not
         normalized — it is already a bounded fraction).

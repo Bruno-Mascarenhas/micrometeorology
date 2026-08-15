@@ -35,6 +35,32 @@ def _series_csv(path: Path, start: str, values: list[float]) -> Path:
     return export_csv(pd.DataFrame({"Temp1": values}, index=index), path)
 
 
+@pytest.mark.parametrize("freq", ["15min", "30min", "30s"])
+def test_a_sub_hourly_index_is_refused_rather_than_written_without_its_minute(
+    tmp_path: Path, freq: str
+) -> None:
+    """year/month/day/hour cannot carry the stamp of a sub-hourly frame.
+
+    Every row inside one clock hour would land on the same key, so the four
+    distinct means of a 15-minute aggregation come back from ``read_dataset``
+    as four rows with an identical timestamp and no warning anywhere.
+    """
+    index = pd.date_range("2025-06-25 12:00", periods=4, freq=freq)
+    frame = pd.DataFrame({"Temp1": [25.0, 26.0, 27.0, 28.0]}, index=index)
+
+    with pytest.raises(ValueError, match="year/month/day/hour"):
+        export_csv(frame, tmp_path / "sub_hourly.csv", include_datetime_columns=True)
+
+
+def test_an_hourly_index_still_exports_its_datetime_columns(tmp_path: Path) -> None:
+    index = pd.date_range("2025-06-25 12:00", periods=2, freq="1h")
+    frame = pd.DataFrame({"Temp1": [25.0, 26.0]}, index=index)
+
+    path = export_csv(frame, tmp_path / "hourly.csv", include_datetime_columns=True)
+
+    assert path.read_text(encoding="utf-8").splitlines()[1] == "2025,6,25,12,25.000"
+
+
 class TestReadDataset:
     def test_export_csv_round_trip_keeps_the_datetime_index(self, tmp_path: Path) -> None:
         path = _series_csv(tmp_path / "obs.csv", "2020-01-01", [20.0, 21.0, 22.0])

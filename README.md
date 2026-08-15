@@ -237,8 +237,8 @@ labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
 The `allsky` package pairs all-sky camera timelapses (`data/all-sky/allsky-YYYYMMDD.mp4`,
 one frame per minute) with the radiation sensors into a portable **v2 dataset** and
 trains a ladder of multimodal models (V0–V7) that predict diffuse horizontal
-irradiance — and optionally a clear-sky index and a clear / partially-cloudy /
-overcast sky class — from the sky image plus non-radiometric sensor context. The
+irradiance — and optionally a clear-sky index and one of the four Escobedo sky
+conditions — from the sky image plus non-radiometric sensor context. The
 default `safe` feature policy is geometry + meteorology only (no radiometry, no
 leakage); diffuse targets come from the PSP pyranometer (`PSP_Wm2_Avg`) or an Erbs
 pseudo-target; splits are by calendar day (no same-day leakage).

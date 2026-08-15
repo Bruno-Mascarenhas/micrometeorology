@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from allsky.config import VideoConfig
 from allsky.data.contracts import QCFlag
 from allsky.video import JPEG_QUALITY, MANIFEST_FILENAME
 from allsky.video import MANIFEST_COLUMNS as VIDEO_MANIFEST_COLUMNS
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "OverlayReading",
     "OverlayTimestampError",
+    "extract_frames_for",
     "extract_frames_with_overlay_timestamps",
     "read_frame_timestamp",
     "read_video_timestamps",
@@ -607,3 +609,58 @@ def extract_frames_with_overlay_timestamps(
         manifest["timestamp"].max() if len(manifest) else "-",
     )
     return manifest
+
+
+def extract_frames_for(
+    video: str | Path,
+    out_dir: str | Path,
+    video_config: VideoConfig,
+    *,
+    step: int = 1,
+    resize: int | None = None,
+) -> pd.DataFrame:
+    """Extract *video*'s frames, timestamped by the clock *video_config* selects.
+
+    The single place the ``overlay`` / ``modelled`` choice is made, so the three
+    commands that extract frames cannot disagree about which clock a config
+    names, nor about the warning the modelled cadence earns.
+
+    Parameters
+    ----------
+    video:
+        One-day timelapse to read.
+    out_dir:
+        Directory the JPEGs and their ``manifest.parquet`` are written to.
+    video_config:
+        Supplies ``timestamps`` (the clock) and, for the modelled mapping, the
+        ``start_time`` / ``minutes_per_frame`` pair it places frames with.
+    step:
+        Keep every *step*-th frame.
+    resize:
+        Square edge in pixels to resize to, or None to keep the native size.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The frame manifest, one row per written JPEG.
+
+    Raises
+    ------
+    OverlayTimestampError
+        Under ``timestamps="overlay"``, when the day's burned-in stamps cannot
+        be read as a strictly increasing sequence.  It propagates so each caller
+        keeps its own policy: ``prepare-local`` skips the day, ``extract-frames``
+        exits non-zero.
+    """
+    if video_config.timestamps == "overlay":
+        return extract_frames_with_overlay_timestamps(video, out_dir, step=step, resize=resize)
+
+    from allsky.video import extract_frames
+
+    logger.warning(
+        "video.timestamps is 'modelled': frame N is placed at %s + N x %s min, a cadence this "
+        "camera does not follow (see docs/allsky-archive.md)",
+        video_config.start_time,
+        video_config.minutes_per_frame,
+    )
+    return extract_frames(video, out_dir, video_config, step=step, resize=resize)

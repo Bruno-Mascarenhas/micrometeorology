@@ -4,6 +4,12 @@ Every request in this module goes to a ``ThreadingHTTPServer`` bound to an
 ephemeral 127.0.0.1 port, so the HTTPS-only client is driven with
 ``allow_plaintext=True``; the one test that proves the opt-in is required leaves
 it off.
+
+``AIA_INTERMEDIATE_PEM`` below is the genuine *RNP ICPEdu GR46 OV TLS CA 2025*
+certificate the archive's leaf names in its AIA extension, embedded so the
+accept path of the pinned digest is exercised without a fetch. A certificate
+taken from the system trust store stands in for the self-signed CA an on-path
+attacker would answer the plaintext fetch with.
 """
 
 import hashlib
@@ -31,6 +37,46 @@ DAY_NEW = "20260810"
 PAYLOAD_OLD = b"O" * 77
 PAYLOAD_NEW = b"N" * 4096
 LIVE_IMAGE = b"\xff\xd8\xff\xe0live-frame-bytes"
+AIA_INTERMEDIATE_PEM = """\
+-----BEGIN CERTIFICATE-----
+MIIGnjCCBIagAwIBAgIRAISsNxNp8rOJbBB1nGV+D9EwDQYJKoZIhvcNAQEMBQAw
+RjELMAkGA1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24gbnYtc2ExHDAaBgNV
+BAMTE0dsb2JhbFNpZ24gUm9vdCBSNDYwHhcNMjUxMTE5MDMyNzU1WhcNMzAxMTE5
+MDAwMDAwWjBpMQswCQYDVQQGEwJCUjExMC8GA1UEChMoUkVERSBOQUNJT05BTCBE
+RSBFTlNJTk8gRSBQRVNRVUlTQSAtIFJOUDEnMCUGA1UEAxMeUk5QIElDUEVkdSBH
+UjQ2IE9WIFRMUyBDQSAyMDI1MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKC
+AgEAqBd4pyjCSQPAFcGq8km8PmRE/BoAJdPvYWKz6gr6x4sXfY40iCWxWLgZkGuN
++OwfXRmCXC1hIb2/WWf8Nl92SSfTb/J0D7KVSksnTrXtxyxXSaEnlKEVKltoTVSC
+yEop+pZf6SwuK0l66xvmM9dt/xGgngIvpeaxIIMAAgNDp52PlSrJh5IKzD/FJ4s0
+Rq9Aiz3bXLYXCMCa+8WSSVfxJWYgK9IdrTAsu1T24c+xj9TvMcbUgzTDZLhvsRwj
+FcY332r9XszFkDqZxCSnjb/ztYa5jFrNGGHlmygMUmBCHGqcsqet/trLKjtaGoqO
+JwD0Kk/FAsqF4aGUH7hwIwRuD6ce4BjmPbv870jGdhlRyaMITLbP1YwPDOuoRkrI
+utjL30dyHZWiJq1WuYbcgWODH8QwF5BUyxdHpGsv/QL2GXn/Z+GFgdO+4dBnGz7S
+AokPYKmMQwKdyn3hzNgShDSFq0sj+vhT3fAXSlth1xjCvdDz+ttccinn71FV5Ahu
+S4n9gw8RmSlJoYhr1pzn4Aryi6+31gJVPA8UyTfVh9MbBi7BqPmMnYeZYj7Pr6o0
+k8wsz5RA+HL5AbS1QouWcFFe4LEKWqXh67xFONVfi1bO/Y31mDU3fhSzW8tx6bkm
+s7N2YunWsPgrOGTcBKbrQTseAShEamJoenImGL4fbP8zZF8CAwEAAaOCAWIwggFe
+MA4GA1UdDwEB/wQEAwIBhjATBgNVHSUEDDAKBggrBgEFBQcDATASBgNVHRMBAf8E
+CDAGAQH/AgEAMB0GA1UdDgQWBBSUsMlPweBs787GK2yztMsiinZJtzAfBgNVHSME
+GDAWgBQDXKtzgYeozLCm1ZTiNpZJ/wWZLDB7BggrBgEFBQcBAQRvMG0wLgYIKwYB
+BQUHMAGGImh0dHA6Ly9vY3NwLmdsb2JhbHNpZ24uY29tL3Jvb3RyNDYwOwYIKwYB
+BQUHMAKGL2h0dHA6Ly9zZWN1cmUuZ2xvYmFsc2lnbi5jb20vY2FjZXJ0L3Jvb3Ry
+NDYuY3J0MDYGA1UdHwQvMC0wK6ApoCeGJWh0dHA6Ly9jcmwuZ2xvYmFsc2lnbi5j
+b20vcm9vdHI0Ni5jcmwwLgYDVR0gBCcwJTAIBgZngQwBAgIwDAYKKwYBBAGgMgoB
+AjALBgkrBgEEAaAyARQwDQYJKoZIhvcNAQEMBQADggIBABAGOWuTA3iFMqABnBPR
+rb1YNwcRqQE1Tvz+9f7a0YUWk+wNH3yPVAqd3i9abWtRT6nNBpu49XNAqWSebXpR
+9J5Im5NJruhYxqtd5c6Y04GdoS/JSh6HmJxiBS2Tv5E+Z9yqkBgt41VhxszYEbus
+qL/56foMry+EWvXRJ0nA9P0GxdFmbTD4DkLFq++E15FBeRf7uRGUe46bZN345OQ7
+jhN2eZwpHzIwTrfaPwHxkFThXU8KPgClmq77JJ/NzlAAPEjpr+TF6K17lzBZS1o1
+Lrk+EFDOGVGc0Ncad7JcFldwmLd0C9B73jq0t5opQcl/u1wdIanosZ418vCJp25K
+QW1BCDCHenf+6mA2VptyuywHcDqM75rSGi5wxbE4IxkMxrl89HsQKfRSJbDT/0v5
+gGlMw/UaCMP6O/4nwHrmXQJ2CVS7M4ucbUbm+ZSqOWgkDCTVvXyyIzWFpWxMk7UH
+XBTei1qG19/PbShKTgYcgod0ReTr4osyARZ5T7jZqe8UKW1DUXcVasukATKryagk
+NRRjRmM9YasyVMO3SVhTFp49aqAe173TKd2yatDmxlvB9s5fZ5pz5ptdyQFTyv+N
+yLDZd5PHiO/JWBFL3g2XVFgKmDVlKsBkqLs/NR18/RWv0d7YKTVVfhc64gdXQAMt
+Lyso4S/KfU1hV0inHITEfil4
+-----END CERTIFICATE-----
+"""
 
 
 @pytest.fixture
@@ -186,7 +232,7 @@ def test_a_ledger_round_trips_through_save_and_load(tmp_path: Path):
     assert stored == ledger.video(DAY_NEW)
     assert stored is not None
     assert stored["sha256"] == result.sha256
-    assert reloaded.frames_match(DAY_NEW, step=3, resize=224) is True
+    assert reloaded.frames_match(DAY_NEW, step=3, resize=224, timestamps="overlay") is True
     assert reloaded.uploaded(DAY_NEW, "gd:LabMiM/allsky/videos/x.mp4") is True
     assert reloaded.last_modified(DAY_NEW) == fake.LAST_MODIFIED
 
@@ -244,13 +290,24 @@ def test_frames_match_is_false_whenever_step_or_resize_differ_from_the_record(
     ledger.record_frames(
         DAY_NEW, directory="frames/20260810", count=4, step=3, resize=224, timestamps="overlay"
     )
-    assert ledger.frames_match(DAY_NEW, step=3, resize=224) is True
-    assert ledger.frames_match(DAY_NEW, step=step, resize=resize) is False
+    assert ledger.frames_match(DAY_NEW, step=3, resize=224, timestamps="overlay") is True
+    assert ledger.frames_match(DAY_NEW, step=step, resize=resize, timestamps="overlay") is False
+
+
+def test_frames_match_is_false_when_another_clock_stamped_the_record(tmp_path: Path):
+    ledger = Ledger(tmp_path / "ledger.json")
+    ledger.record_frames(
+        DAY_NEW, directory="frames/20260810", count=4, step=3, resize=224, timestamps="overlay"
+    )
+
+    matched = ledger.frames_match(DAY_NEW, step=3, resize=224, timestamps="config")
+
+    assert matched is False
 
 
 def test_frames_match_is_false_for_a_day_that_was_never_extracted(tmp_path: Path):
     ledger = Ledger(tmp_path / "ledger.json")
-    assert ledger.frames_match(DAY_NEW, step=1, resize=None) is False
+    assert ledger.frames_match(DAY_NEW, step=1, resize=None, timestamps="overlay") is False
 
 
 def test_uploaded_tracks_each_destination_on_its_own(tmp_path: Path):
@@ -358,7 +415,7 @@ def test_a_cached_intermediate_keeps_the_context_build_offline(
 ):
     monkeypatch.setattr(archive, "AIA_INTERMEDIATE_URL", "http://127.0.0.1:1/unreachable.crt")
     cache = tmp_path / archive.INTERMEDIATE_CACHE_FILENAME
-    cache.write_text(_system_pem(), encoding="ascii")
+    cache.write_text(AIA_INTERMEDIATE_PEM, encoding="ascii")
 
     context = build_ssl_context(state_dir=tmp_path, timeout=1.0)
     assert context.verify_mode == ssl.CERT_REQUIRED
@@ -375,6 +432,31 @@ def test_a_supplied_ca_file_short_circuits_the_intermediate_fetch(
     context = build_ssl_context(state_dir=tmp_path, ca_file=pem, timeout=1.0)
     assert context.verify_mode == ssl.CERT_REQUIRED
     assert not (tmp_path / archive.INTERMEDIATE_CACHE_FILENAME).exists()
+
+
+def test_an_intermediate_served_over_plaintext_is_refused_when_its_digest_is_not_the_pinned_one(
+    tmp_path: Path, mirror: fake.ArchiveMirror, monkeypatch: pytest.MonkeyPatch
+):
+    (mirror.root / "forged.crt").write_text(_system_pem(), encoding="ascii")
+    monkeypatch.setattr(archive, "AIA_INTERMEDIATE_URL", f"{mirror.base_url}forged.crt")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    with pytest.raises(ArchiveError, match="pinned"):
+        build_ssl_context(state_dir=state_dir, timeout=10.0)
+
+    assert not (state_dir / archive.INTERMEDIATE_CACHE_FILENAME).exists()
+
+
+def test_a_cached_intermediate_is_refused_when_its_digest_is_not_the_pinned_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(archive, "AIA_INTERMEDIATE_URL", "http://127.0.0.1:1/unreachable.crt")
+    cache = tmp_path / archive.INTERMEDIATE_CACHE_FILENAME
+    cache.write_text(_system_pem(), encoding="ascii")
+
+    with pytest.raises(ArchiveError, match="pinned"):
+        build_ssl_context(state_dir=tmp_path, timeout=1.0)
 
 
 def test_the_published_base_url_still_points_at_the_planetarium_over_https():

@@ -21,6 +21,7 @@ pins the helper's contract instead.
 """
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -28,7 +29,18 @@ import pytest
 from typer.testing import CliRunner
 
 from allsky.cli import app
-from allsky.snapshot import _image_as_hwc, predict_snapshot
+from allsky.config import SITE_UTC_OFFSET_HOURS, ExperimentConfig, SiteConfig
+from allsky.embeddings import backbone as backbone_module
+from allsky.embeddings.storage import META_FILENAME, read_meta, write_meta
+from allsky.snapshot import (
+    DEFAULT_SENSOR_TOLERANCE,
+    _feature_vector,
+    _image_as_hwc,
+    _sensor_row_near,
+    predict_snapshot,
+)
+from allsky.solar import solar_elevation_deg
+from allsky.training.checkpointing import load_checkpoint
 from tests.allsky import _synthetic as synthetic
 from tests.allsky.test_e2e_experiment import _REPO_V1, _write_embeddings
 
@@ -111,3 +123,113 @@ def test_the_backbone_is_fed_the_layout_its_transform_documents(sky_image: Path)
 
     assert frame.dtype == np.uint8
     assert frame.shape == (64, 64, 3)
+
+
+@pytest.mark.parametrize(
+    ("column", "railed_value", "feature", "feature_set"),
+    [
+        ("BP1_mbar_Avg", 2.62, "pressure_mbar", "minimal"),
+        ("AirT1_C_Avg", 1000.0, "air_temp_c", "safe"),
+    ],
+)
+def test_a_railed_logger_channel_is_imputed_instead_of_fed_as_a_measurement(
+    tmp_path: Path, column: str, railed_value: float, feature: str, feature_set: str
+) -> None:
+    sensor_csv = tmp_path / "station.csv"
+    sensor_csv.write_text(
+        f"timestamp,{column},WS_ms,WindDir\n2026-08-14 12:00:00,{railed_value},3.1,90.0\n",
+        encoding="utf-8",
+    )
+
+    values, imputed = _feature_vector(
+        pd.Timestamp("2026-08-14 12:00:00"),
+        feature_columns=[feature],
+        feature_set=feature_set,
+        site=SiteConfig(),
+        sensor_csv=sensor_csv,
+        tolerance=DEFAULT_SENSOR_TOLERANCE,
+        training_means=np.array([1014.93], dtype=np.float32),
+    )
+
+    assert imputed == [feature]
+    assert float(values[0]) == pytest.approx(1014.93)
+
+
+def test_an_offset_carrying_sensor_export_is_matched_on_site_local_wall_clock(
+    tmp_path: Path,
+) -> None:
+    sensor_csv = tmp_path / "station.csv"
+    sensor_csv.write_text(
+        "timestamp,AirT1_C_Avg\n2026-08-14 12:00:00+00:00,21.4\n2026-08-14 15:00:00+00:00,29.0\n",
+        encoding="utf-8",
+    )
+
+    row = _sensor_row_near(
+        sensor_csv, pd.Timestamp("2026-08-14 12:00:00"), DEFAULT_SENSOR_TOLERANCE
+    )
+
+    assert float(row["AirT1_C_Avg"].iloc[0]) == pytest.approx(29.0)
+
+
+def test_solar_geometry_is_built_on_the_pinned_site_offset_the_manifest_trains_with() -> None:
+    site = SiteConfig(latitude=-13.0, longitude=-60.0)
+    timestamp = pd.Timestamp("2026-01-15 09:00:00")
+
+    values, _ = _feature_vector(
+        timestamp,
+        feature_columns=["solar_elevation"],
+        feature_set="minimal",
+        site=site,
+        sensor_csv=None,
+        tolerance=DEFAULT_SENSOR_TOLERANCE,
+        training_means=np.zeros(1, dtype=np.float32),
+    )
+
+    trained_on = solar_elevation_deg(
+        pd.DatetimeIndex([timestamp]), site, float(SITE_UTC_OFFSET_HOURS)
+    )
+    assert float(values[0]) == pytest.approx(float(trained_on[0]), abs=1e-3)
+
+
+def _embedding_store_of(checkpoint_path: Path) -> Path:
+    payload = load_checkpoint(checkpoint_path, map_location="cpu", trust_pickle=True)
+    cfg = ExperimentConfig.model_validate(payload["config"])
+    assert cfg.data.embeddings_dir is not None
+    return Path(cfg.data.data_root) / cfg.data.embeddings_dir
+
+
+def test_the_live_frame_is_embedded_with_the_pooling_its_training_store_recorded(
+    embedding_checkpoint: Path, sky_image: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _embedding_store_of(embedding_checkpoint)
+    write_meta(store, {**read_meta(store), "pooling": "mean"})
+    seen: dict[str, Any] = {}
+    real_build_backbone = backbone_module.build_backbone
+
+    def recording_build_backbone(name: str, **kwargs: Any) -> Any:
+        seen.update({"name": name, **kwargs})
+        return real_build_backbone(name, **kwargs)
+
+    monkeypatch.setattr(backbone_module, "build_backbone", recording_build_backbone)
+    predict_snapshot(
+        sky_image,
+        embedding_checkpoint,
+        timestamp=pd.Timestamp("2026-01-01 12:00:00"),
+        trust_checkpoint=True,
+    )
+
+    assert seen["pooling"] == "mean"
+
+
+def test_an_unreachable_embedding_store_refuses_to_guess_how_the_frame_was_encoded(
+    embedding_checkpoint: Path, sky_image: Path
+) -> None:
+    (_embedding_store_of(embedding_checkpoint) / META_FILENAME).unlink()
+
+    with pytest.raises(ValueError, match=META_FILENAME):
+        predict_snapshot(
+            sky_image,
+            embedding_checkpoint,
+            timestamp=pd.Timestamp("2026-01-01 12:00:00"),
+            trust_checkpoint=True,
+        )

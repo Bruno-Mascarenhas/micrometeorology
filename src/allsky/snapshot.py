@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from allsky.atomic import atomic_write, atomic_write_json
-from allsky.config import SITE_TZ, SiteConfig
+from allsky.config import SITE_TZ, SITE_UTC_OFFSET_HOURS, ExperimentConfig, SiteConfig
 from allsky.provenance import code_version
 
 logger = logging.getLogger(__name__)
@@ -203,6 +203,18 @@ def capture_snapshot(
 def _sensor_row_near(
     sensor_csv: str | Path, timestamp: pd.Timestamp, tolerance: pd.Timedelta
 ) -> pd.DataFrame:
+    """Row of *sensor_csv* nearest *timestamp*, relabelled to it, or an empty frame.
+
+    The export is read on the same two contracts the training path holds it to.
+    Its clock is the logger's, i.e. naive site-local, so an export that does
+    carry an offset is converted into that zone rather than merely stripped of
+    it. Its values then go through the archive's own sentinel table: an
+    instrument rail is a finite number, so without masking it would pass the
+    ``np.isfinite`` screen in :func:`_feature_vector` and be served as a
+    measurement.
+    """
+    from micrometeorology.sensors.archive import mask_sentinels
+
     frame = pd.read_csv(sensor_csv)
     time_column = next((name for name in SENSOR_TIME_COLUMNS if name in frame.columns), None)
     if time_column is None:
@@ -216,7 +228,7 @@ def _sensor_row_near(
         return frame
     index = frame.index
     if isinstance(index, pd.DatetimeIndex) and index.tz is not None:
-        frame.index = index.tz_localize(None)
+        frame.index = index.tz_convert(SITE_TZ).tz_localize(None)
     position = int(frame.index.get_indexer(pd.DatetimeIndex([timestamp]), method="nearest")[0])
     if position < 0:
         return frame.iloc[0:0]
@@ -228,7 +240,9 @@ def _sensor_row_near(
             tolerance,
         )
         return frame.iloc[0:0]
-    row = frame.iloc[[position]].copy()
+    # Masked after the row is chosen, not before: every sentinel rule is row-wise,
+    # so the outcome is identical, and the nearest-row lookup reads the index only.
+    row, _removed = mask_sentinels(frame.iloc[[position]].copy())
     row.index = pd.DatetimeIndex([timestamp])
     return row
 
@@ -277,7 +291,11 @@ def _feature_vector(
         else pd.DataFrame(index=pd.DatetimeIndex([]))
     )
     engineered = build_feature_frame(
-        _with_absent_sources_as_nan(sensor, feature_set), [timestamp], site, feature_set
+        _with_absent_sources_as_nan(sensor, feature_set),
+        [timestamp],
+        site,
+        feature_set,
+        utc_offset_hours=float(SITE_UTC_OFFSET_HOURS),
     )
     unknown = [name for name in feature_columns if name not in engineered.columns]
     if unknown:
@@ -308,6 +326,43 @@ def _image_as_chw(image_path: str | Path, size: int) -> np.ndarray:
         frame = frame.resize((size, size), Image.Resampling.BILINEAR)
     scaled = np.asarray(frame, dtype=np.uint8).astype(np.float32) / 255.0
     return np.ascontiguousarray(scaled.transpose(2, 0, 1))
+
+
+def _embedding_store_meta(cfg: ExperimentConfig) -> dict[str, Any]:
+    """Provenance sidecar of the embedding store *cfg* was trained against.
+
+    Embedding-mode training never reads ``model.backbone`` /
+    ``model.backbone_pooling``: the representation is whatever
+    ``precompute-embeddings`` wrote, recorded nowhere but this sidecar. Re-encoding
+    a live frame under any other recipe changes the representation silently — the
+    checkpoint carries no backbone identity in embedding mode, and ``cls`` and
+    ``mean`` pooling are both 384-dimensional, so a mismatch survives
+    ``load_state_dict`` and comes out as a plausible number.
+
+    Raises
+    ------
+    ValueError
+        If the checkpoint names no embeddings directory, if the sidecar is not
+        readable there, or if it records no backbone or pooling.
+    """
+    from allsky.data.loading import resolve_against_root
+    from allsky.embeddings.storage import META_FILENAME, read_meta
+
+    if cfg.data.embeddings_dir is None:
+        raise ValueError("input_mode='embedding' checkpoint carries no data.embeddings_dir")
+    store = resolve_against_root(cfg.data.embeddings_dir, Path(cfg.data.data_root))
+    try:
+        meta = read_meta(store)
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f"no {META_FILENAME} under {store}: an embedding-mode checkpoint records no "
+            "backbone of its own, so without the store's sidecar there is no way to encode "
+            "the live frame the way the model was fitted"
+        ) from exc
+    absent = sorted(key for key in ("backbone", "pooling") if meta.get(key) is None)
+    if absent:
+        raise ValueError(f"{store / META_FILENAME} records no {', '.join(absent)}")
+    return meta
 
 
 def predict_snapshot(
@@ -347,7 +402,9 @@ def predict_snapshot(
         accepted; beyond it the row is discarded and the columns imputed.
     site:
         Observation site for the solar geometry; defaults to
-        :class:`~allsky.config.SiteConfig`.
+        :class:`~allsky.config.SiteConfig`. The geometry is built at the pinned
+        :data:`~allsky.config.SITE_UTC_OFFSET_HOURS` the manifest builder trains
+        on, never at an offset inferred from the site longitude.
     device:
         Torch device the backbone and model run on.
     trust_checkpoint:
@@ -368,11 +425,11 @@ def predict_snapshot(
     ------
     ValueError
         If the checkpoint expects a feature column its configured feature set
-        does not produce.
+        does not produce, or — in embedding mode — if the store it was trained
+        against cannot be read for the backbone and pooling that encoded it.
     """
     import torch
 
-    from allsky.config import ExperimentConfig
     from allsky.data.contracts import SKY_CLASS_NAMES
     from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
     from allsky.modeling.registry import build_model, temporal_pooling_for_strategy
@@ -414,10 +471,9 @@ def predict_snapshot(
     else:
         from allsky.embeddings.backbone import build_backbone
 
+        store_meta = _embedding_store_meta(cfg)
         backbone = build_backbone(
-            _model_param(cfg, "backbone", "dinov2_vits14"),
-            device=device,
-            pooling=_model_param(cfg, "backbone_pooling", "cls"),
+            store_meta["backbone"], device=device, pooling=store_meta["pooling"]
         )
         # Through transform(), never straight into encode(): the backbone's
         # contract takes a SEQUENCE of (H, W, 3) uint8 HWC frames and does its

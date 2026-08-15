@@ -10,6 +10,8 @@ loud failure when an entry is missing. The audited row counts are verified by
 reproduce.
 """
 
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -26,7 +28,11 @@ from micrometeorology.sensors.archive import (
     stage_archive,
     verify_frame,
 )
-from micrometeorology.sensors.calibration import resolve_mapping_windows, unify_sensor_columns
+from micrometeorology.sensors.calibration import (
+    load_sensor_switches,
+    resolve_mapping_windows,
+    unify_sensor_columns,
+)
 
 TOA5_METADATA = '"TOA5","CR5000","CR5000","2754","CR5000.Std.06","TEST","1","LBM_test"'
 
@@ -539,3 +545,108 @@ class TestNetRadiationClosesWithItsComponents:
 
         assert closed["Net_CNR1"].to_list() == [1.0, 2.0]
         assert (gained, dropped) == (0, 0)
+
+
+def _clear_sky_days(
+    days: list[str], diffuse_column: str, diffuse_ratio: float, other_ratios: dict[str, float]
+) -> pd.DataFrame:
+    """Midday 5-minute samples at a clear-sky global flux, each column a fixed ratio of it."""
+    stamps = pd.DatetimeIndex(
+        [
+            stamp
+            for day in days
+            for stamp in pd.date_range(f"{day} 09:00", f"{day} 11:00", freq="5min")
+        ]
+    )
+    global_flux_w_m2 = 800.0
+    columns = {
+        "CM3Up_Wm2_Avg": [global_flux_w_m2] * len(stamps),
+        diffuse_column: [global_flux_w_m2 * diffuse_ratio] * len(stamps),
+    }
+    for name, ratio in other_ratios.items():
+        columns[name] = [global_flux_w_m2 * ratio] * len(stamps)
+    return pd.DataFrame(columns, index=stamps)
+
+
+def test_the_shade_ring_coming_off_the_psp_is_reported_in_the_current_era() -> None:
+    """The diffuse role moved to the PSP in 2025; the CMP21 is a constant 0 after that.
+
+    A detector that only ever looks at the retired channel cannot see the fault
+    it exists to catch, whatever the live instrument reads.
+    """
+    frame = _clear_sky_days(
+        ["2025-07-01", "2025-07-02", "2025-07-03"], "PSP_Wm2_Avg", 0.90, {"CMP21_Wm2_Avg": 0.0}
+    )
+
+    flagged = archive.unshaded_diffuse_days(frame)
+
+    assert [day for day, _ratio in flagged] == ["2025-07-01", "2025-07-02", "2025-07-03"]
+
+
+def test_the_psp_reading_global_outside_its_diffuse_era_is_not_a_shade_ring_fault() -> None:
+    """From 2019-10 to 2025-05 the CMP21 is the diffuse sensor and the PSP is not.
+
+    The PSP sits unshaded beside it at 0.82-0.86 of global over those years, on
+    156 days of the real archive: reporting them would drown the one signal the
+    check exists for and fail every ``--strict`` build.
+    """
+    frame = _clear_sky_days(
+        ["2021-08-01", "2021-08-02", "2021-08-03"], "CMP21_Wm2_Avg", 0.20, {"PSP_Wm2_Avg": 0.85}
+    )
+
+    flagged = archive.unshaded_diffuse_days(frame)
+
+    assert flagged == []
+
+
+def test_the_bsrn_ceiling_falls_with_the_earth_sun_distance_at_aphelion() -> None:
+    """Sa is the solar constant at the Earth's actual distance, 3.4% below S0 in July.
+
+    On 2026-07-05 09:00 (mu0 = 0.6045) the BSRN ceiling is 1183.4 W/m2, so a
+    1200 W/m2 sample — the milder residue of a slipped clock — is impossible
+    where a fixed 1367 W/m2 would let it through at 1220.8.
+    """
+    frame = pd.DataFrame({"Sw_dw": [1200.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert np.isnan(masked["Sw_dw"].iloc[0])
+    assert removed == {"Sw_dw": 1}
+
+
+def test_a_perihelion_enhancement_burst_survives_the_ceiling_it_is_under() -> None:
+    """In January the Earth is closer and the ceiling rises with it, to 2001.5 W/m2.
+
+    Tropical cloud enhancement genuinely reaches 1976 W/m2 here; a ceiling built
+    on a fixed 1367 W/m2 stops at 1942.9 and deletes the measurement.
+    """
+    frame = pd.DataFrame({"Sw_dw": [1976.0]}, index=pd.DatetimeIndex(["2026-01-28 10:10"]))
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert masked["Sw_dw"].iloc[0] == pytest.approx(1976.0)
+    assert removed == {}
+
+
+def test_the_diffuse_eras_mirror_the_calibration_map() -> None:
+    switches = load_sensor_switches(Path("configs/micromet/calibrations.yaml"))
+    published = [
+        (mapping["column"], mapping["start_date"], mapping["end_date"])
+        for switch in switches
+        if switch["unified_name"] == "Sw_dif"
+        for mapping in switch["mappings"]
+    ]
+
+    def bounds(
+        windows: Sequence[tuple[str, str | None, str | None]],
+    ) -> list[tuple[str, pd.Timestamp | None, pd.Timestamp | None]]:
+        return [
+            (
+                column,
+                None if first is None else pd.Timestamp(first),
+                None if last is None else pd.Timestamp(last),
+            )
+            for column, first, last in windows
+        ]
+
+    assert bounds(archive.DIFFUSE_CHANNEL_ERAS) == bounds(published)

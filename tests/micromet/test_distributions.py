@@ -238,6 +238,20 @@ class TestNormal:
         np.testing.assert_allclose(cdf(fitted, grid), reference, atol=1e-12)
 
 
+def test_a_stuck_channel_does_not_publish_a_normal_fit():
+    """A constant sample is the Dirac limit, which no normal density represents.
+
+    Reporting sigma = 0 would pass the caller's finite-parameter gate and ship a
+    fit whose density is NaN at every abscissa, whose KS distance and density
+    R-squared are NaN, and whose quantile gap is a perfect 0.0 — the best
+    possible goodness-of-fit score, printed for a dead sensor.
+    """
+    fitted = fit_distribution("normal", np.full(500, 1010.0))
+
+    assert np.isnan(fitted.params["mu"])
+    assert np.isnan(fitted.params["sigma"])
+
+
 class TestHollandsHuget:
     @pytest.fixture
     def clearness(self) -> np.ndarray:

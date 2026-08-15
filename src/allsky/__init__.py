@@ -3,9 +3,9 @@
 Pairs one-day all-sky timelapse videos (one frame per minute) with Campbell
 radiation-sensor records into a portable v2 dataset (manifest + frames +
 precomputed visual embeddings), then trains multimodal experiments that predict
-diffuse horizontal irradiance (and optionally a clear-sky index and a
-clear / partially-cloudy / overcast sky class) from the sky image plus
-engineered sensor features.
+diffuse horizontal irradiance (and optionally a clear-sky index and one of the
+four Escobedo sky conditions) from the sky image plus engineered sensor
+features.
 
 Diffuse targets come from a measured pyranometer column by default
 (:attr:`allsky.config.PrepareTargetsConfig.diffuse_column`, ``PSP_Wm2_Avg``).

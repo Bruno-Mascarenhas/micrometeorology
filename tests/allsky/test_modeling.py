@@ -17,14 +17,15 @@ from allsky.config import ExperimentConfig, TargetsConfig, load_experiment_confi
 from allsky.data.contracts import SKY_CLASS_COUNT
 from allsky.features import active_feature_groups, resolve_feature_set
 from allsky.features.normalization import TargetNormalizer
+from allsky.modeling import heads as heads_module
 from allsky.modeling.baselines import ClimatologyModel
-from allsky.modeling.contracts import MultimodalModel
+from allsky.modeling.contracts import ModelOutputs, MultimodalModel
 from allsky.modeling.fusion import (
     ConcatFusion,
     CrossAttentionFusion,
     FiLMFusion,
 )
-from allsky.modeling.heads import DHIHeteroscedasticHead, Heads, Trunk
+from allsky.modeling.heads import DHIHeteroscedasticHead, Heads, SkyHead, Trunk
 from allsky.modeling.multimodal import MultimodalNet
 from allsky.modeling.registry import (
     MODEL_BUILDERS,
@@ -614,3 +615,23 @@ def test_the_climatology_baseline_refuses_an_all_nan_target_instead_of_reporting
     model = ClimatologyModel(TargetsConfig())
     with pytest.raises(ValueError, match="no finite value"):
         model.fit_from_targets(dhi=np.array([np.nan, np.nan]))
+
+
+SKY_DOCSTRINGS = {
+    "ModelOutputs": ModelOutputs.__doc__,
+    "allsky.modeling.heads": heads_module.__doc__,
+    "SkyHead": SkyHead.__doc__,
+}
+
+
+@pytest.mark.parametrize("documented", SKY_DOCSTRINGS.values(), ids=SKY_DOCSTRINGS)
+def test_sky_logits_documentation_states_the_live_class_count(documented: str):
+    assert "SKY_CLASS_COUNT" in documented
+
+
+@pytest.mark.parametrize("retired_name", ["partially_cloudy", "overcast"])
+@pytest.mark.parametrize("documented", SKY_DOCSTRINGS.values(), ids=SKY_DOCSTRINGS)
+def test_sky_logits_documentation_drops_the_retired_three_class_vocabulary(
+    documented: str, retired_name: str
+):
+    assert retired_name not in documented

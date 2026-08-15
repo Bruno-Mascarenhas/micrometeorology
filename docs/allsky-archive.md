@@ -123,8 +123,9 @@ probably do not want it.
 
 **Implication for data prepared before this change:** any manifest built by an
 earlier `prepare-local` carries the modelled timestamps and the error above, and
-looks perfectly healthy from the inside. Re-running `prepare-local --force`
-rebuilds it from overlay timestamps.
+looks perfectly healthy from the inside. Re-running `prepare-local` rebuilds it
+from overlay timestamps on its own — the extract step re-extracts whenever the
+config that shaped the frames changed, so no `--force` is needed.
 
 ### Accuracy, and how a misread is caught
 
@@ -187,8 +188,8 @@ Two rules matter:
   time that happened.
 - **Work is planned per *outcome*, not per download.** A day is selected when the
   video is missing, *or* frames were never extracted with the current
-  `step`/`resize`, *or* any requested upload destination is absent from its
-  record. So an upload that failed yesterday retries today without
+  `step`/`resize`/timestamp source, *or* any requested upload destination is
+  absent from its record. So an upload that failed yesterday retries today without
   re-downloading the video, and adding `--upload` after a plain backfill uploads
   the days you already hold.
 
