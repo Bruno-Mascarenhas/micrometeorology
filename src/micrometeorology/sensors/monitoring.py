@@ -120,14 +120,19 @@ class MonitoringChart:
 # Candidate spellings for a WRF precipitation column. None of them exists in
 # series_operacional.dat today — the extraction never sampled RAINC/RAINNC — but
 # the laboratory intends to add one.
+#
+# The wrfout names RAINC and RAINNC are deliberately NOT candidates: they are
+# accumulated since the run's initialisation (see
+# micrometeorology.wrf.variables.extract_rain_step, which differences them for
+# exactly that reason), while this card's station layers are the rain of each
+# interval. Nothing on the way to the chart differences a resolved column, so an
+# accumulation would be drawn against per-interval totals under the same unit.
 _WRF_RAIN_CANDIDATES = (
     "precip",
     "Precip",
     "PRECIP",
     "rain",
     "Rain",
-    "RAINNC",
-    "RAINC",
     "rain_total",
 )
 

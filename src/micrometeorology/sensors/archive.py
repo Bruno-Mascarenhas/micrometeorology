@@ -49,7 +49,7 @@ from numpy.typing import NDArray
 # The same solar geometry the climatology exporter uses, so "deep night" means
 # the same angle in both places.
 from allsky.config import SiteConfig
-from allsky.solar import cos_zenith, solar_elevation_deg
+from allsky.solar import cos_zenith, eccentricity_correction, solar_elevation_deg
 from micrometeorology.common.paths import ensure_dir
 from micrometeorology.sensors.ingestion import merge_dat_files
 
@@ -584,9 +584,24 @@ DIFFUSE_RATIO_LIMIT = 0.55
 DIFFUSE_RATIO_CERTAIN = 0.85
 DIFFUSE_MIN_EPISODE_DAYS = 3
 
+# ``(column, first, last)`` per era, mirroring the ``Sw_dif`` map in
+# configs/micromet/calibrations.yaml: the check must follow the diffuse ROLE,
+# which has moved between three columns, and not one column, which mask_sentinels
+# blanks end to end once its instrument retires. Scoped to the era because
+# outside its own the same column is a different measurement — the PSP stands
+# unshaded beside the CMP21 from 2019-10 to 2025-05, at 0.82-0.86 of global on
+# 156 days of the record.
+DIFFUSE_CHANNEL_ERAS: tuple[tuple[str, str | None, str | None], ...] = (
+    ("PSP1_Wm2_Avg", "2018-11-13 00:00", "2019-02-26 09:30"),
+    ("PSP_Wm2_Avg", "2019-03-18 12:55", "2019-08-31 23:55"),
+    ("CMP21_Wm2_Avg", "2019-10-01 00:00", "2025-03-12 13:20"),
+    ("PSP_Wm2_Avg", "2025-05-14 15:25", None),
+)
+
 
 def unshaded_diffuse_days(
-    frame: pd.DataFrame, column: str = "CMP21_Wm2_Avg"
+    frame: pd.DataFrame,
+    eras: Sequence[tuple[str, str | None, str | None]] = DIFFUSE_CHANNEL_ERAS,
 ) -> list[tuple[str, float]]:
     """Days where the diffuse channel is still reading the global flux.
 
@@ -598,12 +613,14 @@ def unshaded_diffuse_days(
     Parameters
     ----------
     frame:
-        5-minute frame in W/m2, holding both *column* and
-        :data:`DIFFUSE_GLOBAL_COLUMN`. Missing either, the check reports
-        nothing rather than guessing.
-    column:
-        The diffuse channel to test. Defaults to the CMP21, which held the
-        diffuse role until the 2025 handover to the PSP.
+        5-minute frame in W/m2 with a monotonic naive station-local index,
+        holding the tested channels and :data:`DIFFUSE_GLOBAL_COLUMN`. A missing
+        column reports nothing rather than guessing.
+    eras:
+        ``(column, first, last)`` windows to test, each bound an inclusive naive
+        local timestamp or ``None`` for open-ended. Defaults to
+        :data:`DIFFUSE_CHANNEL_ERAS`, every channel that has carried the diffuse
+        role, over the era it carried it.
 
     Returns
     -------
@@ -613,6 +630,14 @@ def unshaded_diffuse_days(
         above :data:`DIFFUSE_CLEAR_SKY_FLOOR` only. Empty for the archive as
         shipped: every episode it detects is masked.
     """
+    flagged: list[tuple[str, float]] = []
+    for column, first, last in eras:
+        flagged.extend(_unshaded_diffuse_days_in_era(frame.loc[first:last], column))
+    return sorted(flagged)
+
+
+def _unshaded_diffuse_days_in_era(frame: pd.DataFrame, column: str) -> list[tuple[str, float]]:
+    """Offending days of one diffuse channel over one era of the frame."""
     if column not in frame.columns or DIFFUSE_GLOBAL_COLUMN not in frame.columns:
         return []
     paired = frame[[column, DIFFUSE_GLOBAL_COLUMN]].dropna()
@@ -683,10 +708,15 @@ NIGHT_CORRUPTION_CHANNELS = (*NIGHT_CORRUPTION_COLUMNS, "Net_CNR1")
 # sun's own geometry it catches what a flat gate cannot — the shipped [-20, 1500]
 # rule fires on 6 samples of the record, this one on 3,077, of which 2,477 carry
 # full daylight irradiance with the sun below the horizon. It stays generous at
-# high sun (2,150 W/m2 at zenith) so genuine cloud-edge enhancement survives, and
-# bites only at low sun, where a shifted clock puts midday values. Applied AFTER
-# the whole-day mask above, so what reaches it is the milder residue of the same
-# fault: an afternoon that declines plausibly an hour or two out of place.
+# high sun (2,080-2,220 W/m2 at zenith over the year) so genuine cloud-edge
+# enhancement survives, and bites only at low sun, where a shifted clock puts
+# midday values. Applied AFTER the whole-day mask above, so what reaches it is
+# the milder residue of the same fault: an afternoon that declines plausibly an
+# hour or two out of place.
+#
+# Sa is the constant AT THE EARTH'S ACTUAL DISTANCE, S0 scaled by the
+# eccentricity correction: over the year it spans 1321 to 1415 W/m2, so a fixed
+# S0 would run the ceiling 3.4% high in July and 3.4% low in January.
 SOLAR_CONSTANT_WM2 = 1367.0
 IMPOSSIBLE_SHORTWAVE_CHANNELS = ("Sw_dw", "Net_CNR1")
 
@@ -745,7 +775,7 @@ def mask_impossible_shortwave(
         return frame, removed
     index = pd.DatetimeIndex(frame.index)
     mu0 = np.clip(cos_zenith(index, STATION_SITE, STATION_UTC_OFFSET_HOURS), 0.0, None)
-    ceiling = SOLAR_CONSTANT_WM2 * 1.5 * mu0**1.2 + 100.0
+    ceiling = SOLAR_CONSTANT_WM2 * eccentricity_correction(index) * 1.5 * mu0**1.2 + 100.0
     global_flux = frame["Sw_dw"]
     impossible = (global_flux.notna() & (global_flux > ceiling)).to_numpy()
     if not impossible.any():

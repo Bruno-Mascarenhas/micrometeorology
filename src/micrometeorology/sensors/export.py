@@ -41,7 +41,8 @@ def export_csv(
     include_datetime_columns:
         If True, prepend ``year``, ``month``, ``day``, ``hour`` columns. They
         replace the index rather than joining it: the timestamp is then written
-        only as those four columns, never also as a leading index column.
+        only as those four columns, never also as a leading index column. The
+        frame must therefore be hourly or coarser.
 
     Returns
     -------
@@ -53,6 +54,9 @@ def export_csv(
     TypeError
         If ``include_datetime_columns`` is requested but the index is not a
         ``DatetimeIndex`` (there would be no year/month/day/hour to split out).
+    ValueError
+        If ``include_datetime_columns`` is requested on a sub-hourly index,
+        whose minute the four columns cannot carry.
     """
     out = Path(output_path)
     ensure_dir(out.parent)
@@ -65,6 +69,13 @@ def export_csv(
             raise TypeError(
                 "include_datetime_columns requires a DatetimeIndex; "
                 f"got {type(index).__name__}. Parse the timestamp column first."
+            )
+        if bool((index != index.floor("h")).any()):
+            raise ValueError(
+                "include_datetime_columns writes only year/month/day/hour, so a "
+                "sub-hourly index would lose the minute and collapse every row of "
+                "the same clock hour onto one key. Aggregate to 1h, or export the "
+                "index instead."
             )
         export_df.insert(0, "year", index.year)
         export_df.insert(1, "month", index.month)
