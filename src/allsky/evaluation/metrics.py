@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from allsky.data.contracts import SKY_CLASS_COUNT
 from solrad_correction.evaluation.metrics import compute_regression_metrics
 
 __all__ = [
@@ -161,7 +162,7 @@ def regression_metrics(obs: ArrayLike, pred: ArrayLike) -> dict[str, float]:
 
 
 def classification_metrics(
-    y_true: ArrayLike, y_pred: ArrayLike, n_classes: int = 3
+    y_true: ArrayLike, y_pred: ArrayLike, n_classes: int = SKY_CLASS_COUNT
 ) -> dict[str, Any]:
     """Classification metrics for integer-labelled predictions.
 
@@ -177,7 +178,8 @@ def classification_metrics(
     y_true, y_pred:
         True and predicted class integers.
     n_classes:
-        Number of classes (default 3: clear / partially_cloudy / overcast).
+        Number of classes, defaulting to :data:`~allsky.data.contracts.SKY_CLASS_COUNT`
+        so an absent-column split reports the same confusion shape as a scored one.
 
     Returns
     -------
