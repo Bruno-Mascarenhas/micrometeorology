@@ -24,7 +24,7 @@ Restrict to the observed record (no model subsets)::
 import logging
 import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import numpy as np
 import pandas as pd
@@ -135,7 +135,12 @@ INVALID_DIRECTION = (pd.Timestamp("2019-05-31"), pd.Timestamp("2023-02-20 13:30"
 # (Long & Dutton, BSRN Global Network recommended QC tests V2.0). The WRF field is
 # instantaneous at the stamped hour (wrf.variables.compute_clearness_index), so it
 # shifts by nothing.
-GEOMETRY_OFFSET = {"observed": pd.Timedelta(minutes=30), "wrf": pd.Timedelta(0)}
+GeometrySource = Literal["observed", "wrf"]
+
+GEOMETRY_OFFSET: dict[GeometrySource, pd.Timedelta] = {
+    "observed": pd.Timedelta(minutes=30),
+    "wrf": pd.Timedelta(0),
+}
 
 # Solar elevation above which a shortwave sample counts as daytime: below it the
 # airmass is extreme and relative error swamps the signal, so the clearness index
@@ -234,7 +239,7 @@ def _season_slices(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return {"all": frame, "DJF": groups["DJF"], "JJA": groups["JJA"]}
 
 
-def _geometry_times(frame: pd.DataFrame, source: str) -> pd.DatetimeIndex:
+def _geometry_times(frame: pd.DataFrame, source: GeometrySource) -> pd.DatetimeIndex:
     """The instants the sun's position is evaluated at, for one source's rows.
 
     Parameters
@@ -254,7 +259,7 @@ def _geometry_times(frame: pd.DataFrame, source: str) -> pd.DatetimeIndex:
     return _times(frame) + GEOMETRY_OFFSET[source]
 
 
-def _elevation(frame: pd.DataFrame, source: str) -> np.ndarray:
+def _elevation(frame: pd.DataFrame, source: GeometrySource) -> np.ndarray:
     """Solar elevation in degrees for every row, for the daylight gates."""
     elevation: np.ndarray = solar_elevation_deg(
         _geometry_times(frame, source), SITE, UTC_OFFSET_HOURS
@@ -262,7 +267,7 @@ def _elevation(frame: pd.DataFrame, source: str) -> np.ndarray:
     return elevation
 
 
-def _clearness(frame: pd.DataFrame, column: str, source: str) -> pd.Series:
+def _clearness(frame: pd.DataFrame, column: str, source: GeometrySource) -> pd.Series:
     """Clearness index from measured global irradiance, gated on solar elevation."""
     if column not in frame.columns:
         return pd.Series(dtype=float)
@@ -530,7 +535,9 @@ def _check_caveats_quote_the_published_scalar(spec: object, payload: dict) -> No
         )
 
 
-def _induced_options(spec_id: str, frame: pd.DataFrame, source: str) -> dict[str, object] | None:
+def _induced_options(
+    spec_id: str, frame: pd.DataFrame, source: GeometrySource
+) -> dict[str, object] | None:
     """The covariate-derived options one induced curve needs for one subset.
 
     SUBSET-MATCHED INHERITANCE: lambda and kt_max come from fitting the clearness
@@ -697,7 +704,7 @@ def run(
             "period": {"start": str(observed.index.min()), "end": str(observed.index.max())},
         }
     ]
-    blocks: dict[str, tuple[str, pd.DataFrame]] = {
+    blocks: dict[str, tuple[GeometrySource, pd.DataFrame]] = {
         f"observed_{season.lower()}": ("observed", block)
         for season, block in _season_slices(observed).items()
     }
