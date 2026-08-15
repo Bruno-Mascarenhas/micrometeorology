@@ -299,14 +299,20 @@ def visual_qc(
     arr = _as_rgb_uint8(image)
     flags: set[QCFlag] = set()
 
-    luminance = arr.astype(np.float64) @ _LUMINANCE_WEIGHTS
-    if float(luminance.mean()) < dark_threshold:
+    channels = arr.reshape(-1, 3)
+
+    # Summing each channel in exact integer arithmetic and weighting the three
+    # sums is equal to weighting every pixel and averaging, without the
+    # (H, W, 3) float64 copy the frame-wide dot product materializes.
+    channel_sums = np.array(
+        [channels[:, c].sum(dtype=np.uint64) for c in range(3)], dtype=np.float64
+    )
+    if float(channel_sums @ _LUMINANCE_WEIGHTS) / channels.shape[0] < dark_threshold:
         flags.add(QCFlag.FRAME_DARK)
 
     # Counting the per-channel comparisons costs a fraction of materializing the
     # (H, W, 3) boolean and reducing it along the channel axis, and is exactly
     # equal: both are the same integer count divided by the same pixel total.
-    channels = arr.reshape(-1, 3)
     saturated = np.count_nonzero(
         (channels[:, 0] >= saturated_level)
         & (channels[:, 1] >= saturated_level)
