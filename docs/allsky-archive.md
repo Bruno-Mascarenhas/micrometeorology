@@ -192,6 +192,15 @@ Two rules matter:
   absent from its record. So an upload that failed yesterday retries today without
   re-downloading the video, and adding `--upload` after a plain backfill uploads
   the days you already hold.
+- **A re-extraction always re-uploads.** The frames destination is keyed by the
+  day alone, so the record of the set being replaced names the same remote folder
+  as its replacement; reading it as "already there" would leave Drive holding
+  frames that no longer exist locally, with nothing to reconcile them.
+- **A day the overlay reader refuses is skipped, not fatal.** `sync-archive`
+  follows the same rule `prepare-local` does below: the refusal is filed in the
+  ledger against the extraction parameters and the video's digest, so the daily
+  job stops re-decoding that video every night and still exits 0. A re-download
+  or a different `--step` clears the record and earns a fresh attempt.
 
 The server ignores `If-Modified-Since` (it answers 200 with the full body), so
 conditional GET is not the dedup mechanism — the ledger is, and it decides before

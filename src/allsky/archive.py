@@ -329,7 +329,11 @@ class ArchiveClient:
                 try:
                     return consume(response)
                 except _TransportError as exc:
-                    last = exc.__cause__ or exc
+                    # The wrapped read error when there is one, so the log line and
+                    # the final message name the transport fault rather than the
+                    # marker; the truncation check raises the marker on its own.
+                    cause = exc.__cause__
+                    last = cause if isinstance(cause, Exception) else exc
                 finally:
                     response.close()
             if attempt < self.retries:

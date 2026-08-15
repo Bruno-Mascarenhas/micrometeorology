@@ -21,6 +21,7 @@ Restrict to the observed record (no model subsets)::
     labmim-climatology -i output/archive/station_hourly.parquet -o out/ --no-wrf
 """
 
+import functools
 import logging
 import time
 from pathlib import Path
@@ -300,18 +301,40 @@ def _selection_elevation_bounds(frame: pd.DataFrame) -> tuple[np.ndarray, np.nda
     -------
     tuple of numpy.ndarray
         Minimum and maximum solar elevation in degrees, ``(N,)`` each, in the
-        frame's own row order.
+        frame's own row order.  Both are read-only: they are shared between the
+        callers that ask about the same block.
     """
-    times = _times(frame)
+    stamps = _times(frame).to_numpy()
+    return _elevation_bounds_of(stamps.tobytes(), stamps.dtype.str)
+
+
+@functools.lru_cache(maxsize=16)
+def _elevation_bounds_of(stamps: bytes, stamps_dtype: str) -> tuple[np.ndarray, np.ndarray]:
+    """The bracket for one block of stamps, memoized on the stamps themselves.
+
+    Every published variable asks the same gates about the same handful of blocks
+    — the whole record and its seasonal slices — so an export recomputed this
+    around 200 times over 61k rows, some 10 s of arithmetic for a dozen distinct
+    answers.  The key is the block's own stamps, so a cache hit is the same
+    question and never a near-miss; the results are frozen before being handed
+    out, since every caller of a shared array gets the same object.
+
+    *stamps_dtype* travels with the buffer and is not assumed: a ``datetime64``
+    buffer carries no unit of its own, and reading microsecond stamps as
+    nanoseconds moves every sun position by decades without failing.
+    """
+    times = pd.DatetimeIndex(np.frombuffer(stamps, dtype=stamps_dtype))
     elevations = np.stack(
         [
             solar_elevation_deg(times + offset, SITE, UTC_OFFSET_HOURS)
             for offset in SELECTION_BRACKET_OFFSETS
         ]
     )
-    minimum: np.ndarray = elevations.min(axis=0)
-    maximum: np.ndarray = elevations.max(axis=0)
-    return minimum, maximum
+    lowest_deg: np.ndarray = elevations.min(axis=0)
+    highest_deg: np.ndarray = elevations.max(axis=0)
+    lowest_deg.setflags(write=False)
+    highest_deg.setflags(write=False)
+    return lowest_deg, highest_deg
 
 
 def _daytime_selection(frame: pd.DataFrame) -> np.ndarray:

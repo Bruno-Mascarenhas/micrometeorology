@@ -736,6 +736,15 @@ NIGHT_CORRUPTION_CHANNELS = (*NIGHT_CORRUPTION_COLUMNS, "Net_CNR1")
 # from ``allsky.solar.SOLAR_CONSTANT_WM2``, the Kopp & Lean TSI that scales
 # extraterrestrial irradiance and the clearness index. Two quantities, two names.
 BSRN_CEILING_SOLAR_CONSTANT_WM2 = 1367.0
+
+# The remaining three coefficients of the same prescription, named for the same
+# reason as the one above: they are transcribed from Long & Shi 2008 pp. 24-25,
+# not knobs this repo tunes. The ceiling reads
+# ``Sa * GAIN * mu0**EXPONENT + OFFSET``.
+BSRN_CEILING_GAIN = 1.5
+BSRN_CEILING_MU0_EXPONENT = 1.2
+BSRN_CEILING_OFFSET_WM2 = 100.0
+
 IMPOSSIBLE_SHORTWAVE_CHANNELS = ("Sw_dw", "Net_CNR1")
 
 
@@ -794,7 +803,11 @@ def mask_impossible_shortwave(
     index = pd.DatetimeIndex(frame.index)
     mu0 = np.clip(cos_zenith(index, STATION_SITE, STATION_UTC_OFFSET_HOURS), 0.0, None)
     ceiling = (
-        BSRN_CEILING_SOLAR_CONSTANT_WM2 * eccentricity_correction(index) * 1.5 * mu0**1.2 + 100.0
+        BSRN_CEILING_SOLAR_CONSTANT_WM2
+        * eccentricity_correction(index)
+        * BSRN_CEILING_GAIN
+        * mu0**BSRN_CEILING_MU0_EXPONENT
+        + BSRN_CEILING_OFFSET_WM2
     )
     global_flux = frame["Sw_dw"]
     impossible = (global_flux.notna() & (global_flux > ceiling)).to_numpy()

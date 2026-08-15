@@ -217,6 +217,50 @@ def _plan_day(
     )
 
 
+def _warn_about_ambiguously_clocked_days(
+    ledger: Ledger,
+    selected: tuple[ArchiveEntry, ...],
+    *,
+    clock: TimestampSource,
+    step: int,
+    resize: int | None,
+    extract: bool,
+) -> None:
+    """Announce the days a ledger written before the clock was recorded honestly will redo.
+
+    Earlier releases filed ``timestamps="config"`` for every ``--timestamps
+    config`` run, whatever clock the resolved section actually named — so a day
+    recorded that way may hold overlay-stamped frames or modelled ones, and
+    nothing on disk distinguishes them.  Re-extracting is the only way to settle
+    it, and because the Drive destination is keyed by the day alone, each one is
+    re-uploaded too.
+
+    That is a correct migration and an expensive one, so it is named up front
+    rather than discovered as a cron that ran all night: the days are counted
+    before any work starts, with the flag that skips it.
+    """
+    if not extract or clock is not TimestampSource.overlay:
+        return
+    ambiguous = [
+        entry.key
+        for entry in selected
+        if (record := ledger.frames(entry.key)) is not None
+        and record.get("timestamps") == TimestampSource.config.value
+        and record.get("step") == step
+        and record.get("resize") == resize
+    ]
+    if not ambiguous:
+        return
+    logger.warning(
+        "%d day(s) were extracted by a release that recorded 'config' as the clock whichever "
+        "clock it actually used, so they cannot be told from overlay-stamped days and will be "
+        "re-extracted (and re-uploaded) once: %s%s. Pass --no-extract to defer this.",
+        len(ambiguous),
+        ", ".join(ambiguous[:5]),
+        "..." if len(ambiguous) > 5 else "",
+    )
+
+
 def _video_destination(target: DriveTarget | None, entry: ArchiveEntry) -> str:
     return target.path(REMOTE_VIDEOS, entry.filename) if target else ""
 
@@ -382,6 +426,9 @@ def sync_archive(
             )
             if plan.has_work
         ]
+        _warn_about_ambiguously_clocked_days(
+            ledger, selected, clock=clock, step=step, resize=resize, extract=extract
+        )
         typer.echo(
             f"published: {len(published)} day(s); selected: {len(selected)}; "
             f"needing work: {len(plans)}"

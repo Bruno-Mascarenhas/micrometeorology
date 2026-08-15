@@ -9,6 +9,7 @@ import datetime as dt
 import http.client
 import io
 import json
+import logging
 import os
 import time
 from collections.abc import Iterator
@@ -712,6 +713,25 @@ def test_re_extracting_a_day_queues_its_frames_for_upload_again(
     )
 
     assert (plan.extract, plan.upload_frames) == (True, True)
+
+
+def test_days_a_previous_release_clocked_ambiguously_are_named_before_any_work_starts(
+    mirror: fake.ArchiveMirror, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    data = tmp_path / "data"
+    assert _sync(data, mirror, "--extract", "--since", "2026-08-10").exit_code == 0
+    ledger = _reload(data)
+    (ledger.frames(DAY_NEW) or {})["timestamps"] = "config"
+    ledger.save()
+
+    with caplog.at_level(logging.WARNING, logger="allsky.cli.archive"):
+        result = _sync(data, mirror, "--extract", "--since", "2026-08-10")
+
+    assert result.exit_code == 0, result.output
+    assert any(
+        "recorded 'config' as the clock" in record.getMessage() and DAY_NEW in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_recording_a_new_frame_set_forgets_the_upload_of_the_one_it_replaced(

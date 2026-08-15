@@ -357,8 +357,8 @@ def solar_azimuth_deg(
         where=off_zenith,
     )
     acos_deg = np.rad2deg(np.arccos(np.clip(ratio, -1.0, 1.0)))
-    azimuth = np.where(ha_wrapped_deg > 0.0, acos_deg + 180.0, 540.0 - acos_deg)
-    wrapped: np.ndarray = np.mod(azimuth, 360.0)
+    azimuth_deg = np.where(ha_wrapped_deg > 0.0, acos_deg + 180.0, 540.0 - acos_deg)
+    wrapped: np.ndarray = np.mod(azimuth_deg, 360.0)
     return wrapped
 
 

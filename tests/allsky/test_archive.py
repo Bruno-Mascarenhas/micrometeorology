@@ -259,7 +259,9 @@ class _BodyEndsEarly:
     def read(self, *size: int) -> bytes:
         if self._remaining <= 0:
             return b""
-        chunk = self._response.read(min(size[0], self._remaining) if size else self._remaining)
+        chunk = bytes(
+            self._response.read(min(size[0], self._remaining) if size else self._remaining)
+        )
         self._remaining -= len(chunk)
         return chunk
 
