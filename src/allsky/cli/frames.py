@@ -12,6 +12,7 @@ imageio-ffmpeg is imported lazily inside the command so ``allsky --help`` stays
 light and torch-free.
 """
 
+import logging
 from pathlib import Path
 from typing import Annotated
 
@@ -58,27 +59,18 @@ def extract_frames_cmd(
     typer.Exit
         Code 1 when the day's burned-in overlays cannot be read.
     """
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
+    )
     cfg = PrepareConfig() if config is None else load_prepare_config(config)
 
-    if cfg.video.timestamps == "overlay":
-        from allsky.overlay import OverlayTimestampError, extract_frames_with_overlay_timestamps
+    from allsky.overlay import OverlayTimestampError, extract_frames_for
 
-        try:
-            manifest = extract_frames_with_overlay_timestamps(
-                video, out_dir, step=step, resize=resize
-            )
-        except OverlayTimestampError as exc:
-            typer.echo(f"ERROR: {video} cannot be timestamped: {exc}", err=True)
-            raise typer.Exit(code=1) from exc
-    else:
-        from allsky.video import extract_frames  # lazy: needs imageio-ffmpeg
-
-        typer.echo(
-            f"WARNING: video.timestamps is 'modelled': frame N is placed at "
-            f"{cfg.video.start_time} + N x {cfg.video.minutes_per_frame} min, a cadence this "
-            "camera does not follow (see docs/allsky-archive.md)"
-        )
-        manifest = extract_frames(video, out_dir, cfg.video, step=step, resize=resize)
+    try:
+        manifest = extract_frames_for(video, out_dir, cfg.video, step=step, resize=resize)
+    except OverlayTimestampError as exc:
+        typer.echo(f"ERROR: {video} cannot be timestamped: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     typer.echo(f"Extracted {len(manifest)} frames from {video} into {out_dir}")
 
 
