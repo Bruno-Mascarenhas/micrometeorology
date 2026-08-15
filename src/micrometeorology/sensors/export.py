@@ -56,7 +56,8 @@ def export_csv(
         ``DatetimeIndex`` (there would be no year/month/day/hour to split out).
     ValueError
         If ``include_datetime_columns`` is requested on a sub-hourly index,
-        whose minute the four columns cannot carry.
+        whose minute the four columns cannot carry, or on an index carrying
+        ``NaT``, which four integer columns cannot represent at all.
     """
     out = Path(output_path)
     ensure_dir(out.parent)
@@ -70,7 +71,14 @@ def export_csv(
                 "include_datetime_columns requires a DatetimeIndex; "
                 f"got {type(index).__name__}. Parse the timestamp column first."
             )
-        if bool((index != index.floor("h")).any()):
+        labelled = index[index.notna()]
+        if len(labelled) < len(index):
+            raise ValueError(
+                "include_datetime_columns writes four integer date columns, which "
+                "cannot represent a missing timestamp, and the index carries NaT. "
+                "Drop those rows or export the index instead."
+            )
+        if bool((labelled != labelled.floor("h")).any()):
             raise ValueError(
                 "include_datetime_columns writes only year/month/day/hour, so a "
                 "sub-hourly index would lose the minute and collapse every row of "

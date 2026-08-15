@@ -17,7 +17,10 @@ Process with custom calibrations:
 from pathlib import Path
 from typing import Annotated
 
+import pandas as pd
 import typer
+from pandas.tseries.frequencies import to_offset
+from pandas.tseries.offsets import Tick
 
 from micrometeorology.common.config import get_settings
 from micrometeorology.common.logging import setup_logging
@@ -28,6 +31,23 @@ from micrometeorology.sensors.export import export_csv
 from micrometeorology.sensors.ingestion import apply_physical_limits, merge_dat_files
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
+
+DATETIME_COLUMN_RESOLUTION = pd.Timedelta(hours=1)
+
+
+def _opens_windows_off_the_hour(freq: str) -> bool:
+    """Whether ``freq``'s windows can start away from the hour the date columns resolve.
+
+    Only fixed-length (tick) offsets can misalign: every calendar offset pandas
+    builds -- day, week, month and up -- opens on an hour boundary. A tick
+    shorter than an hour misaligns, and so does any tick that is not a whole
+    multiple of one: ``90min`` clears a "shorter than an hour" test and still
+    opens windows at 01:30, which the four integer columns cannot carry.
+    """
+    offset = to_offset(freq)
+    if not isinstance(offset, Tick):
+        return False
+    return pd.Timedelta(offset) % DATETIME_COLUMN_RESOLUTION != pd.Timedelta(0)
 
 
 @app.command()
@@ -71,6 +91,13 @@ def run(
     log_level: Annotated[str, typer.Option(help="Logging level.")] = "INFO",
 ) -> None:
     """Process raw sensor files: read -> merge -> QC -> calibrate -> aggregate -> export."""
+    if datetime_columns and _opens_windows_off_the_hour(freq):
+        raise typer.BadParameter(
+            f"--datetime-columns writes only year/month/day/hour, which cannot carry "
+            f"the minute of --freq {freq}: windows that do not open on the hour would "
+            f"collapse onto one key. Use a whole number of hours, or --no-datetime-columns."
+        )
+
     settings = get_settings()
     setup_logging(log_level)
 
