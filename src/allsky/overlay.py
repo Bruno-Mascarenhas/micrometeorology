@@ -20,6 +20,8 @@ import base64
 import datetime as dt
 import itertools
 import logging
+import shutil
+import tempfile
 import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -82,6 +84,7 @@ PACKED_GLYPH_BANK = (
 )
 
 FRAME_FILENAME_FORMAT = "allsky-%Y%m%d-%H%M"
+STAGING_DIR_PREFIX = ".staging-"
 #: Overlay-timestamped extraction writes the frame manifest of
 #: :mod:`allsky.video` with one extra column carrying the timestamp provenance,
 #: so both extraction paths produce a manifest the builder reads the same way.
@@ -391,17 +394,37 @@ def read_video_timestamps(
         :data:`MAX_UNREADABLE_FRACTION` of the sampled frames are unreadable, or
         if the recovered timestamps run backwards.
     """
-    import imageio.v3 as iio
-
     if step < 1:
         raise ValueError(f"step must be >= 1, got {step}")
     day = video_date if video_date is not None else _video_date_from_name(path)
     readings: list[OverlayReading] = []
     alternatives: list[tuple[tuple[str, ...], ...]] = []
+    for reading, cell_alternatives, _frame in _sampled_reads(path, step=step, day=day):
+        readings.append(reading)
+        alternatives.append(cell_alternatives)
+    return _settle_readings(readings, alternatives, Path(path).name)
+
+
+def _sampled_reads(
+    path: str | Path, *, step: int, day: dt.date
+) -> Iterator[tuple[OverlayReading, tuple[tuple[str, ...], ...], np.ndarray]]:
+    """One decoding pass, yielding each sampled frame beside its own overlay read.
+
+    Yields
+    ------
+    tuple
+        The frame's :class:`OverlayReading` (timestamp dropped to ``None`` when
+        it lands outside *day* or the day after), the per-cell runner-up digits
+        the temporal pass needs, and the ``(H, W, 3)`` ``uint8`` RGB frame at the
+        camera's native resolution.
+    """
+    import imageio.v3 as iio
+
     for index, frame in enumerate(iio.imiter(path)):
         if index % step:
             continue
-        reading, cell_alternatives = _read_frame(np.asarray(frame))
+        image = np.asarray(frame)
+        reading, cell_alternatives = _read_frame(image)
         stamp = reading.timestamp
         if stamp is not None and not _plausible(stamp, day):
             logger.warning(
@@ -413,23 +436,31 @@ def read_video_timestamps(
                 day + dt.timedelta(days=1),
             )
             stamp = None
-        readings.append(OverlayReading(index=index, timestamp=stamp, text=reading.text))
-        alternatives.append(cell_alternatives)
+        yield (
+            OverlayReading(index=index, timestamp=stamp, text=reading.text),
+            cell_alternatives,
+            image,
+        )
 
+
+def _settle_readings(
+    readings: list[OverlayReading], alternatives: list[tuple[tuple[str, ...], ...]], name: str
+) -> list[OverlayReading]:
+    """Re-decide contested reads, interpolate the failures, and vouch for the order."""
     readings = _correct_against_neighbours(readings, alternatives)
 
     unreadable = sum(1 for item in readings if item.timestamp is None)
     if readings and unreadable / len(readings) > MAX_UNREADABLE_FRACTION:
         raise OverlayTimestampError(
-            f"{unreadable} of {len(readings)} frames in {Path(path).name} have an unreadable "
+            f"{unreadable} of {len(readings)} frames in {name} have an unreadable "
             "timestamp overlay — refusing to timestamp this video from a guess"
         )
     repaired = _repair(readings)
-    _check_monotonic(repaired, Path(path).name)
+    _check_monotonic(repaired, name)
     if unreadable:
         logger.warning(
             "%s: %d of %d overlay reads failed and were interpolated",
-            Path(path).name,
+            name,
             unreadable,
             len(readings),
         )
@@ -486,18 +517,16 @@ def _resized(image: np.ndarray, size: int | tuple[int, int]) -> np.ndarray:
     return np.asarray(Image.fromarray(image).resize(target, Image.Resampling.BILINEAR))
 
 
-def _frames_with_timestamps(
-    path: str | Path, readings: list[OverlayReading], step: int
-) -> Iterator[tuple[OverlayReading, np.ndarray]]:
+def _stage_frame(
+    frame: np.ndarray, staging: Path, index: int, resize: int | tuple[int, int] | None
+) -> Path:
+    """Encode one sampled frame under its source index, before its name is settled."""
     import imageio.v3 as iio
 
-    by_index = {item.index: item for item in readings}
-    for index, frame in enumerate(iio.imiter(path)):
-        if index % step:
-            continue
-        reading = by_index.get(index)
-        if reading is not None and reading.timestamp is not None:
-            yield reading, np.asarray(frame, dtype=np.uint8)
+    image = np.asarray(frame, dtype=np.uint8)
+    staged = staging / f"{index:08d}.jpg"
+    iio.imwrite(staged, image if resize is None else _resized(image, resize), quality=JPEG_QUALITY)
+    return staged
 
 
 def _timestamp_flags(reading: OverlayReading) -> int:
@@ -525,6 +554,11 @@ def extract_frames_with_overlay_timestamps(
     names carry minute resolution, matching the manifest's ``sample_id``, so a
     second frame captured within the same minute is skipped rather than
     overwriting the first.
+
+    The video is decoded once: each sampled frame is encoded under its source
+    index into a staging directory inside *out_dir* while the overlays are read,
+    and moved to its settled name only after the whole day's timestamps have been
+    corrected and repaired. A day the reader refuses leaves nothing behind.
 
     Parameters
     ----------
@@ -557,41 +591,51 @@ def extract_frames_with_overlay_timestamps(
     Raises
     ------
     OverlayTimestampError
-        Propagated from :func:`read_video_timestamps` when the day's overlays
-        cannot be trusted; nothing is written in that case.
+        Raised, as :func:`read_video_timestamps` raises it, when the day's
+        overlays cannot be trusted; nothing is written in that case.
     """
-    import imageio.v3 as iio
-
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     video_name = Path(path).name
-    readings = read_video_timestamps(path, step=step, video_date=video_date)
+    if step < 1:
+        raise ValueError(f"step must be >= 1, got {step}")
+    day = video_date if video_date is not None else _video_date_from_name(path)
 
     rows: list[dict[str, object]] = []
     written: set[str] = set()
     collisions = 0
-    for reading, image in _frames_with_timestamps(path, readings, step):
-        stamp = reading.timestamp
-        if stamp is None:
-            continue
-        name = f"{stamp:{FRAME_FILENAME_FORMAT}}.jpg"
-        if name in written:
-            collisions += 1
-            continue
-        frame_file = out_path / name
-        iio.imwrite(
-            frame_file, image if resize is None else _resized(image, resize), quality=JPEG_QUALITY
-        )
-        written.add(name)
-        rows.append(
-            {
-                "frame_path": str(frame_file),
-                "timestamp": pd.Timestamp(stamp),
-                "video": video_name,
-                "index": reading.index,
-                "qc_frame_flags": _timestamp_flags(reading),
-            }
-        )
+    staging = Path(tempfile.mkdtemp(dir=out_path, prefix=STAGING_DIR_PREFIX))
+    try:
+        readings: list[OverlayReading] = []
+        alternatives: list[tuple[tuple[str, ...], ...]] = []
+        staged: dict[int, Path] = {}
+        for reading, cell_alternatives, frame in _sampled_reads(path, step=step, day=day):
+            readings.append(reading)
+            alternatives.append(cell_alternatives)
+            staged[reading.index] = _stage_frame(frame, staging, reading.index, resize)
+
+        for reading in _settle_readings(readings, alternatives, video_name):
+            stamp = reading.timestamp
+            if stamp is None:
+                continue
+            name = f"{stamp:{FRAME_FILENAME_FORMAT}}.jpg"
+            if name in written:
+                collisions += 1
+                continue
+            frame_file = out_path / name
+            staged[reading.index].replace(frame_file)
+            written.add(name)
+            rows.append(
+                {
+                    "frame_path": str(frame_file),
+                    "timestamp": pd.Timestamp(stamp),
+                    "video": video_name,
+                    "index": reading.index,
+                    "qc_frame_flags": _timestamp_flags(reading),
+                }
+            )
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
     if collisions:
         logger.info(

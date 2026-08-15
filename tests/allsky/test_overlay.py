@@ -378,6 +378,43 @@ def test_a_name_the_configured_format_does_not_describe_falls_back_to_the_allsky
     ]
 
 
+def test_extraction_decodes_the_video_only_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    decodes = 0
+    undecorated = iio.imiter
+
+    def counting_imiter(*args, **kwargs):
+        nonlocal decodes
+        decodes += 1
+        return undecorated(*args, **kwargs)
+
+    monkeypatch.setattr(iio, "imiter", counting_imiter)
+
+    extract_frames_with_overlay_timestamps(_video(tmp_path, MINUTE_APART), tmp_path / "frames")
+
+    assert decodes == 1
+
+
+def test_extraction_leaves_only_frames_and_the_manifest_in_the_output_directory(tmp_path: Path):
+    out_dir = tmp_path / "frames"
+    extract_frames_with_overlay_timestamps(_video(tmp_path, MINUTE_APART), out_dir)
+
+    assert sorted(path.name for path in out_dir.iterdir()) == [
+        "allsky-20260810-1200.jpg",
+        "allsky-20260810-1201.jpg",
+        "allsky-20260810-1202.jpg",
+        MANIFEST_FILENAME,
+    ]
+
+
+def test_a_video_the_reader_will_not_vouch_for_leaves_no_frame_behind(tmp_path: Path):
+    stamps = ("20260810120000", "20260810120200", "20260810120100")
+    out_dir = tmp_path / "frames"
+    with pytest.raises(OverlayTimestampError, match="go backwards"):
+        extract_frames_with_overlay_timestamps(_video(tmp_path, stamps), out_dir)
+
+    assert list(out_dir.rglob("*")) == []
+
+
 def test_a_read_timestamp_carries_no_provenance_flag(tmp_path: Path):
     manifest = extract_frames_with_overlay_timestamps(
         _video(tmp_path, MINUTE_APART), tmp_path / "frames"
