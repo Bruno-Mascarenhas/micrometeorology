@@ -295,11 +295,16 @@ def visual_qc(
     set of QCFlag
         Possibly empty; a clean frame flags nothing. The flags describe
         radiometric usability only — geometry (mask, crop) is not checked here.
+        A frame with no pixels at all (a truncated decode) is unmeasurable: it
+        flags nothing and logs a warning instead.
     """
     arr = _as_rgb_uint8(image)
     flags: set[QCFlag] = set()
 
     channels = arr.reshape(-1, 3)
+    if channels.shape[0] == 0:
+        logger.warning("visual QC skipped: frame has no pixels, shape %s", arr.shape)
+        return flags
 
     # Summing each channel in exact integer arithmetic and weighting the three
     # sums is equal to weighting every pixel and averaging, without the
