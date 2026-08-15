@@ -21,7 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-__all__ = ["atomic_write", "atomic_write_json"]
+__all__ = ["atomic_write", "atomic_write_json", "atomic_write_strict_json"]
 
 
 def atomic_write(path: str | Path, writer: Callable[[Path], Any]) -> Path:
@@ -82,15 +82,48 @@ def _fsync_directory(directory: Path) -> None:
 
 
 def atomic_write_json(path: str | Path, obj: Any) -> Path:
-    """Atomically write *obj* to *path* as indented UTF-8 JSON.
+    """Atomically write *obj* to *path* as indented UTF-8 JSON, non-finite floats allowed.
 
     Uses ``indent=2, ensure_ascii=False, default=str`` — the canonical encoding
     for the pipeline's JSON sidecars (manifest/embedding meta, metrics history,
-    report payloads).
+    report payloads).  ``default=str`` only stringifies objects the encoder
+    cannot serialize at all; it is NOT a guard against non-finite floats, which
+    this writer emits as the bare ``NaN``/``Infinity``/``-Infinity`` tokens of
+    Python's JSON extension.  Those tokens are deliberate here: a diverged
+    epoch's ``float("nan")`` loss is real telemetry that the training metrics
+    history must keep.
+
+    For anything whose bytes can reach the public site, use
+    :func:`atomic_write_strict_json` instead — a browser's ``response.json()``
+    rejects those tokens and loses the whole payload.
     """
 
     def _write(tmp: Path) -> None:
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(obj, handle, indent=2, ensure_ascii=False, default=str)
+
+    return atomic_write(path, _write)
+
+
+def atomic_write_strict_json(path: str | Path, obj: Any) -> Path:
+    """Atomically write *obj* to *path* as RFC-compliant indented UTF-8 JSON.
+
+    Same encoding and signature as :func:`atomic_write_json` plus
+    ``allow_nan=False``, so a non-finite float raises :class:`ValueError` and
+    nothing is published: the destination keeps its previous contents and the
+    temp file is removed.  This is the writer for every payload the public site
+    fetches, whose consumers parse with a strict ``response.json()`` that fails
+    the ENTIRE document on a bare ``NaN``/``Infinity`` token — indistinguishable,
+    to a visitor, from a page that was never deployed.  A missing measurement
+    must therefore reach this writer already encoded as ``None``.
+
+    The guard covers Python floats and their subclasses (``numpy.float64``);
+    types the encoder cannot serialize still go through ``default=str``, so a
+    ``numpy.float32`` NaN is written as the string ``"nan"``.  Pass plain floats.
+    """
+
+    def _write(tmp: Path) -> None:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(obj, handle, indent=2, ensure_ascii=False, default=str, allow_nan=False)
 
     return atomic_write(path, _write)

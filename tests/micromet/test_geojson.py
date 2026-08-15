@@ -11,6 +11,7 @@ import inspect
 import json
 import re
 from pathlib import Path
+from typing import Any, NoReturn
 
 import numpy as np
 import pandas as pd
@@ -455,3 +456,96 @@ def test_grid_geojson_stream_matches_reference_dict(tmp_path, sample_grid):
         actual = json.load(f)
 
     assert actual == expected
+
+
+# ---------------------------------------------------------------------------
+# Non-finite grid geometry — the published files must never carry a bare
+# NaN/Infinity token, which every site consumer's strict JSON parser rejects.
+# ---------------------------------------------------------------------------
+
+GRID_WRITERS = [write_grid_geojson_stream, write_grid_compact_json_stream]
+NON_FINITE_VALUES = [np.nan, np.inf, -np.inf]
+
+
+def _raise_on_non_finite_token(token: str) -> NoReturn:
+    raise ValueError(f"non-finite JSON token: {token}")
+
+
+def _parse_as_a_browser_would(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"), parse_constant=_raise_on_non_finite_token)
+
+
+@pytest.mark.parametrize("writer", GRID_WRITERS, ids=lambda w: w.__name__)
+@pytest.mark.parametrize("value", NON_FINITE_VALUES, ids=str)
+def test_grid_writers_refuse_a_non_finite_longitude(tmp_path, sample_grid, writer, value):
+    lon, lat = sample_grid
+    lon = lon.copy()
+    lon[1, 2] = value
+
+    with pytest.raises(ValueError, match=r"(?i)non-finite"):
+        writer(tmp_path / "grid.json", lon, lat, 1000.0, 2000.0)
+
+
+@pytest.mark.parametrize("writer", GRID_WRITERS, ids=lambda w: w.__name__)
+@pytest.mark.parametrize("value", NON_FINITE_VALUES, ids=str)
+def test_grid_writers_refuse_a_non_finite_latitude(tmp_path, sample_grid, writer, value):
+    lon, lat = sample_grid
+    lat = lat.copy()
+    lat[2, 0] = value
+
+    with pytest.raises(ValueError, match=r"(?i)non-finite"):
+        writer(tmp_path / "grid.json", lon, lat, 1000.0, 2000.0)
+
+
+@pytest.mark.parametrize("writer", GRID_WRITERS, ids=lambda w: w.__name__)
+@pytest.mark.parametrize("value", NON_FINITE_VALUES, ids=str)
+def test_grid_writers_refuse_a_non_finite_resolution(tmp_path, sample_grid, writer, value):
+    lon, lat = sample_grid
+
+    with pytest.raises(ValueError, match=r"(?i)non-finite"):
+        writer(tmp_path / "grid.json", lon, lat, value, 2000.0)
+
+
+@pytest.mark.parametrize("writer", GRID_WRITERS, ids=lambda w: w.__name__)
+def test_grid_writers_publish_nothing_when_they_refuse(tmp_path, sample_grid, writer):
+    lon, lat = sample_grid
+    lat = lat.copy()
+    lat[0, 0] = np.nan
+    out = tmp_path / "grid.json"
+
+    with pytest.raises(ValueError, match=r"(?i)non-finite"):
+        writer(out, lon, lat, 1000.0, 2000.0)
+
+    assert not out.exists()
+
+
+def test_masked_grid_with_a_non_finite_fill_is_refused(tmp_path, sample_grid):
+    """A WRF MaskedArray hides the poisoned cell from ``isfinite`` on the mask,
+    but the corner arithmetic reads the underlying data all the same."""
+    lon, lat = sample_grid
+    poisoned = lon.copy()
+    poisoned[1, 1] = np.nan
+    masked_lon = np.ma.MaskedArray(poisoned, mask=(np.arange(lon.size) == 6).reshape(lon.shape))
+
+    with pytest.raises(ValueError, match=r"(?i)non-finite"):
+        write_grid_geojson_stream(tmp_path / "grid.geojson", masked_lon, lat, 1000.0, 2000.0)
+
+
+def test_grid_geojson_bytes_parse_under_strict_json(tmp_path, sample_grid):
+    lon, lat = sample_grid
+    out = write_grid_geojson_stream(tmp_path / "D01.geojson", lon, lat, 1000.0, 2000.0)
+
+    assert len(_parse_as_a_browser_would(out)["features"]) == lon.size
+
+
+def test_compact_grid_bytes_parse_under_strict_json(tmp_path, sample_grid):
+    lon, lat = sample_grid
+    out = write_grid_compact_json_stream(tmp_path / "D01.grid.json", lon, lat, 1000.0, 2000.0)
+
+    assert _parse_as_a_browser_would(out)["format"] == "grid-edges-v1"
+
+
+def test_values_json_bytes_parse_under_strict_json(tmp_path, sample_values_2d):
+    out = write_values_json_stream(tmp_path / "D01_t00.json", sample_values_2d, 0.0, 20.0, "N/A")
+
+    assert _parse_as_a_browser_would(out)["values"][0] is None
