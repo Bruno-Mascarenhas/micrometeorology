@@ -21,6 +21,7 @@ from allsky.archive import (
     build_ssl_context,
     ledger_lock,
 )
+from allsky.cli.runtime import configure_cli_logging
 from allsky.drive import DriveTarget, RcloneError, RcloneUploader
 
 logger = logging.getLogger(__name__)
@@ -323,9 +324,7 @@ def sync_archive(
         Code 1 when the archive listing or rclone is unreachable, or when any day
         failed to process for a reason a rerun could get past.
     """
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
-    )
+    configure_cli_logging()
     root = data_dir
     videos_dir = root / VIDEOS_SUBDIR
     frames_root = root / FRAMES_SUBDIR
@@ -729,9 +728,7 @@ def snapshot(
     typer.Exit
         Code 1 when the capture, the prediction or the Drive upload fails.
     """
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
-    )
+    configure_cli_logging()
     from allsky.snapshot import capture_snapshot
 
     try:

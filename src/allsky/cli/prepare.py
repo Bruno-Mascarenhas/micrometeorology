@@ -25,7 +25,13 @@ from typing import Annotated, Any
 import typer
 
 from allsky.atomic import atomic_write, atomic_write_json
-from allsky.config import VIDEO_TIME_FIELDS, PrepareConfig, load_prepare_config
+from allsky.cli.runtime import configure_cli_logging
+from allsky.config import (
+    FRAME_PIXEL_SECTIONS,
+    VIDEO_TIME_FIELDS,
+    PrepareConfig,
+    load_prepare_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +57,6 @@ ConfigOption = Annotated[
         dir_okay=False,
     ),
 ]
-
-
-def _configure_logging() -> None:
-    """Enable structured INFO logging once."""
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
-    )
 
 
 def _load_prepare(config: Path | None) -> PrepareConfig:
@@ -90,11 +89,6 @@ _MANIFEST_CONFIG_SECTIONS = (
 )
 
 
-#: :class:`PrepareConfig` sections baked into the extracted JPEG itself by
-#: :func:`_extract_and_qc`.
-_FRAME_CONFIG_SECTIONS = ("mask", "crop", "resize")
-
-
 def _frames_inputs_sha256(cfg: PrepareConfig) -> str:
     """Content hash of the config that decides what an extracted frame is.
 
@@ -115,7 +109,7 @@ def _frames_inputs_sha256(cfg: PrepareConfig) -> str:
 
     return config_subset_sha256(
         cfg,
-        sections=_FRAME_CONFIG_SECTIONS,
+        sections=FRAME_PIXEL_SECTIONS,
         nested_fields={"video": VIDEO_TIME_FIELDS},
         content_files=() if cfg.mask.path is None else (cfg.mask.path,),
         subject="the frame provenance hash",
@@ -181,14 +175,6 @@ def _require_frames_key(video_dir: Path, stem: str, *, frames_key: str, force: b
     raise typer.Exit(1)
 
 
-def _file_sha256(path: Path) -> str:
-    """Content hash of *path*, or a stable marker when it is absent."""
-    if not path.is_file():
-        return f"absent:{path}"
-    with open(path, "rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
-
-
 def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]) -> str:
     """Content hash of everything the manifest is actually built from.
 
@@ -217,13 +203,15 @@ def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]
             f"PrepareConfig has no field(s) {unknown}; pydantic ignores bogus include keys, so "
             "the manifest inputs hash would silently stop covering them"
         )
+    from allsky.provenance import file_content_sha256
+
     digest = hashlib.sha256()
     for frame in per_video:
         for frame_path in sorted(str(value) for value in frame["frame_path"]):
             digest.update(frame_path.encode("utf-8"))
             digest.update(b"\0")
     for sensor_path in cfg.sensor.paths:
-        digest.update(_file_sha256(Path(sensor_path)).encode("utf-8"))
+        digest.update(file_content_sha256(Path(sensor_path)).encode("utf-8"))
     sections = cfg.model_dump(mode="json", include=set(_MANIFEST_CONFIG_SECTIONS))
     digest.update(json.dumps(sections, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     return digest.hexdigest()
@@ -261,7 +249,7 @@ def validate_dataset(
         Code 1 when the manifest is absent or the report holds errors (or, under
         ``--strict``, warnings).
     """
-    _configure_logging()
+    configure_cli_logging()
     cfg = _load_prepare(config)
 
     import pandas as pd
@@ -343,7 +331,7 @@ def prepare_local(
         paired with any video day, when ``build-manifest`` runs with no extracted
         frames, or when the split artifact already exists for a different day set.
     """
-    _configure_logging()
+    configure_cli_logging()
     cfg = _load_prepare(config)
 
     import glob
@@ -425,7 +413,7 @@ def export_colab_bundle_cmd(
     ] = False,
 ) -> None:
     """Pack a prepared dataset into a Colab-ready tar.gz bundle."""
-    _configure_logging()
+    configure_cli_logging()
     cfg = _load_prepare(config)
 
     from allsky.bundle import export_colab_bundle

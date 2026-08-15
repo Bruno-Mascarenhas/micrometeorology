@@ -65,6 +65,14 @@ VIDEO_TIME_FIELDS = (
     "minutes_per_frame",
 )
 
+#: The :class:`PrepareConfig` sections that decide which PIXELS an extracted
+#: frame holds, as opposed to the encoder that later reads them.  Beside
+#: :data:`VIDEO_TIME_FIELDS` for the same reason: the frame extractor's resume
+#: gate and the embedding store's both hash this, and two copies of the tuple
+#: would let one start covering a section the other does not — resuming an
+#: embedding store onto frames it was never extracted from.
+FRAME_PIXEL_SECTIONS = ("mask", "crop", "resize")
+
 
 class SiteConfig(BaseModel):
     """Observation site (LabMiM/UFBA, Salvador-BA by default)."""

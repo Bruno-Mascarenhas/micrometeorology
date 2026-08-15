@@ -13,6 +13,7 @@ from typing import Annotated
 
 import typer
 
+from allsky.cli.runtime import configure_cli_logging
 from allsky.cli.train import (
     DeviceChoice,  # typer resolves this annotation at runtime
 )
@@ -88,9 +89,7 @@ def evaluate_cmd(
         Code 1 when evaluation or report writing fails; the reason is logged
         before the exit.
     """
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
-    )
+    configure_cli_logging()
 
     resolved_root = _resolve_data_root(data_root, config)
     out_dir = report_dir if report_dir is not None else checkpoint.parent / f"eval-{split}"

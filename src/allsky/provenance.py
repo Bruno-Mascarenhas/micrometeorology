@@ -30,7 +30,13 @@ from pydantic import BaseModel
 
 from micrometeorology.common.git import run_git, source_root
 
-__all__ = ["code_version", "config_subset_sha256", "content_sha256", "git_commit"]
+__all__ = [
+    "code_version",
+    "config_subset_sha256",
+    "content_sha256",
+    "file_content_sha256",
+    "git_commit",
+]
 
 _DISTRIBUTION = "labmim-micrometeorology"
 
@@ -80,7 +86,7 @@ def content_sha256(manifest: pd.DataFrame) -> str:
     return digest.hexdigest()
 
 
-def _file_content_sha256(path: Path) -> str:
+def file_content_sha256(path: Path) -> str:
     """Content hash of *path*, or a stable marker naming it when it is absent."""
     if not path.is_file():
         return f"absent:{path}"
@@ -159,5 +165,5 @@ def config_subset_sha256(
     )
     digest = hashlib.sha256(canonical.encode("utf-8"))
     for file in content_files:
-        digest.update(_file_content_sha256(Path(file)).encode("utf-8"))
+        digest.update(file_content_sha256(Path(file)).encode("utf-8"))
     return digest.hexdigest()

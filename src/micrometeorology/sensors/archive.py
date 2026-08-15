@@ -46,11 +46,12 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-# The same solar geometry the climatology exporter uses, so "deep night" means
-# the same angle in both places.
-from allsky.config import SiteConfig
 from allsky.solar import cos_zenith, eccentricity_correction, solar_elevation_deg
 from micrometeorology.common.paths import ensure_dir
+
+# The same solar geometry the climatology exporter uses, so "deep night" means
+# the same angle in both places.
+from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.sensors.ingestion import merge_dat_files
 
 logger = logging.getLogger(__name__)
@@ -689,13 +690,6 @@ def _unshaded_diffuse_days_in_era(frame: pd.DataFrame, column: str) -> list[tupl
         if len(run) >= DIFFUSE_MIN_EPISODE_DAYS or medians[day] > DIFFUSE_RATIO_CERTAIN
     ]
 
-
-# Station coordinates for the solar geometry the checks below need, repeated
-# rather than imported from the climatology exporter: a sensors module must not
-# depend on a CLI. Both copies are the station's own numbers and must stay
-# equal — see SITE in cli/export_climatology.py.
-STATION_SITE = SiteConfig(latitude=-13.0055, longitude=-38.5089)
-STATION_UTC_OFFSET_HOURS = -3.0
 
 # Detection constants for the timestamp-corruption check below, measured in
 # docs/arqueologia/qc/med-fault-detection.md: 42 days (1.22% of the record) carry

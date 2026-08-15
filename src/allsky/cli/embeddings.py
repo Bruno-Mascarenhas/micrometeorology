@@ -21,28 +21,15 @@ from typing import Annotated
 
 import typer
 
-from allsky.config import VIDEO_TIME_FIELDS, PrepareConfig
+from allsky.cli.runtime import configure_cli_logging
+from allsky.config import FRAME_PIXEL_SECTIONS, VIDEO_TIME_FIELDS, PrepareConfig
 
 logger = logging.getLogger("allsky.embeddings")
 
 
-def _configure_logging() -> None:
-    """Attach a stderr handler at INFO once, so progress is visible in the CLI."""
-    root = logging.getLogger("allsky")
-    if not root.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
-        root.addHandler(handler)
-    root.setLevel(logging.INFO)
-
-
-#: Sections deciding the pixels a stored vector was computed from, as opposed to
-#: the encoder that computed it: what ``prepare-local`` bakes into the JPEG.
-_PIXEL_CONFIG_SECTIONS = ("mask", "crop", "resize")
-
 #: Sections a stored vector depends on whole: the encoder itself and the
 #: preprocessing ``prepare-local`` bakes into the JPEG the encoder reads.
-_EMBEDDING_CONFIG_SECTIONS = ("embeddings", *_PIXEL_CONFIG_SECTIONS)
+_EMBEDDING_CONFIG_SECTIONS = ("embeddings", *FRAME_PIXEL_SECTIONS)
 
 
 def _mask_content_files(cfg: PrepareConfig) -> tuple[str, ...]:
@@ -65,7 +52,7 @@ def _pixel_config_sha256(cfg: PrepareConfig) -> str:
 
     return config_subset_sha256(
         cfg,
-        sections=_PIXEL_CONFIG_SECTIONS,
+        sections=FRAME_PIXEL_SECTIONS,
         nested_fields={"video": VIDEO_TIME_FIELDS},
         content_files=_mask_content_files(cfg),
         subject="the embedding pixel provenance hash",
@@ -157,7 +144,7 @@ def precompute_embeddings(
     from allsky.embeddings import build_backbone, extract_embeddings
     from allsky.embeddings.backbone import AVAILABLE_BACKBONES
 
-    _configure_logging()
+    configure_cli_logging()
 
     cfg = load_prepare_config(config)
     dataset_dir = Path(cfg.output.dataset_dir)

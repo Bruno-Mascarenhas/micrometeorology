@@ -42,7 +42,6 @@ Relationship to the neighbouring modules
 
 import json
 import logging
-import os
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -52,7 +51,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from micrometeorology.common.paths import ensure_dir
+from allsky.atomic import atomic_write
 from micrometeorology.stats import distributions as dist
 
 logger = logging.getLogger(__name__)
@@ -1185,28 +1184,21 @@ _assert_references()
 def write_json(output_path: str | Path, payload: Mapping[str, Any]) -> Path:
     """Write one artifact atomically, in the encoding the site pipeline uses.
 
-    Same contract as :mod:`micrometeorology.wrf.jobs`: serialise to a private
-    ``.<name>.tmp-<pid>`` sibling and ``os.replace`` it into place, so a reader
-    fetching the directory mid-run sees the old file or the new one, never a
-    truncated parse error. ``allow_nan=False`` because ``NaN`` is not valid JSON
-    and would fail in the browser instead of here.
+    Serialised to a private sibling and ``os.replace``-d into place by
+        :func:`allsky.atomic.atomic_write`, so a reader fetching the directory
+        mid-run sees the old file or the new one, never a truncated parse error.
+        The compact separators are this artifact's published byte contract, so the
+        encoding stays here rather than moving to a shared JSON writer.
+        ``allow_nan=False`` because ``NaN`` is not valid JSON and would fail in the
+        browser instead of here.
 
-    Raises
-    ------
-    ValueError
-        If the payload still contains a non-finite float. Route every number
-        through :func:`_finite` before calling this.
+        Raises
+        ------
+        ValueError
+            If the payload still contains a non-finite float. Route every number
+            through :func:`_finite` before calling this.
     """
-    out = Path(output_path)
-    ensure_dir(out.parent)
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    temporary = out.with_name(f".{out.name}.tmp-{os.getpid()}")
-    try:
-        with open(temporary, "w", encoding="utf-8") as handle:
-            handle.write(encoded)
-        os.replace(temporary, out)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    out = atomic_write(output_path, lambda tmp: tmp.write_text(encoded, encoding="utf-8"))
     logger.info("wrote %s (%d bytes)", out, len(encoded.encode("utf-8")))
     return out

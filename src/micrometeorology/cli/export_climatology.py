@@ -32,10 +32,10 @@ import typer
 
 # allsky.solar is pure numpy/pandas (no torch) and ships in the same wheel, so
 # this CLI reuses NOAA's formulas without pulling a training dependency in.
-from allsky.config import SiteConfig
 from allsky.solar import extraterrestrial_ghi, solar_elevation_deg
 from micrometeorology.common.git import run_git, source_root
 from micrometeorology.common.logging import setup_logging
+from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.stats import distributions as dist
 from micrometeorology.stats.climatology import seasonal_groups
 from micrometeorology.stats.climatology_export import (
@@ -52,11 +52,11 @@ app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
 logger = logging.getLogger(__name__)
 
-# LabMiM tower, Instituto de Física, UFBA — Ondina, Salvador.
-SITE = SiteConfig(latitude=-13.0055, longitude=-38.5089)
-# Salvador keeps UTC-3 all year — DST never applied to Bahia and Brazil abolished
-# it in 2019 — so a fixed offset is exact, not an approximation.
-UTC_OFFSET_HOURS = -3.0
+#: Re-exported under this module's shorter local names; the numbers themselves
+#: live in :mod:`micrometeorology.common.site`, shared with the sensor archive's
+#: quality checks so the two cannot describe different towers.
+SITE = STATION_SITE
+UTC_OFFSET_HOURS = STATION_UTC_OFFSET_HOURS
 
 STATION = {
     "name": "Estação Micrometeorológica LabMiM",

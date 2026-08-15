@@ -12,13 +12,13 @@ bare ``ModuleNotFoundError``.
 """
 
 import json
-import logging
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from allsky.cli.runtime import configure_cli_logging
 from allsky.config import is_experiment_config, load_experiment_config
 from micrometeorology.common.optional import require
 
@@ -84,9 +84,7 @@ def train(
     experiment config. A resumed checkpoint is read under torch's restricted
     unpickler unless ``--trust-checkpoint`` is passed.
     """
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
-    )
+    configure_cli_logging()
 
     if config is None or not is_experiment_config(config):
         raise typer.BadParameter(

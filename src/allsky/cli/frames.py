@@ -12,12 +12,12 @@ imageio-ffmpeg is imported lazily inside the command so ``allsky --help`` stays
 light and torch-free.
 """
 
-import logging
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from allsky.cli.runtime import configure_cli_logging
 from allsky.config import PrepareConfig, load_prepare_config
 
 ConfigOption = Annotated[
@@ -59,9 +59,7 @@ def extract_frames_cmd(
     typer.Exit
         Code 1 when the day's burned-in overlays cannot be read.
     """
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
-    )
+    configure_cli_logging()
     cfg = PrepareConfig() if config is None else load_prepare_config(config)
 
     from allsky.overlay import OverlayTimestampError, extract_frames_for
