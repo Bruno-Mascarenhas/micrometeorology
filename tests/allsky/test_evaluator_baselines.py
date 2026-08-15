@@ -32,6 +32,14 @@ import pytest
 
 from allsky.clearsky import haurwitz_ghi_from_cos_zenith
 from allsky.config import SITE_TZ, SITE_UTC_OFFSET_HOURS, SiteConfig
+from allsky.data.contracts import (
+    SKY_CLASS_KT_UPPER_BOUNDS,
+    SKY_CLEAR,
+    SKY_CLOUDY,
+    SKY_PARTLY_CLOUDY_CLEAR,
+    SKY_PARTLY_CLOUDY_DIFFUSE,
+)
+from allsky.data.manifest import _classify_sky
 from allsky.evaluation.evaluator import (
     _add_strata,
     _build_predictions_frame,
@@ -88,9 +96,35 @@ def _stratified_row(
     return selected.iloc[0]
 
 
+#: The sky classes each published band may hold, so a Kt sitting exactly on a
+#: bound cannot be labelled one condition by the manifest and another by the
+#: evaluator's band.
+_BAND_SKY_CLASSES: dict[str, set[int]] = {
+    "overcast_le0.35": {SKY_CLOUDY},
+    "partial_0.35-0.65": {SKY_PARTLY_CLOUDY_DIFFUSE, SKY_PARTLY_CLOUDY_CLEAR},
+    "clear_gt0.65": {SKY_CLEAR},
+}
+
+
+@pytest.mark.parametrize("bound", SKY_CLASS_KT_UPPER_BOUNDS)
+def test_a_kt_on_a_published_bound_lands_in_the_band_that_holds_its_sky_class(
+    bound: float,
+) -> None:
+    sky_class = _classify_sky(np.array([bound]), labelable=np.array([True]))
+    split_df = _manifest_rows(
+        pd.date_range("2025-03-20 12:00", periods=1), target_kt=[bound], sky_class=sky_class
+    )
+    frame = pd.DataFrame({"sample_id": split_df["sample_id"]})
+
+    _add_strata(frame, split_df)
+
+    band = str(frame["kindex_band"].iloc[0])
+    assert int(sky_class[0]) in _BAND_SKY_CLASSES.get(band, set())
+
+
 @pytest.mark.parametrize(
     ("target_kt", "target_kindex", "expected_band"),
-    [(0.30, 0.42, "overcast_lt0.35"), (0.50, 0.70, "partial_0.35-0.65")],
+    [(0.30, 0.42, "overcast_le0.35"), (0.50, 0.70, "partial_0.35-0.65")],
 )
 def test_kindex_band_bins_the_index_its_bounds_are_published_on(
     target_kt: float, target_kindex: float, expected_band: str
@@ -254,6 +288,91 @@ def test_a_known_kindex_kind_scores_its_clearsky_baseline_without_warning(
         )
 
     assert [record for record in caplog.records if "kindex_kind" in record.msg] == []
+
+
+def _stratified_rows(
+    stratified: pd.DataFrame, *, stratum_kind: str, stratum: str, metric: str
+) -> pd.DataFrame:
+    return stratified[
+        (stratified["stratum_kind"] == stratum_kind)
+        & (stratified["stratum"] == stratum)
+        & (stratified["metric"] == metric)
+    ]
+
+
+def _two_days_whose_noon_frames_all_open_their_day() -> pd.DatetimeIndex:
+    """Two days whose only 12:00 frame is the first of the day, plus two at 13:00."""
+    return pd.DatetimeIndex(
+        [
+            pd.Timestamp("2025-03-20 12:00"),
+            pd.Timestamp("2025-03-20 13:00"),
+            pd.Timestamp("2025-03-20 13:10"),
+            pd.Timestamp("2025-03-21 12:00"),
+            pd.Timestamp("2025-03-21 13:00"),
+            pd.Timestamp("2025-03-21 13:10"),
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "metric", ["rmse_persistence", "rmse_model_persistence", "skill_persistence"]
+)
+def test_a_stratum_that_pairs_no_persistence_row_publishes_no_persistence_metric(
+    metric: str,
+) -> None:
+    local_times = _two_days_whose_noon_frames_all_open_their_day()
+    observed = np.array([100.0, 110.0, 120.0, 500.0, 510.0, 520.0])
+    split_df = _manifest_rows(local_times, target_dhi=observed)
+    frame = _build_predictions_frame(
+        split_df, {"dhi": observed + 5.0}, ["dhi"], kindex_kind="kstar"
+    )
+
+    stratified = _stratified_metrics(frame, ["dhi"], {"dhi": _target_metrics(frame, "dhi")})
+
+    assert _stratified_rows(
+        stratified, stratum_kind="hour_of_day", stratum="12", metric=metric
+    ).empty
+
+
+def test_a_stratum_keeps_its_model_metrics_when_a_reference_pairs_nothing() -> None:
+    local_times = _two_days_whose_noon_frames_all_open_their_day()
+    observed = np.array([100.0, 110.0, 120.0, 500.0, 510.0, 520.0])
+    split_df = _manifest_rows(local_times, target_dhi=observed)
+    frame = _build_predictions_frame(
+        split_df, {"dhi": observed + 5.0}, ["dhi"], kindex_kind="kstar"
+    )
+
+    stratified = _stratified_metrics(frame, ["dhi"], {"dhi": _target_metrics(frame, "dhi")})
+
+    noon = _stratified_row(stratified, stratum_kind="hour_of_day", stratum="12", metric="rmse")
+    assert int(noon["n"]) == 2
+
+
+def test_an_unresolvable_clearsky_baseline_publishes_no_clearsky_metric() -> None:
+    local_times = pd.date_range("2025-03-20 08:00", periods=5, freq="1h")
+    split_df = _manifest_rows(local_times)
+    frame = _build_predictions_frame(
+        split_df, {"kindex": np.full(len(local_times), 0.7)}, ["kindex"], kindex_kind=None
+    )
+
+    stratified = _stratified_metrics(
+        frame, ["kindex"], {"kindex": _target_metrics(frame, "kindex")}
+    )
+
+    assert stratified[stratified["metric"].str.endswith("_clearsky")].empty
+
+
+def test_no_stratified_row_is_published_over_zero_pairs() -> None:
+    local_times = _two_days_whose_noon_frames_all_open_their_day()
+    observed = np.array([100.0, 110.0, 120.0, 500.0, 510.0, 520.0])
+    split_df = _manifest_rows(local_times, target_dhi=observed)
+    frame = _build_predictions_frame(
+        split_df, {"dhi": observed + 5.0}, ["dhi"], kindex_kind="kstar"
+    )
+
+    stratified = _stratified_metrics(frame, ["dhi"], {"dhi": _target_metrics(frame, "dhi")})
+
+    assert bool((stratified["n"] > 0).all())
 
 
 def _two_days_with_a_dropped_persistence_row() -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
