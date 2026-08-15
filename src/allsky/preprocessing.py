@@ -12,8 +12,9 @@ frames that are unusable for radiometric reasons:
 - :func:`resize_image` bilinearly resizes (the same PIL recipe as
   :func:`allsky.video.extract_frames`);
 - :func:`visual_qc` returns the :class:`~allsky.data.contracts.QCFlag` bits
-  ``FRAME_DARK`` (mean luminance below a threshold) and ``FRAME_SATURATED``
-  (too large a fraction of fully-clipped white pixels);
+  ``FRAME_DARK`` (mean luminance below a threshold), ``FRAME_SATURATED``
+  (too large a fraction of fully-clipped white pixels) and ``FRAME_UNREADABLE``
+  (a frame with no pixels at all, on which nothing can be measured);
 - :func:`process_frame` composes mask -> crop -> resize from a
   :class:`~allsky.config.PrepareConfig`, optionally reusing a mask decoded once
   by :func:`resolve_mask` instead of re-reading the PNG for every frame.
@@ -21,15 +22,12 @@ frames that are unusable for radiometric reasons:
 Everything is pure numpy + PIL: importing this module never pulls torch.
 """
 
-import logging
 from pathlib import Path
 
 import numpy as np
 
 from allsky.config import CropConfig, PrepareConfig
 from allsky.data.contracts import QCFlag
-
-logger = logging.getLogger(__name__)
 
 __all__ = [
     "DARK_LUMINANCE_THRESHOLD",
@@ -266,13 +264,16 @@ def visual_qc(
 ) -> set[QCFlag]:
     """Flag radiometrically unusable frames.
 
-    Returns the subset of ``{FRAME_DARK, FRAME_SATURATED}`` that applies:
+    Returns the subset of ``{FRAME_DARK, FRAME_SATURATED, FRAME_UNREADABLE}``
+    that applies:
 
     - ``FRAME_DARK`` when the mean BT.601 luminance is below *dark_threshold*
       (night/twilight frames captured below the usable-sun horizon);
     - ``FRAME_SATURATED`` when the fraction of fully-clipped white pixels (every
       channel ``>= saturated_level``) exceeds *saturated_fraction_threshold*
-      (over-exposure / direct-sun bloom washing out the sky texture).
+      (over-exposure / direct-sun bloom washing out the sky texture);
+    - ``FRAME_UNREADABLE``, alone, when the frame has no pixels: neither
+      radiometric quantity exists, so neither threshold can be evaluated.
 
     The thresholds default to the module-level constants
     (:data:`DARK_LUMINANCE_THRESHOLD`, :data:`SATURATED_FRACTION_THRESHOLD`,
@@ -295,15 +296,16 @@ def visual_qc(
     set of QCFlag
         Possibly empty; a clean frame flags nothing. The flags describe
         radiometric usability only — geometry (mask, crop) is not checked here.
-        A frame with no pixels at all (a truncated decode) is unmeasurable: it
-        flags nothing and logs a warning instead.
+        A frame with no pixels at all (a truncated decode) is unmeasurable and
+        carries ``FRAME_UNREADABLE``, so the bitmask persisted for it is never
+        zero and no downstream reader can mistake it for a clean frame.
     """
     arr = _as_rgb_uint8(image)
     flags: set[QCFlag] = set()
 
     channels = arr.reshape(-1, 3)
     if channels.shape[0] == 0:
-        logger.warning("visual QC skipped: frame has no pixels, shape %s", arr.shape)
+        flags.add(QCFlag.FRAME_UNREADABLE)
         return flags
 
     # Summing each channel in exact integer arithmetic and weighting the three
