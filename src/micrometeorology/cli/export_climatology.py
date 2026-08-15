@@ -127,6 +127,16 @@ ERA_SPLIT = pd.Timestamp("2019-03-15")
 # 15 deg of north in the whole of 2021. Kept in the database, excluded here.
 INVALID_DIRECTION = (pd.Timestamp("2019-05-31"), pd.Timestamp("2023-02-20 13:30"))
 
+# Where inside its own stamp each source's row lives, for the solar geometry only.
+# The observed rows are MEANS over [T, T+1h) — sensors.aggregation.aggregate_to_hourly
+# resamples on pandas' defaults, which label a window by its start — and
+# docs/arqueologia/qc/lit-radiation-qc.md prescribes the correction: "If
+# interval-averaged data is later ingested, evaluate mu0 at the interval midpoint"
+# (Long & Dutton, BSRN Global Network recommended QC tests V2.0). The WRF field is
+# instantaneous at the stamped hour (wrf.variables.compute_clearness_index), so it
+# shifts by nothing.
+GEOMETRY_OFFSET = {"observed": pd.Timedelta(minutes=30), "wrf": pd.Timedelta(0)}
+
 # Solar elevation above which a shortwave sample counts as daytime: below it the
 # airmass is extreme and relative error swamps the signal, so the clearness index
 # and every shortwave distribution are gated on it.
@@ -224,18 +234,40 @@ def _season_slices(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return {"all": frame, "DJF": groups["DJF"], "JJA": groups["JJA"]}
 
 
-def _elevation(frame: pd.DataFrame) -> np.ndarray:
+def _geometry_times(frame: pd.DataFrame, source: str) -> pd.DatetimeIndex:
+    """The instants the sun's position is evaluated at, for one source's rows.
+
+    Parameters
+    ----------
+    frame:
+        Block indexed by naive station-local (UTC-03) stamps, ``(N,)``.
+    source:
+        ``"observed"`` or ``"wrf"``; anything else raises, since a source with no
+        declared averaging convention has no defensible geometry.
+
+    Returns
+    -------
+    pandas.DatetimeIndex
+        Naive station-local instants, ``(N,)``, in the same order as the index.
+        The frame's own labels are untouched: only the geometry moves.
+    """
+    return _times(frame) + GEOMETRY_OFFSET[source]
+
+
+def _elevation(frame: pd.DataFrame, source: str) -> np.ndarray:
     """Solar elevation in degrees for every row, for the daylight gates."""
-    elevation: np.ndarray = solar_elevation_deg(_times(frame), SITE, UTC_OFFSET_HOURS)
+    elevation: np.ndarray = solar_elevation_deg(
+        _geometry_times(frame, source), SITE, UTC_OFFSET_HOURS
+    )
     return elevation
 
 
-def _clearness(frame: pd.DataFrame, column: str) -> pd.Series:
+def _clearness(frame: pd.DataFrame, column: str, source: str) -> pd.Series:
     """Clearness index from measured global irradiance, gated on solar elevation."""
     if column not in frame.columns:
         return pd.Series(dtype=float)
-    elevation = _elevation(frame)
-    extraterrestrial = extraterrestrial_ghi(_times(frame), SITE, UTC_OFFSET_HOURS)
+    elevation = _elevation(frame, source)
+    extraterrestrial = extraterrestrial_ghi(_geometry_times(frame, source), SITE, UTC_OFFSET_HOURS)
     daylight = (elevation > MIN_SOLAR_ELEVATION_DEG) & (extraterrestrial > 0)
     with np.errstate(invalid="ignore", divide="ignore"):
         kt = frame[column].to_numpy() / extraterrestrial
@@ -316,7 +348,7 @@ def _paired_speed(
 def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Atom]]:
     """Select, gate and de-atomise one variable from the observed hourly frame."""
     if spec_id == "clearness_index":
-        values = _clearness(frame, OBSERVED_COLUMN[spec_id])
+        values = _clearness(frame, OBSERVED_COLUMN[spec_id], "observed")
         return values.to_numpy(), []
 
     column = OBSERVED_COLUMN[spec_id]
@@ -325,9 +357,9 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
     series = frame[column]
 
     if spec_id in DAYTIME_ONLY:
-        series = series.loc[_elevation(frame) > MIN_SOLAR_ELEVATION_DEG]
+        series = series.loc[_elevation(frame, "observed") > MIN_SOLAR_ELEVATION_DEG]
     elif spec_id in NIGHTTIME_ONLY:
-        series = series.loc[_elevation(frame) < 0.0]
+        series = series.loc[_elevation(frame, "observed") < 0.0]
     series = series.dropna()
 
     if spec_id == "par_early":
@@ -414,7 +446,7 @@ def _wrf_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Ato
     if spec_id not in WRF_COLUMN:
         return np.array([]), []
     if spec_id == "clearness_index":
-        return _clearness(frame, WRF_COLUMN[spec_id]).to_numpy(), []
+        return _clearness(frame, WRF_COLUMN[spec_id], "wrf").to_numpy(), []
     column = WRF_COLUMN[spec_id]
     if column not in frame.columns:
         return np.array([]), []
@@ -422,9 +454,9 @@ def _wrf_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Ato
     # The SAME solar gate and de-atomisation as the observed side: conditioning the
     # two histograms on different events makes the comparison meaningless.
     if spec_id in DAYTIME_ONLY:
-        series = series.loc[_elevation(frame) > MIN_SOLAR_ELEVATION_DEG]
+        series = series.loc[_elevation(frame, "wrf") > MIN_SOLAR_ELEVATION_DEG]
     elif spec_id in NIGHTTIME_ONLY:
-        series = series.loc[_elevation(frame) < 0.0]
+        series = series.loc[_elevation(frame, "wrf") < 0.0]
     series = series.dropna()
     return _strip_atoms(
         spec_id, series, _paired_speed(spec_id, frame, series, WRF_COLUMN["wind_speed"])
@@ -515,11 +547,13 @@ def _induced_options(spec_id: str, frame: pd.DataFrame, source: str) -> dict[str
     )
     if global_column not in frame.columns:
         return None
-    parent = dist.fit_distribution("hollands_huget", _clearness(frame, global_column).to_numpy())
+    parent = dist.fit_distribution(
+        "hollands_huget", _clearness(frame, global_column, source).to_numpy()
+    )
     if not np.isfinite(parent.params.get("lambda", np.nan)):
         return None
 
-    daylight = frame.loc[_elevation(frame) > MIN_SOLAR_ELEVATION_DEG]
+    daylight = frame.loc[_elevation(frame, source) > MIN_SOLAR_ELEVATION_DEG]
     if spec_id in ("par_late", "shortwave_up"):
         daylight = daylight.loc[daylight.index >= ERA_SPLIT]
     elif spec_id == "par_early":
@@ -527,7 +561,9 @@ def _induced_options(spec_id: str, frame: pd.DataFrame, source: str) -> dict[str
     if daylight.empty:
         return None
 
-    extraterrestrial = extraterrestrial_ghi(_times(daylight), SITE, UTC_OFFSET_HOURS)
+    extraterrestrial = extraterrestrial_ghi(
+        _geometry_times(daylight, source), SITE, UTC_OFFSET_HOURS
+    )
     scales, weights = _scale_mixture(np.asarray(extraterrestrial, dtype=float))
     if not scales:
         return None
