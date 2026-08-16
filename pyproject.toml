@@ -29,17 +29,7 @@ dependencies = [
     "matplotlib>=3.11",
     "cartopy>=0.23",
     "scikit-learn>=1.5",
-    # Already in the graph through scikit-learn, declared explicitly because
-    # micrometeorology.stats.distributions imports scipy.special directly: the
-    # digamma/trigamma/Bessel-I0 kernels behind the gamma, beta and von Mises
-    # estimators are the numerics a published distribution fit rests on, and
-    # hand-rolling them would put the laboratory's public statistics on
-    # unreviewed special-function code. Weibull and Gaussian stay pure numpy.
     "scipy>=1.14",
-    # Already in the graph through matplotlib, declared explicitly for the same
-    # reason scipy is: micrometeorology.wrf.isobars imports contourpy directly to
-    # trace the published sea-level isobars without opening a figure, and the
-    # polylines it returns ARE the artifact the site draws.
     "contourpy>=1.3",
     "typer>=0.15",
     "pydantic>=2.7",
@@ -47,9 +37,8 @@ dependencies = [
     "pyyaml>=6.0",
     "imageio>=2.34",
     "pyarrow>=15.0",
-    # Used directly by allsky and transitively by matplotlib/imageio. The floor
-    # covers CVE-2026-25990 / 40192 / 42308-42311 plus
-    # PYSEC-2026-2253..2257 / 3451..3453 (fixed in 12.3.0).
+    # Security floor: 12.3.0 fixes CVE-2026-25990 / 40192 / 42308-42311 and
+    # PYSEC-2026-2253..2257 / 3451..3453. Do not lower.
     "pillow>=12.3.0",
 ]
 
@@ -59,41 +48,30 @@ dev = [
     "ruff>=0.16.1",
     "mypy>=1.8",
     "pre-commit>=3.6",
-    # pandas-stubs versions track the pandas release they were tested against
-    # (3.0.5.260730 = pandas 3.0.5), and the two move together: the 3.0.3 -> 3.0.5
-    # stubs made the `to_*` writers keyword-only and rewrote the `.str` accessor.
-    # Floor it at the stubs for the pandas floor above so an unlocked
-    # `pip install -e .[dev]` cannot typecheck against a different pandas API.
+    # Stub versions track the pandas release they were tested against, so this
+    # floor must move with the pandas floor above.
     "pandas-stubs>=3.0.5.260730",
     "pytest-xdist>=3.5",
     "types-PyYAML",
 ]
-# INSTALLABLE THROUGH `uv sync --extra video` ONLY. moviepy 2.2.x requires
-# pillow<12.0 while the runtime floor above is pillow>=12.3.0 (a CVE floor), so
-# the two are mutually unsatisfiable in DISTRIBUTION METADATA. What reconciles
-# them is `[tool.uv] override-dependencies` below, which is project-local uv
-# configuration and does not travel with the built wheel or sdist — so
-# `pip install '.[video]'` and any future PyPI release of the extra abort with
-# ResolutionImpossible. The floor is not lowered, because that would ship a
-# CVE-affected pillow to everyone to make one optional extra pip-installable.
-# Revisit when moviepy allows pillow 12.
+# `uv sync --extra video` only: moviepy caps pillow<12.0 against the CVE floor
+# above, and what reconciles them is `[tool.uv] override-dependencies`, which is
+# project-local and does not travel with the wheel or sdist. `pip install
+# '.[video]'` therefore fails by design. Revisit when moviepy allows pillow 12.
 video = [
     "moviepy>=2.2",
 ]
-# All-sky camera + radiation fusion (CPU-only torch by default; see install-cuda)
 allsky = [
     "torch>=2.6.0",
     "imageio-ffmpeg>=0.6",
     "tensorboard>=2.14",
     "safetensors>=0.5",
 ]
-# TCC: ML-based solar radiation correction (CPU-only PyTorch)
 tcc = [
     "torch>=2.6.0",
     "joblib>=1.3",
     "tensorboard>=2.14",
 ]
-# TCC with CUDA support (install the current CUDA wheel with `make install-cuda`)
 tcc-cuda = [
     "joblib>=1.3",
     "tensorboard>=2.14",
@@ -105,7 +83,6 @@ Repository = "https://github.com/Bruno-Mascarenhas/micrometeorology"
 Issues = "https://github.com/Bruno-Mascarenhas/micrometeorology/issues"
 
 [project.scripts]
-# Micrometeorology CLIs
 labmim-wrf-figures = "micrometeorology.cli.render_wrf_maps:main"
 labmim-wrf-geojson = "micrometeorology.cli.export_wrf_geojson:main"
 labmim-sensor-process = "micrometeorology.cli.ingest_sensor_data:main"
@@ -117,36 +94,26 @@ labmim-comparison = "micrometeorology.cli.compare_wrf_observations:main"
 labmim-metrics = "micrometeorology.cli.compute_metrics:main"
 labmim-station-graphs = "micrometeorology.cli.generate_station_graphs:main"
 labmim-site-graphs = "micrometeorology.cli.plot_station_graphs:main"
-# All-sky CLI
 allsky = "allsky.cli:main"
-# TCC CLIs
 solrad-run = "solrad_correction.cli:main"
 solrad-colab = "solrad_correction.cli_colab:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/micrometeorology", "src/solrad_correction", "src/allsky"]
 
-# The sensor QC limits, the sum/direction aggregation columns and the
-# calibration table all live in configs/micromet/, which sits at the repo root
-# and so shipped in neither the wheel nor the sdist. An installed CLI then
-# resolved every one of them to its empty default and exported unfiltered,
-# uncalibrated data with exit code 0. Shipping the tree inside the package is
-# what makes `_project_root()`'s installed-layout fallback resolvable.
+# Without this the installed CLI resolves the QC limits, aggregation columns and
+# calibration table to their empty defaults and exports unfiltered, uncalibrated
+# data with exit code 0.
 [tool.hatch.build.targets.wheel.force-include]
 "configs/micromet" = "micrometeorology/configs/micromet"
 
-# The sdist keeps the tree's own layout, deliberately: `uv build` produces the
-# wheel FROM the unpacked sdist, so the wheel's force-include above has to find
-# `configs/micromet` at the same path it has here. Relocating it in the sdist
-# instead made that second build fail with "Forced include not found" — a break
-# invisible to `uv build --wheel`, which reads the working tree.
+# The sdist must keep the tree's own layout: `uv build` builds the wheel from the
+# unpacked sdist, so the force-include above has to resolve at this same path.
 [tool.hatch.build.targets.sdist]
 include = ["src", "tests", "configs/micromet", "README.md", "LICENSE", "pyproject.toml"]
 
-# Lock torch against the CPU wheel index on Linux/macOS so the resolver does not
-# pull the multi-GB CUDA dependency stack into uv.lock. Windows wheels on PyPI
-# are already CPU-only. For CUDA installs use `make install-cuda`, which
-# replaces the CPU wheel with the locked public version from the CUDA index.
+# Pin torch to the CPU wheel index so the resolver keeps the multi-GB CUDA stack
+# out of uv.lock. For CUDA installs use `make install-cuda`.
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
@@ -159,14 +126,10 @@ torch = [
 ]
 
 [tool.uv]
-# Keep the isolated build backend reproducible even though build requirements
-# are intentionally separate from the runtime lock graph.
 build-constraint-dependencies = ["hatchling==1.31.0"]
-# moviepy 2.2.x caps pillow<12.0, but pillow 11.x/12.2 have known CVEs and
-# PYSECs (see the pillow floor comment above). Override the cap so the lock can
-# include pillow>=12.3.0. Revisit when moviepy allows pillow 12.
-# setuptools is transitive (torch/tensorboard build chain); 81.x carries
-# PYSEC-2026-3447, fixed in 83.0.0.
+# pillow overrides moviepy's cap so the lock can satisfy the CVE floor above;
+# setuptools is transitive through the torch/tensorboard build chain and 81.x
+# carries PYSEC-2026-3447.
 override-dependencies = [
     "pillow>=12.3.0",
     "setuptools>=83.0.0",
@@ -176,103 +139,67 @@ override-dependencies = [
 src = ["src"]
 target-version = "py314"
 line-length = 100
-# `exclude` REPLACES ruff's 25 built-in exclusions; `extend-exclude` adds to
-# them. `.venv`, `venv` and `.git` are already built-ins, so only these two are
-# ours. Keeping the built-ins matters because `make check` runs a bare
-# `ruff check .` with force-exclude off.
+# `extend-exclude`, not `exclude`, which would replace ruff's 25 built-ins that
+# a bare `ruff check .` in `make check` relies on.
 extend-exclude = [
     "legacy",
     "env",
 ]
 
 [tool.ruff.lint]
-# Ruff 0.16 grew its default set from 59 to 413 rules, so this list is
-# `extend-select`, not `select`: the defaults come in on top of it. It still
-# earns its keep — E402 (67 `# noqa: E402` depend on it), the specific N/S rules
-# used here, and ARG/NPY/PD are all absent from the 0.16 defaults.
+# `extend-select`, not `select`: ruff 0.16 ships 413 default rules and these come
+# on top of them.
 extend-select = [
-    "E",    # pycodestyle errors
-    "W",    # pycodestyle warnings
-    "F",    # pyflakes
-    "I",    # isort
-    "N",    # pep8-naming
-    "UP",   # pyupgrade
-    "B",    # flake8-bugbear
-    "SIM",  # flake8-simplify
-    "PERF", # perflint — catch performance anti-patterns
-    "RUF",  # ruff-specific rules
-    "C4",   # flake8-comprehensions
-    "ARG",  # flake8-unused-arguments
-    "PT",   # flake8-pytest-style
-    "PD",   # pandas-vet
-    "NPY",  # numpy-specific rules (legacy RNG, deprecated aliases)
-    "S",    # flake8-bandit — security anti-patterns
-    # Docstring presence on public classes (D101) and module-level functions
-    # (D103), both at zero today, so a new public API cannot ship undocumented.
-    # Deliberately NOT D102: 29 of this tree's public methods are `@property`
-    # accessors whose body is one attribute or one path join, and the only
-    # docstring such a property can carry restates its own name — which the
-    # repo's documentation standard forbids. Enabling D102 would force the
-    # writing of the exact docstrings that standard rejects. Note also that the
-    # numpy convention below silently disables D417, and that no presence rule
-    # can check the thing that matters in a scientific docstring — shape, dtype
-    # and unit — which stays a matter for review.
+    "E",
+    "W",
+    "F",
+    "I",
+    "N",
+    "UP",
+    "B",
+    "SIM",
+    "PERF",
+    "RUF",
+    "C4",
+    "ARG",
+    "PT",
+    "PD",
+    "NPY",
+    "S",
+    # Docstring presence on public classes and module-level functions, both at
+    # zero today. Deliberately NOT D102: 29 public methods here are one-line
+    # `@property` accessors whose only possible docstring restates their name,
+    # which this repo's documentation standard forbids.
     "D101",
     "D103",
 ]
 ignore = [
-    # Line length is enforced at format time by `line-length = 100`, not by
-    # E501, and E501 reaches this repo only via the "E" entry above (it is not
-    # in ruff's default set). It stays off because the violations it reports are
-    # unsplittable string content — f-strings and docstring CLI-usage examples —
-    # that the formatter provably cannot rewrap.
+    # Enforced at format time by `line-length` above. What E501 reports here is
+    # unsplittable string content the formatter cannot rewrap.
     "E501",
 ]
 
-# Suppression policy, one rule for the whole tree: a suppression is admissible
-# only where the rule does not APPLY, never to waive a defect, and it is always
-# written at the NARROWEST scope that expresses it.
-#
-# That makes the inline `# noqa: RULE - reason` at the offending line the normal
-# form, because it covers exactly one statement: the 16 in `src/` are broad
-# `except` clauses that must not fail their caller (BLE001), deliberate seeding
-# of numpy's legacy global stream (NPY002), subprocess calls on an executable
-# resolved at runtime rather than a literal path (S603), a `ValueError` raised
-# where the documented contract promises one (TRY004), and scikit-learn's own
-# `C` parameter name (N803). Every one carries its reason on the same line.
-#
-# A `per-file-ignores` entry below is for the case an inline marker cannot
-# express: the rule does not apply to the file as a whole. It is broader by
-# construction — it hides future violations of that rule in that file — so it is
-# used only where the whole-file claim is true, and each entry says why.
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
 
+# Suppression policy: admissible only where the rule does not APPLY, never to
+# waive a defect, and always at the narrowest scope that expresses it. An inline
+# `# noqa: RULE - reason` is the normal form; an entry below is the broader claim
+# that a rule does not apply to a whole file, and each one says why.
 [tool.ruff.lint.per-file-ignores]
-#
-# `np.random.seed` seeds the legacy GLOBAL stream on purpose — that is the one
-# sklearn, torch's DataLoader shuffling and every bare `np.random.*` call draw
-# from. `default_rng` returns an independent Generator none of them observe, so
-# there is no modern spelling of "make this run reproducible".
+# Seeds the legacy GLOBAL stream on purpose — the one sklearn, torch's DataLoader
+# and every bare `np.random.*` call draw from. `default_rng` has no such reach.
 "src/solrad_correction/utils/seeds.py" = ["NPY002"]
-# A test's NAME is its documentation in this repo — the standard puts the context
-# a name cannot hold into a descriptively-named test, not into prose beside it.
-# Requiring a docstring on `test_the_gap_days_belong_to_no_split` would force one
-# that restates the name, which the same standard forbids. Benchmarks are scripts
-# driven by their own `__main__`, not a public API.
+# A test's NAME is its documentation here, so a required docstring would restate
+# it. `assert` is pytest's assertion API. Benchmarks are `__main__` scripts.
 "tests/**" = ["D101", "D103", "S101"]
 "benchmarks/**" = ["D101", "D103"]
-# `assert` IS pytest's assertion API (2089 of them); S101 is a production-code
-# rule and ruff documents tests as its exception.
-
-# Pickle is the thing under test, not an incidental choice: these two assert
-# that a WorkUnit and a torch tensor survive a round-trip through the pickle
-# protocol the process pool actually uses.
+# Pickle is the thing under test: these assert a WorkUnit and a torch tensor
+# survive the protocol the process pool actually uses.
 "tests/allsky/test_embeddings_storage.py" = ["S301"]
 "tests/micromet/test_wrf_jobs.py" = ["S301", "S603"]
-# These spawn this package's own CLIs via `sys.executable`. S603 is silent only
-# when every argv element is a string literal, which `sys.executable` never is,
-# so subprocess-based CLI tests cannot satisfy it by construction.
+# Spawn this package's own CLIs via `sys.executable`, which S603 cannot accept by
+# construction: it is silent only when every argv element is a string literal.
 "tests/allsky/test_cli.py" = ["S603"]
 "tests/allsky/test_data_datasets.py" = ["S603"]
 "tests/allsky/test_data_loading.py" = ["S603"]
@@ -280,11 +207,9 @@ convention = "numpy"
 "tests/micromet/test_comparison.py" = ["S603"]
 "tests/tcc/test_benchmarks_smoke.py" = ["S603"]
 "tests/tcc/test_training_contracts.py" = ["S603"]
-# A verbatim frozen copy of the pre-deletion writer, kept so the production
-# writers can be diffed against it bitwise. Its docstring forbids touching the
-# body, so its blind except is suppressed from here rather than edited.
+# A frozen copy of the pre-deletion writer, kept for bitwise diffing against the
+# production ones; its docstring forbids editing the body.
 "tests/micromet/_reference.py" = ["BLE001"]
-# Colab notebook drives this package's own CLI over the user's Drive files.
 "notebooks/*.ipynb" = ["S603", "S607"]
 
 [tool.ruff.lint.isort]
@@ -307,17 +232,15 @@ exclude = ["^legacy/"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "--basetemp=.pytest_tmp"
-# Visibility first: the stack is deliberately bleeding-edge (numpy 2.x, pandas
-# 3.x, xarray) and dependabot bumps it monthly, so an upcoming upstream removal
-# must show up in the CI warnings summary during its deprecation window instead
-# of landing as a hard failure. Nothing here is fatal — a blanket
-# "ignore::DeprecationWarning" is what hid them. Silence known third-party noise
-# BY MESSAGE (later entries win), so a reworded or new warning re-surfaces.
+# Nothing here is fatal, deliberately: the stack is bleeding-edge and bumped
+# monthly, so an upcoming upstream removal must surface in the CI warnings
+# summary during its deprecation window. A blanket "ignore::DeprecationWarning"
+# is what hid them. Silence known third-party noise BY MESSAGE, later entries
+# winning, so a reworded or new warning re-surfaces.
 filterwarnings = [
     "default::DeprecationWarning",
     "default::UserWarning",
-    # netCDF4 Variable.__setitem__ and joblib's numpy pickler both assign
-    # ndarray.shape, which numpy 2.5 deprecated. Both are upstream fixes.
+    # netCDF4 and joblib's numpy pickler both assign ndarray.shape; upstream fixes.
     "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
     # torch.as_tensor on read-only mmap arrays (safetensors / parquet buffers).
     "ignore:The given NumPy array is not writable:UserWarning",
