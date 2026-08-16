@@ -27,18 +27,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from micrometeorology.cli.export_climatology import _observed_sample
 from micrometeorology.common.git import run_git, source_root
+from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.stats import distributions as dist
-from micrometeorology.stats.climatology_export import CLIMATOLOGY_VARIABLES
+from micrometeorology.stats import ktkd as ktkd_stats
 from micrometeorology.stats.sky_condition import (
+    KT_CUMULATIVE_EDGES,
     cumulative_fractions,
     sky_condition_summary,
 )
 
 logger = logging.getLogger(__name__)
-
-SPEC_ID = "clearness_index_cumulative"
 
 #: Okabe-Ito, the colour-vision-safe palette the station graphs already use, so
 #: the four conditions read the same here as on every other published figure.
@@ -59,24 +58,24 @@ def build_figure(hourly: pd.DataFrame) -> tuple[plt.Figure, dict[str, Any]]:
     tuple
         The figure and the sky-condition summary that annotates it.
     """
-    spec = {item.id: item for item in CLIMATOLOGY_VARIABLES}[SPEC_ID]
-    sample, _atoms = _observed_sample(SPEC_ID, hourly)
-    values = np.asarray(sample, dtype=float)
+    values = ktkd_stats.prepare_clearness(
+        hourly, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
+    ).to_numpy()
     if not values.size:
         raise ValueError("no clearness index survived the daylight gate; nothing to plot")
 
-    binned = dist.histogram(values, spec.edges)
+    binned = dist.histogram(values, KT_CUMULATIVE_EDGES)
     total = binned.n + binned.below + binned.above
     cumulative = cumulative_fractions(binned.counts, total=total)
     summary = sky_condition_summary(values)
 
     figure, axes = plt.subplots(figsize=(7.0, 4.5))
-    upper_edges = np.asarray(spec.edges[1:], dtype=float)
+    upper_edges = np.asarray(KT_CUMULATIVE_EDGES[1:], dtype=float)
     axes.step(upper_edges, cumulative, where="post", color="#000000", linewidth=1.6)
 
     lower = 0.0
     for condition, color in zip(summary["conditions"], CONDITION_COLORS, strict=True):
-        upper = condition["kt_range"][1] or float(spec.edges[-1])
+        upper = condition["kt_range"][1] or float(KT_CUMULATIVE_EDGES[-1])
         axes.axvspan(lower, upper, color=color, alpha=0.14)
         share = condition["fraction"]
         axes.annotate(
@@ -92,7 +91,7 @@ def build_figure(hourly: pd.DataFrame) -> tuple[plt.Figure, dict[str, Any]]:
 
     axes.set_xlabel("Índice de claridade $K_t$")
     axes.set_ylabel("Frequência acumulada $F(K_t)$")
-    axes.set_xlim(float(spec.edges[0]), float(spec.edges[-1]))
+    axes.set_xlim(float(KT_CUMULATIVE_EDGES[0]), float(KT_CUMULATIVE_EDGES[-1]))
     axes.set_ylim(0.0, 1.0)
     axes.grid(alpha=0.3)
     axes.set_title(f"Condições de céu (Escobedo et al., 2009) — n = {summary['n']:,} horas")

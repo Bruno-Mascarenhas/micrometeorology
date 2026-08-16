@@ -322,6 +322,45 @@ MAX_RATIO = 1.2
 MIN_GLOBAL_WM2 = 50.0
 
 
+def prepare_clearness(
+    hourly: pd.DataFrame,
+    *,
+    site: Any,
+    utc_offset_hours: float,
+    min_elevation_deg: float = 10.0,
+    global_column: str = "Sw_dw",
+) -> pd.Series:
+    """Gate the record down to the hours whose clearness index means something.
+
+    Deliberately does NOT require a diffuse measurement, unlike
+    :func:`prepare_ktkd`: the clearness record must describe every hour the
+    global pyranometer measured, not only the subset where the shaded sensor
+    happened to be up. Using the Kt-Kd gate here would publish F(Kt) conditioned
+    on the diffuse channel's availability — a different population wearing the
+    same name.
+
+    Returns
+    -------
+    pandas.Series
+        Kt on the surviving hours, with the extraterrestrial denominator
+        evaluated at the averaging window's midpoint (BSRN).
+    """
+    from allsky.solar import extraterrestrial_ghi
+
+    index = pd.DatetimeIndex(hourly.index)
+    midpoint = index + pd.Timedelta(minutes=30)
+    extraterrestrial = pd.Series(
+        extraterrestrial_ghi(midpoint, site, utc_offset_hours), index=index
+    )
+    elevation = pd.Series(
+        solar_elevation_for(midpoint, site.latitude, site.longitude, utc_offset_hours), index=index
+    )
+    global_flux = hourly[global_column]
+    usable = (extraterrestrial > 0) & (elevation > min_elevation_deg) & global_flux.notna()
+    kt = (global_flux / extraterrestrial).where(usable)
+    return kt[usable & kt.between(0.0, MAX_RATIO)]
+
+
 def prepare_ktkd(
     hourly: pd.DataFrame,
     *,

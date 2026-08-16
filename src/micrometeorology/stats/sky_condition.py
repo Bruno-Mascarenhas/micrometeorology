@@ -35,7 +35,10 @@ from allsky.data.contracts import (
 )
 
 __all__ = [
+    "KT_CUMULATIVE_EDGES",
+    "KT_CUMULATIVE_SCHEMA",
     "SKY_CONDITION_IDS",
+    "build_kt_cumulative_payload",
     "classify_sky_condition",
     "cumulative_fractions",
     "sky_condition_summary",
@@ -154,4 +157,92 @@ def sky_condition_summary(kt: NDArray) -> dict[str, Any]:
         "reference": SKY_CLASS_REFERENCE,
         "n": total,
         "conditions": conditions,
+    }
+
+
+#: Published schema tag of the artifact the sky page reads.
+KT_CUMULATIVE_SCHEMA = "labmim-kt-cumulative-v1"
+
+#: Frozen bin edges, deliberately the same set the climatology page bins Kt on:
+#: the two pages then describe one record on one axis, and 0.35 / 0.55 / 0.65 all
+#: land exactly on an edge, so each class share is read straight off the curve
+#: instead of interpolated.
+KT_CUMULATIVE_EDGES: tuple[float, ...] = tuple(round(0.02 * step, 2) for step in range(51))
+
+
+def cumulative_subset(sample: NDArray, *, label: str) -> dict[str, Any]:
+    """One published recorte: its bars, its F(Kt) and the classes it partitions.
+
+    Parameters
+    ----------
+    sample:
+        Clearness index of the subset, ``(N,)``, already gated.
+    label:
+        Portuguese caption the page prints on the selector chip.  It travels in
+        the subset because this artifact is self-contained: unlike the
+        climatology payloads there is no manifest beside it to look the name up
+        in.
+
+    Returns
+    -------
+    dict
+        ``label``, ``n``, ``counts``, ``cumulative``, ``below``, ``above`` and
+        ``sky_conditions``.  ``n`` counts the WHOLE subset, the out-of-range
+        samples included, so ``cumulative[-1]`` reaches 1 only when nothing fell
+        outside the axis — the same meaning ``n`` carries in the climatology
+        payloads.
+    """
+    from micrometeorology.stats import distributions as dist
+
+    values = np.asarray(sample, dtype=float)
+    binned = dist.histogram(values, KT_CUMULATIVE_EDGES)
+    total = binned.n + binned.below + binned.above
+    return {
+        "label": label,
+        "n": total,
+        "counts": [int(count) for count in binned.counts],
+        "cumulative": [
+            round(value, 6) for value in cumulative_fractions(binned.counts, total=total)
+        ],
+        "below": binned.below,
+        "above": binned.above,
+        "sky_conditions": sky_condition_summary(values),
+    }
+
+
+def build_kt_cumulative_payload(
+    subsets: dict[str, NDArray],
+    labels: dict[str, str],
+    *,
+    version: str,
+    caveats: list[str],
+) -> dict[str, Any]:
+    """Assemble the published ``labmim-kt-cumulative-v1`` payload.
+
+    Parameters
+    ----------
+    subsets:
+        Recorte id -> its clearness-index sample.  Insertion order is the order
+        the page offers the chips in, and the first is its default.
+    labels:
+        Recorte id -> the caption printed on that chip.
+
+    Returns
+    -------
+    dict
+        JSON-ready payload; every number is finite or ``None``.
+    """
+    return {
+        "format": KT_CUMULATIVE_SCHEMA,
+        "version": version,
+        "variable": "clearness_index_cumulative",
+        "label": "Frequência acumulada do índice de claridade F(Kt)",
+        "unit": "",
+        "chart": "cumulative",
+        "edges": list(KT_CUMULATIVE_EDGES),
+        "caveats": caveats,
+        "subsets": {
+            subset_id: cumulative_subset(sample, label=labels[subset_id])
+            for subset_id, sample in subsets.items()
+        },
     }
