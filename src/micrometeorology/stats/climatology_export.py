@@ -715,7 +715,7 @@ def _rounded(value: float | None, decimals: int) -> float | None:
     return None if number is None else round(number, decimals)
 
 
-def _rounded_list(values: NDArray, decimals: int) -> list[float | None]:
+def _rounded_list(values: NDArray | Sequence[float], decimals: int) -> list[float | None]:
     return [_rounded(float(value), decimals) for value in np.asarray(values, dtype=float)]
 
 
