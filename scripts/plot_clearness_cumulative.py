@@ -1,0 +1,147 @@
+"""Figure of the cumulative clearness index F(Kt) with the Escobedo sky conditions.
+
+The publication companion of the ``clearness_index_cumulative`` artifact the
+climatology exporter writes: same computation, same frozen edges, same published
+bounds, so a figure in a paper and the curve on the site cannot disagree.
+
+Every number comes from :mod:`micrometeorology.stats.sky_condition` and the
+exporter's own spec — this file only arranges axes and labels.
+
+Usage
+-----
+::
+
+    uv run python scripts/plot_clearness_cumulative.py \\
+        -i output/archive/station_hourly.parquet -o output/figures/
+"""
+
+import argparse
+import logging
+from pathlib import Path
+from typing import Any
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+from micrometeorology.cli.export_climatology import _observed_sample
+from micrometeorology.common.git import run_git, source_root
+from micrometeorology.stats import distributions as dist
+from micrometeorology.stats.climatology_export import CLIMATOLOGY_VARIABLES
+from micrometeorology.stats.sky_condition import (
+    cumulative_fractions,
+    sky_condition_summary,
+)
+
+logger = logging.getLogger(__name__)
+
+SPEC_ID = "clearness_index_cumulative"
+
+#: Okabe-Ito, the colour-vision-safe palette the station graphs already use, so
+#: the four conditions read the same here as on every other published figure.
+CONDITION_COLORS = ("#0072B2", "#56B4E9", "#E69F00", "#D55E00")
+
+
+def build_figure(hourly: pd.DataFrame) -> tuple[plt.Figure, dict[str, Any]]:
+    """Draw F(Kt) with the sky-condition bands, and return it with its summary.
+
+    Parameters
+    ----------
+    hourly:
+        The hourly database, indexed by naive station-local stamps, as
+        ``labmim-archive`` writes it.
+
+    Returns
+    -------
+    tuple
+        The figure and the sky-condition summary that annotates it.
+    """
+    spec = {item.id: item for item in CLIMATOLOGY_VARIABLES}[SPEC_ID]
+    sample, _atoms = _observed_sample(SPEC_ID, hourly)
+    values = np.asarray(sample, dtype=float)
+    if not values.size:
+        raise ValueError("no clearness index survived the daylight gate; nothing to plot")
+
+    binned = dist.histogram(values, spec.edges)
+    total = binned.n + binned.below + binned.above
+    cumulative = cumulative_fractions(binned.counts, total=total)
+    summary = sky_condition_summary(values)
+
+    figure, axes = plt.subplots(figsize=(7.0, 4.5))
+    upper_edges = np.asarray(spec.edges[1:], dtype=float)
+    axes.step(upper_edges, cumulative, where="post", color="#000000", linewidth=1.6)
+
+    lower = 0.0
+    for condition, color in zip(summary["conditions"], CONDITION_COLORS, strict=True):
+        upper = condition["kt_range"][1] or float(spec.edges[-1])
+        axes.axvspan(lower, upper, color=color, alpha=0.14)
+        share = condition["fraction"]
+        axes.annotate(
+            f"{condition['id'].upper()}\n{share:.1%}"
+            if share is not None
+            else condition["id"].upper(),
+            xy=((lower + upper) / 2.0, 0.06),
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+        lower = upper
+
+    axes.set_xlabel("Índice de claridade $K_t$")
+    axes.set_ylabel("Frequência acumulada $F(K_t)$")
+    axes.set_xlim(float(spec.edges[0]), float(spec.edges[-1]))
+    axes.set_ylim(0.0, 1.0)
+    axes.grid(alpha=0.3)
+    axes.set_title(f"Condições de céu (Escobedo et al., 2009) — n = {summary['n']:,} horas")
+    figure.tight_layout()
+    return figure, summary
+
+
+def _commit() -> str:
+    """Commit the figure was produced at, stamped into its metadata."""
+    return run_git(["rev-parse", "--short", "HEAD"], cwd=source_root()) or "unknown"
+
+
+def render(input_path: Path, output_dir: Path) -> Path:
+    """Write the figure for *input_path* into *output_dir* and return its path."""
+    hourly = pd.read_parquet(input_path)
+    figure, summary = build_figure(hourly)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    destination = output_dir / "clearness_cumulative.png"
+    figure.savefig(
+        destination,
+        dpi=300,
+        bbox_inches="tight",
+        metadata={"Software": f"labmim micrometeorology @ {_commit()}"},
+    )
+    plt.close(figure)
+    logger.info(
+        "wrote %s (n=%d, %s)",
+        destination,
+        summary["n"],
+        ", ".join(
+            f"{c['id'].upper()}={c['fraction']:.1%}"
+            for c in summary["conditions"]
+            if c["fraction"] is not None
+        ),
+    )
+    return destination
+
+
+def main() -> None:
+    """Parse the arguments and render the figure."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
+    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("-i", "--input", type=Path, required=True, help="Hourly parquet database.")
+    parser.add_argument("-o", "--output", type=Path, required=True, help="Directory for the PNG.")
+    arguments = parser.parse_args()
+    render(arguments.input, arguments.output)
+
+
+if __name__ == "__main__":
+    main()

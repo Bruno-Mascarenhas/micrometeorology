@@ -53,6 +53,7 @@ from numpy.typing import NDArray
 
 from allsky.atomic import atomic_write
 from micrometeorology.stats import distributions as dist
+from micrometeorology.stats.sky_condition import cumulative_fractions, sky_condition_summary
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +240,16 @@ REFERENCES: dict[str, Reference] = {
             "directional wind speeds using mixtures of von Mises distributions: case study. "
             "Energy Conversion and Management 49(5), 897-907.",
             "https://doi.org/10.1016/j.enconman.2007.10.017",
+        ),
+        Reference(
+            "escobedo2009",
+            "Escobedo et al., 2009",
+            "Escobedo, J. F., Gomes, E. N., Oliveira, A. P. & Soares, J. (2009). Modeling "
+            "hourly and daily fractions of UV, PAR and NIR to global solar radiation under "
+            "various sky conditions at Botucatu, Brazil. Applied Energy 86(3), 299-309. "
+            "Section 3.1 defines the four sky conditions by clearness-index bands; the "
+            "Portuguese nomenclature follows Teramoto & Escobedo (2012), RBEAA 16(9), 985-992.",
+            "https://doi.org/10.1016/j.apenergy.2008.04.013",
         ),
         Reference(
             "hollands1983",
@@ -682,6 +693,21 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         ),
     ),
     VariableSpec(
+        id="clearness_index_cumulative",
+        label="Frequência acumulada do índice de claridade F(Kt)",
+        unit="",
+        chart="cumulative",
+        family=None,
+        family_label="",
+        edges=_linear_edges(0.0, 1.0, 0.02),
+        caveats=(
+            "A curva é a soma corrida das MESMAS barras do histograma de Kt ao lado: mesma seleção, mesmas arestas congeladas. Ler as duas como registros independentes seria um erro — uma é a integral da outra por construção.",
+            "As quatro condições de céu são as de [[escobedo2009]], aplicadas aos limites publicados de Kt (0,35 / 0,55 / 0,65) com a aresta superior FECHADA: um Kt exatamente em 0,35 é condição I, não II.",
+            "A fração por classe vem calculada daqui e não é reobtida da curva: interpolar F(Kt) no cliente seria um segundo caminho numérico para o mesmo número publicado.",
+            "Este Kt é a média HORÁRIA com a correção de ponto médio da BSRN no denominador extraterrestre, restrita às horas com o sol acima de 10° em toda a janela. Ele não é o Kt por quadro do manifesto da câmera, então estas frações de classe não têm de bater com a distribuição de sky_class do conjunto multimodal.",
+        ),
+    ),
+    VariableSpec(
         id="clearness_index",
         label="Índice de claridade (Kt)",
         unit="",
@@ -715,7 +741,7 @@ def _rounded(value: float | None, decimals: int) -> float | None:
     return None if number is None else round(number, decimals)
 
 
-def _rounded_list(values: NDArray, decimals: int) -> list[float | None]:
+def _rounded_list(values: NDArray | Sequence[float], decimals: int) -> list[float | None]:
     return [_rounded(float(value), decimals) for value in np.asarray(values, dtype=float)]
 
 
@@ -813,6 +839,56 @@ def _shape_moments(values: NDArray) -> tuple[float, float]:
     excess = m4 / (m2 * m2) - 3.0
     kurtosis = (n - 1.0) / ((n - 2.0) * (n - 3.0)) * ((n + 1.0) * excess + 6.0)
     return float(skewness), float(kurtosis)
+
+
+def _cumulative_subset(
+    spec: VariableSpec, sample: NDArray, atoms: Sequence[Atom]
+) -> dict[str, Any]:
+    """Empirical F(x) over the frozen edges, plus the sky conditions it partitions.
+
+    The curve is the running sum of the SAME bars the histogram artifact
+    publishes — same selection, same frozen edges — so the two charts on the page
+    cannot disagree about the same record. No fitted family: a cumulative
+    frequency needs no density curve, and inventing one would put a smooth
+    through a step function.
+
+    The class shares travel already computed. Reading them off an interpolated
+    F(Kt) in the browser would be a second numerical path to a published number.
+    """
+    values = np.asarray(sample, dtype=float)
+    binned = dist.histogram(values, spec.edges)
+    total = binned.n + binned.below + binned.above
+    return {
+        "n": total,
+        "counts": [int(count) for count in binned.counts],
+        "cumulative": _rounded_list(
+            cumulative_fractions(binned.counts, total=total), _FRACTION_DECIMALS
+        ),
+        "below": binned.below,
+        "above": binned.above,
+        "stats": _describe(values),
+        "atoms": [
+            {
+                "id": atom.id,
+                "label": atom.label,
+                "fraction": _rounded(atom.fraction, _FRACTION_DECIMALS),
+                "count": atom.count,
+            }
+            for atom in atoms
+        ],
+        "sky_conditions": _rounded_sky_conditions(sky_condition_summary(values)),
+    }
+
+
+def _rounded_sky_conditions(summary: dict[str, Any]) -> dict[str, Any]:
+    """Round the published class shares to the fraction precision the page prints."""
+    return {
+        **summary,
+        "conditions": [
+            {**condition, "fraction": _rounded(condition["fraction"], _FRACTION_DECIMALS)}
+            for condition in summary["conditions"]
+        ],
+    }
 
 
 def _histogram_subset(
@@ -1067,6 +1143,8 @@ def build_variable_payload(
         subset_atoms = list(per_subset.get(subset_id, ()))
         if spec.chart == "rose":
             subsets[subset_id] = _rose_subset(sample, subset_atoms, components=mixture_components)
+        elif spec.chart == "cumulative":
+            subsets[subset_id] = _cumulative_subset(spec, sample, subset_atoms)
         else:
             subsets[subset_id] = _histogram_subset(
                 spec,

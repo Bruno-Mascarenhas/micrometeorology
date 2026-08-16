@@ -190,11 +190,26 @@ class TestPublishedBibliography:
             assert len(reference.citation) > 60, key
             assert reference.url.startswith("https://"), key
 
-    def test_every_variable_declares_a_family_and_a_reference(self):
+    def test_every_fitted_variable_declares_a_family_and_a_reference(self):
         """The requirement this work exists to satisfy: nothing merely descriptive."""
         for spec in CLIMATOLOGY_VARIABLES:
+            if spec.chart == "cumulative":
+                continue
             assert spec.family is not None, spec.id
             assert _REFERENCE_MARKER.search(spec.family_label), spec.id
+
+    def test_a_cumulative_variable_fits_nothing_and_cites_in_its_caveats(self):
+        """An empirical F(x) has no density to fit; a family here would be invented.
+
+        It still has to carry its literature: the sky-condition bands it is read
+        against are published bounds, so the citation moves to the caveats, which
+        travel with the payload just as ``family_label`` does.
+        """
+        cumulative = [spec for spec in CLIMATOLOGY_VARIABLES if spec.chart == "cumulative"]
+        assert cumulative, "no cumulative variable is published"
+        for spec in cumulative:
+            assert spec.family is None, spec.id
+            assert any(_REFERENCE_MARKER.search(caveat) for caveat in spec.caveats), spec.id
 
     def test_induced_specs_declare_the_options_their_family_needs(self):
         """A spec that forgets one would fit a curve on the wrong covariate."""

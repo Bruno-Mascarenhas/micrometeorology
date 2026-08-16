@@ -91,6 +91,8 @@ OBSERVED_COLUMN = {
     "par_early": "Sw_par",
     "par_late": "Sw_par",
     "clearness_index": "Sw_dw",
+    # Same source and same gate as the histogram: the cumulative is its integral.
+    "clearness_index_cumulative": "Sw_dw",
 }
 
 # Same, for the WRF point extraction. A variable absent here simply has no model
@@ -102,6 +104,7 @@ WRF_COLUMN = {
     "wind_speed": "WS",
     "wind_direction": "WD",
     "clearness_index": "Swdw",
+    "clearness_index_cumulative": "Swdw",
     "shortwave_down": "Swdw",
     # Only the two DOWNWELLING streams are trustworthy: Swup_calc and Lwup_calc
     # derive from ALBD and EMISS, which the writer emits as the constants -273.01
@@ -457,9 +460,13 @@ def _paired_speed(
     return frame[name].reindex(series.index) if name in frame.columns else None
 
 
+#: Variables whose sample IS the clearness index, however it is later drawn.
+_CLEARNESS_SPECS = ("clearness_index", "clearness_index_cumulative")
+
+
 def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Atom]]:
     """Select, gate and de-atomise one variable from the observed hourly frame."""
-    if spec_id == "clearness_index":
+    if spec_id in _CLEARNESS_SPECS:
         values = _clearness(frame, OBSERVED_COLUMN[spec_id], "observed")
         return values.to_numpy(), []
 
@@ -557,7 +564,7 @@ def _wrf_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Ato
     """Same selection for the model series, where the variable exists there."""
     if spec_id not in WRF_COLUMN:
         return np.array([]), []
-    if spec_id == "clearness_index":
+    if spec_id in _CLEARNESS_SPECS:
         return _clearness(frame, WRF_COLUMN[spec_id], "wrf").to_numpy(), []
     column = WRF_COLUMN[spec_id]
     if column not in frame.columns:
