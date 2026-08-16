@@ -151,22 +151,29 @@ extend-exclude = [
 # `extend-select`, not `select`: ruff 0.16 ships 413 default rules and these come
 # on top of them.
 extend-select = [
-    "E",
-    "W",
-    "F",
-    "I",
-    "N",
-    "UP",
-    "B",
-    "SIM",
-    "PERF",
-    "RUF",
-    "C4",
-    "ARG",
-    "PT",
-    "PD",
-    "NPY",
-    "S",
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes — undefined names, unused imports
+    "I",    # isort — import ordering
+    "N",    # pep8-naming
+    "UP",   # pyupgrade — modern syntax for the target version
+    "B",    # flake8-bugbear — likely bugs and design traps
+    "SIM",  # flake8-simplify
+    "PERF", # perflint — performance anti-patterns
+    "RUF",  # ruff-specific rules
+    "C4",   # flake8-comprehensions
+    "ARG",  # flake8-unused-arguments
+    "PT",   # flake8-pytest-style
+    "PD",   # pandas-vet
+    "NPY",  # numpy-specific — legacy RNG, deprecated aliases
+    "S",    # flake8-bandit — security anti-patterns
+    "A",    # flake8-builtins — names that shadow a builtin
+    "DTZ",  # flake8-datetimez — naive datetimes
+    "FURB", # refurb — outdated idioms with a modern replacement
+    "G",    # flake8-logging-format — f-strings in log calls
+    "ISC",  # flake8-implicit-str-concat
+    "LOG",  # flake8-logging — misuse of the logging API
+    "TID",  # flake8-tidy-imports — relative and banned imports
     # Docstring presence on public classes and module-level functions, both at
     # zero today. Deliberately NOT D102: 29 public methods here are one-line
     # `@property` accessors whose only possible docstring restates their name,
@@ -227,6 +234,7 @@ warn_unused_ignores = true
 strict_equality = true
 extra_checks = true
 ignore_missing_imports = true
+enable_error_code = ["ignore-without-code", "mutable-override"]
 exclude = ["^legacy/"]
 
 [tool.pytest.ini_options]
