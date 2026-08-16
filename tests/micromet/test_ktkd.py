@@ -173,6 +173,11 @@ def test_the_payload_declares_the_published_schema_and_both_model_kinds():
     assert kinds["ridley_brl_2010"] == "band"
     assert payload["sky_conditions"]["kt_upper_bounds"] == [0.35, 0.55, 0.65]
     assert len(payload["points"]) == len(kt)
+    assert payload["points_format"] == ["kt", "kd", "t"]
+    first = payload["points"][0]
+    assert isinstance(first, list)
+    assert len(first) == 3
+    assert first[0] == pytest.approx(float(kt.iloc[0]), abs=5e-4)
 
 
 def test_the_published_payload_carries_no_non_finite_number():

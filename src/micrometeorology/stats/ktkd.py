@@ -464,10 +464,16 @@ def build_ktkd_payload(
         "caveats": caveats,
     }
     if include_points:
+        # Positional [kt, kd, t], which the reader accepts and which drops three
+        # repeated keys per observation: the production host serves this JSON
+        # uncompressed, so those bytes are bytes on the wire. Three decimals is
+        # finer than the 0.02 bins the density is drawn on; `t` stays because the
+        # page's CSV export reads it.
         payload["points"] = [
-            {"t": stamp.isoformat(), "kt": float(x), "kd": float(y)}
+            [round(float(x), 3), round(float(y), 3), stamp.isoformat()]
             for stamp, x, y in zip(kt.index, kt.to_numpy(), kd.to_numpy(), strict=True)
         ]
+        payload["points_format"] = ["kt", "kd", "t"]
     return payload
 
 
