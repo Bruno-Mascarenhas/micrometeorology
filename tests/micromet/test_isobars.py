@@ -138,29 +138,20 @@ def test_every_level_falls_strictly_inside_the_field_so_each_one_draws():
 
 @pytest.mark.parametrize(
     ("low_hpa", "high_hpa"),
-    [(1016.02, 1016.09), (1013.994, 1013.998)],
-    ids=["flatter_than_the_spacing", "narrower_than_the_rounding_step"],
+    [(1016.02, 1016.09), (1013.0, 1013.0)],
+    ids=["flatter_than_the_spacing", "no_variation_at_all"],
 )
-def test_a_field_too_flat_for_a_round_level_still_yields_one_inside_its_own_range(
-    low_hpa, high_hpa
-):
-    """The guarantee the page rests on: no step is ever published lineless.
-
-    The narrower field is thinner than the rounding step, where a rounded midpoint
-    lands back outside the field it came from: the level traces nothing, the entry
-    is dropped as empty, and the step ships `"isobars": []` — the guarantee failing
-    in exactly the case it exists for.
-    """
+def test_a_field_too_flat_to_name_a_round_level_draws_nothing(low_hpa, high_hpa):
+    """A line at the midpoint would assert a gradient the field does not resolve."""
     barely_varying = np.linspace(low_hpa, high_hpa, 64).reshape(8, 8)
 
-    (level,) = isobars.isobar_levels_hpa(barely_varying, 1.0)
-
-    assert barely_varying.min() < level < barely_varying.max()
+    assert isobars.isobar_levels_hpa(barely_varying, 1.0).size == 0
 
 
-def test_a_field_with_no_variation_at_all_has_no_isobars_and_says_so():
-    with pytest.raises(ValueError, match="constant"):
-        isobars.isobar_levels_hpa(np.full((4, 4), 1013.0), 1.0)
+def test_a_reduction_that_produced_nothing_finite_is_an_error_not_an_empty_step():
+    """A failed reduction and a flat field are different claims about the world."""
+    with pytest.raises(ValueError, match="reduction failed"):
+        isobars.isobar_levels_hpa(np.full((4, 4), np.nan), 1.0)
 
 
 def _ramp_grid(size: int = 24) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -371,7 +362,8 @@ def test_the_manifest_tells_the_page_which_variables_the_overlay_belongs_over(tm
     assert manifest["index_max"] == len(result.files) - 1
 
 
-def test_a_step_with_no_contour_is_dropped_without_taking_the_domain_with_it(tmp_path):
+def test_a_step_with_no_contour_publishes_an_empty_overlay(tmp_path):
+    """The step is published and says it drew nothing, rather than inventing a line."""
     wrf = tmp_path / "wrfout_d03_partial.nc"
     _write_standard_atmosphere_wrfout(wrf, terrain_max_m=0.0, flat_steps=(1,))
     unit = _isobars_unit(tmp_path, wrf)
@@ -379,6 +371,9 @@ def test_a_step_with_no_contour_is_dropped_without_taking_the_domain_with_it(tmp
     result = jobs.process_unit(unit)
 
     assert result.error is None
-    assert len(result.files) == 2
-    assert any("step 001" in warning for warning in result.warnings)
-    assert not (tmp_path / "json" / "D03_ISOBARS_001.json").exists()
+    assert len(result.files) == 3
+    flat = json.loads((tmp_path / "json" / "D03_ISOBARS_001.json").read_text(encoding="utf-8"))
+    assert flat["isobars"] == []
+    assert flat["metadata"]["unit"] == "hPa"
+    drawn = json.loads((tmp_path / "json" / "D03_ISOBARS_000.json").read_text(encoding="utf-8"))
+    assert drawn["isobars"]

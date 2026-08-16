@@ -577,9 +577,11 @@ def _run_isobars_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], l
     for meta in published:
         step_index = meta["index"]
         field = reduced[step_index]
-        # A step with no contour at all is dropped rather than sinking the domain:
-        # the other 75 are good data, and the step's absence is what `availability`
-        # reports, since it is derived from the files actually written.
+        # A step whose reduction FAILED is dropped rather than sinking the domain;
+        # a step that merely has no contour to draw still publishes, empty. The
+        # two are different claims and the page must be able to tell them apart:
+        # a missing file is an artifact that was never written, an empty one is a
+        # field too flat to carry a line the spacing can name.
         try:
             levels = isobars.isobar_levels_hpa(field, interval)
         except ValueError as unusable:

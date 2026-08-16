@@ -17,7 +17,6 @@ Sea-level reduction, and why surface pressure will not do, is in
 :mod:`micrometeorology.wrf.sea_level_pressure`.
 """
 
-import logging
 from typing import Any
 
 import numpy as np
@@ -26,8 +25,6 @@ from numpy.typing import NDArray
 from scipy.ndimage import gaussian_filter
 
 from micrometeorology.wrf.safety import assert_reasonable_array_size
-
-logger = logging.getLogger(__name__)
 
 #: Output id the per-step files are named with, matching the WIND_VECTORS
 #: overlay's spelling: ``{D}_{ID}_{NNN}.json``.
@@ -61,9 +58,8 @@ ISOBAR_INTERVALS_HPA: tuple[float, ...] = (4.0, 2.0, 1.0, 0.5, 0.2, 0.1)
 #: Lines a typical step should carry.  The spacing is chosen against the domain's
 #: MEDIAN range rather than its narrowest step: sizing it so the flattest step of
 #: all still holds a line would drive the outer domains to a spacing that leaves
-#: them nearly blank, which is where isobars carry the most meaning.  The
-#: occasional step flatter than the chosen spacing is caught by the midpoint
-#: fallback in :func:`isobar_levels_hpa`.
+#: them nearly blank, which is where isobars carry the most meaning.  A step
+#: flatter than the chosen spacing publishes no line at all.
 TARGET_LEVELS_PER_STEP = 5
 
 #: Gaussian smoothing applied before contouring, in GRID CELLS, so each domain
@@ -143,7 +139,13 @@ def choose_interval_hpa(typical_range_hpa: float) -> float:
 
 
 def isobar_levels_hpa(field: NDArray, interval_hpa: float) -> NDArray:
-    """Round pressure levels crossing *field*, never fewer than one.
+    """Round pressure levels crossing *field*, empty when none do.
+
+    A field flatter than the spacing yields NO levels rather than a line at its
+    midpoint. Such a line would sit at a value the spacing never names, drawn
+    only because something had to be drawn: it asserts a gradient the field does
+    not resolve. An empty step is the honest publication, and the page renders it
+    as a map with no isobars rather than as a map with one meaningless one.
 
     Parameters
     ----------
@@ -156,39 +158,24 @@ def isobar_levels_hpa(field: NDArray, interval_hpa: float) -> NDArray:
     -------
     numpy.ndarray
         Levels in hPa, ``(L,)``, ascending, every one strictly inside the field's
-        range so each yields a real contour. A field too flat to contain a
-        multiple of *interval_hpa* falls back to its own midpoint, which keeps
-        the guarantee of one line per step at the cost of a level that is not a
-        round number — a case no operational domain has reached.
+        range so each yields a real contour. ``L`` may be zero.
 
     Raises
     ------
     ValueError
-        When the field is constant or all-NaN, which has no contour at all.
+        When the field is entirely non-finite, which is a failed reduction rather
+        than a flat one and must not be published as an empty step.
     """
     values = np.asarray(field, dtype=np.float64)
     if not np.isfinite(values).any():
-        raise ValueError("sea-level pressure field is all-NaN; it has no isobars")
+        raise ValueError("sea-level pressure field is all-NaN; the reduction failed")
     low, high = float(np.nanmin(values)), float(np.nanmax(values))
     if not high > low:
-        raise ValueError(f"sea-level pressure field is constant at {low} hPa; it has no isobars")
+        return np.empty(0, dtype=np.float64)
 
     first = np.ceil(low / interval_hpa) * interval_hpa
     levels = np.round(np.arange(first, high, interval_hpa), ISOBAR_LEVEL_DECIMALS)
-    levels = levels[(levels > low) & (levels < high)]
-    if levels.size == 0:
-        logger.warning(
-            "sea-level field spans %.3f hPa, narrower than the %.1f hPa interval; "
-            "falling back to a single isobar at its midpoint",
-            high - low,
-            interval_hpa,
-        )
-        # Deliberately NOT rounded: a field spanning less than the rounding step
-        # would have its midpoint rounded straight back outside its own range,
-        # the contour would come back empty, and the step would publish no line
-        # at all — the exact guarantee this branch exists to keep.
-        return np.array([0.5 * (low + high)])
-    return np.asarray(levels, dtype=np.float64)
+    return np.asarray(levels[(levels > low) & (levels < high)], dtype=np.float64)
 
 
 def create_isobars_json(
@@ -249,9 +236,6 @@ def create_isobars_json(
             if np.asarray(segment).shape[0] >= 2
         ]
         if paths:
-            # Published as given: the levels arrive already rounded to the
-            # interval grid, and re-rounding here would move a midpoint fallback
-            # outside the very range it was chosen inside.
             isobars.append({"level": float(level), "paths": paths})
 
     return {
