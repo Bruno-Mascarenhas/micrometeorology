@@ -144,21 +144,20 @@ def run(
     results: dict[str, dict[str, float]] = {}
     for col in cols:
         a_col, b_col = f"{col}_a", f"{col}_b"
-        if a_col in aligned.columns and b_col in aligned.columns:
-            circular = is_circular_column(col)
-            if circular:
-                typer.echo(
-                    f"{col}: circular quantity — residuals wrapped to [-180, 180); "
-                    "R2/r/d/IOA/NRMSE suppressed"
-                )
-            a_values, b_values = aligned[a_col].to_numpy(), aligned[b_col].to_numpy()
-            # "Aligned N rows" above counts rows, not comparable pairs: every
-            # metric below is computed over the finite ones only, and that count
-            # differs per column. It belongs in the artifact, not just the log.
-            results[col] = {
-                "n": float(valid_pairs(a_values, b_values)),
-                **compute_all(a_values, b_values, circular=circular),
-            }
+        circular = is_circular_column(col)
+        if circular:
+            typer.echo(
+                f"{col}: circular quantity — residuals wrapped to [-180, 180); "
+                "R2/r/d/IOA/NRMSE suppressed"
+            )
+        a_values, b_values = aligned[a_col].to_numpy(), aligned[b_col].to_numpy()
+        # "Aligned N rows" above counts rows, not comparable pairs: every
+        # metric below is computed over the finite ones only, and that count
+        # differs per column. It belongs in the artifact, not just the log.
+        results[col] = {
+            "n": float(valid_pairs(a_values, b_values)),
+            **compute_all(a_values, b_values, circular=circular),
+        }
 
     metrics_df = pd.DataFrame(results)
 

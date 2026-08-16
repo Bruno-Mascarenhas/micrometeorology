@@ -102,13 +102,10 @@ def train(
     if device is not None:
         exp_cfg.train.device = str(device)
 
-    resume_arg: str | None = None
-    if resume is not None:
-        if resume != "auto" and not Path(resume).exists():
-            raise typer.BadParameter(
-                f"resume checkpoint does not exist: {resume}", param_hint="--resume"
-            )
-        resume_arg = resume
+    if resume is not None and resume != "auto" and not Path(resume).exists():
+        raise typer.BadParameter(
+            f"resume checkpoint does not exist: {resume}", param_hint="--resume"
+        )
 
     require("torch", "allsky")
     from allsky.training import TrainingError, run_experiment  # lazy: pulls torch at run time
@@ -120,7 +117,7 @@ def train(
             output_dir=out_dir,
             device=str(device) if device is not None else None,
             amp=amp,
-            resume=resume_arg,
+            resume=resume,
             trust_checkpoint=trust_checkpoint,
         )
     except TrainingError as exc:

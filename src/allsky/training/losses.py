@@ -98,7 +98,6 @@ class MultitaskLoss(nn.Module):
                 "learned uncertainty weighting is not implemented yet; leave "
                 "learned_uncertainty=False to use the configured fixed weights"
             )
-        self.learned_uncertainty = learned_uncertainty
         self._huber_delta = float(huber_delta)
 
         self._dhi_enabled = bool(targets.dhi.enabled)

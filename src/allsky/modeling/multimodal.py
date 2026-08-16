@@ -19,7 +19,7 @@ from allsky.modeling.contracts import ModelOutputs
 from allsky.modeling.fusion import build_fusion
 from allsky.modeling.heads import Heads, Trunk
 from allsky.modeling.sensor_encoder import SensorEncoder
-from allsky.modeling.visual_encoder import build_visual_encoder
+from allsky.modeling.visual_encoder import build_visual_encoder, split_backbone_param_groups
 
 __all__ = ["MultimodalNet"]
 
@@ -86,7 +86,6 @@ class MultimodalNet(nn.Module):
     ) -> None:
         super().__init__()
         self.feature_columns = list(feature_columns)
-        self.input_mode = input_mode
         self.backbone_lr = backbone_lr
 
         self.sensor_encoder = SensorEncoder(
@@ -171,16 +170,4 @@ class MultimodalNet(nn.Module):
             group.  Otherwise a single group of all trainable parameters.
         """
         lr = backbone_lr if backbone_lr is not None else self.backbone_lr
-        get_backbone_groups = getattr(self.visual_encoder, "param_groups", None)
-        if lr is None or get_backbone_groups is None:
-            return [{"params": [p for p in self.parameters() if p.requires_grad]}]
-        backbone_params = {
-            id(p): p for group in get_backbone_groups(lr) if "lr" in group for p in group["params"]
-        }
-        other = [p for p in self.parameters() if p.requires_grad and id(p) not in backbone_params]
-        groups: list[dict[str, Any]] = []
-        if backbone_params:
-            groups.append({"params": list(backbone_params.values()), "lr": lr})
-        if other:
-            groups.append({"params": other})
-        return groups
+        return split_backbone_param_groups(self, self.visual_encoder, lr)

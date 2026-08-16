@@ -444,9 +444,7 @@ def _index_parts(out: Path) -> list[Path]:
 
 
 def _remove_index_parts(out: Path) -> None:
-    """Delete every per-shard index part file in *out* (if the dir exists)."""
-    if not out.exists():
-        return
+    """Delete every per-shard index part file in *out*."""
     for part in _index_parts(out):
         part.unlink(missing_ok=True)
 

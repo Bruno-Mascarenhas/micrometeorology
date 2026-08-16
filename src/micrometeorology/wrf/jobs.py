@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -186,7 +186,7 @@ class UnitResult:
     kind: UnitKind
     files: tuple[str, ...] = ()
     seconds: float = 0.0
-    warnings: tuple[str, ...] = field(default=())
+    warnings: tuple[str, ...] = ()
     error: str | None = None
     start_local: str | None = None
     n_steps: int | None = None
@@ -381,7 +381,7 @@ class _SiteArtifactAccumulator:
             # sunrise mean covers a fraction of the grid and reads like a
             # physical trend when it is really the shrinking sample.
             "finite_cells": self.finite_cells,
-            "cells": self._matrix.shape[0] if self._matrix is not None else 0,
+            "cells": self._matrix.shape[0],
         }
         summary_path = Path(json_dir) / f"{stem}.summary.json"
         series_tmp = _staged_bytes(series_path, self._matrix.tobytes())

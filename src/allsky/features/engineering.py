@@ -26,10 +26,8 @@ import pandas as pd
 
 from allsky.config import SiteConfig
 from allsky.features.policy import FeatureSet, resolve_feature_set, source_column
-from allsky.solar import solar_azimuth_deg, solar_elevation_deg
+from allsky.solar import DatetimeLike, solar_azimuth_deg, solar_elevation_deg
 from micrometeorology.sensors.wind import wind_components
-
-type DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
 
 __all__ = ["DAYS_PER_YEAR", "build_feature_frame"]
 

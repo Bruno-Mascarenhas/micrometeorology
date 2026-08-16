@@ -212,7 +212,6 @@ def write_grid_geojson_stream(
     lat: NDArray,
     resolution_x: float,
     resolution_y: float,
-    _colormap: str = "",
 ) -> Path:
     """Write grid GeoJSON feature-by-feature without building a full feature list.
 
@@ -230,10 +229,6 @@ def write_grid_geojson_stream(
         ``(ny, nx)`` cell-centre coordinates in degrees east and degrees north.
     resolution_x, resolution_y:
         Grid spacing in meters, published under ``metadata.resolucao_m``.
-    _colormap:
-        Accepted for call compatibility with the frozen reference writer and
-        unused.
-
     Returns
     -------
     Path

@@ -74,12 +74,6 @@ __all__ = [
 TARGET_SOURCE_MEASURED = "measured"
 TARGET_SOURCE_ERBS = "erbs_pseudo"
 
-#: Fixed UTC offset of the America/Bahia logger/camera clock, re-exported from
-#: :mod:`allsky.config` so the pipeline has one pinned site clock.
-LOCAL_UTC_OFFSET_HOURS = SITE_UTC_OFFSET_HOURS
-LOCAL_TZ_NAME = SITE_TZ_NAME
-_LOCAL_TZ = SITE_TZ
-
 
 def build_manifest(
     frames_manifest: pd.DataFrame,
@@ -230,7 +224,7 @@ def build_manifest(
         site,
         feature_set,
         extra=extra_features,
-        utc_offset_hours=float(LOCAL_UTC_OFFSET_HOURS),
+        utc_offset_hours=float(SITE_UTC_OFFSET_HOURS),
     )
     finite = np.isfinite(features.to_numpy(dtype=np.float64)).all(axis=1)
     n_nonfinite = int((~finite).sum())
@@ -245,7 +239,7 @@ def build_manifest(
     if len(frames) == 0:
         raise ValueError("no rows survived the finite-feature filter; check sensor coverage")
 
-    utc_offset = float(LOCAL_UTC_OFFSET_HOURS)
+    utc_offset = float(SITE_UTC_OFFSET_HOURS)
     elevation = solar_elevation_deg(frame_times, site, utc_offset)
 
     if night_min_elevation_deg is not None:
@@ -308,7 +302,7 @@ def build_manifest(
     sample_id = [f"allsky-{ts:%Y%m%d-%H%M}" for ts in frame_times]
     _check_sample_id_unique(sample_id)
     day_id = frame_times.strftime("%Y-%m-%d")
-    timestamp_utc = frame_times.tz_localize(_LOCAL_TZ).tz_convert("UTC").as_unit("ns")
+    timestamp_utc = frame_times.tz_localize(SITE_TZ).tz_convert("UTC").as_unit("ns")
     image_path = [to_relative(path, data_root) for path in frames["frame_path"]]
 
     dtypes = manifest_column_dtypes(feature_columns)
@@ -454,7 +448,7 @@ def write_manifest_parquet(
     """
     out = Path(path)
 
-    sha = _content_sha256(manifest)
+    sha = content_sha256(manifest)
     written_meta = {**meta, "manifest_sha256": sha, "row_count": len(manifest)}
 
     atomic_write(out, lambda tmp: manifest.to_parquet(tmp, index=False))
@@ -668,21 +662,11 @@ def _build_meta(
         },
         "target_source": target_source,
         "config_sha256": config_sha256,
-        "code_version": _code_version(),
+        "code_version": code_version(),
         "created_at": datetime.now(UTC).isoformat(),
         "row_count": row_count,
-        "timezone": {"name": LOCAL_TZ_NAME, "utc_offset_hours": LOCAL_UTC_OFFSET_HOURS},
+        "timezone": {"name": SITE_TZ_NAME, "utc_offset_hours": SITE_UTC_OFFSET_HOURS},
         "site": {"latitude": site.latitude, "longitude": site.longitude},
         "thresholds": thresholds,
         "manifest_sha256": None,
     }
-
-
-def _content_sha256(manifest: pd.DataFrame) -> str:
-    """Manifest content hash — delegates to :func:`allsky.provenance.content_sha256`."""
-    return content_sha256(manifest)
-
-
-def _code_version() -> dict[str, str | None]:
-    """Reproducibility stamp — delegates to :func:`allsky.provenance.code_version`."""
-    return code_version()

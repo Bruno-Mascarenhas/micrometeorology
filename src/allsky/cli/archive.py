@@ -610,9 +610,7 @@ def _process_day(
         )
         ledger.save()
 
-    if prune_uploaded and ledger.uploaded(
-        entry.key, uploader.target.path(REMOTE_VIDEOS, entry.filename)
-    ):
+    if prune_uploaded and ledger.uploaded(entry.key, _video_destination(uploader.target, entry)):
         video_path.unlink(missing_ok=True)
         ledger.mark_pruned(entry.key)
         ledger.save()

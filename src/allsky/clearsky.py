@@ -29,9 +29,8 @@ import numpy as np
 import pandas as pd
 
 from allsky.config import SiteConfig
-from allsky.solar import cos_zenith, solar_elevation_deg
+from allsky.solar import DatetimeLike, cos_zenith, solar_elevation_deg
 
-type DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
 type ArrayLike = Sequence[float] | np.ndarray | pd.Series
 
 __all__ = [

@@ -108,7 +108,6 @@ class PrecomputedEmbedding(nn.Module):
             raise ValueError(
                 f"temporal_pooling must be 'mean' or 'attention', got {temporal_pooling!r}"
             )
-        self.in_dim = in_dim
         self.temporal_pooling = temporal_pooling
         self.projection, self._out_dim = _projection(in_dim, out_dim, dropout)
         if temporal_pooling == "attention":
@@ -248,14 +247,13 @@ class ImageEncoder(nn.Module):
         if dim is None:
             raise AttributeError("image backbone must expose an integer 'dim' attribute")
         self.backbone = backbone
-        self.backbone_dim = int(dim)
         partial_finetune = unfreeze_last_n > 0 and getattr(backbone, "blocks", None) is not None
         if frozen or partial_finetune:
             for param in self.backbone.parameters():
                 param.requires_grad_(False)
         if unfreeze_last_n > 0:
             self._unfreeze_last_blocks(unfreeze_last_n)
-        self.projection, self._out_dim = _projection(self.backbone_dim, out_dim, dropout)
+        self.projection, self._out_dim = _projection(int(dim), out_dim, dropout)
 
     def _unfreeze_last_blocks(self, n: int) -> None:
         """Re-enable gradients on the last *n* transformer blocks, if any."""

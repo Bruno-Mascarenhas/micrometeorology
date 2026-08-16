@@ -85,8 +85,9 @@ def _resolve_record_range(
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
     """Resolve a record's inclusive ``[start, end]`` bounds against *df*'s index.
 
-    Must mirror the application path: an absent ``start_date`` defaults to the
-    first index timestamp, ``end_date`` goes through :func:`_resolve_inclusive_end`.
+    Both application paths call this, so an absent ``start_date`` defaults to the
+    first index timestamp and ``end_date`` goes through
+    :func:`_resolve_inclusive_end` identically wherever a record is applied.
     """
     start = (
         pd.Timestamp(record["start_date"])
@@ -196,8 +197,7 @@ def apply_calibrations(
             logger.debug("Skipping calibration for missing column: %s", column)
             continue
 
-        start = pd.Timestamp(record["start_date"]) if record.get("start_date") else df.index.min()
-        end = _resolve_inclusive_end(record.get("end_date"), df.index.max())
+        start, end = _resolve_record_range(record, df)
         factor = record.get("factor")
         description = record.get("description", "")
 
@@ -437,10 +437,7 @@ def unify_sensor_columns(
                 logger.warning("Column %s not found for unified variable %s", column, unified_name)
                 continue
 
-            start = (
-                pd.Timestamp(mapping["start_date"]) if mapping.get("start_date") else df.index.min()
-            )
-            end = _resolve_inclusive_end(mapping.get("end_date"), df.index.max())
+            start, end = _resolve_record_range(mapping, df)
 
             mask = (df.index >= start) & (df.index <= end)
             part = df.loc[mask, column].rename(unified_name)

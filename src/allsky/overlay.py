@@ -32,7 +32,7 @@ import pandas as pd
 
 from allsky.config import VideoConfig
 from allsky.data.contracts import QCFlag
-from allsky.video import JPEG_QUALITY, MANIFEST_FILENAME
+from allsky.video import JPEG_QUALITY, MANIFEST_FILENAME, _resize_image
 from allsky.video import MANIFEST_COLUMNS as VIDEO_MANIFEST_COLUMNS
 
 logger = logging.getLogger(__name__)
@@ -514,13 +514,6 @@ def _video_date_from_name(path: str | Path) -> dt.date:
         ) from exc
 
 
-def _resized(image: np.ndarray, size: int | tuple[int, int]) -> np.ndarray:
-    from PIL import Image
-
-    target = (size, size) if isinstance(size, int) else size
-    return np.asarray(Image.fromarray(image).resize(target, Image.Resampling.BILINEAR))
-
-
 def _stage_frame(
     frame: np.ndarray, staging: Path, index: int, resize: int | tuple[int, int] | None
 ) -> Path:
@@ -529,7 +522,9 @@ def _stage_frame(
 
     image = np.asarray(frame, dtype=np.uint8)
     staged = staging / f"{index:08d}.jpg"
-    iio.imwrite(staged, image if resize is None else _resized(image, resize), quality=JPEG_QUALITY)
+    iio.imwrite(
+        staged, image if resize is None else _resize_image(image, resize), quality=JPEG_QUALITY
+    )
     return staged
 
 

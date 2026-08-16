@@ -243,7 +243,7 @@ class ArchiveReport:
 _TOA5_METADATA = '"TOA5","CR5000","CR5000","2754","CR5000.Std.06","STAGED","0","LBM_staged"'
 
 
-def _write_toa5(frame: pd.DataFrame, destination: Path, timestamp_column: str) -> None:
+def _write_toa5(frame: pd.DataFrame, destination: Path) -> None:
     """Write a frame back out in TOA5 shape (metadata, names, units, aggregation)."""
     columns = list(frame.columns)
     with open(destination, "w", encoding="utf-8", newline="") as handle:
@@ -255,7 +255,6 @@ def _write_toa5(frame: pd.DataFrame, destination: Path, timestamp_column: str) -
         handle.write(",".join('""' for _ in columns) + "\n")
     frame.to_csv(destination, mode="a", header=False, index=False, date_format="%Y-%m-%d %H:%M:%S")
     logger.info("staged %s (%d rows)", destination.name, len(frame))
-    del timestamp_column
 
 
 def _read_raw_toa5(path: Path) -> pd.DataFrame:
@@ -276,7 +275,7 @@ def _stage_clock_shift(source: Path, destination: Path) -> None:
     shifted = stamps.where(stamps > _CLOCK_SLIP_LAST, stamps + pd.Timedelta(hours=1))
     moved = int((shifted != stamps).sum())
     frame["TIMESTAMP"] = shifted.dt.strftime("%Y-%m-%d %H:%M:%S")
-    _write_toa5(frame, destination, "TIMESTAMP")
+    _write_toa5(frame, destination)
     logger.info("  clock: shifted %d rows by +1h", moved)
 
 
@@ -285,7 +284,7 @@ def _stage_drop_late_tail(source: Path, destination: Path) -> None:
     frame = _read_raw_toa5(source)
     stamps = pd.to_datetime(frame["TIMESTAMP"], format="ISO8601")
     keep = stamps < _LATE_TAIL_FIRST
-    _write_toa5(frame.loc[keep], destination, "TIMESTAMP")
+    _write_toa5(frame.loc[keep], destination)
     logger.info("  tail: dropped %d late rows", int((~keep).sum()))
 
 
@@ -298,7 +297,7 @@ def _stage_keep_2023_block(source: Path, destination: Path) -> None:
     frame = _read_raw_toa5(source)
     stamps = pd.to_datetime(frame["TIMESTAMP"], format="ISO8601")
     keep = (stamps >= pd.Timestamp("2023-08-01")) & (stamps < pd.Timestamp("2023-09-01"))
-    _write_toa5(frame.loc[keep], destination, "TIMESTAMP")
+    _write_toa5(frame.loc[keep], destination)
     logger.info(
         "  spare logger: kept %d rows of 2023-08, dropped %d", int(keep.sum()), int((~keep).sum())
     )
