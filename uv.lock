@@ -399,6 +399,7 @@ version = "1.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "cartopy" },
+    { name = "contourpy" },
     { name = "imageio" },
     { name = "matplotlib" },
     { name = "netcdf4" },
@@ -451,6 +452,7 @@ video = [
 [package.metadata]
 requires-dist = [
     { name = "cartopy", specifier = ">=0.23" },
+    { name = "contourpy", specifier = ">=1.3" },
     { name = "imageio", specifier = ">=2.34" },
     { name = "imageio-ffmpeg", marker = "extra == 'allsky'", specifier = ">=0.6" },
     { name = "joblib", marker = "extra == 'tcc'", specifier = ">=1.3" },

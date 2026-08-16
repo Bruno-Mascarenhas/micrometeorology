@@ -95,6 +95,39 @@ def test_the_class_shares_are_published_already_computed_with_their_bounds():
     assert sum(c["fraction"] for c in conditions["conditions"]) == pytest.approx(1.0, abs=1e-6)
 
 
+def test_the_cumulative_selects_exactly_what_the_climatology_histogram_selects():
+    """The published caveat says one is the integral of the other. It must be true.
+
+    The two artifacts live on different pages, so nothing but this test stops
+    their gates from drifting apart — and a drift shows up only as two row counts
+    no reader can reconcile.
+    """
+    from micrometeorology.cli.export_climatology import _observed_sample
+
+    frame = _hourly()
+    histogram, _atoms = _observed_sample("clearness_index", frame)
+    cumulative = ktkd_stats.prepare_clearness(
+        frame, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
+    )
+
+    assert len(cumulative) == len(histogram)
+    np.testing.assert_allclose(np.sort(cumulative.to_numpy()), np.sort(histogram))
+
+
+def test_the_daylight_gate_brackets_the_whole_hour_not_only_its_midpoint():
+    """An hour the sun rises inside is not daytime, however bright its midpoint."""
+    from micrometeorology.stats.daylight import elevation_bounds
+
+    # 2024-01-31 05:00 local: -6.92 deg at the start, -0.02 at the midpoint,
+    # +6.95 by the end. A midpoint-only gate would call this hour daytime-adjacent.
+    times = pd.DatetimeIndex(["2024-01-31 05:00"])
+    lowest, highest = elevation_bounds(times, STATION_SITE, STATION_UTC_OFFSET_HOURS)
+
+    assert lowest[0] < highest[0]
+    assert lowest[0] == pytest.approx(-6.92, abs=0.05)
+    assert highest[0] == pytest.approx(6.95, abs=0.05)
+
+
 def test_every_model_publishes_a_short_label_beside_its_full_citation():
     """The page prints the producer's name, not one parsed out of the citation."""
     models = build_payloads(_hourly(), version="probe")["ktkd.json"]["models"]

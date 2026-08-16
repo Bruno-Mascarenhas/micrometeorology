@@ -36,6 +36,11 @@ dependencies = [
     # hand-rolling them would put the laboratory's public statistics on
     # unreviewed special-function code. Weibull and Gaussian stay pure numpy.
     "scipy>=1.14",
+    # Already in the graph through matplotlib, declared explicitly for the same
+    # reason scipy is: micrometeorology.wrf.isobars imports contourpy directly to
+    # trace the published sea-level isobars without opening a figure, and the
+    # polylines it returns ARE the artifact the site draws.
+    "contourpy>=1.3",
     "typer>=0.15",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",

@@ -33,7 +33,7 @@ import typer
 
 # allsky.solar is pure numpy/pandas (no torch) and ships in the same wheel, so
 # this CLI reuses NOAA's formulas without pulling a training dependency in.
-from allsky.solar import extraterrestrial_ghi, solar_elevation_deg
+from allsky.solar import extraterrestrial_ghi
 from micrometeorology.common.git import run_git, source_root
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
@@ -47,6 +47,10 @@ from micrometeorology.stats.climatology_export import (
     build_manifest,
     build_variable_payload,
     write_json,
+)
+from micrometeorology.stats.daylight import (
+    MIN_SOLAR_ELEVATION_DEG,
+    elevation_bounds,
 )
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
@@ -141,23 +145,6 @@ GEOMETRY_OFFSET: dict[GeometrySource, pd.Timedelta] = {
     "wrf": pd.Timedelta(0),
 }
 
-# Instants the SHARED daylight gates bracket the sun over: the averaging window's
-# own endpoints, not the per-source offsets above. Those two answer "where in its
-# stamp does each source's VALUE live"; a gate on an hourly mean has to answer
-# "does this hour contain sunlight at all", and the widest thing either published
-# quantity covers is [T, T+1h). Bracketing the offsets alone called an hour night
-# whenever sunrise fell after T+30min, averaging a sunlit stretch into a
-# distribution published as the nocturnal regime.
-SELECTION_BRACKET_OFFSETS: tuple[pd.Timedelta, ...] = (
-    pd.Timedelta(0),
-    pd.Timedelta(minutes=30),
-    pd.Timedelta(minutes=60),
-)
-
-# Solar elevation above which a shortwave sample counts as daytime: below it the
-# airmass is extreme and relative error swamps the signal, so the clearness index
-# and every shortwave distribution are gated on it.
-MIN_SOLAR_ELEVATION_DEG = 10.0
 
 # Variables restricted to daylight. Ungated, night fills half the record with
 # zeros and the histogram collapses to one unreadable bar. PAR is a shortwave band
@@ -312,14 +299,7 @@ def _elevation_bounds_of(stamps: bytes, stamps_dtype: str) -> tuple[np.ndarray, 
     nanoseconds moves every sun position by decades without failing.
     """
     times = pd.DatetimeIndex(np.frombuffer(stamps, dtype=stamps_dtype))
-    elevations = np.stack(
-        [
-            solar_elevation_deg(times + offset, SITE, UTC_OFFSET_HOURS)
-            for offset in SELECTION_BRACKET_OFFSETS
-        ]
-    )
-    lowest_deg: np.ndarray = elevations.min(axis=0)
-    highest_deg: np.ndarray = elevations.max(axis=0)
+    lowest_deg, highest_deg = elevation_bounds(times, SITE, UTC_OFFSET_HOURS)
     lowest_deg.setflags(write=False)
     highest_deg.setflags(write=False)
     return lowest_deg, highest_deg

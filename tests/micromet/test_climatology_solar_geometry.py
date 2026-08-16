@@ -21,7 +21,6 @@ import pytest
 from allsky.solar import extraterrestrial_ghi, solar_elevation_deg
 from micrometeorology.cli.export_climatology import (
     OBSERVED_COLUMN,
-    SELECTION_BRACKET_OFFSETS,
     SITE,
     UTC_OFFSET_HOURS,
     WRF_COLUMN,
@@ -29,6 +28,7 @@ from micrometeorology.cli.export_climatology import (
     _selection_elevation_bounds,
     _wrf_sample,
 )
+from micrometeorology.stats.daylight import SELECTION_BRACKET_OFFSETS
 
 AVERAGING_WINDOW_MIDPOINT = pd.Timedelta(minutes=30)
 
