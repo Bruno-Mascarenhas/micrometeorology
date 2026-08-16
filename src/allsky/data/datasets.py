@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 
 from allsky.config import AlignmentStrategyName
-from allsky.data.contracts import resolve
+from allsky.data.contracts import NS_PER_MINUTE, resolve
 from allsky.features.normalization import FeatureNormalizer
 
 __all__ = [
@@ -52,7 +52,6 @@ type SampleTensors = dict[str, Any]
 type WindowMode = AlignmentStrategyName
 _WINDOW_MODES: tuple[WindowMode, ...] = get_args(AlignmentStrategyName)
 #: Window bounds are computed on int64 nanosecond timestamps.
-_NS_PER_MINUTE = 60_000_000_000
 
 
 @runtime_checkable
@@ -328,7 +327,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         index = pd.DatetimeIndex(self.manifest["timestamp_utc"]).tz_convert("UTC").tz_localize(None)
         times_ns = index.as_unit("ns").to_numpy().astype("int64")
         day_codes = pd.factorize(self.manifest["day_id"].astype(str), sort=False)[0]
-        half_ns = round(self.window_minutes / 2.0 * _NS_PER_MINUTE)
+        half_ns = round(self.window_minutes / 2.0 * NS_PER_MINUTE)
         n_rows = len(self.manifest)
         windows: list[list[int]] = [[] for _ in range(n_rows)]
         order = np.lexsort((np.arange(n_rows), times_ns, day_codes))

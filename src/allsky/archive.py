@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin
 
 from allsky.atomic import atomic_write, atomic_write_json
 
@@ -675,11 +675,6 @@ class Ledger:
         if isinstance(record, dict):
             record.pop("extraction_fault", None)
 
-    def last_modified(self, key: str) -> str | None:
-        """The ``Last-Modified`` header stored for day *key*'s video, if any."""
-        stored = self.video(key)
-        return None if stored is None else stored.get("last_modified")
-
     def uploaded(self, key: str, destination: str) -> bool:
         """Whether day *key* has already reached *destination*.
 
@@ -783,8 +778,3 @@ def ledger_lock(path: str | Path) -> Generator[None]:
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-def archive_host(base_url: str = ARCHIVE_BASE_URL) -> str:
-    """Hostname of the archive, for log lines and remote folder names."""
-    return urlsplit(base_url).hostname or base_url

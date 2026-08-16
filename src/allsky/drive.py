@@ -43,14 +43,12 @@ class RcloneUploader:
     """Idempotent wrapper over ``rclone``, one process per file or per directory.
 
     Every transfer runs with ``--checksum``, so re-uploading an unchanged file
-    moves no bytes and a partial sync can simply be rerun. With *dry_run* set,
-    rclone reports what it would do and transfers nothing.
+    moves no bytes and a partial sync can simply be rerun.
     """
 
     target: DriveTarget
     binary: str = "rclone"
     extra_args: tuple[str, ...] = ()
-    dry_run: bool = False
     timeout: float = DEFAULT_TIMEOUT
     _resolved_binary: str | None = field(default=None, init=False, repr=False)
 
@@ -78,8 +76,6 @@ class RcloneUploader:
 
     def _run(self, args: list[str]) -> str:
         command = [self.executable(), *args, *self.extra_args]
-        if self.dry_run:
-            command.append("--dry-run")
         logger.debug("rclone: %s", " ".join(command))
         try:
             # S603: the resolved-executable case documented in
@@ -137,18 +133,3 @@ class RcloneUploader:
         self._run(args)
         logger.info("uploaded %s/%s -> %s", source.name, pattern, destination)
         return destination
-
-    def list_remote(self, *remote_parts: str) -> tuple[str, ...]:
-        """Names directly under a remote folder, or an empty tuple if it cannot be listed.
-
-        A missing folder and an unreachable remote both come back empty: this is
-        an informational listing, and a caller that needs the remote to be
-        configured should use :meth:`check`.
-        """
-        destination = self.target.path(*remote_parts)
-        try:
-            output = self._run(["lsf", destination])
-        except RcloneError as exc:
-            logger.debug("remote listing of %s unavailable: %s", destination, exc)
-            return ()
-        return tuple(line.strip("/") for line in output.splitlines() if line.strip())

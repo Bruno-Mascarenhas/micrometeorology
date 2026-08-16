@@ -19,12 +19,12 @@ tree and their limitations live on the ``compute_*`` functions below.
 import logging
 import warnings
 from dataclasses import dataclass
-from datetime import datetime
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
-from allsky.solar import SOLAR_CONSTANT_WM2
+from allsky.solar import SOLAR_CONSTANT_WM2, eccentricity_correction
 from micrometeorology.common.physics import STEFAN_BOLTZMANN
 from micrometeorology.wrf.reader import WRFDataset
 from micrometeorology.wrf.safety import assert_reasonable_array_size
@@ -322,38 +322,6 @@ def extract_scalar(ds: WRFDataset, var_name: str) -> tuple[NDArray, float, float
 MIN_COSZEN_FOR_CLEARNESS = 0.1736
 
 
-def _eccentricity_correction(times: list[datetime]) -> NDArray:
-    """Sun-Earth distance correction ``E0 = (r0/r)^2`` per time step (Spencer 1971).
-
-    Duplicates :func:`allsky.solar.eccentricity_correction` because
-    ``micrometeorology`` and ``allsky`` are independent packages. E0 runs 0.9666
-    (aphelion, early July) to 1.0351 (perihelion, early January), a +-3.4% swing
-    that keeps COSZEN alone from being the clearness denominator.
-    """
-    fractional_year = np.array(
-        [
-            2.0
-            * np.pi
-            / 365.0
-            * (
-                t.timetuple().tm_yday
-                - 1.0
-                + (t.hour + t.minute / 60.0 + t.second / 3600.0 - 12.0) / 24.0
-            )
-            for t in times
-        ],
-        dtype=np.float64,
-    )
-    correction: NDArray = (
-        1.000110
-        + 0.034221 * np.cos(fractional_year)
-        + 0.001280 * np.sin(fractional_year)
-        + 0.000719 * np.cos(2.0 * fractional_year)
-        + 0.000077 * np.sin(2.0 * fractional_year)
-    )
-    return correction
-
-
 def _finite_scale_bounds(values: NDArray, fallback: tuple[float, float]) -> tuple[float, float]:
     """Percentile scale bounds, falling back when the field is entirely no-value.
 
@@ -581,7 +549,8 @@ def extract_clearness_index(ds: WRFDataset) -> tuple[NDArray, float, float]:
     coszen = ds.get_variable("COSZEN")
     times = ds.parse_times()
     if len(times) == swdown.shape[0]:
-        eccentricity = _eccentricity_correction(times)[:, np.newaxis, np.newaxis]
+        stamps = pd.DatetimeIndex([t.replace(tzinfo=None) for t in times])
+        eccentricity = eccentricity_correction(stamps)[:, np.newaxis, np.newaxis]
     else:
         logger.warning(
             "Times axis (%d) does not match SWDOWN time axis (%d); "

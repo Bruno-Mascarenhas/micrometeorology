@@ -377,7 +377,6 @@ def run_experiment(
                     device=resolved_device,
                     autocast_device=autocast_device,
                     autocast_dtype=autocast_dtype,
-                    amp_enabled=amp_enabled,
                     target_stats=(dhi_mean, dhi_std, kindex_mean, kindex_std),
                     component_weights=component_weights,
                 )
@@ -906,7 +905,6 @@ def _eval_epoch(
     device: str,
     autocast_device: str | None,
     autocast_dtype: Any,
-    amp_enabled: bool,
     target_stats: tuple[float, float, float, float],
     component_weights: Mapping[str, float],
 ) -> dict[str, float]:
@@ -916,7 +914,7 @@ def _eval_epoch(
     with torch.no_grad():
         for raw in loader:
             batch = _move(raw, device)
-            with _autocast(autocast_device if amp_enabled else None, autocast_dtype):
+            with _autocast(autocast_device, autocast_dtype):
                 outputs = model(batch)
                 losses = loss_fn(outputs, batch)
             accumulator.update(outputs, batch, losses)

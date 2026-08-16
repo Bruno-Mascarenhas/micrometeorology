@@ -365,7 +365,7 @@ def test_a_ledger_round_trips_through_save_and_load(tmp_path: Path):
     assert stored["sha256"] == result.sha256
     assert reloaded.frames_match(DAY_NEW, step=3, resize=224, timestamps="overlay") is True
     assert reloaded.uploaded(DAY_NEW, "gd:LabMiM/allsky/videos/x.mp4") is True
-    assert reloaded.last_modified(DAY_NEW) == fake.LAST_MODIFIED
+    assert stored["last_modified"] == fake.LAST_MODIFIED
 
 
 def test_loading_a_missing_ledger_starts_an_empty_one(tmp_path: Path):

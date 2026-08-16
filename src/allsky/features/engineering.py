@@ -37,21 +37,6 @@ __all__ = ["DAYS_PER_YEAR", "build_feature_frame"]
 #: a non-integer divisor keeps the encoding continuous across leap years.
 DAYS_PER_YEAR = 365.25
 
-#: Engineered names handled by a dedicated transform rather than a raw
-#: column pass-through.
-_DERIVED = frozenset(
-    {
-        "solar_elevation",
-        "solar_zenith",
-        "azimuth_sin",
-        "azimuth_cos",
-        "doy_sin",
-        "doy_cos",
-        "wind_dir_sin",
-        "wind_dir_cos",
-    }
-)
-
 
 def build_feature_frame(
     sensor_df: pd.DataFrame,
@@ -105,15 +90,9 @@ def build_feature_frame(
     index = pd.DatetimeIndex(timestamps)
     resolved = resolve_feature_set(feature_set, extra)
 
-    required = {
-        col
-        for name in resolved
-        if name not in _DERIVED
-        for col in (source_column(name),)
-        if col is not None
-    }
-    if "wind_dir_sin" in resolved or "wind_dir_cos" in resolved:
-        required.add("WindDir")
+    # source_column() answers None for every name a dedicated transform builds
+    # (the solar geometry, the cyclic pairs), so those drop out here on their own.
+    required = {col for name in resolved for col in (source_column(name),) if col is not None}
     missing = sorted(required - set(sensor_df.columns))
     if missing:
         raise KeyError(f"sensor frame is missing required feature columns: {missing}")

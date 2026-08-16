@@ -27,6 +27,8 @@ import typer
 from allsky.atomic import atomic_write, atomic_write_json
 from allsky.cli.runtime import configure_cli_logging
 from allsky.config import (
+    DATASET_MANIFEST_FILENAME,
+    DATASET_SPLIT_FILENAME,
     FRAME_PIXEL_SECTIONS,
     VIDEO_TIME_FIELDS,
     PrepareConfig,
@@ -43,8 +45,6 @@ type PandasDataFrame = Any
 #: Preparation steps ``prepare-local`` can run, in execution order.
 VALID_STEPS = ("extract-frames", "build-manifest", "splits")
 
-_MANIFEST_NAME = "manifest.parquet"
-_SPLIT_NAME = "splits.json"
 _FRAMES_META_NAME = "frames.meta.json"
 
 ConfigOption = Annotated[
@@ -258,7 +258,9 @@ def validate_dataset(
     from allsky.data.validation import validate_manifest
 
     manifest_path = (
-        manifest if manifest is not None else Path(cfg.output.dataset_dir) / _MANIFEST_NAME
+        manifest
+        if manifest is not None
+        else Path(cfg.output.dataset_dir) / DATASET_MANIFEST_FILENAME
     )
     if not manifest_path.exists():
         typer.echo(f"ERROR: manifest not found: {manifest_path}")
@@ -273,7 +275,7 @@ def validate_dataset(
     data_root = manifest_path.parent
 
     split_artifact = None
-    split_path = manifest_path.with_name(_SPLIT_NAME)
+    split_path = manifest_path.with_name(DATASET_SPLIT_FILENAME)
     if split_path.exists():
         split_artifact = load_split_artifact(split_path).to_dict()
         typer.echo(f"Split artifact: {split_path}")
@@ -339,9 +341,9 @@ def prepare_local(
     step_set = _parse_steps(steps)
     dataset_dir = Path(cfg.output.dataset_dir)
     frames_root = dataset_dir / "frames"
-    manifest_path = dataset_dir / _MANIFEST_NAME
+    manifest_path = dataset_dir / DATASET_MANIFEST_FILENAME
     meta_path = manifest_path.with_name(f"{manifest_path.name}.meta.json")
-    split_path = dataset_dir / _SPLIT_NAME
+    split_path = dataset_dir / DATASET_SPLIT_FILENAME
     videos = sorted(glob.glob(cfg.video.pattern))
     config_sha = _config_sha256(cfg)
 
@@ -517,7 +519,7 @@ def _run_extract_step(
     for video in videos:
         stem = Path(video).stem
         video_dir = frames_root / stem
-        video_manifest = video_dir / _MANIFEST_NAME
+        video_manifest = video_dir / DATASET_MANIFEST_FILENAME
         existing = _read_frame_manifest(video_manifest)
         qc_complete = existing is not None and "qc_frame_flags" in existing.columns
 

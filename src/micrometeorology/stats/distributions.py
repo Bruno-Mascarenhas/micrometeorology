@@ -255,7 +255,6 @@ class Family:
     :data:`micrometeorology.stats.metrics.ALL_METRICS` is.
     """
 
-    name: str
     # `...` rather than `[NDArray]`: hollands_huget takes an extra keyword-only
     # option, and a precise signature here would reject it at the registry.
     fit: Callable[..., dict[str, Any]]
@@ -1091,7 +1090,6 @@ def _compound_gaussian_ppf(q: NDArray, params: Mapping[str, Any]) -> NDArray:
 
 FAMILIES: dict[str, Family] = {
     "weibull": Family(
-        name="weibull",
         fit=_fit_weibull,
         pdf=_weibull_pdf,
         cdf=_weibull_cdf,
@@ -1099,7 +1097,6 @@ FAMILIES: dict[str, Family] = {
         support=(0.0, np.inf),
     ),
     "gamma": Family(
-        name="gamma",
         fit=_fit_gamma,
         pdf=_gamma_pdf,
         cdf=_gamma_cdf,
@@ -1107,7 +1104,6 @@ FAMILIES: dict[str, Family] = {
         support=(0.0, np.inf),
     ),
     "beta": Family(
-        name="beta",
         fit=_fit_beta,
         pdf=_beta_pdf,
         cdf=_beta_cdf,
@@ -1115,14 +1111,12 @@ FAMILIES: dict[str, Family] = {
         support=(0.0, 1.0),
     ),
     "normal": Family(
-        name="normal",
         fit=_fit_normal,
         pdf=_normal_pdf,
         cdf=_normal_cdf,
         ppf=_normal_ppf,
     ),
     "hollands_huget": Family(
-        name="hollands_huget",
         fit=_fit_hollands_huget,
         pdf=_hollands_pdf,
         cdf=_hollands_cdf,
@@ -1131,7 +1125,6 @@ FAMILIES: dict[str, Family] = {
         options=("kt_max",),
     ),
     "compound_hollands_huget": Family(
-        name="compound_hollands_huget",
         fit=_fit_compound_hollands,
         pdf=_compound_pdf,
         cdf=_compound_cdf,
@@ -1140,7 +1133,6 @@ FAMILIES: dict[str, Family] = {
         options=("lam", "kt_max", "scales", "weights", "gain"),
     ),
     "power_normal_mixture": Family(
-        name="power_normal_mixture",
         fit=_fit_power_normal_mixture,
         pdf=_power_normal_pdf,
         cdf=_power_normal_cdf,
@@ -1149,7 +1141,6 @@ FAMILIES: dict[str, Family] = {
         options=("components",),
     ),
     "compound_hollands_gaussian": Family(
-        name="compound_hollands_gaussian",
         fit=_fit_compound_hollands_gaussian,
         pdf=_compound_gaussian_pdf,
         cdf=_compound_gaussian_cdf,

@@ -73,6 +73,14 @@ VIDEO_TIME_FIELDS = (
 #: embedding store onto frames it was never extracted from.
 FRAME_PIXEL_SECTIONS = ("mask", "crop", "resize")
 
+#: Filenames a prepared dataset is published under. The bundle writer and the
+#: prepare CLI both name these; separate copies let a rename land in one and not
+#: the other, and the bundle reader would then look for a member the writer no
+#: longer produces. Declared here rather than in ``allsky.data.contracts``
+#: because importing that package pulls pandas, which the CLI modules must not.
+DATASET_MANIFEST_FILENAME = "manifest.parquet"
+DATASET_SPLIT_FILENAME = "splits.json"
+
 
 class SiteConfig(BaseModel):
     """Observation site (LabMiM/UFBA, Salvador-BA by default)."""

@@ -68,10 +68,6 @@ STATION = {
     "timezone": "America/Bahia",
 }
 
-# Seasons the page offers, on the Southern-Hemisphere convention already used by
-# stats.climatology.seasonal_groups.
-SEASONS = ("all", "DJF", "JJA")
-
 # The four options the page shows. Every source-by-season pair is computed
 # anyway, so the selector can widen later without regenerating anything.
 SELECTOR = ("observed_all", "observed_djf", "observed_jja", "wrf_all")
@@ -273,14 +269,6 @@ def _geometry_times(frame: pd.DataFrame, source: GeometrySource) -> pd.DatetimeI
         The frame's own labels are untouched: only the geometry moves.
     """
     return _times(frame) + GEOMETRY_OFFSET[source]
-
-
-def _elevation(frame: pd.DataFrame, source: GeometrySource) -> np.ndarray:
-    """Solar elevation in degrees for every row, for the daylight gates."""
-    elevation: np.ndarray = solar_elevation_deg(
-        _geometry_times(frame, source), SITE, UTC_OFFSET_HOURS
-    )
-    return elevation
 
 
 def _selection_elevation_bounds(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:

@@ -27,6 +27,7 @@ __all__ = [
     "FEATURE_DTYPE",
     "GEOMETRY_COLUMNS",
     "META_COLUMNS",
+    "NS_PER_MINUTE",
     "PROVENANCE_COLUMNS",
     "SKY_CLASS_COUNT",
     "SKY_CLASS_KT_UPPER_BOUNDS",
@@ -100,6 +101,11 @@ DEGRADABLE_TARGET_COLUMNS: tuple[str, ...] = (
     "target_kt",
     "cloud_fraction",
 )
+
+#: Nanoseconds in a minute. The alignment search and the temporal window both
+#: work on int64 nanosecond stamps, and two copies of this factor are two places
+#: a window could silently stop meaning minutes.
+NS_PER_MINUTE = 60_000_000_000
 
 #: Name of the (nullable) split-label column: empty at build, filled in place by
 #: :func:`allsky.data.manifest.attach_split_column` from a day-level split.

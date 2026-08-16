@@ -21,14 +21,13 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 import pandas as pd
 
+from allsky.data.contracts import NS_PER_MINUTE
+
 __all__ = [
     "AlignmentResult",
     "AlignmentStrategy",
     "CenterFrame",
 ]
-
-#: Frame/sensor distances are computed on int64 nanosecond timestamps.
-_NS_PER_MINUTE = 60_000_000_000
 
 
 def _ns(index: pd.DatetimeIndex) -> np.ndarray:
@@ -164,8 +163,8 @@ class CenterFrame:
         nearest = np.where(take_right, right, left)
         nearest_dist_ns = np.where(take_right, dist_right, dist_left)
 
-        tolerance_ns = self.max_distance_minutes * _NS_PER_MINUTE
+        tolerance_ns = self.max_distance_minutes * NS_PER_MINUTE
         within = nearest_dist_ns <= tolerance_ns
         sensor_pos[within] = nearest[within]
-        distance_minutes[within] = nearest_dist_ns[within] / _NS_PER_MINUTE
+        distance_minutes[within] = nearest_dist_ns[within] / NS_PER_MINUTE
         return AlignmentResult(sensor_pos=sensor_pos, distance_minutes=distance_minutes)

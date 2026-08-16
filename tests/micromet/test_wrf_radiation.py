@@ -31,9 +31,11 @@ from pathlib import Path
 
 import netCDF4
 import numpy as np
+import pandas as pd
 import pytest
 import scipy.constants
 
+from allsky.solar import eccentricity_correction
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import variables
 from micrometeorology.wrf.reader import WRFDataset
@@ -47,7 +49,6 @@ from micrometeorology.wrf.variables import (
     MIN_COSZEN_FOR_CLEARNESS,
     SOLAR_CONSTANT_WM2,
     STEFAN_BOLTZMANN,
-    _eccentricity_correction,
     compute_clearness_index,
     compute_net_longwave,
     compute_net_radiation,
@@ -406,10 +407,8 @@ def test_eccentricity_correction_stays_within_the_annual_swing():
     """E0 = (r0/r)^2 varies ~+-3.4% over the year (Spencer 1971)."""
     from datetime import UTC, datetime
 
-    from micrometeorology.wrf.variables import _eccentricity_correction
-
     days = [datetime(2026, 1, 1, 12, tzinfo=UTC).replace(month=m) for m in range(1, 13)]
-    e0 = _eccentricity_correction(days)
+    e0 = eccentricity_correction(pd.DatetimeIndex([d.replace(tzinfo=None) for d in days]))
 
     assert 0.96 < e0.min() < 1.0
     assert 1.0 < e0.max() < 1.04
@@ -687,7 +686,9 @@ def test_operational_clearness_index_stays_below_the_erbs_ceiling(domain):
             ).replace(tzinfo=UTC)  # WRF Times are UTC, as in WRFDataset.parse_times
             for i in range(ds.variables["Times"].shape[0])
         ]
-    eccentricity = _eccentricity_correction(times)[1:, np.newaxis, np.newaxis]
+    eccentricity = eccentricity_correction(
+        pd.DatetimeIndex([t.replace(tzinfo=None) for t in times])
+    )[1:, np.newaxis, np.newaxis]
 
     kt = compute_clearness_index(f["SWDOWN"], f["COSZEN"], eccentricity)
     valid = kt[np.isfinite(kt)]
