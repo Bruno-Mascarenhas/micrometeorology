@@ -150,6 +150,29 @@ stall floor, which looks far more principled — collapses the catch from 33,037
 816 and makes the 18-day dead anemometer disappear entirely. **Never key the
 exemption to the instrument's own calm constant.**
 
+### Why both layers are needed: one fault code, three channels
+
+In August 2026 a Gill MetSENS1 unit failed terminally and began emitting the value
+**2.62** on every channel it fed. The same number reached three columns, and what
+caught it was different in each — which is the clearest illustration of why range
+gates and statistical gates are not redundant.
+
+| channel | occurrences | survived | caught by |
+|---|---|---|---|
+| `BP1_mbar_Avg` | 1,566 | 0 | sentinel — 2.62 hPa is impossible |
+| `RH1` | 1,567 | 0 | sentinel |
+| `WS1_ms_GMX` | 1,592 | 26 | persistence — 2.62 m/s is a perfectly ordinary wind |
+
+A value-based gate cannot see a fault code that lands inside its channel's
+physical range. Only duration separates it from a real reading there, and only the
+persistence test measures duration.
+
+The 26 survivors on the anemometer are not residue: they are twenty-six isolated
+single samples spread from 2025-05 to 2026-07, a year before the failure, and they
+are genuine wind measurements that happen to read 2.62 m/s. The 1,566-sample rail
+was removed in full from all three channels. Across the rest of the archive 2.62
+appears in ten other columns, always isolated or in pairs, and every one is kept.
+
 ---
 
 ## What is deliberately not tested
