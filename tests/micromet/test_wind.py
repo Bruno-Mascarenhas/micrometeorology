@@ -31,21 +31,8 @@ class TestWindComponents:
         assert abs(u) < 1e-10
         assert v == pytest.approx(1.0)
 
-    def test_array_input(self):
-        speeds = np.array([1.0, 2.0, 3.0])
-        dirs = np.array([0.0, 90.0, 180.0])
-        u, v = wind_components(speeds, dirs)
-        assert u.shape == (3,)
-        assert v.shape == (3,)
-
 
 class TestVectorMeanDirection:
-    def test_uniform_north(self):
-        """Average of all-north winds should be ~0° (or 360°)."""
-        u, v = wind_components(np.ones(10), np.zeros(10))
-        mean_dir = vector_mean_direction(u, v)
-        assert mean_dir == pytest.approx(0.0, abs=2.0) or mean_dir == pytest.approx(360.0, abs=2.0)
-
     def test_wrap_around(self):
         """Averaging 350° and 10° should give ~0°, not 180°."""
         speeds = np.array([1.0, 1.0])

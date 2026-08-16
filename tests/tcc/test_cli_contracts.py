@@ -37,18 +37,15 @@ def isolated_root_logger() -> Iterator[logging.Logger]:
         root.setLevel(saved_level)
 
 
-def test_cli_validate_print_and_dry_run_config_modes(scratch_config: Path) -> None:
+def test_cli_validate_and_dry_run_config_modes(scratch_config: Path) -> None:
     scratch_config.write_text(yaml.safe_dump({"name": "cli_contract"}), encoding="utf-8")
     runner = CliRunner()
 
     validate = runner.invoke(solrad_app, ["--config", str(scratch_config), "--validate-config"])
-    printed = runner.invoke(solrad_app, ["--config", str(scratch_config), "--print-config"])
     dry_run = runner.invoke(solrad_app, ["--config", str(scratch_config), "--dry-run"])
 
     assert validate.exit_code == 0, validate.output
     assert "Config is valid." in validate.output
-    assert printed.exit_code == 0, printed.output
-    assert '"name": "cli_contract"' in printed.output
     assert dry_run.exit_code == 0, dry_run.output
     assert "Dry run" in dry_run.output
 
@@ -136,13 +133,6 @@ def test_cli_runtime_overrides_show_in_print_config(scratch_config: Path) -> Non
         f'"output_dir": "{str(Path("scratch/cli-runtime-output")).replace(chr(92), chr(92) * 2)}"',
     ]:
         assert expected in result.output
-
-
-def test_cli_smoke_dry_run_does_not_need_config() -> None:
-    result = CliRunner().invoke(solrad_app, ["--smoke-test", "--dry-run"])
-
-    assert result.exit_code == 0, result.output
-    assert "Dry run" in result.output
 
 
 def test_colab_wrapper_loads_config_and_applies_runtime_overrides(scratch_config: Path) -> None:

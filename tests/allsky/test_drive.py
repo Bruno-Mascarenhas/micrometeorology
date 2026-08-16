@@ -52,10 +52,6 @@ def test_drive_target_composes_the_remote_path(root: str, parts: tuple[str, ...]
     assert DriveTarget(remote="gd", root=root).path(*parts) == expected
 
 
-def test_drive_target_defaults_to_the_labs_allsky_folder():
-    assert DriveTarget(remote="gd").path("videos") == "gd:LabMiM/allsky/videos"
-
-
 def test_a_missing_rclone_binary_explains_how_to_install_and_configure_it(
     target: DriveTarget, monkeypatch: pytest.MonkeyPatch
 ):

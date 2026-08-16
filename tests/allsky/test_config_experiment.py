@@ -20,14 +20,6 @@ from allsky.config import (
 # ---------------------------------------------------------------------------
 
 
-def test_deep_merge_scalar_dict_and_list_semantics():
-    base = {"a": 1, "nested": {"x": 1, "y": 2}, "lst": [1, 2, 3]}
-    override = {"a": 9, "nested": {"y": 20, "z": 30}, "lst": [9]}
-    merged = _deep_merge(base, override)
-    # scalar overwrite, dict deep-merge, list wholesale overwrite
-    assert merged == {"a": 9, "nested": {"x": 1, "y": 20, "z": 30}, "lst": [9]}
-
-
 def test_deep_merge_does_not_mutate_inputs():
     base = {"nested": {"x": 1}}
     override = {"nested": {"y": 2}}

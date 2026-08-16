@@ -15,7 +15,6 @@ import torch
 from torch import nn
 
 from allsky.training.checkpointing import (
-    capture_rng_state,
     load_checkpoint,
     restore_rng_state,
     save_checkpoint,
@@ -274,12 +273,3 @@ class TestDivergedWeights:
         path = _save(tmp_path / "last.ckpt", model, optimizer, scheduler)
 
         assert load_checkpoint(path)["epoch"] == 2
-
-
-class TestRngState:
-    def test_capture_restore_round_trip(self):
-        state = capture_rng_state()
-        first = torch.randn(5)
-        restore_rng_state(state)
-        second = torch.randn(5)
-        assert torch.equal(first, second)

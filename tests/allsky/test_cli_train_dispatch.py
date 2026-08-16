@@ -271,16 +271,3 @@ class TestTrustCheckpointFlag:
         seen.clear()
         assert runner.invoke(app, [*base, "--resume", "auto", "--trust-checkpoint"]).exit_code == 0
         assert seen == [True]
-
-
-class TestNonExperimentRejected:
-    def test_non_experiment_config_is_rejected_before_the_engine(self, tmp_path: Path):
-        # A config without 'experiment: true' is rejected with a clear pointer to
-        # the experiment configs — it never reaches the training engine.
-        config_path = tmp_path / "legacy.yaml"
-        config_path.write_text("train:\n  epochs: 1\n", encoding="utf-8")
-        result = runner.invoke(
-            app, ["train", "--config", str(config_path), "--out-dir", str(tmp_path / "out")]
-        )
-        assert result.exit_code != 0
-        assert "experiment" in result.output

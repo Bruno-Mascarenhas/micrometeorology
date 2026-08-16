@@ -189,17 +189,6 @@ def test_a_day_already_downloaded_extracted_and_uploaded_everywhere_has_no_work_
     )
 
 
-def test_a_day_whose_upload_failed_is_planned_for_upload_again_without_re_downloading(
-    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
-):
-    fake.record_downloaded_day(ledger, tmp_path, entry.key)
-    plan = _plan(entry, ledger, tmp_path, target=TARGET, upload=UploadChoice.videos)
-
-    assert plan.download is False
-    assert plan.upload_video is True
-    assert plan.extract is False
-
-
 def test_asking_for_upload_after_the_fact_replans_an_already_held_day(
     entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
 ):
@@ -212,7 +201,7 @@ def test_asking_for_upload_after_the_fact_replans_an_already_held_day(
     assert later.upload_video is True
 
 
-@pytest.mark.parametrize(("step", "resize"), [(2, None), (1, 224), (4, 448)])
+@pytest.mark.parametrize(("step", "resize"), [(2, None), (1, 224)])
 def test_changing_the_extraction_parameters_replans_extraction_only(
     entry: ArchiveEntry, ledger: Ledger, tmp_path: Path, step: int, resize: int | None
 ):

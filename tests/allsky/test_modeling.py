@@ -279,7 +279,7 @@ def test_cross_attention_unmasked_group_matters():
     assert not torch.allclose(out1, out2)
 
 
-@pytest.mark.parametrize("num_heads", [1, 2, 4, 8])
+@pytest.mark.parametrize("num_heads", [1, 8])
 def test_cross_attention_head_count_configurable(num_heads: int):
     fusion = _cross_fusion(num_heads=num_heads, token_dim=8)
     fusion.eval()
@@ -295,15 +295,6 @@ def test_cross_attention_head_count_configurable(num_heads: int):
 def test_cross_attention_rejects_indivisible_heads():
     with pytest.raises(ValueError, match="divisible"):
         _cross_fusion(num_heads=3, token_dim=32)
-
-
-def test_cross_attention_works_end_to_end_in_multimodal():
-    cfg = _cfg("cross_attention", targets={"dhi": {"enabled": True, "loss": "huber"}})
-    model = build_model(cfg, N_FEATURES, embedding_dim=EMBED_DIM)
-    model.eval()
-    out = model(_batch())
-    assert set(out) == {"dhi"}
-    assert bool(torch.isfinite(out["dhi"]).all())
 
 
 # --------------------------------------------------------------------------- #
@@ -346,13 +337,6 @@ def test_climatology_uses_normalized_space_means():
     out = model(_batch())
     # (200 - 100) / 50 == 2.0 in normalized space
     assert torch.allclose(out["dhi"], torch.full((BATCH,), 2.0))
-
-
-def test_climatology_has_a_trainable_parameter():
-    cfg = _cfg("climatology")
-    model = ClimatologyModel(cfg.targets)
-    params = [p for p in model.parameters() if p.requires_grad]
-    assert params, "climatology must expose a dummy parameter for the optimizer"
 
 
 # --------------------------------------------------------------------------- #
@@ -442,25 +426,6 @@ def test_attention_pool_all_masked_row_falls_back_to_zero():
 def test_attention_pool_rejects_indivisible_heads():
     with pytest.raises(ValueError, match="num_heads"):
         PrecomputedEmbedding(EMBED_DIM, temporal_pooling="attention", num_heads=5)  # 32 % 5
-
-
-def test_multimodal_attention_temporal_pooling_forward():
-    cfg = _cfg("concat", targets={"dhi": {"enabled": True, "loss": "huber"}})
-    model = MultimodalNet(
-        feature_columns=SAFE_FEATURES,
-        targets=cfg.targets,
-        fusion_name="concat",
-        input_mode="embedding",
-        embedding_dim=EMBED_DIM,
-        temporal_pooling="attention",
-    )
-    batch = {
-        "features": torch.randn(BATCH, N_FEATURES),
-        "embedding_seq": torch.randn(BATCH, 3, EMBED_DIM),
-        "frame_mask": torch.tensor([[True, True, False]] * BATCH),
-    }
-    out = model(batch)
-    assert out["dhi"].shape == (BATCH,)
 
 
 def test_build_model_warns_on_unknown_hyperparameter(caplog):

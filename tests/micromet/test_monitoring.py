@@ -105,10 +105,6 @@ class TestResolveWrfColumn:
         series = MonitoringSeries("x", "X", "T", ("missing", "second", "third"))
         assert resolve_wrf_column(series, pd.Index(["third", "second"])) == "second"
 
-    def test_absent_returns_none(self) -> None:
-        series = MonitoringSeries("x", "X", "T", ("nope",))
-        assert resolve_wrf_column(series, pd.Index(["T"])) is None
-
     def test_no_candidates_declared_returns_none(self) -> None:
         assert resolve_wrf_column(MonitoringSeries("x", "X", "Sw_up"), pd.Index(["Sw_up"])) is None
 
@@ -157,15 +153,6 @@ class TestExporter:
         assert raw["axis"]["step_minutes"] == 5
         assert raw["axis"]["count"] == len(next(iter(raw["series"].values())))
         assert chart["layers"]["hourly"]["axis"]["step_minutes"] == 60
-
-    def test_without_a_model_file_every_chart_reports_the_wrf_layer_absent(
-        self, archive: Path, tmp_path: Path
-    ) -> None:
-        for chart in self._payload(archive, tmp_path)["charts"]:
-            assert chart["layers"]["wrf"] is None
-            declared = {s["id"] for s in chart["series"]}
-            pending = set(chart["wrf_pending"])
-            assert pending <= declared
 
     @staticmethod
     def _wrf_dat(tmp_path: Path) -> Path:

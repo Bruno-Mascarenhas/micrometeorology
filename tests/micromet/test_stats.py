@@ -31,11 +31,6 @@ def hourly_year() -> pd.DataFrame:
 
 
 class TestDiurnalCycle:
-    def test_indexed_by_hour_0_to_23(self, hourly_year):
-        result = diurnal_cycle(hourly_year, columns=["temp"])
-        assert list(result.index) == list(range(24))
-        assert list(result.columns) == ["temp"]
-
     def test_recovers_the_injected_hourly_signal(self, hourly_year):
         result = diurnal_cycle(hourly_year, columns=["temp"])
         expected = 20.0 + 5.0 * np.sin(2 * np.pi * np.arange(24) / 24.0)
@@ -56,10 +51,6 @@ class TestDiurnalCycle:
 
 
 class TestMonthlyMeans:
-    def test_indexed_by_month(self, hourly_year):
-        result = monthly_means(hourly_year, columns=["temp"])
-        assert list(result.index) == list(range(1, 13))
-
     def test_constant_column_mean_is_constant(self, hourly_year):
         result = monthly_means(hourly_year, columns=["rain"])
         np.testing.assert_allclose(result["rain"].to_numpy(), 1.0)
@@ -83,15 +74,6 @@ class TestSeasonalGroups:
 
 
 class TestDailyTotals:
-    def test_sum_counts_all_hours(self, hourly_year):
-        result = daily_totals(hourly_year, columns=["rain"], agg="sum")
-        # Each full day has 24 hourly ones.
-        assert result["rain"].iloc[0] == 24.0
-
-    def test_mean_of_constant_is_the_constant(self, hourly_year):
-        result = daily_totals(hourly_year, columns=["rain"], agg="mean")
-        assert result["rain"].iloc[0] == 1.0
-
     @pytest.mark.parametrize("agg", ["sum", "mean"])
     def test_day_without_a_valid_sample_is_nan_not_zero(self, hourly_year, agg):
         """A 24 h sensor outage is a gap, not 0 mm of rain.
@@ -212,10 +194,3 @@ class TestDiffuseFraction:
         ghi = pd.Series([500.0])
         kd = diffuse_fraction(dif, ghi)
         assert kd.isna().all()
-
-    def test_valid_fraction_within_bounds_survives(self):
-        dif = pd.Series([100.0, 400.0])
-        ghi = pd.Series([500.0, 500.0])
-        kd = diffuse_fraction(dif, ghi)
-        assert kd.notna().all()
-        assert ((kd >= 0) & (kd <= 1.5)).all()

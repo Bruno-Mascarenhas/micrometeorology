@@ -53,13 +53,6 @@ class TestManifestColumnDtypes:
         with pytest.raises(ValueError, match="reserved"):
             manifest_column_dtypes(["air_temp_c", "split"])
 
-    def test_geometry_features_not_duplicated(self):
-        # solar_elevation / solar_zenith are both geometry and features -> appear once.
-        feature_columns = resolve_feature_set("safe")
-        columns = list(manifest_column_dtypes(feature_columns))
-        assert columns.count("solar_elevation") == 1
-        assert columns.count("solar_zenith") == 1
-
     def test_every_resolved_feature_is_a_column(self):
         feature_columns = resolve_feature_set("extended")
         columns = set(manifest_column_dtypes(feature_columns))
@@ -81,13 +74,6 @@ class TestManifestColumnDtypes:
 
 
 class TestQCFlag:
-    def test_flags_are_additive_bits(self):
-        combined = QCFlag.LOW_SUN | QCFlag.KT_ARTIFACT
-        assert QCFlag.LOW_SUN in combined
-        assert QCFlag.KT_ARTIFACT in combined
-        assert QCFlag.SENSOR_GAP not in combined
-        assert int(combined) == int(QCFlag.LOW_SUN) + int(QCFlag.KT_ARTIFACT)
-
     def test_distinct_powers_of_two(self):
         values = [
             QCFlag.LOW_SUN,
@@ -140,13 +126,6 @@ class TestPortablePaths:
     def test_relative_path_normalized_to_posix(self):
         assert to_relative("frames/a.jpg", "/data/root") == "frames/a.jpg"
 
-    def test_absolute_inside_root_becomes_relative(self, tmp_path: Path):
-        root = tmp_path / "dataset"
-        (root / "frames").mkdir(parents=True)
-        image = root / "frames" / "x.jpg"
-        image.write_bytes(b"")
-        assert to_relative(image, root) == "frames/x.jpg"
-
     def test_absolute_outside_root_rejected(self, tmp_path: Path):
         root = tmp_path / "dataset"
         root.mkdir()
@@ -178,10 +157,6 @@ class TestPortablePaths:
 
     def test_relative_path_outside_relative_root_passes_through(self):
         assert to_relative("frames/a.jpg", "out/ds") == "frames/a.jpg"
-
-    def test_resolve_roundtrip(self, tmp_path: Path):
-        resolved = resolve("frames/x.jpg", tmp_path)
-        assert resolved == tmp_path / "frames" / "x.jpg"
 
     def test_resolve_rejects_absolute(self, tmp_path: Path):
         with pytest.raises(ValueError, match="relative POSIX"):

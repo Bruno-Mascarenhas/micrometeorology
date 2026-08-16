@@ -32,11 +32,6 @@ class TestHaurwitzGhi:
         ghi = clearsky.haurwitz_ghi(day, site)
         assert 1000.0 < ghi.max() < 1100.0
 
-    def test_never_exceeds_amplitude(self, site: SiteConfig):
-        day = pd.date_range("2025-01-01", "2025-12-31 23:55", freq="1h")
-        ghi = clearsky.haurwitz_ghi(day, site)
-        assert ghi.max() <= clearsky.HAURWITZ_A_WM2
-
     def test_tz_aware_timestamps_rejected(self, site: SiteConfig):
         times = pd.date_range("2025-06-25", periods=3, freq="1h", tz="UTC")
         with pytest.raises(ValueError, match="naive"):

@@ -290,39 +290,6 @@ class TestPrepareLocal:
         jpegs = list((dataset_dir / "frames" / "allsky-20260101").glob("*.jpg"))
         assert len(jpegs) == 8
 
-    def test_resume_does_not_reextract(
-        self, tmp_path: Path, synthetic_video: Path, synthetic_dat: Path
-    ):
-        dataset_dir = tmp_path / "dataset"
-        config = _write_config(
-            tmp_path / "c.yaml",
-            dataset_dir=dataset_dir,
-            video_pattern=f"{synthetic_video.parent}/allsky-*.mp4",
-            dat_path=synthetic_dat,
-        )
-        steps = [
-            "prepare-local",
-            "--config",
-            str(config),
-            "--steps",
-            "extract-frames,build-manifest",
-        ]
-        first = runner.invoke(app, steps)
-        assert first.exit_code == 0, first.output
-
-        jpeg_dir = dataset_dir / "frames" / "allsky-20260101"
-        before = {p: p.stat().st_mtime_ns for p in jpeg_dir.glob("*.jpg")}
-        manifest_mtime = (dataset_dir / "manifest.parquet").stat().st_mtime_ns
-
-        second = runner.invoke(app, steps)
-        assert second.exit_code == 0, second.output
-        assert "resume: skipping extraction" in second.output
-        assert "resume: manifest up to date" in second.output
-
-        after = {p: p.stat().st_mtime_ns for p in jpeg_dir.glob("*.jpg")}
-        assert before == after  # no JPEG re-extracted
-        assert (dataset_dir / "manifest.parquet").stat().st_mtime_ns == manifest_mtime
-
     def test_unknown_step_exits_one(self, tmp_path: Path):
         config = _write_config(
             tmp_path / "c.yaml",

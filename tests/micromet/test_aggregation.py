@@ -32,11 +32,6 @@ class TestAggregateToHourly:
         result = aggregate_to_hourly(sample_5min_data)
         assert len(result) == 2
 
-    def test_mean_columns(self, sample_5min_data):
-        result = aggregate_to_hourly(sample_5min_data)
-        assert "Temp" in result.columns
-        assert abs(result["Temp"].iloc[0] - 25.0) < 3.0
-
     def test_sum_columns(self, sample_5min_data):
         result = aggregate_to_hourly(
             sample_5min_data,

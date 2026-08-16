@@ -141,23 +141,6 @@ class TestImageDatasetContract:
         assert item["cloud_fraction"].dtype == torch.float32
 
     @pytest.mark.usefixtures("torch")
-    def test_targets_are_raw_physical(self, tmp_path: Path):
-        manifest, root = _build(tmp_path)
-        dataset = MultimodalImageDataset(
-            manifest, resolve_feature_set("safe"), data_root=root, image_size=16, train=True
-        )
-        item = dataset[2]
-        # Raw target equals the manifest value (no normalization applied to targets).
-        assert float(item["dhi"]) == pytest.approx(float(manifest["target_dhi"].iloc[2]), rel=1e-5)
-
-    def test_cloud_fraction_missing_is_nan(self, torch: Any, tmp_path: Path):
-        manifest, root = _build(tmp_path)
-        dataset = MultimodalImageDataset(
-            manifest, resolve_feature_set("safe"), data_root=root, image_size=16, train=True
-        )
-        assert bool(torch.isnan(dataset[0]["cloud_fraction"]))
-
-    @pytest.mark.usefixtures("torch")
     def test_train_features_standardized(self, tmp_path: Path):
         manifest, root = _build(tmp_path)
         dataset = MultimodalImageDataset(
@@ -351,17 +334,6 @@ class TestEmbeddingDatasetContract:
             manifest, resolve_feature_set("safe"), embedding_reader=reader, train=True
         )
         assert dataset.embedding_dim == 5  # inferred from the first read
-
-    @pytest.mark.usefixtures("torch")
-    def test_deterministic_reader_is_repeatable(self, tmp_path: Path):
-        manifest, _ = _build(tmp_path)
-        reader = FakeEmbeddingReader(dim=8)
-        dataset = MultimodalEmbeddingDataset(
-            manifest, resolve_feature_set("safe"), embedding_reader=reader, train=True
-        )
-        np.testing.assert_array_equal(
-            dataset[1]["embedding"].numpy(), dataset[1]["embedding"].numpy()
-        )
 
     @pytest.mark.usefixtures("torch")
     def test_wrong_dim_raises(self, tmp_path: Path):

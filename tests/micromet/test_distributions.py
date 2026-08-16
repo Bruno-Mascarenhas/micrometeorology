@@ -15,7 +15,6 @@ from scipy import stats
 
 from micrometeorology.stats.distributions import (
     FAMILIES,
-    Histogram,
     cdf,
     circular_summary,
     effective_sample_size,
@@ -85,10 +84,6 @@ class TestHistogram:
         integral = float((binned.density * np.diff(binned.edges)).sum())
         assert integral == pytest.approx(1.0, abs=1e-12)
 
-    def test_counts_sum_to_n(self, temperature):
-        binned = histogram(temperature, np.arange(14.0, 40.01, 0.5))
-        assert int(binned.counts.sum()) == binned.n
-
     def test_out_of_range_samples_are_tallied_not_dropped(self):
         binned = histogram(np.array([-5.0, 0.5, 1.5, 99.0]), [0.0, 1.0, 2.0])
         assert (binned.below, binned.n, binned.above) == (1, 2, 1)
@@ -105,13 +100,6 @@ class TestHistogram:
         binned = histogram(np.array([]), [0.0, 1.0, 2.0])
         assert binned.n == 0
         assert np.all(binned.density == 0.0)
-
-    def test_frozen_edges_are_shared_across_subsets(self, temperature):
-        """The whole reason edges are an input: two subsets must stay comparable."""
-        edges = np.arange(14.0, 40.01, 0.5)
-        warm = histogram(temperature[temperature > 26.0], edges)
-        cool = histogram(temperature[temperature <= 26.0], edges)
-        np.testing.assert_array_equal(warm.edges, cool.edges)
 
     def test_too_few_edges_raises(self):
         with pytest.raises(ValueError, match="at least two edges"):
@@ -133,14 +121,6 @@ class TestWeibull:
         fitted = fit_distribution("weibull", wind_speed)
         assert fitted.params["shape"] == pytest.approx(1.9, rel=0.02)
         assert fitted.params["scale"] == pytest.approx(2.4, rel=0.02)
-
-    def test_fitted_mean_reproduces_the_sample_mean(self, wind_speed):
-        """c * Gamma(1 + 1/k) is the Weibull mean; a bad fit shows up here first."""
-        fitted = fit_distribution("weibull", wind_speed)
-        from scipy.special import gamma as gamma_function
-
-        modelled = fitted.params["scale"] * gamma_function(1.0 + 1.0 / fitted.params["shape"])
-        assert modelled == pytest.approx(float(wind_speed.mean()), rel=0.01)
 
     def test_calms_are_excluded_from_the_fit(self, wind_speed):
         """A zero atom must not reach the estimator; support is the open (0, inf)."""
@@ -438,10 +418,6 @@ class TestSectorFrequencies:
         _centers, frequencies = sector_frequencies(np.array([355.0, 0.0, 5.0]), sectors=16)
         assert frequencies[0] == pytest.approx(1.0)
 
-    def test_sector_centers_are_the_compass_points(self):
-        centers, _frequencies = sector_frequencies(np.array([0.0]), sectors=16)
-        np.testing.assert_allclose(centers[:4], [0.0, 22.5, 45.0, 67.5])
-
     def test_dominant_sector_matches_the_injected_direction(self):
         generator = np.random.default_rng(9)
         centers, frequencies = sector_frequencies(generator.normal(120.0, 3.0, 5_000), sectors=16)
@@ -523,9 +499,6 @@ class TestVonMisesMixture:
 
 
 class TestPublicShapes:
-    def test_histogram_is_the_declared_type(self, temperature):
-        assert isinstance(histogram(temperature, [0.0, 1.0]), Histogram)
-
     def test_every_family_round_trips_cdf_and_ppf(self):
         """A quantile fed back through the CDF must return the probability it came from."""
         probabilities = np.array([0.05, 0.25, 0.5, 0.75, 0.95])

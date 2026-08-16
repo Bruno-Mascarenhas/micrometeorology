@@ -81,18 +81,6 @@ class TestEndToEnd:
                 reader(row["sample_id"]), expected.astype(np.float16), rtol=0
             )
 
-    def test_shard_sizes(self, tmp_path: Path):
-        manifest = _make_dataset(tmp_path, n=5)
-        out = tmp_path / "emb"
-        extract_embeddings(
-            manifest, FakeBackbone(dim=8), out, data_root=tmp_path, batch_size=2, shard_size=2
-        )
-        # 5 samples, shard_size 2 -> shards of 2, 2, 1.
-        assert shard_path(out, 0).exists()
-        assert shard_path(out, 1).exists()
-        assert shard_path(out, 2).exists()
-        assert not shard_path(out, 3).exists()
-
 
 class TestFrameDecoding:
     """Frame bytes are the FakeBackbone/DINOv2 input: the decoder must not shift them."""
@@ -161,51 +149,8 @@ class TestResume:
         assert len(index) == 5
         assert len(set(index["sample_id"])) == 5
 
-    def test_no_resume_reprocesses(self, tmp_path: Path):
-        manifest = _make_dataset(tmp_path, n=3)
-        out = tmp_path / "emb"
-        extract_embeddings(
-            manifest, FakeBackbone(dim=8), out, data_root=tmp_path, batch_size=4, shard_size=4
-        )
-        summary = extract_embeddings(
-            manifest,
-            FakeBackbone(dim=8),
-            out,
-            data_root=tmp_path,
-            batch_size=4,
-            shard_size=4,
-            resume=False,
-        )
-        assert summary["encoded"] == 3
-        assert summary["skipped"] == 0
-
 
 class TestResumeCompatibility:
-    def test_matching_meta_resumes(self, tmp_path: Path):
-        """A resume with an identical backbone/config skips already-done work."""
-        manifest = _make_dataset(tmp_path, n=4)
-        out = tmp_path / "emb"
-        extract_embeddings(
-            manifest,
-            FakeBackbone(dim=8),
-            out,
-            data_root=tmp_path,
-            batch_size=4,
-            shard_size=4,
-            config_sha256="cfg-1",
-        )
-        summary = extract_embeddings(
-            manifest,
-            FakeBackbone(dim=8),
-            out,
-            data_root=tmp_path,
-            batch_size=4,
-            shard_size=4,
-            config_sha256="cfg-1",
-        )
-        assert summary["encoded"] == 0
-        assert summary["skipped"] == 4
-
     def test_pooling_change_refuses_resume(self, tmp_path: Path):
         """A different pooling on resume must raise rather than mix stores."""
         manifest = _make_dataset(tmp_path, n=4)

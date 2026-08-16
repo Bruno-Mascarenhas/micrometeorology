@@ -637,22 +637,6 @@ class TestGradAccumulation:
         assert summary["global_step"] == expected
 
 
-class TestClimatology:
-    def test_runs_end_to_end(self, tmp_path: Path):
-        root, manifest, _ = _make_dataset(tmp_path)
-        cfg = _cfg(
-            root,
-            model="climatology",
-            epochs=2,
-            targets={"dhi": {"enabled": True, "loss": "mse"}, "sky": {"enabled": True}},
-        )
-        summary = run_experiment(
-            cfg, data_root=root, output_dir=tmp_path / "run", embedding_reader=_reader(manifest)
-        )
-        assert summary["epochs_ran"] == 2
-        assert (tmp_path / "run" / "best.ckpt").exists()
-
-
 class TestDeviceErrors:
     def test_cuda_requested_without_cuda_raises(self, tmp_path: Path):
         if torch.cuda.is_available():

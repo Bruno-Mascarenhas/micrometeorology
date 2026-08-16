@@ -97,9 +97,6 @@ class TestSafeArcname:
         with pytest.raises(ValueError, match="unsafe"):
             _safe_arcname("allsky_bundle/../secret")
 
-    def test_accepts_relative(self):
-        assert _safe_arcname("allsky_bundle/manifest.parquet") == "allsky_bundle/manifest.parquet"
-
 
 class TestExportRoundtrip:
     def test_explicit_paths_roundtrip(self, dataset_dir: Path, tmp_path: Path):

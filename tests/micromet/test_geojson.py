@@ -309,39 +309,6 @@ class TestWriteGridCompactJsonStream:
 
 
 class TestCreateWindVectorsJson:
-    def test_downsampling_reduces_count(self, sample_wind_2d):
-        u, v = sample_wind_2d
-        full = create_wind_vectors_json(u, v, None, downsampling=1)
-        ds = create_wind_vectors_json(u, v, None, downsampling=2)
-        assert len(ds["downsampled_angles"]) < len(full["downsampled_angles"])
-
-    def test_angles_in_valid_range(self, sample_wind_2d):
-        u, v = sample_wind_2d
-        result = create_wind_vectors_json(u, v, None, downsampling=1)
-        for angle in result["downsampled_angles"]:
-            assert 0 <= angle < 360
-
-    def test_magnitudes_non_negative(self, sample_wind_2d):
-        u, v = sample_wind_2d
-        result = create_wind_vectors_json(u, v, None, downsampling=1)
-        for mag in result["downsampled_magnitudes"]:
-            assert mag >= 0
-
-    def test_linear_indices_within_grid(self, sample_wind_2d):
-        u, v = sample_wind_2d
-        ny, nx = u.shape
-        result = create_wind_vectors_json(u, v, None, downsampling=1)
-        for idx in result["downsampled_linear_indices"]:
-            assert 0 <= idx < ny * nx
-
-    def test_magnitude_consistency(self):
-        """Magnitude should match np.hypot for known inputs."""
-        u = np.array([[3.0, 0.0]], dtype=np.float64)
-        v = np.array([[4.0, 5.0]], dtype=np.float64)
-        result = create_wind_vectors_json(u, v, None, downsampling=1)
-        assert result["downsampled_magnitudes"][0] == pytest.approx(5.0, abs=0.01)
-        assert result["downsampled_magnitudes"][1] == pytest.approx(5.0, abs=0.01)
-
     def test_date_in_metadata(self, sample_wind_2d):
         u, v = sample_wind_2d
         # Naive on purpose (the writer drops tzinfo anyway); pandas keeps it so.

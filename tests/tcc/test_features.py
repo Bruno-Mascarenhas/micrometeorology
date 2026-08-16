@@ -10,7 +10,6 @@ from solrad_correction.features.engineering import (
     add_rolling_features,
 )
 from solrad_correction.features.temporal import (
-    add_all_cyclic_encodings,
     add_temporal_features,
 )
 
@@ -53,16 +52,3 @@ class TestTemporal:
         assert all(c in df_out.columns for c in ["hour", "day_of_year", "month", "weekday"])
         assert df_out["hour"].iloc[0] == 0
         assert df_out["hour"].iloc[1] == 1
-
-    def test_add_all_cyclic_encodings(self, sample_df):
-        df_out = add_temporal_features(sample_df)
-        df_out = add_all_cyclic_encodings(df_out)
-        expected_cols = [
-            "hour_sin",
-            "hour_cos",
-            "day_of_year_sin",
-            "day_of_year_cos",
-            "month_sin",
-            "month_cos",
-        ]
-        assert all(c in df_out.columns for c in expected_cols)

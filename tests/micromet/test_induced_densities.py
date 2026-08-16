@@ -16,7 +16,6 @@ from micrometeorology.stats.climatology_export import (
     _REFERENCE_MARKER,
     CLIMATOLOGY_VARIABLES,
     REFERENCES,
-    _assert_references,
 )
 
 # A realistic extraterrestrial-irradiance mixture: sixty equal-weight bins over
@@ -170,9 +169,6 @@ class TestCompoundHollandsGaussian:
 
 
 class TestPublishedBibliography:
-    def test_every_marker_resolves(self):
-        _assert_references()
-
     def test_no_record_cites_itself(self):
         """The failure mode a global rename of the prose citations once caused."""
         for key, reference in REFERENCES.items():

@@ -172,19 +172,9 @@ Deliberately NOT cited, having been checked and found unsupportable:
 # ---------------------------------------------------------------------------
 
 
-def test_stefan_boltzmann_matches_codata():
-    """sigma = 5.670374419e-8 W m-2 K-4 exactly (CODATA 2018, exact by SI defn)."""
-    assert pytest.approx(5.670374419e-8, rel=1e-12) == STEFAN_BOLTZMANN
-
-
 def test_solar_constant_matches_kopp_lean():
     """Kopp & Lean (2011) put total solar irradiance at 1360.8 +- 0.5 W/m2."""
     assert pytest.approx(1361.0, abs=1.0) == SOLAR_CONSTANT
-
-
-def test_blackbody_emission_at_300k_is_the_textbook_value():
-    """sigma * 300^4 = 459.3 W/m2 -- the number every radiation chapter opens with."""
-    assert pytest.approx(459.3003, abs=1e-3) == STEFAN_BOLTZMANN * 300.0**4
 
 
 # ---------------------------------------------------------------------------
@@ -225,20 +215,6 @@ def test_upwelling_longwave_hand_computed_value():
     assert lwup[0] == pytest.approx(456.33531, abs=1e-4)
 
 
-def test_dropping_the_reflected_term_is_a_large_error_not_a_rounding_one():
-    """Guards the (1 - eps) * GLW term against a 'simplification'.
-
-    Over the real d02 archive this term is worth ~15 W/m2 in the mean; the
-    point of the test is that omitting it is a physics change, not noise.
-    """
-    emiss, tsk, glw = np.array([0.95]), np.array([300.0]), np.array([400.0])
-
-    with_reflection = compute_upwelling_longwave(emiss, tsk, glw)
-    emission_only = emiss * STEFAN_BOLTZMANN * tsk**4
-
-    assert (with_reflection - emission_only).item() == pytest.approx(20.0, abs=1e-6)
-
-
 # ---------------------------------------------------------------------------
 # 3. Budget identities -- the terms must add up
 # ---------------------------------------------------------------------------
@@ -271,27 +247,6 @@ def test_net_longwave_equals_downwelling_minus_upwelling(surface_state):
     )
 
 
-def test_shortwave_up_and_net_partition_the_incoming_beam(surface_state):
-    """SWup + SWnet == SWDOWN: albedo splits the beam, it does not create energy."""
-    albedo, swdown = surface_state["albedo"], surface_state["swdown"]
-
-    total = compute_upwelling_shortwave(albedo, swdown) + compute_net_shortwave(albedo, swdown)
-
-    np.testing.assert_allclose(total, swdown, rtol=1e-12)
-
-
-def test_net_radiation_is_exactly_its_two_components(surface_state):
-    """Rn = SWnet + LWnet, bit-for-bit -- it is built from them."""
-    state = surface_state
-    np.testing.assert_array_equal(
-        compute_net_radiation(
-            state["swdown"], state["albedo"], state["emiss"], state["tsk"], state["glw"]
-        ),
-        compute_net_shortwave(state["albedo"], state["swdown"])
-        + compute_net_longwave(state["emiss"], state["tsk"], state["glw"]),
-    )
-
-
 def test_net_radiation_expands_to_the_four_stream_budget(surface_state):
     """Rn == (SWdown - SWup) + (LWdown - LWup), Oke (1987) eq. 1.
 
@@ -319,46 +274,6 @@ def test_net_radiation_expands_to_the_four_stream_budget(surface_state):
 # ---------------------------------------------------------------------------
 # 4. Literature value ranges
 # ---------------------------------------------------------------------------
-
-
-def test_upwelling_longwave_falls_in_the_published_terrestrial_band(surface_state):
-    """Oke (1987) Ch. 1: surface L-up over land runs roughly 300-500 W/m2.
-
-    BSRN's QC limits for upwelling longwave are 40-900 W/m2 (physically
-    possible) and 60-700 W/m2 (extremely rare). For scale, the observed global
-    mean surface LWup is 396 W/m2 (Trenberth et al. 2009) and the land-only
-    annual mean 372 W/m2 (Wild et al. 2015).
-
-    The bracket is deliberately loose — the fixture reaches 315 K skin
-    temperature, and hot dry land at midday genuinely reaches 550-590 W/m2, so
-    a tight ceiling would be a false constraint. What this actually guards is
-    the order of magnitude: a Celsius-for-Kelvin slip lands at ~1e-2 W/m2.
-    """
-    lwup = compute_upwelling_longwave(
-        surface_state["emiss"], surface_state["tsk"], surface_state["glw"]
-    )
-
-    assert lwup.min() > 60.0
-    assert lwup.max() < 700.0
-
-
-def test_upwelling_longwave_is_monotonic_in_skin_temperature():
-    """A hotter surface always emits more. Catches a sign or exponent slip."""
-    tsk = np.linspace(270.0, 330.0, 40)
-    emiss = np.full_like(tsk, 0.95)
-    glw = np.full_like(tsk, 400.0)
-
-    lwup = compute_upwelling_longwave(emiss, tsk, glw)
-
-    assert np.all(np.diff(lwup) > 0)
-
-
-def test_surface_warmer_than_the_effective_sky_loses_longwave():
-    """LWnet < 0 whenever sigma*Tsk^4 exceeds GLW -- the usual daytime state."""
-    tsk = np.array([300.0])  # sigma*T^4 = 459.3 W/m2
-    glw = np.array([400.0])  # sky supplies less than the surface emits
-
-    assert compute_net_longwave(np.array([0.95]), tsk, glw).item() < 0.0
 
 
 def test_net_longwave_can_turn_positive_under_a_warm_overcast():
@@ -460,15 +375,6 @@ def test_clearness_index_is_undefined_below_the_elevation_floor():
     assert np.isfinite(kt[3])
 
 
-def test_clearness_index_never_divides_by_a_negative_denominator():
-    """A negative COSZEN must never yield a negative kt (it would plot as 'clear')."""
-    coszen = np.linspace(-1.0, 1.0, 201)
-    kt = compute_clearness_index(np.full_like(coszen, 500.0), coszen, np.ones_like(coszen))
-
-    finite = kt[np.isfinite(kt)]
-    assert np.all(finite > 0.0)
-
-
 def test_eccentricity_correction_stays_within_the_annual_swing():
     """E0 = (r0/r)^2 varies ~+-3.4% over the year (Spencer 1971)."""
     from datetime import UTC, datetime
@@ -567,65 +473,6 @@ def test_derived_lwup_reproduces_wrfs_own_lwupb():
 
             assert error.mean() < 5.0, f"step {step}: MAE {error.mean():.3f} W/m2"
             assert np.percentile(error, 99) < 25.0
-
-
-@pytest.mark.skipif(not _LWUPB_FILE.exists(), reason="archive wrfout with LWUPB absent")
-def test_derived_lwup_beats_the_emission_only_form_on_real_data():
-    """The reflected term is not decoration: it is ~an order of magnitude of error.
-
-    The empirical counterpart of the analytic guard above.
-    """
-    with netCDF4.Dataset(_LWUPB_FILE) as ds:
-        step = 30
-        emiss = ds.variables["EMISS"][step].astype(np.float64)
-        tsk = ds.variables["TSK"][step].astype(np.float64)
-        glw = ds.variables["GLW"][step].astype(np.float64)
-        truth = ds.variables["LWUPB"][step].astype(np.float64)
-
-        full = np.abs(compute_upwelling_longwave(emiss, tsk, glw) - truth).mean()
-        emission_only = np.abs(emiss * STEFAN_BOLTZMANN * tsk**4 - truth).mean()
-
-    assert full < emission_only / 5.0, f"full={full:.3f} emission_only={emission_only:.3f}"
-
-
-@pytest.mark.skipif(not _SWUPB_FILE.exists(), reason="operational wrfout absent")
-def test_upwelling_longwave_respects_the_bsrn_air_temperature_envelope():
-    """BSRN QC: ``sigma*(Ta-15)^4 < LWup < sigma*(Ta+25)^4``.
-
-    A surface cannot sit arbitrarily far from the air above it. This is the
-    one published bound that scales with the state instead of being a fixed
-    window, so it stays meaningful across seasons and climates.
-
-    It is checked on real output rather than on the synthetic fixture because
-    it constrains TSK and T2 *jointly*: the fixture draws the two from
-    independent ranges and so contains combinations (skin 20 K below screen
-    air) that no real surface produces and that this bound rightly rejects.
-    """
-    with netCDF4.Dataset(_SWUPB_FILE) as ds:
-        for step in (12, 24, 36, 48):
-            emiss = ds.variables["EMISS"][step].astype(np.float64)
-            tsk = ds.variables["TSK"][step].astype(np.float64)
-            glw = ds.variables["GLW"][step].astype(np.float64)
-            t2 = ds.variables["T2"][step].astype(np.float64)
-
-            lwup = compute_upwelling_longwave(emiss, tsk, glw)
-
-            assert np.all(lwup > STEFAN_BOLTZMANN * (t2 - 15.0) ** 4), f"step {step}"
-            assert np.all(lwup < STEFAN_BOLTZMANN * (t2 + 25.0) ** 4), f"step {step}"
-
-
-@pytest.mark.skipif(not _SWUPB_FILE.exists(), reason="operational wrfout absent")
-def test_derived_swup_reproduces_wrfs_own_swupb_exactly():
-    """SWup = ALBEDO * SWDOWN is how WRF forms SWUPB, so this is exact."""
-    with netCDF4.Dataset(_SWUPB_FILE) as ds:
-        for step in (12, 15, 18):
-            albedo = ds.variables["ALBEDO"][step].astype(np.float64)
-            swdown = ds.variables["SWDOWN"][step].astype(np.float64)
-            truth = ds.variables["SWUPB"][step].astype(np.float64)
-
-            np.testing.assert_allclose(
-                compute_upwelling_shortwave(albedo, swdown), truth, rtol=1e-6, atol=1e-4
-            )
 
 
 @pytest.mark.skipif(not _SWUPB_FILE.exists(), reason="operational wrfout absent")

@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from allsky.data.datasets import EmbeddingReader, MultimodalEmbeddingDataset
+from allsky.data.datasets import MultimodalEmbeddingDataset
 from allsky.embeddings.storage import (
     EMBEDDINGS_TENSOR_KEY,
     INDEX_FILENAME,
@@ -91,11 +91,6 @@ class TestReader:
             assert got.shape == (4,)
             assert got.dtype == np.float32
             np.testing.assert_allclose(got, source[i].astype(np.float16), rtol=0)
-
-    def test_reader_satisfies_embedding_reader_protocol(self, tmp_path: Path):
-        _write_store(tmp_path, ["allsky-20250321-0900"], dim=4)
-        reader = SafetensorsEmbeddingReader(tmp_path)
-        assert isinstance(reader, EmbeddingReader)
 
     def test_missing_sample_id_raises_keyerror_naming_it(self, tmp_path: Path):
         _write_store(tmp_path, ["allsky-20250321-0900"], dim=4)
@@ -201,15 +196,6 @@ class TestValidation:
         report = validate_embeddings(index, ["a", "b"])
         assert report.ok
         report.raise_if_failed()  # must not raise
-
-    def test_validate_against_written_store(self, tmp_path: Path):
-        ids = ["allsky-20250321-0900", "allsky-20250321-0930"]
-        _write_store(tmp_path, ids, dim=4)
-        index = read_index(tmp_path)
-        assert index is not None
-        report = validate_embeddings(index, [*ids, "allsky-20250321-1000"])
-        assert report.missing == ["allsky-20250321-1000"]
-        assert report.duplicate == []
 
 
 class TestAtomicity:

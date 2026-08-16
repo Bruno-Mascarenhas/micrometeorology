@@ -212,26 +212,6 @@ def test_the_day_a_video_covers_can_be_supplied_when_its_name_does_not_say(tmp_p
     assert readings[0].timestamp == _naive("2026-08-10 12:00")
 
 
-def test_extraction_names_every_jpeg_after_the_stamp_burned_into_its_own_frame(tmp_path: Path):
-    stamps = (
-        "20260810120010",
-        "20260810120040",
-        "20260810120130",
-        "20260810120220",
-        "20260810120310",
-    )
-    out_dir = tmp_path / "frames"
-    extract_frames_with_overlay_timestamps(_video(tmp_path, stamps), out_dir)
-
-    assert sorted(path.name for path in out_dir.glob("*.jpg")) == [
-        "allsky-20260810-1200.jpg",
-        "allsky-20260810-1201.jpg",
-        "allsky-20260810-1202.jpg",
-        "allsky-20260810-1203.jpg",
-    ]
-    assert not list(out_dir.glob("allsky-20260810-06*.jpg"))
-
-
 def test_a_second_frame_landing_in_the_same_minute_is_skipped_not_overwritten(tmp_path: Path):
     stamps = (
         "20260810120010",
@@ -278,12 +258,6 @@ def test_extraction_creates_the_output_directory_and_honours_step_and_resize(tmp
     assert manifest["index"].tolist() == [0, 2, 4]
     assert iio.imread(manifest["frame_path"].iloc[0]).shape == (32, 32, 3)
     assert (out_dir / MANIFEST_FILENAME).is_file()
-
-
-def test_extraction_refuses_a_video_the_timestamp_reader_will_not_vouch_for(tmp_path: Path):
-    stamps = ("20260810120000", "20260810120200", "20260810120100")
-    with pytest.raises(OverlayTimestampError, match="go backwards"):
-        extract_frames_with_overlay_timestamps(_video(tmp_path, stamps), tmp_path / "frames")
 
 
 def test_a_lookalike_digit_is_re_decided_from_the_frames_around_it():

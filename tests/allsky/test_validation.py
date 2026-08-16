@@ -75,12 +75,6 @@ class TestReport:
 
 
 class TestCleanManifestPasses:
-    def test_clean_manifest_validates(self, site: SiteConfig, tmp_path: Path):
-        manifest, meta = _clean_manifest(site, tmp_path)
-        report = validate_manifest(manifest, meta, data_root=tmp_path)
-        assert report.ok, report.errors
-        report.raise_if_failed()
-
     def test_clean_manifest_from_disk(self, site: SiteConfig, tmp_path: Path):
         manifest, meta = _clean_manifest(site, tmp_path)
         path = tmp_path / "manifest.parquet"

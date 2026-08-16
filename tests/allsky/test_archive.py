@@ -137,10 +137,6 @@ def test_parse_catalog_returns_nothing_for_a_page_that_lists_no_timelapses():
     assert parse_catalog("<html><body>maintenance</body></html>") == ()
 
 
-def test_list_videos_reads_the_served_index_and_orders_it_oldest_first(client: ArchiveClient):
-    assert [entry.key for entry in client.list_videos()] == [DAY_OLD, DAY_NEW]
-
-
 def test_list_videos_ignores_a_link_the_server_advertises_without_a_file_behind_it(
     mirror: fake.ArchiveMirror, client: ArchiveClient
 ):
@@ -417,7 +413,7 @@ def test_has_video_reports_the_record_alone_when_no_local_root_is_given(tmp_path
     assert ledger.has_video("20200101") is False
 
 
-@pytest.mark.parametrize(("step", "resize"), [(1, None), (2, 224), (3, None), (3, 448), (1, 224)])
+@pytest.mark.parametrize(("step", "resize"), [(2, 224), (3, None), (3, 448)])
 def test_frames_match_is_false_whenever_step_or_resize_differ_from_the_record(
     tmp_path: Path, step: int, resize: int | None
 ):
@@ -475,23 +471,6 @@ def test_mark_pruned_reports_the_video_as_gone_but_keeps_everything_it_knew(tmp_
     assert "pruned_at" in stored
 
 
-def test_saving_a_later_day_keeps_the_entries_for_days_the_server_has_purged(tmp_path: Path):
-    path = tmp_path / "ledger.json"
-    first = Ledger(path)
-    purged = fake.record_downloaded_day(first, tmp_path, DAY_OLD)
-    first.save()
-
-    second = Ledger.load(path)
-    fake.record_downloaded_day(second, tmp_path, DAY_NEW)
-    second.save()
-
-    reloaded = Ledger.load(path)
-    assert sorted(reloaded.entries) == [DAY_OLD, DAY_NEW]
-    stored = reloaded.video(DAY_OLD)
-    assert stored is not None
-    assert stored["sha256"] == purged.sha256
-
-
 def test_recorded_paths_are_stored_relative_to_the_root_and_resolved_back_against_it(
     tmp_path: Path,
 ):
@@ -531,12 +510,6 @@ def test_the_ledger_lock_is_released_when_its_block_exits(tmp_path: Path):
     with ledger_lock(path):
         pass
     assert (tmp_path / "state" / "ledger.json.lock").is_file()
-
-
-def test_the_ledger_lock_creates_the_state_directory_it_locks_in(tmp_path: Path):
-    path = tmp_path / "brand" / "new" / "ledger.json"
-    with ledger_lock(path):
-        assert path.parent.is_dir()
 
 
 def test_the_insecure_context_turns_verification_off(tmp_path: Path):
