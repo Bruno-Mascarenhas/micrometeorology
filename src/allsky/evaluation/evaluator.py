@@ -659,7 +659,10 @@ def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame) -> None:
     ``solar_zenith`` and ``kindex_band`` are attached only when the manifest
     carries the column they read: a manifest built before ``target_kt`` joined
     the schema still validates, and it loses that one breakdown rather than the
-    whole evaluation (:func:`_stratified_metrics` skips an absent column).
+    whole evaluation (:func:`_stratified_metrics` skips an absent column).  The
+    loss is logged, as the k-index clear-sky baseline logs its own: a breakdown
+    that is simply absent from ``stratified.csv`` reads like a stratum with no
+    rows in it rather than one that was never computed.
     """
     local = pd.to_datetime(split_df["timestamp_utc"], utc=True).dt.tz_convert(_LOCAL_TZ)
     frame["hour"] = local.dt.hour.to_numpy(dtype=np.int64)
@@ -684,6 +687,12 @@ def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame) -> None:
         frame["kindex_band"] = pd.cut(
             kt, bins=list(_KINDEX_EDGES), labels=list(_KINDEX_LABELS), right=True
         ).astype("object")
+    else:
+        logger.warning(
+            "this manifest carries no target_kt, so the kindex_band breakdown is absent from "
+            "stratified.csv rather than empty; rebuild the manifest with the current schema "
+            "to restore it"
+        )
 
 
 #: Stratification column -> the ``stratum_kind`` label reported in the long table.

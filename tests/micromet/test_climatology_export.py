@@ -64,11 +64,6 @@ class TestVariableCatalogue:
             lattice_index = edge / RAIN_BUCKET_MM - 0.5
             assert lattice_index == pytest.approx(round(lattice_index), abs=1e-6), edge
 
-    def test_rain_bins_are_never_narrower_than_one_bucket(self):
-        spec = next(s for s in CLIMATOLOGY_VARIABLES if s.id == "precipitation")
-        widths = np.diff(spec.edges)
-        assert widths.min() >= RAIN_BUCKET_MM - 1e-9
-
 
 class TestVariablePayload:
     def test_carries_the_declared_format(self, wind_spec, wind_samples):

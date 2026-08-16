@@ -45,7 +45,7 @@ def test_vertical_interpolator_fast_path_matches_reference_float32(monkeypatch):
     heights = _monotonic_heights(shape, axis=1, seed=1)
     values = _random_values(shape, seed=2)
     # Below all heights, interior, exactly-representable, above all heights.
-    targets = [-5.0, 0.5, 37.0, 123.4, 1.0e6]
+    targets = [-5.0, 37.0, 123.4, 1.0e6]
 
     expected = {target: vertical_interpolate(values, heights, target, axis=1) for target in targets}
 

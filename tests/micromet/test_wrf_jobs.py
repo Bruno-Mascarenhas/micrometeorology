@@ -623,6 +623,38 @@ def test_manifest_omits_features_when_any_unit_failed(tmp_path):
     assert manifest["index_max"] == NT - 1
 
 
+def test_a_variable_that_publishes_no_step_withholds_the_directory_wide_features(
+    tmp_path, monkeypatch
+):
+    """A gated-out variable leaves LAST run's .series.bin newest on disk.
+
+    00..04 UTC is 21..01 local, entirely outside SWDOWN's 6-18h daylight gate, so
+    the unit finds its variable, errors on nothing, and still writes no step. Its
+    fixed output names then hold the previous run's matrix, which the
+    directory-wide cell_series descriptor would vouch for under THIS run's step
+    count — reading every cell at the wrong byte offset if the two runs differ in
+    length.
+    """
+    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+    wrf = tmp_path / "wrfout_d02_jobs_allnight.nc"
+    _write_full_wrf_file(wrf, seed=57, start_hour_utc=0)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], ["temperature", "SWDOWN"], json_dir, geo_dir)
+    results = jobs.execute_units(units, workers=1)
+
+    assert [r for r in results if r.error] == []
+    assert any("SWDOWN" in variable for r in results for variable in r.missing_variables)
+
+    manifest_path = jobs.write_run_manifest(json_dir, results)
+    assert manifest_path is not None
+    with open(manifest_path, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    assert "features" not in manifest
+    assert manifest["availability"]["SWDOWN"] == []
+
+
 def test_build_units_refuses_two_files_of_the_same_domain(tmp_path):
     """Both files would write D02_TEMP_000.json, D02_TEMP.series.bin and
     D02.geojson, concurrently, and the survivor would be whichever unit

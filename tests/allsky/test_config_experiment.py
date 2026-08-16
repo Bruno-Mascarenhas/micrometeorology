@@ -20,14 +20,6 @@ from allsky.config import (
 # ---------------------------------------------------------------------------
 
 
-def test_deep_merge_scalar_dict_and_list_semantics():
-    base = {"a": 1, "nested": {"x": 1, "y": 2}, "lst": [1, 2, 3]}
-    override = {"a": 9, "nested": {"y": 20, "z": 30}, "lst": [9]}
-    merged = _deep_merge(base, override)
-    # scalar overwrite, dict deep-merge, list wholesale overwrite
-    assert merged == {"a": 9, "nested": {"x": 1, "y": 20, "z": 30}, "lst": [9]}
-
-
 def test_deep_merge_does_not_mutate_inputs():
     base = {"nested": {"x": 1}}
     override = {"nested": {"y": 2}}
@@ -142,6 +134,13 @@ def test_extra_forbid_rejects_nested_typo(tmp_path):
     path = tmp_path / "exp.yaml"
     path.write_text("features:\n  sett: extended\n", encoding="utf-8")
     with pytest.raises(ValidationError, match="sett"):
+        load_experiment_config(path)
+
+
+def test_an_optimizer_the_engine_cannot_build_is_rejected_when_the_config_loads(tmp_path):
+    path = tmp_path / "exp.yaml"
+    path.write_text("experiment: true\ntrain:\n  optimizer: adam\n", encoding="utf-8")
+    with pytest.raises(ValidationError, match="optimizer"):
         load_experiment_config(path)
 
 

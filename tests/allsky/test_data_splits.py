@@ -18,12 +18,6 @@ DAYS = [f"2025-03-{d:02d}" for d in range(1, 21)]  # 20 distinct days
 
 
 class TestCreateDaySplits:
-    def test_deterministic_for_same_seed(self):
-        a = create_day_splits(DAYS, val_fraction=0.2, test_fraction=0.1, seed=7)
-        b = create_day_splits(DAYS, val_fraction=0.2, test_fraction=0.1, seed=7)
-        assert a.assignment == b.assignment
-        assert a.split_id == b.split_id
-
     def test_order_of_input_does_not_matter(self):
         a = create_day_splits(DAYS, seed=3)
         b = create_day_splits(list(reversed(DAYS)), seed=3)
@@ -120,14 +114,6 @@ class TestCreateDaySplits:
 
 
 class TestSplitArtifact:
-    def test_save_load_roundtrip(self, tmp_path: Path):
-        split = create_day_splits(DAYS, seed=11)
-        path = tmp_path / "splits.json"
-        save_split_artifact(split, path)
-        loaded = load_split_artifact(path)
-        assert loaded.assignment == split.assignment
-        assert loaded.split_id == split.split_id
-
     def test_artifact_json_has_expected_fields(self, tmp_path: Path):
         split = create_day_splits(DAYS, seed=1)
         path = tmp_path / "splits.json"

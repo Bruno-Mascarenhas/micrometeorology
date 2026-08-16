@@ -25,7 +25,15 @@ from typing import Annotated, Any
 import typer
 
 from allsky.atomic import atomic_write, atomic_write_json
-from allsky.config import VIDEO_TIME_FIELDS, PrepareConfig, load_prepare_config
+from allsky.cli.runtime import configure_cli_logging
+from allsky.config import (
+    DATASET_MANIFEST_FILENAME,
+    DATASET_SPLIT_FILENAME,
+    FRAME_PIXEL_SECTIONS,
+    VIDEO_TIME_FIELDS,
+    PrepareConfig,
+    load_prepare_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +45,6 @@ type PandasDataFrame = Any
 #: Preparation steps ``prepare-local`` can run, in execution order.
 VALID_STEPS = ("extract-frames", "build-manifest", "splits")
 
-_MANIFEST_NAME = "manifest.parquet"
-_SPLIT_NAME = "splits.json"
 _FRAMES_META_NAME = "frames.meta.json"
 
 ConfigOption = Annotated[
@@ -51,13 +57,6 @@ ConfigOption = Annotated[
         dir_okay=False,
     ),
 ]
-
-
-def _configure_logging() -> None:
-    """Enable structured INFO logging once."""
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
-    )
 
 
 def _load_prepare(config: Path | None) -> PrepareConfig:
@@ -90,11 +89,6 @@ _MANIFEST_CONFIG_SECTIONS = (
 )
 
 
-#: :class:`PrepareConfig` sections baked into the extracted JPEG itself by
-#: :func:`_extract_and_qc`.
-_FRAME_CONFIG_SECTIONS = ("mask", "crop", "resize")
-
-
 def _frames_inputs_sha256(cfg: PrepareConfig) -> str:
     """Content hash of the config that decides what an extracted frame is.
 
@@ -115,7 +109,7 @@ def _frames_inputs_sha256(cfg: PrepareConfig) -> str:
 
     return config_subset_sha256(
         cfg,
-        sections=_FRAME_CONFIG_SECTIONS,
+        sections=FRAME_PIXEL_SECTIONS,
         nested_fields={"video": VIDEO_TIME_FIELDS},
         content_files=() if cfg.mask.path is None else (cfg.mask.path,),
         subject="the frame provenance hash",
@@ -142,42 +136,43 @@ def _write_frames_key(video_dir: Path, frames_sha: str) -> None:
 
 
 def _require_frames_key(video_dir: Path, stem: str, *, frames_key: str, force: bool) -> None:
-    """Abort when frames the manifest is about to be built from predate *frames_key*.
+    """Abort when frames the manifest is about to be built from contradict *frames_key*.
 
     ``--steps build-manifest`` is a supported entry point that runs no extraction,
     so the only check standing between frames of one config and a manifest stamped
     with another is this one: the manifest's own provenance records the config of
     the run that built it, which would then assert a preprocessing the JPEGs on
     disk never went through.  Nothing can be re-extracted from here — the step
-    that does was not requested — so the run stops instead.
+    that does was not requested — so a recorded hash that DIFFERS stops the run.
 
-    Raises
-    ------
-    typer.Exit
-        Code 1 when the recorded frame-provenance hash is missing or differs.
+    A video directory with no hash recorded at all is a different statement: it
+    predates the sidecar, which only :func:`_write_frames_key` writes and which no
+    step backfills for frames already extracted.  Refusing it would make
+    ``--steps build-manifest`` impossible on every dataset prepared before this
+    check existed, with only ``--force`` — which skips the comparison entirely —
+    as a way through.  It warns and proceeds instead: the frames may well match,
+    and the manifest's own provenance still records the config that built it.
     """
     if force:
         return
     recorded = _read_frames_key(video_dir)
     if recorded == frames_key:
         return
+    if recorded is None:
+        typer.echo(
+            f"WARNING: the frames for {stem} in {video_dir} record no video/mask/crop/resize "
+            "config, so build-manifest cannot confirm they went through the one it is about to "
+            "stamp the manifest with. Re-run with the extract-frames step included to settle it."
+        )
+        return
     typer.echo(
-        f"ERROR: the frames for {stem} in {video_dir} were extracted under "
-        + ("no recorded" if recorded is None else "a different")
-        + " video/mask/crop/resize config, so build-manifest would stamp the manifest with a "
+        f"ERROR: the frames for {stem} in {video_dir} were extracted under a different "
+        "video/mask/crop/resize config, so build-manifest would stamp the manifest with a "
         "config that did not produce them.\n"
         "Re-run with the extract-frames step included (or --force to build from them as they "
         "are)."
     )
     raise typer.Exit(1)
-
-
-def _file_sha256(path: Path) -> str:
-    """Content hash of *path*, or a stable marker when it is absent."""
-    if not path.is_file():
-        return f"absent:{path}"
-    with open(path, "rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]) -> str:
@@ -208,13 +203,15 @@ def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]
             f"PrepareConfig has no field(s) {unknown}; pydantic ignores bogus include keys, so "
             "the manifest inputs hash would silently stop covering them"
         )
+    from allsky.provenance import file_content_sha256
+
     digest = hashlib.sha256()
     for frame in per_video:
         for frame_path in sorted(str(value) for value in frame["frame_path"]):
             digest.update(frame_path.encode("utf-8"))
             digest.update(b"\0")
     for sensor_path in cfg.sensor.paths:
-        digest.update(_file_sha256(Path(sensor_path)).encode("utf-8"))
+        digest.update(file_content_sha256(Path(sensor_path)).encode("utf-8"))
     sections = cfg.model_dump(mode="json", include=set(_MANIFEST_CONFIG_SECTIONS))
     digest.update(json.dumps(sections, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     return digest.hexdigest()
@@ -252,7 +249,7 @@ def validate_dataset(
         Code 1 when the manifest is absent or the report holds errors (or, under
         ``--strict``, warnings).
     """
-    _configure_logging()
+    configure_cli_logging()
     cfg = _load_prepare(config)
 
     import pandas as pd
@@ -261,7 +258,9 @@ def validate_dataset(
     from allsky.data.validation import validate_manifest
 
     manifest_path = (
-        manifest if manifest is not None else Path(cfg.output.dataset_dir) / _MANIFEST_NAME
+        manifest
+        if manifest is not None
+        else Path(cfg.output.dataset_dir) / DATASET_MANIFEST_FILENAME
     )
     if not manifest_path.exists():
         typer.echo(f"ERROR: manifest not found: {manifest_path}")
@@ -276,7 +275,7 @@ def validate_dataset(
     data_root = manifest_path.parent
 
     split_artifact = None
-    split_path = manifest_path.with_name(_SPLIT_NAME)
+    split_path = manifest_path.with_name(DATASET_SPLIT_FILENAME)
     if split_path.exists():
         split_artifact = load_split_artifact(split_path).to_dict()
         typer.echo(f"Split artifact: {split_path}")
@@ -334,7 +333,7 @@ def prepare_local(
         paired with any video day, when ``build-manifest`` runs with no extracted
         frames, or when the split artifact already exists for a different day set.
     """
-    _configure_logging()
+    configure_cli_logging()
     cfg = _load_prepare(config)
 
     import glob
@@ -342,9 +341,9 @@ def prepare_local(
     step_set = _parse_steps(steps)
     dataset_dir = Path(cfg.output.dataset_dir)
     frames_root = dataset_dir / "frames"
-    manifest_path = dataset_dir / _MANIFEST_NAME
+    manifest_path = dataset_dir / DATASET_MANIFEST_FILENAME
     meta_path = manifest_path.with_name(f"{manifest_path.name}.meta.json")
-    split_path = dataset_dir / _SPLIT_NAME
+    split_path = dataset_dir / DATASET_SPLIT_FILENAME
     videos = sorted(glob.glob(cfg.video.pattern))
     config_sha = _config_sha256(cfg)
 
@@ -416,7 +415,7 @@ def export_colab_bundle_cmd(
     ] = False,
 ) -> None:
     """Pack a prepared dataset into a Colab-ready tar.gz bundle."""
-    _configure_logging()
+    configure_cli_logging()
     cfg = _load_prepare(config)
 
     from allsky.bundle import export_colab_bundle
@@ -520,7 +519,7 @@ def _run_extract_step(
     for video in videos:
         stem = Path(video).stem
         video_dir = frames_root / stem
-        video_manifest = video_dir / _MANIFEST_NAME
+        video_manifest = video_dir / DATASET_MANIFEST_FILENAME
         existing = _read_frame_manifest(video_manifest)
         qc_complete = existing is not None and "qc_frame_flags" in existing.columns
 

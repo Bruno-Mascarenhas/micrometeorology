@@ -21,6 +21,7 @@ Restrict to the observed record (no model subsets)::
     labmim-climatology -i output/archive/station_hourly.parquet -o out/ --no-wrf
 """
 
+import functools
 import logging
 import time
 from pathlib import Path
@@ -32,10 +33,10 @@ import typer
 
 # allsky.solar is pure numpy/pandas (no torch) and ships in the same wheel, so
 # this CLI reuses NOAA's formulas without pulling a training dependency in.
-from allsky.config import SiteConfig
 from allsky.solar import extraterrestrial_ghi, solar_elevation_deg
 from micrometeorology.common.git import run_git, source_root
 from micrometeorology.common.logging import setup_logging
+from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.stats import distributions as dist
 from micrometeorology.stats.climatology import seasonal_groups
 from micrometeorology.stats.climatology_export import (
@@ -52,11 +53,11 @@ app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
 logger = logging.getLogger(__name__)
 
-# LabMiM tower, Instituto de Física, UFBA — Ondina, Salvador.
-SITE = SiteConfig(latitude=-13.0055, longitude=-38.5089)
-# Salvador keeps UTC-3 all year — DST never applied to Bahia and Brazil abolished
-# it in 2019 — so a fixed offset is exact, not an approximation.
-UTC_OFFSET_HOURS = -3.0
+#: Re-exported under this module's shorter local names; the numbers themselves
+#: live in :mod:`micrometeorology.common.site`, shared with the sensor archive's
+#: quality checks so the two cannot describe different towers.
+SITE = STATION_SITE
+UTC_OFFSET_HOURS = STATION_UTC_OFFSET_HOURS
 
 STATION = {
     "name": "Estação Micrometeorológica LabMiM",
@@ -66,10 +67,6 @@ STATION = {
     "elevation_m": 46.0,
     "timezone": "America/Bahia",
 }
-
-# Seasons the page offers, on the Southern-Hemisphere convention already used by
-# stats.climatology.seasonal_groups.
-SEASONS = ("all", "DJF", "JJA")
 
 # The four options the page shows. Every source-by-season pair is computed
 # anyway, so the selector can widen later without regenerating anything.
@@ -143,6 +140,19 @@ GEOMETRY_OFFSET: dict[GeometrySource, pd.Timedelta] = {
     "observed": pd.Timedelta(minutes=30),
     "wrf": pd.Timedelta(0),
 }
+
+# Instants the SHARED daylight gates bracket the sun over: the averaging window's
+# own endpoints, not the per-source offsets above. Those two answer "where in its
+# stamp does each source's VALUE live"; a gate on an hourly mean has to answer
+# "does this hour contain sunlight at all", and the widest thing either published
+# quantity covers is [T, T+1h). Bracketing the offsets alone called an hour night
+# whenever sunrise fell after T+30min, averaging a sunlit stretch into a
+# distribution published as the nocturnal regime.
+SELECTION_BRACKET_OFFSETS: tuple[pd.Timedelta, ...] = (
+    pd.Timedelta(0),
+    pd.Timedelta(minutes=30),
+    pd.Timedelta(minutes=60),
+)
 
 # Solar elevation above which a shortwave sample counts as daytime: below it the
 # airmass is extreme and relative error swamps the signal, so the clearness index
@@ -261,16 +271,14 @@ def _geometry_times(frame: pd.DataFrame, source: GeometrySource) -> pd.DatetimeI
     return _times(frame) + GEOMETRY_OFFSET[source]
 
 
-def _elevation(frame: pd.DataFrame, source: GeometrySource) -> np.ndarray:
-    """Solar elevation in degrees for every row, for the daylight gates."""
-    elevation: np.ndarray = solar_elevation_deg(
-        _geometry_times(frame, source), SITE, UTC_OFFSET_HOURS
-    )
-    return elevation
-
-
 def _selection_elevation_bounds(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    """Lowest and highest solar elevation over the instants ANY source evaluates.
+    """Lowest and highest solar elevation over the hour each row averages.
+
+    The bracket spans :data:`SELECTION_BRACKET_OFFSETS` — the averaging window
+    ``[T, T+1h]`` — rather than the two per-source geometry offsets.  Solar
+    elevation has at most one turning point inside an hour, and the only one that
+    can fall in a window either gate is deciding is solar midnight (a minimum), so
+    sampling the endpoints and the midpoint brackets the window.
 
     Parameters
     ----------
@@ -280,13 +288,41 @@ def _selection_elevation_bounds(frame: pd.DataFrame) -> tuple[np.ndarray, np.nda
     Returns
     -------
     tuple of numpy.ndarray
-        Minimum and maximum solar elevation in degrees, ``(N,)`` each, over the
-        instants in :data:`GEOMETRY_OFFSET`, in the frame's own row order.
+        Minimum and maximum solar elevation in degrees, ``(N,)`` each, in the
+        frame's own row order.  Both are read-only: they are shared between the
+        callers that ask about the same block.
     """
-    elevations = np.stack([_elevation(frame, source) for source in GEOMETRY_OFFSET])
-    minimum: np.ndarray = elevations.min(axis=0)
-    maximum: np.ndarray = elevations.max(axis=0)
-    return minimum, maximum
+    stamps = _times(frame).to_numpy()
+    return _elevation_bounds_of(stamps.tobytes(), stamps.dtype.str)
+
+
+@functools.lru_cache(maxsize=16)
+def _elevation_bounds_of(stamps: bytes, stamps_dtype: str) -> tuple[np.ndarray, np.ndarray]:
+    """The bracket for one block of stamps, memoized on the stamps themselves.
+
+    Every published variable asks the same gates about the same handful of blocks
+    — the whole record and its seasonal slices — so an export recomputed this
+    around 200 times over 61k rows, some 10 s of arithmetic for a dozen distinct
+    answers.  The key is the block's own stamps, so a cache hit is the same
+    question and never a near-miss; the results are frozen before being handed
+    out, since every caller of a shared array gets the same object.
+
+    *stamps_dtype* travels with the buffer and is not assumed: a ``datetime64``
+    buffer carries no unit of its own, and reading microsecond stamps as
+    nanoseconds moves every sun position by decades without failing.
+    """
+    times = pd.DatetimeIndex(np.frombuffer(stamps, dtype=stamps_dtype))
+    elevations = np.stack(
+        [
+            solar_elevation_deg(times + offset, SITE, UTC_OFFSET_HOURS)
+            for offset in SELECTION_BRACKET_OFFSETS
+        ]
+    )
+    lowest_deg: np.ndarray = elevations.min(axis=0)
+    highest_deg: np.ndarray = elevations.max(axis=0)
+    lowest_deg.setflags(write=False)
+    highest_deg.setflags(write=False)
+    return lowest_deg, highest_deg
 
 
 def _daytime_selection(frame: pd.DataFrame) -> np.ndarray:
@@ -296,9 +332,9 @@ def _daytime_selection(frame: pd.DataFrame) -> np.ndarray:
     the offsets differ by half an hour, so near the terminators the two sides
     would admit different hours — around one row per day per terminator — and the
     paired histograms this artifact exists for would be conditional on different
-    events. The hour is daytime only when the sun clears the floor at every
-    instant either source evaluates, which also keeps each side's own
-    extraterrestrial denominator away from zero.
+    events. The hour is daytime only when the sun clears the floor throughout the
+    hour the row averages, which also keeps each side's own extraterrestrial
+    denominator away from zero.
 
     Parameters
     ----------
@@ -316,11 +352,13 @@ def _daytime_selection(frame: pd.DataFrame) -> np.ndarray:
 
 
 def _nighttime_selection(frame: pd.DataFrame) -> np.ndarray:
-    """Which hours carry no sunlight at any instant either source evaluates.
+    """Which hours carry no sunlight at any instant inside the hour they average.
 
     The mirror of :func:`_daytime_selection`, and for an hourly MEAN the stricter
     reading of "night": an hour the sun rises or sets inside averages a sunlit
-    half into a quantity published as the nocturnal regime.
+    half into a quantity published as the nocturnal regime, so the bracket has to
+    span ``[T, T+1h]`` and not merely the instants the two sources' own values
+    are evaluated at.
 
     Parameters
     ----------

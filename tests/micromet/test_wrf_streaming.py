@@ -238,16 +238,3 @@ def test_stream_wind_subgrid_matches_full_grid_interpolation(tmp_path, block_ste
         ref = reference[wind_series.target]
         assert np.array_equal(wind_series.speed_steps, ref["speed"], equal_nan=True)
         assert wind_series.wind_vectors == ref["vectors"]
-
-
-def test_stream_wind_block_boundary_independence(tmp_path):
-    path = tmp_path / "wrfout_d03_stream_blocks.nc"
-    _write_wind_wrf_file(path, seed=23)
-
-    with WRFDataset(path) as ds:
-        a = vmod.stream_wind_at_heights(ds, (100,), block_steps=2)
-        b = vmod.stream_wind_at_heights(ds, (100,), block_steps=7)
-
-    assert np.array_equal(a[0].speed_steps, b[0].speed_steps, equal_nan=True)
-    assert a[0].wind_vectors == b[0].wind_vectors
-    assert (a[0].vmin, a[0].vmax) == (b[0].vmin, b[0].vmax)

@@ -221,22 +221,21 @@ def _render_figure(task: FigureTask) -> str:
         transform = ccrs.PlateCarree()
         cmap = saturated_cmap(task.cmap_name, task.saturation)
 
-        if task.u is not None and task.v is not None:
-            speed = task.data
-            mesh = ax.pcolormesh(
-                task.lon,
-                task.lat,
-                speed,
-                alpha=0.4,
-                cmap=cmap,
-                vmin=task.vmin,
-                vmax=task.vmax,
-                transform=transform,
-                shading="auto",
-            )
-            cb = plt.colorbar(mesh, ax=ax, shrink=0.5, pad=0.04)
-            cb.ax.tick_params(labelsize=10)
+        mesh = ax.pcolormesh(
+            task.lon,
+            task.lat,
+            task.data,
+            alpha=0.4,
+            cmap=cmap,
+            vmin=task.vmin,
+            vmax=task.vmax,
+            transform=transform,
+            shading="auto",
+        )
+        cb = plt.colorbar(mesh, ax=ax, shrink=0.5, pad=0.04)
+        cb.ax.tick_params(labelsize=10)
 
+        if task.u is not None and task.v is not None:
             # Sub-sampled so the arrows stay readable at each domain's grid pitch.
             stride_map = {"D01": 6, "D02": 3, "D03": 4, "D04": 4, "D05": 4}
             stride = stride_map.get(map_config.grid_level, 4)
@@ -249,20 +248,6 @@ def _render_figure(task: FigureTask) -> str:
                 scale=50,
                 width=0.003,
             )
-        else:
-            mesh = ax.pcolormesh(
-                task.lon,
-                task.lat,
-                task.data,
-                alpha=0.4,
-                cmap=cmap,
-                vmin=task.vmin,
-                vmax=task.vmax,
-                transform=transform,
-                shading="auto",
-            )
-            cb = plt.colorbar(mesh, ax=ax, shrink=0.5, pad=0.04)
-            cb.ax.tick_params(labelsize=10)
 
         if task.overlay_data is not None:
             levels = task.overlay_levels or [880, 900, 950, 1000, 1013]

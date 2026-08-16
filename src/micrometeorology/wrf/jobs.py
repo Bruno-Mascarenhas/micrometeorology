@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -186,7 +186,7 @@ class UnitResult:
     kind: UnitKind
     files: tuple[str, ...] = ()
     seconds: float = 0.0
-    warnings: tuple[str, ...] = field(default=())
+    warnings: tuple[str, ...] = ()
     error: str | None = None
     start_local: str | None = None
     n_steps: int | None = None
@@ -237,16 +237,34 @@ def _atomic_values_json(
     return str(output_path)
 
 
-def _atomic_json_dump(output_path: Path, payload: dict) -> str:
+def _compact_json_bytes(payload: dict) -> bytes:
+    """The published compact encoding of *payload*, as the bytes that reach disk.
+
+    ``allow_nan=False``: a NaN must fail the unit here, not ship as an
+    invalid-JSON token that only breaks in the browser.  ``dumps``-then-write,
+    because ``json.dump(obj, fp)`` never reaches the C encoder and costs 3x for
+    the same bytes on a wind-vector payload.
+    """
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode(
+        "utf-8"
+    )
+
+
+def _staged_bytes(output_path: Path, payload: bytes) -> Path:
+    """Write *payload* to a same-directory temp file and return it, ready to be swapped in.
+
+    Same directory because ``os.replace`` is only atomic within one filesystem.
+    Split from the swap so callers publishing a pair of files can stage both
+    before replacing either.
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = output_path.with_name(f".{output_path.name}.tmp-{os.getpid()}")
-    with open(tmp, "w", encoding="utf-8") as f:
-        # allow_nan=False: a NaN must fail the unit here, not ship as an
-        # invalid-JSON token that only breaks in the browser. dumps-then-write,
-        # because json.dump(obj, fp) never reaches the C encoder and costs 3x
-        # for the same bytes on a wind-vector payload.
-        f.write(json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False))
-    os.replace(tmp, output_path)
+    tmp.write_bytes(payload)
+    return tmp
+
+
+def _atomic_json_dump(output_path: Path, payload: dict) -> str:
+    os.replace(_staged_bytes(output_path, _compact_json_bytes(payload)), output_path)
     return str(output_path)
 
 
@@ -336,14 +354,18 @@ class _SiteArtifactAccumulator:
     def write(self, json_dir: str, stem: str, domain: str, variable: str) -> list[str]:
         """Atomically flush the ``.series.bin`` and ``.summary.json`` artifacts.
 
+        The two are a pair — the summary's ``indices`` say which columns of the
+        matrix carry data — so both payloads are staged before either is swapped
+        in.  Two files cannot be replaced in one atomic step, but staging first
+        narrows the window in which a reader could see a new matrix beside the
+        previous summary to the gap between two ``os.replace`` calls, instead of
+        the whole time it takes to encode the summary.
+
         Returns the paths written, empty when no finite step was accumulated.
         """
         if self._matrix is None or not self.indices:
             return []
         series_path = Path(json_dir) / f"{stem}.series.bin"
-        tmp = series_path.with_name(f".{series_path.name}.tmp-{os.getpid()}")
-        tmp.write_bytes(self._matrix.tobytes())
-        os.replace(tmp, series_path)
 
         summary = {
             "format": "domain-summary-v1",
@@ -359,19 +381,25 @@ class _SiteArtifactAccumulator:
             # sunrise mean covers a fraction of the grid and reads like a
             # physical trend when it is really the shrinking sample.
             "finite_cells": self.finite_cells,
-            "cells": self._matrix.shape[0] if self._matrix is not None else 0,
+            "cells": self._matrix.shape[0],
         }
-        summary_path = _atomic_json_dump(Path(json_dir) / f"{stem}.summary.json", summary)
-        return [str(series_path), summary_path]
+        summary_path = Path(json_dir) / f"{stem}.summary.json"
+        series_tmp = _staged_bytes(series_path, self._matrix.tobytes())
+        summary_tmp = _staged_bytes(summary_path, _compact_json_bytes(summary))
+        os.replace(series_tmp, series_path)
+        os.replace(summary_tmp, summary_path)
+        return [str(series_path), str(summary_path)]
 
 
 def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str], list[str]]:
     """Write every timestep JSON of one values variable.
 
     Returns the files written, the warnings, and the output variable ids this
-    wrfout does not carry — the only "no files" case that leaves the previous
-    run's files newest on disk, unlike the legitimately empty ones (an
-    all-night SWDOWN window, ``--skip-first``).
+    wrfout does not carry, and any variable that published no step at all — both
+    leave the previous run's fixed output names newest on disk, which is what
+    the manifest must not vouch for.  An all-night SWDOWN window and
+    ``--skip-first`` reach the second case: legitimately empty for this run, and
+    still not evidence for last run's matrix.
     """
     written_files: list[str] = []
     unit_warnings: list[str] = []
@@ -426,6 +454,19 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
                 output_variable_id,
             )
         )
+    if not written_files:
+        # Found the variable and still published nothing: every step was skipped,
+        # gated out or all-non-finite (a wrfout window lying entirely outside the
+        # daylight hours does this to SWDOWN/SWUP/SWNET/clearness_index). The
+        # previous run's fixed output names are then the newest on disk, which is
+        # the same state a variable the wrfout does not carry leaves behind — so
+        # it is reported the same way, or the directory-wide series descriptor
+        # would vouch for that matrix under THIS run's step count.
+        unit_warnings.append(
+            f"Variable {unit.variable.upper()} published no step in this window — "
+            "its previous artifacts are not vouched for"
+        )
+        return written_files, unit_warnings, [output_variable_id]
     return written_files, unit_warnings, []
 
 

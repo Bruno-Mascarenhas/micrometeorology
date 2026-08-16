@@ -37,7 +37,7 @@ import pandas as pd
 import yaml
 
 from allsky.atomic import atomic_write
-from allsky.config import PrepareConfig
+from allsky.config import DATASET_MANIFEST_FILENAME, DATASET_SPLIT_FILENAME, PrepareConfig
 from allsky.provenance import content_sha256
 
 logger = logging.getLogger(__name__)
@@ -49,8 +49,6 @@ __all__ = [
 ]
 
 BUNDLE_README_NAME = "BUNDLE_README.md"
-_MANIFEST_NAME = "manifest.parquet"
-_SPLIT_NAME = "splits.json"
 _EMBEDDINGS_DIRNAME = "embeddings"
 
 
@@ -149,11 +147,11 @@ def export_colab_bundle(
 
     root = PurePosixPath(bundle_name)
     file_members: dict[str, Path] = {
-        _safe_arcname((root / _MANIFEST_NAME).as_posix()): manifest_file,
-        _safe_arcname((root / f"{_MANIFEST_NAME}.meta.json").as_posix()): meta_file,
+        _safe_arcname((root / DATASET_MANIFEST_FILENAME).as_posix()): manifest_file,
+        _safe_arcname((root / f"{DATASET_MANIFEST_FILENAME}.meta.json").as_posix()): meta_file,
     }
     if split_file is not None and split_file.exists():
-        file_members[_safe_arcname((root / _SPLIT_NAME).as_posix())] = split_file
+        file_members[_safe_arcname((root / DATASET_SPLIT_FILENAME).as_posix())] = split_file
 
     embedded_files = 0
     if include_embeddings and emb_dir is not None and emb_dir.is_dir():
@@ -228,10 +226,10 @@ def validate_bundle(path: str | Path) -> dict[str, Any]:
         for name in names:
             _safe_arcname(name)
 
-        manifest_member = _find_member(names, _MANIFEST_NAME)
-        meta_member = _find_member(names, f"{_MANIFEST_NAME}.meta.json")
+        manifest_member = _find_member(names, DATASET_MANIFEST_FILENAME)
+        meta_member = _find_member(names, f"{DATASET_MANIFEST_FILENAME}.meta.json")
         if manifest_member is None:
-            raise ValueError(f"bundle {path} has no {_MANIFEST_NAME} member")
+            raise ValueError(f"bundle {path} has no {DATASET_MANIFEST_FILENAME} member")
         if meta_member is None:
             raise ValueError(f"bundle {path} has no manifest meta sidecar member")
 
@@ -271,7 +269,7 @@ def _resolve_sources(
     if manifest_path is not None:
         manifest_file = Path(manifest_path)
     elif dataset_dir is not None:
-        manifest_file = dataset_dir / _MANIFEST_NAME
+        manifest_file = dataset_dir / DATASET_MANIFEST_FILENAME
     else:
         raise ValueError("no manifest_path given and no prepare_cfg to derive one from")
 
@@ -284,9 +282,9 @@ def _resolve_sources(
     if split_path is not None:
         split_file: Path | None = Path(split_path)
     elif dataset_dir is not None:
-        split_file = dataset_dir / _SPLIT_NAME
+        split_file = dataset_dir / DATASET_SPLIT_FILENAME
     else:
-        split_file = manifest_file.with_name(_SPLIT_NAME)
+        split_file = manifest_file.with_name(DATASET_SPLIT_FILENAME)
 
     if embeddings_dir is not None:
         emb_dir: Path | None = Path(embeddings_dir)
@@ -432,7 +430,7 @@ uv python install 3.14
 tar -xzf {bundle_name}.tar.gz
 uv run --python 3.14 python - <<'PY'
 import pandas as pd
-manifest = pd.read_parquet("{bundle_name}/{_MANIFEST_NAME}")
+manifest = pd.read_parquet("{bundle_name}/{DATASET_MANIFEST_FILENAME}")
 print(manifest.shape)
 print(manifest.head())
 PY

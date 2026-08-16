@@ -31,7 +31,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from allsky.atomic import atomic_write
+from allsky.atomic import atomic_write, atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -129,14 +129,7 @@ def read_index(embeddings_dir: str | Path) -> pd.DataFrame | None:
 
 def write_meta(embeddings_dir: str | Path, meta: dict[str, Any]) -> Path:
     """Atomically write the ``embeddings.meta.json`` provenance sidecar."""
-    out = Path(embeddings_dir) / META_FILENAME
-
-    def _write(tmp: Path) -> None:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(meta, handle, indent=2, ensure_ascii=False, default=str)
-
-    atomic_write(out, _write)
-    return out
+    return atomic_write_json(Path(embeddings_dir) / META_FILENAME, meta)
 
 
 def read_meta(embeddings_dir: str | Path) -> dict[str, Any]:

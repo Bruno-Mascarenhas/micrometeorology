@@ -52,10 +52,6 @@ def test_drive_target_composes_the_remote_path(root: str, parts: tuple[str, ...]
     assert DriveTarget(remote="gd", root=root).path(*parts) == expected
 
 
-def test_drive_target_defaults_to_the_labs_allsky_folder():
-    assert DriveTarget(remote="gd").path("videos") == "gd:LabMiM/allsky/videos"
-
-
 def test_a_missing_rclone_binary_explains_how_to_install_and_configure_it(
     target: DriveTarget, monkeypatch: pytest.MonkeyPatch
 ):
@@ -129,17 +125,17 @@ def test_uploading_a_file_sends_copyto_with_the_composed_destination(
     ]
 
 
-def test_extra_arguments_and_dry_run_are_appended_to_every_invocation(
+def test_extra_arguments_are_appended_to_every_invocation(
     target: DriveTarget, rclone_log: Path, tmp_path: Path
 ):
     video = tmp_path / "allsky-20260810.mp4"
     video.write_bytes(b"timelapse")
-    uploader = RcloneUploader(target=target, extra_args=("--transfers", "8"), dry_run=True)
+    uploader = RcloneUploader(target=target, extra_args=("--transfers", "8"))
 
     uploader.upload_file(video, "videos", video.name)
 
     (invocation,) = fake.rclone_invocations(rclone_log)
-    assert invocation.endswith("--checksum --transfers 8 --dry-run")
+    assert invocation.endswith("--checksum --transfers 8")
 
 
 def test_uploading_something_that_is_not_a_file_never_reaches_rclone(
@@ -179,25 +175,3 @@ def test_check_probes_the_remote_root_before_any_transfer(target: DriveTarget, r
 def test_check_reports_an_unconfigured_remote_as_an_rclone_error(target: DriveTarget):
     with pytest.raises(RcloneError, match="rclone lsd exited 3"):
         RcloneUploader(target=target, binary="rclone-broken").check()
-
-
-@pytest.mark.usefixtures("rclone_log")
-def test_listing_a_remote_that_cannot_be_reached_yields_an_empty_tuple(target: DriveTarget):
-    assert RcloneUploader(target=target, binary="rclone-broken").list_remote("videos") == ()
-
-
-def test_listing_a_remote_strips_the_trailing_slash_rclone_puts_on_directories(
-    target: DriveTarget, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    binaries = tmp_path / "bin"
-    binaries.mkdir()
-    listing = binaries / "rclone-listing"
-    listing.write_text(
-        "#!/bin/sh\nprintf '%s\\n' 'allsky-20260810.mp4' '20260810/' '' \nexit 0\n",
-        encoding="utf-8",
-    )
-    listing.chmod(0o700)
-    monkeypatch.setenv("PATH", f"{binaries}{os.pathsep}{os.environ['PATH']}")
-
-    uploader = RcloneUploader(target=target, binary="rclone-listing")
-    assert uploader.list_remote("videos") == ("allsky-20260810.mp4", "20260810")

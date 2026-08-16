@@ -246,6 +246,18 @@ def _screened_for_plausibility(row: pd.DataFrame) -> pd.DataFrame:
     # radiometry, every one of them a FORBIDDEN_FEATURES column no feature set
     # can read. Raw and calibrated coincide for the channels served here.
     declared = [str(limit["column"]) for limit in limits if limit["column"] in row.columns]
+    ungated = [
+        column
+        for column in row.columns
+        if column not in declared and bool(row[column].notna().to_numpy()[0])
+    ]
+    if ungated:
+        logger.warning(
+            "the sensor export measures %s, which sensor_limits declares no gate for — "
+            "imputing them at the training mean rather than serving unscreened readings; "
+            "declare their bounds in configs/micromet/default.yaml to use them",
+            ", ".join(str(column) for column in ungated),
+        )
     measured = row.loc[:, declared].copy()
     was_measured = measured.notna().to_numpy()[0]
     screened = apply_physical_limits(measured, limits)
@@ -394,6 +406,46 @@ def _image_as_chw(image_path: str | Path, size: int) -> np.ndarray:
     return np.ascontiguousarray(scaled.transpose(2, 0, 1))
 
 
+class _EmbeddingStoreUnreachableError(ValueError):
+    """The embedding store a checkpoint names is not on this machine at all.
+
+    Distinct from a store that is present but unusable: one is a checkpoint that
+    travelled away from its store and can still be answered from the recipe the
+    checkpoint carries, the other is a store whose own record of how it was
+    encoded is broken, where nothing on disk describes the encoding any more.
+    """
+
+
+def embedding_recipe_of(store: str | Path) -> dict[str, Any] | None:
+    """The encoding recipe *store* records, or None when it cannot be read.
+
+    Returned as the ``backbone`` provenance an embedding-mode checkpoint carries,
+    so a checkpoint copied away from the machine that trained it can still
+    rebuild the encoder the model was fitted on.  None when the store or its
+    sidecar is unreachable, or when the recipe is incomplete: recording half of
+    it would be worse than recording none, since the missing half would be
+    guessed at prediction time.
+
+    Returns
+    -------
+    dict or None
+        ``backbone``, ``pooling``, ``revision``, ``dim``, ``dtype`` and, when the
+        store recorded it, ``transform``.
+    """
+    from allsky.embeddings.storage import read_meta
+
+    try:
+        meta = read_meta(store)
+    except FileNotFoundError, OSError, ValueError:
+        return None
+    if any(meta.get(key) is None for key in STORE_RECIPE_KEYS):
+        return None
+    recipe = {key: meta[key] for key in STORE_RECIPE_KEYS}
+    if meta.get("transform"):
+        recipe["transform"] = meta["transform"]
+    return recipe
+
+
 def _embedding_store_meta(
     cfg: ExperimentConfig, embeddings_dir: str | Path | None
 ) -> tuple[Path, dict[str, Any]]:
@@ -437,7 +489,7 @@ def _embedding_store_meta(
     try:
         meta = read_meta(store)
     except FileNotFoundError as exc:
-        raise ValueError(
+        raise _EmbeddingStoreUnreachableError(
             f"no {META_FILENAME} under {store}: an embedding-mode checkpoint records no "
             "backbone of its own, so without the store's sidecar there is no way to encode "
             "the live frame the way the model was fitted. Point predict_snapshot at the "
@@ -454,19 +506,21 @@ def _embedding_store_meta(
     return store, meta
 
 
-def _backbone_matching_store(store: Path, meta: dict[str, Any], device: str) -> VisualBackbone:
+def _backbone_matching_recipe(source: str, meta: dict[str, Any], device: str) -> VisualBackbone:
     """Backbone built to *meta*'s recipe, refusing anything it cannot reproduce.
 
     ``build_backbone`` takes the pooling, the storage dtype and the fake
     backbone's width, so those are forwarded; the pinned revision and the
     embedding width are properties of the built backbone instead, so they are
-    compared against what the store recorded and a difference is fatal. Both
+    compared against what the recipe recorded and a difference is fatal. Both
     would otherwise re-encode the live frame under a recipe the model was never
     fitted on and still produce a vector of the width ``load_state_dict``
     accepts.
+
+    *source* names where the recipe came from — the store's sidecar or the
+    checkpoint's own provenance — and appears in the error when the two disagree.
     """
     from allsky.embeddings.backbone import build_backbone
-    from allsky.embeddings.storage import META_FILENAME
 
     backbone = build_backbone(
         meta["backbone"],
@@ -486,11 +540,11 @@ def _backbone_matching_store(store: Path, meta: dict[str, Any], device: str) -> 
     differing = {key: pair for key, pair in mismatched.items() if pair[0] != pair[1]}
     if differing:
         detail = "; ".join(
-            f"{key}: store={recorded!r} live={built!r}"
+            f"{key}: recorded={recorded!r} live={built!r}"
             for key, (recorded, built) in differing.items()
         )
         raise ValueError(
-            f"the live backbone cannot reproduce the recipe {store / META_FILENAME} records "
+            f"the live backbone cannot reproduce the recipe {source} records "
             f"({detail}), so the frame would be encoded differently from the vectors the "
             "model was fitted on; re-extract the store with this code, or predict with the "
             "checkpoint trained against it"
@@ -616,8 +670,22 @@ def predict_snapshot(
             torch.from_numpy(_image_as_chw(image_path, image_size)).unsqueeze(0).to(device)
         )
     else:
-        store, store_meta = _embedding_store_meta(cfg, embeddings_dir)
-        backbone = _backbone_matching_store(store, store_meta, device)
+        from allsky.embeddings.storage import META_FILENAME
+
+        try:
+            store, store_meta = _embedding_store_meta(cfg, embeddings_dir)
+            source = str(store / META_FILENAME)
+        except _EmbeddingStoreUnreachableError:
+            # The store the run trained against is not on this machine. The
+            # checkpoint's own copy of its recipe is the only other record of how
+            # those vectors were encoded, and a checkpoint written before that
+            # copy existed carries none — which is still a refusal, not a guess.
+            recorded_recipe = checkpoint.get("backbone") if embeddings_dir is None else None
+            if not recorded_recipe:
+                raise
+            source, store_meta = f"{checkpoint_path} (its own provenance)", dict(recorded_recipe)
+            logger.info("embedding store unreachable; encoding to the recipe %s records", source)
+        backbone = _backbone_matching_recipe(source, store_meta, device)
         # Through transform(), never straight into encode(): the backbone's
         # contract takes a SEQUENCE of (H, W, 3) uint8 HWC frames and does its
         # own resize, ImageNet normalisation and stacking, and that is the

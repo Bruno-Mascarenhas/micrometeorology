@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin
 
 from allsky.atomic import atomic_write, atomic_write_json
 
@@ -64,6 +64,30 @@ type _Consumer[T] = Callable[[Any], T]
 
 class ArchiveError(RuntimeError):
     """A request against the all-sky archive failed after every retry."""
+
+
+class _TransportError(Exception):
+    """The connection, not the local machine, is what broke — so the request is worth retrying.
+
+    Reading a response body and writing it to disk raise the same
+    :class:`OSError` family, and retrying a full GET because the destination
+    filesystem is out of space wastes the whole transfer to fail the same way.
+    Only the read side is wrapped in this, so the retry loop can tell a
+    connection that died from a disk that did.
+    """
+
+
+def _read_response(response: Any, size: int | None = None) -> bytes:
+    """Read from an open response, marking a broken transport as :class:`_TransportError`.
+
+    With *size* the read is one chunk of at most that many bytes and an empty
+    result means the body ended; without it the whole remaining body is read and
+    a short one raises :class:`http.client.IncompleteRead`.
+    """
+    try:
+        return bytes(response.read() if size is None else response.read(size))
+    except (http.client.HTTPException, urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise _TransportError(str(exc)) from exc
 
 
 def _https_only_opener(
@@ -281,6 +305,12 @@ class ArchiveClient:
         university host actually shows on a long video — costs one more attempt
         instead of the whole transfer.  It must therefore be safe to call twice:
         each attempt has to start its own digest, byte count and output file.
+
+        Only failures of the transport are retried.  A consumer reads through
+        :func:`_read_response`, which marks read-side faults as
+        :class:`_TransportError`; anything else it raises is the local machine
+        failing — a full disk, a read-only destination — and surfaces at once
+        rather than costing another full GET to fail the same way.
         """
         self._opener.addheaders = [("User-Agent", USER_AGENT), *(headers or {}).items()]
         last: Exception | None = None
@@ -298,13 +328,12 @@ class ArchiveClient:
             else:
                 try:
                     return consume(response)
-                except (
-                    http.client.HTTPException,
-                    urllib.error.URLError,
-                    TimeoutError,
-                    OSError,
-                ) as exc:
-                    last = exc
+                except _TransportError as exc:
+                    # The wrapped read error when there is one, so the log line and
+                    # the final message name the transport fault rather than the
+                    # marker; the truncation check raises the marker on its own.
+                    cause = exc.__cause__
+                    last = cause if isinstance(cause, Exception) else exc
                 finally:
                     response.close()
             if attempt < self.retries:
@@ -329,7 +358,7 @@ class ArchiveClient:
         """
 
         def _decode(response: Any) -> str:
-            payload = bytes(response.read())
+            payload = _read_response(response)
             charset = response.headers.get_content_charset() or "utf-8"
             return payload.decode(charset, errors="replace")
 
@@ -343,7 +372,7 @@ class ArchiveClient:
         """
 
         def _read_whole(response: Any) -> tuple[bytes, dict[str, str]]:
-            payload = bytes(response.read())
+            payload = _read_response(response)
             return payload, {key.lower(): value for key, value in response.headers.items()}
 
         return self._fetch(urljoin(self.base_url, path), None, _read_whole)
@@ -413,12 +442,16 @@ class ArchiveClient:
             def _stream(tmp: Path) -> None:
                 nonlocal written
                 with open(tmp, "wb") as handle:
-                    while chunk := response.read(_DOWNLOAD_CHUNK_BYTES):
+                    while chunk := _read_response(response, _DOWNLOAD_CHUNK_BYTES):
                         handle.write(chunk)
                         digest.update(chunk)
                         written += len(chunk)
                 if declared is not None and written != declared:
-                    raise ArchiveError(
+                    # ``HTTPResponse.read(amt)`` returns b"" on a body that ends
+                    # early instead of raising IncompleteRead, so a connection
+                    # dropped mid-video reaches here as a silent short read. It is
+                    # a broken transport like any other and gets the same retry.
+                    raise _TransportError(
                         f"{entry.filename} truncated: got {written} bytes, "
                         f"server announced {declared}"
                     )
@@ -596,10 +629,51 @@ class Ledger:
             and stored.get("timestamps") == timestamps
         )
 
-    def last_modified(self, key: str) -> str | None:
-        """The ``Last-Modified`` header stored for day *key*'s video, if any."""
-        stored = self.video(key)
-        return None if stored is None else stored.get("last_modified")
+    def record_extraction_fault(
+        self, key: str, *, reason: str, step: int, resize: int | None, timestamps: str
+    ) -> None:
+        """File a day whose own bytes cannot be timestamped, so it is not decoded again.
+
+        The fault is stored against the extraction parameters that hit it and
+        against the digest of the video that carried it, because both can change
+        what the overlay reader sees: a re-download that brings different bytes,
+        or a different *step*, is a different question and clears the record.
+        """
+        stored = self.video(key) or {}
+        self.entry(key)["extraction_fault"] = {
+            "reason": reason,
+            "step": step,
+            "resize": resize,
+            "timestamps": timestamps,
+            "video_sha256": stored.get("sha256", ""),
+            "recorded_at": _utc_now(),
+        }
+
+    def extraction_faulted(
+        self, key: str, *, step: int, resize: int | None, timestamps: str
+    ) -> str | None:
+        """The recorded reason *key* cannot be extracted under these parameters, or None."""
+        record = self.entries.get(key)
+        if not isinstance(record, dict):
+            return None
+        stored = record.get("extraction_fault")
+        if not isinstance(stored, dict):
+            return None
+        video = self.video(key) or {}
+        matches = (
+            stored.get("step") == step
+            and stored.get("resize") == resize
+            and stored.get("timestamps") == timestamps
+            and stored.get("video_sha256") == video.get("sha256", "")
+        )
+        reason: str | None = stored.get("reason") if matches else None
+        return reason
+
+    def clear_extraction_fault(self, key: str) -> None:
+        """Forget a recorded extraction fault, after an extraction of *key* succeeded."""
+        record = self.entries.get(key)
+        if isinstance(record, dict):
+            record.pop("extraction_fault", None)
 
     def uploaded(self, key: str, destination: str) -> bool:
         """Whether day *key* has already reached *destination*.
@@ -641,7 +715,15 @@ class Ledger:
         resize: int | None,
         timestamps: str,
     ) -> None:
-        """File a frame extraction, including the parameters :meth:`frames_match` tests."""
+        """File a frame extraction, including the parameters :meth:`frames_match` tests.
+
+        Any frame upload already on file for *key* is dropped: the destination is
+        keyed by the day, so the record describes a set this extraction has just
+        replaced, and leaving it would answer :meth:`uploaded` for frames that are
+        no longer on disk.  The video's own upload record is untouched, and any
+        extraction fault on file is forgotten: this run just disproved it.
+        """
+        self.clear_extraction_fault(key)
         self.entry(key)["frames"] = {
             "dir": Path(directory).as_posix(),
             "count": count,
@@ -650,6 +732,11 @@ class Ledger:
             "timestamps": timestamps,
             "extracted_at": _utc_now(),
         }
+        uploads: dict[str, Any] = self.entry(key).get("uploads", {})
+        for destination in [
+            name for name, record in uploads.items() if record.get("kind") == "frames"
+        ]:
+            del uploads[destination]
 
     def record_upload(self, key: str, destination: str, **details: Any) -> None:
         """File an upload under its remote destination, which :meth:`uploaded` tests."""
@@ -691,8 +778,3 @@ def ledger_lock(path: str | Path) -> Generator[None]:
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-def archive_host(base_url: str = ARCHIVE_BASE_URL) -> str:
-    """Hostname of the archive, for log lines and remote folder names."""
-    return urlsplit(base_url).hostname or base_url

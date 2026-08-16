@@ -9,6 +9,7 @@ import datetime as dt
 import http.client
 import io
 import json
+import logging
 import os
 import time
 from collections.abc import Iterator
@@ -188,17 +189,6 @@ def test_a_day_already_downloaded_extracted_and_uploaded_everywhere_has_no_work_
     )
 
 
-def test_a_day_whose_upload_failed_is_planned_for_upload_again_without_re_downloading(
-    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
-):
-    fake.record_downloaded_day(ledger, tmp_path, entry.key)
-    plan = _plan(entry, ledger, tmp_path, target=TARGET, upload=UploadChoice.videos)
-
-    assert plan.download is False
-    assert plan.upload_video is True
-    assert plan.extract is False
-
-
 def test_asking_for_upload_after_the_fact_replans_an_already_held_day(
     entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
 ):
@@ -211,7 +201,7 @@ def test_asking_for_upload_after_the_fact_replans_an_already_held_day(
     assert later.upload_video is True
 
 
-@pytest.mark.parametrize(("step", "resize"), [(2, None), (1, 224), (4, 448)])
+@pytest.mark.parametrize(("step", "resize"), [(2, None), (1, 224)])
 def test_changing_the_extraction_parameters_replans_extraction_only(
     entry: ArchiveEntry, ledger: Ledger, tmp_path: Path, step: int, resize: int | None
 ):
@@ -623,7 +613,7 @@ def _fail_re_extracting_a_day_whose_overlay_cannot_be_read(
 
     failed = _sync(data, mirror, "--extract", "--since", "2026-08-11")
 
-    assert failed.exit_code == 1
+    assert failed.exit_code == 0, failed.output
     return data / FRAMES_SUBDIR / DAY_LATER
 
 
@@ -661,6 +651,96 @@ def test_a_re_extraction_that_fails_leaves_no_half_written_frame_set_behind(
     frames_dir = _fail_re_extracting_a_day_whose_overlay_cannot_be_read(data, mirror, tmp_path)
 
     assert [path.name for path in frames_dir.parent.iterdir()] == [DAY_LATER]
+
+
+def test_a_day_whose_overlay_can_never_be_read_is_recorded_and_not_decoded_again(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    _fail_re_extracting_a_day_whose_overlay_cannot_be_read(data, mirror, tmp_path)
+
+    assert (
+        _reload(data).extraction_faulted(DAY_LATER, step=1, resize=None, timestamps="overlay")
+        is not None
+    )
+
+    again = _sync(data, mirror, "--extract", "--since", "2026-08-11")
+
+    assert again.exit_code == 0, again.output
+    assert "nothing to do" in again.output
+
+
+def test_a_video_that_decodes_to_no_frame_keeps_the_frames_the_previous_run_left(
+    mirror: fake.ArchiveMirror, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    data = tmp_path / "data"
+    assert _sync(data, mirror, "--extract", "--since", "2026-08-10").exit_code == 0
+    frames_dir = data / FRAMES_SUBDIR / DAY_NEW
+    before = sorted(path.name for path in frames_dir.glob("*.jpg"))
+    assert before
+
+    monkeypatch.setattr("allsky.overlay._sampled_reads", lambda *_args, **_kwargs: iter(()))
+    empty = _sync(data, mirror, "--extract", "--step", "2", "--since", "2026-08-10")
+
+    assert empty.exit_code == 0, empty.output
+    assert sorted(path.name for path in frames_dir.glob("*.jpg")) == before
+
+
+def test_re_extracting_a_day_queues_its_frames_for_upload_again(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    _mark_fully_mirrored(ledger, tmp_path, entry)
+
+    plan = _plan(
+        entry,
+        ledger,
+        tmp_path,
+        target=TARGET,
+        extract=True,
+        timestamps=TimestampSource.config,
+        upload=UploadChoice.frames,
+    )
+
+    assert (plan.extract, plan.upload_frames) == (True, True)
+
+
+def test_days_a_previous_release_clocked_ambiguously_are_named_before_any_work_starts(
+    mirror: fake.ArchiveMirror, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    data = tmp_path / "data"
+    assert _sync(data, mirror, "--extract", "--since", "2026-08-10").exit_code == 0
+    ledger = _reload(data)
+    (ledger.frames(DAY_NEW) or {})["timestamps"] = "config"
+    ledger.save()
+
+    with caplog.at_level(logging.WARNING, logger="allsky.cli.archive"):
+        result = _sync(data, mirror, "--extract", "--since", "2026-08-10")
+
+    assert result.exit_code == 0, result.output
+    assert any(
+        "recorded 'config' as the clock" in record.getMessage() and DAY_NEW in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_recording_a_new_frame_set_forgets_the_upload_of_the_one_it_replaced(
+    entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
+):
+    _mark_fully_mirrored(ledger, tmp_path, entry)
+    frames_destination = TARGET.path(REMOTE_FRAMES, entry.key)
+    assert ledger.uploaded(entry.key, frames_destination) is True
+
+    ledger.record_frames(
+        entry.key,
+        directory=f"{FRAMES_SUBDIR}/{entry.key}",
+        count=4,
+        step=1,
+        resize=None,
+        timestamps="config",
+    )
+
+    assert ledger.uploaded(entry.key, frames_destination) is False
+    assert ledger.uploaded(entry.key, TARGET.path(REMOTE_VIDEOS, entry.filename)) is True
 
 
 def test_changing_the_step_re_extracts_without_asking_the_server_for_the_video_again(

@@ -20,13 +20,13 @@ torch-free (pandas + stdlib only).
 
 import json
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from allsky.atomic import atomic_write
+from allsky.atomic import atomic_write, atomic_write_json
 from allsky.evaluation.evaluator import EvaluationResult
 
 __all__ = ["compare_experiments", "write_evaluation_report"]
@@ -76,7 +76,7 @@ def write_evaluation_report(
         "meta": result.meta,
         "global": result.global_metrics,
     }
-    written["metrics"] = str(_atomic_json(report_root / "metrics.json", metrics_payload))
+    written["metrics"] = str(atomic_write_json(report_root / "metrics.json", metrics_payload))
     written["stratified"] = str(_atomic_csv(report_root / "stratified.csv", result.stratified))
 
     if result.confusion is not None:
@@ -86,7 +86,7 @@ def write_evaluation_report(
 
     if predictions and not result.predictions.empty:
         written["predictions"] = str(
-            _atomic(
+            atomic_write(
                 report_root / "predictions.parquet",
                 lambda tmp: result.predictions.to_parquet(tmp, index=False),
             )
@@ -247,25 +247,11 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
-def _atomic(path: Path, write: Callable[[Path], Any]) -> Path:
-    return atomic_write(path, write)
-
-
 def _atomic_text(path: Path, text: str) -> Path:
     """Atomically write *text* to *path* (UTF-8)."""
-    return _atomic(path, lambda tmp: tmp.write_text(text, encoding="utf-8"))
-
-
-def _atomic_json(path: Path, obj: Any) -> Path:
-    """Atomically write *obj* to *path* as indented JSON."""
-
-    def _write(tmp: Path) -> None:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(obj, handle, indent=2, ensure_ascii=False, default=str)
-
-    return _atomic(path, _write)
+    return atomic_write(path, lambda tmp: tmp.write_text(text, encoding="utf-8"))
 
 
 def _atomic_csv(path: Path, frame: pd.DataFrame) -> Path:
     """Atomically write *frame* to *path* as CSV (no index)."""
-    return _atomic(path, lambda tmp: frame.to_csv(tmp, index=False))
+    return atomic_write(path, lambda tmp: frame.to_csv(tmp, index=False))

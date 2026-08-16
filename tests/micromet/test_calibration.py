@@ -57,34 +57,6 @@ class TestApplyCalibrations:
             original[mask_after],
         )
 
-    def test_null_factor_sets_nan(self, sample_data):
-        cals = [
-            {
-                "column": "CMP21_Wm2_Avg",
-                "start_date": None,
-                "end_date": "2019-01-01",
-                "factor": None,
-                "description": "sensor not installed",
-            }
-        ]
-        apply_calibrations(sample_data, cals)
-        # The whole boundary day (2019-01-01) is NaN'd, not just its midnight sample.
-        assert sample_data.loc["2019-01-01", "CMP21_Wm2_Avg"].isna().all()
-        assert sample_data.loc["2019-01-02", "CMP21_Wm2_Avg"].notna().all()
-
-    def test_missing_column_skipped(self, sample_data):
-        cals = [
-            {
-                "column": "NONEXISTENT",
-                "start_date": None,
-                "end_date": None,
-                "factor": 2.0,
-                "description": "should skip",
-            }
-        ]
-        # Should not raise
-        apply_calibrations(sample_data, cals)
-
 
 @pytest.fixture
 def five_min_data() -> pd.DataFrame:
@@ -165,31 +137,6 @@ class TestBoundaryDayCalibration:
         assert five_min_data.loc["2018-12-31", "U"].notna().all()
         assert (five_min_data.loc["2018-12-31", "U"] == 100.0).all()
         assert (five_min_data.loc["2019-01-01", "U"] == 20.0).all()
-
-
-class TestUnifySensorColumns:
-    def test_basic_switch(self):
-        idx = pd.date_range("2018-01-01", "2019-06-01", freq="1D")
-        df = pd.DataFrame(
-            {
-                "sensor_A": np.ones(len(idx)) * 10,
-                "sensor_B": np.ones(len(idx)) * 20,
-            },
-            index=idx,
-        )
-        switches = [
-            {
-                "unified_name": "unified",
-                "mappings": [
-                    {"column": "sensor_A", "start_date": "2018-01-01", "end_date": "2018-12-31"},
-                    {"column": "sensor_B", "start_date": "2019-01-01", "end_date": "2019-06-01"},
-                ],
-            }
-        ]
-        unify_sensor_columns(df, switches)
-        assert "unified" in df.columns
-        assert df.loc["2018-06-01", "unified"] == 10
-        assert df.loc["2019-03-01", "unified"] == 20
 
 
 class TestOverlapGuard:

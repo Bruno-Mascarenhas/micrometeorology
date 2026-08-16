@@ -9,55 +9,10 @@ import os
 from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, cast
 
 from micrometeorology.common.paths import ensure_dir
 
 logger = logging.getLogger(__name__)
-
-
-def create_gif(
-    image_dir: str | Path,
-    output_path: str | Path,
-    pattern: str = "*.png",
-    duration: float = 0.5,
-) -> Path:
-    """Create an animated GIF from a directory of images.
-
-    Parameters
-    ----------
-    image_dir:
-        Directory containing the source images.
-    output_path:
-        Path for the output GIF file.
-    pattern:
-        Glob pattern to select images.
-    duration:
-        Duration of each frame in seconds.
-
-    Returns
-    -------
-    Path
-        The GIF written, looping forever. When no image matched, the path is
-        returned with nothing written and a warning logged.
-    """
-    import imageio.v2 as imageio
-
-    images_dir = Path(image_dir)
-    files = sorted(images_dir.glob(pattern))
-    if not files:
-        logger.warning("No images found in %s matching %s", images_dir, pattern)
-        return Path(output_path)
-
-    out = Path(output_path)
-    ensure_dir(out.parent)
-
-    with imageio.get_writer(str(out), mode="I", duration=duration, loop=0) as writer:
-        gif_writer = cast("Any", writer)
-        for file_path in files:
-            gif_writer.append_data(imageio.imread(str(file_path)))
-    logger.info("Created GIF: %s (%d frames)", out, len(files))
-    return out
 
 
 def create_webm_from_images(
@@ -115,47 +70,6 @@ def create_webm_from_images(
         clip.close()
 
     logger.info("Created WebM: %s (%d frames, %d fps)", out, len(image_paths), fps)
-    return out
-
-
-def gif_to_webm(
-    gif_path: str | Path,
-    output_path: str | Path | None = None,
-) -> Path:
-    """Convert a GIF to WebM video using moviepy.
-
-    Requires the ``video`` optional dependency (``uv sync --extra video``).
-
-    Returns
-    -------
-    Path
-        The WebM written, defaulting to the GIF's path with a ``.webm`` suffix.
-
-    Raises
-    ------
-    ImportError
-        When the ``video`` extra is not installed.
-    """
-    try:
-        from moviepy import VideoFileClip
-    except ImportError as exc:
-        raise ImportError(
-            "moviepy is required for video conversion.  "
-            "Install with: uv sync --extra video (see the video extra in pyproject: "
-            "moviepy caps pillow below the CVE floor this project pins, so a bare "
-            "pip install of the extra cannot resolve)."
-        ) from exc
-
-    gif = Path(gif_path)
-    out = Path(output_path) if output_path else gif.with_suffix(".webm")
-    ensure_dir(out.parent)
-
-    clip = VideoFileClip(str(gif))
-    try:
-        clip.write_videofile(str(out), audio=False, threads=1, logger=None)
-    finally:
-        clip.close()
-    logger.info("Created WebM: %s", out)
     return out
 
 

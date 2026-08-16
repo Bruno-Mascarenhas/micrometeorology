@@ -14,16 +14,19 @@ source's own instant admits different hours around sunrise and sunset and the
 paired histograms would then be conditional on different events.
 """
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from allsky.solar import extraterrestrial_ghi
+from allsky.solar import extraterrestrial_ghi, solar_elevation_deg
 from micrometeorology.cli.export_climatology import (
     OBSERVED_COLUMN,
+    SELECTION_BRACKET_OFFSETS,
     SITE,
     UTC_OFFSET_HOURS,
     WRF_COLUMN,
     _observed_sample,
+    _selection_elevation_bounds,
     _wrf_sample,
 )
 
@@ -114,3 +117,68 @@ def test_an_hour_that_begins_with_the_sun_up_is_not_a_night_sample() -> None:
     sample, _atoms = _observed_sample("net_radiation_night", frame)
 
     assert sample.size == 0
+
+
+def test_an_hour_the_sun_rises_in_after_the_midpoint_is_not_a_night_sample() -> None:
+    """At 05:00 the sun is at -6,92 deg and still -0,02 deg at the midpoint.
+
+    It clears the horizon at roughly +31 min and reaches +6,95 deg by the end of
+    the hour, so a bracket spanning only the two per-source geometry offsets reads
+    the whole hour as night and averages some 29 min of daylight into the
+    nocturnal distribution.
+    """
+    frame = _hourly(
+        OBSERVED_COLUMN["net_radiation_night"],
+        [-30.0],
+        ["2024-01-31 05:00"],
+    )
+
+    sample, _atoms = _observed_sample("net_radiation_night", frame)
+
+    assert sample.size == 0
+
+
+def test_the_memoized_bracket_agrees_with_recomputing_the_geometry() -> None:
+    """The cache key carries the stamps' unit, which a datetime64 buffer does not.
+
+    Reading microsecond stamps back as nanoseconds moves every sun position by
+    decades and raises nothing, so the cached answer is compared against a fresh
+    computation rather than merely being exercised.
+    """
+    hours = pd.date_range("2024-01-01", "2024-01-07 23:00", freq="h")
+    frame = pd.DataFrame({"x": np.zeros(len(hours))}, index=hours)
+
+    lowest_deg, highest_deg = _selection_elevation_bounds(frame)
+
+    elevations = np.stack(
+        [
+            solar_elevation_deg(hours + offset, SITE, UTC_OFFSET_HOURS)
+            for offset in SELECTION_BRACKET_OFFSETS
+        ]
+    )
+    assert np.array_equal(lowest_deg, elevations.min(axis=0))
+    assert np.array_equal(highest_deg, elevations.max(axis=0))
+
+
+def test_a_shorter_block_is_not_answered_from_a_longer_block_s_cache_entry() -> None:
+    hours = pd.date_range("2024-01-01", "2024-01-07 23:00", freq="h")
+    whole = pd.DataFrame({"x": np.zeros(len(hours))}, index=hours)
+    lowest_whole, _highest = _selection_elevation_bounds(whole)
+
+    lowest_part, _part_highest = _selection_elevation_bounds(whole.iloc[:24])
+
+    assert lowest_part.shape == (24,)
+    assert np.array_equal(lowest_part, lowest_whole[:24])
+
+
+def test_a_wholly_dark_hour_is_still_a_night_sample() -> None:
+    """02:00 on the same day: the sun stays below the horizon for the whole hour."""
+    frame = _hourly(
+        OBSERVED_COLUMN["net_radiation_night"],
+        [-30.0],
+        ["2024-01-31 02:00"],
+    )
+
+    sample, _atoms = _observed_sample("net_radiation_night", frame)
+
+    assert sample.size == 1

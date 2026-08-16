@@ -174,13 +174,6 @@ def eccentricity_correction(timestamps: DatetimeLike) -> np.ndarray:
     return eccentricity
 
 
-def _resolve_utc_offset(longitude: float, utc_offset_hours: float | None) -> float:
-    """UTC offset of the local clock: explicit value or the standard meridian."""
-    if utc_offset_hours is not None:
-        return utc_offset_hours
-    return round(longitude / 15.0)
-
-
 def hour_angle_deg(
     timestamps: DatetimeLike,
     longitude: float,
@@ -210,7 +203,8 @@ def hour_angle_deg(
         before noon.  It is not wrapped to ``[-180, 180)``.
     """
     times = _as_datetime_index(timestamps)
-    offset = _resolve_utc_offset(longitude, utc_offset_hours)
+    # Explicit offset when given, else the standard meridian for this longitude.
+    offset = utc_offset_hours if utc_offset_hours is not None else round(longitude / 15.0)
     eqtime = equation_of_time(times)
     time_offset = eqtime + 4.0 * longitude - 60.0 * offset
     tst = (
@@ -357,8 +351,8 @@ def solar_azimuth_deg(
         where=off_zenith,
     )
     acos_deg = np.rad2deg(np.arccos(np.clip(ratio, -1.0, 1.0)))
-    azimuth = np.where(ha_wrapped_deg > 0.0, acos_deg + 180.0, 540.0 - acos_deg)
-    wrapped: np.ndarray = np.mod(azimuth, 360.0)
+    azimuth_deg = np.where(ha_wrapped_deg > 0.0, acos_deg + 180.0, 540.0 - acos_deg)
+    wrapped: np.ndarray = np.mod(azimuth_deg, 360.0)
     return wrapped
 
 

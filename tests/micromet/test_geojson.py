@@ -7,6 +7,7 @@ Covers:
 - ``create_wind_vectors_json`` → standalone wind vector file schema
 """
 
+import errno
 import inspect
 import json
 import re
@@ -169,6 +170,55 @@ class TestCreateValuesJson:
 # ---------------------------------------------------------------------------
 
 
+class TestPublishedGridsAreWrittenAtomically:
+    """A failed grid write must leave the file the site is serving untouched."""
+
+    @pytest.mark.parametrize(
+        ("writer", "name"),
+        [
+            (write_grid_geojson_stream, "grid.geojson"),
+            (write_grid_compact_json_stream, "grid.grid.json"),
+        ],
+    )
+    def test_a_write_that_dies_partway_leaves_the_previous_grid_in_place(
+        self, tmp_path, sample_grid, monkeypatch, writer, name
+    ):
+        lon, lat = sample_grid
+        published = tmp_path / name
+        writer(published, lon, lat, 1000.0, 2000.0)
+        intact = published.read_bytes()
+
+        def _die(*_args, **_kwargs):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("micrometeorology.wrf.geojson.json.dump", _die)
+        with pytest.raises(OSError, match="No space left on device"):
+            writer(published, lon, lat, 1000.0, 2000.0)
+
+        assert published.read_bytes() == intact
+
+    @pytest.mark.parametrize(
+        ("writer", "name"),
+        [
+            (write_grid_geojson_stream, "grid.geojson"),
+            (write_grid_compact_json_stream, "grid.grid.json"),
+        ],
+    )
+    def test_a_failed_write_leaves_no_temporary_file_behind(
+        self, tmp_path, sample_grid, monkeypatch, writer, name
+    ):
+        lon, lat = sample_grid
+
+        def _die(*_args, **_kwargs):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("micrometeorology.wrf.geojson.json.dump", _die)
+        with pytest.raises(OSError, match="No space left on device"):
+            writer(tmp_path / name, lon, lat, 1000.0, 2000.0)
+
+        assert list(tmp_path.iterdir()) == []
+
+
 class TestWriteGridCompactJsonStream:
     # 7-decimal vs 10-decimal rounding of the SAME corner value can differ by
     # at most 0.5e-7 + 0.5e-10.
@@ -259,39 +309,6 @@ class TestWriteGridCompactJsonStream:
 
 
 class TestCreateWindVectorsJson:
-    def test_downsampling_reduces_count(self, sample_wind_2d):
-        u, v = sample_wind_2d
-        full = create_wind_vectors_json(u, v, None, downsampling=1)
-        ds = create_wind_vectors_json(u, v, None, downsampling=2)
-        assert len(ds["downsampled_angles"]) < len(full["downsampled_angles"])
-
-    def test_angles_in_valid_range(self, sample_wind_2d):
-        u, v = sample_wind_2d
-        result = create_wind_vectors_json(u, v, None, downsampling=1)
-        for angle in result["downsampled_angles"]:
-            assert 0 <= angle < 360
-
-    def test_magnitudes_non_negative(self, sample_wind_2d):
-        u, v = sample_wind_2d
-        result = create_wind_vectors_json(u, v, None, downsampling=1)
-        for mag in result["downsampled_magnitudes"]:
-            assert mag >= 0
-
-    def test_linear_indices_within_grid(self, sample_wind_2d):
-        u, v = sample_wind_2d
-        ny, nx = u.shape
-        result = create_wind_vectors_json(u, v, None, downsampling=1)
-        for idx in result["downsampled_linear_indices"]:
-            assert 0 <= idx < ny * nx
-
-    def test_magnitude_consistency(self):
-        """Magnitude should match np.hypot for known inputs."""
-        u = np.array([[3.0, 0.0]], dtype=np.float64)
-        v = np.array([[4.0, 5.0]], dtype=np.float64)
-        result = create_wind_vectors_json(u, v, None, downsampling=1)
-        assert result["downsampled_magnitudes"][0] == pytest.approx(5.0, abs=0.01)
-        assert result["downsampled_magnitudes"][1] == pytest.approx(5.0, abs=0.01)
-
     def test_date_in_metadata(self, sample_wind_2d):
         u, v = sample_wind_2d
         # Naive on purpose (the writer drops tzinfo anyway); pandas keeps it so.

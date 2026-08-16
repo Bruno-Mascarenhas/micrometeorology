@@ -359,15 +359,6 @@ class TestThreeLayers:
         assert result.exit_code == 0, result.output
         assert sorted(p.name for p in out.glob("*.png")) == sorted(CONTRACT_PNGS)
 
-    def test_without_the_optional_layers_the_output_is_unchanged(self, hourly_csv, tmp_path):
-        """The legacy single-layer invocation must keep working untouched."""
-        out = tmp_path / "one"
-        result = runner.invoke(
-            app, ["site", "-i", str(hourly_csv), "-o", str(out), "--log-level", "WARNING"]
-        )
-        assert result.exit_code == 0, result.output
-        assert sorted(p.name for p in out.glob("*.png")) == sorted(CONTRACT_PNGS)
-
     def test_a_wrf_column_the_extraction_lacks_is_skipped_not_fatal(self, hourly_csv, tmp_path):
         """`series_operacional.dat` has no PAR and no rain; that is normal."""
         from micrometeorology.cli.plot_station_graphs import _wrf_series

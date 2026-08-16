@@ -87,8 +87,6 @@ def aggregate_to_hourly(
     resampler = df.resample(freq)
 
     for col in sorted(mean_columns):
-        if col not in df.columns:
-            continue
         grouped = resampler[col]
         counts = grouped.count()
         means = grouped.mean()

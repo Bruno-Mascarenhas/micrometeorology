@@ -66,9 +66,6 @@ def vertical_interpolate(
 
     values = values_arr.astype(dtype, copy=False)
     heights = heights_arr.astype(dtype, copy=False)
-    if values.shape != heights.shape:
-        raise ValueError("values and heights must have the same shape")
-
     levels = values.shape[axis]
 
     v_moved = np.moveaxis(values, axis, 0)

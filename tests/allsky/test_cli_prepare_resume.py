@@ -368,6 +368,23 @@ def test_build_manifest_alone_still_runs_on_frames_from_the_same_config(
     assert len(pd.read_parquet(dataset_dir / "manifest.parquet")) > 0
 
 
+def test_build_manifest_alone_runs_on_frames_that_predate_the_provenance_sidecar(
+    tmp_path: Path, dark_video: Path, synthetic_dat: Path
+):
+    config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
+    assert _extract_only(config).exit_code == 0
+    for sidecar in dataset_dir.rglob("frames.meta.json"):
+        sidecar.unlink()
+
+    result = runner.invoke(
+        app, ["prepare-local", "--config", str(config), "--steps", "build-manifest"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "record no video/mask/crop/resize config" in result.output
+    assert len(pd.read_parquet(dataset_dir / "manifest.parquet")) > 0
+
+
 def test_a_non_utf8_frame_provenance_is_read_as_absent(tmp_path: Path):
     video_dir = tmp_path / "allsky-20260101"
     video_dir.mkdir()

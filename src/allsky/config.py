@@ -65,6 +65,22 @@ VIDEO_TIME_FIELDS = (
     "minutes_per_frame",
 )
 
+#: The :class:`PrepareConfig` sections that decide which PIXELS an extracted
+#: frame holds, as opposed to the encoder that later reads them.  Beside
+#: :data:`VIDEO_TIME_FIELDS` for the same reason: the frame extractor's resume
+#: gate and the embedding store's both hash this, and two copies of the tuple
+#: would let one start covering a section the other does not — resuming an
+#: embedding store onto frames it was never extracted from.
+FRAME_PIXEL_SECTIONS = ("mask", "crop", "resize")
+
+#: Filenames a prepared dataset is published under. The bundle writer and the
+#: prepare CLI both name these; separate copies let a rename land in one and not
+#: the other, and the bundle reader would then look for a member the writer no
+#: longer produces. Declared here rather than in ``allsky.data.contracts``
+#: because importing that package pulls pandas, which the CLI modules must not.
+DATASET_MANIFEST_FILENAME = "manifest.parquet"
+DATASET_SPLIT_FILENAME = "splits.json"
+
 
 class SiteConfig(BaseModel):
     """Observation site (LabMiM/UFBA, Salvador-BA by default)."""
@@ -293,7 +309,10 @@ class ExperimentTrainConfig(BaseModel):
     lr: float = 3e-4
     backbone_lr: float | None = None
     weight_decay: float = 1e-4
-    optimizer: str = "adamw"
+    # AdamW is the only algorithm allsky.training.engine builds. Declared as the
+    # literal so a config naming another one is refused when it is loaded, rather
+    # than after the seed, the dataset and the model of a whole run.
+    optimizer: Literal["adamw"] = "adamw"
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     amp: AMPConfig = Field(default_factory=AMPConfig)
     grad_accum_steps: int = 1

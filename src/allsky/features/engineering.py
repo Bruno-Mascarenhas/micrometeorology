@@ -26,31 +26,14 @@ import pandas as pd
 
 from allsky.config import SiteConfig
 from allsky.features.policy import FeatureSet, resolve_feature_set, source_column
-from allsky.solar import solar_azimuth_deg, solar_elevation_deg
+from allsky.solar import DatetimeLike, solar_azimuth_deg, solar_elevation_deg
 from micrometeorology.sensors.wind import wind_components
-
-type DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
 
 __all__ = ["DAYS_PER_YEAR", "build_feature_frame"]
 
 #: Period of the day-of-year cyclic encoding (mean tropical/Julian year); using
 #: a non-integer divisor keeps the encoding continuous across leap years.
 DAYS_PER_YEAR = 365.25
-
-#: Engineered names handled by a dedicated transform rather than a raw
-#: column pass-through.
-_DERIVED = frozenset(
-    {
-        "solar_elevation",
-        "solar_zenith",
-        "azimuth_sin",
-        "azimuth_cos",
-        "doy_sin",
-        "doy_cos",
-        "wind_dir_sin",
-        "wind_dir_cos",
-    }
-)
 
 
 def build_feature_frame(
@@ -105,15 +88,9 @@ def build_feature_frame(
     index = pd.DatetimeIndex(timestamps)
     resolved = resolve_feature_set(feature_set, extra)
 
-    required = {
-        col
-        for name in resolved
-        if name not in _DERIVED
-        for col in (source_column(name),)
-        if col is not None
-    }
-    if "wind_dir_sin" in resolved or "wind_dir_cos" in resolved:
-        required.add("WindDir")
+    # source_column() answers None for every name a dedicated transform builds
+    # (the solar geometry, the cyclic pairs), so those drop out here on their own.
+    required = {col for name in resolved for col in (source_column(name),) if col is not None}
     missing = sorted(required - set(sensor_df.columns))
     if missing:
         raise KeyError(f"sensor frame is missing required feature columns: {missing}")

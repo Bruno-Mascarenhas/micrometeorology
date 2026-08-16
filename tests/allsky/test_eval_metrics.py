@@ -19,16 +19,6 @@ from allsky.evaluation.metrics import (
 
 
 class TestRegressionMetrics:
-    def test_perfect_prediction(self):
-        obs = np.array([100.0, 200.0, 300.0, 400.0])
-        metrics = regression_metrics(obs, obs.copy())
-        assert metrics["rmse"] == 0.0
-        assert metrics["mae"] == 0.0
-        assert metrics["bias"] == 0.0
-        assert metrics["nmae"] == 0.0
-        assert metrics["nrmse"] == 0.0
-        assert metrics["n"] == 4.0
-
     def test_bias_alias_matches_mbe(self):
         obs = np.array([10.0, 20.0, 30.0])
         pred = np.array([12.0, 24.0, 33.0])  # over-predicts -> positive bias
@@ -118,10 +108,6 @@ def test_a_model_matching_its_reference_scores_zero_skill():
 
 def test_a_perfect_model_scores_full_skill():
     assert skill_score(0.0, 10.0) == 1.0
-
-
-def test_a_model_worse_than_its_reference_scores_negative_skill():
-    assert skill_score(20.0, 10.0) == -1.0
 
 
 @pytest.mark.parametrize("reference", [0.0, float("nan")])

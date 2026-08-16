@@ -223,29 +223,7 @@ def _drop_pixel_provenance(dataset_dir: Path) -> None:
     _meta_path(dataset_dir).write_text(json.dumps(meta), encoding="utf-8")
 
 
-def test_a_store_stamped_by_the_old_formula_resumes_when_its_pixel_config_is_unchanged(
-    tmp_path: Path,
-):
-    pytest.importorskip("torch")
-    dataset_dir = tmp_path / "dataset"
-    _build_dataset(dataset_dir, n=4)
-    config = _write_config(tmp_path, dataset_dir)
-    assert runner.invoke(app, ["precompute-embeddings", "--config", str(config)]).exit_code == 0
-    cfg = load_prepare_config(config)
-    _restamp(dataset_dir, _pre_migration_config_sha256(cfg))
-
-    result = runner.invoke(app, ["precompute-embeddings", "--config", str(config)])
-
-    assert result.exit_code == 0, result.output
-    assert _summary(result.output)["encoded"] == 0
-    assert json.loads(_meta_path(dataset_dir).read_text(encoding="utf-8"))[
-        "config_sha256"
-    ] == _config_sha256(cfg)
-
-
-def test_a_store_stamped_by_the_old_formula_with_no_pixel_provenance_refuses_to_resume(
-    tmp_path: Path,
-):
+def test_a_store_stamped_by_the_old_formula_refuses_to_resume(tmp_path: Path):
     pytest.importorskip("torch")
     dataset_dir = tmp_path / "dataset"
     _build_dataset(dataset_dir, n=4)

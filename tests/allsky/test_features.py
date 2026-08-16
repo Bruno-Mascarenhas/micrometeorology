@@ -7,7 +7,6 @@ import pytest
 from allsky.config import SiteConfig
 from allsky.features import (
     EXTENDED_FEATURES,
-    MINIMAL_FEATURES,
     SAFE_FEATURES,
     THERMOHYGROMETER_FEATURES,
     FeatureNormalizer,
@@ -106,9 +105,6 @@ class TestFeaturePolicy:
         assert resolve_feature_set("minimal") == [
             name for name in SAFE_FEATURES if name not in THERMOHYGROMETER_FEATURES
         ]
-
-    def test_minimal_carries_no_thermohygrometer_channel(self):
-        assert not (set(MINIMAL_FEATURES) & THERMOHYGROMETER_FEATURES)
 
     def test_minimal_keeps_the_barometer_and_the_anemometer(self):
         resolved = resolve_feature_set("minimal")

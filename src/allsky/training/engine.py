@@ -78,6 +78,7 @@ from allsky.training.checkpointing import (
     restore_rng_state,
     save_checkpoint,
 )
+from allsky.training.errors import TrainingError
 from solrad_correction.utils.seeds import set_global_seed
 
 logger = logging.getLogger(__name__)
@@ -116,7 +117,7 @@ def resolve_run_device(requested: str) -> str:
 
     device = resolve_device(requested)
     if device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError(
+        raise TrainingError(
             "device 'cuda' was requested but no CUDA device is available; "
             "use device='cpu' or device='auto'"
         )
@@ -376,7 +377,6 @@ def run_experiment(
                     device=resolved_device,
                     autocast_device=autocast_device,
                     autocast_dtype=autocast_dtype,
-                    amp_enabled=amp_enabled,
                     target_stats=(dhi_mean, dhi_std, kindex_mean, kindex_std),
                     component_weights=component_weights,
                 )
@@ -472,7 +472,7 @@ def run_experiment(
         finally:
             writer.close()
         if epochs_ran and best_value is None:
-            raise RuntimeError(
+            raise TrainingError(
                 f"no best checkpoint: {monitor_key} was non-finite in every one of the "
                 f"{epochs_ran} epoch(s) that ran, so no epoch was ever a candidate for "
                 f"{BEST_CHECKPOINT}. The metrics and the diverged weights are in {run_dir} "
@@ -688,7 +688,7 @@ def _default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Calla
             backbone = build_backbone(name, pooling=_backbone_pooling(pooling), device=device)
             return coerce_image_backbone(backbone, pooling=pooling)
         except Exception as exc:
-            raise RuntimeError(
+            raise TrainingError(
                 "failed to construct the default image backbone for input_mode='image' "
                 f"(model.backbone={name!r}, model.backbone_pooling={pooling!r}, "
                 f"train.device={device!r}); fix those config knobs or inject an "
@@ -750,14 +750,11 @@ def _build_optimizer(
     :meth:`MultimodalModel.param_groups` sets it on); everything else runs at
     ``train.lr`` and is labelled ``lr``.
 
-    ``train.optimizer`` is validated here rather than honoured: AdamW is the only
-    algorithm this engine builds, and a config naming another one used to train as
-    AdamW anyway while the checkpoint recorded the name it asked for.
+    ``train.optimizer`` is not read: AdamW is the only algorithm this engine
+    builds, and :class:`~allsky.config.TrainConfig` declares the field as that one
+    literal, so a config naming another one is refused when it is loaded rather
+    than after a run has already seeded, loaded its dataset and built its model.
     """
-    if cfg.train.optimizer != "adamw":
-        raise ValueError(
-            f"unknown optimizer {cfg.train.optimizer!r}; this engine builds 'adamw' only"
-        )
     param_groups_fn = getattr(model, "param_groups", None)
     if callable(param_groups_fn):
         params: Any = param_groups_fn(cfg.train.backbone_lr)
@@ -828,10 +825,10 @@ def _build_amp(amp_enabled: bool, dtype: str, device: str) -> tuple[str | None, 
         return None, None, None
     if dtype == "fp16":
         if device != "cuda":
-            raise RuntimeError("amp dtype 'fp16' requires a CUDA device; use 'bf16' on CPU")
+            raise TrainingError("amp dtype 'fp16' requires a CUDA device; use 'bf16' on CPU")
         return "cuda", torch.float16, torch.amp.GradScaler("cuda")
     if not torch.amp.is_autocast_available(device):
-        raise RuntimeError(
+        raise TrainingError(
             f"amp has no autocast for device {device!r}; set train.amp.enabled=false "
             "or run on a device torch can autocast"
         )
@@ -908,7 +905,6 @@ def _eval_epoch(
     device: str,
     autocast_device: str | None,
     autocast_dtype: Any,
-    amp_enabled: bool,
     target_stats: tuple[float, float, float, float],
     component_weights: Mapping[str, float],
 ) -> dict[str, float]:
@@ -918,7 +914,7 @@ def _eval_epoch(
     with torch.no_grad():
         for raw in loader:
             batch = _move(raw, device)
-            with _autocast(autocast_device if amp_enabled else None, autocast_dtype):
+            with _autocast(autocast_device, autocast_dtype):
                 outputs = model(batch)
                 losses = loss_fn(outputs, batch)
             accumulator.update(outputs, batch, losses)
@@ -1192,7 +1188,7 @@ def _check_resume_provenance(
             f"feature_columns: checkpoint {list(stored_columns)} vs current {feature_columns}"
         )
     if mismatches:
-        raise RuntimeError(
+        raise TrainingError(
             f"refusing to resume from {path}: it was trained against a different dataset "
             + "; ".join(mismatches)
             + ". Run without --resume (or point --out-dir at a fresh run directory) to "
@@ -1376,9 +1372,14 @@ def _rotate_superseded_best(run_dir: Path) -> None:
     actually improves: rotating at the start of a fresh run leaves the directory
     with no ``best.ckpt`` at all for a run that then dies (an unresolvable monitor,
     a divergent first epoch), which is when the previous best matters most.
+
+    The destination is taken through :func:`_free_rotation_destination` for the
+    same reason a monitor change is: two fresh runs in one directory would
+    otherwise rotate onto the same name, and the second would delete the weights
+    the first preserved.
     """
     path = run_dir / BEST_CHECKPOINT
-    backup = path.with_name(f"{BEST_CHECKPOINT}{STALE_RUN_SUFFIX}")
+    backup = _free_rotation_destination(path.with_name(f"{BEST_CHECKPOINT}{STALE_RUN_SUFFIX}"))
     os.replace(path, backup)
     logger.warning(
         "fresh run: rotated stale %s aside to %s (a previous run wrote it)", path, backup.name
@@ -1413,6 +1414,8 @@ def _checkpoint_common(
             "dim": getattr(image_backbone, "dim", None),
             "frozen": bool(_model_param(cfg, "backbone_frozen", False)),
         }
+    elif cfg.data.input_mode == "embedding":
+        backbone_info = _embedding_recipe(cfg)
     return {
         "model": model,
         "optimizer": optimizer,
@@ -1428,6 +1431,26 @@ def _checkpoint_common(
         "backbone_info": backbone_info,
         "code_version_info": code_version(),
     }
+
+
+def _embedding_recipe(cfg: ExperimentConfig) -> dict[str, Any] | None:
+    """The encoding recipe of the store this embedding-mode run reads, if it can be read.
+
+    Embedding-mode training never builds a backbone, so without this the
+    checkpoint records no encoder identity at all and predicting a live frame
+    from it needs the training machine's store still mounted at the path baked
+    into ``data.data_root``.  Copying the recipe in at save time makes the
+    checkpoint portable; None when the store cannot be read, which leaves
+    prediction to fall back on the store exactly as before rather than on a
+    guess.
+    """
+    from allsky.data.loading import resolve_against_root
+    from allsky.snapshot import embedding_recipe_of
+
+    if cfg.data.embeddings_dir is None:
+        return None
+    store = resolve_against_root(cfg.data.embeddings_dir, Path(cfg.data.data_root))
+    return embedding_recipe_of(store)
 
 
 def _dataset_version(meta: Mapping[str, Any]) -> str:

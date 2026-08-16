@@ -46,11 +46,12 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-# The same solar geometry the climatology exporter uses, so "deep night" means
-# the same angle in both places.
-from allsky.config import SiteConfig
 from allsky.solar import cos_zenith, eccentricity_correction, solar_elevation_deg
 from micrometeorology.common.paths import ensure_dir
+
+# The same solar geometry the climatology exporter uses, so "deep night" means
+# the same angle in both places.
+from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.sensors.ingestion import merge_dat_files
 
 logger = logging.getLogger(__name__)
@@ -242,7 +243,7 @@ class ArchiveReport:
 _TOA5_METADATA = '"TOA5","CR5000","CR5000","2754","CR5000.Std.06","STAGED","0","LBM_staged"'
 
 
-def _write_toa5(frame: pd.DataFrame, destination: Path, timestamp_column: str) -> None:
+def _write_toa5(frame: pd.DataFrame, destination: Path) -> None:
     """Write a frame back out in TOA5 shape (metadata, names, units, aggregation)."""
     columns = list(frame.columns)
     with open(destination, "w", encoding="utf-8", newline="") as handle:
@@ -254,7 +255,6 @@ def _write_toa5(frame: pd.DataFrame, destination: Path, timestamp_column: str) -
         handle.write(",".join('""' for _ in columns) + "\n")
     frame.to_csv(destination, mode="a", header=False, index=False, date_format="%Y-%m-%d %H:%M:%S")
     logger.info("staged %s (%d rows)", destination.name, len(frame))
-    del timestamp_column
 
 
 def _read_raw_toa5(path: Path) -> pd.DataFrame:
@@ -275,7 +275,7 @@ def _stage_clock_shift(source: Path, destination: Path) -> None:
     shifted = stamps.where(stamps > _CLOCK_SLIP_LAST, stamps + pd.Timedelta(hours=1))
     moved = int((shifted != stamps).sum())
     frame["TIMESTAMP"] = shifted.dt.strftime("%Y-%m-%d %H:%M:%S")
-    _write_toa5(frame, destination, "TIMESTAMP")
+    _write_toa5(frame, destination)
     logger.info("  clock: shifted %d rows by +1h", moved)
 
 
@@ -284,7 +284,7 @@ def _stage_drop_late_tail(source: Path, destination: Path) -> None:
     frame = _read_raw_toa5(source)
     stamps = pd.to_datetime(frame["TIMESTAMP"], format="ISO8601")
     keep = stamps < _LATE_TAIL_FIRST
-    _write_toa5(frame.loc[keep], destination, "TIMESTAMP")
+    _write_toa5(frame.loc[keep], destination)
     logger.info("  tail: dropped %d late rows", int((~keep).sum()))
 
 
@@ -297,7 +297,7 @@ def _stage_keep_2023_block(source: Path, destination: Path) -> None:
     frame = _read_raw_toa5(source)
     stamps = pd.to_datetime(frame["TIMESTAMP"], format="ISO8601")
     keep = (stamps >= pd.Timestamp("2023-08-01")) & (stamps < pd.Timestamp("2023-09-01"))
-    _write_toa5(frame.loc[keep], destination, "TIMESTAMP")
+    _write_toa5(frame.loc[keep], destination)
     logger.info(
         "  spare logger: kept %d rows of 2023-08, dropped %d", int(keep.sum()), int((~keep).sum())
     )
@@ -690,13 +690,6 @@ def _unshaded_diffuse_days_in_era(frame: pd.DataFrame, column: str) -> list[tupl
     ]
 
 
-# Station coordinates for the solar geometry the checks below need, repeated
-# rather than imported from the climatology exporter: a sensors module must not
-# depend on a CLI. Both copies are the station's own numbers and must stay
-# equal — see SITE in cli/export_climatology.py.
-STATION_SITE = SiteConfig(latitude=-13.0055, longitude=-38.5089)
-STATION_UTC_OFFSET_HOURS = -3.0
-
 # Detection constants for the timestamp-corruption check below, measured in
 # docs/arqueologia/qc/med-fault-detection.md: 42 days (1.22% of the record) carry
 # at least three DEEP-NIGHT samples of global irradiance above 50 W/m2, the worst
@@ -742,6 +735,15 @@ NIGHT_CORRUPTION_CHANNELS = (*NIGHT_CORRUPTION_COLUMNS, "Net_CNR1")
 # from ``allsky.solar.SOLAR_CONSTANT_WM2``, the Kopp & Lean TSI that scales
 # extraterrestrial irradiance and the clearness index. Two quantities, two names.
 BSRN_CEILING_SOLAR_CONSTANT_WM2 = 1367.0
+
+# The remaining three coefficients of the same prescription, named for the same
+# reason as the one above: they are transcribed from Long & Shi 2008 pp. 24-25,
+# not knobs this repo tunes. The ceiling reads
+# ``Sa * GAIN * mu0**EXPONENT + OFFSET``.
+BSRN_CEILING_GAIN = 1.5
+BSRN_CEILING_MU0_EXPONENT = 1.2
+BSRN_CEILING_OFFSET_WM2 = 100.0
+
 IMPOSSIBLE_SHORTWAVE_CHANNELS = ("Sw_dw", "Net_CNR1")
 
 
@@ -800,7 +802,11 @@ def mask_impossible_shortwave(
     index = pd.DatetimeIndex(frame.index)
     mu0 = np.clip(cos_zenith(index, STATION_SITE, STATION_UTC_OFFSET_HOURS), 0.0, None)
     ceiling = (
-        BSRN_CEILING_SOLAR_CONSTANT_WM2 * eccentricity_correction(index) * 1.5 * mu0**1.2 + 100.0
+        BSRN_CEILING_SOLAR_CONSTANT_WM2
+        * eccentricity_correction(index)
+        * BSRN_CEILING_GAIN
+        * mu0**BSRN_CEILING_MU0_EXPONENT
+        + BSRN_CEILING_OFFSET_WM2
     )
     global_flux = frame["Sw_dw"]
     impossible = (global_flux.notna() & (global_flux > ceiling)).to_numpy()

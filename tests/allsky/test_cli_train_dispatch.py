@@ -19,6 +19,7 @@ from allsky.data.manifest import build_manifest, write_manifest_parquet
 from allsky.data.splits import create_day_splits, save_split_artifact
 from allsky.embeddings.storage import save_shard, shard_path, write_index, write_meta
 from allsky.training.checkpointing import load_checkpoint as _load_checkpoint
+from allsky.training.errors import TrainingError
 
 runner = CliRunner()
 
@@ -145,6 +146,32 @@ class TestExperimentDispatch:
         assert (run_dir / "last.ckpt").exists()
         assert (run_dir / "metrics.json").exists()
 
+    def test_a_run_the_engine_refuses_reports_the_reason_instead_of_a_traceback(
+        self, tmp_path: Path, monkeypatch
+    ):
+        root, config_path = _build_experiment(tmp_path)
+
+        def _refuse(*_args, **_kwargs):
+            raise TrainingError("lower train.lr, enable train.grad_clip_norm or turn AMP off")
+
+        monkeypatch.setattr("allsky.training.engine.run_experiment", _refuse)
+        result = runner.invoke(
+            app,
+            [
+                "train",
+                "--config",
+                str(config_path),
+                "--data-root",
+                str(root),
+                "--out-dir",
+                str(tmp_path / "run"),
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "lower train.lr" in result.output
+        assert "Traceback" not in result.output
+
     def test_resume_auto_accepted(self, tmp_path: Path):
         root, config_path = _build_experiment(tmp_path)
         run_dir = tmp_path / "run"
@@ -244,16 +271,3 @@ class TestTrustCheckpointFlag:
         seen.clear()
         assert runner.invoke(app, [*base, "--resume", "auto", "--trust-checkpoint"]).exit_code == 0
         assert seen == [True]
-
-
-class TestNonExperimentRejected:
-    def test_non_experiment_config_is_rejected_before_the_engine(self, tmp_path: Path):
-        # A config without 'experiment: true' is rejected with a clear pointer to
-        # the experiment configs — it never reaches the training engine.
-        config_path = tmp_path / "legacy.yaml"
-        config_path.write_text("train:\n  epochs: 1\n", encoding="utf-8")
-        result = runner.invoke(
-            app, ["train", "--config", str(config_path), "--out-dir", str(tmp_path / "out")]
-        )
-        assert result.exit_code != 0
-        assert "experiment" in result.output

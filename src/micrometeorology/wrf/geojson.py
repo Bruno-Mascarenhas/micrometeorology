@@ -24,6 +24,7 @@ from typing import Any, TextIO
 import numpy as np
 from numpy.typing import NDArray
 
+from allsky.atomic import atomic_write
 from micrometeorology.wrf.safety import assert_reasonable_array_size
 
 logger = logging.getLogger(__name__)
@@ -211,7 +212,6 @@ def write_grid_geojson_stream(
     lat: NDArray,
     resolution_x: float,
     resolution_y: float,
-    _colormap: str = "",
 ) -> Path:
     """Write grid GeoJSON feature-by-feature without building a full feature list.
 
@@ -229,10 +229,6 @@ def write_grid_geojson_stream(
         ``(ny, nx)`` cell-centre coordinates in degrees east and degrees north.
     resolution_x, resolution_y:
         Grid spacing in meters, published under ``metadata.resolucao_m``.
-    _colormap:
-        Accepted for call compatibility with the frozen reference writer and
-        unused.
-
     Returns
     -------
     Path
@@ -252,34 +248,33 @@ def write_grid_geojson_stream(
         context=f"streamed GeoJSON grid for {output_path}",
     )
     metadata = {"resolucao_m": [float(resolution_x), float(resolution_y)]}
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
 
     lon_left, lon_right, lat_top, lat_bottom = _grid_cell_corners(lon, lat)
     n_cells = n_rows * n_cols
 
-    with open(out, "w", encoding="utf-8") as f:
-        f.write('{"type":"FeatureCollection","metadata":')
-        json.dump(metadata, f, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-        f.write(',"features":[')
-        for start in range(0, n_cells, GEOJSON_FEATURE_CHUNK_SIZE):
-            stop = min(start + GEOJSON_FEATURE_CHUNK_SIZE, n_cells)
-            chunk = ",".join(
-                f'{{"type":"Feature","geometry":{{"type":"Polygon","coordinates":'
-                f"[[[{lon_left[k]!r},{lat_bottom[k]!r}],"
-                f"[{lon_right[k]!r},{lat_bottom[k]!r}],"
-                f"[{lon_right[k]!r},{lat_top[k]!r}],"
-                f"[{lon_left[k]!r},{lat_top[k]!r}],"
-                f"[{lon_left[k]!r},{lat_bottom[k]!r}]]]}}"
-                f',"properties":{{"linear_index":{k}}}}}'
-                for k in range(start, stop)
-            )
-            if start:
-                f.write(",")
-            f.write(chunk)
-        f.write("]}")
+    def _stream(destination: Path) -> None:
+        with open(destination, "w", encoding="utf-8") as f:
+            f.write('{"type":"FeatureCollection","metadata":')
+            json.dump(metadata, f, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+            f.write(',"features":[')
+            for start in range(0, n_cells, GEOJSON_FEATURE_CHUNK_SIZE):
+                stop = min(start + GEOJSON_FEATURE_CHUNK_SIZE, n_cells)
+                chunk = ",".join(
+                    f'{{"type":"Feature","geometry":{{"type":"Polygon","coordinates":'
+                    f"[[[{lon_left[k]!r},{lat_bottom[k]!r}],"
+                    f"[{lon_right[k]!r},{lat_bottom[k]!r}],"
+                    f"[{lon_right[k]!r},{lat_top[k]!r}],"
+                    f"[{lon_left[k]!r},{lat_top[k]!r}],"
+                    f"[{lon_left[k]!r},{lat_bottom[k]!r}]]]}}"
+                    f',"properties":{{"linear_index":{k}}}}}'
+                    for k in range(start, stop)
+                )
+                if start:
+                    f.write(",")
+                f.write(chunk)
+            f.write("]}")
 
-    return out
+    return atomic_write(output_path, _stream)
 
 
 GRID_COMPACT_DECIMALS = 7
@@ -354,10 +349,11 @@ def write_grid_compact_json_stream(
         payload["shape"] = [n_rows, n_cols]
         payload["bounds"] = [[west[k], bottom[k], east[k], top[k]] for k in range(n_rows * n_cols)]
 
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(payload, f, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    def _dump(destination: Path) -> None:
+        with open(destination, "w", encoding="utf-8") as f:
+            json.dump(payload, f, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+    out = atomic_write(output_path, _dump)
     logger.info("Saved compact grid JSON: %s (%s)", out, payload["format"])
     return out
 

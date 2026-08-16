@@ -32,7 +32,7 @@ import pandas as pd
 
 from allsky.config import VideoConfig
 from allsky.data.contracts import QCFlag
-from allsky.video import JPEG_QUALITY, MANIFEST_FILENAME
+from allsky.video import JPEG_QUALITY, MANIFEST_FILENAME, _resize_image
 from allsky.video import MANIFEST_COLUMNS as VIDEO_MANIFEST_COLUMNS
 
 logger = logging.getLogger(__name__)
@@ -390,9 +390,9 @@ def read_video_timestamps(
     ValueError
         If *step* is below 1.
     OverlayTimestampError
-        If the filename encodes no date, if more than
-        :data:`MAX_UNREADABLE_FRACTION` of the sampled frames are unreadable, or
-        if the recovered timestamps run backwards.
+        If the filename encodes no date, if the video decodes to no frame at
+        all, if more than :data:`MAX_UNREADABLE_FRACTION` of the sampled frames
+        are unreadable, or if the recovered timestamps run backwards.
     """
     if step < 1:
         raise ValueError(f"step must be >= 1, got {step}")
@@ -449,8 +449,12 @@ def _settle_readings(
     """Re-decide contested reads, interpolate the failures, and vouch for the order."""
     readings = _correct_against_neighbours(readings, alternatives)
 
+    if not readings:
+        raise OverlayTimestampError(
+            f"no frame of {name} could be decoded — refusing to describe the day as empty"
+        )
     unreadable = sum(1 for item in readings if item.timestamp is None)
-    if readings and unreadable / len(readings) > MAX_UNREADABLE_FRACTION:
+    if unreadable / len(readings) > MAX_UNREADABLE_FRACTION:
         raise OverlayTimestampError(
             f"{unreadable} of {len(readings)} frames in {name} have an unreadable "
             "timestamp overlay — refusing to timestamp this video from a guess"
@@ -510,13 +514,6 @@ def _video_date_from_name(path: str | Path) -> dt.date:
         ) from exc
 
 
-def _resized(image: np.ndarray, size: int | tuple[int, int]) -> np.ndarray:
-    from PIL import Image
-
-    target = (size, size) if isinstance(size, int) else size
-    return np.asarray(Image.fromarray(image).resize(target, Image.Resampling.BILINEAR))
-
-
 def _stage_frame(
     frame: np.ndarray, staging: Path, index: int, resize: int | tuple[int, int] | None
 ) -> Path:
@@ -525,7 +522,9 @@ def _stage_frame(
 
     image = np.asarray(frame, dtype=np.uint8)
     staged = staging / f"{index:08d}.jpg"
-    iio.imwrite(staged, image if resize is None else _resized(image, resize), quality=JPEG_QUALITY)
+    iio.imwrite(
+        staged, image if resize is None else _resize_image(image, resize), quality=JPEG_QUALITY
+    )
     return staged
 
 
@@ -537,6 +536,22 @@ def _timestamp_flags(reading: OverlayReading) -> int:
     if reading.corrected:
         bits |= int(QCFlag.TIMESTAMP_CORRECTED)
     return bits
+
+
+def _sweep_orphaned_staging(out_path: Path) -> None:
+    """Remove staging directories a killed extraction left in *out_path*.
+
+    The staging directory is named uniquely per run and removed in a ``finally``,
+    which covers an exception but not a ``SIGKILL`` or a host reset — and a
+    unique name means nothing ever collects what those leave behind, so a
+    directory extracted repeatedly accumulates a full frame set of debris per
+    kill.  Sweeping on entry is safe because two extractions into one output
+    directory would already collide on the frame filenames themselves.
+    """
+    for orphan in sorted(out_path.glob(f"{STAGING_DIR_PREFIX}*")):
+        if orphan.is_dir():
+            shutil.rmtree(orphan, ignore_errors=True)
+            logger.info("removed staging debris from an interrupted extraction: %s", orphan)
 
 
 def extract_frames_with_overlay_timestamps(
@@ -604,6 +619,7 @@ def extract_frames_with_overlay_timestamps(
     rows: list[dict[str, object]] = []
     written: set[str] = set()
     collisions = 0
+    _sweep_orphaned_staging(out_path)
     staging = Path(tempfile.mkdtemp(dir=out_path, prefix=STAGING_DIR_PREFIX))
     try:
         readings: list[OverlayReading] = []

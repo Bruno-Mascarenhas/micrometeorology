@@ -55,8 +55,6 @@ class ConcatFusion(nn.Module):
 
     def __init__(self, visual_dim: int, sensor_dim: int) -> None:
         super().__init__()
-        self.visual_dim = visual_dim
-        self.sensor_dim = sensor_dim
         self._out_dim = visual_dim + sensor_dim
 
     @property
@@ -116,8 +114,6 @@ class FiLMFusion(nn.Module):
 
     def __init__(self, visual_dim: int, sensor_dim: int) -> None:
         super().__init__()
-        self.visual_dim = visual_dim
-        self.sensor_dim = sensor_dim
         self.film_gen = nn.Linear(sensor_dim, 2 * visual_dim)
         nn.init.zeros_(self.film_gen.weight)
         nn.init.zeros_(self.film_gen.bias)
@@ -203,8 +199,6 @@ class CrossAttentionFusion(nn.Module):
         slices = group_slices(feature_columns, groups)
         if not slices:
             raise ValueError("no non-empty feature groups for cross-attention tokens")
-        self.token_dim = resolved_token_dim
-        self.sensor_dim = sensor_dim
         self.group_names: list[str] = list(slices)
         self._group_indices: list[list[int]] = [slices[name] for name in self.group_names]
         self.group_proj = nn.ModuleList(

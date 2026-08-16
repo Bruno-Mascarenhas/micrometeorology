@@ -752,7 +752,7 @@ def run(
     # would be published under today's date. plot_station_graphs, the sibling
     # producer of the same images, stamps the data end for the same reason.
     plotted = [frame.index.max() for frame in (raw, raw_rain) if not frame.empty]
-    graph_dt = (max(plotted) if plotted else date_end).to_pydatetime()
+    graph_dt = max(plotted).to_pydatetime()
 
     typer.echo("Generating graphs...")
 

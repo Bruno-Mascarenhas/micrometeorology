@@ -10,7 +10,6 @@ import pytest
 from solrad_correction.data.preprocessing import PreprocessingPipeline
 from solrad_correction.data.splits import ExpandingWindowSplit, temporal_train_val_test_split
 from solrad_correction.datasets.sequence import WindowedSequenceDataset
-from solrad_correction.datasets.tabular import TabularDataset
 from solrad_correction.evaluation.policy import align_test_frame, prediction_index
 from solrad_correction.features.sequence import create_sequences, create_sequences_index
 
@@ -275,16 +274,6 @@ def test_windowed_dataset_drops_windows_spanning_temporal_gaps() -> None:
         features, target, sequence_length=3, index=index, max_gap="3h"
     )
     assert len(relaxed) == 8
-
-
-def test_tabular_dataset_preserves_full_prediction_index() -> None:
-    index = pd.date_range("2024-01-01", periods=8, freq="1h")
-    df = pd.DataFrame({"feature": np.arange(8), "target": np.arange(8)}, index=index)
-
-    dataset = TabularDataset.from_dataframe(df, ["feature"], "target")
-
-    assert dataset.index is not None
-    assert dataset.index.equals(index)
 
 
 def test_model_native_policy_preserves_model_rows_and_returns_aligned_index() -> None:

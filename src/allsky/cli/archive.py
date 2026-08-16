@@ -21,6 +21,7 @@ from allsky.archive import (
     build_ssl_context,
     ledger_lock,
 )
+from allsky.cli.runtime import configure_cli_logging
 from allsky.drive import DriveTarget, RcloneError, RcloneUploader
 
 logger = logging.getLogger(__name__)
@@ -182,16 +183,28 @@ def _plan_day(
     matches this *step*/*resize*/*timestamps* combination, and uploaded when the
     ledger holds no record of that exact Drive destination.  Frames are only
     queued for upload once they exist or are about to.
+
+    A day being extracted again is always queued for upload, whatever the ledger
+    records: the destination is keyed by the day alone, so the record of the
+    superseded set names the same remote folder as the set replacing it, and
+    reading it as "already there" would leave the remote holding frames that no
+    longer exist locally and no later run would ever reconcile.
+
+    A day the ledger records as unusable under these very parameters is not
+    queued for extraction again: its video decodes the same way every time, and
+    re-reading it nightly costs the whole decode to reach the same refusal.
     """
     frames_done = ledger.frames_match(entry.key, step=step, resize=resize, timestamps=timestamps)
-    wants_extract = extract and not frames_done
+    faulted = ledger.extraction_faulted(
+        entry.key, step=step, resize=resize, timestamps=timestamps.value
+    )
+    wants_extract = extract and not frames_done and faulted is None
     wants_video_upload = upload.wants_videos and not ledger.uploaded(
         entry.key, _video_destination(target, entry)
     )
-    wants_frame_upload = (
-        upload.wants_frames
-        and (frames_done or wants_extract)
-        and not ledger.uploaded(entry.key, _frames_destination(target, entry))
+    wants_frame_upload = upload.wants_frames and (
+        wants_extract
+        or (frames_done and not ledger.uploaded(entry.key, _frames_destination(target, entry)))
     )
     video_on_disk = ledger.has_video(entry.key, local_root=root)
     needs_video_bytes = wants_extract or wants_video_upload
@@ -201,6 +214,50 @@ def _plan_day(
         extract=wants_extract,
         upload_video=wants_video_upload,
         upload_frames=wants_frame_upload,
+    )
+
+
+def _warn_about_ambiguously_clocked_days(
+    ledger: Ledger,
+    selected: tuple[ArchiveEntry, ...],
+    *,
+    clock: TimestampSource,
+    step: int,
+    resize: int | None,
+    extract: bool,
+) -> None:
+    """Announce the days a ledger written before the clock was recorded honestly will redo.
+
+    Earlier releases filed ``timestamps="config"`` for every ``--timestamps
+    config`` run, whatever clock the resolved section actually named — so a day
+    recorded that way may hold overlay-stamped frames or modelled ones, and
+    nothing on disk distinguishes them.  Re-extracting is the only way to settle
+    it, and because the Drive destination is keyed by the day alone, each one is
+    re-uploaded too.
+
+    That is a correct migration and an expensive one, so it is named up front
+    rather than discovered as a cron that ran all night: the days are counted
+    before any work starts, with the flag that skips it.
+    """
+    if not extract or clock is not TimestampSource.overlay:
+        return
+    ambiguous = [
+        entry.key
+        for entry in selected
+        if (record := ledger.frames(entry.key)) is not None
+        and record.get("timestamps") == TimestampSource.config.value
+        and record.get("step") == step
+        and record.get("resize") == resize
+    ]
+    if not ambiguous:
+        return
+    logger.warning(
+        "%d day(s) were extracted by a release that recorded 'config' as the clock whichever "
+        "clock it actually used, so they cannot be told from overlay-stamped days and will be "
+        "re-extracted (and re-uploaded) once: %s%s. Pass --no-extract to defer this.",
+        len(ambiguous),
+        ", ".join(ambiguous[:5]),
+        "..." if len(ambiguous) > 5 else "",
     )
 
 
@@ -293,6 +350,14 @@ def sync_archive(
     whole run, so a rerun transfers only what is missing.  It is saved after each
     day, so a failure mid-run keeps the days already done.
 
+    A day whose burned-in stamps cannot be read is skipped rather than fatal, on
+    the same reasoning ``prepare-local`` states: the fault is a permanent
+    property of that day's bytes, so a run that failed on it fails on it forever
+    and an exit code that can never go green signals nothing.  The refusal is
+    filed in the ledger against the extraction parameters and the video's digest,
+    so the daily job stops re-decoding that video every night while a
+    re-download or a different ``--step`` still gets a fresh attempt.
+
     Raises
     ------
     typer.BadParameter
@@ -301,11 +366,9 @@ def sync_archive(
         ``--upload frames``/``both`` without ``--extract``.
     typer.Exit
         Code 1 when the archive listing or rclone is unreachable, or when any day
-        failed to process.
+        failed to process for a reason a rerun could get past.
     """
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
-    )
+    configure_cli_logging()
     root = data_dir
     videos_dir = root / VIDEOS_SUBDIR
     frames_root = root / FRAMES_SUBDIR
@@ -337,6 +400,8 @@ def sync_archive(
         logger.error("%s", exc)
         raise typer.Exit(code=1) from exc
 
+    from allsky.overlay import OverlayTimestampError
+
     selected = _select(published, since=since_date, until=until_date)
     video_config = _video_config(timestamps, config)
     clock = _clock(video_config)
@@ -361,6 +426,9 @@ def sync_archive(
             )
             if plan.has_work
         ]
+        _warn_about_ambiguously_clocked_days(
+            ledger, selected, clock=clock, step=step, resize=resize, extract=extract
+        )
         typer.echo(
             f"published: {len(published)} day(s); selected: {len(selected)}; "
             f"needing work: {len(plans)}"
@@ -389,6 +457,7 @@ def sync_archive(
                 raise typer.Exit(code=1) from exc
 
         processed = 0
+        unusable = 0
         for plan in plans:
             try:
                 _process_day(
@@ -405,6 +474,16 @@ def sync_archive(
                     prune_uploaded=prune_uploaded,
                 )
                 processed += 1
+            except OverlayTimestampError as exc:
+                unusable += 1
+                ledger.record_extraction_fault(
+                    plan.entry.key,
+                    reason=str(exc),
+                    step=step,
+                    resize=resize,
+                    timestamps=clock.value,
+                )
+                logger.warning("%s cannot be timestamped, skipping: %s", plan.entry.filename, exc)
             except (
                 ArchiveError,
                 RcloneError,
@@ -417,7 +496,8 @@ def sync_archive(
             finally:
                 ledger.save()
 
-        typer.echo(f"done: {processed} day(s) processed, {failures} failed")
+        unusable_note = f", {unusable} unusable" if unusable else ""
+        typer.echo(f"done: {processed} day(s) processed{unusable_note}, {failures} failed")
         typer.echo(f"ledger: {ledger.path}")
     if failures:
         raise typer.Exit(code=1)
@@ -530,9 +610,7 @@ def _process_day(
         )
         ledger.save()
 
-    if prune_uploaded and ledger.uploaded(
-        entry.key, uploader.target.path(REMOTE_VIDEOS, entry.filename)
-    ):
+    if prune_uploaded and ledger.uploaded(entry.key, _video_destination(uploader.target, entry)):
         video_path.unlink(missing_ok=True)
         ledger.mark_pruned(entry.key)
         ledger.save()
@@ -570,22 +648,40 @@ def _extract_replacing_previous_frames(
     per process: the ledger lock already serialises runs, and a unique name would
     turn every crash into debris nothing ever collects.
 
+    A replacement set that holds no frame is refused before anything is
+    discarded, and a swap that fails partway keeps the staging directory the
+    frames it had not moved yet: both are cases where deleting first and finding
+    out afterwards costs a day that no rerun can rebuild once the video is gone.
+
     Returns
     -------
     pandas.DataFrame
         The frame manifest, with ``frame_path`` pointing at the frames where they
         now live rather than at the staging directory they were written in.
+
+    Raises
+    ------
+    allsky.overlay.OverlayTimestampError
+        If the video decodes to no usable frame, in which case *frames_dir* is
+        left exactly as it was.
     """
     from allsky.atomic import atomic_write
-    from allsky.overlay import MANIFEST_FILENAME, extract_frames_for
+    from allsky.overlay import MANIFEST_FILENAME, OverlayTimestampError, extract_frames_for
 
     staging = frames_dir.with_name(f".{frames_dir.name}.incoming")
     shutil.rmtree(staging, ignore_errors=True)
+    swapping = False
     try:
         manifest = extract_frames_for(video_path, staging, video_config, step=step, resize=resize)
+        staged = sorted(staging.glob(FRAME_PATTERN))
+        if not staged:
+            raise OverlayTimestampError(
+                f"{video_path.name} produced no frame — keeping the frames already in {frames_dir}"
+            )
+        swapping = True
         _discard_previous_frames(frames_dir)
         frames_dir.mkdir(parents=True, exist_ok=True)
-        for frame in sorted(staging.glob(FRAME_PATTERN)):
+        for frame in staged:
             frame.replace(frames_dir / frame.name)
         manifest["frame_path"] = [
             str(frames_dir / Path(written).name) for written in manifest["frame_path"]
@@ -593,8 +689,10 @@ def _extract_replacing_previous_frames(
         atomic_write(
             frames_dir / MANIFEST_FILENAME, lambda tmp: manifest.to_parquet(tmp, index=False)
         )
+        swapping = False
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        if not swapping:
+            shutil.rmtree(staging, ignore_errors=True)
     return manifest
 
 
@@ -675,9 +773,7 @@ def snapshot(
     typer.Exit
         Code 1 when the capture, the prediction or the Drive upload fails.
     """
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
-    )
+    configure_cli_logging()
     from allsky.snapshot import capture_snapshot
 
     try:

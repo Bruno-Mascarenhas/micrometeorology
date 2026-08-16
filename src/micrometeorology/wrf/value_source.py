@@ -147,33 +147,20 @@ def build_value_frame_source(
     if required and not all(dataset.has_variable(field) for field in required):
         return None
 
-    if variable_name == WRFVariable.TEMPERATURE:
-        temperature_kelvin, scale_min, scale_max = variables.extract_temperature(dataset)
+    if variable_name in (WRFVariable.TEMPERATURE, WRFVariable.SKIN_TEMPERATURE):
+        # Both arrive in Kelvin and share extract_temperature_step's conversion;
+        # only the field they read differs.
+        extract_kelvin = (
+            variables.extract_temperature
+            if variable_name == WRFVariable.TEMPERATURE
+            else variables.extract_skin_temperature
+        )
+        kelvin, scale_min, scale_max = extract_kelvin(dataset)
         return ValueFrameSource(
             frame_for_step=lambda time_step_index: variables.materialize_2d(
                 variables.extract_temperature_step(
-                    temperature_kelvin[time_step_index : time_step_index + 1, :, :]
+                    kelvin[time_step_index : time_step_index + 1, :, :]
                 )
-            ),
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.SKIN_TEMPERATURE:
-        skin_temperature_kelvin, scale_min, scale_max = variables.extract_skin_temperature(dataset)
-        return ValueFrameSource(
-            frame_for_step=lambda time_step_index: variables.materialize_2d(
-                variables.extract_temperature_step(
-                    skin_temperature_kelvin[time_step_index : time_step_index + 1, :, :]
-                )
-            ),
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
-    if variable_name == WRFVariable.RELATIVE_HUMIDITY:
-        relative_humidity, scale_min, scale_max = variables.extract_relative_humidity(dataset)
-        return ValueFrameSource(
-            frame_for_step=lambda time_step_index: variables.materialize_2d(
-                relative_humidity[time_step_index : time_step_index + 1, :, :]
             ),
             scale_min=scale_min,
             scale_max=scale_max,
@@ -207,19 +194,14 @@ def build_value_frame_source(
             scale_max=scale_max,
             vector_for_step=wind_components_for_step,
         )
-    if variable_name == WRFVariable.WIND_POWER_DENSITY_10M:
-        power_density, scale_min, scale_max = variables.extract_wind_power_density_10m(dataset)
-        return ValueFrameSource(
-            frame_for_step=lambda time_step_index: variables.materialize_2d(
-                power_density[time_step_index : time_step_index + 1, :, :]
-            ),
-            scale_min=scale_min,
-            scale_max=scale_max,
-        )
     if variable_name == WRFVariable.PRESSURE:
         scalar_values, scale_min, scale_max = variables.extract_pressure(dataset)
     elif variable_name == WRFVariable.VAPOR:
         scalar_values, scale_min, scale_max = variables.extract_vapor(dataset)
+    elif variable_name == WRFVariable.RELATIVE_HUMIDITY:
+        scalar_values, scale_min, scale_max = variables.extract_relative_humidity(dataset)
+    elif variable_name == WRFVariable.WIND_POWER_DENSITY_10M:
+        scalar_values, scale_min, scale_max = variables.extract_wind_power_density_10m(dataset)
     elif variable_name in DERIVED_RADIATION_SOURCES:
         extractor, required_fields = DERIVED_RADIATION_SOURCES[variable_name]
         # Checked up front so a missing input is reported as the ordinary

@@ -27,6 +27,7 @@ __all__ = [
     "FEATURE_DTYPE",
     "GEOMETRY_COLUMNS",
     "META_COLUMNS",
+    "NS_PER_MINUTE",
     "PROVENANCE_COLUMNS",
     "SKY_CLASS_COUNT",
     "SKY_CLASS_KT_UPPER_BOUNDS",
@@ -87,6 +88,24 @@ TARGET_COLUMNS: Mapping[str, str] = {
     "cloud_fraction": "float64",
     "qc_flags": "int64",
 }
+
+#: Target columns that joined :data:`TARGET_COLUMNS` after the v2 layout was
+#: first published.  A manifest built before them is structurally sound and both
+#: trains and evaluates; each consumer degrades on its own — the evaluator drops
+#: the ``kindex_band`` stratum without ``target_kt``, and the k-index clear-sky
+#: baseline is unresolvable without ``kindex_kind`` — so validation reports them
+#: as warnings rather than refusing a dataset that works.
+DEGRADABLE_TARGET_COLUMNS: tuple[str, ...] = (
+    "target_source",
+    "kindex_kind",
+    "target_kt",
+    "cloud_fraction",
+)
+
+#: Nanoseconds in a minute. The alignment search and the temporal window both
+#: work on int64 nanosecond stamps, and two copies of this factor are two places
+#: a window could silently stop meaning minutes.
+NS_PER_MINUTE = 60_000_000_000
 
 #: Name of the (nullable) split-label column: empty at build, filled in place by
 #: :func:`allsky.data.manifest.attach_split_column` from a day-level split.

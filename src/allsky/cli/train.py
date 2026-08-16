@@ -12,13 +12,13 @@ bare ``ModuleNotFoundError``.
 """
 
 import json
-import logging
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from allsky.cli.runtime import configure_cli_logging
 from allsky.config import is_experiment_config, load_experiment_config
 from micrometeorology.common.optional import require
 
@@ -84,9 +84,7 @@ def train(
     experiment config. A resumed checkpoint is read under torch's restricted
     unpickler unless ``--trust-checkpoint`` is passed.
     """
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
-    )
+    configure_cli_logging()
 
     if config is None or not is_experiment_config(config):
         raise typer.BadParameter(
@@ -104,26 +102,31 @@ def train(
     if device is not None:
         exp_cfg.train.device = str(device)
 
-    resume_arg: str | None = None
-    if resume is not None:
-        if resume != "auto" and not Path(resume).exists():
-            raise typer.BadParameter(
-                f"resume checkpoint does not exist: {resume}", param_hint="--resume"
-            )
-        resume_arg = resume
+    if resume is not None and resume != "auto" and not Path(resume).exists():
+        raise typer.BadParameter(
+            f"resume checkpoint does not exist: {resume}", param_hint="--resume"
+        )
 
     require("torch", "allsky")
-    from allsky.training import run_experiment  # lazy: pulls torch at run time
+    from allsky.training import TrainingError, run_experiment  # lazy: pulls torch at run time
 
-    summary = run_experiment(
-        exp_cfg,
-        data_root=data_root,
-        output_dir=out_dir,
-        device=str(device) if device is not None else None,
-        amp=amp,
-        resume=resume_arg,
-        trust_checkpoint=trust_checkpoint,
-    )
+    try:
+        summary = run_experiment(
+            exp_cfg,
+            data_root=data_root,
+            output_dir=out_dir,
+            device=str(device) if device is not None else None,
+            amp=amp,
+            resume=resume,
+            trust_checkpoint=trust_checkpoint,
+        )
+    except TrainingError as exc:
+        # Every TrainingError names the knob to change. A traceback through the
+        # engine's internals buries that message under frames the operator has no
+        # use for, and a run that diverged is the one time they most need to read
+        # it.
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     typer.echo(json.dumps(summary, indent=2, default=str))
 
 

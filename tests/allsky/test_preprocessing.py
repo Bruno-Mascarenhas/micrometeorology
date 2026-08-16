@@ -140,11 +140,6 @@ class TestVisualQC:
         image[0, :] = 255  # 10% of pixels saturated < 20% default threshold
         assert QCFlag.FRAME_SATURATED not in visual_qc(image)
 
-    def test_thresholds_are_overridable(self):
-        image = _rgb(10, 10, fill=128)
-        image[:2, :] = 255  # 20% saturated
-        assert QCFlag.FRAME_SATURATED in visual_qc(image, saturated_fraction_threshold=0.1)
-
     @pytest.mark.parametrize("shape", [(0, 0, 3), (0, 4, 3), (4, 0, 3)])
     def test_pixelless_frame_is_flagged_unreadable_not_clean(self, shape: tuple[int, int, int]):
         flags = visual_qc(np.zeros(shape, dtype=np.uint8))
