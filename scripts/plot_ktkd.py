@@ -42,10 +42,12 @@ KD_EDGES = np.round(np.arange(0.0, 1.02, 0.02), 2)
 
 #: Okabe-Ito, so the model lines stay distinguishable in greyscale and to a
 #: colour-blind reader, matching the palette the station figures already use.
-MODEL_STYLE = {
-    "marques_filho_2016": ("#D55E00", "Marques Filho et al. (2016)"),
-    "lemos_2017": ("#0072B2", "Lemos et al. (2017)"),
-    "ridley_brl_2010": ("#009E73", "BRL — Ridley et al. (2010)"),
+#: Only the colour lives here — the names come from the same MODEL_LABELS the
+#: payload publishes, so a figure and the site cannot caption a model differently.
+MODEL_COLOURS = {
+    "marques_filho_2016": "#D55E00",
+    "lemos_2017": "#0072B2",
+    "ridley_brl_2010": "#009E73",
 }
 
 
@@ -84,11 +86,17 @@ def build_figure(hourly: pd.DataFrame) -> tuple[plt.Figure, dict[str, Any]]:
     bar.set_label("horas por célula")
 
     grid = (KT_EDGES[:-1] + KT_EDGES[1:]) / 2.0
-    colour, label = MODEL_STYLE["marques_filho_2016"]
-    axes.plot(grid, ktkd_stats.marques_filho_2016(grid), color=colour, lw=2.0, label=label)
+    axes.plot(
+        grid,
+        ktkd_stats.marques_filho_2016(grid),
+        color=MODEL_COLOURS["marques_filho_2016"],
+        lw=2.0,
+        label=ktkd_stats.MODEL_LABELS["marques_filho_2016"],
+    )
 
     for model_id in ("lemos_2017", "ridley_brl_2010"):
-        colour, label = MODEL_STYLE[model_id]
+        colour = MODEL_COLOURS[model_id]
+        label = ktkd_stats.MODEL_LABELS[model_id]
         band = ktkd_stats.model_band(
             kt.to_numpy(), predictions[model_id], KT_EDGES, min_samples_per_bin=30
         )

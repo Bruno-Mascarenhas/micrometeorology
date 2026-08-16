@@ -30,6 +30,7 @@ from allsky.solar import hour_angle_deg, solar_elevation_deg
 
 __all__ = [
     "KTKD_SCHEMA",
+    "MODEL_LABELS",
     "MODEL_REFERENCES",
     "apparent_solar_time_hours",
     "daily_clearness_index",
@@ -44,6 +45,15 @@ __all__ = [
 
 #: Published schema tag of the artifact the sky page reads.
 KTKD_SCHEMA = "labmim-ktkd-v1"
+
+#: Short display names. Published in the payload so the page prints the name the
+#: producer chose, instead of deriving one by splitting the citation on its first
+#: comma — a parser that turns a bibliography edit into a relabelled chart.
+MODEL_LABELS: dict[str, str] = {
+    "marques_filho_2016": "Marques Filho et al. (2016)",
+    "lemos_2017": "Lemos et al. (2017)",
+    "ridley_brl_2010": "BRL — Ridley et al. (2010)",
+}
 
 MODEL_REFERENCES: dict[str, str] = {
     "marques_filho_2016": (
@@ -482,7 +492,13 @@ def build_ktkd_payload(
                 kt.to_numpy(), predicted, kt_edges, min_samples_per_bin=min_samples_per_bin
             )
         published_models.append(
-            {"id": model_id, "reference": MODEL_REFERENCES[model_id], **entry, **scores}
+            {
+                "id": model_id,
+                "label": MODEL_LABELS[model_id],
+                "reference": MODEL_REFERENCES[model_id],
+                **entry,
+                **scores,
+            }
         )
 
     payload: dict[str, Any] = {

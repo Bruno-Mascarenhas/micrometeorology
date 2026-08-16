@@ -95,6 +95,16 @@ def test_the_class_shares_are_published_already_computed_with_their_bounds():
     assert sum(c["fraction"] for c in conditions["conditions"]) == pytest.approx(1.0, abs=1e-6)
 
 
+def test_every_model_publishes_a_short_label_beside_its_full_citation():
+    """The page prints the producer's name, not one parsed out of the citation."""
+    models = build_payloads(_hourly(), version="probe")["ktkd.json"]["models"]
+
+    for model in models:
+        assert model["label"]
+        assert "," not in model["label"].split("(")[0].rstrip()
+        assert model["reference"] != model["label"]
+
+
 def test_the_density_matrix_rows_match_the_kd_edges_the_renderer_checks():
     density = build_payloads(_hourly(), version="probe")["ktkd.json"]["density"]
 

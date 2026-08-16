@@ -172,6 +172,11 @@ def test_the_payload_declares_the_published_schema_and_both_model_kinds():
     assert kinds["lemos_2017"] == "band"
     assert kinds["ridley_brl_2010"] == "band"
     assert payload["sky_conditions"]["kt_upper_bounds"] == [0.35, 0.55, 0.65]
+    # The display name is published, so the page never derives one by splitting
+    # the citation: a bibliography edit would otherwise relabel the chart.
+    labels = {model["id"]: model["label"] for model in payload["models"]}
+    assert labels["marques_filho_2016"] == "Marques Filho et al. (2016)"
+    assert all(model["reference"] for model in payload["models"])
     assert len(payload["points"]) == len(kt)
     assert payload["points_format"] == ["kt", "kd", "t"]
     first = payload["points"][0]
