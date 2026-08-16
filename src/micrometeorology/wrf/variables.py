@@ -24,6 +24,8 @@ from datetime import datetime
 import numpy as np
 from numpy.typing import NDArray
 
+from allsky.solar import SOLAR_CONSTANT_WM2
+from micrometeorology.common.physics import STEFAN_BOLTZMANN
 from micrometeorology.wrf.reader import WRFDataset
 from micrometeorology.wrf.safety import assert_reasonable_array_size
 
@@ -306,15 +308,6 @@ def extract_scalar(ds: WRFDataset, var_name: str) -> tuple[NDArray, float, float
     return var, v_min, v_max
 
 
-#: Stefan-Boltzmann constant, W m-2 K-4 (CODATA 2018).
-STEFAN_BOLTZMANN = 5.670374419e-8
-
-#: Total solar irradiance at 1 AU, W m-2: Kopp & Lean (2011) measured 1360.8 +- 0.5.
-#: Must match ``allsky.solar.SOLAR_CONSTANT_WM2`` so the WRF and all-sky-camera
-#: clearness indices stay on one scale; the older 1367 (Duffie & Beckman, quoting
-#: the WRC) would shift kt by 0.4%.
-SOLAR_CONSTANT = 1361.0
-
 #: Sun-elevation floor for the clearness index: below it the extraterrestrial
 #: denominator is small enough that ``kt`` tracks the horizon singularity rather
 #: than sky condition, so those cells publish "no value".
@@ -512,7 +505,7 @@ def compute_clearness_index(swdown: NDArray, coszen: NDArray, eccentricity: NDAr
         unusually clear sky. ``COSZEN`` is negative at night, which the elevation
         floor screens out along with the singularity.
     """
-    denominator = SOLAR_CONSTANT * eccentricity * coszen
+    denominator = SOLAR_CONSTANT_WM2 * eccentricity * coszen
     clearness = np.full(swdown.shape, np.nan, dtype=np.float64)
     sun_up = coszen >= MIN_COSZEN_FOR_CLEARNESS
     np.divide(swdown, denominator, out=clearness, where=sun_up)

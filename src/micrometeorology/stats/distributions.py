@@ -82,6 +82,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import special
 
+from micrometeorology.common.physics import STEFAN_BOLTZMANN
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -772,11 +774,6 @@ def _hollands_ppf(q: NDArray, params: Mapping[str, float]) -> NDArray:
     midpoint: NDArray = 0.5 * (low + high)
     return midpoint
 
-
-# CODATA 2018. Only used to invert Stefan-Boltzmann at unit emissivity, which is
-# an exact relabelling of an upwelling flux as a brightness temperature and so
-# needs no emissivity value.
-STEFAN_BOLTZMANN = 5.670374419e-8
 
 # Gauss-Legendre nodes for the net-radiation convolution. 48, 96 and 192 agree to
 # five decimals on the real record, so 96 carries no quadrature noise.

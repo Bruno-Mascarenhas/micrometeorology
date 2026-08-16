@@ -25,12 +25,14 @@ Plus the wiring: dispatcher registration, the daylight gate, and the
 missing-input skip path.
 """
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 import netCDF4
 import numpy as np
 import pytest
+import scipy.constants
 
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import variables
@@ -43,7 +45,7 @@ from micrometeorology.wrf.value_source import (
 )
 from micrometeorology.wrf.variables import (
     MIN_COSZEN_FOR_CLEARNESS,
-    SOLAR_CONSTANT,
+    SOLAR_CONSTANT_WM2,
     STEFAN_BOLTZMANN,
     _eccentricity_correction,
     compute_clearness_index,
@@ -174,7 +176,32 @@ Deliberately NOT cited, having been checked and found unsupportable:
 
 def test_solar_constant_matches_kopp_lean():
     """Kopp & Lean (2011) put total solar irradiance at 1360.8 +- 0.5 W/m2."""
-    assert pytest.approx(1361.0, abs=1.0) == SOLAR_CONSTANT
+    assert pytest.approx(1361.0, abs=1.0) == SOLAR_CONSTANT_WM2
+
+
+def test_the_stefan_boltzmann_constant_matches_the_codata_table_scipy_ships():
+    """Checked against an independently maintained source, not a second literal.
+
+    A test comparing the constant to a number written out beside it catches
+    nothing: a typo is fixed by editing whichever copy the author is looking at.
+    ``scipy.constants`` carries the CODATA table, so this fails on a typo in ours
+    and cannot be silenced by editing this file.
+    """
+    assert pytest.approx(scipy.constants.Stefan_Boltzmann, rel=1e-9) == STEFAN_BOLTZMANN
+
+
+def test_the_whole_package_declares_the_stefan_boltzmann_constant_once():
+    """Two copies of a constant are two things that can drift apart silently."""
+    declarations = sorted(
+        str(path)
+        for path in Path("src").rglob("*.py")
+        if any(
+            re.match(r"^STEFAN_BOLTZMANN\s*=", line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+    )
+
+    assert declarations == ["src/micrometeorology/common/physics.py"]
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +384,7 @@ def test_clearness_index_matches_its_definition_at_high_sun():
 
     kt = compute_clearness_index(swdown, coszen, eccentricity)
 
-    assert kt.item() == pytest.approx(900.0 / (SOLAR_CONSTANT * 0.9), rel=1e-12)
+    assert kt.item() == pytest.approx(900.0 / (SOLAR_CONSTANT_WM2 * 0.9), rel=1e-12)
     # Duffie & Beckman p. 77: above kt = 0.80 "there are very few data", so a
     # high-sun clear-sky value must land below that edge, not above it.
     assert 0.7 < kt.item() < 0.8
