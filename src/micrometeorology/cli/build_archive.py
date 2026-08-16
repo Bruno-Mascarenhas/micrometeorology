@@ -73,6 +73,7 @@ from micrometeorology.sensors.ingestion import (
     apply_physical_limits,
     values_outside_declared_limits,
 )
+from micrometeorology.sensors.quality import mask_persistent_runs, mask_step_excursions
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -198,6 +199,7 @@ def run(
     limits_absent_columns: list[str] = []
     gaps: list[tuple[str, str, pd.Timestamp, pd.Timestamp]] = []
     net_gained = net_dropped = 0
+    step_excursions_removed = persistence_runs_removed = 0
     invalidated: dict[str, int] = {}
 
     if settings.sensor_limits:
@@ -235,6 +237,17 @@ def run(
             for column, count in (before_calibration - qc.notna().sum()).items()
             if int(count) > 0
         }
+        # Statistical QC runs HERE, after calibration and before unification.
+        # After calibration because the thresholds are in physical units, the same
+        # reason the second apply_physical_limits pass exists; before unification
+        # because that step COPIES, so masking the raw alias reaches the unified
+        # channel for free. Per raw alias also means per instrument, so no era
+        # boundary can manufacture a step across a sensor swap.
+        qc, step_excursions_removed = mask_step_excursions(qc, settings.sensor_step_limits)
+        qc, persistence_runs_removed = mask_persistent_runs(
+            qc, settings.sensor_persistence_limits, settings.sensor_wind_speed_column_map
+        )
+
         # Without this the sensor_switches block parses and does nothing, and
         # every era-spanning variable has to be reassembled by hand downstream.
         switches = load_sensor_switches(calibrations_path)
@@ -353,6 +366,8 @@ def run(
         "physical_limits_absent_columns": limits_absent_columns,
         "physical_limits_after_calibration": outside_after_calibration,
         "calibration_invalidated": invalidated,
+        "step_excursions_removed": step_excursions_removed,
+        "persistence_runs_removed": persistence_runs_removed,
         "impossible_shortwave_removed": impossible,
         # Dated, so the episode stays auditable after the samples are gone.
         "timestamp_corrupted_days": [day for day, _count in corrupted],

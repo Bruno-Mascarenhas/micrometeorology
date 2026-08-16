@@ -110,6 +110,23 @@ class Settings(BaseSettings):
         default_factory=list,
         description="Quality-control ranges, one dict per column: {column, lower, upper}",
     )
+    sensor_step_limits: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Excursion (spike/dip) tests, one dict per column: "
+            "{column, threshold, return_tol, max_len}. These reject the improbable, "
+            "which the ranges above structurally cannot: a barometer dropping 17 hPa "
+            "for one sample and returning stays inside every bound."
+        ),
+    )
+    sensor_persistence_limits: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Exact-repeat run tests, one dict per column: "
+            "{column, min_run, exempt_at_or_below}. These catch a railed sensor, "
+            "which reads inside every bound forever."
+        ),
+    )
     sensor_sum_columns: list[str] = Field(
         default_factory=list,
         description="Columns aggregated by sum instead of mean",
