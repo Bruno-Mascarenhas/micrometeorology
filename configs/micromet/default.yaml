@@ -145,6 +145,12 @@ sensor_step_limits:
 # breaks a run. `exempt_at_or_below` skips a level at which a repeated value is
 # the instrument reading calm; for a direction column it is evaluated on the
 # PAIRED SPEED from sensor_wind_speed_column_map.
+# That exemption is bounded in DURATION too, by `exempt_max_run`, defaulting to
+# the channel's own `min_run`. Unbounded it protects a sensor that died reporting
+# zero for as long as it stays dead. The two populations are three orders of
+# magnitude apart here: genuine calm runs reach 2 samples at p99 and 6 at their
+# longest, while the rails run 1,318 to 3,060 samples — 110 to 255 hours of a
+# coastal site reporting no wind at all.
 # The windows are LOCALLY DERIVED from the longest genuine run per family, not
 # taken from WMO/TD-No. 1236: its minimum-variability-over-60-minutes form flags
 # 3.6% of Temp1_Avg and 10.1% of RH1_Avg at this site. A damped maritime tropical

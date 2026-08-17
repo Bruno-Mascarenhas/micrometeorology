@@ -100,7 +100,8 @@ def test_a_repeated_calm_reading_is_not_a_railed_anemometer():
     frame = _frame("WS_WXT_Avg", [0.0] * 8)
 
     _frame_out, removed = mask_persistent_runs(
-        frame, [{"column": "WS_WXT_Avg", "min_run": 4, "exempt_at_or_below": 0.1}]
+        frame,
+        [{"column": "WS_WXT_Avg", "min_run": 4, "exempt_at_or_below": 0.1, "exempt_max_run": 12}],
     )
 
     assert removed == 0
@@ -124,7 +125,14 @@ def test_a_direction_frozen_during_calm_is_spared_by_its_paired_speed():
 
     _frame_out, removed = mask_persistent_runs(
         frame,
-        [{"column": "WindDir_D1_WVT", "min_run": 4, "exempt_at_or_below": 0.1}],
+        [
+            {
+                "column": "WindDir_D1_WVT",
+                "min_run": 4,
+                "exempt_at_or_below": 0.1,
+                "exempt_max_run": 12,
+            }
+        ],
         {"WindDir_D1_WVT": "WS_ms_S_WVT"},
     )
 
@@ -181,22 +189,36 @@ def test_an_excursion_window_shorter_than_one_sample_is_refused():
         )
 
 
-def test_a_missing_paired_speed_spares_the_run_rather_than_condemning_it():
-    """IEEE semantics fail the other way: `NaN <= level` is False, lifting the gate.
-
-    Absence of evidence that the air was still would become evidence that it was
-    moving, and the vane would be called jammed on no evidence at all.
-    """
+def test_a_short_run_with_no_paired_speed_is_spared():
+    """Left to IEEE semantics this failed the other way: `NaN <= level` is False,
+    so the exemption lifted and the absence of evidence that the air was still
+    became evidence that it was moving."""
     frame = _frame("WD_WXT_Avg", [0.0] * 8)
     frame["WS_WXT_Avg"] = np.nan
 
     _frame_out, removed = mask_persistent_runs(
         frame,
-        [{"column": "WD_WXT_Avg", "min_run": 4, "exempt_at_or_below": 0.1}],
+        [{"column": "WD_WXT_Avg", "min_run": 4, "exempt_at_or_below": 0.1, "exempt_max_run": 12}],
         {"WD_WXT_Avg": "WS_WXT_Avg"},
     )
 
     assert removed == 0
+
+
+def test_a_calm_that_outlasts_the_ceiling_is_a_dead_sensor_not_a_calm():
+    """Unbounded, the exemption protects a sensor that died reporting zero forever.
+
+    The populations do not overlap here: genuine calm runs reach six samples at
+    their longest, the rails run for 110 to 255 hours.
+    """
+    frame = _frame("WS_WXT_Avg", [0.0] * 20)
+
+    _frame_out, removed = mask_persistent_runs(
+        frame,
+        [{"column": "WS_WXT_Avg", "min_run": 4, "exempt_at_or_below": 0.1, "exempt_max_run": 12}],
+    )
+
+    assert removed == 20
 
 
 def test_the_reported_count_never_includes_a_cell_that_was_already_missing():

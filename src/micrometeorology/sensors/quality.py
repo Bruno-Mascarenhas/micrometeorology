@@ -219,11 +219,15 @@ def mask_persistent_runs(
             gate = (
                 frame[gate_column].to_numpy(dtype=float) if gate_column in frame.columns else values
             )
-            # A missing gate spares the run. Left to IEEE semantics this fails the
-            # other way — `NaN <= level` is False, so the exemption lifts and the
-            # absence of evidence that the air was still becomes evidence that it
-            # was moving, which is the opposite of what the gate is for.
-            stuck &= ~((gate <= float(exempt_level)) | np.isnan(gate))
+            # The exemption is bounded in DURATION as well as in level. Unbounded,
+            # a sensor that died reporting zero is exempt forever and the only
+            # remaining defence is a hand-written window list. Measured here, the
+            # two populations do not overlap: genuine calm runs reach 2 samples at
+            # p99 and 6 at the maximum, while the rails run 1,318 to 3,060 samples
+            # — 110 to 255 hours of a coastal site reporting no wind at all.
+            ceiling = int(limit.get("exempt_max_run", min_run))
+            calm = (gate <= float(exempt_level)) | np.isnan(gate)
+            stuck &= ~(calm & (lengths[runs] <= ceiling))
 
         if stuck.any():
             frame.loc[stuck, column] = np.nan
