@@ -484,6 +484,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         fit_scale=100.0,
         caveats=(
             "A beta é definida no intervalo aberto (0, 100): o acúmulo de amostras na saturação sai do ajuste e é informado à parte. Barras e curva são densidades condicionais ao restante.",
+            "Dez meses desta distribuição vêm de um higrômetro com viés seco. De março a dezembro de 2025 o canal publicado é a unidade 1 do Gill MetSENS, cujo máximo mensal fica entre 80 e 87 % de umidade relativa e nunca aproxima a saturação, num sítio litorâneo que satura com frequência — os 97 meses anteriores, medidos pelo HMP, tocam 100 %. O desvio é da ordem de 10 pontos e desloca a cauda úmida desta distribuição para baixo. O canal não tem registro após dezembro de 2025.",
         ),
     ),
     VariableSpec(
@@ -523,6 +524,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         caveats=(
             "A Weibull não representa massa em zero: as calmarias saem do ajuste e são informadas à parte. Barras e curva são densidades condicionais às horas com vento acima do limiar de partida — é a densidade híbrida de [[takle1978]], mostrada como as suas duas peças. O limiar entra como calmaria: é o valor que o anemômetro reporta parado, não uma velocidade medida.",
             "O mesmo corte é aplicado ao recorte do modelo, e essa é uma escolha declarada: um modelo não tem velocidade de partida, então o limiar ali não é um estado de instrumento e sim a condição que torna as duas densidades comparáveis. Sem ele o modelo publicaria a sua massa dentro das barras e do ajuste enquanto o observado a publica fora — dois histogramas condicionados a eventos diferentes, lado a lado, que é justamente a comparação que esta página existe para permitir.",
+            "A ausência de dado de vento no acervo não é uniforme ao longo do ano: a cobertura vai de 66 % em maio a 90 % em janeiro, e o verão austral está 12 pontos percentuais melhor amostrado que o inverno. O recorte de todo o registro é portanto pesado para o verão, e as comparações que importam são entre os recortes sazonais, que essa desigualdade não atravessa.",
         ),
     ),
     VariableSpec(
