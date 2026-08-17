@@ -52,12 +52,15 @@ from micrometeorology.sensors.archive import (
     RAIN_MANIFEST,
     STATUS_COLUMNS,
     ArchiveReport,
+    blocked_gauge_runs,
     build_five_minute_frame,
     close_net_radiation,
     mask_impossible_shortwave,
     mask_night_corrupted_days,
     mask_sentinels,
+    months_never_reaching_saturation,
     night_corrupted_days,
+    unquantised_rain_samples,
     unshaded_diffuse_days,
     verify_frame,
 )
@@ -73,6 +76,7 @@ from micrometeorology.sensors.ingestion import (
     apply_physical_limits,
     values_outside_declared_limits,
 )
+from micrometeorology.sensors.quality import mask_persistent_runs, mask_step_excursions
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -192,12 +196,23 @@ def run(
         if strict:
             raise typer.Exit(code=1)
 
+    # A blocked funnel and a dry spell are the same run of zeros to every gate
+    # here; only the length parts them, and the curated window that covers the
+    # one known episode ages silently the next time it clogs.
+    blocked = blocked_gauge_runs(qc)
+    for column, first, last, days in blocked:
+        typer.echo(f"\n  ! {column} sem chuva por {days} dias ({first} a {last}): funil suspeito")
+    unquantised = unquantised_rain_samples(qc)
+    for column, count in unquantised.items():
+        typer.echo(f"  ! {column}: {count} total(is) fora da grade da bascula")
+
     # Every stage below is conditional; pre-declared so the report can say "this
     # stage removed nothing" rather than omit the key.
     limits_fired: dict[str, int] = {}
     limits_absent_columns: list[str] = []
     gaps: list[tuple[str, str, pd.Timestamp, pd.Timestamp]] = []
     net_gained = net_dropped = 0
+    step_excursions_removed = persistence_runs_removed = 0
     invalidated: dict[str, int] = {}
 
     if settings.sensor_limits:
@@ -235,6 +250,15 @@ def run(
             for column, count in (before_calibration - qc.notna().sum()).items()
             if int(count) > 0
         }
+        # Statistical QC runs HERE, after calibration and before unification.
+        # After calibration because the thresholds are in physical units, the same
+        # reason the second apply_physical_limits pass exists; before unification
+        # because that step COPIES, so masking the raw alias reaches the unified
+        # channel for free. Per raw alias also means per instrument, so no era
+        # boundary can manufacture a step across a sensor swap.
+        qc, step_excursions_removed = mask_step_excursions(qc, settings.sensor_step_limits)
+        qc, persistence_runs_removed = mask_persistent_runs(qc, settings.sensor_persistence_limits)
+
         # Without this the sensor_switches block parses and does nothing, and
         # every era-spanning variable has to be reassembled by hand downstream.
         switches = load_sensor_switches(calibrations_path)
@@ -304,6 +328,15 @@ def run(
         ]:
             typer.echo(f"  {column:22s} {count:,}")
 
+    # AFTER unification, deliberately: the one channel this matters most for is
+    # the unified ``ur``, which does not exist before it. The fault family is the
+    # one every other gate here is blind to by construction — a hygrometer reading
+    # a steady offset low never repeats, never steps and never leaves its range,
+    # so saturation is the only external anchor that reaches it.
+    unsaturated = months_never_reaching_saturation(qc)
+    for column, month, peak in unsaturated[-6:]:
+        typer.echo(f"  ! {column} nunca passou de {peak:.1f} %UR em {month}: vies seco suspeito")
+
     _write(qc, out / "station_5min_qc", output_format)
 
     # The logger's quality flag is text, which no hourly mean can carry; the
@@ -346,13 +379,26 @@ def run(
             }
             for report in reports
         ],
-        # Every stage that removes a sample reports here, so these tallies sum
-        # to the raw-to-QC delta rather than living only in a console log.
+        # Every stage that removes a sample reports here. The tallies close the
+        # raw-to-QC accounting NET of what unification and net recomposition ADD:
+        # raw + copied cells + recomposed - removed = qc, residue zero. The naive
+        # raw-minus-qc delta is negative, because unify_sensor_columns copies about
+        # 12.9 million cells into the canonical channels.
         "sentinels_removed": sentinels_removed,
         "physical_limits_removed": limits_fired,
         "physical_limits_absent_columns": limits_absent_columns,
         "physical_limits_after_calibration": outside_after_calibration,
         "calibration_invalidated": invalidated,
+        "blocked_gauge_runs": [
+            {"column": column, "first": first, "last": last, "days": days}
+            for column, first, last, days in blocked
+        ],
+        "unquantised_rain_samples": unquantised,
+        "months_never_reaching_saturation": [
+            {"column": column, "month": month, "peak": peak} for column, month, peak in unsaturated
+        ],
+        "step_excursions_removed": step_excursions_removed,
+        "persistence_runs_removed": persistence_runs_removed,
         "impossible_shortwave_removed": impossible,
         # Dated, so the episode stays auditable after the samples are gone.
         "timestamp_corrupted_days": [day for day, _count in corrupted],

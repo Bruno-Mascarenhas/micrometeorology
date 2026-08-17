@@ -53,7 +53,19 @@ DEFAULT_VARS = [
     "poteolico",
     "wind_power_density_10m",
     "wind_vectors",
+    "isobars",
 ]
+
+#: The requests whose units write the consolidated ``.series.bin`` and
+#: ``.summary.json`` that the manifest's ``features`` vouch for. The overlays —
+#: the wind arrows, the isobars — write neither, so leaving one out of a request
+#: does not make the run partial in the sense those descriptors care about, and
+#: counting it would revoke a byte-offset contract over a file it never touches.
+ARTIFACT_VARIABLES: frozenset[str] = frozenset(
+    variable
+    for variable in DEFAULT_VARS
+    if jobs.unit_kind_for(variable) in {"values_json", "poteolico"}
+)
 
 
 _WRFOUT_DOMAIN_RE = re.compile(r"^wrfout_(d\d+)_", re.IGNORECASE)
@@ -265,7 +277,7 @@ def run(
         for warning in result.warnings:
             typer.echo(f"  ⚠ {warning}")
     manifest_path = jobs.write_run_manifest(
-        output_dir, results, var_list, covers_every_variable=set(var_list) >= set(DEFAULT_VARS)
+        output_dir, results, var_list, covers_every_variable=set(var_list) >= ARTIFACT_VARIABLES
     )
     if manifest_path:
         typer.echo(f"✓ Manifest: {manifest_path}")

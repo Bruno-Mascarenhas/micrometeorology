@@ -100,6 +100,109 @@ sensor_limits:
   - { column: Ramount_Tot, lower: 0, upper: 25.4 }
   - { column: Hamount_Tot, lower: 0, upper: 25.4 }
   - { column: Hamount_WXT_Tot, lower: 0, upper: 25.4 }
+
+# Excursion (spike/dip) test: a value that leaves the series and returns within
+# `max_len` samples, coming back inside `return_tol` of where it left. The RETURN
+# is the discriminator, not the size of the jump — a convective cold pool is a
+# large step but does not recover in five minutes. Measured over the whole
+# archive: a plain step test at 1.5 C flags 305 temperature samples, 50.2% of
+# them rain-coincident against a 6.12% baseline; the excursion form flags 32, at
+# 15.6%. Differences are taken between consecutive samples that CARRY A VALUE, at
+# most two intervals apart: an earlier gate has usually masked one side of the
+# very dropout being looked for.
+sensor_step_limits:
+  # 609 samples, 533 hours shifted by up to 4.26 hPa, none of it weather: the
+  # flagged set is 4.1% rain-coincident against the 6.12% baseline, and 97.4% of
+  # it sits INSIDE the [985, 1030] range gate above. The threshold is read off a
+  # gap, not chosen: genuine 5-min variability has p99 = 0.20 hPa and the
+  # smallest artifact step measured is 11.21 hPa. 1.0 also clears the coarsest
+  # barometer's 1 hPa quantisation. Pmb_WXT, Pmb_WXT_Avg and AirPressure are
+  # deliberately absent — their dropouts already fall outside the range gate.
+  - { column: BP1_mbar_Avg, threshold: 1.0, return_tol: 1.0, max_len: 2 }
+  - { column: BP2_mbar_Avg, threshold: 1.0, return_tol: 1.0, max_len: 2 }
+  - { column: BP_mbar_Avg, threshold: 1.0, return_tol: 1.0, max_len: 2 }
+  # 212 samples. 3.0 C is the WMO one-minute air-temperature step limit
+  # (Zahumensky 2004, WMO/TD-No. 1236, ch. II sec. II.b), which is conservative
+  # applied to a 5-minute mean. Do NOT lower to 1.5 on Temp1_Avg: the samples it
+  # would add there are 30% rain-coincident. It is measured safe on the others.
+  - { column: Temp1_Avg, threshold: 3.0, return_tol: 1.5, max_len: 2 }
+  - { column: Temp_WXT_Avg, threshold: 3.0, return_tol: 1.5, max_len: 2 }
+  - { column: AirTemp_Avg, threshold: 3.0, return_tol: 1.5, max_len: 2 }
+  - { column: AirT_C_Avg, threshold: 3.0, return_tol: 1.5, max_len: 2 }
+  - { column: AirT1_C_Avg, threshold: 3.0, return_tol: 1.5, max_len: 2 }
+  - { column: AirT2_C_Avg, threshold: 3.0, return_tol: 1.5, max_len: 2 }
+  # 18 samples. 15 %RH sits between the two published same-family anchors — the
+  # Oklahoma Mesonet's 20% per 5 min (Shafer et al. 2000, JTECH 17:474-494,
+  # tab. 3) and WMO's 10% per 1 min — and is fifteen quantiser counts on the
+  # integer-recorded channels, so it cannot degenerate into flagging digitisation.
+  - { column: RH1_Avg, threshold: 15.0, return_tol: 7.5, max_len: 2 }
+  - { column: RH_WXT_Avg, threshold: 15.0, return_tol: 7.5, max_len: 2 }
+  - { column: RelHumidity, threshold: 15.0, return_tol: 7.5, max_len: 2 }
+  - { column: RH, threshold: 15.0, return_tol: 7.5, max_len: 2 }
+  - { column: RH1, threshold: 15.0, return_tol: 7.5, max_len: 2 }
+  - { column: RH2, threshold: 15.0, return_tol: 7.5, max_len: 2 }
+
+# Persistence test: runs of more than `min_run` bitwise-identical samples, which
+# is how a railed sensor looks to a gate that only checks bounds. A data gap
+# breaks a run. There is deliberately NO exemption for calm: the two populations
+# are three orders of magnitude apart here, so `min_run` separates them on its
+# own. Genuine calm runs reach 2 samples at p99 and 6 at their longest, while the
+# rails run 1,318 to 3,060 samples — 110 to 255 hours of a coastal site reporting
+# no wind at all. An exemption keyed to the calm LEVEL would have protected
+# exactly those rails, because a sensor that dies reporting zero reads calm for
+# as long as it stays dead.
+# The windows are LOCALLY DERIVED from the longest genuine run per family, not
+# taken from WMO/TD-No. 1236: its minimum-variability-over-60-minutes form flags
+# 3.6% of Temp1_Avg and 10.1% of RH1_Avg at this site. A damped maritime tropical
+# climate genuinely holds still longer than the stations that criterion was
+# written for.
+sensor_persistence_limits:
+  # 0 samples today: a regression guard. The longest genuine run in ten years is
+  # 33 samples, so 36 clears the observed maximum and still fires the moment a
+  # thermometer rails at an in-range value.
+  - { column: Temp1_Avg, min_run: 36 }
+  - { column: Temp_WXT_Avg, min_run: 36 }
+  - { column: AirTemp_Avg, min_run: 36 }
+  - { column: AirT_C_Avg, min_run: 36 }
+  - { column: AirT1_C_Avg, min_run: 36 }
+  - { column: AirT2_C_Avg, min_run: 36 }
+  # 0 samples today, longest genuine run 14. High-resolution barometers ONLY:
+  # Pmb_WXT and Pmb_WXT_Avg are quantised to 0.1 and 1 hPa, where identical
+  # consecutive readings are the quantiser rather than a fault.
+  - { column: BP1_mbar_Avg, min_run: 36 }
+  - { column: BP2_mbar_Avg, min_run: 36 }
+  - { column: BP_mbar_Avg, min_run: 36 }
+  - { column: AirPressure, min_run: 36 }
+  # 41,517 samples, and the largest published change in this file: it removes an
+  # anemometer that sat at two distinct values for 18 consecutive days while the
+  # paired vane swept 6,984 distinct bearings, and two more that died reporting a
+  # steady 0.00 and 0.08 m/s for 255 and 110 hours.
+  - { column: WS_ms_S_WVT, min_run: 36 }
+  - { column: WS_WXT_Avg, min_run: 36 }
+  - { column: WS_ms, min_run: 36 }
+  - { column: WS1_ms_GMX, min_run: 36 }
+  - { column: WS2_ms_GMX, min_run: 36 }
+  # 17,042 samples. WindDir_D1_WVT frozen at 71.6 deg for 3,551 samples while its
+  # anemometer averaged 1.3 m/s, plus 4,582 WD_WXT_Avg zeros that coincide with
+  # the sonic's own 17-day rail at exactly 0.00 m/s. Those zeros look like the
+  # logger's calm-fill convention and are not: the instrument writing them was
+  # dead, and masking them is correct.
+  - { column: WindDir_D1_WVT, min_run: 36 }
+  - { column: WD_WXT_Avg, min_run: 36 }
+  - { column: WindDir1_GMX, min_run: 36 }
+  - { column: WindDir2_GMX, min_run: 36 }
+  # 2,265 samples: 146 h frozen at 72.47 %RH from 2018-08-21 and 42.7 h at
+  # 48.3 %RH from 2023-03-08, both of which survive the range gate today. The
+  # window is four times temperature's because RH, RH1 and RH2 are
+  # integer-recorded and hold genuine 61-sample runs from digitisation alone; at
+  # 144 those three fall to exactly zero while both real rails are still caught.
+  - { column: RH1_Avg, min_run: 144 }
+  - { column: RH_WXT_Avg, min_run: 144 }
+  - { column: RelHumidity, min_run: 144 }
+  - { column: RH, min_run: 144 }
+  - { column: RH1, min_run: 144 }
+  - { column: RH2, min_run: 144 }
+
 # Columns requiring special aggregation
 sensor_sum_columns:
   - PL01_mm_Tot

@@ -27,6 +27,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from allsky.solar import hour_angle_deg, solar_elevation_deg
+from micrometeorology.stats.daylight import elevation_bounds
 
 __all__ = [
     "KTKD_SCHEMA",
@@ -362,13 +363,17 @@ def prepare_clearness(
     extraterrestrial = pd.Series(
         extraterrestrial_ghi(midpoint, site, utc_offset_hours), index=index
     )
-    elevation = pd.Series(
-        solar_elevation_for(midpoint, site.latitude, site.longitude, utc_offset_hours), index=index
-    )
+    # The sun must clear the floor over the WHOLE hour the row averages, which is
+    # the gate the climatology page applies and the one this artifact's text
+    # claims. Testing the midpoint alone admits the hours the sun rises inside.
+    lowest, _highest = elevation_bounds(index, site, utc_offset_hours)
     global_flux = hourly[global_column]
-    usable = (extraterrestrial > 0) & (elevation > min_elevation_deg) & global_flux.notna()
-    kt = (global_flux / extraterrestrial).where(usable)
-    return kt[usable & kt.between(0.0, MAX_RATIO)]
+    usable = (extraterrestrial > 0) & (lowest > min_elevation_deg) & global_flux.notna()
+    # No ratio ceiling here, unlike the Kt-Kd gate: a Kt above the axis is a real
+    # measurement, and the histogram counts it in `above` so the reader sees the
+    # axis is clipped. Dropping it would delete data and put this artifact's row
+    # count out of step with the clearness histogram it claims to integrate.
+    return (global_flux / extraterrestrial).where(usable).dropna()
 
 
 def prepare_ktkd(
@@ -402,9 +407,7 @@ def prepare_ktkd(
     extraterrestrial = pd.Series(
         extraterrestrial_ghi(midpoint, site, utc_offset_hours), index=index
     )
-    elevation = pd.Series(
-        solar_elevation_for(midpoint, site.latitude, site.longitude, utc_offset_hours), index=index
-    )
+    lowest, _highest = elevation_bounds(index, site, utc_offset_hours)
 
     global_flux = hourly[global_column]
     diffuse_flux = hourly[diffuse_column]
@@ -412,7 +415,7 @@ def prepare_ktkd(
         (global_flux > MIN_GLOBAL_WM2)
         & (extraterrestrial > 0)
         & diffuse_flux.notna()
-        & (elevation > min_elevation_deg)
+        & (lowest > min_elevation_deg)
     )
     kt_all = (global_flux / extraterrestrial).where(usable)
     kd_all = (diffuse_flux / global_flux).where(usable)

@@ -29,7 +29,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
-from micrometeorology.wrf import geojson, variables
+from micrometeorology.wrf import geojson, isobars, sea_level_pressure, variables
 from micrometeorology.wrf.batch import _max_tasks_per_child
 from micrometeorology.wrf.geojson import create_wind_vectors_json, write_values_json_stream
 from micrometeorology.wrf.reader import (
@@ -42,13 +42,15 @@ from micrometeorology.wrf.value_source import build_value_frame_source, publishe
 
 logger = logging.getLogger(__name__)
 
-UnitKind = Literal["values_json", "poteolico", "wind_vectors", "grid_geojson"]
+UnitKind = Literal["values_json", "poteolico", "wind_vectors", "isobars", "grid_geojson"]
 
 HDF5_LOCKING_ENV = "LABMIM_HDF5_FILE_LOCKING"
 
 POTEOLICO_ALL_HEIGHTS: tuple[int, ...] = (50, 100, 150)
 
 WIND_VECTORS_VARIABLE = "wind_vectors"
+
+ISOBARS_VARIABLE = "isobars"
 
 #: Casefolded request spelling -> the canonical name every downstream lookup
 #: compares against.  Both the JSON export and the figure renderer fold through
@@ -58,6 +60,7 @@ CANONICAL_VARIABLES: dict[str, str] = {
     **{variable.value.casefold(): variable.value for variable in WRFVariable},
     **{f"poteolico{height}": f"poteolico{height}" for height in POTEOLICO_ALL_HEIGHTS},
     WIND_VECTORS_VARIABLE: WIND_VECTORS_VARIABLE,
+    ISOBARS_VARIABLE: ISOBARS_VARIABLE,
 }
 
 WIND_VECTORS_OUTPUT_ID = "WIND_VECTORS"
@@ -89,6 +92,8 @@ def unit_kind_for(variable: str) -> UnitKind:
         return "poteolico"
     if variable == WIND_VECTORS_VARIABLE:
         return "wind_vectors"
+    if variable == ISOBARS_VARIABLE:
+        return "isobars"
     return "values_json"
 
 
@@ -539,6 +544,64 @@ def _run_wind_vectors_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[st
     return files, []
 
 
+def _run_isobars_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str]]:
+    """Write the standalone sea-level isobar overlay for every timestep.
+
+    Every step is reduced before any is contoured: the spacing
+    ``isobars.choose_interval_hpa`` picks is a property of the DOMAIN.
+    """
+    grid_level = dataset.grid_level.value
+    time_step_metadata = dataset.build_date_metadata(skip_first_n=unit.skip_first)
+    published = [meta for meta in time_step_metadata if not meta.get("skip")]
+    if not published:
+        return [], []
+
+    warnings: list[str] = []
+    terrain_caveat = sea_level_pressure.terrain_reduction_caveat(
+        dataset.get_variable_block("HGT", 0, 1)[0]
+    )
+    if terrain_caveat:
+        warnings.append(f"{Path(unit.wrf_path).name}: {terrain_caveat}")
+    reduced = {
+        meta["index"]: isobars.smooth_for_contouring(
+            sea_level_pressure.read_sea_level_pressure_hpa(dataset, meta["index"])
+        )
+        for meta in published
+    }
+    interval = isobars.choose_interval_hpa(
+        float(np.nanmedian([np.nanmax(field) - np.nanmin(field) for field in reduced.values()]))
+    )
+    lon, lat = dataset.read_grid()
+
+    files: list[str] = []
+    for meta in published:
+        step_index = meta["index"]
+        field = reduced[step_index]
+        # A step whose reduction FAILED is dropped rather than sinking the domain;
+        # a step that merely has no contour to draw still publishes, empty. The
+        # two are different claims and the page must be able to tell them apart:
+        # a missing file is an artifact that was never written, an empty one is a
+        # field too flat to carry a line the spacing can name.
+        try:
+            levels = isobars.isobar_levels_hpa(field, interval)
+        except ValueError as unusable:
+            warnings.append(f"step {step_index:03d} published no isobar: {unusable}")
+            continue
+        payload = isobars.create_isobars_json(
+            lon,
+            lat,
+            field,
+            levels_hpa=levels,
+            interval_hpa=interval,
+            date_time=_format_datetime(meta["datetime_local"]),
+        )
+        output_path = (
+            Path(unit.json_dir) / f"{grid_level}_{isobars.ISOBARS_OUTPUT_ID}_{step_index:03d}.json"
+        )
+        files.append(_atomic_json_dump(output_path, payload))
+    return files, warnings
+
+
 def _run_grid_geojson_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], list[str]]:
     """Write the domain's cell rectangles, once as legacy GeoJSON and once compact."""
     lon, lat = dataset.read_grid()
@@ -729,8 +792,14 @@ def write_run_manifest(
         # only when the run covered every variable — the templates below are
         # wildcards over the whole directory. (The site falls back to the
         # per-step JSONs otherwise.)
+        # Judged over the units that WRITE those artifacts. An overlay unit — the
+        # arrows, the isobars — writes neither a matrix nor a summary, so its
+        # failure says nothing about their byte offsets, and letting it revoke
+        # them would take the whole site's preview and cell modal down with it.
         run_clean = covers_every_variable and not any(
-            r.error or r.missing_variables for r in results
+            r.error or r.missing_variables
+            for r in results
+            if r.kind in {"values_json", "poteolico"}
         )
         features: dict = {}
         if have_summary and run_clean:
@@ -753,6 +822,17 @@ def write_run_manifest(
                 "missing": SERIES_MISSING,
                 "index_min": 0,
                 "index_max": n_steps - 1,
+            }
+        # Which fields the isobars may be drawn over is a judgement about what the
+        # synoptic pattern explains, so it is published from the producer rather
+        # than kept as a second copy in the page. The per-step files themselves
+        # are already covered by `availability`, which indexes them like any other
+        # `{D}_{VAR}_{NNN}.json`; this only says what they are FOR.
+        if any(result.kind == "isobars" and result.files for result in results):
+            features["isobar_overlay"] = {
+                "format": "isobars-v1",
+                "variable": isobars.ISOBARS_OUTPUT_ID,
+                "draw_over": list(isobars.ISOBAR_OVERLAY_VARIABLES),
             }
         if features:
             payload["features"] = features
@@ -818,6 +898,8 @@ def _unit_output_ids(unit: WorkUnit) -> tuple[str, ...]:
         return tuple(poteolico_output_id(height) for height in heights)
     if unit.kind == "wind_vectors":
         return (WIND_VECTORS_OUTPUT_ID,)
+    if unit.kind == "isobars":
+        return (isobars.ISOBARS_OUTPUT_ID,)
     return ()
 
 
@@ -841,6 +923,8 @@ def process_unit(unit: WorkUnit) -> UnitResult:
                 files, warnings = _run_poteolico_unit(unit, dataset)
             elif unit.kind == "wind_vectors":
                 files, warnings = _run_wind_vectors_unit(unit, dataset)
+            elif unit.kind == "isobars":
+                files, warnings = _run_isobars_unit(unit, dataset)
             elif unit.kind == "grid_geojson":
                 files, warnings = _run_grid_geojson_unit(unit, dataset)
             else:
@@ -869,7 +953,15 @@ def process_unit(unit: WorkUnit) -> UnitResult:
         )
 
 
-_KIND_COST_RANK = {"poteolico": 0, "values_json": 1, "wind_vectors": 1, "grid_geojson": 2}
+# Isobars rank with the heaviest: they are the only unit that reads the 3-D
+# fields, two orders of magnitude more bytes per step than a surface variable.
+_KIND_COST_RANK = {
+    "isobars": 0,
+    "poteolico": 0,
+    "values_json": 1,
+    "wind_vectors": 1,
+    "grid_geojson": 2,
+}
 
 
 def _init_worker_logging(level: int) -> None:

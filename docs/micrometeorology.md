@@ -698,6 +698,7 @@ authoritative description of that contract.
 | `GeoJSON/{domain}.geojson`             | `GeoJSON/{domain}.geojson`                 | grid loader fallback + `charts` cell lookup | live (fallback) |
 | `JSON/{domain}_{variableId}_{NNN}.json`| same                                        | `map-manager.loadValueData` (the map raster) | live |
 | `JSON/{domain}_WIND_VECTORS_{NNN}.json`| same                                        | `map-manager.renderWindVectors` (arrow overlay) | live |
+| `JSON/{domain}_ISOBARS_{NNN}.json`     | same                                        | sea-level isobar polylines; the variables to draw them over are in `features.isobar_overlay.draw_over` | not consumed yet |
 | `JSON/{domain}_{variableId}.summary.json` | via `features.domain_summary.template`   | `charts-manager._loadSummaryArtifactSeries` (domain preview) | live |
 | `JSON/{domain}_{variableId}.series.bin`   | via `features.cell_series.template`      | `charts-manager._loadCellSeriesFromBinary` (cell modal, HTTP Range) | live |
 
@@ -713,11 +714,14 @@ The `{variableId}` tokens are the string values of `VARIABLE_NETCDF_MAP` in
 `src/micrometeorology/common/types.py` (`TEMP`, `PRES`, `WIND`, `RAIN`,
 `VAPOR`, `TSK`, `RH2`, `HFX`, `LH`, `SWDOWN`, `GLW`,
 `WIND_POWER_DENSITY_10M`), plus the poteolico expansion
-(`POT_EOLICO_50M/100M/150M`) and the standalone `WIND_VECTORS`. On the consumer
-side the same ids are the `id`/`id_100m`/`id_150m` fields of `VARIABLES_CONFIG`
-in `site/assets/js/variables-config.js` — the front-end's registry and the
-single source of truth for which ids the map can request. The default exporter
-variable set (`DEFAULT_VARS`) matches this registry exactly.
+(`POT_EOLICO_50M/100M/150M`) and the two standalone overlays, `WIND_VECTORS`
+and `ISOBARS`. On the consumer side the shaded ids are the
+`id`/`id_100m`/`id_150m` fields of `VARIABLES_CONFIG` in
+`site/assets/js/variables-config.js` — the front-end's registry and the single
+source of truth for which ids the map can request as a base layer. The default
+exporter variable set (`DEFAULT_VARS`) covers that registry exactly, and adds
+the two overlays, which are drawn OVER a base layer and are therefore not
+members of it.
 
 ### Guarantees the site relies on
 

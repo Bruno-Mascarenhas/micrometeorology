@@ -69,6 +69,7 @@ __all__ = [
     "STATUS_COLUMNS",
     "ArchiveFile",
     "ArchiveReport",
+    "blocked_gauge_runs",
     "build_five_minute_frame",
     "close_net_radiation",
     "mask_impossible_shortwave",
@@ -76,6 +77,7 @@ __all__ = [
     "mask_sentinels",
     "night_corrupted_days",
     "stage_archive",
+    "unquantised_rain_samples",
     "unshaded_diffuse_days",
     "verify_frame",
 ]
@@ -690,6 +692,218 @@ def _unshaded_diffuse_days_in_era(frame: pd.DataFrame, column: str) -> list[tupl
     ]
 
 
+#: The one gauge these checks are defined for. Measured before choosing it: over
+#: ten years ``PL01_mm_Tot`` carries 21,444 positive samples on a clean 0.254 mm
+#: grid, while ``Rain_WXT_Tot`` carries 9 and ``Ramount_Tot`` 6, on scales that
+#: are neither each other's nor the bucket's — 547 and 2052 mm in a five-minute
+#: total. Whatever those two are, they are not a tipping bucket, and a
+#: quantisation check keyed to one would only ever report its own wrong premise.
+#: The hail counters ``Hamount_Tot`` and ``Hamount_WXT_Tot`` are out for a
+#: simpler reason: they count impacts, not depth.
+RAIN_DEPTH_COLUMNS: tuple[str, ...] = ("PL01_mm_Tot",)
+
+#: One tip of the bucket, 0.01 inch. Every positive interval total is an integer
+#: multiple of it: 21,443 of 21,444 positive samples over ten years, worst
+#: deviation 4e-06. The one exception is the point — 1.09e9 mm of rain in five
+#: minutes, on 2018-06-10 09:10, which is a corrupted field rather than weather.
+RAIN_TIP_DEPTH_MM = 0.254
+
+#: Tolerance the multiple is checked to. Floored at 1e-5 deliberately: at 1e-6
+#: four samples fail on float storage alone (8.636001, 9.398001), which is the
+#: encoding and not the instrument.
+RAIN_QUANTISATION_TOLERANCE = 1e-5
+
+#: Consecutive dry calendar days after which a gauge is presumed blocked rather
+#: than the sky dry. Read off a gap: the longest run in ten years is 54 days
+#: (2024-02-13..2024-04-06, the funnel that INVALID_WINDOWS covers by hand), and
+#: the next longest is 17. Any threshold in [18, 54] finds that episode and
+#: nothing else; 30 sits in the middle of the gap.
+BLOCKED_GAUGE_MIN_DRY_DAYS = 30
+
+
+def blocked_gauge_runs(
+    frame: pd.DataFrame,
+    columns: Sequence[str] = RAIN_DEPTH_COLUMNS,
+    min_dry_days: int = BLOCKED_GAUGE_MIN_DRY_DAYS,
+) -> list[tuple[str, str, str, int]]:
+    """Stretches where a gauge reported no rain for implausibly long.
+
+    A blocked funnel and a dry spell look identical sample by sample — both are
+    a run of zeros — and only the LENGTH separates them at this site. Reported
+    rather than masked: the run is evidence about the instrument, and which of
+    the dry days inside it were genuinely dry is not recoverable from the gauge
+    that failed to measure them.
+
+    Run on the frame after :func:`mask_sentinels`, for the same reason
+    :func:`unshaded_diffuse_days` is: an episode already covered by
+    :data:`INVALID_WINDOWS` is ``NaN`` by then, so what comes back is what the
+    hand-curated list misses. That list ages silently — the column keeps its
+    name and its zeros the next time the funnel clogs.
+
+    Parameters
+    ----------
+    frame:
+        5-minute frame in mm with a naive station-local index.
+    columns:
+        Gauge columns to test. A column absent from *frame* reports nothing.
+    min_dry_days:
+        Consecutive dry calendar days that make a run suspect.
+
+    Returns
+    -------
+    list
+        ``(column, first iso date, last iso date, days)`` per run, oldest first.
+    """
+    found: list[tuple[str, str, str, int]] = []
+    for column in columns:
+        if column not in frame.columns:
+            continue
+        depth = frame[column].dropna()
+        if depth.empty:
+            continue
+        daily = depth.groupby(pd.DatetimeIndex(depth.index).date).max()
+        dry = daily <= 0.0
+        # A month of missing days between two dry days is not a dry run: without
+        # this, `cumsum` bridges the gap and reports the span as one long stretch.
+        consecutive = (
+            pd.Series(pd.DatetimeIndex(daily.index)).diff().eq(pd.Timedelta(days=1)).to_numpy()
+        )
+        run_id = pd.Series((~dry).to_numpy() | ~consecutive, index=daily.index).cumsum()
+        for _, block in daily[dry].groupby(run_id[dry]):
+            span = len(block)
+            if span >= min_dry_days:
+                found.append((column, str(block.index[0]), str(block.index[-1]), span))
+    return sorted(found, key=lambda entry: entry[1])
+
+
+def unquantised_rain_samples(
+    frame: pd.DataFrame, columns: Sequence[str] = RAIN_DEPTH_COLUMNS
+) -> dict[str, int]:
+    """Positive rain totals that are not whole multiples of one bucket tip.
+
+    A tipping bucket can only report multiples of its own tip, so a total that
+    is not one did not come from the bucket: it came from a unit conversion, a
+    running accumulator read as an interval total, or a parser. That is a
+    different failure family from a broken instrument, and no range, step or
+    persistence test looks for it.
+
+    Evaluated BEFORE the range gate, so it sees what that gate is about to remove:
+    on this archive it reports one sample, ``1.09e9`` mm of rain in five minutes on
+    2018-06-10 09:10. After the gate it would report nothing, which is a less
+    useful thing to publish — the corrupted field is the finding.
+
+    Parameters
+    ----------
+    frame:
+        5-minute frame in mm with a naive station-local index.
+    columns:
+        Gauge columns to test.
+
+    Returns
+    -------
+    dict
+        ``{column: offending samples}``, omitting the columns with none.
+    """
+    offending: dict[str, int] = {}
+    for column in columns:
+        if column not in frame.columns:
+            continue
+        depth = frame[column]
+        positive = depth[depth.notna() & (depth > 0.0)].to_numpy(dtype=float)
+        if positive.size == 0:
+            continue
+        tips = positive / RAIN_TIP_DEPTH_MM
+        count = int(np.sum(np.abs(tips - np.round(tips)) > RAIN_QUANTISATION_TOLERANCE))
+        if count:
+            offending[column] = count
+    return offending
+
+
+#: Humidity channels checked against saturation. Every hygrometer at this site
+#: should reach it: the coast saturates often enough that a month which never
+#: does is the sensor, not the sky.
+HUMIDITY_COLUMNS: tuple[str, ...] = (
+    "ur",
+    "RH1_Avg",
+    "RH_WXT_Avg",
+    "RelHumidity",
+    "RH",
+    "RH1",
+    "RH2",
+)
+
+#: Monthly maximum below which a hygrometer is presumed biased low. Read off a
+#: gap, not chosen: over ten years the healthy channels never put a month below
+#: 95.0 %RH (``RH1_Avg`` p05 = 95.5 across 97 months, ``RH2`` p05 = 95.0), and the
+#: faulty ones never put one above 90.7 (``RH_WXT_Avg`` max = 90.7 across 49
+#: months, ``RH1`` max = 87.0). 93.0 sits in the middle of that empty band, so
+#: the check separates the two populations with nothing on either shoulder.
+HUMIDITY_SATURATION_FLOOR = 93.0
+
+#: Samples a month needs before its maximum means anything.
+HUMIDITY_MIN_SAMPLES_PER_MONTH = 2000
+
+
+def months_never_reaching_saturation(
+    frame: pd.DataFrame,
+    columns: Sequence[str] = HUMIDITY_COLUMNS,
+    floor: float = HUMIDITY_SATURATION_FLOOR,
+) -> list[tuple[str, str, float]]:
+    """Months whose hygrometer never came near saturation, which it should have.
+
+    The one fault family no gate in this pipeline can otherwise see. A sensor
+    reading a steady 10 %RH low moves correctly, never repeats, never steps and
+    never leaves its range — range, excursion and persistence tests are all blind
+    to it by construction, because each of them asks about the sample's relation
+    to its own neighbours. This asks about its relation to PHYSICS instead:
+    saturation is an external anchor at 100 %RH, and a coastal tropical site
+    reaches it.
+
+    MONTHLY, deliberately. Measured on this archive the daily form flags 31.88%
+    of the healthy channel's days as well as 98.48% of the faulty one's — it does
+    not separate them. The monthly form separates them completely: zero of 97
+    months on the healthy channel, 49 of 49 on the faulty one.
+
+    Reported, never masked. The samples are wrong by an offset, not absent, and
+    which offset is not recoverable from the channel that carries it. Masking
+    would also delete a year of otherwise usable humidity over a defect a
+    recalibration can correct.
+
+    Parameters
+    ----------
+    frame:
+        5-minute frame in %RH with a naive station-local index.
+    columns:
+        Hygrometer columns to test, including the unified ``ur``.
+    floor:
+        Monthly maximum below which the month is reported.
+
+    Returns
+    -------
+    list
+        ``(column, month as YYYY-MM, monthly maximum)``, oldest first. Months
+        with fewer than :data:`HUMIDITY_MIN_SAMPLES_PER_MONTH` samples are
+        skipped: a maximum over a handful of readings says nothing.
+    """
+    flagged: list[tuple[str, str, float]] = []
+    for column in columns:
+        if column not in frame.columns:
+            continue
+        humidity = frame[column].dropna()
+        if humidity.empty:
+            continue
+        grouped = humidity.groupby(pd.DatetimeIndex(humidity.index).to_period("M"))
+        monthly = grouped.agg(["max", "count"])
+        suspect = monthly[
+            (monthly["count"] >= HUMIDITY_MIN_SAMPLES_PER_MONTH) & (monthly["max"] < floor)
+        ]
+        flagged.extend(
+            (column, str(month), float(value))
+            for month, value in zip(suspect.index, suspect["max"], strict=True)
+        )
+    return sorted(flagged, key=lambda entry: (entry[1], entry[0]))
+
+
 # Detection constants for the timestamp-corruption check below, measured in
 # docs/arqueologia/qc/med-fault-detection.md: 42 days (1.22% of the record) carry
 # at least three DEEP-NIGHT samples of global irradiance above 50 W/m2, the worst
@@ -708,11 +922,17 @@ NIGHT_CORRUPTION_ELEVATION_DEG = -10.0
 NIGHT_CORRUPTION_FLUX_WM2 = 50.0
 NIGHT_CORRUPTION_MIN_SAMPLES = 3
 
-# Every shortwave stream plus ``Net_CNR1``. The net is NOT an independent
-# measurement — over 729,225 samples its residual against
-# ``Sw_dw - Sw_up + Lw_dw - Lw_up`` never exceeds 8.95 W/m2 — so masking only the
-# shortwave channels would leave the corrupted contribution inside the net.
-NIGHT_CORRUPTION_CHANNELS = (*NIGHT_CORRUPTION_COLUMNS, "Net_CNR1")
+# What is MASKED once a day is flagged, which is not the same list as what
+# DETECTS it. Longwave cannot detect the episode — a pyrgeometer reads
+# 300-400 W/m2 all night by design — but the shifted clock belongs to the whole
+# day and to every channel the logger stamped with it. Leaving Lw_dw and Lw_up
+# out published 25,999 samples carrying a timestamp already proven wrong, and
+# with them 1,123 hours of longwave statistics. ``Net_CNR1`` is here for the
+# converse reason: it is not an independent measurement — over 729,225 samples
+# its residual against ``Sw_dw - Sw_up + Lw_dw - Lw_up`` never exceeds
+# 8.95 W/m2 — so masking only the components would leave the corrupted
+# contribution inside the net.
+NIGHT_CORRUPTION_CHANNELS = (*NIGHT_CORRUPTION_COLUMNS, "Lw_dw", "Lw_up", "Net_CNR1")
 
 # BSRN "physically possible" ceiling for global horizontal irradiance
 # (Long & Shi 2008): Sa * 1.5 * mu0**1.2 + 100. Because the limit follows the
@@ -745,6 +965,32 @@ BSRN_CEILING_MU0_EXPONENT = 1.2
 BSRN_CEILING_OFFSET_WM2 = 100.0
 
 IMPOSSIBLE_SHORTWAVE_CHANNELS = ("Sw_dw", "Net_CNR1")
+
+#: BSRN physically-possible ceilings as ``(gain, offset)`` in
+#: ``Sa * gain * mu0**1.2 + offset`` (Long & Shi 2008, tab. 1). One pair per
+#: component, because a shaded pyranometer and an upward-facing one cannot reach
+#: the global's ceiling: reusing the global's pair for all of them is a gate that
+#: only ever fires on the global. PAR is the broadband ceiling scaled by the
+#: fraction of the solar spectrum the quantum sensor answers to.
+_PAR_SPECTRAL_FRACTION = 0.55
+BSRN_PPL_COEFFICIENTS: dict[str, tuple[float, float]] = {
+    "Sw_dw": (BSRN_CEILING_GAIN, BSRN_CEILING_OFFSET_WM2),
+    "Sw_dif": (0.95, 50.0),
+    "Sw_up": (1.2, 50.0),
+    "Sw_par": (
+        BSRN_CEILING_GAIN * _PAR_SPECTRAL_FRACTION,
+        BSRN_CEILING_OFFSET_WM2 * _PAR_SPECTRAL_FRACTION,
+    ),
+}
+
+#: Global irradiance above which ``Sw_dif > Sw_dw`` is a real inconsistency
+#: rather than thermal offset. Below it the two channels differ by a couple of
+#: W/m2 of uncorrected IR loss and the comparison is meaningless: measured, the
+#: raw rule fires on 126,404 samples, of which only 30 sit above this level.
+#: Those 30 have no physical reading — the witness is 2024-05-15 12:50, where the
+#: SHADED CMP21 published 1136.04 W/m2 against a global of 681.11 while the
+#: unshaded PSP beside it read 316.66 in the same instant.
+DIFFUSE_EXCEEDS_GLOBAL_MIN_WM2 = 200.0
 
 
 # ``{unified name: [(source column, inclusive start, inclusive end), ...]}``, as
@@ -801,22 +1047,44 @@ def mask_impossible_shortwave(
         return frame, removed
     index = pd.DatetimeIndex(frame.index)
     mu0 = np.clip(cos_zenith(index, STATION_SITE, STATION_UTC_OFFSET_HOURS), 0.0, None)
-    ceiling = (
+    geometry = (
         BSRN_CEILING_SOLAR_CONSTANT_WM2
         * eccentricity_correction(index)
-        * BSRN_CEILING_GAIN
         * mu0**BSRN_CEILING_MU0_EXPONENT
-        + BSRN_CEILING_OFFSET_WM2
     )
-    global_flux = frame["Sw_dw"]
-    impossible = (global_flux.notna() & (global_flux > ceiling)).to_numpy()
-    if not impossible.any():
-        return frame, removed
-    for column in IMPOSSIBLE_SHORTWAVE_CHANNELS:
-        _mask_column(frame, column, impossible, removed)
+
+    def _blank(column: str, offending: NDArray) -> None:
+        _mask_column(frame, column, offending, removed)
         for source, start, end in (sources or {}).get(column, ()):
             within = (index >= start) & (index <= end)
-            _mask_column(frame, source, impossible & within, removed)
+            _mask_column(frame, source, offending & within, removed)
+
+    for column, (gain, offset) in BSRN_PPL_COEFFICIENTS.items():
+        if column not in frame.columns:
+            continue
+        flux = frame[column]
+        above = (flux.notna() & (flux > geometry * gain + offset)).to_numpy()
+        if not above.any():
+            continue
+        _blank(column, above)
+        # The net is not an independent measurement: the logger derives it from
+        # the four components, so a component the sun cannot produce is inside it.
+        if column == "Sw_dw":
+            _blank("Net_CNR1", above)
+
+    # A shaded sensor measures a subset of what the unshaded one sees, so this is
+    # impossible at any level — but only above the offset floor is the comparison
+    # meaningful at all.
+    if "Sw_dif" in frame.columns:
+        global_flux, diffuse = frame["Sw_dw"], frame["Sw_dif"]
+        inconsistent = (
+            global_flux.notna()
+            & diffuse.notna()
+            & (global_flux > DIFFUSE_EXCEEDS_GLOBAL_MIN_WM2)
+            & (diffuse > global_flux)
+        ).to_numpy()
+        if inconsistent.any():
+            _blank("Sw_dif", inconsistent)
     return frame, removed
 
 
