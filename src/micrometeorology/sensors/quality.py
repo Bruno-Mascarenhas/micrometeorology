@@ -61,6 +61,33 @@ def _on_grid(index: pd.DatetimeIndex) -> NDArray:
     return np.asarray((spacing == SAMPLING_INTERVAL).to_numpy(), dtype=bool)
 
 
+def _reachable(stamps: NDArray, reach: pd.Timedelta) -> NDArray:
+    """Whether each sample is close enough in TIME to its predecessor to difference across.
+
+    Used on the finite subsequence of a channel, where "predecessor" is the last
+    sample that carried a value.  A dropout that an earlier gate already masked
+    leaves a hole, and requiring the raw five-minute grid across that hole is what
+    made this test blind to the very episodes it exists for: the gate NaNs one
+    side of a spike, and the spike then has no neighbour to be measured against.
+
+    Parameters
+    ----------
+    stamps:
+        Sample stamps of the finite subsequence, ``(M,)``, ``datetime64``.
+    reach:
+        Longest separation still treated as adjacent.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean, ``(M,)``, first entry ``False``.
+    """
+    adjacent = np.zeros(stamps.size, dtype=bool)
+    if stamps.size > 1:
+        adjacent[1:] = np.diff(stamps) <= np.timedelta64(reach)
+    return adjacent
+
+
 def mask_step_excursions(
     frame: pd.DataFrame, limits: list[dict[str, Any]]
 ) -> tuple[pd.DataFrame, int]:
@@ -84,7 +111,7 @@ def mask_step_excursions(
         Only the excursion's INTERIOR is masked — the sample that returns is
         good data and stays.
     """
-    on_grid = _on_grid(pd.DatetimeIndex(frame.index))
+    stamps = pd.DatetimeIndex(frame.index).to_numpy()
     removed = 0
 
     for limit in limits:
@@ -94,24 +121,37 @@ def mask_step_excursions(
         threshold = float(limit["threshold"])
         return_tol = float(limit["return_tol"])
         max_len = int(limit["max_len"])
+        if max_len < 1:
+            raise ValueError(
+                f"{column}: max_len must be at least 1, got {max_len}. A shorter one "
+                "detects nothing and reports zero removals, which reads as a clean run."
+            )
 
+        # Work on the samples that carry a value, not on the raw grid: an earlier
+        # gate has usually already masked one side of the very dropout being
+        # looked for, and differencing across that hole is what blinded this test.
         values = frame[column].to_numpy(dtype=float)
-        steps = np.diff(values, prepend=np.nan)
-        departures = np.flatnonzero(on_grid & (np.abs(steps) > threshold))
+        finite = np.flatnonzero(np.isfinite(values))
+        if finite.size < 3:
+            continue
+        present = values[finite]
+        adjacent = _reachable(stamps[finite], max_len * SAMPLING_INTERVAL)
+        steps = np.diff(present, prepend=np.nan)
+        departures = np.flatnonzero(adjacent & (np.abs(steps) > threshold))
 
         excursion = np.zeros(values.size, dtype=bool)
         for start in departures:
-            baseline = values[start - 1]
-            for end in range(start + 1, min(start + max_len + 1, values.size)):
-                if not on_grid[end]:
+            baseline = present[start - 1]
+            for end in range(start + 1, min(start + max_len + 1, present.size)):
+                if not adjacent[end]:
                     break
                 returns = (
                     np.sign(steps[end]) == -np.sign(steps[start])
                     and abs(steps[end]) > threshold
-                    and abs(values[end] - baseline) <= return_tol
+                    and abs(present[end] - baseline) <= return_tol
                 )
                 if returns:
-                    excursion[start:end] = True
+                    excursion[finite[start:end]] = True
                     break
 
         if excursion.any():
@@ -179,7 +219,11 @@ def mask_persistent_runs(
             gate = (
                 frame[gate_column].to_numpy(dtype=float) if gate_column in frame.columns else values
             )
-            stuck &= ~(gate <= float(exempt_level))
+            # A missing gate spares the run. Left to IEEE semantics this fails the
+            # other way — `NaN <= level` is False, so the exemption lifts and the
+            # absence of evidence that the air was still becomes evidence that it
+            # was moving, which is the opposite of what the gate is for.
+            stuck &= ~((gate <= float(exempt_level)) | np.isnan(gate))
 
         if stuck.any():
             frame.loc[stuck, column] = np.nan

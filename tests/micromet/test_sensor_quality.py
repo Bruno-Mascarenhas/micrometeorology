@@ -9,6 +9,7 @@ stays down survives.
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from micrometeorology.sensors.quality import mask_persistent_runs, mask_step_excursions
 
@@ -153,6 +154,61 @@ def test_a_column_the_logger_never_wrote_is_skipped_rather_than_raising():
     )
 
     assert removed == 0
+
+
+def test_a_masked_neighbour_does_not_blind_the_excursion_test():
+    """The gate before this one usually took one side of the very dropout sought.
+
+    Differencing across that hole made the test blind exactly where it was needed:
+    the spike loses the neighbour it would have been measured against.
+    """
+    frame = _frame("BP1_mbar_Avg", [1013.0, np.nan, 996.0, 1013.0, 1013.0])
+
+    _frame_out, removed = mask_step_excursions(
+        frame, [{"column": "BP1_mbar_Avg", "threshold": 1.0, "return_tol": 1.0, "max_len": 2}]
+    )
+
+    assert removed == 1
+
+
+def test_an_excursion_window_shorter_than_one_sample_is_refused():
+    """It would detect nothing and report zero, which reads as a clean archive."""
+    frame = _frame("BP1_mbar_Avg", [1013.0, 1013.0, 996.0, 1013.0])
+
+    with pytest.raises(ValueError, match="max_len must be at least 1"):
+        mask_step_excursions(
+            frame, [{"column": "BP1_mbar_Avg", "threshold": 1.0, "return_tol": 1.0, "max_len": 0}]
+        )
+
+
+def test_a_missing_paired_speed_spares_the_run_rather_than_condemning_it():
+    """IEEE semantics fail the other way: `NaN <= level` is False, lifting the gate.
+
+    Absence of evidence that the air was still would become evidence that it was
+    moving, and the vane would be called jammed on no evidence at all.
+    """
+    frame = _frame("WD_WXT_Avg", [0.0] * 8)
+    frame["WS_WXT_Avg"] = np.nan
+
+    _frame_out, removed = mask_persistent_runs(
+        frame,
+        [{"column": "WD_WXT_Avg", "min_run": 4, "exempt_at_or_below": 0.1}],
+        {"WD_WXT_Avg": "WS_WXT_Avg"},
+    )
+
+    assert removed == 0
+
+
+def test_the_reported_count_never_includes_a_cell_that_was_already_missing():
+    """`archive_report.json` tallies must sum to the real raw-to-QC delta."""
+    frame = _frame("BP1_mbar_Avg", [1013.0, 996.0, np.nan, 996.0, 1013.0])
+    already_missing = int(frame["BP1_mbar_Avg"].isna().sum())
+
+    frame, removed = mask_step_excursions(
+        frame, [{"column": "BP1_mbar_Avg", "threshold": 1.0, "return_tol": 1.0, "max_len": 3}]
+    )
+
+    assert removed == int(frame["BP1_mbar_Avg"].isna().sum()) - already_missing
 
 
 def test_missing_samples_neither_start_nor_extend_a_run():
