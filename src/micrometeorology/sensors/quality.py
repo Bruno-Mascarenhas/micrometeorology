@@ -35,6 +35,13 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+#: Longest hop between two samples still differenced against each other, as a
+#: multiple of the sampling interval: one masked or missing sample between them is
+#: tolerated, two are not. Deliberately NOT tied to ``max_len``, which would let
+#: the tolerated hop grow with the excursion length, against thresholds calibrated
+#: on five-minute variability.
+MAX_ADJACENT_INTERVALS = 2
+
 #: Sampling interval a first difference is only meaningful across.  Comparing
 #: index spacing against this as a ``Timedelta`` is deliberate: the archive index
 #: carries MICROSECOND resolution, so an integer nanosecond conversion silently
@@ -84,7 +91,11 @@ def _reachable(stamps: NDArray, reach: pd.Timedelta) -> NDArray:
     """
     adjacent = np.zeros(stamps.size, dtype=bool)
     if stamps.size > 1:
-        adjacent[1:] = np.diff(stamps) <= np.timedelta64(reach)
+        # A backwards jump is not adjacency. Without the lower bound a
+        # non-monotonic index differences across arbitrary time, which the
+        # exact-grid predicate this replaced was immune to by construction.
+        deltas = np.diff(stamps)
+        adjacent[1:] = (deltas > np.timedelta64(0, "us")) & (deltas <= np.timedelta64(reach))
     return adjacent
 
 
@@ -135,12 +146,18 @@ def mask_step_excursions(
         if finite.size < 3:
             continue
         present = values[finite]
-        adjacent = _reachable(stamps[finite], max_len * SAMPLING_INTERVAL)
+        adjacent = _reachable(stamps[finite], MAX_ADJACENT_INTERVALS * SAMPLING_INTERVAL)
         steps = np.diff(present, prepend=np.nan)
         departures = np.flatnonzero(adjacent & (np.abs(steps) > threshold))
 
         excursion = np.zeros(values.size, dtype=bool)
         for start in departures:
+            # On a double dip the sample that RECOVERS one excursion is also a
+            # departure from it, and its baseline would be the rejected value. That
+            # inverts the test: the ambient reading becomes the excursion and gets
+            # masked. A baseline this function already rejected is no baseline.
+            if excursion[finite[start - 1]]:
+                continue
             baseline = present[start - 1]
             for end in range(start + 1, min(start + max_len + 1, present.size)):
                 if not adjacent[end]:
@@ -173,9 +190,7 @@ def _run_starts(values: NDArray, on_grid: NDArray) -> NDArray:
 
 
 def mask_persistent_runs(
-    frame: pd.DataFrame,
-    limits: list[dict[str, Any]],
-    wind_speed_columns: dict[str, str] | None = None,
+    frame: pd.DataFrame, limits: list[dict[str, Any]]
 ) -> tuple[pd.DataFrame, int]:
     """Mask runs of bitwise-identical values longer than a column tolerates.
 
@@ -185,13 +200,13 @@ def mask_persistent_runs(
         Five-minute archive frame indexed by naive station-local stamps.
     limits:
         One entry per column, with ``column``, ``min_run`` as the longest run
-        left alone, and optionally ``exempt_at_or_below``: a level at which a
-        repeated value is the instrument reading calm rather than failing. For a
-        wind-direction column the exemption is evaluated on the PAIRED SPEED,
-        because the logger writes direction zero whenever speed is zero and that
-        convention is not a jammed vane.
-    wind_speed_columns:
-        Direction column -> the speed column that gates its exemption.
+        left alone. There is deliberately no calm exemption: measured on this
+        archive the two populations do not overlap, so ``min_run`` separates them
+        on its own. Genuine calm runs reach 2 samples at p99 and 6 at their
+        longest, while the rails run 1,318 to 3,060 samples — 110 to 255 hours of
+        a coastal site reporting no wind at all. An exemption keyed to the calm
+        LEVEL would have protected exactly those rails, since a sensor that dies
+        reporting zero reads calm forever.
 
     Returns
     -------
@@ -199,7 +214,6 @@ def mask_persistent_runs(
         The same object, mutated in place, and the number of samples masked.
     """
     on_grid = _on_grid(pd.DatetimeIndex(frame.index))
-    paired = wind_speed_columns or {}
     removed = 0
 
     for limit in limits:
@@ -212,22 +226,6 @@ def mask_persistent_runs(
         runs = _run_starts(values, on_grid)
         lengths = np.bincount(runs)
         stuck = (lengths[runs] > min_run) & np.isfinite(values)
-
-        exempt_level = limit.get("exempt_at_or_below")
-        if exempt_level is not None:
-            gate_column = paired.get(column, column)
-            gate = (
-                frame[gate_column].to_numpy(dtype=float) if gate_column in frame.columns else values
-            )
-            # The exemption is bounded in DURATION as well as in level. Unbounded,
-            # a sensor that died reporting zero is exempt forever and the only
-            # remaining defence is a hand-written window list. Measured here, the
-            # two populations do not overlap: genuine calm runs reach 2 samples at
-            # p99 and 6 at the maximum, while the rails run 1,318 to 3,060 samples
-            # — 110 to 255 hours of a coastal site reporting no wind at all.
-            ceiling = int(limit.get("exempt_max_run", min_run))
-            calm = (gate <= float(exempt_level)) | np.isnan(gate)
-            stuck &= ~(calm & (lengths[runs] <= ceiling))
 
         if stuck.any():
             frame.loc[stuck, column] = np.nan

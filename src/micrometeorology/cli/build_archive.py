@@ -257,9 +257,7 @@ def run(
         # channel for free. Per raw alias also means per instrument, so no era
         # boundary can manufacture a step across a sensor swap.
         qc, step_excursions_removed = mask_step_excursions(qc, settings.sensor_step_limits)
-        qc, persistence_runs_removed = mask_persistent_runs(
-            qc, settings.sensor_persistence_limits, settings.sensor_wind_speed_column_map
-        )
+        qc, persistence_runs_removed = mask_persistent_runs(qc, settings.sensor_persistence_limits)
 
         # Without this the sensor_switches block parses and does nothing, and
         # every era-spanning variable has to be reassembled by hand downstream.
@@ -381,8 +379,11 @@ def run(
             }
             for report in reports
         ],
-        # Every stage that removes a sample reports here, so these tallies sum
-        # to the raw-to-QC delta rather than living only in a console log.
+        # Every stage that removes a sample reports here. The tallies close the
+        # raw-to-QC accounting NET of what unification and net recomposition ADD:
+        # raw + copied cells + recomposed - removed = qc, residue zero. The naive
+        # raw-minus-qc delta is negative, because unify_sensor_columns copies about
+        # 12.9 million cells into the canonical channels.
         "sentinels_removed": sentinels_removed,
         "physical_limits_removed": limits_fired,
         "physical_limits_absent_columns": limits_absent_columns,

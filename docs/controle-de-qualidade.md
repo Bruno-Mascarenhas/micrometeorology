@@ -32,7 +32,7 @@ build_five_minute_frame          merge the .dat archive against an explicit mani
 mask_sentinels                   1,093,223 samples   logger fill values (-99999, NAN, ...)
 apply_physical_limits            236,815             range gates, raw logger units
 apply_calibrations               1,227               a `factor: null` record voids its window
-mask_step_excursions             860       ← statistical
+mask_step_excursions             839       ← statistical
 mask_persistent_runs             60,824    ← statistical
 unify_sensor_columns                                 era-to-era channel unification (COPIES)
 close_net_radiation              36,241 recomposed
@@ -95,9 +95,9 @@ sensor dropout does.
 
 | family | threshold | removed | evidence |
 |---|---|---|---|
-| pressure | 1.0 hPa | 591 | rain-coincidence *below* the archive baseline; 97.4% of it sits inside the range gate |
-| temperature | 3.0 °C | 207 | WMO one-minute step limit, conservative on a 5-minute mean |
-| humidity | 15 %RH | 16 | fifteen quantiser counts on the integer-recorded channels |
+| pressure | 1.0 hPa | 609 | rain-coincidence *below* the archive baseline; 97.4% of it sits inside the range gate |
+| temperature | 3.0 °C | 212 | WMO one-minute step limit, conservative on a 5-minute mean |
+| humidity | 15 %RH | 18 | fifteen quantiser counts on the integer-recorded channels |
 
 The pressure threshold is **read off a gap, not chosen**: genuine five-minute
 variability at this site has p99 = 0.20 hPa, and the smallest artifact step
@@ -136,29 +136,26 @@ Humidity needs four times temperature's window for a mechanical reason: `RH`,
 61-sample runs. At 144 those channels fall to exactly zero flagged while both real
 rails are still caught in full.
 
-#### The calm exemption, and the trap in it
+#### Why there is no exemption for calm
 
-`exempt_at_or_below` skips a level at which a repeated reading is the instrument
-reporting calm rather than failing. For a **direction** channel it is evaluated on
-the paired speed from `sensor_wind_speed_column_map`, because the logger writes
-direction zero whenever speed is zero; without the pairing, 4,765 calm-fill zeros
-would be masked as a jammed vane.
+An earlier revision carried one, keyed to the wind speed: a repeated reading at or
+below 0.1 m/s was treated as the instrument reporting calm rather than failing, and
+for a direction channel the level was read off the paired speed, because the logger
+writes direction zero whenever speed is zero.
 
-The exemption level is the most dangerous single number in the configuration.
-Setting it to 0.1 m/s costs nothing. Setting it to 0.281 m/s — the propeller's own
-stall floor, which looks far more principled — collapses the catch from 33,037 to
-816 and makes the 18-day dead anemometer disappear entirely. **Never key the
-exemption to the instrument's own calm constant.**
+It was removed, because the measurement says it protects the wrong thing. Genuine
+calm runs at this site reach 2 samples at p99 and 6 at their longest; the rails run
+1,318 to 3,060 samples — 110 to 255 hours of a coastal site reporting no wind at
+all. A level-keyed exemption cannot tell those apart, and a sensor that dies
+reporting zero reads calm for as long as it stays dead, so the exemption protected
+exactly the failures the test exists to find. `min_run` separates the two
+populations on its own, with three orders of magnitude to spare.
 
-### Why both layers are needed: one fault code, three channels
+The same measurement kills the more principled-looking variant: keying the level to
+the propeller's own 0.281 m/s stall floor collapses the catch from 33,037 to 816
+and makes an 18-day dead anemometer disappear entirely.
 
-In August 2026 a Gill MetSENS1 unit failed terminally and began emitting the value
-**2.62** on every channel it fed. The same number reached three columns, and what
-caught it was different in each — which is the clearest illustration of why range
-gates and statistical gates are not redundant.
-
-| channel | occurrences | survived | caught by |
-|---|---|---|---|
+---|---|---|---|
 | `BP1_mbar_Avg` | 1,566 | 0 | sentinel — 2.62 hPa is impossible |
 | `RH1` | 1,567 | 0 | sentinel |
 | `WS1_ms_GMX` | 1,592 | 26 | persistence — 2.62 m/s is a perfectly ordinary wind |

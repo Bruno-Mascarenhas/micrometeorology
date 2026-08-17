@@ -763,7 +763,12 @@ def blocked_gauge_runs(
             continue
         daily = depth.groupby(pd.DatetimeIndex(depth.index).date).max()
         dry = daily <= 0.0
-        run_id = (~dry).cumsum()
+        # A month of missing days between two dry days is not a dry run: without
+        # this, `cumsum` bridges the gap and reports the span as one long stretch.
+        consecutive = (
+            pd.Series(pd.DatetimeIndex(daily.index)).diff().eq(pd.Timedelta(days=1)).to_numpy()
+        )
+        run_id = pd.Series((~dry).to_numpy() | ~consecutive, index=daily.index).cumsum()
         for _, block in daily[dry].groupby(run_id[dry]):
             span = len(block)
             if span >= min_dry_days:
@@ -782,8 +787,10 @@ def unquantised_rain_samples(
     different failure family from a broken instrument, and no range, step or
     persistence test looks for it.
 
-    Zero on this archive, which is the point — it is a regression guard, in the
-    same spirit as the temperature and pressure persistence entries.
+    Evaluated BEFORE the range gate, so it sees what that gate is about to remove:
+    on this archive it reports one sample, ``1.09e9`` mm of rain in five minutes on
+    2018-06-10 09:10. After the gate it would report nothing, which is a less
+    useful thing to publish — the corrupted field is the finding.
 
     Parameters
     ----------
@@ -815,7 +822,15 @@ def unquantised_rain_samples(
 #: Humidity channels checked against saturation. Every hygrometer at this site
 #: should reach it: the coast saturates often enough that a month which never
 #: does is the sensor, not the sky.
-HUMIDITY_COLUMNS: tuple[str, ...] = ("ur", "RH1_Avg", "RH_WXT_Avg", "RH", "RH1", "RH2")
+HUMIDITY_COLUMNS: tuple[str, ...] = (
+    "ur",
+    "RH1_Avg",
+    "RH_WXT_Avg",
+    "RelHumidity",
+    "RH",
+    "RH1",
+    "RH2",
+)
 
 #: Monthly maximum below which a hygrometer is presumed biased low. Read off a
 #: gap, not chosen: over ten years the healthy channels never put a month below
@@ -847,7 +862,7 @@ def months_never_reaching_saturation(
     MONTHLY, deliberately. Measured on this archive the daily form flags 31.88%
     of the healthy channel's days as well as 98.48% of the faulty one's — it does
     not separate them. The monthly form separates them completely: zero of 97
-    months on the healthy channel, 36 of 49 on the faulty one.
+    months on the healthy channel, 49 of 49 on the faulty one.
 
     Reported, never masked. The samples are wrong by an offset, not absent, and
     which offset is not recoverable from the channel that carries it. Masking
