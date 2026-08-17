@@ -722,3 +722,89 @@ def test_a_sample_above_the_cited_ceiling_is_still_masked() -> None:
 
     assert np.isnan(masked["Sw_dw"].iloc[0])
     assert removed == {"Sw_dw": 1}
+
+
+def test_each_component_is_judged_by_its_own_ceiling_not_the_globals():
+    """Reusing the global's pair for every channel is a gate that only fires on the global.
+
+    At this instant the global's ceiling is far above what a shaded pyranometer
+    or a quantum sensor can physically reach, so a diffuse and a PAR reading that
+    are impossible for their OWN instrument sit comfortably under it.
+    """
+    stamps = pd.DatetimeIndex(["2026-07-05 09:00"])
+    frame = pd.DataFrame({"Sw_dw": [700.0], "Sw_dif": [900.0], "Sw_par": [900.0]}, index=stamps)
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert not np.isnan(masked["Sw_dw"].iloc[0])
+    assert np.isnan(masked["Sw_dif"].iloc[0])
+    assert np.isnan(masked["Sw_par"].iloc[0])
+    assert removed == {"Sw_dif": 1, "Sw_par": 1}
+
+
+def test_diffuse_above_the_global_is_masked_only_where_the_comparison_means_something():
+    """A shaded sensor measures a subset of what the unshaded one sees.
+
+    Below the offset floor both channels are a couple of W/m2 of uncorrected IR
+    loss around zero, and the comparison is noise: measured on the archive the
+    raw rule fires on 126,404 samples, of which only 30 sit above the floor.
+    """
+    stamps = pd.DatetimeIndex(["2026-07-05 09:00", "2026-07-05 19:00"])
+    frame = pd.DataFrame({"Sw_dw": [681.0, -2.0], "Sw_dif": [1136.0, -1.0]}, index=stamps)
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert np.isnan(masked["Sw_dif"].iloc[0]), "shaded sensor reading 1.67x the global"
+    assert masked["Sw_dif"].iloc[1] == -1.0, "night thermal offset is not an inconsistency"
+    assert removed["Sw_dif"] == 1
+
+
+def test_longwave_is_masked_on_a_day_whose_clock_is_already_proven_wrong():
+    """It cannot DETECT the episode, but the shifted clock stamped it too."""
+    assert "Lw_dw" in archive.NIGHT_CORRUPTION_CHANNELS
+    assert "Lw_up" in archive.NIGHT_CORRUPTION_CHANNELS
+    assert "Lw_dw" not in archive.NIGHT_CORRUPTION_COLUMNS
+
+
+def test_a_rain_total_off_the_bucket_grid_is_reported():
+    """A tipping bucket can only report multiples of its own tip.
+
+    A total that is not one did not come from the bucket: it came from a unit
+    conversion, an accumulator read as an interval total, or a parser. No range,
+    step or persistence test looks for that family.
+    """
+    stamps = pd.date_range("2024-01-01", periods=3, freq="5min")
+    frame = pd.DataFrame({"PL01_mm_Tot": [0.254, 0.508, 1.090922e09]}, index=stamps)
+
+    assert archive.unquantised_rain_samples(frame) == {"PL01_mm_Tot": 1}
+
+
+def test_a_gauge_on_its_own_grid_reports_nothing():
+    stamps = pd.date_range("2024-01-01", periods=3, freq="5min")
+    frame = pd.DataFrame({"PL01_mm_Tot": [0.254, 0.0, 2.032]}, index=stamps)
+
+    assert archive.unquantised_rain_samples(frame) == {}
+
+
+def test_a_gauge_dry_for_longer_than_the_sky_ever_is_gets_reported():
+    """A blocked funnel and a dry spell are the same run of zeros; only length parts them.
+
+    Read off a gap: the longest genuine run in ten years is 17 days, the blocked
+    funnel ran 54.
+    """
+    stamps = pd.date_range("2024-01-01", periods=40 * 288, freq="5min")
+    frame = pd.DataFrame({"PL01_mm_Tot": 0.0}, index=stamps)
+    frame.iloc[0, 0] = 0.254
+
+    (found,) = archive.blocked_gauge_runs(frame, min_dry_days=30)
+
+    assert found[0] == "PL01_mm_Tot"
+    assert found[3] >= 30
+
+
+def test_a_gauge_that_rains_within_the_window_is_not_reported():
+    stamps = pd.date_range("2024-01-01", periods=40 * 288, freq="5min")
+    frame = pd.DataFrame({"PL01_mm_Tot": 0.0}, index=stamps)
+    frame.iloc[:: 288 * 10, 0] = 0.254
+
+    assert archive.blocked_gauge_runs(frame, min_dry_days=30) == []

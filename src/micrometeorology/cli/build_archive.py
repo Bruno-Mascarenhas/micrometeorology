@@ -52,12 +52,14 @@ from micrometeorology.sensors.archive import (
     RAIN_MANIFEST,
     STATUS_COLUMNS,
     ArchiveReport,
+    blocked_gauge_runs,
     build_five_minute_frame,
     close_net_radiation,
     mask_impossible_shortwave,
     mask_night_corrupted_days,
     mask_sentinels,
     night_corrupted_days,
+    unquantised_rain_samples,
     unshaded_diffuse_days,
     verify_frame,
 )
@@ -192,6 +194,16 @@ def run(
             typer.echo(f"    {day}  razao {ratio:.2f}")
         if strict:
             raise typer.Exit(code=1)
+
+    # A blocked funnel and a dry spell are the same run of zeros to every gate
+    # here; only the length parts them, and the curated window that covers the
+    # one known episode ages silently the next time it clogs.
+    blocked = blocked_gauge_runs(qc)
+    for column, first, last, days in blocked:
+        typer.echo(f"\n  ! {column} sem chuva por {days} dias ({first} a {last}): funil suspeito")
+    unquantised = unquantised_rain_samples(qc)
+    for column, count in unquantised.items():
+        typer.echo(f"  ! {column}: {count} total(is) fora da grade da bascula")
 
     # Every stage below is conditional; pre-declared so the report can say "this
     # stage removed nothing" rather than omit the key.
@@ -366,6 +378,11 @@ def run(
         "physical_limits_absent_columns": limits_absent_columns,
         "physical_limits_after_calibration": outside_after_calibration,
         "calibration_invalidated": invalidated,
+        "blocked_gauge_runs": [
+            {"column": column, "first": first, "last": last, "days": days}
+            for column, first, last, days in blocked
+        ],
+        "unquantised_rain_samples": unquantised,
         "step_excursions_removed": step_excursions_removed,
         "persistence_runs_removed": persistence_runs_removed,
         "impossible_shortwave_removed": impossible,
