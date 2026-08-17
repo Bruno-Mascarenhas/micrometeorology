@@ -485,6 +485,7 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
         caveats=(
             "A beta é definida no intervalo aberto (0, 100): o acúmulo de amostras na saturação sai do ajuste e é informado à parte. Barras e curva são densidades condicionais ao restante.",
             "Dez meses desta distribuição vêm de um higrômetro com viés seco. De março a dezembro de 2025 o canal publicado é a unidade 1 do Gill MetSENS, cujo máximo mensal fica entre 80 e 87 % de umidade relativa e nunca aproxima a saturação, num sítio litorâneo que satura com frequência — os 97 meses anteriores, medidos pelo HMP, tocam 100 %. O desvio é da ordem de 10 pontos e desloca a cauda úmida desta distribuição para baixo. O canal não tem registro após dezembro de 2025.",
+            "Esse viés não é sazonalmente neutro e atravessa os recortes: a janela de 2025 contém os três meses de JJA e apenas um de DJF, de modo que 11,4 % das amostras de inverno vêm do higrômetro seco contra 2,6 % das de verão — quatro vezes mais. Aqui o inverno austral é a estação mais úmida (82,0 % contra 79,2 % nos 97 meses sadios, com 133 contra 79 mm de chuva por mês), então o artefato derruba precisamente o recorte mais úmido e apaga cerca de um terço do contraste sazonal real, em vez de inventar um. Comparar a cauda úmida de DJF com a de JJA subestima a diferença.",
         ),
     ),
     VariableSpec(
