@@ -206,13 +206,6 @@ def run(
     for column, count in unquantised.items():
         typer.echo(f"  ! {column}: {count} total(is) fora da grade da bascula")
 
-    # The one fault family every other gate here is blind to by construction: a
-    # hygrometer reading a steady offset low never repeats, never steps and never
-    # leaves its range. Saturation is the external anchor that catches it.
-    unsaturated = months_never_reaching_saturation(qc)
-    for column, month, peak in unsaturated[-6:]:
-        typer.echo(f"  ! {column} nunca passou de {peak:.1f} %UR em {month}: viés seco suspeito")
-
     # Every stage below is conditional; pre-declared so the report can say "this
     # stage removed nothing" rather than omit the key.
     limits_fired: dict[str, int] = {}
@@ -336,6 +329,15 @@ def run(
             :8
         ]:
             typer.echo(f"  {column:22s} {count:,}")
+
+    # AFTER unification, deliberately: the one channel this matters most for is
+    # the unified ``ur``, which does not exist before it. The fault family is the
+    # one every other gate here is blind to by construction — a hygrometer reading
+    # a steady offset low never repeats, never steps and never leaves its range,
+    # so saturation is the only external anchor that reaches it.
+    unsaturated = months_never_reaching_saturation(qc)
+    for column, month, peak in unsaturated[-6:]:
+        typer.echo(f"  ! {column} nunca passou de {peak:.1f} %UR em {month}: vies seco suspeito")
 
     _write(qc, out / "station_5min_qc", output_format)
 
