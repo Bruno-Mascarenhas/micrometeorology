@@ -808,3 +808,33 @@ def test_a_gauge_that_rains_within_the_window_is_not_reported():
     frame.iloc[:: 288 * 10, 0] = 0.254
 
     assert archive.blocked_gauge_runs(frame, min_dry_days=30) == []
+
+
+def test_a_hygrometer_that_never_nears_saturation_for_a_month_is_reported():
+    """The one fault the other gates are blind to by construction.
+
+    A sensor reading a steady offset low moves correctly, never repeats, never
+    steps and never leaves its range. Saturation is the external anchor.
+    """
+    stamps = pd.date_range("2024-01-01", periods=3000, freq="5min")
+    frame = pd.DataFrame({"RH1_Avg": np.linspace(40.0, 87.0, 3000)}, index=stamps)
+
+    (found,) = archive.months_never_reaching_saturation(frame, ("RH1_Avg",))
+
+    assert found[0] == "RH1_Avg"
+    assert found[2] == pytest.approx(87.0)
+
+
+def test_a_hygrometer_that_reaches_saturation_is_left_alone():
+    stamps = pd.date_range("2024-01-01", periods=3000, freq="5min")
+    frame = pd.DataFrame({"RH1_Avg": np.linspace(40.0, 100.0, 3000)}, index=stamps)
+
+    assert archive.months_never_reaching_saturation(frame, ("RH1_Avg",)) == []
+
+
+def test_a_month_with_too_few_samples_says_nothing_either_way():
+    """A maximum over a handful of readings is not evidence about the sensor."""
+    stamps = pd.date_range("2024-01-01", periods=100, freq="5min")
+    frame = pd.DataFrame({"RH1_Avg": np.linspace(40.0, 50.0, 100)}, index=stamps)
+
+    assert archive.months_never_reaching_saturation(frame, ("RH1_Avg",)) == []

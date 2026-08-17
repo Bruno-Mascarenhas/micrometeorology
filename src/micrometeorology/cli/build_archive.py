@@ -58,6 +58,7 @@ from micrometeorology.sensors.archive import (
     mask_impossible_shortwave,
     mask_night_corrupted_days,
     mask_sentinels,
+    months_never_reaching_saturation,
     night_corrupted_days,
     unquantised_rain_samples,
     unshaded_diffuse_days,
@@ -204,6 +205,13 @@ def run(
     unquantised = unquantised_rain_samples(qc)
     for column, count in unquantised.items():
         typer.echo(f"  ! {column}: {count} total(is) fora da grade da bascula")
+
+    # The one fault family every other gate here is blind to by construction: a
+    # hygrometer reading a steady offset low never repeats, never steps and never
+    # leaves its range. Saturation is the external anchor that catches it.
+    unsaturated = months_never_reaching_saturation(qc)
+    for column, month, peak in unsaturated[-6:]:
+        typer.echo(f"  ! {column} nunca passou de {peak:.1f} %UR em {month}: viés seco suspeito")
 
     # Every stage below is conditional; pre-declared so the report can say "this
     # stage removed nothing" rather than omit the key.
@@ -383,6 +391,9 @@ def run(
             for column, first, last, days in blocked
         ],
         "unquantised_rain_samples": unquantised,
+        "months_never_reaching_saturation": [
+            {"column": column, "month": month, "peak": peak} for column, month, peak in unsaturated
+        ],
         "step_excursions_removed": step_excursions_removed,
         "persistence_runs_removed": persistence_runs_removed,
         "impossible_shortwave_removed": impossible,

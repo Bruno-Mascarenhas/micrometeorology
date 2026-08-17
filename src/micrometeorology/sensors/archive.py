@@ -812,6 +812,83 @@ def unquantised_rain_samples(
     return offending
 
 
+#: Humidity channels checked against saturation. Every hygrometer at this site
+#: should reach it: the coast saturates often enough that a month which never
+#: does is the sensor, not the sky.
+HUMIDITY_COLUMNS: tuple[str, ...] = ("ur", "RH1_Avg", "RH_WXT_Avg", "RH", "RH1", "RH2")
+
+#: Monthly maximum below which a hygrometer is presumed biased low. Read off a
+#: gap, not chosen: over ten years the healthy channels never put a month below
+#: 95.0 %RH (``RH1_Avg`` p05 = 95.5 across 97 months, ``RH2`` p05 = 95.0), and the
+#: faulty ones never put one above 90.7 (``RH_WXT_Avg`` max = 90.7 across 49
+#: months, ``RH1`` max = 87.0). 93.0 sits in the middle of that empty band, so
+#: the check separates the two populations with nothing on either shoulder.
+HUMIDITY_SATURATION_FLOOR = 93.0
+
+#: Samples a month needs before its maximum means anything.
+HUMIDITY_MIN_SAMPLES_PER_MONTH = 2000
+
+
+def months_never_reaching_saturation(
+    frame: pd.DataFrame,
+    columns: Sequence[str] = HUMIDITY_COLUMNS,
+    floor: float = HUMIDITY_SATURATION_FLOOR,
+) -> list[tuple[str, str, float]]:
+    """Months whose hygrometer never came near saturation, which it should have.
+
+    The one fault family no gate in this pipeline can otherwise see. A sensor
+    reading a steady 10 %RH low moves correctly, never repeats, never steps and
+    never leaves its range — range, excursion and persistence tests are all blind
+    to it by construction, because each of them asks about the sample's relation
+    to its own neighbours. This asks about its relation to PHYSICS instead:
+    saturation is an external anchor at 100 %RH, and a coastal tropical site
+    reaches it.
+
+    MONTHLY, deliberately. Measured on this archive the daily form flags 31.88%
+    of the healthy channel's days as well as 98.48% of the faulty one's — it does
+    not separate them. The monthly form separates them completely: zero of 97
+    months on the healthy channel, 36 of 49 on the faulty one.
+
+    Reported, never masked. The samples are wrong by an offset, not absent, and
+    which offset is not recoverable from the channel that carries it. Masking
+    would also delete a year of otherwise usable humidity over a defect a
+    recalibration can correct.
+
+    Parameters
+    ----------
+    frame:
+        5-minute frame in %RH with a naive station-local index.
+    columns:
+        Hygrometer columns to test, including the unified ``ur``.
+    floor:
+        Monthly maximum below which the month is reported.
+
+    Returns
+    -------
+    list
+        ``(column, month as YYYY-MM, monthly maximum)``, oldest first. Months
+        with fewer than :data:`HUMIDITY_MIN_SAMPLES_PER_MONTH` samples are
+        skipped: a maximum over a handful of readings says nothing.
+    """
+    flagged: list[tuple[str, str, float]] = []
+    for column in columns:
+        if column not in frame.columns:
+            continue
+        humidity = frame[column].dropna()
+        if humidity.empty:
+            continue
+        grouped = humidity.groupby(pd.DatetimeIndex(humidity.index).to_period("M"))
+        monthly = grouped.agg(["max", "count"])
+        suspect = monthly[
+            (monthly["count"] >= HUMIDITY_MIN_SAMPLES_PER_MONTH) & (monthly["max"] < floor)
+        ]
+        flagged.extend(
+            (column, str(month), float(value))
+            for month, value in zip(suspect.index, suspect["max"], strict=True)
+        )
+    return sorted(flagged, key=lambda entry: (entry[1], entry[0]))
+
+
 # Detection constants for the timestamp-corruption check below, measured in
 # docs/arqueologia/qc/med-fault-detection.md: 42 days (1.22% of the record) carry
 # at least three DEEP-NIGHT samples of global irradiance above 50 W/m2, the worst
