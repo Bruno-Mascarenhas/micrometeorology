@@ -32,12 +32,12 @@ build_five_minute_frame          merge the .dat archive against an explicit mani
 mask_sentinels                   1,093,223 samples   logger fill values (-99999, NAN, ...)
 apply_physical_limits            236,815             range gates, raw logger units
 apply_calibrations               1,227               a `factor: null` record voids its window
-mask_step_excursions             849       ← statistical
-mask_persistent_runs             48,585    ← statistical
+mask_step_excursions             860       ← statistical
+mask_persistent_runs             60,824    ← statistical
 unify_sensor_columns                                 era-to-era channel unification (COPIES)
 close_net_radiation              36,241 recomposed
-mask_night_corrupted_days        135,828             53 days of timestamp corruption
-mask_impossible_shortwave        339                 BSRN geometric ceiling
+mask_night_corrupted_days        187,826             53 days of timestamp corruption
+mask_impossible_shortwave        559                 BSRN per-component ceiling
 apply_physical_limits (2nd)      579                 re-check in calibrated units
   └─ write station_5min_qc
 aggregate_to_hourly                                  means, sums, vector means
@@ -95,7 +95,7 @@ sensor dropout does.
 
 | family | threshold | removed | evidence |
 |---|---|---|---|
-| pressure | 1.0 hPa | 626 | rain-coincidence *below* the archive baseline; 97.4% of it sits inside the range gate |
+| pressure | 1.0 hPa | 591 | rain-coincidence *below* the archive baseline; 97.4% of it sits inside the range gate |
 | temperature | 3.0 °C | 207 | WMO one-minute step limit, conservative on a 5-minute mean |
 | humidity | 15 %RH | 16 | fifteen quantiser counts on the integer-recorded channels |
 
@@ -119,8 +119,8 @@ held still in between.
 
 | family | window | removed | what it caught |
 |---|---|---|---|
-| wind speed | 36 (3 h) | 33,971 | an anemometer at two distinct values for 18 consecutive days |
-| wind direction | 36 (3 h) | 9,995 | a vane frozen at 71.6° while its anemometer averaged 1.3 m/s |
+| wind speed | 36 (3 h) | 41,517 | an anemometer at two distinct values for 18 consecutive days |
+| wind direction | 36 (3 h) | 17,042 | a vane frozen at 71.6° while its anemometer averaged 1.3 m/s |
 | humidity | 144 (12 h) | 2,265 | 146 h frozen at 72.47 %RH; 42.7 h at 48.3 %RH |
 | temperature | 36 (3 h) | 0 | regression guard; longest genuine run in ten years is 33 |
 | pressure | 36 (3 h) | 0 | regression guard; longest genuine run is 14 |
@@ -242,3 +242,81 @@ stages before it already took. They were measured on the frame at the exact
 pipeline slot the stage occupies, not on `station_5min_qc.parquet` — that frame is
 censored by the very gates under revision, and measuring a proposed gate against it
 understates it.
+
+---
+
+## References
+
+Every control below was checked against a source that was actually opened. Where
+a published threshold did not transfer to this site, that is stated with the
+measurement that showed it — a citation attached to a number we did not use would
+be worse than none.
+
+Three categories, and the third is the one to read first.
+
+### Controls with a verified published source
+
+| control | source |
+|---|---|
+| range gates, all variables | WMO (2008), *Guide to Meteorological Instruments and Methods of Observation*, WMO-No. 8, 7th ed. — Zahumenský, I. (2004), *Guidelines on Quality Control Procedures for Data from Automatic Weather Stations*, WMO CBS/OPAG-IOS/ET AWS-3/Doc. 4(1) |
+| excursion (spike/dip) form | Fiebrich, C. A. et al. (2010), *Quality Assurance Procedures for Mesoscale Meteorological Data*, J. Atmos. Oceanic Technol. 27, 1565–1582, sec. 3.b.1, reporting Graybeal et al. (2002): spike/dip tests outperform plain step tests |
+| temperature excursion, 3.0 °C | Zahumenský (2004), ch. II sec. II.b — the one-minute air-temperature step limit, conservative applied to a five-minute mean |
+| humidity excursion, 15 %RH | between Shafer, M. A. et al. (2000), *Quality Assurance Procedures in the Oklahoma Mesonetwork*, J. Atmos. Oceanic Technol. 17, 474–494, tab. 3 (20 %RH per 5 min) and Zahumenský (2004) (10 %RH per 1 min) |
+| streak/persistence parametrised by reporting resolution | Dunn, R. J. H. et al. (2012), *HadISD: a quality-controlled global synoptic report database…*, Climate of the Past 8, 1649–1679 |
+| BSRN physically-possible ceilings, per component | Long, C. N. & Shi, Y. (2008), *An Automated Quality Assessment and Control Algorithm for Surface Radiation Measurements*, Open Atmos. Sci. J. 2, 23–37 — Long, C. N. & Dutton, E. G. (2002, rev. 2009), *BSRN Global Network recommended QC tests V2.0* |
+| diffuse must not exceed global | Long & Shi (2008), the two-component comparison test |
+| tipping-bucket quantisation | Lewis, E., Pritchard, D. et al., *GSDR-QC* reference implementation, Newcastle University Water Group — Vaisala Oyj, *WXT530 Series User Guide* M211840EN-G, precipitation measurement principle |
+| blocked-gauge detection by dry run | Meira, M. A. (2021), *Quality control procedures for sub-hourly rainfall data*, MSc thesis, UFRGS — Castro, M. L., Vichete, W. D. & Filho, L. L. (2026), *METBRA25Y: Brazil Surface Meteorology Archive with Harmonized Variables and Quality Control*, arXiv:2605.08701 |
+| saturation check on hygrometers | Estévez, J., Gavilán, P. & García-Marín, A. P. (2011), *Data validation procedures in agricultural meteorology*, Adv. Sci. Res. 6, 141–146 — AASC (2019), *Recommendations and Best Practices for Mesonets*, v1 |
+| calm-fill convention on wind direction | Lucio-Eceiza, E. E. et al. (2018), *Quality Control of Surface Wind Observations in Northeastern North America*, Parts I and II, J. Atmos. Oceanic Technol. 35, 159–182 and 183–205 |
+| the decision NOT to step-test wind direction | Shafer et al. (2000), tab. 3 — the Oklahoma Mesonet operates on native five-minute data and sets its direction-step threshold to 360°, declining the test |
+
+### Controls derived locally, because the published form does not transfer
+
+Each of these was measured against the published criterion first, and the
+measurement is why it was not used.
+
+| control | published form, and what it did here |
+|---|---|
+| persistence windows (36 samples for T and P, 144 for RH) | WMO/TD-No. 1236 specifies minimum VARIABILITY over 60 minutes. Measured here it flags 3.6 % of one temperature channel and 10.1 % of one humidity channel — a damped maritime tropical climate genuinely holds still longer than the continental stations that criterion was written for. The windows here come from the longest genuine run per family over ten years. |
+| pressure excursion, 1.0 hPa | No published five-minute limit fits a sea-level tropical site where genuine variability has p99 = 0.20 hPa. Read off a two-order-of-magnitude gap: the smallest artifact step measured is 11.21 hPa. |
+| calm exemption, 0.1 m/s with a duration ceiling | Keyed to the instrument's own stall floor (0.281 m/s) — the principled-looking choice — the catch collapses from 33,037 to 816 and an 18-day dead anemometer disappears. |
+| humidity saturation floor, 93.0 %RH | The literature prescribes the test, not the number. Read off a gap: healthy channels never put a month below 95.0, faulty ones never above 90.7. |
+| diffuse-exceeds-global floor, 200 W/m² | The rule is absolute in the literature. Applied absolutely here it fires on 126,404 samples, of which all but 30 are night thermal offset around zero. |
+
+### Controls with neither a source nor a local measurement
+
+The most important list in this document, because these are in production on
+habit alone.
+
+- **The longwave range gates** `CG3Up [250, 550]` and `CG3Dn [300, 650]` carry no
+  citation, and they contradict the BSRN limits this same file cites for
+  shortwave. They also remove only the tip of a known CNR1 Pt-100 fault rather
+  than the fault.
+- **`panel_temp`** passes through the whole pipeline and into `station_hourly`
+  with no entry in any of the three control lists.
+- **The three dewpoint channels** `DP_C_Avg`, `DP1_C_Avg`, `DP2_C_Avg` have a
+  range gate and no statistical test, while every sibling T and RH channel of the
+  same instrument has both.
+- **`WindDir_SD1_WVT`**, 267,252 samples of σ-θ, has only a range gate.
+- **Nine wind channels** have no persistence rule, including `WindDir` with
+  212,681 samples.
+
+### Sources consulted that produced a deliberate negative
+
+Recording these so the same ground is not covered twice.
+
+- **Segovia-Cardozo, D. A. et al. (2021)**, *Understanding the Mechanical Biases
+  of Tipping-Bucket Rain Gauges*, Water 13, 2285 — the CUSUM inter-tip test needs
+  tip timestamps. Our data is interval totals, and 47.3 % of wet samples contain
+  two or more tips, carrying 81.66 % of the archive's depth.
+- **Muchan, K. & Dixon, H. (2019)**, Hydrology Research 50(6), 1564–1576, and
+  **Rombeek, N. et al. (2025)**, HESS — undercatch and wind correction are
+  corrections to the measurement, not quality control of it, and would rewrite
+  values rather than reject them.
+- **Jiménez, P. A. et al. (2010)**, J. Appl. Meteor. Climatol. 49, 308–325 — the
+  wind-direction step test, declined for the reason Shafer et al. give.
+- **Long & Shi (2008)** minimum of −4 W/m² — measured here as 100 % false
+  positive: 21,256 samples of uncorrected thermal offset from IR loss, exactly
+  the effect the same paper describes. Masking would bias the night mean upward
+  and destroy the diagnostic.
