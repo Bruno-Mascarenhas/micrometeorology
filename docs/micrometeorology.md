@@ -315,6 +315,7 @@ GeoJSON/{domain}.geojson              # legacy full FeatureCollection (fallback)
 GeoJSON/{domain}.grid.json            # compact grid companion (edges/bounds)
 JSON/{domain}_{variableId}_{NNN}.json # per-time-step value payload
 JSON/{domain}_WIND_VECTORS_{NNN}.json # wind-arrow overlay for any variable
+JSON/{domain}_ISOBARS_{NNN}.json      # sea-level isobar overlay for any variable
 JSON/{domain}_{variableId}.series.bin # per-cell time-series (int32 matrix)
 JSON/{domain}_{variableId}.summary.json  # per-step domain mean/min/max
 JSON/manifest.json                    # run manifest (v2)
@@ -350,6 +351,39 @@ gaps in the timeline).
   masked); `metadata.scale_values` holds six linspace legend stops and
   `metadata.date_time` the local timestamp. Poteolico/wind payloads carry an
   extra `metadata.wind` block.
+- **`{domain}_ISOBARS_{NNN}.json`** — `{"metadata":{...},"isobars":[...]}`. One
+  entry per traced level, each `{"level": hPa, "paths": [[[lon, lat], ...], ...]}`;
+  a level whose contour comes back empty is omitted, so every published entry
+  draws something, and a step too flat to name a round level publishes
+  `"isobars": []` rather than a line at the field's midpoint.
+  `metadata.interval` is the spacing the legend states.
+
+  The spacing is one value per **domain**, not per step — a spacing that changed
+  between steps would make the lines jump under the animation. It is the coarsest
+  rung of `ISOBAR_INTERVALS_HPA` that still yields `TARGET_LEVELS_PER_STEP` lines
+  on the domain's *median* step, so a single flat step cannot drive a whole domain
+  to a fine spacing.
+
+  **The ladder holds only 4/2/1 hPa.** Rungs of 0.5/0.2/0.1 hPa were published
+  once and withdrawn. On the 2026-05-03 run the innermost domain spans a median
+  1.14 hPa across its 84 km, which earned 0.2 hPa and drew a median 6 labelled
+  lines over 14 separate polylines (18.4 KB a step); the same run's domain-mean
+  pressure moves 2.9 hPa in a typical hour, fourteen of those spacings, so
+  consecutive steps shared no level at all and the overlay reshuffled instead of
+  drifting. At the 1 hPa floor the same domain draws a median 1 line (4.3 KB) and
+  publishes none in 5 of 76 steps, which is the honest reading of a field flatter
+  than the coarsest chart anyone draws. Measured effect of the trim, per domain:
+  d01 and d02 unchanged (2 and 1 hPa), d03 0.5 → 1 hPa (7 → 3 lines), d04
+  0.2 → 1 hPa (6 → 1 line). 3 hPa is deliberately absent: it is not an interval
+  charts are drawn at, and it would blank d04 in 39 of 76 steps.
+
+  Isobars are an overlay over whichever field is shaded beneath them, so they are
+  published once per domain and step and drawn over the variables listed in
+  `features.isobar_overlay.draw_over`. Sea-level reduction is only defensible
+  below roughly 1500 m of terrain; a domain that crosses it earns an operator
+  warning rather than a failed unit. **The absolute levels are only as good as the
+  run's mass field** — see "Reading isobars from a run whose pressure oscillates"
+  below.
 - **`{domain}_{variableId}.series.bin`** — `cell-series-int32-le-v1`: a
   row-major `cells × steps` little-endian int32 matrix of
   `round(value, 2) × 100`, with sentinel `-2147483648` for never-written /
@@ -360,7 +394,7 @@ gaps in the timeline).
   for the lightweight domain-preview panel.
 - **`manifest.json`** — see "Run manifest (v2)" below. Only `values_json` and
   `poteolico` work units accumulate `.series.bin`/`.summary.json`;
-  `WIND_VECTORS` and the grid GeoJSON do not.
+  `WIND_VECTORS`, `ISOBARS` and the grid GeoJSON do not.
 
 Supported site-oriented variables include the legacy fields `TEMP`, `PRES`,
 `VAPOR`, `RAIN`, `WIND`, `SWDOWN`, `HFX`, `LH`, and the wind-potential files
@@ -368,6 +402,40 @@ Supported site-oriented variables include the legacy fields `TEMP`, `PRES`,
 `poteolico`. Additional 2026 WRF fields include `TSK`, `RH2`, `GLW`, and
 `WIND_POWER_DENSITY_10M`. Units, formulas, and limitations are documented in
 the extractor docstrings in `src/micrometeorology/wrf/variables.py`.
+
+#### Reading isobars from a run whose pressure oscillates
+
+Isobar levels are absolute pressures, so they inherit every defect in the run's
+mass field, and the overlay is the artifact where such a defect is most visible:
+a domain-wide shift in the mean moves the whole level family across the map at
+once, which reads on the page as flicker rather than as weather.
+
+The 2026-05-03 operational run has such a defect, and it is worth knowing what
+it looks like because no contouring choice repairs it:
+
+| | 2026-05-03 | 2013-07-01 (control) | station barometer `BP1` |
+|---|---|---|---|
+| hourly \|Δ\| of the domain-mean surface pressure | 2.84 hPa/h (max 7.8) | 0.195 hPa/h (max 0.78) | 0.59 hPa/h |
+
+At the station's own cell the run moves 3.18 hPa/h against the barometer's
+0.59 — a factor 5.4. The oscillation is spatially **uniform** (spatial standard
+deviation of the hourly jump 0.2–0.4 hPa against a mean of −6.7), it is present in
+`MU`, the prognostic dry-air mass, and it carries the same phase in all four
+domains, so it enters through the outermost domain or the boundary conditions
+rather than through nesting. Its largest jumps are phase-locked to the 03→04,
+09→10, 15→16 and 21→22 UTC transitions.
+
+None of it comes from the sea-level reduction, which was audited against RIP4
+`seaprs` on this data: it contributes at most 0.16 hPa/h of the swing (1.4% at the
+station cell), the terrain-locked artifact its own module docstring declares
+accounts for 0.2–2.9%, and its reordered hot-surface branch differs from RIP4's
+on zero cells across all four domains. 86–94% of the hourly change in the reduced
+field is inherited verbatim from the wrfout's own `PSFC`.
+
+Before trusting a new run's isobars, check
+`np.abs(np.diff(PSFC.mean(axis=(1, 2))))`: a median above roughly 1 hPa/h is the
+input, not the exporter. Coarsening the interval reduces the visual clutter but
+cannot damp the sweep, because the sweep is in the field.
 
 JSON export runs coarse (file, variable) work units on ONE persistent process
 pool (`micrometeorology.wrf.jobs`). Each worker opens the NetCDF itself with
@@ -698,7 +766,7 @@ authoritative description of that contract.
 | `GeoJSON/{domain}.geojson`             | `GeoJSON/{domain}.geojson`                 | grid loader fallback + `charts` cell lookup | live (fallback) |
 | `JSON/{domain}_{variableId}_{NNN}.json`| same                                        | `map-manager.loadValueData` (the map raster) | live |
 | `JSON/{domain}_WIND_VECTORS_{NNN}.json`| same                                        | `map-manager.renderWindVectors` (arrow overlay) | live |
-| `JSON/{domain}_ISOBARS_{NNN}.json`     | same                                        | sea-level isobar polylines; the variables to draw them over are in `features.isobar_overlay.draw_over` | not consumed yet |
+| `JSON/{domain}_ISOBARS_{NNN}.json`     | same                                        | `map-manager.renderIsobars` (line overlay); the variables to draw them over are in `features.isobar_overlay.draw_over`, the legend text comes from `metadata.interval` | live |
 | `JSON/{domain}_{variableId}.summary.json` | via `features.domain_summary.template`   | `charts-manager._loadSummaryArtifactSeries` (domain preview) | live |
 | `JSON/{domain}_{variableId}.series.bin`   | via `features.cell_series.template`      | `charts-manager._loadCellSeriesFromBinary` (cell modal, HTTP Range) | live |
 
