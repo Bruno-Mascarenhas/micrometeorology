@@ -20,12 +20,12 @@ Examples
 Publish the last seven days straight into a checkout of the site::
 
     labmim-monitoring -i output/archive -o ../site-labmim/site/Monitoramento \\
-        -w data/series_operacional.dat
+        -w data/series/labmim_series_operacional.dat
 
 Reproduce the reference test window (station and model both essentially
 complete)::
 
-    labmim-monitoring -i output/archive -o out/ -w data/series_operacional.dat \\
+    labmim-monitoring -i output/archive -o out/ -w data/series/labmim_series_operacional.dat \\
         --end 2022-07-08
 """
 

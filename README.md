@@ -180,16 +180,17 @@ the columns to carry their units, repairs four defects recovered from the record
 propagated into, the specific-humidity conversion applied to WRF's mixing ratio,
 and WRF's cold-start step published as measurement), and keeps a `.bak`:
 
+`run` writes one file per station, named after it, so the v2 record is a NEW
+artifact at a new path and the v1 file is left where it is:
+
 ```bash
-labmim-wrf-series migrate -i data/series_operacional.dat
+cp data/series_operacional.dat data/series/labmim_series_operacional.dat
+labmim-wrf-series migrate -i data/series/labmim_series_operacional.dat
 ```
 
-The record then becomes the tower's own file: `run` writes one file per station,
-named after it, so rename the migrated file to `labmim_series_operacional.dat`
-inside the `-o` directory before the first append. Appending to a file still on
-the v1 schema is refused rather than attempted — extending a v1 header would
-weld both schemas into one file that neither `migrate` nor the readers could
-make sense of.
+Appending to a file still on the v1 schema is refused rather than attempted:
+extending a v1 header would weld both schemas into one file that neither
+`migrate` nor the readers could make sense of.
 
 See the [operational-series contract](docs/micrometeorology.md#operational-point-series)
 for the column table and the full v1 → v2 repair list.
@@ -333,15 +334,15 @@ labmim-archive -d data -o output/archive --strict
 
 # Publish the climatology page's distribution artifacts from that database
 labmim-climatology -i output/archive/station_hourly.parquet \
-    -w data/series_operacional.dat -o ../site-labmim/site/Climatologia
+    -w data/series/labmim_series_operacional.dat -o ../site-labmim/site/Climatologia
 
 # Publish the rolling 7-day window the interactive monitoring page draws
-labmim-monitoring -i output/archive -w data/series_operacional.dat \
+labmim-monitoring -i output/archive -w data/series/labmim_series_operacional.dat \
     -o ../site-labmim/site/Monitoramento
 
 # Nine fixed-name monitoring-page PNGs from the hourly CSV (site-labmim consumer)
 labmim-site-graphs site -i data/hourly/sensor_data.csv -o ../site-labmim/site/assets/graphs \
-    --raw output/archive/station_5min_qc.parquet --wrf data/series_operacional.dat
+    --raw output/archive/station_5min_qc.parquet --wrf data/series/labmim_series_operacional.dat
 ```
 
 Both monitoring producers draw the same three layers — the raw 5-minute samples,

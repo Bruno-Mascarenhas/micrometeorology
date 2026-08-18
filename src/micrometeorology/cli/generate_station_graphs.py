@@ -16,7 +16,7 @@ Usage::
     python -m micrometeorology.cli.generate_station_graphs \
         --lenta data/LBM_lenta_2025.dat \
         --rain  data/LBM_rain_2025.dat  \
-        --wrf   data/series_operacional.dat \
+        --wrf   data/series/labmim_series_operacional.dat \
         --output-dir output/figures
 """
 

@@ -594,7 +594,7 @@ hourly database above plus the WRF point extraction.
 
 ```bash
 labmim-climatology -i output/archive/station_hourly.parquet \
-    -w data/series_operacional.dat \
+    -w data/series/labmim_series_operacional.dat \
     -o ../site-labmim/site/Climatologia
 ```
 
@@ -673,8 +673,9 @@ that turns a wrfout into a block.
 labmim-wrf-series run --wrf-dir /data/wrf/20260815/wrf01 --date 20260815 \
     -o data/series -s labmim:-13.0055:-38.5089 -s ilheus:-14.7889:-39.0339
 
-# Once, before the first append, on the historical file
-labmim-wrf-series migrate -i data/series_operacional.dat
+# Once, before the first append: the v2 record is a new artifact at a new path
+cp data/series_operacional.dat data/series/labmim_series_operacional.dat
+labmim-wrf-series migrate -i data/series/labmim_series_operacional.dat
 ```
 
 The file is **not** the product of a single run. The server simulates one day at
@@ -804,7 +805,7 @@ window rather than the whole record.
 
 ```bash
 labmim-monitoring -i output/archive -o ../site-labmim/site/Monitoramento \
-    -w data/series_operacional.dat
+    -w data/series/labmim_series_operacional.dat
 ```
 
 One JSON carries all nine charts in the three layers the researcher asked for —
@@ -865,7 +866,7 @@ labmim-site-graphs site -i data/hourly/sensor_data.csv \
 
 # The same nine in three layers: raw under the hourly mean, model on top
 labmim-site-graphs site -i data/hourly/sensor_data.csv -o out/ \
-    --raw output/archive/station_5min_qc.parquet --wrf data/series_operacional.dat
+    --raw output/archive/station_5min_qc.parquet --wrf data/series/labmim_series_operacional.dat
 
 # Retarget a renamed logger column without editing code
 labmim-site-graphs site -i data/hourly/sensor_data.csv -o out/ \

@@ -13,7 +13,7 @@ Examples
 Publish straight into a checkout of the site::
 
     labmim-climatology -i output/archive/station_hourly.parquet \\
-        -w data/series_operacional.dat \\
+        -w data/series/labmim_series_operacional.dat \\
         -o ../site-labmim/site/Climatologia
 
 Restrict to the observed record (no model subsets)::
