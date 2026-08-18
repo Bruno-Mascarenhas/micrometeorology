@@ -309,6 +309,14 @@ def _wind_speed(sample: PointSample) -> NDArray:
 
 
 def _wind_direction_deg(sample: PointSample) -> NDArray:
+    """Bearing the wind blows FROM, degrees clockwise from true north.
+
+    So 270 is a westerly and 90 an easterly, and the value is 180 from the
+    direction the air actually moves toward. The arithmetic is
+    :func:`~micrometeorology.sensors.wind.wind_direction_from_components`,
+    which the station's own hourly means already use, so the model layer and
+    the observed layer of the direction chart cannot disagree by a convention.
+    """
     return np.asarray(wind_direction_from_components(*_earth_relative_wind(sample)))
 
 

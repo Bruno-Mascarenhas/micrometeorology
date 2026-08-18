@@ -200,6 +200,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         caveats=(
             "Todas as camadas são pontos, inclusive a do WRF: direção é circular, e uma linha ligando 350° a 10° varreria o gráfico inteiro passando por um rumo que nunca ocorreu.",
             "A média horária é vetorial ponderada pela velocidade — cada amostra do intervalo entra com o peso do vento que a produziu, de modo que uma calmaria não desloca o rumo da hora.",
+            "O WRF traz o vento mais de leste do que a estação: em 12.618 horas pareadas com vento acima de 1,5 m/s o rumo médio do modelo é 104° contra 131° medidos, um desvio sistemático de cerca de 20°. Três em cada quatro horas caem dentro de 45° da medida, então isso é viés de sítio costeiro e não convenção invertida.",
         ),
     ),
     MonitoringChart(
