@@ -45,6 +45,7 @@ from micrometeorology.sensors.plotting import (
     save_figure,
     setup_date_axis,
 )
+from micrometeorology.wrf.operational_record import rename_v1_columns
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -83,12 +84,12 @@ RH_WXT_OFFSET = 10.339
 
 # Graph name -> column of series_operacional.dat carrying the model series.
 WRF_COLUMNS = {
-    "radiacao_difusa": "Swdw",
-    "temperatura": "T",
-    "umidade": "ur",
-    "pressao": "pressure",
-    "velocidade": "WS",
-    "direcao": "WD",
+    "radiacao_difusa": "swdown_w_m2",
+    "temperatura": "t2_c",
+    "umidade": "rh_pct",
+    "pressao": "psfc_hpa",
+    "velocidade": "wind_speed_m_s",
+    "direcao": "wind_dir_deg",
 }
 
 
@@ -97,7 +98,9 @@ def read_wrf_series(path: str | Path) -> pd.DataFrame:
 
     The file is a CSV whose first four columns are year, month, day and hour;
     they become the DatetimeIndex. The remaining columns are hourly model
-    variables (Sw_dw, T, ur, pressure, WS, WD, etc.).
+    variables (``t2_c``, ``rh_pct``, ``psfc_hpa``, ``swdown_w_m2``, ...). A file
+    still on the v1 schema is read under the v2 names, so a caller names its
+    columns once either way.
 
     Parameters
     ----------
@@ -116,7 +119,7 @@ def read_wrf_series(path: str | Path) -> pd.DataFrame:
     source = Path(path)
     logger.info("Reading WRF series: %s", source.name)
 
-    wrf = pd.read_csv(source, sep=",")
+    wrf = rename_v1_columns(pd.read_csv(source, sep=","))
 
     datetime_parts = wrf.iloc[:, :4]
     datetime_parts.columns = ["year", "month", "day", "hour"]

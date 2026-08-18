@@ -520,7 +520,7 @@ class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
         """The chart keeps whatever layer does have data — it just stops
         claiming the one that does not."""
         frame = self._frame()
-        model = pd.DataFrame({"pressure": np.linspace(1010, 1020, 48)}, index=frame.index)
+        model = pd.DataFrame({"psfc_hpa": np.linspace(1010, 1020, 48)}, index=frame.index)
 
         written, _missing, empty = render_site_graphs(
             frame,
