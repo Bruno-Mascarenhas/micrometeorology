@@ -119,7 +119,11 @@ def test_a_column_bracketed_by_a_missing_level_refuses_rather_than_returning_nan
 def test_the_spacing_is_the_coarsest_that_still_fills_a_typical_step():
     """A 12 hPa run takes 2 hPa lines; anything coarser leaves the map nearly bare."""
     assert isobars.choose_interval_hpa(12.0) == 2.0
-    assert isobars.choose_interval_hpa(1.4) == 0.2
+
+
+def test_a_field_flatter_than_any_chart_spacing_takes_the_floor_not_a_finer_rung():
+    """1.14 hPa is the innermost domain's median range; it used to earn 0.2 hPa."""
+    assert isobars.choose_interval_hpa(1.14) == 1.0
 
 
 @pytest.mark.parametrize("unusable", [np.nan, 0.0, -3.0])

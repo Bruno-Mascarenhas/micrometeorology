@@ -49,11 +49,10 @@ ISOBAR_OVERLAY_VARIABLES: tuple[str, ...] = (
     "TEMP",
 )
 
-#: Contour spacings tried from coarsest to finest.  The first three are the
-#: intervals synoptic charts are drawn at; the finer ones exist for the innermost
-#: domains, whose sea-level field spans as little as 0.68 hPa across 84 km and
-#: would carry a single line at any conventional spacing.
-ISOBAR_INTERVALS_HPA: tuple[float, ...] = (4.0, 2.0, 1.0, 0.5, 0.2, 0.1)
+#: Contour spacings tried from coarsest to finest, all of them intervals synoptic
+#: charts are drawn at. Sub-hPa rungs were published once and withdrawn; the
+#: measurements are in ``docs/micrometeorology.md``.
+ISOBAR_INTERVALS_HPA: tuple[float, ...] = (4.0, 2.0, 1.0)
 
 #: Lines a typical step should carry.  The spacing is chosen against the domain's
 #: MEDIAN range rather than its narrowest step: sizing it so the flattest step of
@@ -116,16 +115,16 @@ def choose_interval_hpa(typical_range_hpa: float) -> float:
     -------
     float
         One of :data:`ISOBAR_INTERVALS_HPA` — the coarsest yielding at least
-        :data:`TARGET_LEVELS_PER_STEP` lines on that typical step, or the finest
-        available when no spacing reaches it.
+        :data:`TARGET_LEVELS_PER_STEP` lines on that typical step, or the 1 hPa
+        floor when none does, which draws one line on a typical step and none on
+        the flattest.
 
     Raises
     ------
     ValueError
-        When the range is not finite and positive. Returning the finest spacing
-        instead would publish a domain at 0.1 hPa — ninety-odd levels a step,
-        with a legend stating an interval nothing is wrong with — and the only
-        symptom of the field being unusable would be the file size.
+        When the range is not finite and positive. Falling back to the floor
+        instead would publish a failed reduction as a plausible single isobar, and
+        nothing downstream would report the field as unusable.
     """
     if not np.isfinite(typical_range_hpa) or typical_range_hpa <= 0.0:
         raise ValueError(
