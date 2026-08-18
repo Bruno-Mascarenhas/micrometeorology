@@ -215,6 +215,31 @@ def extract_relative_humidity(ds: WRFDataset) -> tuple[NDArray, float, float]:
     return rh, rh_min, rh_max
 
 
+def rotate_components(
+    u: NDArray, v: NDArray, cos_alpha: NDArray, sin_alpha: NDArray
+) -> tuple[NDArray, NDArray]:
+    """Apply a grid-to-earth rotation already reduced to the caller's shape.
+
+    The rotation itself, separated from the reading in
+    :func:`rotate_to_earth_relative` so a caller working at one grid cell — the
+    operational point series — turns its wind with the same arithmetic instead
+    of a second copy of it.
+
+    Parameters
+    ----------
+    u, v:
+        Grid-relative components, m/s, any shape.
+    cos_alpha, sin_alpha:
+        ``COSALPHA``/``SINALPHA`` broadcastable against *u* and *v*.
+
+    Returns
+    -------
+    tuple[NDArray, NDArray]
+        ``(east, north)`` in m/s, earth-relative.
+    """
+    return u * cos_alpha + v * sin_alpha, v * cos_alpha - u * sin_alpha
+
+
 def rotate_to_earth_relative(
     ds: WRFDataset, u: NDArray, v: NDArray, t0: int | None = None, t1: int | None = None
 ) -> tuple[NDArray, NDArray]:
@@ -244,7 +269,7 @@ def rotate_to_earth_relative(
     if u.ndim == cos_alpha.ndim + 1:
         cos_alpha = cos_alpha[:, np.newaxis, :, :]
         sin_alpha = sin_alpha[:, np.newaxis, :, :]
-    return u * cos_alpha + v * sin_alpha, v * cos_alpha - u * sin_alpha
+    return rotate_components(u, v, cos_alpha, sin_alpha)
 
 
 def extract_wind(ds: WRFDataset) -> tuple[NDArray, NDArray, float, float]:

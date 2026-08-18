@@ -171,16 +171,16 @@ _WRF_COLOR = "#e07a1f"
 # a single name, because ``series_operacional.dat`` gains variables over time:
 # precipitation is absent today; the overlay appears the day it lands, no edit.
 DEFAULT_WRF_COLUMNS: dict[str, tuple[str, ...]] = {
-    "temperatura": ("T",),
-    "umidade": ("ur", "RH"),
-    "pressao": ("pressure",),
+    "temperatura": ("t2_c",),
+    "umidade": ("rh_pct",),
+    "pressao": ("psfc_hpa",),
     "precipitacao": _WRF_RAIN_CANDIDATES,
-    "velocidade": ("WS",),
-    "direcao": ("WD",),
-    "radiacao_difusa": ("Swdf",),
-    # Incoming shortwave only: the model's upwelling and net terms derive from
-    # ALBD and EMISS, which the extraction writes as broken constants.
-    "balanco": ("Swdw",),
+    "velocidade": ("wind_speed_m_s",),
+    "direcao": ("wind_dir_deg",),
+    "radiacao_difusa": ("swddif_w_m2",),
+    # Incoming shortwave only: the four-stream balance would need the model's
+    # upwelling terms, which this graph has never drawn.
+    "balanco": ("swdown_w_m2",),
     # No PAR in the point extraction.
     "radiacao_par": (),
 }

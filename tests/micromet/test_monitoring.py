@@ -173,8 +173,8 @@ class TestExporter:
     def test_precipitation_records_the_names_it_looked_for(
         self, archive: Path, tmp_path: Path
     ) -> None:
-        """Today there is no WRF rain column; the payload must say so, and say
-        which spellings would be picked up when the extraction grows one.
+        """A record written before the producer existed carries no rain column;
+        the payload must say so, and name the column that would be picked up.
 
         A model file is loaded on purpose: ``wrf_pending`` is a statement about
         what the extraction writes, so it is meaningful only once there is an
@@ -183,7 +183,7 @@ class TestExporter:
         payload = self._payload(archive, tmp_path, "-w", str(self._wrf_dat(tmp_path)))
         charts = {chart["id"]: chart for chart in payload["charts"]}
         candidates = charts["precipitacao"]["wrf_pending"]["precip"]
-        assert "precip" in candidates
+        assert "precip_mm" in candidates
         assert "RAINNC" not in candidates, "an accumulated field is not a per-interval layer"
 
     def test_gaps_serialise_as_null(self, archive: Path, tmp_path: Path) -> None:

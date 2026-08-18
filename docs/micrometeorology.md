@@ -68,6 +68,8 @@ src/micrometeorology/
     ├── animation.py         # PNG → WebM / GIF creation (parallel batch support)
     ├── interpolation.py     # Vectorised vertical interpolation (replaces wrf-python)
     ├── series.py            # Point time-series extraction from gridded data
+    ├── operational_record.py # series_operacional.dat: schema, rows, v1->v2 repair
+    ├── operational_series.py # wrfout -> one station's block (the netCDF half)
     └── geojson.py           # GeoJSON + value JSON export
 ```
 
@@ -592,7 +594,7 @@ hourly database above plus the WRF point extraction.
 
 ```bash
 labmim-climatology -i output/archive/station_hourly.parquet \
-    -w data/series_operacional.dat \
+    -w data/series/labmim_series_operacional.dat \
     -o ../site-labmim/site/Climatologia
 ```
 
@@ -656,6 +658,145 @@ The output is **not** committed to the site repository: it derives from the
 laboratory's private sensor archive, so like the WRF data it is gitignored there
 and attached at deploy time.
 
+### Operational point series
+
+Producer for the hourly model series at a point -- the file
+`labmim-climatology`, `labmim-monitoring` and `labmim-site-graphs` read as their
+WRF layer. The command is `labmim-wrf-series` (`cli/export_operational_series.py`) over two
+modules: `wrf/operational_record.py` holds what the record IS -- its schema, its
+rows, its repair -- and needs only pandas, so the CLIs that merely read the
+record do not pay for a NetCDF stack; `wrf/operational_series.py` is the half
+that turns a wrfout into a block.
+
+```bash
+# One run's block for every station, appended to each station's own record
+labmim-wrf-series run --wrf-dir /data/wrf/20260815/wrf01 --date 20260815 \
+    -o data/series -s labmim:-13.0055:-38.5089 -s ilheus:-14.7889:-39.0339
+
+# Once, before the first append: the v2 record is a new artifact at a new path
+cp data/series_operacional.dat data/series/labmim_series_operacional.dat
+labmim-wrf-series migrate -i data/series/labmim_series_operacional.dat
+```
+
+The file is **not** the product of a single run. The server simulates one day at
+a time and each run contributes 24 rows, so the record spans years while every
+block comes from a different execution of the model. Step 0 is 00 UTC, written
+as hour 21 of the previous **local** day (UTC-03) -- the run's initialisation,
+where the physics has not been called yet -- and step 23 is 23 UTC, hour 20
+local. 1087 such blocks were appended between 2022-06-15 and 2026-03-18.
+
+#### Several stations, one domain each
+
+A nested run covers the same region at four resolutions, so which wrfout answers
+for a station depends on where the station is. Pass the whole run and every
+station: each is served by the **finest domain whose grid contains it**, and
+writes to its own `{name}_series_operacional.dat` in `-o`. A station no domain
+reaches is named in the output and the command exits non-zero -- the others are
+still written, because a series that silently stops being published is the
+failure worth catching.
+
+| Station | Domain that serves it | dx |
+|---|---|---|
+| LabMiM tower (-13.0055, -38.5089) | `d04` | 1 km |
+| Feira de Santana (-12.2664, -38.9663) | `d03` | 3 km |
+| Ilhéus (-14.7889, -39.0339) | `d02` | 9 km |
+| Brasília (-15.79, -47.88) | `d01` | 27 km |
+
+Stations come from `-s name:lat:lon` (repeatable) or `--stations file.csv`
+(`name,lat,lon`, header optional). With neither, the run covers the LabMiM
+tower alone and writes `labmim_series_operacional.dat`. A station name becomes a
+file name, so it is restricted to `[A-Za-z0-9][A-Za-z0-9_-]*` rather than
+sanitised.
+
+#### The header is the schema
+
+Rows are rendered against the header the FILE declares, field by field, with
+`nan` wherever the run produced no value. Three consequences, all deliberate:
+
+- a variable the model stops writing **empties one column** instead of shifting
+  every column after it;
+- a column this extraction has never heard of is **preserved**, not dropped;
+- a new quantity is **appended** to the header (`--extend-header`, on by
+  default) and the rows already written stay shorter than it, which pandas reads
+  as no-value -- which is what they mean.
+
+`-v/--variables` selects the columns to compute. A name the catalogue does not
+define but the wrfout carries becomes a raw passthrough column, so a field WRF
+starts writing reaches the record with no code change; a name that is neither is
+a usage error, not a silently short row.
+
+#### Columns (v2)
+
+Every name carries its unit, because the record does mix them -- `e_hpa` beside
+`es_pa` is the file's own historical convention, kept rather than converted.
+
+| Column | Source | Unit |
+|---|---|---|
+| `year,month,day,hour` | `Times` + `STATION_UTC_OFFSET_HOURS` | local hour |
+| `t2_c` | `T2 - 273.15` | °C |
+| `rh_pct` | `100·e/es`, **unclipped** | % |
+| `psfc_hpa` | `PSFC/100` | hPa |
+| `e_hpa` | `w·p/(0.622 + w)`, `w` = `Q2` | hPa |
+| `es_pa` | Bolton (1980) eq. 10 | Pa |
+| `q2_g_kg` | `Q2·1000` | g/kg |
+| `wind_speed_m_s`, `wind_dir_deg`, `u10_m_s`, `v10_m_s` | `U10`,`V10` rotated onto true north | m/s, ° |
+| `swdown_w_m2`, `swdnb_w_m2`, `swupb_w_m2` | `SWDOWN`, `SWDNB`, `SWUPB` | W/m² |
+| `swddif_w_m2`, `swddir_w_m2` | `SWDDIF`, `SWDDIR` | W/m² |
+| `swup_w_m2` | `ALBEDO · SWDOWN` | W/m² |
+| `glw_w_m2` | `GLW` | W/m² |
+| `lwdnb_w_m2` | `LWDNB`, else `GLW` | W/m² |
+| `lwup_w_m2` | `LWUPB`, else `ε·σ·TSK⁴ + (1−ε)·GLW` | W/m² |
+| `lwup_air_w_m2` | `ε·σ·T2⁴` | W/m² |
+| `albedo`, `emissivity` | `ALBEDO`, `EMISS` | – |
+| `hfx_w_m2`, `lh_w_m2`, `grdflx_w_m2` | `HFX`, `LH`, `GRDFLX` | W/m² |
+| `ustar_m_s`, `pblh_m` | `UST`, `PBLH` | m/s, m |
+| `sst_c` | `SST - 273.15` | °C |
+| `precip_mm` | hourly increment of `RAINC+RAINNC` | mm |
+| `swdown_farms_w_m2`, `swddif_farms_w_m2`, `swddir_farms_w_m2` | none — `nan` | W/m² |
+
+`rh_pct` is deliberately **not** `variables.compute_relative_humidity`, which
+clips to 0-100% for a colour scale: this file is read as model state, and a
+model reporting supersaturated air should say so.
+
+`sst_c` is WRF's `SST` at the serving cell. Over a **land** cell -- which the
+tower's is -- WRF fills that field with the skin temperature at initialisation
+and never updates it, so at this site it is a per-run constant that is not a sea
+temperature. Pointed at a water cell it is one.
+
+The `_farms` trio has no source in the current configuration: `SWDDIR + SWDDIF`
+equals `SWDOWN` exactly in every wrfout of this era, so there is one
+direct/diffuse pair and it already feeds `swddir_w_m2`/`swddif_w_m2`. The
+2022-2026 values stay; nothing new is written there.
+
+#### v1 → v2: what `migrate` repairs
+
+The extraction that wrote the record was never committed here; its formulas were
+recovered from the 26,087 rows themselves, which surfaced four defects. All four
+are exactly invertible from the rows' own fields, so `migrate` repairs the
+record rather than annotating it, keeping a `.bak` and passing every untouched
+cell through verbatim so a diff shows only what changed.
+
+| # | Defect | Repair | Cells |
+|---|---|---|---|
+| 1 | `ALBD`/`EMISS` written as `value − 273.15` — a Kelvin-to-Celsius conversion applied to two dimensionless quantities | `+ 273.15` | 23 759 each |
+| 1a | `Swup_calc` = `(albedo − 273.15)·Swdw`, down to −294 069 W/m² | `+ 273.15·Swdw`, which needs no albedo — the 2022 rows have none | 26 087 |
+| 1b | `Lwup_calc` = `(ε − 273.15)·σ·T_celsius⁴` — broken emissivity **and** Celsius under Stefan-Boltzmann | `ε·σ·T_K⁴`, with ε from the repaired column or the constant 0.88 the record itself implies | 26 087 |
+| 2 | `e` used `w·p/(0.622 + 0.378·w)`, the **specific-humidity** conversion, on WRF's `Q2`, which is a **mixing ratio** | `w·p/(0.622 + w)`, and `ur` recomputed from it | 26 087 each |
+| 3 | WRF's cold-start step published as measurement: every flux written identically zero, and zero is a physically valid irradiance | no-value, keyed on `GLW == 0` | 1087 rows × 20 columns |
+| 4 | Until 2022-10-07 the row was 47 fields with `Swup_calc`/`Lwup_calc` at its **end** and `nan` in their named columns | moved into place before the repairs | 4656 |
+
+Defect 2 is why the record carried 322 rows -- 314 distinct hours -- above 100%
+relative humidity: `e`
+was 1.57% too high and `ur` 1.23 percentage points too high throughout. After the
+repair the record's maximum is 99.80% and no hour exceeds saturation.
+
+Shortening the header alone was never an option: pandas refuses a row wider than
+its header, so the 47-field rows and a 35-name header cannot coexist. That is
+why this is a file migration and not a header edit. Both readers of the record
+(`export_climatology.read_wrf_series`, `generate_station_graphs.read_wrf_series`)
+call `rename_v1_columns`, so a file still on v1 is read under the v2 names and no
+consumer needs to know which schema is on disk.
+
 ### Monitoring window artifacts (`labmim-monitoring`)
 
 Producer for the `labmim-monitoring-v1` document the site's **interactive**
@@ -664,7 +805,7 @@ window rather than the whole record.
 
 ```bash
 labmim-monitoring -i output/archive -o ../site-labmim/site/Monitoramento \
-    -w data/series_operacional.dat
+    -w data/series/labmim_series_operacional.dat
 ```
 
 One JSON carries all nine charts in the three layers the researcher asked for —
@@ -676,10 +817,11 @@ toggle and download. The time axis is published as `start` + `step_minutes` +
 
 The WRF column is resolved per series against an **ordered tuple of candidate
 names** (`sensors/monitoring.py`). `series_operacional.dat` gains variables over
-time — precipitation is expected but absent today — so the payload records which
-names were looked for and the page says the layer is missing instead of showing
-a legend that is silently one entry short. When the extraction starts writing
-rain, the chart picks it up with no code change here.
+time, so the payload records which names were looked for and the page says the
+layer is missing instead of showing a legend that is silently one entry short.
+Precipitation is the case that exercised the mechanism: `labmim-wrf-series` now
+writes a `precip_mm` column and the chart picked it up with no change here, while
+every hour before that column existed still reads as absent.
 
 The `window` object carries four fields, and two of them are easy to confuse:
 
@@ -724,7 +866,7 @@ labmim-site-graphs site -i data/hourly/sensor_data.csv \
 
 # The same nine in three layers: raw under the hourly mean, model on top
 labmim-site-graphs site -i data/hourly/sensor_data.csv -o out/ \
-    --raw output/archive/station_5min_qc.parquet --wrf data/series_operacional.dat
+    --raw output/archive/station_5min_qc.parquet --wrf data/series/labmim_series_operacional.dat
 
 # Retarget a renamed logger column without editing code
 labmim-site-graphs site -i data/hourly/sensor_data.csv -o out/ \

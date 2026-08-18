@@ -13,7 +13,7 @@ Examples
 Publish straight into a checkout of the site::
 
     labmim-climatology -i output/archive/station_hourly.parquet \\
-        -w data/series_operacional.dat \\
+        -w data/series/labmim_series_operacional.dat \\
         -o ../site-labmim/site/Climatologia
 
 Restrict to the observed record (no model subsets)::
@@ -52,6 +52,7 @@ from micrometeorology.stats.daylight import (
     MIN_SOLAR_ELEVATION_DEG,
     elevation_bounds,
 )
+from micrometeorology.wrf.operational_record import rename_v1_columns
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -100,18 +101,14 @@ OBSERVED_COLUMN = {
 # Same, for the WRF point extraction. A variable absent here simply has no model
 # subset — the page renders the observed ones and says so.
 WRF_COLUMN = {
-    "air_temperature": "T",
-    "relative_humidity": "ur",
-    "pressure": "pressure",
-    "wind_speed": "WS",
-    "wind_direction": "WD",
-    "clearness_index": "Swdw",
-    "shortwave_down": "Swdw",
-    # Only the two DOWNWELLING streams are trustworthy: Swup_calc and Lwup_calc
-    # derive from ALBD and EMISS, which the writer emits as the constants -273.01
-    # and -272.27 (Kelvin-to-Celsius applied to a fill value), so they and any net
-    # radiation built from them are physically meaningless.
-    "longwave_down": "Lwdw_glw",
+    "air_temperature": "t2_c",
+    "relative_humidity": "rh_pct",
+    "pressure": "psfc_hpa",
+    "wind_speed": "wind_speed_m_s",
+    "wind_direction": "wind_dir_deg",
+    "clearness_index": "swdown_w_m2",
+    "shortwave_down": "swdown_w_m2",
+    "longwave_down": "glw_w_m2",
 }
 
 # One date, two instruments. The PAR sensor changed here and the later era's
@@ -215,6 +212,7 @@ def read_wrf_series(path: str | Path) -> pd.DataFrame:
     """
     frame = pd.read_csv(path)
     frame = frame.drop(columns=[c for c in frame.columns if str(c).startswith("Unnamed")])
+    frame = rename_v1_columns(frame)
     stamps = pd.to_datetime(frame[["year", "month", "day", "hour"]])
     frame.index = pd.DatetimeIndex(stamps)
     frame = frame.drop(columns=["year", "month", "day", "hour"])

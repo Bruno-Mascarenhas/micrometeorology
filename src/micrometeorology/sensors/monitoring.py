@@ -16,13 +16,18 @@ shared with :mod:`micrometeorology.stats.climatology_export`.
 
 Why the WRF column is a LIST of candidates
 ------------------------------------------
-``series_operacional.dat`` is produced by a separate extraction script that
-gains variables over time — precipitation is expected but not present today.
-So every chart declares an ORDERED TUPLE of candidate column names and the
-exporter resolves whichever one the file actually carries. The day the
-extraction starts writing rain, the chart picks it up with no code change; until
-then the payload records that the layer is absent and which names were looked
-for, so the page can say so instead of rendering a silently short legend.
+``series_operacional.dat`` gains variables over time. So every chart declares an
+ORDERED TUPLE of candidate column names and the exporter resolves whichever one
+the file actually carries; a variable the extraction does not write yet is
+declared so the payload can say the layer is absent instead of rendering a
+silently short legend. Precipitation is the case that exercised it -- it arrived
+as ``precip_mm`` and lit its chart with no change here.
+
+The tuples carry only names the record can actually hold. A file still on the v1
+schema is renamed to v2 by
+:func:`~micrometeorology.wrf.operational_record.rename_v1_columns` inside the
+readers, so no consumer ever sees a v1 spelling and listing one here would only
+publish a name that cannot match into the page's "looked for" report.
 
 Add a new candidate spelling to the tuple; do not add a branch.
 """
@@ -117,9 +122,9 @@ class MonitoringChart:
     caveats: tuple[str, ...] = ()
 
 
-# Candidate spellings for a WRF precipitation column. None of them exists in
-# series_operacional.dat today — the extraction never sampled RAINC/RAINNC — but
-# the laboratory intends to add one.
+# `labmim-wrf-series` writes this column; a record produced before it existed
+# has no precipitation at all, which the tuple mechanism reports as an absent
+# layer rather than an empty one.
 #
 # The wrfout names RAINC and RAINNC are deliberately NOT candidates: they are
 # accumulated since the run's initialisation (see
@@ -127,14 +132,7 @@ class MonitoringChart:
 # exactly that reason), while this card's station layers are the rain of each
 # interval. Nothing on the way to the chart differences a resolved column, so an
 # accumulation would be drawn against per-interval totals under the same unit.
-_WRF_RAIN_CANDIDATES = (
-    "precip",
-    "Precip",
-    "PRECIP",
-    "rain",
-    "Rain",
-    "rain_total",
-)
+_WRF_RAIN_CANDIDATES = ("precip_mm",)
 
 MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
     MonitoringChart(
@@ -142,7 +140,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         title="Temperatura do ar",
         unit="°C",
         kind="line",
-        series=(MonitoringSeries("t", "Temperatura", "T", ("T",)),),
+        series=(MonitoringSeries("t", "Temperatura", "T", ("t2_c",)),),
         y_limits=(10.0, 40.0),
     ),
     MonitoringChart(
@@ -150,13 +148,14 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         title="Umidade relativa",
         unit="%",
         kind="line",
-        series=(MonitoringSeries("ur", "Umidade relativa", "ur", ("ur", "RH")),),
-        # 0-105, not 0-100: the WRF humidity is not clipped at saturation and
-        # reaches 101,6% over the record. A 0-100 frame would push those points
-        # off the axis without a trace.
+        series=(MonitoringSeries("ur", "Umidade relativa", "ur", ("rh_pct",)),),
+        # 0-105, not 0-100: the model value is published unclipped, so a WRF
+        # hour CAN land above saturation and a 0-100 frame would push it off the
+        # axis without a trace. The 322 such rows -- 314 distinct hours -- the v1
+        # record carried were its specific-humidity bug, not the model.
         y_limits=(0.0, 105.0),
         caveats=(
-            "A umidade do WRF não é limitada na saturação e passa de 100% em algumas horas; o eixo vai a 105% para que esses pontos apareçam em vez de sumirem.",
+            "A umidade do WRF é publicada sem recorte na saturação, então o eixo vai a 105% para que uma hora supersaturada apareça em vez de sumir. As 314 horas acima de 100% que o registro trazia até março de 2026 são erro da extração antiga, que aplicava a conversão de umidade específica sobre uma razão de mistura; a migração para o esquema v2 as corrige.",
         ),
     ),
     MonitoringChart(
@@ -164,7 +163,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         title="Pressão atmosférica",
         unit="hPa",
         kind="line",
-        series=(MonitoringSeries("pressure", "Pressão", "pressure", ("pressure",)),),
+        series=(MonitoringSeries("pressure", "Pressão", "pressure", ("psfc_hpa",)),),
         caveats=(
             "O WRF traz um deslocamento sistemático de cerca de +2 hPa em relação à estação, que é diferença de redução ao nível da estação e não ruído.",
         ),
@@ -177,6 +176,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         series=(MonitoringSeries("precip", "Precipitação", "precip", _WRF_RAIN_CANDIDATES),),
         caveats=(
             "A camada bruta é o acumulado de cada intervalo do pluviômetro (báscula de 0,254 mm) e a horária é a soma dele, não uma média.",
+            "A camada do WRF é o incremento de cada hora de RAINC+RAINNC, já diferenciado na extração; as horas anteriores à entrada do produtor atual não têm essa coluna, porque a extração antiga nunca amostrou precipitação.",
         ),
     ),
     MonitoringChart(
@@ -184,7 +184,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         title="Velocidade do vento",
         unit="m/s",
         kind="line",
-        series=(MonitoringSeries("ws", "Velocidade", "WS", ("WS",)),),
+        series=(MonitoringSeries("ws", "Velocidade", "WS", ("wind_speed_m_s",)),),
         y_limits=(0.0, 15.0),
         caveats=(
             "O WRF é sistematicamente mais ventoso que a estação — cerca de +1,3 m/s nesta janela, mais da metade da média observada. A linha do modelo não é uma correção da medida.",
@@ -195,11 +195,12 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         title="Direção do vento",
         unit="°",
         kind="scatter",
-        series=(MonitoringSeries("wd", "Direção", "WD", ("WD",)),),
+        series=(MonitoringSeries("wd", "Direção", "WD", ("wind_dir_deg",)),),
         y_limits=(0.0, 360.0),
         caveats=(
             "Todas as camadas são pontos, inclusive a do WRF: direção é circular, e uma linha ligando 350° a 10° varreria o gráfico inteiro passando por um rumo que nunca ocorreu.",
             "A média horária é vetorial ponderada pela velocidade — cada amostra do intervalo entra com o peso do vento que a produziu, de modo que uma calmaria não desloca o rumo da hora.",
+            "O WRF traz o vento mais de leste do que a estação: em 12.618 horas pareadas com vento acima de 1,5 m/s o rumo médio do modelo é 104° contra 131° medidos, um desvio sistemático de cerca de 20°. Três em cada quatro horas caem dentro de 45° da medida, então isso é viés de sítio costeiro e não convenção invertida.",
         ),
     ),
     MonitoringChart(
@@ -210,17 +211,27 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         series=(
             MonitoringSeries("net", "Saldo (Rn)", "Net_CNR1", (), hue="net"),
             MonitoringSeries(
-                "sw_down", "Onda curta ↓", "Sw_dw", ("Swdw",), hue="shortwave", direction="down"
+                "sw_down",
+                "Onda curta ↓",
+                "Sw_dw",
+                ("swdown_w_m2",),
+                hue="shortwave",
+                direction="down",
             ),
             MonitoringSeries("sw_up", "Onda curta ↑", "Sw_up", (), hue="shortwave", direction="up"),
             MonitoringSeries(
-                "lw_down", "Onda longa ↓", "Lw_dw", ("Lwdw_glw",), hue="longwave", direction="down"
+                "lw_down",
+                "Onda longa ↓",
+                "Lw_dw",
+                ("glw_w_m2",),
+                hue="longwave",
+                direction="down",
             ),
             MonitoringSeries("lw_up", "Onda longa ↑", "Lw_up", (), hue="longwave", direction="up"),
         ),
         caveats=(
             "As parcelas ascendentes vão em magnitude física, positivas. Nos PNGs antigos elas apareciam negadas, que era convenção de desenho para as parcelas somarem visualmente ao saldo.",
-            "O WRF só entra nas duas parcelas incidentes. As ascendentes e o saldo do modelo seriam derivados de ALBD e EMISS, que a extração escreve como constantes quebradas (-273,01 e -272,27), e portanto não têm significado físico.",
+            "O WRF só entra nas duas parcelas incidentes. As ascendentes do modelo existem no arquivo (swupb_w_m2 e lwup_w_m2) mas não são desenhadas aqui; até março de 2026 elas dependiam de um albedo e de uma emissividade que a extração antiga gravava com 273,15 subtraídos; a migração para o esquema v2 refaz essas colunas em todo o registro.",
         ),
     ),
     MonitoringChart(
@@ -228,7 +239,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         title="Radiação difusa",
         unit="W/m²",
         kind="line",
-        series=(MonitoringSeries("sw_dif", "Difusa", "Sw_dif", ("Swdf",), hue="shortwave"),),
+        series=(MonitoringSeries("sw_dif", "Difusa", "Sw_dif", ("swddif_w_m2",), hue="shortwave"),),
         caveats=(
             "A difusa migrou do CMP21 para o PSP em 14/05/2025; janelas anteriores a essa data vêm do outro instrumento.",
         ),
