@@ -370,6 +370,32 @@ def run(
     # ``select_dtypes(include="number")`` columns, which matches neither bool nor
     # the object dtype a null introduces. ``qc_flag`` is the unified spelling.
     hourly_input = qc.copy()
+    # Administrative counters, dropped for the same reason the textual status
+    # flags are converted: an hourly MEAN of a monotonic record number is not a
+    # record number. Measured before this line existed, 99.8% of the published
+    # RECORD values were non-integer, and the rtime date components with them.
+    # generate_station_graphs already treats the same columns as administrative.
+    counters = [
+        column
+        for column in hourly_input.columns
+        if column == "RECORD" or str(column).startswith("rtime")
+    ]
+    # The instrument's raw electrical signal, dropped for a stronger reason: the
+    # hourly product publishes physical quantities that passed quality control,
+    # and these passed none of it. Every radiation gate in this pipeline — the
+    # BSRN envelope, the sign rule, the nocturnal mask, the shade-ring correction
+    # — is defined on the W/m2 channel, so the millivolt twin of the same sensor
+    # reached the artifact unfiltered: measured before this line, 81,172 hours of
+    # PAR_Den_Avg with no mask at all, night included, beside 38,269 of the Sw_par
+    # that IS masked. No consumer reads them; both places that name them —
+    # cli/generate_station_graphs.py and allsky.features.policy — do so to
+    # exclude them.
+    raw_signal = [
+        column
+        for column in hourly_input.columns
+        if str(column).endswith("_mv_Avg") or column in UNGATED_RADIATION_TWINS
+    ]
+    hourly_input = hourly_input.drop(columns=[*counters, *raw_signal])
     for column in (*STATUS_COLUMNS, "qc_flag"):
         if column in hourly_input.columns:
             flag = hourly_input.pop(column)

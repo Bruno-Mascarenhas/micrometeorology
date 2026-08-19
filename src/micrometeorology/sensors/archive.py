@@ -59,23 +59,32 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ARCHIVE_END",
     "ARCHIVE_START",
+    "DIFFUSE_EXCEEDS_GLOBAL_TOLERANCE",
     "DIFFUSE_RATIO_LIMIT",
     "EXPECTED_LENTA_ROWS",
     "EXPECTED_RAIN_ROWS",
     "LENTA_MANIFEST",
+    "MERGE_SAMPLING_INTERVAL",
     "NIGHT_CORRUPTION_CHANNELS",
     "NIGHT_CORRUPTION_FLUX_WM2",
+    "NOCTURNAL_SHORTWAVE_CHANNELS",
+    "OFFSET_DRIFT_ALARM_WM2",
     "RAIN_MANIFEST",
     "STATUS_COLUMNS",
+    "UNGATED_RADIATION_TWINS",
     "ArchiveFile",
     "ArchiveReport",
+    "NocturnalOffset",
     "blocked_gauge_runs",
     "build_five_minute_frame",
     "close_net_radiation",
+    "close_nocturnal_net_radiation",
     "mask_impossible_shortwave",
     "mask_night_corrupted_days",
+    "mask_nocturnal_shortwave",
     "mask_sentinels",
     "night_corrupted_days",
+    "nocturnal_offset_statistics",
     "stage_archive",
     "unquantised_rain_samples",
     "unshaded_diffuse_days",
@@ -965,6 +974,22 @@ BSRN_CEILING_MU0_EXPONENT = 1.2
 BSRN_CEILING_OFFSET_WM2 = 100.0
 
 IMPOSSIBLE_SHORTWAVE_CHANNELS = ("Sw_dw", "Net_CNR1")
+
+#: Radiation channels carrying the sensor's raw count or bridge voltage rather
+#: than a flux. They have no range gate, no BSRN envelope and no nocturnal mask,
+#: because every one of those is written against the ``_Wm2_`` twin — so they
+#: reach the hourly artifact unfiltered, indistinguishable there from the
+#: channels that were filtered. Dropped before aggregation for that reason.
+UNGATED_RADIATION_TWINS = (
+    "CMP21_Avg",
+    "CMP22_Avg",
+    "CUV5_Avg",
+    "NRLite_Avg",
+    "PAR_Den_Avg",
+    "PIR1_Avg",
+    "PSP1_Avg",
+    "PSP_Avg",
+)
 
 #: BSRN physically-possible ceilings as ``(gain, offset)`` in
 #: ``Sa * gain * mu0**1.2 + offset`` (Long & Shi 2008, tab. 1). One pair per
