@@ -448,3 +448,108 @@ def unify_sensor_columns(
             logger.info("Created unified column: %s", unified_name)
 
     return df
+
+
+#: Arquivo de geometria solar do laboratório, em passo de cinco minutos e no mesmo
+#: relógio ingênuo local do acervo. A coluna ``fc`` é o fator geométrico de
+#: correção do anel de sombreamento (Drummond, 1956), que devolve à difusa medida
+#: a fração do domo que o anel oculta. Sem ele o piranômetro sombreado subestima
+#: a difusa: medida sobre este acervo, a fração difusa satura em 0,81 sob céu
+#: encoberto (Kt < 0,10), quando a física exige que tenda a 1.
+SHADE_RING_FACTOR_FILE = "teorica_2016-2030.csv"
+
+_SHADE_RING_TIME_COLUMNS = ("ano_i", "mes_i", "dia_i", "hor_i", "min_i")
+
+
+class MissingShadeRingFactorError(LookupError):
+    """Uma amostra de difusa não encontrou fator de correção do anel."""
+
+
+def load_shade_ring_factors(path: Path | str) -> pd.Series:
+    """Fator geométrico do anel de sombreamento, por instante de cinco minutos.
+
+    Parameters
+    ----------
+    path:
+        Caminho do arquivo de geometria solar.
+
+    Returns
+    -------
+    pandas.Series
+        ``(N,)`` adimensional, índice ``DatetimeIndex`` ingênuo local, ordenado.
+
+    Raises
+    ------
+    ValueError
+        Se o arquivo não trouxer a coluna ``fc`` ou as de tempo.
+    """
+    frame = pd.read_csv(path, usecols=[*_SHADE_RING_TIME_COLUMNS, "fc"])
+    faltando = {*_SHADE_RING_TIME_COLUMNS, "fc"} - set(frame.columns)
+    if faltando:
+        raise ValueError(f"{path}: faltam as colunas {sorted(faltando)}")
+    instantes = pd.to_datetime(
+        {
+            "year": frame["ano_i"],
+            "month": frame["mes_i"],
+            "day": frame["dia_i"],
+            "hour": frame["hor_i"],
+            "minute": frame["min_i"],
+        }
+    )
+    fatores = pd.Series(frame["fc"].to_numpy(dtype=float), index=pd.DatetimeIndex(instantes))
+    return fatores.sort_index()
+
+
+def apply_shade_ring_correction(
+    df: pd.DataFrame,
+    factors: pd.Series,
+    windows: Sequence[tuple[str, pd.Timestamp, pd.Timestamp]],
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Devolve à difusa medida a parcela do céu que o anel de sombreamento oculta.
+
+    Aplicada às colunas CRUAS e dentro da janela em que cada uma alimentou
+    ``Sw_dif``, pelo mesmo motivo que :func:`apply_calibrations` roda antes da
+    unificação: a cópia herda a correção, e o escopo por janela é obrigatório
+    porque o mesmo instrumento mede o GLOBAL fora dela — ``PSP_Wm2_Avg`` foi o
+    piranômetro global até 2018-08, e corrigi-lo ali corromperia ``Sw_dw``.
+
+    Parameters
+    ----------
+    df:
+        Frame de cinco minutos com índice ingênuo local.
+    factors:
+        Fatores por instante, como :func:`load_shade_ring_factors` os devolve.
+    windows:
+        ``(coluna, início, fim)`` inclusivos, das janelas de mapeamento de
+        ``Sw_dif``.
+
+    Returns
+    -------
+    tuple
+        O mesmo frame, mutado in place, e ``{coluna: amostras corrigidas}``.
+
+    Raises
+    ------
+    MissingShadeRingFactorError
+        Se alguma amostra de difusa dentro de uma janela não tiver fator. Um
+        fator ausente que virasse NaN apagaria a medida em silêncio, e um que
+        virasse 1,0 publicaria difusa sem correção sob o nome da corrigida.
+    """
+    alinhados = factors.reindex(pd.DatetimeIndex(df.index))
+    corrigidas: dict[str, int] = {}
+    for column, start, end in windows:
+        if column not in df.columns:
+            continue
+        dentro = (df.index >= start) & (df.index <= end)
+        alvo = dentro & df[column].notna().to_numpy()
+        if not alvo.any():
+            continue
+        if alinhados[alvo].isna().any():
+            perdidas = int(alinhados[alvo].isna().sum())
+            raise MissingShadeRingFactorError(
+                f"{column}: {perdidas} amostra(s) de difusa entre {start} e {end} sem fator "
+                f"de anel em {SHADE_RING_FACTOR_FILE}"
+            )
+        df.loc[alvo, column] = df.loc[alvo, column] * alinhados[alvo]
+        corrigidas[column] = corrigidas.get(column, 0) + int(alvo.sum())
+    return df, corrigidas

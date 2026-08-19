@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from micrometeorology.sensors import calibration
 from micrometeorology.sensors.calibration import (
     apply_calibrations,
     uncalibrated_mapping_windows,
@@ -427,3 +428,61 @@ class TestUncalibratedMappingWindows:
         ]
 
         assert uncalibrated_mapping_windows(self._frame(), calibrations, self._switches()) == []
+
+
+class TestShadeRingCorrection:
+    """O anel de sombreamento oculta parte do domo, e a difusa medida sob ele subestima.
+
+    Medido neste acervo antes da correção: a fração difusa satura em 0,81 sob céu
+    encoberto (Kt < 0,10), quando a física exige que tenda a 1. Com o fator
+    geométrico aplicado ela vai a 0,97.
+    """
+
+    @staticmethod
+    def _fatores(stamps: pd.DatetimeIndex, valor: float = 1.2) -> pd.Series:
+        return pd.Series([valor] * len(stamps), index=stamps)
+
+    def test_a_difusa_dentro_da_janela_e_escalada(self) -> None:
+        stamps = pd.DatetimeIndex(["2021-06-15 12:00"])
+        frame = pd.DataFrame({"CMP21_Wm2_Avg": [100.0]}, index=stamps)
+        janelas = [("CMP21_Wm2_Avg", pd.Timestamp("2020-06-01"), pd.Timestamp("2025-03-12"))]
+
+        corrigido, contagem = calibration.apply_shade_ring_correction(
+            frame, self._fatores(stamps), janelas
+        )
+
+        assert corrigido["CMP21_Wm2_Avg"].iloc[0] == pytest.approx(120.0)
+        assert contagem == {"CMP21_Wm2_Avg": 1}
+
+    def test_a_mesma_coluna_fora_da_janela_fica_intocada(self) -> None:
+        """Fora da janela o instrumento mede o GLOBAL, e escalá-lo corromperia Sw_dw."""
+        stamps = pd.DatetimeIndex(["2017-06-15 12:00"])
+        frame = pd.DataFrame({"PSP_Wm2_Avg": [800.0]}, index=stamps)
+        janelas = [("PSP_Wm2_Avg", pd.Timestamp("2025-05-14"), pd.Timestamp("2026-08-15"))]
+
+        corrigido, contagem = calibration.apply_shade_ring_correction(
+            frame, self._fatores(stamps), janelas
+        )
+
+        assert corrigido["PSP_Wm2_Avg"].iloc[0] == pytest.approx(800.0)
+        assert contagem == {}
+
+    def test_fator_ausente_levanta_em_vez_de_apagar_a_medida(self) -> None:
+        """Um fator ausente que virasse NaN apagaria a difusa em silêncio."""
+        stamps = pd.DatetimeIndex(["2021-06-15 12:00"])
+        frame = pd.DataFrame({"CMP21_Wm2_Avg": [100.0]}, index=stamps)
+        janelas = [("CMP21_Wm2_Avg", pd.Timestamp("2020-06-01"), pd.Timestamp("2025-03-12"))]
+        vazios = pd.Series(dtype="float64", index=pd.DatetimeIndex([]))
+
+        with pytest.raises(calibration.MissingShadeRingFactorError):
+            calibration.apply_shade_ring_correction(frame, vazios, janelas)
+
+    def test_uma_hora_sem_difusa_nao_exige_fator(self) -> None:
+        stamps = pd.DatetimeIndex(["2021-06-15 12:00"])
+        frame = pd.DataFrame({"CMP21_Wm2_Avg": [float("nan")]}, index=stamps)
+        janelas = [("CMP21_Wm2_Avg", pd.Timestamp("2020-06-01"), pd.Timestamp("2025-03-12"))]
+        vazios = pd.Series(dtype="float64", index=pd.DatetimeIndex([]))
+
+        _corrigido, contagem = calibration.apply_shade_ring_correction(frame, vazios, janelas)
+
+        assert contagem == {}

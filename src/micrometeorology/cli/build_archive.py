@@ -49,25 +49,33 @@ from micrometeorology.sensors.archive import (
     LENTA_MANIFEST,
     NIGHT_CORRUPTION_CHANNELS,
     NIGHT_CORRUPTION_FLUX_WM2,
+    NOCTURNAL_SHORTWAVE_CHANNELS,
     RAIN_MANIFEST,
     STATUS_COLUMNS,
+    UNGATED_RADIATION_TWINS,
     ArchiveReport,
     blocked_gauge_runs,
     build_five_minute_frame,
     close_net_radiation,
+    close_nocturnal_net_radiation,
     mask_impossible_shortwave,
     mask_night_corrupted_days,
+    mask_nocturnal_shortwave,
     mask_sentinels,
     months_never_reaching_saturation,
     night_corrupted_days,
+    nocturnal_offset_statistics,
     unquantised_rain_samples,
     unshaded_diffuse_days,
     verify_frame,
 )
 from micrometeorology.sensors.calibration import (
+    SHADE_RING_FACTOR_FILE,
     apply_calibrations,
+    apply_shade_ring_correction,
     load_calibrations,
     load_sensor_switches,
+    load_shade_ring_factors,
     resolve_mapping_windows,
     uncalibrated_mapping_windows,
     unify_sensor_columns,
@@ -250,6 +258,23 @@ def run(
             for column, count in (before_calibration - qc.notna().sum()).items()
             if int(count) > 0
         }
+        # A correção do anel de sombreamento é uma calibração geométrica e entra
+        # junto das outras, antes da unificação, para que a cópia unificada herde
+        # o valor corrigido. Escopo por janela de mapeamento de Sw_dif: o mesmo
+        # piranômetro mede o GLOBAL fora dela. Sem esta etapa a fração difusa
+        # satura em 0,81 sob céu encoberto, quando a física exige que tenda a 1.
+        switches = load_sensor_switches(calibrations_path)
+        shade_windows = resolve_mapping_windows(qc, switches, ("Sw_dif",)).get("Sw_dif", ())
+        qc, shade_ring_corrected = apply_shade_ring_correction(
+            qc, load_shade_ring_factors(data_dir / SHADE_RING_FACTOR_FILE), shade_windows
+        )
+        if shade_ring_corrected:
+            typer.echo(
+                f"\nCorrecao do anel de sombreamento aplicada a "
+                f"{sum(shade_ring_corrected.values()):,} amostras de difusa "
+                f"em {len(shade_ring_corrected)} coluna(s)"
+            )
+
         # Statistical QC runs HERE, after calibration and before unification.
         # After calibration because the thresholds are in physical units, the same
         # reason the second apply_physical_limits pass exists; before unification
