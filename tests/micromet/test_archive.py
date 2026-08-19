@@ -10,6 +10,7 @@ loud failure when an entry is missing. The audited row counts are verified by
 reproduce.
 """
 
+import inspect
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -838,3 +839,359 @@ def test_a_month_with_too_few_samples_says_nothing_either_way():
     frame = pd.DataFrame({"RH1_Avg": np.linspace(40.0, 50.0, 100)}, index=stamps)
 
     assert archive.months_never_reaching_saturation(frame, ("RH1_Avg",)) == []
+
+
+class TestNocturnalShortwave:
+    """Shortwave with the sun below the horizon is thermal offset, not flux.
+
+    Measured on the archive before this stage existed: 36,202 negative hours of
+    ``Sw_dw``, 35,308 of them nocturnal, median -1.478 W/m2; ``Sw_up`` carries
+    the same fault with the opposite sign, median +2.620, because the dome faces
+    the warm ground instead of the cold sky.
+    """
+
+    def test_a_negative_night_sample_is_masked_not_zeroed(self) -> None:
+        frame = pd.DataFrame({"Sw_dw": [-1.48]}, index=pd.DatetimeIndex(["2024-06-15 22:00"]))
+
+        masked, removed = archive.mask_nocturnal_shortwave(frame)
+
+        assert np.isnan(masked["Sw_dw"].iloc[0])
+        assert removed == {"Sw_dw": 1}
+
+    def test_a_positive_night_sample_is_masked_too(self) -> None:
+        """The offset's sign follows the dome, so a one-sided gate misses half of it."""
+        frame = pd.DataFrame({"Sw_up": [2.62]}, index=pd.DatetimeIndex(["2024-06-15 02:00"]))
+
+        masked, removed = archive.mask_nocturnal_shortwave(frame)
+
+        assert np.isnan(masked["Sw_up"].iloc[0])
+        assert removed == {"Sw_up": 1}
+
+    def test_daylight_is_untouched(self) -> None:
+        frame = pd.DataFrame({"Sw_dw": [800.0]}, index=pd.DatetimeIndex(["2024-06-15 12:00"]))
+
+        masked, removed = archive.mask_nocturnal_shortwave(frame)
+
+        assert masked["Sw_dw"].iloc[0] == pytest.approx(800.0)
+        assert removed == {}
+
+    def test_longwave_and_net_keep_their_nocturnal_values(self) -> None:
+        """A pyrgeometer reads 300-400 W/m2 all night by design, and the net is negative."""
+        stamps = pd.DatetimeIndex(["2024-06-15 22:00"])
+        frame = pd.DataFrame(
+            {"Lw_dw": [410.0], "Lw_up": [455.0], "Net_CNR1": [-45.0]}, index=stamps
+        )
+
+        masked, removed = archive.mask_nocturnal_shortwave(frame)
+
+        assert masked["Lw_dw"].iloc[0] == pytest.approx(410.0)
+        assert masked["Net_CNR1"].iloc[0] == pytest.approx(-45.0)
+        assert removed == {}
+
+    def test_the_raw_twin_is_masked_outside_its_own_era_window(self) -> None:
+        """The sun's elevation belongs to the timestamp, not to the instrument.
+
+        Era-scoping the mask, as the BSRN gate does, would leave the raw column
+        publishing the same offset under the logger's own name outside the window
+        its unified channel claimed it.
+        """
+        stamps = pd.DatetimeIndex(["2024-06-15 22:00"])
+        frame = pd.DataFrame({"Sw_dw": [-1.5], "CM3Up_Wm2_Avg": [-1.5]}, index=stamps)
+        sources = {
+            "Sw_dw": [
+                (
+                    "CM3Up_Wm2_Avg",
+                    pd.Timestamp("2019-01-01"),
+                    pd.Timestamp("2019-12-31"),
+                )
+            ]
+        }
+
+        masked, removed = archive.mask_nocturnal_shortwave(frame, sources)
+
+        assert np.isnan(masked["CM3Up_Wm2_Avg"].iloc[0])
+        assert removed == {"Sw_dw": 1, "CM3Up_Wm2_Avg": 1}
+
+    def test_the_clock_slip_detector_still_sees_its_witness(self) -> None:
+        """Stage ORDER: masking the night before night_corrupted_days blinds it.
+
+        The detector finds a shifted logger clock by the irradiance stamped at
+        night. Run the nocturnal mask first and the witness is gone, the day is
+        never flagged, and the whole clock-slip detection becomes a silent no-op
+        that reports zero corrupted days on an archive that has 42.
+        """
+        stamps = [f"2024-06-15 02:{minute:02d}" for minute in (0, 5, 10, 15)]
+        frame = pd.DataFrame(
+            {"Sw_dw": [600.0, 610.0, 590.0, 605.0]}, index=pd.DatetimeIndex(stamps)
+        )
+
+        detected_first = archive.night_corrupted_days(frame)
+        blanked, _removed = archive.mask_nocturnal_shortwave(frame.copy())
+        detected_after_masking = archive.night_corrupted_days(blanked)
+
+        assert [day for day, _count in detected_first] == ["2024-06-15"]
+        assert detected_after_masking == []
+
+
+def test_the_bsrn_floor_rejects_a_daytime_negative_the_flat_gate_passes() -> None:
+    """Long & Shi 2008 tab. 1 sets the minimum at -4 W/m2 for every SW component.
+
+    The flat ``[-20, 1500]`` rule in default.yaml passes -9.47 W/m2, the deepest
+    negative the archive published on ``Sw_dw``, because it was written wide
+    enough to admit the thermal offset it could not otherwise separate.
+    """
+    frame = pd.DataFrame({"Sw_dw": [-9.47]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert np.isnan(masked["Sw_dw"].iloc[0])
+    assert removed == {"Sw_dw": 1}
+
+
+def test_a_floor_violation_propagates_to_the_net_as_the_ceiling_does() -> None:
+    """The logger derives Net_CNR1 from the four components, so the fault is inside it."""
+    stamps = pd.DatetimeIndex(["2026-07-05 09:00"])
+    frame = pd.DataFrame({"Sw_dw": [-9.47], "Net_CNR1": [-40.0]}, index=stamps)
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert np.isnan(masked["Net_CNR1"].iloc[0])
+    assert removed == {"Sw_dw": 1, "Net_CNR1": 1}
+
+
+def test_a_daytime_negative_inside_the_floor_still_falls_to_the_sign_rule() -> None:
+    """-1.5 W/m2 clears the -4 floor, and the sign rule takes it anyway.
+
+    The three parts of the gate divide the fault: the ceiling rejects what the
+    sun cannot produce, the floor what no instrument can read at any hour, and
+    the sign rule what cannot be a flux while the sun is up.
+    """
+    frame = pd.DataFrame({"Sw_dw": [-1.5]}, index=pd.DatetimeIndex(["2024-06-15 06:30"]))
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert np.isnan(masked["Sw_dw"].iloc[0])
+    assert removed == {"Sw_dw": 1}
+
+
+class TestNocturnalOffsetMonitor:
+    """The drift diagnostic that has to outlive the samples the mask removes.
+
+    docs/arqueologia/qc/lit-radiation-qc.md measured this archive's offsets at
+    SZA > 100: Sw_dw median -1.48, Sw_dif -1.70, Sw_up +2.61, and a year-by-year
+    Sw_dw median from -2.30 (2016) to -1.56 (2026) with no drift.
+    """
+
+    @staticmethod
+    def _deep_night(count: int, value: float, column: str = "Sw_dw") -> pd.DataFrame:
+        stamps = pd.date_range("2024-06-15 02:00", periods=count, freq="5min")
+        return pd.DataFrame({column: [value] * count}, index=stamps)
+
+    def test_the_offset_median_is_measured(self) -> None:
+        frame = self._deep_night(6, -1.48)
+
+        statistics = archive.nocturnal_offset_statistics(frame)
+
+        assert statistics["Sw_dw"].median_wm2 == pytest.approx(-1.48)
+        assert statistics["Sw_dw"].night_samples == 6
+
+    def test_daylight_samples_are_not_in_the_statistic(self) -> None:
+        """The offset is only an offset where there is no sun to add to it."""
+        stamps = pd.DatetimeIndex(["2024-06-15 12:00", "2024-06-15 02:00"])
+        frame = pd.DataFrame({"Sw_dw": [800.0, -1.5]}, index=stamps)
+
+        statistics = archive.nocturnal_offset_statistics(frame)
+
+        assert statistics["Sw_dw"].night_samples == 1
+        assert statistics["Sw_dw"].median_wm2 == pytest.approx(-1.5)
+
+    def test_a_channel_with_no_night_sample_reports_zero_not_absence(self) -> None:
+        """A measured-and-empty channel must not read as a channel never looked at."""
+        frame = pd.DataFrame({"Sw_dw": [800.0]}, index=pd.DatetimeIndex(["2024-06-15 12:00"]))
+
+        statistics = archive.nocturnal_offset_statistics(frame)
+
+        assert statistics["Sw_dw"].as_report() == {"night_samples": 0}
+
+    def test_the_monitor_still_reads_the_offset_the_mask_is_about_to_remove(self) -> None:
+        """ORDER: measure, then mask. Reversed, the diagnostic reports nothing.
+
+        This is the compensation that makes masking the nocturnal samples
+        defensible against lit-radiation-qc.md, which keeps them precisely
+        because they carry the only drift signal available here.
+        """
+        frame = self._deep_night(6, -1.48)
+
+        measured_first = archive.nocturnal_offset_statistics(frame)
+        masked, _removed = archive.mask_nocturnal_shortwave(frame.copy())
+        measured_after = archive.nocturnal_offset_statistics(masked)
+
+        assert measured_first["Sw_dw"].median_wm2 == pytest.approx(-1.48)
+        assert measured_after["Sw_dw"].as_report() == {"night_samples": 0}
+
+
+def test_the_offset_monitor_is_emptied_by_the_floor_it_reports_against() -> None:
+    """ORDER: measure the offset BEFORE the BSRN floor, or the share is always zero.
+
+    ``fraction_below_bsrn_floor`` counts deep-night samples under -4 W/m2. The
+    floor in ``mask_impossible_shortwave`` removes exactly those samples, so run
+    after it the statistic is structurally 0.0 on every channel and reads as a
+    clean instrument. Measured on the archive, the true shares are 0.678% for
+    ``Sw_dw`` and 3.562% for ``Sw_dif``.
+    """
+    stamps = pd.date_range("2024-06-15 02:00", periods=4, freq="5min")
+    frame = pd.DataFrame({"Sw_dw": [-1.5, -1.5, -1.5, -5.0]}, index=stamps)
+
+    before_the_floor = archive.nocturnal_offset_statistics(frame)
+    gated, _removed = archive.mask_impossible_shortwave(frame.copy())
+    after_the_floor = archive.nocturnal_offset_statistics(gated)
+
+    assert before_the_floor["Sw_dw"].fraction_below_bsrn_floor == pytest.approx(0.25)
+    assert after_the_floor["Sw_dw"].fraction_below_bsrn_floor == pytest.approx(0.0)
+
+
+def test_a_zero_diffuse_with_the_sun_up_is_masked() -> None:
+    """Rayleigh scattering alone keeps diffuse above zero whenever the sun is up.
+
+    A zero there is a stuck channel or an offset that happened to land on the
+    bound, and averaging it drags the daytime mean down.
+    """
+    stamps = pd.DatetimeIndex(["2024-06-15 12:00"])
+    frame = pd.DataFrame({"Sw_dw": [800.0], "Sw_dif": [0.0]}, index=stamps)
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert np.isnan(masked["Sw_dif"].iloc[0])
+    assert removed == {"Sw_dif": 1}
+
+
+def test_a_daytime_negative_inside_the_floor_is_masked_by_the_sign_rule() -> None:
+    """-1.5 W/m2 clears the -4 floor but still cannot be a daylight flux."""
+    stamps = pd.DatetimeIndex(["2024-06-15 12:00"])
+    frame = pd.DataFrame({"Sw_dw": [800.0], "Sw_dif": [-1.5]}, index=stamps)
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert np.isnan(masked["Sw_dif"].iloc[0])
+    assert removed == {"Sw_dif": 1}
+
+
+def test_the_sign_rule_does_not_reach_the_night() -> None:
+    """At night the nocturnal mask owns the channel; the sign rule must not double-count.
+
+    Were it active with the sun down it would fire on essentially every
+    nocturnal sample and report a removal tally that says nothing about physics.
+    """
+    stamps = pd.DatetimeIndex(["2024-06-15 02:00"])
+    frame = pd.DataFrame({"Sw_dw": [-1.5], "Sw_dif": [-1.5]}, index=stamps)
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert masked["Sw_dif"].iloc[0] == pytest.approx(-1.5)
+    assert removed == {}
+
+
+def test_the_pipeline_calls_its_radiation_stages_in_the_load_bearing_order() -> None:
+    """The order of run() is asserted nowhere else, and four comments depend on it.
+
+    Read off the source rather than executed, because executing run() needs the
+    whole ``data/`` tree; what has to be pinned is the SEQUENCE, and reordering
+    the calls is precisely what this catches. Each of these fails SILENTLY when
+    reversed — the run still succeeds and the manifest still reports numbers,
+    only wrong ones:
+
+    - the offset monitor before both the BSRN envelope and the nocturnal mask, or
+      it measures a distribution those two already censored, and
+      ``fraction_below_bsrn_floor`` reads 0.0 on every channel;
+    - ``night_corrupted_days`` before the nocturnal mask, or the clock-slip
+      detector loses the only witness it has and reports zero corrupted days;
+    - the nocturnal net recomposition after the nocturnal mask, or it folds the
+      thermal offset straight back into the saldo it exists to remove.
+    """
+    from micrometeorology.cli import build_archive as cli
+
+    fonte = inspect.getsource(cli.run)
+    esperado = [
+        "night_corrupted_days(",
+        "nocturnal_offset_statistics(",
+        "mask_impossible_shortwave(",
+        "mask_nocturnal_shortwave(",
+        "close_nocturnal_net_radiation(",
+    ]
+    posicoes = [fonte.index(chamada) for chamada in esperado]
+
+    assert posicoes == sorted(posicoes)
+
+
+def test_the_nocturnal_net_is_the_longwave_difference_alone() -> None:
+    """With the sun down the shortwave terms are zero, not the thermopile offset.
+
+    Measured before this stage existed, the published nocturnal net carried
+    ``offset(Sw_dw) - offset(Sw_up)``, a median of -3.85 W/m2 against a nocturnal
+    net of -49.1 — close to 8% of it.
+    """
+    stamps = pd.DatetimeIndex(["2024-06-15 22:00"])
+    frame = pd.DataFrame({"Lw_dw": [410.0], "Lw_up": [455.0], "Net_CNR1": [-48.85]}, index=stamps)
+
+    recomposed, count = archive.close_nocturnal_net_radiation(frame)
+
+    assert recomposed["Net_CNR1"].iloc[0] == pytest.approx(-45.0)
+    assert count == 1
+
+
+def test_the_daytime_net_is_left_to_the_full_four_term_closure() -> None:
+    frame = pd.DataFrame(
+        {"Lw_dw": [410.0], "Lw_up": [455.0], "Net_CNR1": [500.0]},
+        index=pd.DatetimeIndex(["2024-06-15 12:00"]),
+    )
+
+    recomposed, count = archive.close_nocturnal_net_radiation(frame)
+
+    assert recomposed["Net_CNR1"].iloc[0] == pytest.approx(500.0)
+    assert count == 0
+
+
+def test_the_floor_no_longer_deletes_an_ordinary_nocturnal_saldo() -> None:
+    """The floor fires on the night offset; carrying that verdict into the net
+    deleted 1,955 nocturnal saldos whose shortwave term is zero anyway."""
+    stamps = pd.DatetimeIndex(["2024-06-15 22:00"])
+    frame = pd.DataFrame({"Sw_dw": [-9.47], "Net_CNR1": [-45.0]}, index=stamps)
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert np.isnan(masked["Sw_dw"].iloc[0])
+    assert masked["Net_CNR1"].iloc[0] == pytest.approx(-45.0)
+    assert removed == {"Sw_dw": 1}
+
+
+def test_a_daytime_ceiling_violation_still_reaches_the_net() -> None:
+    stamps = pd.DatetimeIndex(["2026-07-05 09:00"])
+    frame = pd.DataFrame({"Sw_dw": [1200.0], "Net_CNR1": [900.0]}, index=stamps)
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert np.isnan(masked["Net_CNR1"].iloc[0])
+    assert removed == {"Sw_dw": 1, "Net_CNR1": 1}
+
+
+def test_the_diffuse_may_exceed_the_global_inside_the_instruments_error() -> None:
+    """Since the shade-ring correction the two channels carry the combined error
+    of two instruments plus the isotropic ring model; a bare ``>`` rejected 3,018
+    daytime samples that exceed the global by under 2%."""
+    stamps = pd.DatetimeIndex(["2024-06-15 12:00"])
+    frame = pd.DataFrame({"Sw_dw": [300.0], "Sw_dif": [306.0]}, index=stamps)
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert masked["Sw_dif"].iloc[0] == pytest.approx(306.0)
+    assert removed == {}
+
+
+def test_a_diffuse_well_past_the_global_is_still_a_fault() -> None:
+    stamps = pd.DatetimeIndex(["2024-06-15 12:00"])
+    frame = pd.DataFrame({"Sw_dw": [300.0], "Sw_dif": [500.0]}, index=stamps)
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert np.isnan(masked["Sw_dif"].iloc[0])
+    assert removed == {"Sw_dif": 1}

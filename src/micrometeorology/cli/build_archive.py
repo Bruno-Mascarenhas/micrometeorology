@@ -231,9 +231,11 @@ def run(
     limits_fired: dict[str, int] = {}
     limits_absent_columns: list[str] = []
     gaps: list[tuple[str, str, pd.Timestamp, pd.Timestamp]] = []
-    net_gained = net_dropped = 0
+    net_gained = net_dropped = nocturnal_net = 0
     step_excursions_removed = persistence_runs_removed = 0
+    shade_ring_corrected: dict[str, int] = {}
     invalidated: dict[str, int] = {}
+    outside_after_calibration: dict[str, int] = {}
 
     if settings.sensor_limits:
         # apply_physical_limits skips a limit naming an absent column in silence,
@@ -296,14 +298,40 @@ def run(
         qc, step_excursions_removed = mask_step_excursions(qc, settings.sensor_step_limits)
         qc, persistence_runs_removed = mask_persistent_runs(qc, settings.sensor_persistence_limits)
 
+        # The gate runs twice: the first pass on the RAW signal keeps the
+        # calibration from scaling a never-physical value, the second because a
+        # value sitting AT the boundary crosses it once scaled — as the Eppley
+        # PSP factor declared in this same config does.
+        #
+        # BEFORE unify_sensor_columns, and that is the fix for a leak this stage
+        # had while it ran after: sensor_limits names RAW columns only, so a
+        # sample rejected here after unification left the raw column and stayed
+        # published under the unified name. Measured, exactly one sample escaped
+        # — 2026-03-24 10:00, Sw_dw = 1508.65 W/m2 against a blanked
+        # CM3Up_Wm2_Avg — and it shifted the published hour by 50.31 W/m2.
+        # Running before the copy makes unification carry the gated value.
+        outside_after_calibration = values_outside_declared_limits(qc, settings.sensor_limits)
+        if outside_after_calibration:
+            qc = apply_physical_limits(qc, settings.sensor_limits)
+            typer.echo(
+                f"\nLimites reaplicados apos calibracao: "
+                f"{sum(outside_after_calibration.values()):,} amostra(s) "
+                f"em {len(outside_after_calibration)} coluna(s) cruzaram o portao ao serem escaladas"
+            )
+            for column, count in sorted(
+                outside_after_calibration.items(), key=lambda item: -item[1]
+            )[:8]:
+                typer.echo(f"  {column:22s} {count:,}")
+
         # Without this the sensor_switches block parses and does nothing, and
         # every era-spanning variable has to be reassembled by hand downstream.
-        switches = load_sensor_switches(calibrations_path)
         qc = unify_sensor_columns(qc, switches)
         # Unification COPIES: each unified channel keeps a raw twin under the
         # logger's own name, and the masks below must reach both or the artifact
         # publishes the rejected value under the other name.
-        sources = resolve_mapping_windows(qc, switches, NIGHT_CORRUPTION_CHANNELS)
+        sources = resolve_mapping_windows(
+            qc, switches, (*NIGHT_CORRUPTION_CHANNELS, *NOCTURNAL_SHORTWAVE_CHANNELS)
+        )
 
         qc, net_gained, net_dropped = close_net_radiation(qc)
         if net_gained or net_dropped:
@@ -333,7 +361,27 @@ def run(
     # the two channels it invalidates.
     corrupted = night_corrupted_days(qc)
     qc, night_masked = mask_night_corrupted_days(qc, corrupted, sources)
+    # BEFORE both radiation masks, and the position is load-bearing twice over.
+    # After mask_night_corrupted_days, so a shifted clock cannot put daylight into
+    # the nocturnal sample and inflate the offset. Before mask_impossible_shortwave,
+    # because that stage removes exactly the samples below the BSRN floor whose
+    # SHARE this monitor exists to report: measured afterwards, fraction_below_
+    # bsrn_floor is structurally 0.0 for every channel and the statistic reports
+    # success while measuring nothing.
+    offsets = nocturnal_offset_statistics(qc)
     qc, impossible = mask_impossible_shortwave(qc, sources)
+    # LAST of the radiation stages: night_corrupted_days above detects a slipped
+    # logger clock BY the irradiance recorded at night, so blanking the nocturnal
+    # samples any earlier removes its only witness. It also lands after
+    # close_net_radiation, which keeps the nocturnal net — a negative saldo at
+    # night is physics, not offset.
+    qc, nocturnal = mask_nocturnal_shortwave(qc, sources)
+    # AFTER the nocturnal mask, and only now: with the shortwave declared "not a
+    # flux" the net must not keep carrying it. Below the horizon the shortwave
+    # terms are zero, so the net is the longwave difference alone.
+    qc, nocturnal_net = close_nocturnal_net_radiation(qc)
+    if nocturnal_net:
+        typer.echo(f"Saldo noturno recomposto so da onda longa: {nocturnal_net:,} amostras")
     typer.echo(
         f"\nDias com carimbo de tempo corrompido: {len(corrupted)} "
         f"({sum(night_masked.values()):,} amostras mascaradas em {len(night_masked)} colunas)"
@@ -457,6 +505,7 @@ def run(
         "physical_limits_absent_columns": limits_absent_columns,
         "physical_limits_after_calibration": outside_after_calibration,
         "calibration_invalidated": invalidated,
+        "shade_ring_corrected": shade_ring_corrected,
         "blocked_gauge_runs": [
             {"column": column, "first": first, "last": last, "days": days}
             for column, first, last, days in blocked
@@ -468,6 +517,12 @@ def run(
         "step_excursions_removed": step_excursions_removed,
         "persistence_runs_removed": persistence_runs_removed,
         "impossible_shortwave_removed": impossible,
+        "nocturnal_shortwave_masked": nocturnal,
+        # Measured before the mask above removed the samples; see
+        # docs/arqueologia/qc/lit-radiation-qc.md for why the monitor must survive it.
+        "nocturnal_offset_monitor": {
+            column: statistic.as_report() for column, statistic in offsets.items()
+        },
         # Dated, so the episode stays auditable after the samples are gone.
         "timestamp_corrupted_days": [day for day, _count in corrupted],
         "timestamp_corruption_masked": night_masked,
