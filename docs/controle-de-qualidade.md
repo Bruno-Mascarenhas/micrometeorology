@@ -34,12 +34,15 @@ build_five_minute_frame          merge the .dat archive against an explicit mani
 mask_sentinels                   1,093,223 samples   logger fill values (-99999, NAN, ...)
 apply_physical_limits            236,815             range gates, raw logger units
 apply_calibrations               1,227               a `factor: null` record voids its window
+apply_shade_ring_correction      733,433 scaled      geometric shade-ring factor on the diffuse
 mask_step_excursions             839       ← statistical
 mask_persistent_runs             60,824    ← statistical
 unify_sensor_columns                                 era-to-era channel unification (COPIES)
 close_net_radiation              36,241 recomposed
 mask_night_corrupted_days        187,826             53 days of timestamp corruption
-mask_impossible_shortwave        559                 BSRN per-component ceiling
+nocturnal_offset_statistics      0 (measures only)   drift monitor, read before BOTH masks below
+mask_impossible_shortwave                            BSRN ceiling, BSRN floor, and the daylight sign rule
+mask_nocturnal_shortwave                             shortwave with the sun below the horizon
 apply_physical_limits (2nd)      579                 re-check in calibrated units
   └─ write station_5min_qc
 aggregate_to_hourly                                  means, sums, vector means
@@ -171,6 +174,120 @@ single samples spread from 2025-05 to 2026-07, a year before the failure, and th
 are genuine wind measurements that happen to read 2.62 m/s. The 1,566-sample rail
 was removed in full from all three channels. Across the rest of the archive 2.62
 appears in ten other columns, always isolated or in pairs, and every one is kept.
+
+---
+
+## The shade-ring correction on the diffuse
+
+A shaded pyranometer measures the sky with a band of it hidden: the ring that
+keeps the direct beam off the detector also occults the part of the dome the sun
+would have crossed. The measurement therefore UNDERSTATES the diffuse flux by a
+geometric factor that depends on the ring's dimensions and on the solar
+declination, and returning it is the baseline correction of Drummond (1956).
+
+`apply_shade_ring_correction` multiplies the raw diffuse channels by the factor
+tabulated per five-minute stamp in `data/teorica_2016-2030.csv` (column `fc`,
+1.082 to 1.203 over the year, lowest in June and highest between October and
+February). It runs alongside the instrument calibrations and before unification,
+so the unified `Sw_dif` inherits the corrected value, and it is **scoped to the
+mapping windows of `Sw_dif`** — outside them the same instrument is measuring the
+GLOBAL flux, and scaling it there would corrupt `Sw_dw`.
+
+**Why it exists.** Without it the diffuse fraction Kd = Sw_dif / Sw_dw saturates
+at 0.81 under a fully overcast sky (Kt < 0.10), where the physics requires it to
+approach 1: with the sun's disc extinguished, every photon reaching the ground is
+diffuse. With the correction the same bin reads 0.97.
+
+**What it changed downstream**, measured on this archive: the three empirical
+diffuse-fraction models lose most of the positive bias previously attributed to
+them. Marques Filho et al. (2016) goes from MBE +0.071 to +0.004, Lemos et al.
+(2017) crosses to -0.018 and the BRL model of Ridley et al. (2010) from +0.130 to
++0.069. The "systematic overestimation by all three models" reported before this
+correction was in large part the missing shade-ring factor, not the models.
+
+A missing factor raises `MissingShadeRingFactorError` rather than becoming NaN or
+1.0: the first would erase a measurement in silence and the second would publish
+uncorrected diffuse under the corrected channel's name.
+
+---
+
+## Nocturnal shortwave: a deliberate deviation from the QCRad prescription
+
+`mask_nocturnal_shortwave` blanks `Sw_dw`, `Sw_dif`, `Sw_up`, `Sw_par` and `Sw_uv`
+wherever the sun is below the horizon, and `mask_impossible_shortwave` carries a
+floor of −4 W/m² and a sign rule alongside its ceiling. **This departs from what
+`docs/arqueologia/qc/lit-radiation-qc.md` prescribes**, and the departure is
+recorded here rather than left for a reader to discover as an inconsistency.
+
+The literature review concluded "mask the max side; flag the min side", and kept
+the nocturnal values for three reasons: the negative reading is a real
+measurement of thermopile IR loss; clipping it to zero biases every nocturnal
+statistic upward; and the offset is the only pyranometer drift diagnostic
+available without a calibration lab.
+
+What was weighed against it:
+
+- Reason two does not apply. Nothing is clipped to zero. A masked sample becomes
+  `NaN`, which keeps the hour out of a mean rather than entering it as an
+  observation — the same contract every other gate in this pipeline honours.
+- Reason one is softened by `station_5min_raw.parquet`, which is written before
+  any gate runs and is immutable. The measurement is not destroyed, only excluded
+  from the QC'd product.
+- Reason three stands, and is met directly: `nocturnal_offset_statistics` runs
+  **before** the mask and persists the per-channel median, the 5th and 95th
+  percentiles, the fractions below the physically-possible (−4 W/m²) and
+  extremely-rare (−2 W/m²) minima, the yearly and monthly medians, and any month
+  whose median departs from its trailing 12-month baseline by more than
+  1.5 W/m² — into `nocturnal_offset_monitor` in `archive_report.json`. The drift
+  monitor outlives the samples it was measured on.
+
+What the archive published without the floor and the mask: 36,202 negative hours
+of `Sw_dw`, 35,308 of them nocturnal, median −1.478 W/m²; `Sw_up` carried the
+same fault with the opposite sign, median +2.620, because its dome faces the warm
+ground rather than the cold sky.
+
+### The daylight sign rule
+
+Separately from the floor, `mask_impossible_shortwave` rejects any shortwave
+sample that is **zero or negative while the sun is above the horizon**. The floor
+is the instrument's error bar; this is the sign of the quantity. Rayleigh
+scattering alone keeps diffuse above zero whenever the sun is up, so a zero or a
+negative there is thermal offset or a stuck channel, never a flux — and it drags
+the daytime mean down, which is the one statistic the nocturnal mask was supposed
+to protect.
+
+Measured before the rule existed: 2,342 daylight samples of `Sw_dw`, 1,034 of
+`Sw_dif` and 179 of `Sw_up` sat between the −4 W/m² floor and zero, and `Sw_par`
+carried 7,812 exact zeros — 1.68% of its daylight record, a quantum sensor
+reading nothing with the sun up.
+
+The rule is deliberately inactive at night, where `mask_nocturnal_shortwave`
+already owns the channel: active there it would fire on nearly every nocturnal
+sample and report a tally that says nothing about physics.
+
+**Two consequences that must be read the same way everywhere downstream.** After
+this stage a shortwave mean is a **daylight** mean, not a 24-hour mean, and it is
+therefore not comparable to one computed before this change. A daily insolation
+total needs the nocturnal hours restored as zero before integrating, because they
+are no longer in the frame.
+
+**Order is load-bearing, in three places, and each one fails silently.**
+
+1. `mask_nocturnal_shortwave` runs after `night_corrupted_days`, which detects a
+   slipped logger clock *by* the irradiance stamped at night. Blanking the
+   nocturnal samples first removes the only witness and turns 53 days of detected
+   timestamp corruption into a reported zero.
+2. `nocturnal_offset_statistics` runs before `mask_impossible_shortwave`. The BSRN
+   floor removes exactly the samples whose share the monitor reports, so measured
+   afterwards `fraction_below_bsrn_floor` is 0.0 on every channel — against true
+   values of 0.678% for `Sw_dw` and 3.562% for `Sw_dif` — and the monitor reports
+   a clean instrument while measuring nothing. The medians survive the reordering,
+   which is why a spot-check against them does not catch this.
+3. `nocturnal_offset_statistics` runs after `mask_night_corrupted_days`, so a
+   shifted clock cannot put daylight irradiance into the nocturnal sample and
+   inflate the offset it is meant to measure.
+
+`tests/micromet/test_archive.py` pins all three.
 
 ---
 
