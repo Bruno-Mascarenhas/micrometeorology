@@ -178,6 +178,18 @@ def run(
     raw = lenta.join(rain[rain_columns], how="outer")
     typer.echo(f"\nBase unificada de 5 min: {len(raw):,} linhas x {len(raw.columns)} colunas")
 
+    # --strict decide AQUI, antes do primeiro artefato. Avaliado ao final, como
+    # estava, o processo escrevia os tres parquets e o manifesto e só então saía
+    # não-zero, deixando em disco exatamente o acervo que a verificação acabara de
+    # reprovar — e um `make` que ignore o código de saída o publicaria.
+    failed = [problem for report in reports for problem in report.problems]
+    if failed:
+        typer.echo(f"\n! {len(failed)} divergencia(s) em relacao a auditoria do acervo")
+        if strict:
+            raise typer.Exit(code=1)
+    else:
+        typer.echo("\n>> Merge confere com a auditoria: nenhuma linha perdida ou duplicada")
+
     typer.echo("\nArtefatos:")
     _write(raw, out / "station_5min_raw", output_format)
 
@@ -331,27 +343,32 @@ def run(
             f"Irradiancia impossivel para a posicao do sol (limite BSRN): "
             f"{sum(impossible.values()):,} amostras em {len(impossible)} colunas"
         )
+    if nocturnal:
+        typer.echo(
+            f"Onda curta com o sol abaixo do horizonte (offset termico, nao fluxo): "
+            f"{sum(nocturnal.values()):,} amostras em {len(nocturnal)} colunas"
+        )
+    for column, statistic in offsets.items():
+        if statistic.median_wm2 is not None:
+            typer.echo(
+                f"  offset noturno {column:8s} mediana {statistic.median_wm2:+7.3f} W/m2 "
+                f"({statistic.night_samples:,} amostras)"
+            )
+    alarms = [
+        (column, month, median)
+        for column, statistic in offsets.items()
+        for month, median in statistic.drift_alarms
+    ]
+    for column, month, median in alarms:
+        typer.echo(f"  ! deriva de offset em {column} ({month}): mediana {median:+.3f} W/m2")
+    if alarms and strict:
+        # Um alarme que não tem consequência não é um alarme. Sob --strict a deriva
+        # do piranômetro reprova a construção, como já reprova a difusa sem sombra.
+        raise typer.Exit(code=1)
     for day, count in sorted(corrupted, key=lambda item: -item[1])[:8]:
         typer.echo(
             f"  {day}  {count} amostra(s) acima de {NIGHT_CORRUPTION_FLUX_WM2:.0f} W/m2 de madrugada"
         )
-
-    # The gate runs twice: the first pass on the RAW signal keeps the calibration
-    # from scaling a never-physical value, the second because a value sitting AT
-    # the boundary crosses it once scaled — as the Eppley PSP factor declared in
-    # this same config does.
-    outside_after_calibration = values_outside_declared_limits(qc, settings.sensor_limits)
-    if outside_after_calibration:
-        qc = apply_physical_limits(qc, settings.sensor_limits)
-        typer.echo(
-            f"\nLimites reaplicados apos calibracao: "
-            f"{sum(outside_after_calibration.values()):,} amostra(s) "
-            f"em {len(outside_after_calibration)} coluna(s) cruzaram o portao ao serem escaladas"
-        )
-        for column, count in sorted(outside_after_calibration.items(), key=lambda item: -item[1])[
-            :8
-        ]:
-            typer.echo(f"  {column:22s} {count:,}")
 
     # AFTER unification, deliberately: the one channel this matters most for is
     # the unified ``ur``, which does not exist before it. The fault family is the
@@ -458,19 +475,15 @@ def run(
             {"unified": unified, "column": column, "start": str(start), "end": str(end)}
             for unified, column, start, end in gaps
         ],
-        "net_radiation_recomposed": {"gained": net_gained, "dropped": net_dropped},
+        "net_radiation_recomposed": {
+            "gained": net_gained,
+            "dropped": net_dropped,
+            "nocturnal_longwave_only": nocturnal_net,
+        },
     }
     report_path = out / "archive_report.json"
     report_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     typer.echo(f"  [ok] {report_path.name}")
-
-    failed = [problem for report in reports for problem in report.problems]
-    if failed:
-        typer.echo(f"\n! {len(failed)} divergencia(s) em relacao a auditoria do acervo")
-        if strict:
-            raise typer.Exit(code=1)
-    else:
-        typer.echo("\n>> Merge confere com a auditoria: nenhuma linha perdida ou duplicada")
 
 
 def main() -> None:

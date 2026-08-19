@@ -98,6 +98,11 @@ EXPECTED_RAIN_ROWS = 1_018_291
 ARCHIVE_START = pd.Timestamp("2016-09-29 13:40:00")
 ARCHIVE_END = pd.Timestamp("2026-08-12 00:00:00")
 
+#: Grid the two logger tables are written on, used by :func:`verify_frame` to
+#: check that everything past :data:`ARCHIVE_END` is later acquisition and not a
+#: duplicated or injected file.
+MERGE_SAMPLING_INTERVAL = pd.Timedelta(minutes=5)
+
 # Per-row instrument quality flags. Text, and therefore destroyed by a numeric
 # coercion unless named explicitly (see ingestion.read_campbell_dat).
 STATUS_COLUMNS = ("MetSENS1_Status", "MetSENS2_Status", "MetSENS_Status")
@@ -437,15 +442,31 @@ def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
     duplicated = int(index.duplicated().sum())
     monotonic = bool(index.is_monotonic_increasing)
 
+    # The station keeps recording after the audit was taken, so equality with the
+    # audited count goes red on every later acquisition and did: it reported four
+    # problems on a merge that had lost nothing, which is a verification that
+    # cries wolf and therefore verifies nothing. What IS invariant is that the
+    # record only grows, and that the growth is exactly the sampling grid between
+    # the audited end and the observed one — measured here, 1,146 intervals in
+    # BOTH tables, which is what proves the tail is grid and not an injected file.
     problems: list[str] = []
-    if len(frame) != expected:
+    surplus = len(frame) - expected
+    if surplus < 0:
         problems.append(
-            f"{kind}: {len(frame)} rows, audit measured {expected} ({len(frame) - expected:+d})"
+            f"{kind}: {len(frame)} rows, audit measured {expected} ({surplus:+d}); "
+            "the record cannot shrink"
         )
     if first is not None and first != ARCHIVE_START:
         problems.append(f"{kind}: starts {first}, audit measured {ARCHIVE_START}")
-    if last is not None and last != ARCHIVE_END:
-        problems.append(f"{kind}: ends {last}, audit measured {ARCHIVE_END}")
+    if last is not None and last < ARCHIVE_END:
+        problems.append(f"{kind}: ends {last}, before the audited {ARCHIVE_END}")
+    if last is not None and last > ARCHIVE_END and surplus >= 0:
+        grid = int((last - ARCHIVE_END) / MERGE_SAMPLING_INTERVAL)
+        if surplus != grid:
+            problems.append(
+                f"{kind}: {surplus} rows past the audited end, but {ARCHIVE_END} to {last} "
+                f"spans {grid} sampling intervals"
+            )
     if duplicated:
         problems.append(f"{kind}: {duplicated} duplicated timestamps")
     if not monotonic:
