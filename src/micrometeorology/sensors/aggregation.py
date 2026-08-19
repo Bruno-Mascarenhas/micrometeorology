@@ -115,13 +115,33 @@ def aggregate_to_hourly(
             u, v = wind_components(np.ones(len(df)), df[dir_col].to_numpy())
 
         df_uv = pd.DataFrame({"u": u, "v": v}, index=df.index)
-        uv_resampled = df_uv.resample(freq)
-        uv_counts = uv_resampled["u"].count()
-        uv_means = uv_resampled.mean()
+        uv_means = df_uv.resample(freq).mean()
+
+        # Completeness is judged on the DIRECTION channel, not on the u component.
+        # u is NaN whenever the speed is NaN, so gating on it discarded hours whose
+        # directional record was complete: measured on this archive, 2,619 hours
+        # with 6 to 12 valid directions (median 12) were published as NaN purely
+        # because the paired anemometer was down, 1,701 of them in 2018 alone.
+        dir_counts = resampler[dir_col].count()
+
+        # Where the speed is too sparse to weight with, fall back to the unit-weight
+        # directional mean the branch above already uses when there is no speed
+        # column at all. A vector mean of directions is still a vector mean; only
+        # the weighting is lost, and losing the weight beats losing the hour.
+        if speed_col and speed_col in df.columns:
+            speed_counts = resampler[speed_col].count()
+            unweighted_u, unweighted_v = wind_components(np.ones(len(df)), df[dir_col].to_numpy())
+            unweighted = (
+                pd.DataFrame({"u": unweighted_u, "v": unweighted_v}, index=df.index)
+                .resample(freq)
+                .mean()
+            )
+            sparse = (speed_counts < min_samples).reindex(uv_means.index, fill_value=True)
+            uv_means = uv_means.mask(sparse, unweighted)
 
         dirs = wind_direction_from_components(uv_means["u"].to_numpy(), uv_means["v"].to_numpy())
         dir_series = pd.Series(dirs, index=uv_means.index)
-        dir_series[uv_counts < min_samples] = np.nan
+        dir_series[dir_counts.reindex(dir_series.index) < min_samples] = np.nan
         results[dir_col] = dir_series
 
     out = pd.DataFrame(results)
