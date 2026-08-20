@@ -21,11 +21,27 @@ belongs to the layers that publish, which apply the site's pinned offset.
 import logging
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TypedDict, Unpack
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+class CampbellReadOptions(TypedDict, total=False):
+    """The keyword options :func:`read_campbell_dat` accepts, for forwarding.
+
+    Every key is optional and falls back to that function's own default, so a
+    forwarder never restates a default and the two cannot drift apart.
+    """
+
+    separator: str
+    skip_rows: list[int] | None
+    timestamp_column: str
+    drop_columns: list[str] | None
+    sentinel_value: float | None
+    text_columns: Sequence[str] | None
 
 
 def read_campbell_dat(
@@ -140,7 +156,7 @@ def read_campbell_dat(
 
 def merge_dat_files(
     paths: Sequence[str | Path],
-    **kwargs,
+    **kwargs: Unpack[CampbellReadOptions],
 ) -> pd.DataFrame:
     """Read and merge multiple ``.dat`` files into a single DataFrame.
 
@@ -158,7 +174,8 @@ def merge_dat_files(
         collect them as ``list[Path]`` or ``list[str]``, and an invariant
         ``list[str | Path]`` would reject both.
     **kwargs:
-        Additional keyword arguments passed to :func:`read_campbell_dat`.
+        Forwarded to :func:`read_campbell_dat`; see
+        :class:`CampbellReadOptions` for the keys it accepts.
 
     Returns
     -------

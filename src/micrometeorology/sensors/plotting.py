@@ -7,11 +7,14 @@ around, behind one set of color, watermark, date-axis and legend conventions.
 
 import logging
 from pathlib import Path
+from typing import Protocol
 
 import matplotlib
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +43,14 @@ BALANCE_COMPONENT_COLORS = {
 }
 
 
+class SupportsStrftime(Protocol):
+    """What :func:`add_timestamp_label` needs of the stamp it prints."""
+
+    def strftime(self, fmt: str, /) -> str: ...
+
+
 def add_labmim_watermark(
-    ax,
+    ax: Axes,
     line1: str = WATERMARK_LINE1,
     line2: str = WATERMARK_LINE2,
 ) -> None:
@@ -84,7 +93,7 @@ def add_labmim_watermark(
 DAILY_TICK_MAX_DAYS = 21
 
 
-def setup_date_axis(ax) -> None:
+def setup_date_axis(ax: Axes) -> None:
     """Configure the date axis: day-major / 6 h-minor, thinning on long spans.
 
     Call this **after** the data is plotted: the span is read from the current
@@ -110,7 +119,7 @@ def setup_date_axis(ax) -> None:
     ax.xaxis.grid(True, linestyle="-", which="major", color="grey", alpha=0.5)
 
 
-def add_timestamp_label(ax, dt) -> None:
+def add_timestamp_label(ax: Axes, dt: SupportsStrftime) -> None:
     """Add a date/time label in the top-right corner of the axes.
 
     Parameters
@@ -132,7 +141,7 @@ def add_timestamp_label(ax, dt) -> None:
     )
 
 
-def add_top_legend(ax, *, ncol: int = 3, loc: int = 3) -> None:
+def add_top_legend(ax: Axes, *, ncol: int = 3, loc: int = 3) -> None:
     """Add a legend bar along the top edge of the axes.
 
     Parameters
@@ -155,7 +164,7 @@ def add_top_legend(ax, *, ncol: int = 3, loc: int = 3) -> None:
     )
 
 
-def create_figure(figsize: tuple[float, float] = DEFAULT_FIGSIZE):
+def create_figure(figsize: tuple[float, float] = DEFAULT_FIGSIZE) -> tuple[Figure, Axes]:
     """Create a new figure + axes pair for a station graph.
 
     Parameters
@@ -177,7 +186,7 @@ def create_figure(figsize: tuple[float, float] = DEFAULT_FIGSIZE):
     return fig, ax
 
 
-def save_figure(fig, path: str | Path, *, dpi: int = 100) -> Path:
+def save_figure(fig: Figure, path: str | Path, *, dpi: int = 100) -> Path:
     """Save a figure and close it.  Creates parent directories as needed.
 
     Parameters

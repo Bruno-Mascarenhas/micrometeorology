@@ -7,6 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
+from solrad_correction.config import RuntimeConfig
 from solrad_correction.training.dataloaders import DataLoaderSettings
 from solrad_correction.utils.serialization import capture_rng_state, save_torch_checkpoint
 
@@ -44,7 +45,7 @@ class CheckpointManager:
     @classmethod
     def from_runtime(
         cls,
-        runtime: Any,
+        runtime: RuntimeConfig | None,
         *,
         checkpoint_config: dict[str, Any] | None = None,
         preprocessing_fingerprint: str | None = None,

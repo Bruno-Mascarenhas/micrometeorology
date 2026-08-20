@@ -19,6 +19,7 @@ from typing import Annotated
 
 import typer
 
+from solrad_correction.config import ExperimentConfig
 from solrad_correction.experiments.overrides import (
     ExperimentOverrides,
     load_config_with_overrides,
@@ -150,7 +151,7 @@ def load_colab_config(
     torch_compile: bool | None = None,
     resume: str | None = None,
     allow_preprocessing_change: bool = False,
-):
+) -> ExperimentConfig:
     """Load config with the same override path used by local CLI.
 
     Exposed separately from the command so a Colab notebook can build the

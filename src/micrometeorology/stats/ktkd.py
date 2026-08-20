@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from allsky.config import SiteConfig
 from allsky.solar import hour_angle_deg, solar_elevation_deg
 from micrometeorology.stats.daylight import elevation_bounds
 
@@ -432,7 +433,7 @@ MIN_GLOBAL_WM2 = 50.0
 def prepare_clearness(
     hourly: pd.DataFrame,
     *,
-    site: Any,
+    site: SiteConfig,
     utc_offset_hours: float,
     min_elevation_deg: float = 10.0,
     global_column: str = "Sw_dw",
@@ -475,7 +476,7 @@ def prepare_clearness(
 def prepare_ktkd(
     hourly: pd.DataFrame,
     *,
-    site: Any,
+    site: SiteConfig,
     utc_offset_hours: float,
     min_elevation_deg: float = 10.0,
     global_column: str = "Sw_dw",
