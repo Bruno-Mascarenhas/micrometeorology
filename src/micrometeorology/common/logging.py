@@ -17,18 +17,33 @@ def setup_logging(level: str = "INFO") -> None:
     Parameters
     ----------
     level:
-        Logging level name (``DEBUG``, ``INFO``, ``WARNING``, …).
+        Logging level name (``DEBUG``, ``INFO``, ``WARNING``, …), case-insensitive.
+
+    Raises
+    ------
+    ValueError
+        When *level* names no logging level. Falling back to ``INFO`` would run
+        the whole pipeline at a verbosity the operator did not ask for and never
+        say so.
+
     Notes
     -----
     ``matplotlib``, ``PIL``, ``fiona`` and ``rasterio`` are pinned to
     ``WARNING``: at ``INFO`` they bury the pipeline's own messages under font
     cache and driver chatter.
     """
+    known_levels = logging.getLevelNamesMapping()
+    requested = level.upper()
+    if requested not in known_levels:
+        raise ValueError(
+            f"unknown logging level {level!r}; expected one of {', '.join(sorted(known_levels))}"
+        )
+
     fmt = "%(asctime)s | %(name)-40s | %(levelname)-7s | %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
 
     logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
+        level=known_levels[requested],
         format=fmt,
         datefmt=datefmt,
         handlers=[logging.StreamHandler(sys.stdout)],
