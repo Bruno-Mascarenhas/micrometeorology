@@ -178,10 +178,6 @@ def run(
     raw = lenta.join(rain[rain_columns], how="outer")
     typer.echo(f"\nBase unificada de 5 min: {len(raw):,} linhas x {len(raw.columns)} colunas")
 
-    # --strict decide AQUI, antes do primeiro artefato. Avaliado ao final, como
-    # estava, o processo escrevia os tres parquets e o manifesto e só então saía
-    # não-zero, deixando em disco exatamente o acervo que a verificação acabara de
-    # reprovar — e um `make` que ignore o código de saída o publicaria.
     failed = [problem for report in reports for problem in report.problems]
     if failed:
         typer.echo(f"\n! {len(failed)} divergencia(s) em relacao a auditoria do acervo")
@@ -272,11 +268,6 @@ def run(
             for column, count in (before_calibration - qc.notna().sum()).items()
             if int(count) > 0
         }
-        # A correção do anel de sombreamento é uma calibração geométrica e entra
-        # junto das outras, antes da unificação, para que a cópia unificada herde
-        # o valor corrigido. Escopo por janela de mapeamento de Sw_dif: o mesmo
-        # piranômetro mede o GLOBAL fora dela. Sem esta etapa a fração difusa
-        # satura em 0,81 sob céu encoberto, quando a física exige que tenda a 1.
         switches = load_sensor_switches(calibrations_path)
         shade_windows = resolve_mapping_windows(qc, switches, ("Sw_dif",)).get("Sw_dif", ())
         qc, shade_ring_corrected = apply_shade_ring_correction(
@@ -302,14 +293,8 @@ def run(
         # calibration from scaling a never-physical value, the second because a
         # value sitting AT the boundary crosses it once scaled — as the Eppley
         # PSP factor declared in this same config does.
-        #
-        # BEFORE unify_sensor_columns, and that is the fix for a leak this stage
-        # had while it ran after: sensor_limits names RAW columns only, so a
-        # sample rejected here after unification left the raw column and stayed
-        # published under the unified name. Measured, exactly one sample escaped
-        # — 2026-03-24 10:00, Sw_dw = 1508.65 W/m2 against a blanked
-        # CM3Up_Wm2_Avg — and it shifted the published hour by 50.31 W/m2.
-        # Running before the copy makes unification carry the gated value.
+        # Before unify_sensor_columns: sensor_limits names raw columns only, so a
+        # sample rejected after the copy stays published under the unified name.
         outside_after_calibration = values_outside_declared_limits(qc, settings.sensor_limits)
         if outside_after_calibration:
             qc = apply_physical_limits(qc, settings.sensor_limits)
@@ -361,24 +346,12 @@ def run(
     # the two channels it invalidates.
     corrupted = night_corrupted_days(qc)
     qc, night_masked = mask_night_corrupted_days(qc, corrupted, sources)
-    # BEFORE both radiation masks, and the position is load-bearing twice over.
-    # After mask_night_corrupted_days, so a shifted clock cannot put daylight into
-    # the nocturnal sample and inflate the offset. Before mask_impossible_shortwave,
-    # because that stage removes exactly the samples below the BSRN floor whose
-    # SHARE this monitor exists to report: measured afterwards, fraction_below_
-    # bsrn_floor is structurally 0.0 for every channel and the statistic reports
-    # success while measuring nothing.
+    # The order of the four stages below is load-bearing and every way of getting
+    # it wrong fails silently; test_the_pipeline_calls_its_radiation_stages_in_the
+    # _load_bearing_order pins it and docs/controle-de-qualidade.md explains it.
     offsets = nocturnal_offset_statistics(qc)
     qc, impossible = mask_impossible_shortwave(qc, sources)
-    # LAST of the radiation stages: night_corrupted_days above detects a slipped
-    # logger clock BY the irradiance recorded at night, so blanking the nocturnal
-    # samples any earlier removes its only witness. It also lands after
-    # close_net_radiation, which keeps the nocturnal net — a negative saldo at
-    # night is physics, not offset.
     qc, nocturnal = mask_nocturnal_shortwave(qc, sources)
-    # AFTER the nocturnal mask, and only now: with the shortwave declared "not a
-    # flux" the net must not keep carrying it. Below the horizon the shortwave
-    # terms are zero, so the net is the longwave difference alone.
     qc, nocturnal_net = close_nocturnal_net_radiation(qc)
     if nocturnal_net:
         typer.echo(f"Saldo noturno recomposto so da onda longa: {nocturnal_net:,} amostras")
@@ -410,8 +383,6 @@ def run(
     for column, month, median in alarms:
         typer.echo(f"  ! deriva de offset em {column} ({month}): mediana {median:+.3f} W/m2")
     if alarms and strict:
-        # Um alarme que não tem consequência não é um alarme. Sob --strict a deriva
-        # do piranômetro reprova a construção, como já reprova a difusa sem sombra.
         raise typer.Exit(code=1)
     for day, count in sorted(corrupted, key=lambda item: -item[1])[:8]:
         typer.echo(
@@ -435,26 +406,12 @@ def run(
     # ``select_dtypes(include="number")`` columns, which matches neither bool nor
     # the object dtype a null introduces. ``qc_flag`` is the unified spelling.
     hourly_input = qc.copy()
-    # Administrative counters, dropped for the same reason the textual status
-    # flags are converted: an hourly MEAN of a monotonic record number is not a
-    # record number. Measured before this line existed, 99.8% of the published
-    # RECORD values were non-integer, and the rtime date components with them.
-    # generate_station_graphs already treats the same columns as administrative.
+    # An hourly mean of a monotonic counter is not a record number.
     counters = [
         column
         for column in hourly_input.columns
         if column == "RECORD" or str(column).startswith("rtime")
     ]
-    # The instrument's raw electrical signal, dropped for a stronger reason: the
-    # hourly product publishes physical quantities that passed quality control,
-    # and these passed none of it. Every radiation gate in this pipeline — the
-    # BSRN envelope, the sign rule, the nocturnal mask, the shade-ring correction
-    # — is defined on the W/m2 channel, so the millivolt twin of the same sensor
-    # reached the artifact unfiltered: measured before this line, 81,172 hours of
-    # PAR_Den_Avg with no mask at all, night included, beside 38,269 of the Sw_par
-    # that IS masked. No consumer reads them; both places that name them —
-    # cli/generate_station_graphs.py and allsky.features.policy — do so to
-    # exclude them.
     raw_signal = [
         column
         for column in hourly_input.columns
@@ -518,8 +475,6 @@ def run(
         "persistence_runs_removed": persistence_runs_removed,
         "impossible_shortwave_removed": impossible,
         "nocturnal_shortwave_masked": nocturnal,
-        # Measured before the mask above removed the samples; see
-        # docs/arqueologia/qc/lit-radiation-qc.md for why the monitor must survive it.
         "nocturnal_offset_monitor": {
             column: statistic.as_report() for column, statistic in offsets.items()
         },

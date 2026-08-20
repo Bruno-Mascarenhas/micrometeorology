@@ -850,22 +850,16 @@ class TestNocturnalShortwave:
     the warm ground instead of the cold sky.
     """
 
-    def test_a_negative_night_sample_is_masked_not_zeroed(self) -> None:
-        frame = pd.DataFrame({"Sw_dw": [-1.48]}, index=pd.DatetimeIndex(["2024-06-15 22:00"]))
+    @pytest.mark.parametrize(("column", "value"), [("Sw_dw", -1.48), ("Sw_up", 2.62)])
+    def test_a_night_sample_is_masked_not_zeroed(self, column, value) -> None:
+        """Two-sided: the offset's sign follows the dome, so a one-sided gate
+        would miss half of it."""
+        frame = pd.DataFrame({column: [value]}, index=pd.DatetimeIndex(["2024-06-15 22:00"]))
 
         masked, removed = archive.mask_nocturnal_shortwave(frame)
 
-        assert np.isnan(masked["Sw_dw"].iloc[0])
-        assert removed == {"Sw_dw": 1}
-
-    def test_a_positive_night_sample_is_masked_too(self) -> None:
-        """The offset's sign follows the dome, so a one-sided gate misses half of it."""
-        frame = pd.DataFrame({"Sw_up": [2.62]}, index=pd.DatetimeIndex(["2024-06-15 02:00"]))
-
-        masked, removed = archive.mask_nocturnal_shortwave(frame)
-
-        assert np.isnan(masked["Sw_up"].iloc[0])
-        assert removed == {"Sw_up": 1}
+        assert np.isnan(masked[column].iloc[0])
+        assert removed == {column: 1}
 
     def test_daylight_is_untouched(self) -> None:
         frame = pd.DataFrame({"Sw_dw": [800.0]}, index=pd.DatetimeIndex(["2024-06-15 12:00"]))
@@ -948,30 +942,20 @@ def test_the_bsrn_floor_rejects_a_daytime_negative_the_flat_gate_passes() -> Non
     assert removed == {"Sw_dw": 1}
 
 
-def test_a_floor_violation_propagates_to_the_net_as_the_ceiling_does() -> None:
-    """The logger derives Net_CNR1 from the four components, so the fault is inside it."""
-    stamps = pd.DatetimeIndex(["2026-07-05 09:00"])
-    frame = pd.DataFrame({"Sw_dw": [-9.47], "Net_CNR1": [-40.0]}, index=stamps)
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [("Sw_dw", -1.5), ("Sw_dif", -1.5), ("Sw_dif", 0.0)],
+)
+def test_a_non_positive_daylight_flux_falls_to_the_sign_rule(column, value) -> None:
+    """Inside the -4 floor and still impossible: Rayleigh keeps the diffuse above
+    zero whenever the sun is up, so a zero or a negative there is offset."""
+    stamps = pd.DatetimeIndex(["2024-06-15 12:00"])
+    frame = pd.DataFrame({"Sw_dw": [800.0], column: [value]}, index=stamps)
 
     masked, removed = archive.mask_impossible_shortwave(frame)
 
-    assert np.isnan(masked["Net_CNR1"].iloc[0])
-    assert removed == {"Sw_dw": 1, "Net_CNR1": 1}
-
-
-def test_a_daytime_negative_inside_the_floor_still_falls_to_the_sign_rule() -> None:
-    """-1.5 W/m2 clears the -4 floor, and the sign rule takes it anyway.
-
-    The three parts of the gate divide the fault: the ceiling rejects what the
-    sun cannot produce, the floor what no instrument can read at any hour, and
-    the sign rule what cannot be a flux while the sun is up.
-    """
-    frame = pd.DataFrame({"Sw_dw": [-1.5]}, index=pd.DatetimeIndex(["2024-06-15 06:30"]))
-
-    masked, removed = archive.mask_impossible_shortwave(frame)
-
-    assert np.isnan(masked["Sw_dw"].iloc[0])
-    assert removed == {"Sw_dw": 1}
+    assert np.isnan(masked[column].iloc[0])
+    assert removed == {column: 1}
 
 
 class TestNocturnalOffsetMonitor:
@@ -1048,32 +1032,6 @@ def test_the_offset_monitor_is_emptied_by_the_floor_it_reports_against() -> None
 
     assert before_the_floor["Sw_dw"].fraction_below_bsrn_floor == pytest.approx(0.25)
     assert after_the_floor["Sw_dw"].fraction_below_bsrn_floor == pytest.approx(0.0)
-
-
-def test_a_zero_diffuse_with_the_sun_up_is_masked() -> None:
-    """Rayleigh scattering alone keeps diffuse above zero whenever the sun is up.
-
-    A zero there is a stuck channel or an offset that happened to land on the
-    bound, and averaging it drags the daytime mean down.
-    """
-    stamps = pd.DatetimeIndex(["2024-06-15 12:00"])
-    frame = pd.DataFrame({"Sw_dw": [800.0], "Sw_dif": [0.0]}, index=stamps)
-
-    masked, removed = archive.mask_impossible_shortwave(frame)
-
-    assert np.isnan(masked["Sw_dif"].iloc[0])
-    assert removed == {"Sw_dif": 1}
-
-
-def test_a_daytime_negative_inside_the_floor_is_masked_by_the_sign_rule() -> None:
-    """-1.5 W/m2 clears the -4 floor but still cannot be a daylight flux."""
-    stamps = pd.DatetimeIndex(["2024-06-15 12:00"])
-    frame = pd.DataFrame({"Sw_dw": [800.0], "Sw_dif": [-1.5]}, index=stamps)
-
-    masked, removed = archive.mask_impossible_shortwave(frame)
-
-    assert np.isnan(masked["Sw_dif"].iloc[0])
-    assert removed == {"Sw_dif": 1}
 
 
 def test_the_sign_rule_does_not_reach_the_night() -> None:

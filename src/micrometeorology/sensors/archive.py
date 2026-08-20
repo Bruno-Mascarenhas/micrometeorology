@@ -442,13 +442,8 @@ def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
     duplicated = int(index.duplicated().sum())
     monotonic = bool(index.is_monotonic_increasing)
 
-    # The station keeps recording after the audit was taken, so equality with the
-    # audited count goes red on every later acquisition and did: it reported four
-    # problems on a merge that had lost nothing, which is a verification that
-    # cries wolf and therefore verifies nothing. What IS invariant is that the
-    # record only grows, and that the growth is exactly the sampling grid between
-    # the audited end and the observed one — measured here, 1,146 intervals in
-    # BOTH tables, which is what proves the tail is grid and not an injected file.
+    # The station keeps recording after the audit, so the invariant is growth and
+    # not equality: the surplus must be the sampling grid between the two ends.
     problems: list[str] = []
     surplus = len(frame) - expected
     if surplus < 0:
@@ -1158,13 +1153,8 @@ def mask_impossible_shortwave(
             continue
         flux = frame[column]
         floor = BSRN_PPL_FLOOR_WM2 * (_PAR_SPECTRAL_FRACTION if column == "Sw_par" else 1.0)
-        # A non-positive flux with the sun above the horizon is impossible in a
-        # way the flat floor cannot express: the floor is the instrument's error
-        # bar, this is the sign of the quantity. Rayleigh scattering alone puts
-        # diffuse above zero whenever the sun is up, so a zero or a negative
-        # there is offset or a stuck channel, and averaging it drags the daytime
-        # mean down. Measured before this rule: 2,342 daylight samples of Sw_dw,
-        # 1,034 of Sw_dif and 7,812 exact zeros of Sw_par.
+        # Rayleigh scattering alone puts the diffuse above zero whenever the sun
+        # is up, so a non-positive daylight flux is offset or a stuck channel.
         above = flux > geometry * gain + offset
         unsigned = daylight & (flux <= 0.0)
         outside = (flux.notna() & (above | (flux < floor) | unsigned)).to_numpy()
@@ -1173,12 +1163,8 @@ def mask_impossible_shortwave(
         _blank(column, outside)
         # The net is not an independent measurement: the logger derives it from
         # the four components, so a component the sun cannot produce is inside it.
-        #
-        # Only the DAYTIME verdicts propagate. The floor fires overwhelmingly at
-        # night, on the thermopile offset, and carrying that verdict into the net
-        # deleted 1,955 perfectly ordinary nocturnal saldos — median -29.24 W/m2 —
-        # over a component whose true value there is zero anyway. The nocturnal
-        # net is longwave, and it is recomposed as such after the nocturnal mask.
+        # Only the daytime verdicts: the floor fires on the nocturnal offset, over
+        # a component whose true value is zero, and the night net is longwave.
         if column == "Sw_dw":
             _blank("Net_CNR1", (flux.notna() & (above | unsigned)).to_numpy())
 
@@ -1427,31 +1413,16 @@ def mask_nocturnal_shortwave(
     """Blank shortwave recorded while the sun is below the horizon.
 
     What a pyranometer reports at night is its own thermal zero-offset, not
-    irradiance: the dome radiates to a cold sky, the detector's cold junction
-    follows, and the instrument answers with a few W/m2 whose sign depends only
-    on which way it faces. Measured on this archive before this stage existed,
-    ``Sw_dw`` published a nocturnal median of -1.478 W/m2 over 37,751 hours and
-    ``Sw_up`` one of +2.620 — an offset published as a flux.
+    irradiance, and the sign follows which way the dome faces. The value is
+    masked, never clamped to zero: zero is a valid irradiance and would enter
+    every downstream mean as an observation. After this stage a shortwave mean is
+    a DAYLIGHT mean, and a daily insolation total needs the nocturnal hours
+    restored as zero before integrating.
 
-    The value is masked, never clamped to zero. Zero is a physically valid
-    irradiance and would enter every downstream mean as an observation, pulling
-    the average of the valid hours toward it; NaN keeps the hour out of the
-    statistic, which is what "no measurable signal" means. The consequence is
-    deliberate and has to be read the same way everywhere downstream: after this
-    stage a shortwave mean is a DAYLIGHT mean, and a daily insolation total needs
-    the nocturnal hours restored as zero before integrating, because they are no
-    longer in the frame.
-
-    ORDER MATTERS. This must run after :func:`night_corrupted_days` has already
-    listed its days: that detector finds a slipped logger clock BY the irradiance
-    recorded at night, so blanking the nocturnal samples first removes the only
-    witness and turns the whole clock-slip detection into a silent no-op.
-
-    Unlike :func:`mask_impossible_shortwave`, the raw twins are masked over the
-    WHOLE record rather than inside each era window, for the reason
-    :func:`mask_night_corrupted_days` gives: the sun's elevation is a property of
-    the timestamp, not of the instrument, so a raw column outside its unified
-    window is as unable to see the sun as the one inside it.
+    Must run after :func:`night_corrupted_days`, which finds a slipped logger
+    clock BY the irradiance recorded at night. The raw twins are masked over the
+    whole record rather than per era window: the sun's elevation belongs to the
+    timestamp, not to the instrument.
 
     Parameters
     ----------
@@ -1531,16 +1502,10 @@ def close_nocturnal_net_radiation(frame: pd.DataFrame) -> tuple[pd.DataFrame, in
     """Recompose the net with the sun down, where the shortwave terms are zero.
 
     :func:`close_net_radiation` runs before :func:`mask_nocturnal_shortwave` and
-    therefore folds the nocturnal thermopile offset into the published net: the
-    sum carries ``offset(Sw_dw) - offset(Sw_up)``, measured on this archive as a
-    median of -3.85 W/m2 against a nocturnal net of -49.1 W/m2, close to 8% of
-    it. Leaving it there states two incompatible things about the same samples on
-    the same night — that the shortwave is not a flux, and that it belongs inside
-    the flux balance.
-
-    With the sun below the horizon the shortwave terms are ZERO, not missing and
-    not the offset, so the nocturnal net is the longwave difference alone. That
-    is what this recomposes, after the nocturnal mask has run.
+    folds the nocturnal thermopile offset into the published net — measured here,
+    a median of -3.85 W/m2 against a nocturnal net of -49.1. With the sun below
+    the horizon the shortwave terms are ZERO, not the offset, so the nocturnal
+    net is the longwave difference alone.
 
     Parameters
     ----------
