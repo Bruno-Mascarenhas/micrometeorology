@@ -2,6 +2,13 @@
 
 import sys
 import time
+from collections.abc import Callable
+
+
+def _write_to_stdout(text: str) -> None:
+    """Write and flush at once: an unflushed ``\r`` line never reaches the terminal."""
+    sys.stdout.write(text)
+    sys.stdout.flush()
 
 
 class TrainingProgress:
@@ -16,6 +23,12 @@ class TrainingProgress:
         ``total_epochs - start_epoch`` epochs count toward the overall
         percentage, so a resume does not report itself as almost finished
         before it has trained anything.
+    write:
+        Where the display goes. Defaults to stdout, which is what a console run
+        wants; a batch job or a test passes its own sink instead. Deliberately a
+        writer and not a logger: every line here is redrawn in place with a
+        leading ``\r``, and a logging handler's newline and prefix would turn
+        one progress bar into one line per batch.
 
     Usage::
 
@@ -27,7 +40,14 @@ class TrainingProgress:
         progress.finish()
     """
 
-    def __init__(self, total_epochs: int, start_epoch: int = 0) -> None:
+    def __init__(
+        self,
+        total_epochs: int,
+        start_epoch: int = 0,
+        *,
+        write: Callable[[str], None] = _write_to_stdout,
+    ) -> None:
+        self._write = write
         self.total_epochs = total_epochs
         self._initial_epoch = start_epoch
         self.epoch_start_time = 0.0
@@ -63,13 +83,12 @@ class TrainingProgress:
         total_to_do = self.total_epochs - self._initial_epoch
         overall_pct = epochs_done / total_to_do * 100 if total_to_do > 0 else 0
 
-        sys.stdout.write(
+        self._write(
             f"\r  Epoch {self.current_epoch + 1}/{self.total_epochs} "
             f"[{pct:5.1f}%] "
             f"ETA epoch: {self._fmt_time(eta_epoch)} | "
             f"Overall: {overall_pct:5.1f}%"
         )
-        sys.stdout.flush()
 
     def end_epoch(
         self,
@@ -100,13 +119,12 @@ class TrainingProgress:
             eta_total = 0.0
 
         val_str = f"  val_loss={val_loss:.6f}" if val_loss is not None else ""
-        sys.stdout.write(
+        self._write(
             f"\r  Epoch {self.current_epoch + 1}/{self.total_epochs} "
             f"- train_loss={train_loss:.6f}{val_str} "
             f"({self._fmt_time(elapsed)}/epoch, ETA: {self._fmt_time(eta_total)})"
             f"{extra}\n"
         )
-        sys.stdout.flush()
 
     def finish(self) -> None:
         """Print the total wall-clock time of the run.
@@ -115,7 +133,7 @@ class TrainingProgress:
         that training ran to completion.
         """
         total = time.time() - self.training_start_time
-        print(f"\nTraining complete in {self._fmt_time(total)}")
+        self._write(f"\nTraining complete in {self._fmt_time(total)}\n")
 
     @staticmethod
     def _fmt_time(seconds: float) -> str:
