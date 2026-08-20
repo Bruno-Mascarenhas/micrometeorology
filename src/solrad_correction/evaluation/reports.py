@@ -14,7 +14,7 @@ from solrad_correction.utils.io import save_json, save_predictions
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ExperimentReport:
     """Container for experiment results.
 

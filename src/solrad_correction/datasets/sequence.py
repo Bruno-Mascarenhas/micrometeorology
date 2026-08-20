@@ -412,7 +412,7 @@ class WindowedSequenceDataset(Dataset):
         return load_windowed_sequence_dataset(path)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class WindowedSequenceDatasetMeta:
     """Metadata for lazy sequence datasets saved without dense windows.
 

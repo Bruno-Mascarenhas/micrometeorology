@@ -46,7 +46,7 @@ class PipelineProfile:
             self.stage_seconds[name] = time.monotonic() - started
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class LoadedData:
     """Input data loaded from the configured source, before any engineering.
 
@@ -60,7 +60,7 @@ class LoadedData:
     frame: pd.DataFrame
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class FeatureFrame:
     """Feature-engineered data and resolved model input columns.
 
@@ -76,7 +76,7 @@ class FeatureFrame:
     feature_cols: list[str]
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class SplitFrames:
     """Chronological train/validation/test dataframes.
 
@@ -90,7 +90,7 @@ class SplitFrames:
     test: pd.DataFrame
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class PreprocessedSplits:
     """Preprocessed train/validation/test frames plus fitted state.
 
@@ -114,7 +114,7 @@ class PreprocessedSplits:
     feature_cols: list[str]
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class DatasetBundle:
     """Datasets and evaluation payload for a model family.
 
@@ -143,7 +143,7 @@ class DatasetBundle:
     prediction_index: pd.DatetimeIndex | None
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class TrainingOutput:
     """Trained model and training metadata.
 
@@ -159,7 +159,7 @@ class TrainingOutput:
     result: TrainingResult
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class PredictionOutput:
     """Predictions in preprocessed target space.
 
@@ -177,7 +177,7 @@ class PredictionOutput:
     index: pd.DatetimeIndex | None
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class EvaluationResult:
     """Predictions in original target space plus computed metrics.
 
@@ -196,7 +196,7 @@ class EvaluationResult:
     metrics: dict[str, float]
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class ExperimentResult:
     """Complete experiment result ready for artifact writing."""
 
