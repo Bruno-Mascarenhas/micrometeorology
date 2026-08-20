@@ -11,6 +11,7 @@ reproduce.
 """
 
 import inspect
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -934,7 +935,7 @@ def test_the_bsrn_floor_rejects_a_daytime_negative_the_flat_gate_passes() -> Non
     negative the archive published on ``Sw_dw``, because it was written wide
     enough to admit the thermal offset it could not otherwise separate.
     """
-    frame = pd.DataFrame({"Sw_dw": [-9.47]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
+    frame = pd.DataFrame({"Sw_dw": [-9.47]}, index=pd.DatetimeIndex(["2024-06-15 22:00"]))
 
     masked, removed = archive.mask_impossible_shortwave(frame)
 
@@ -1068,17 +1069,19 @@ def test_the_pipeline_calls_its_radiation_stages_in_the_load_bearing_order() -> 
     """
     from micrometeorology.cli import build_archive as cli
 
-    fonte = inspect.getsource(cli.run)
-    esperado = [
-        "night_corrupted_days(",
-        "nocturnal_offset_statistics(",
-        "mask_impossible_shortwave(",
-        "mask_nocturnal_shortwave(",
-        "close_nocturnal_net_radiation(",
-    ]
-    posicoes = [fonte.index(chamada) for chamada in esperado]
+    estagios = (
+        "night_corrupted_days",
+        "nocturnal_offset_statistics",
+        "mask_impossible_shortwave",
+        "mask_nocturnal_shortwave",
+        "close_nocturnal_net_radiation",
+    )
+    # Comments are stripped first: a future comment naming a stage would otherwise
+    # satisfy the check over a wrong order.
+    fonte = "\n".join(linha.split("#", 1)[0] for linha in inspect.getsource(cli.run).splitlines())
+    chamadas = re.findall(rf"\b({'|'.join(estagios)})\(", fonte)
 
-    assert posicoes == sorted(posicoes)
+    assert chamadas == list(estagios)
 
 
 def test_the_nocturnal_net_is_the_longwave_difference_alone() -> None:

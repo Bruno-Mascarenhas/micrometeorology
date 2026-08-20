@@ -37,7 +37,7 @@ Relationship to the neighbouring modules
 
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from itertools import pairwise
 from pathlib import Path
@@ -53,6 +53,7 @@ from micrometeorology.common.paths import ensure_dir
 # the same angle in both places.
 from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.sensors.ingestion import merge_dat_files
+from micrometeorology.sensors.quality import SAMPLING_INTERVAL
 
 logger = logging.getLogger(__name__)
 
@@ -64,12 +65,12 @@ __all__ = [
     "EXPECTED_LENTA_ROWS",
     "EXPECTED_RAIN_ROWS",
     "LENTA_MANIFEST",
-    "MERGE_SAMPLING_INTERVAL",
     "NIGHT_CORRUPTION_CHANNELS",
     "NIGHT_CORRUPTION_FLUX_WM2",
     "NOCTURNAL_SHORTWAVE_CHANNELS",
     "OFFSET_DRIFT_ALARM_WM2",
     "RAIN_MANIFEST",
+    "SAMPLING_INTERVAL",
     "STATUS_COLUMNS",
     "UNGATED_RADIATION_TWINS",
     "ArchiveFile",
@@ -86,6 +87,7 @@ __all__ = [
     "night_corrupted_days",
     "nocturnal_offset_statistics",
     "stage_archive",
+    "station_elevation_deg",
     "unquantised_rain_samples",
     "unshaded_diffuse_days",
     "verify_frame",
@@ -97,11 +99,6 @@ EXPECTED_LENTA_ROWS = 1_017_857
 EXPECTED_RAIN_ROWS = 1_018_291
 ARCHIVE_START = pd.Timestamp("2016-09-29 13:40:00")
 ARCHIVE_END = pd.Timestamp("2026-08-12 00:00:00")
-
-#: Grid the two logger tables are written on, used by :func:`verify_frame` to
-#: check that everything past :data:`ARCHIVE_END` is later acquisition and not a
-#: duplicated or injected file.
-MERGE_SAMPLING_INTERVAL = pd.Timedelta(minutes=5)
 
 # Per-row instrument quality flags. Text, and therefore destroyed by a numeric
 # coercion unless named explicitly (see ingestion.read_campbell_dat).
@@ -456,7 +453,7 @@ def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
     if last is not None and last < ARCHIVE_END:
         problems.append(f"{kind}: ends {last}, before the audited {ARCHIVE_END}")
     if last is not None and last > ARCHIVE_END and surplus >= 0:
-        grid = int((last - ARCHIVE_END) / MERGE_SAMPLING_INTERVAL)
+        grid = int((last - ARCHIVE_END) / SAMPLING_INTERVAL)
         if surplus != grid:
             problems.append(
                 f"{kind}: {surplus} rows past the audited end, but {ARCHIVE_END} to {last} "
@@ -1155,9 +1152,10 @@ def mask_impossible_shortwave(
         floor = BSRN_PPL_FLOOR_WM2 * (_PAR_SPECTRAL_FRACTION if column == "Sw_par" else 1.0)
         # Rayleigh scattering alone puts the diffuse above zero whenever the sun
         # is up, so a non-positive daylight flux is offset or a stuck channel.
-        above = flux > geometry * gain + offset
-        unsigned = daylight & (flux <= 0.0)
-        outside = (flux.notna() & (above | (flux < floor) | unsigned)).to_numpy()
+        daytime_fault = (
+            flux.notna() & ((flux > geometry * gain + offset) | (daylight & (flux <= 0.0)))
+        ).to_numpy()
+        outside = daytime_fault | (flux.notna() & (flux < floor)).to_numpy()
         if not outside.any():
             continue
         _blank(column, outside)
@@ -1166,7 +1164,7 @@ def mask_impossible_shortwave(
         # Only the daytime verdicts: the floor fires on the nocturnal offset, over
         # a component whose true value is zero, and the night net is longwave.
         if column == "Sw_dw":
-            _blank("Net_CNR1", (flux.notna() & (above | unsigned)).to_numpy())
+            _blank("Net_CNR1", daytime_fault)
 
     # A shaded sensor measures a subset of what the unshaded one sees, so this is
     # impossible at any level — but only above the offset floor is the comparison
@@ -1325,23 +1323,17 @@ class NocturnalOffset:
         """JSON-ready mapping for ``archive_report.json``."""
         if not self.night_samples:
             return {"night_samples": 0}
-        return {
-            "night_samples": self.night_samples,
-            "median_wm2": self.median_wm2,
-            "p5_wm2": self.p5_wm2,
-            "p95_wm2": self.p95_wm2,
-            "fraction_below_bsrn_floor": self.fraction_below_bsrn_floor,
-            "fraction_below_extremely_rare": self.fraction_below_extremely_rare,
-            "yearly_median_wm2": dict(self.yearly_median_wm2),
-            "monthly_median_wm2": dict(self.monthly_median_wm2),
-            "drift_alarms": [
-                {"month": month, "median_wm2": median} for month, median in self.drift_alarms
-            ],
-        }
+        report = asdict(self)
+        report["drift_alarms"] = [
+            {"month": month, "median_wm2": median} for month, median in self.drift_alarms
+        ]
+        return report
 
 
 def nocturnal_offset_statistics(
-    frame: pd.DataFrame, columns: Sequence[str] = NOCTURNAL_SHORTWAVE_CHANNELS
+    frame: pd.DataFrame,
+    columns: Sequence[str] = NOCTURNAL_SHORTWAVE_CHANNELS,
+    elevation_deg: NDArray | None = None,
 ) -> dict[str, NocturnalOffset]:
     """Thermopile zero-offset per channel, measured in deep night.
 
@@ -1371,11 +1363,9 @@ def nocturnal_offset_statistics(
         record reporting zero rather than being omitted, so a reader can tell
         "measured, nothing there" from "never looked".
     """
-    index = pd.DatetimeIndex(frame.index)
-    deep_night = (
-        solar_elevation_deg(index, STATION_SITE, STATION_UTC_OFFSET_HOURS)
-        < OFFSET_MONITOR_ELEVATION_DEG
-    )
+    if elevation_deg is None:
+        elevation_deg = station_elevation_deg(pd.DatetimeIndex(frame.index))
+    deep_night = elevation_deg < OFFSET_MONITOR_ELEVATION_DEG
     statistics: dict[str, NocturnalOffset] = {}
     for column in columns:
         if column not in frame.columns:
@@ -1407,8 +1397,29 @@ def nocturnal_offset_statistics(
     return statistics
 
 
+def station_elevation_deg(index: pd.DatetimeIndex) -> NDArray:
+    """Solar elevation over *index*, from the pinned site and UTC offset.
+
+    One spelling for every stage that needs it: a second copy of the call is a
+    second definition of "night", free to drift from the first without failing.
+
+    Parameters
+    ----------
+    index:
+        Naive station-local stamps, ``(N,)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Degrees above the local horizon, ``(N,)``.
+    """
+    return solar_elevation_deg(index, STATION_SITE, STATION_UTC_OFFSET_HOURS)
+
+
 def mask_nocturnal_shortwave(
-    frame: pd.DataFrame, sources: SourceWindows | None = None
+    frame: pd.DataFrame,
+    sources: SourceWindows | None = None,
+    elevation_deg: NDArray | None = None,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     """Blank shortwave recorded while the sun is below the horizon.
 
@@ -1442,10 +1453,9 @@ def mask_nocturnal_shortwave(
         tally in the shape :func:`mask_sentinels` reports.
     """
     removed: dict[str, int] = {}
-    index = pd.DatetimeIndex(frame.index)
-    below = (
-        solar_elevation_deg(index, STATION_SITE, STATION_UTC_OFFSET_HOURS) < NOCTURNAL_ELEVATION_DEG
-    )
+    if elevation_deg is None:
+        elevation_deg = station_elevation_deg(pd.DatetimeIndex(frame.index))
+    below = elevation_deg < NOCTURNAL_ELEVATION_DEG
     if not below.any():
         return frame, removed
     for column in NOCTURNAL_SHORTWAVE_CHANNELS:
@@ -1498,7 +1508,9 @@ def close_net_radiation(frame: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
     return frame, gained, dropped
 
 
-def close_nocturnal_net_radiation(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+def close_nocturnal_net_radiation(
+    frame: pd.DataFrame, elevation_deg: NDArray | None = None
+) -> tuple[pd.DataFrame, int]:
     """Recompose the net with the sun down, where the shortwave terms are zero.
 
     :func:`close_net_radiation` runs before :func:`mask_nocturnal_shortwave` and
@@ -1521,10 +1533,9 @@ def close_nocturnal_net_radiation(frame: pd.DataFrame) -> tuple[pd.DataFrame, in
     needed = ("Lw_dw", "Lw_up", "Net_CNR1")
     if not all(column in frame.columns for column in needed):
         return frame, 0
-    index = pd.DatetimeIndex(frame.index)
-    below = (
-        solar_elevation_deg(index, STATION_SITE, STATION_UTC_OFFSET_HOURS) < NOCTURNAL_ELEVATION_DEG
-    )
+    if elevation_deg is None:
+        elevation_deg = station_elevation_deg(pd.DatetimeIndex(frame.index))
+    below = elevation_deg < NOCTURNAL_ELEVATION_DEG
     longwave = frame["Lw_dw"] - frame["Lw_up"]
     target = below & longwave.notna().to_numpy()
     if not target.any():

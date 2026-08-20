@@ -544,8 +544,8 @@ def apply_shade_ring_correction(
         alvo = dentro & df[column].notna().to_numpy()
         if not alvo.any():
             continue
-        if alinhados[alvo].isna().any():
-            perdidas = int(alinhados[alvo].isna().sum())
+        perdidas = int(alinhados[alvo].isna().sum())
+        if perdidas:
             raise MissingShadeRingFactorError(
                 f"{column}: {perdidas} amostra(s) de difusa entre {start} e {end} sem fator "
                 f"de anel em {SHADE_RING_FACTOR_FILE}"

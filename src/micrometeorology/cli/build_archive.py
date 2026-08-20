@@ -65,6 +65,7 @@ from micrometeorology.sensors.archive import (
     months_never_reaching_saturation,
     night_corrupted_days,
     nocturnal_offset_statistics,
+    station_elevation_deg,
     unquantised_rain_samples,
     unshaded_diffuse_days,
     verify_frame,
@@ -227,7 +228,7 @@ def run(
     limits_fired: dict[str, int] = {}
     limits_absent_columns: list[str] = []
     gaps: list[tuple[str, str, pd.Timestamp, pd.Timestamp]] = []
-    net_gained = net_dropped = nocturnal_net = 0
+    net_gained = net_dropped = 0
     step_excursions_removed = persistence_runs_removed = 0
     shade_ring_corrected: dict[str, int] = {}
     invalidated: dict[str, int] = {}
@@ -269,9 +270,15 @@ def run(
             if int(count) > 0
         }
         switches = load_sensor_switches(calibrations_path)
-        shade_windows = resolve_mapping_windows(qc, switches, ("Sw_dif",)).get("Sw_dif", ())
+        # Resolved once, before the copy: the windows are read off the RAW columns
+        # and the frame's own bounds, neither of which unification changes.
+        sources = resolve_mapping_windows(
+            qc, switches, (*NIGHT_CORRUPTION_CHANNELS, *NOCTURNAL_SHORTWAVE_CHANNELS)
+        )
         qc, shade_ring_corrected = apply_shade_ring_correction(
-            qc, load_shade_ring_factors(data_dir / SHADE_RING_FACTOR_FILE), shade_windows
+            qc,
+            load_shade_ring_factors(data_dir / SHADE_RING_FACTOR_FILE),
+            sources.get("Sw_dif", ()),
         )
         if shade_ring_corrected:
             typer.echo(
@@ -314,9 +321,6 @@ def run(
         # Unification COPIES: each unified channel keeps a raw twin under the
         # logger's own name, and the masks below must reach both or the artifact
         # publishes the rejected value under the other name.
-        sources = resolve_mapping_windows(
-            qc, switches, (*NIGHT_CORRUPTION_CHANNELS, *NOCTURNAL_SHORTWAVE_CHANNELS)
-        )
 
         qc, net_gained, net_dropped = close_net_radiation(qc)
         if net_gained or net_dropped:
@@ -344,15 +348,18 @@ def run(
     # Radiation in deep night is a slipped clock, not a sky, and the flat gates
     # of default.yaml pass 1313 W/m2 at 04h — so the day is removed whole from
     # the two channels it invalidates.
+    # Computed once for the four stages below: a second call is a second
+    # definition of "night", free to drift from the first without failing.
+    elevation = station_elevation_deg(pd.DatetimeIndex(qc.index))
     corrupted = night_corrupted_days(qc)
     qc, night_masked = mask_night_corrupted_days(qc, corrupted, sources)
     # The order of the four stages below is load-bearing and every way of getting
     # it wrong fails silently; test_the_pipeline_calls_its_radiation_stages_in_the
     # _load_bearing_order pins it and docs/controle-de-qualidade.md explains it.
-    offsets = nocturnal_offset_statistics(qc)
+    offsets = nocturnal_offset_statistics(qc, elevation_deg=elevation)
     qc, impossible = mask_impossible_shortwave(qc, sources)
-    qc, nocturnal = mask_nocturnal_shortwave(qc, sources)
-    qc, nocturnal_net = close_nocturnal_net_radiation(qc)
+    qc, nocturnal = mask_nocturnal_shortwave(qc, sources, elevation_deg=elevation)
+    qc, nocturnal_net = close_nocturnal_net_radiation(qc, elevation_deg=elevation)
     if nocturnal_net:
         typer.echo(f"Saldo noturno recomposto so da onda longa: {nocturnal_net:,} amostras")
     typer.echo(
@@ -405,19 +412,15 @@ def run(
     # ``float64``: ``aggregate_to_hourly`` keeps only
     # ``select_dtypes(include="number")`` columns, which matches neither bool nor
     # the object dtype a null introduces. ``qc_flag`` is the unified spelling.
-    hourly_input = qc.copy()
     # An hourly mean of a monotonic counter is not a record number.
-    counters = [
+    discarded = [
         column
-        for column in hourly_input.columns
-        if column == "RECORD" or str(column).startswith("rtime")
+        for column in qc.columns
+        if column in {"RECORD", *UNGATED_RADIATION_TWINS}
+        or str(column).startswith("rtime")
+        or str(column).endswith("_mv_Avg")
     ]
-    raw_signal = [
-        column
-        for column in hourly_input.columns
-        if str(column).endswith("_mv_Avg") or column in UNGATED_RADIATION_TWINS
-    ]
-    hourly_input = hourly_input.drop(columns=[*counters, *raw_signal])
+    hourly_input = qc.drop(columns=discarded)
     for column in (*STATUS_COLUMNS, "qc_flag"):
         if column in hourly_input.columns:
             flag = hourly_input.pop(column)

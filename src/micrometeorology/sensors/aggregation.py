@@ -13,6 +13,7 @@ import logging
 
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 from micrometeorology.sensors.wind import (
     wind_components,
@@ -109,35 +110,26 @@ def aggregate_to_hourly(
         if dir_col not in df.columns:
             continue
         speed_col = speed_column_map.get(dir_col)
-        if speed_col and speed_col in df.columns:
-            u, v = wind_components(df[speed_col].to_numpy(), df[dir_col].to_numpy())
-        else:
-            u, v = wind_components(np.ones(len(df)), df[dir_col].to_numpy())
 
-        df_uv = pd.DataFrame({"u": u, "v": v}, index=df.index)
-        uv_means = df_uv.resample(freq).mean()
+        def directional_mean(weights: NDArray, column: str = dir_col) -> pd.DataFrame:
+            u, v = wind_components(weights, df[column].to_numpy())
+            return pd.DataFrame({"u": u, "v": v}, index=df.index).resample(freq).mean()
 
-        # Completeness is judged on the DIRECTION channel, not on the u component.
-        # u is NaN whenever the speed is NaN, so gating on it discarded hours whose
-        # directional record was complete: measured on this archive, 2,619 hours
-        # with 6 to 12 valid directions (median 12) were published as NaN purely
-        # because the paired anemometer was down, 1,701 of them in 2018 alone.
-        dir_counts = resampler[dir_col].count()
-
-        # Where the speed is too sparse to weight with, fall back to the unit-weight
-        # directional mean the branch above already uses when there is no speed
-        # column at all. A vector mean of directions is still a vector mean; only
-        # the weighting is lost, and losing the weight beats losing the hour.
-        if speed_col and speed_col in df.columns:
-            speed_counts = resampler[speed_col].count()
-            unweighted_u, unweighted_v = wind_components(np.ones(len(df)), df[dir_col].to_numpy())
-            unweighted = (
-                pd.DataFrame({"u": unweighted_u, "v": unweighted_v}, index=df.index)
-                .resample(freq)
-                .mean()
+        if speed_col is not None and speed_col in df.columns:
+            uv_means = directional_mean(df[speed_col].to_numpy())
+            # Where the speed is too sparse to weight with, fall back to the
+            # unit-weight directional mean: losing the weight beats losing the hour.
+            sparse = (resampler[speed_col].count() < min_samples).reindex(
+                uv_means.index, fill_value=True
             )
-            sparse = (speed_counts < min_samples).reindex(uv_means.index, fill_value=True)
-            uv_means = uv_means.mask(sparse, unweighted)
+            if sparse.any():
+                uv_means = uv_means.mask(sparse, directional_mean(np.ones(len(df))))
+        else:
+            uv_means = directional_mean(np.ones(len(df)))
+
+        # Completeness is judged on the DIRECTION channel, not on the u component,
+        # which is NaN whenever the paired speed is.
+        dir_counts = resampler[dir_col].count()
 
         dirs = wind_direction_from_components(uv_means["u"].to_numpy(), uv_means["v"].to_numpy())
         dir_series = pd.Series(dirs, index=uv_means.index)
