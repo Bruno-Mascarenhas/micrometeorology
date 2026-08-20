@@ -18,6 +18,10 @@ assert a determinism the model does not have.
 The solar geometry is not recomputed here: :mod:`allsky.solar` owns it, and the
 extraterrestrial term behind Kt is the same one the climatology exporter divides
 by.
+
+Timestamps are naive station-local, as they arrive from the datalogger's own
+clock; the apparent solar time derived here takes its offset from the
+``utc_offset_hours`` parameter, never from the host's zone.
 """
 
 from typing import Any

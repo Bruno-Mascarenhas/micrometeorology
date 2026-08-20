@@ -7,6 +7,10 @@ bounds, so a figure in a paper and the curve on the site cannot disagree.
 Every number comes from :mod:`micrometeorology.stats.sky_condition` and the
 exporter's own spec — this file only arranges axes and labels.
 
+The hourly database read here is indexed by naive station-local stamps, from the
+datalogger's own clock; the daylight gate takes its offset from the pinned
+``STATION_UTC_OFFSET_HOURS`` rather than the host's zone.
+
 Usage
 -----
 ::

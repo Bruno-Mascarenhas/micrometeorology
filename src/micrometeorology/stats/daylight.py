@@ -9,6 +9,10 @@ describing different populations.
 This module owns that gate so the climatology page, the sky page and any figure
 answer it identically.  A second copy of the bracket is a second definition of
 "daytime", and the only symptom is two row counts that no caveat explains.
+
+Timestamps are naive station-local, as they arrive from the datalogger's own
+clock; the offset that turns them into solar geometry enters explicitly as
+``utc_offset_hours`` and never from the host's zone.
 """
 
 import numpy as np

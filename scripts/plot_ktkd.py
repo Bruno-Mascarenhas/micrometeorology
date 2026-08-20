@@ -9,6 +9,10 @@ Lemos et al. (2017) and the BRL of Ridley, Boland & Lauret (2010) read four more
 predictors, so at one Kt they predict a spread: they are drawn as a median with a
 p10-p90 envelope, never as a line.
 
+The hourly database read here is indexed by naive station-local stamps, from the
+datalogger's own clock; the solar geometry takes its offset from the pinned
+``STATION_UTC_OFFSET_HOURS`` rather than the host's zone.
+
 Usage
 -----
 ::

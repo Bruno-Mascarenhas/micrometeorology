@@ -12,6 +12,13 @@ here: it is implemented once, vectorized per day, by
 accepts is owned by :data:`allsky.config.AlignmentStrategyName`, so the config
 that selects a windowing mode and the code that implements it cannot disagree.
 
+Both sides of the pairing are naive station-local, each stamped by its own
+instrument clock — the camera through the burned-in overlay, the sensor through
+the datalogger. The UTC boundary belongs to
+:mod:`allsky.data.manifest`, which declares its own; a side arriving aware or
+re-stamped would pair against the wrong hour inside the tolerance and say
+nothing.
+
 Pure numpy/pandas; importing this module never pulls torch.
 """
 

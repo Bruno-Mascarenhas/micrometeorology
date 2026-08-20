@@ -12,6 +12,11 @@ Two documents, both written into the site's ``Ceu/`` directory:
 Both derive from the same hourly database and the same solar geometry as the
 climatology export, so a reader can put the three pages side by side.
 
+The hourly database is indexed by naive station-local stamps, from the
+datalogger's own clock; the solar geometry behind both documents takes its
+offset from the pinned :data:`~micrometeorology.common.site.STATION_UTC_OFFSET_HOURS`
+rather than the host's zone.
+
 Examples
 --------
 ::

@@ -5,6 +5,9 @@ website expects, keeping the layout of the ``graficos3_UFBA_v1.py`` script the
 site was built around. WRF model output (``series_operacional.dat``) is
 optionally overlaid on the applicable graphs as dashed black lines.
 
+Timestamps are naive station-local throughout, as the datalogger writes them;
+the graphs' axes are therefore local wall-clock hours, not UTC ones.
+
 Usage::
 
     python -m micrometeorology.cli.generate_station_graphs \
