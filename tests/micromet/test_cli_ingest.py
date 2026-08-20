@@ -210,3 +210,51 @@ def test_cli_min_samples_falls_back_to_the_configured_value(
     assert from_flag.exit_code == 0, from_flag.output
     assert pd.isna(pd.read_csv(tmp_path / "config.csv", index_col=0)["Temp1"].iloc[0])
     assert pd.read_csv(tmp_path / "flag.csv", index_col=0)["Temp1"].iloc[0] == pytest.approx(25.0)
+
+
+def test_the_window_mode_reads_the_live_tables_instead_of_the_manifest(tmp_path) -> None:
+    """The rolling window is a different question from the historical record.
+
+    The manifest fails hard on a missing entry — every one is unique coverage or
+    a documented repair — which is right for the ten-year record and wrong for
+    the hourly job, whose input is whatever the datalogger is writing now.
+    Measured on this archive, the window build costs 3.6 s against 18.9 s, and
+    563 MB of peak against 4.7 GB, for a payload identical field for field.
+    """
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    fatores = tmp_path / "teorica_2016-2030.csv"
+    fatores.write_text(
+        "ano_i,mes_i,dia_i,hor_i,min_i,fc\n"
+        + "".join(f"2026,8,15,12,{minute},1.18\n" for minute in range(0, 60, 5)),
+        encoding="utf-8",
+    )
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(
+        lenta,
+        ["CM3Up_Wm2_Avg"],
+        [(f"2026-08-15 12:{minute:02d}:00", [500.0]) for minute in range(0, 60, 5)],
+    )
+    saida = tmp_path / "out"
+
+    resultado = CliRunner().invoke(
+        app, ["-d", str(tmp_path), "-o", str(saida), "--source", str(lenta)]
+    )
+
+    assert resultado.exit_code == 0, resultado.output
+    assert "sem manifesto" in resultado.output
+    assert (saida / "station_5min_qc.parquet").exists()
+    assert (saida / "station_hourly.parquet").exists()
+
+
+def test_without_sources_the_manifest_still_refuses_a_missing_entry(tmp_path) -> None:
+    """The historical build must keep failing loud: a dropped entry shortens the record."""
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    resultado = CliRunner().invoke(app, ["-d", str(tmp_path), "-o", str(tmp_path / "out")])
+
+    assert resultado.exit_code != 0

@@ -83,6 +83,7 @@ from micrometeorology.sensors.calibration import (
 )
 from micrometeorology.sensors.ingestion import (
     apply_physical_limits,
+    merge_dat_files,
     values_outside_declared_limits,
 )
 from micrometeorology.sensors.quality import mask_persistent_runs, mask_step_excursions
@@ -147,6 +148,17 @@ def run(
             help="Exit non-zero if the merge does not reproduce the audited row counts.",
         ),
     ] = False,
+    source_files: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--source",
+            help=(
+                "Build the window from these .dat files instead of the historical "
+                "manifest. Repeatable. For the rolling monitoring window, where "
+                "re-merging ten years to publish seven days is the wrong unit of work."
+            ),
+        ),
+    ] = None,
     log_level: Annotated[str, typer.Option(help="Logging level.")] = "INFO",
 ) -> None:
     """Merge, verify and aggregate the station archive into one database.
@@ -165,13 +177,34 @@ def run(
     staging = staging_dir or (out / "_staged")
 
     typer.echo("Merge do acervo (manifesto explicito):")
-    lenta = build_five_minute_frame(LENTA_MANIFEST, data_dir, Path(staging) / "lenta")
-    rain = build_five_minute_frame(RAIN_MANIFEST, data_dir, Path(staging) / "rain")
+    if source_files:
+        # The logger's live tables, read as they are: no manifest, because the
+        # manifest is the HISTORY — every entry unique coverage or a documented
+        # repair, and it fails hard on a missing one. A rolling window is a
+        # different question, asked of the files the datalogger is writing now.
+        lenta = merge_dat_files(
+            [path for path in source_files if "lenta" in path.name.lower()],
+            text_columns=list(STATUS_COLUMNS),
+        )
+        rain_paths = [path for path in source_files if "rain" in path.name.lower()]
+        rain = (
+            merge_dat_files(rain_paths, text_columns=list(STATUS_COLUMNS))
+            if rain_paths
+            else pd.DataFrame(index=lenta.index[:0])
+        )
+        typer.echo(
+            f"Janela a partir de {len(source_files)} arquivo(s) do registrador "
+            f"(sem manifesto, sem verificacao contra a auditoria do acervo)"
+        )
+        reports = []
+    else:
+        lenta = build_five_minute_frame(LENTA_MANIFEST, data_dir, Path(staging) / "lenta")
+        rain = build_five_minute_frame(RAIN_MANIFEST, data_dir, Path(staging) / "rain")
 
-    typer.echo("\nVerificacao contra a auditoria do acervo:")
-    reports = [verify_frame(lenta, "lenta"), verify_frame(rain, "rain")]
-    for report in reports:
-        _echo_report(report)
+        typer.echo("\nVerificacao contra a auditoria do acervo:")
+        reports = [verify_frame(lenta, "lenta"), verify_frame(rain, "rain")]
+        for report in reports:
+            _echo_report(report)
 
     # The rain logger is a separate table on the same 5-minute grid: JOINED, not
     # concatenated, which would double the index.
@@ -184,7 +217,7 @@ def run(
         typer.echo(f"\n! {len(failed)} divergencia(s) em relacao a auditoria do acervo")
         if strict:
             raise typer.Exit(code=1)
-    else:
+    elif reports:
         typer.echo("\n>> Merge confere com a auditoria: nenhuma linha perdida ou duplicada")
 
     # --strict sai UMA vez, no fim, depois de todos os artefatos e do manifesto.

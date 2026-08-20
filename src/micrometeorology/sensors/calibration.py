@@ -480,9 +480,17 @@ def load_shade_ring_factors(path: Path | str) -> pd.Series:
 
     Raises
     ------
+    FileNotFoundError
+        Se a tabela não existir sob o diretório de dados.
     ValueError
         Se o arquivo não trouxer a coluna ``fc`` ou as de tempo.
     """
+    if not Path(path).is_file():
+        raise FileNotFoundError(
+            f"{path}: the shade-ring factor table is missing. The diffuse cannot be "
+            "published without it — uncorrected, the diffuse fraction saturates at "
+            "0.81 under an overcast sky where the physics requires 1."
+        )
     frame = pd.read_csv(path, usecols=[*_SHADE_RING_TIME_COLUMNS, "fc"])
     faltando = {*_SHADE_RING_TIME_COLUMNS, "fc"} - set(frame.columns)
     if faltando:
