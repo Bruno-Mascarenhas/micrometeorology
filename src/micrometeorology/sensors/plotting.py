@@ -28,11 +28,15 @@ DEFAULT_FIGSIZE: tuple[float, float] = (8, 4)
 # the two station-graph producers in agreement without touching the global
 # scientific colormaps.
 _OKABE_ITO = matplotlib.color_sequences["okabe_ito"]
+_ORANGE = _OKABE_ITO[1]
+_SKY_BLUE = _OKABE_ITO[2]
+_BLUISH_GREEN = _OKABE_ITO[3]
+_REDDISH_PURPLE = _OKABE_ITO[7]
 BALANCE_COMPONENT_COLORS = {
-    "sw_down": _OKABE_ITO[1],  # orange
-    "sw_up": _OKABE_ITO[2],  # sky blue
-    "lw_down": _OKABE_ITO[3],  # bluish green
-    "lw_up": _OKABE_ITO[7],  # reddish purple
+    "sw_down": _ORANGE,
+    "sw_up": _SKY_BLUE,
+    "lw_down": _BLUISH_GREEN,
+    "lw_up": _REDDISH_PURPLE,
 }
 
 
