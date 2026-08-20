@@ -384,7 +384,7 @@ def run_experiment(
 
                 monitor_value = val_metrics.get(monitor_key)
                 if monitor_value is None:
-                    raise KeyError(
+                    raise TrainingError(
                         f"early-stopping monitor {cfg.train.early_stopping.monitor!r} "
                         f"resolves to {monitor_key!r}, absent from val metrics "
                         f"{sorted(val_metrics)}"
@@ -500,13 +500,13 @@ def _select_splits(manifest: pd.DataFrame, split: Any) -> tuple[pd.DataFrame, pd
     train_days = set(split.days_for("train"))
     val_days = set(split.days_for("val"))
     if not val_days:
-        raise ValueError("split has no validation days; a val split is required for training")
+        raise TrainingError("split has no validation days; a val split is required for training")
     train_df = manifest.loc[day_ids.isin(train_days)].reset_index(drop=True)
     val_df = manifest.loc[day_ids.isin(val_days)].reset_index(drop=True)
     if train_df.empty:
-        raise ValueError("no train rows: the split's train days are absent from the manifest")
+        raise TrainingError("no train rows: the split's train days are absent from the manifest")
     if val_df.empty:
-        raise ValueError("no val rows: the split's validation days are absent from the manifest")
+        raise TrainingError("no val rows: the split's validation days are absent from the manifest")
     return train_df, val_df
 
 
@@ -599,7 +599,7 @@ def _validate_embedding_coverage(
     missing = sorted(needed - available)
     if missing:
         preview = ", ".join(missing[:10])
-        raise ValueError(
+        raise TrainingError(
             f"embeddings are missing {len(missing)} required sample_id(s): {preview}"
             + (" ..." if len(missing) > 10 else "")
         )
