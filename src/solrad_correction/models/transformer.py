@@ -235,17 +235,26 @@ class TransformerRegressor(TorchRegressorModel):
         and early-stopping counters, in contrast, start empty here and are
         recovered from checkpoint metadata by the resume path in
         ``TorchRegressorModel``.
+
+        Raises
+        ------
+        KeyError
+            When the checkpoint carries no ``config`` section, or one missing an
+            architecture argument. Falling back to defaults would rebuild the
+            module at a width nobody chose — and ``dropout`` never reaches the
+            ``state_dict``, so ``load_state_dict`` would not object either: the
+            resumed run would simply carry a regularization the original did not.
         """
         checkpoint = load_torch_checkpoint(path)
-        cfg = checkpoint.get("config", {})
+        cfg = checkpoint["config"]
 
         instance = cls(
-            input_size=cfg.get("input_size", 1),
-            d_model=cfg.get("d_model", 64),
-            nhead=cfg.get("nhead", 4),
-            num_encoder_layers=cfg.get("num_encoder_layers", 2),
-            dim_feedforward=cfg.get("dim_feedforward", 128),
-            dropout=cfg.get("dropout", 0.1),
+            input_size=cfg["input_size"],
+            d_model=cfg["d_model"],
+            nhead=cfg["nhead"],
+            num_encoder_layers=cfg["num_encoder_layers"],
+            dim_feedforward=cfg["dim_feedforward"],
+            dropout=cfg["dropout"],
         )
         instance._module.load_state_dict(checkpoint["model_state_dict"])
         instance._start_epoch = checkpoint.get("epoch", 0)
