@@ -519,3 +519,34 @@ class TestMapeDropsNonFinitePairs:
         predicted = np.array([110.0, 190.0, 330.0, 380.0])
 
         assert mape(self.observed, predicted) == pytest.approx(7.5)
+
+
+def test_a_column_railed_at_an_unrepresentable_value_is_not_standardized_by_its_noise() -> None:
+    """A column stuck at 0.1 has std 2.8e-17, not 0.0, so ``== 0`` never caught it.
+
+    It only shows once the sensor comes back: the train split fits on the noise
+    and the first recovered sample standardizes to order 1e16, which is what the
+    model then trains against, with nothing failing.
+    """
+    train = pd.DataFrame({"railed": [0.1] * 50, "target": np.arange(50, dtype=float)})
+    recovered = pd.DataFrame({"railed": [0.5, 0.1], "target": [1.0, 2.0]})
+    pipeline = PreprocessingPipeline(
+        scaler_type="standard", impute_strategy="drop", target_column="target"
+    )
+
+    transformed = pipeline.fit(train).transform(recovered)
+
+    assert transformed["railed"].abs().max() < 10.0
+
+
+def test_a_railed_column_whose_range_is_rounding_residue_is_not_expanded_by_minmax() -> None:
+    """Unequal window counts leave a range of 1e-17 that ``== 0`` also let through."""
+    lower, upper = 0.1, 0.1 + 1.3877787807814457e-17
+    train = pd.DataFrame({"railed": [lower, upper] * 25, "target": np.arange(50, dtype=float)})
+    pipeline = PreprocessingPipeline(
+        scaler_type="minmax", impute_strategy="drop", target_column="target"
+    )
+
+    transformed = pipeline.fit_transform(train)
+
+    assert transformed["railed"].abs().max() < 1.0

@@ -12,6 +12,18 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+#: Guard against divide-by-zero when standardizing a (near-)constant column, the
+#: same floor :mod:`allsky.features.normalization` applies. An exact ``== 0``
+#: test does not reach it: a column railed at 0.1 has std 2.8e-17 rather than
+#: 0.0, because 0.1 is not representable, so the standardization would divide by
+#: that and hand the model z-scores of order 1e16.
+_MIN_STD = 1e-6
+
+#: Same guard for the min-max range. Resampling a railed column over windows of
+#: unequal count — the normal case here, since an acquisition gap is explicit
+#: state — leaves a residual range of 1e-17 that ``== 0`` also lets through.
+_MIN_RANGE = 1e-6
+
 
 @dataclass(slots=True)
 class PreprocessingState:
@@ -411,13 +423,15 @@ class Preprocessor:
         if self.scaler_type == "standard":
             return {
                 "mean": _series_to_float_dict(df.mean(numeric_only=True)),
-                "std": _series_to_float_dict(df.std(numeric_only=True).replace(0, 1)),
+                "std": _series_to_float_dict(
+                    df.std(numeric_only=True).mask(lambda std: std < _MIN_STD, 1.0)
+                ),
             }
         if self.scaler_type == "minmax":
             min_values = df.min(numeric_only=True)
             max_values = df.max(numeric_only=True)
             diff = max_values - min_values
-            max_values = min_values + diff.mask(diff == 0, 1)
+            max_values = min_values + diff.mask(diff < _MIN_RANGE, 1.0)
             return {
                 "min": _series_to_float_dict(min_values),
                 "max": _series_to_float_dict(max_values),
