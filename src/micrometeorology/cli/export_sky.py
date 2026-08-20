@@ -38,6 +38,7 @@ from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.stats import ktkd as ktkd_stats
 from micrometeorology.stats.climatology_export import write_json
 from micrometeorology.stats.sky_condition import (
+    KT_CUMULATIVE_EDGES,
     build_kt_cumulative_payload,
     sky_condition_summary,
 )
@@ -117,7 +118,7 @@ def build_payloads(hourly: pd.DataFrame, *, version: str) -> dict[str, Any]:
     )
 
     predictors = (prepared["ast"], prepared["elevation"], prepared["daily_kt"], prepared["psi"])
-    edges = np.asarray([round(0.02 * step, 2) for step in range(51)], dtype=float)
+    edges = np.asarray(KT_CUMULATIVE_EDGES, dtype=float)
     ktkd_payload = ktkd_stats.build_ktkd_payload(
         kt,
         kd,
