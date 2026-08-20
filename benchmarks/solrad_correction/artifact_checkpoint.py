@@ -9,7 +9,6 @@ Run with a larger model:
     python benchmarks/solrad_correction/artifact_checkpoint.py --hidden-size 128 --layers 6
 """
 
-import sys
 import time
 from pathlib import Path
 from typing import Annotated
@@ -17,8 +16,6 @@ from typing import Annotated
 import typer
 
 ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src"))
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 

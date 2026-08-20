@@ -191,8 +191,5 @@ def write_manifest(layout: ArtifactLayout, *, extra: dict[str, Any] | None = Non
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
