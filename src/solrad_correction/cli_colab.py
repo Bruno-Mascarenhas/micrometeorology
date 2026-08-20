@@ -134,7 +134,7 @@ def run_colab_cli(
 
     from solrad_correction.experiments.runner import run_experiment
 
-    run_experiment(cfg)
+    typer.echo(run_experiment(cfg).summary())
 
 
 def load_colab_config(

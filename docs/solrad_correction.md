@@ -173,7 +173,7 @@ from solrad_correction.experiments.runner import run_experiment
 
 config = ExperimentConfig.from_yaml("configs/tcc/experiments/my_experiment.yaml")
 report = run_experiment(config)
-report.print_summary()
+print(report.summary())
 ```
 
 ### 3. Output Structure
