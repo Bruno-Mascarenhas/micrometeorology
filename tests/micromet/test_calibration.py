@@ -1,5 +1,6 @@
 """Tests for calibration application."""
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -486,3 +487,54 @@ class TestShadeRingCorrection:
         _corrigido, contagem = calibration.apply_shade_ring_correction(frame, vazios, janelas)
 
         assert contagem == {}
+
+
+class TestSolarGeometryParquet:
+    """The lab's 203 MB CSV, rewritten in the shape the rest of the archive uses.
+
+    Measured on the real table: 29 MB against 203, and 0.037 s against 1.42 s to
+    answer for one column — which the hourly window job pays every run.
+    """
+
+    @staticmethod
+    def _csv(path: Path) -> Path:
+        path.write_text(
+            "lon,lat,ano_i,mes_i,dia_i,hor_i,min_i,oc_topo,fc\n"
+            "-38.5,-13.0,2026,8,15,12,0,1200.5,1.1802\n"
+            "-38.5,-13.0,2026,8,15,12,5,1201.0,1.1803\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_the_derived_table_carries_the_factor_unchanged(self, tmp_path) -> None:
+        """``fc`` multiplies the measured diffuse, so single precision is not an
+        option: its 5.4e-08 relative error would move every corrected value."""
+        origem = self._csv(tmp_path / calibration.SHADE_RING_FACTOR_FILE)
+        destino = tmp_path / calibration.SHADE_RING_FACTOR_PARQUET
+
+        calibration.solar_geometry_to_parquet(origem, destino)
+        derivado = pd.read_parquet(destino)
+
+        assert derivado["fc"].tolist() == [1.1802, 1.1803]
+        assert derivado.index.tolist() == [
+            pd.Timestamp("2026-08-15 12:00"),
+            pd.Timestamp("2026-08-15 12:05"),
+        ]
+
+    def test_the_loader_prefers_the_derived_table(self, tmp_path) -> None:
+        origem = self._csv(tmp_path / calibration.SHADE_RING_FACTOR_FILE)
+        calibration.solar_geometry_to_parquet(
+            origem, tmp_path / calibration.SHADE_RING_FACTOR_PARQUET
+        )
+        origem.unlink()
+
+        fatores = calibration.load_shade_ring_factors(origem)
+
+        assert fatores.tolist() == [1.1802, 1.1803]
+
+    def test_the_csv_remains_the_fallback(self, tmp_path) -> None:
+        origem = self._csv(tmp_path / calibration.SHADE_RING_FACTOR_FILE)
+
+        fatores = calibration.load_shade_ring_factors(origem)
+
+        assert fatores.tolist() == [1.1802, 1.1803]

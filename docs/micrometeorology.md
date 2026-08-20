@@ -828,7 +828,27 @@ labmim-monitoring -i /var/tmp/labmim-janela -o ../site-labmim/site/Monitoramento
 
 Both `--source` files matter: the rain table is where `precip` comes from, and
 the precipitation card is one of the nine. `-d` still points at `data/` because
-the shade-ring factors are read from `teorica_2016-2030.csv` there.
+the shade-ring factors are read from the solar-geometry table there.
+
+That table ships as a 203 MB CSV whose five leading integer columns spell out a
+timestamp, and the pipeline reads six of its twenty columns. Rewritten once in
+the shape the rest of the archive uses — one `DatetimeIndex` in naive local time,
+`float64`, zstd — it is 29 MB and answers in 0.037 s against 1.42 s:
+
+```bash
+uv run python scripts/converter_teorica.py --data data
+```
+
+`load_shade_ring_factors` prefers `teorica_2016-2030.parquet` when it sits beside
+the CSV and falls back to the CSV otherwise, so the step is an optimisation and
+never a prerequisite. The CSV stays the source of truth and is not modified. Run
+it once per machine, and again whenever the lab replaces the CSV — on the server
+it takes the window build from 3.6 s to **2.2 s** and its peak from 563 MB to
+473 MB, and leaves the published archive byte for byte identical.
+
+`float64` rather than `float32` is deliberate. Single precision would shrink the
+file by a further 3 MB and introduce a 5.4e-08 relative error in `fc`, which
+multiplies the measured diffuse — every corrected value in the archive would move.
 
 Measured on this archive, the window pair costs **3.6 s and 0.9 s with a 563 MB
 peak**, against **18.9 s and 0.9 s with a 4.7 GB peak** for the full rebuild —
