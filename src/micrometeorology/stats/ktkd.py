@@ -24,6 +24,7 @@ clock; the apparent solar time derived here takes its offset from the
 ``utc_offset_hours`` parameter, never from the host's zone.
 """
 
+import itertools
 from typing import Any
 
 import numpy as np
@@ -361,9 +362,9 @@ def model_band(
     p10: list[float | None] = []
     p90: list[float | None] = []
     per_bin: list[int] = []
-    for bin_index in range(len(edges) - 1):
+    for bin_index, (low_edge, high_edge) in enumerate(itertools.pairwise(edges)):
         selected = predicted_values[finite][index == bin_index]
-        centres.append(float((edges[bin_index] + edges[bin_index + 1]) / 2.0))
+        centres.append(float((low_edge + high_edge) / 2.0))
         per_bin.append(int(selected.size))
         if selected.size < min_samples_per_bin:
             medians.append(None)

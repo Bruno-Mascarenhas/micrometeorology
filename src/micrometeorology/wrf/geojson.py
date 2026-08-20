@@ -347,7 +347,10 @@ def write_grid_compact_json_stream(
         payload["format"] = "grid-bounds-v1"
         payload["metadata"] = {"resolucao_m": [float(resolution_x), float(resolution_y)]}
         payload["shape"] = [n_rows, n_cols]
-        payload["bounds"] = [[west[k], bottom[k], east[k], top[k]] for k in range(n_rows * n_cols)]
+        payload["bounds"] = [
+            [west_v, bottom_v, east_v, top_v]
+            for west_v, bottom_v, east_v, top_v in zip(west, bottom, east, top, strict=True)
+        ]
 
     def _dump(destination: Path) -> None:
         with open(destination, "w", encoding="utf-8") as f:

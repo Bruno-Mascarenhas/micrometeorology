@@ -278,7 +278,7 @@ def _candidate_texts(alternatives: tuple[tuple[str, ...], ...]) -> Iterator[str]
         admitted[cell] = options
         combinations *= len(options)
     per_cell = [
-        admitted.get(cell, alternatives[cell][:1] or ("",)) for cell in range(len(alternatives))
+        admitted.get(cell, options[:1] or ("",)) for cell, options in enumerate(alternatives)
     ]
     for choice in itertools.product(*per_cell):
         yield "".join(choice)
