@@ -14,7 +14,6 @@ import inspect
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -32,6 +31,8 @@ from micrometeorology.sensors.archive import (
     verify_frame,
 )
 from micrometeorology.sensors.calibration import (
+    DatedColumnRecord,
+    SensorSwitch,
     load_sensor_switches,
     resolve_mapping_windows,
     unify_sensor_columns,
@@ -412,15 +413,19 @@ class TestTheMasksReachTheRawTwin:
     """
 
     @staticmethod
-    def _switches() -> list[dict[str, Any]]:
+    def _switches() -> list[SensorSwitch]:
         return [
-            {
-                "unified_name": "Sw_dw",
-                "mappings": [
-                    {"column": "PSP1_Wm2_Avg", "start_date": None, "end_date": "2024-06-15"},
-                    {"column": "CM3Up_Wm2_Avg", "start_date": "2024-06-16", "end_date": None},
-                ],
-            }
+            SensorSwitch(
+                unified_name="Sw_dw",
+                mappings=(
+                    DatedColumnRecord(
+                        column="PSP1_Wm2_Avg", start_date=None, end_date="2024-06-15"
+                    ),
+                    DatedColumnRecord(
+                        column="CM3Up_Wm2_Avg", start_date="2024-06-16", end_date=None
+                    ),
+                ),
+            )
         ]
 
     @staticmethod
@@ -638,10 +643,10 @@ def test_a_perihelion_enhancement_burst_survives_the_ceiling_it_is_under() -> No
 def test_the_diffuse_eras_mirror_the_calibration_map() -> None:
     switches = load_sensor_switches(CALIBRATIONS_YAML)
     published = [
-        (mapping["column"], mapping["start_date"], mapping["end_date"])
+        (mapping.column, mapping.start_date, mapping.end_date)
         for switch in switches
-        if switch["unified_name"] == "Sw_dif"
-        for mapping in switch["mappings"]
+        if switch.unified_name == "Sw_dif"
+        for mapping in switch.mappings
     ]
 
     def bounds(

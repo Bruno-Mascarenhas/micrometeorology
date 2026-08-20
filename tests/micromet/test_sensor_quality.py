@@ -74,7 +74,9 @@ def test_a_gap_in_the_record_is_not_a_step():
 def test_a_run_longer_than_the_column_tolerates_is_masked():
     frame = _frame("RH1_Avg", [50.0] + [72.47] * 6 + [55.0])
 
-    frame, removed = mask_persistent_runs(frame, [SensorPersistenceLimit(column="RH1_Avg", min_run=4)])
+    frame, removed = mask_persistent_runs(
+        frame, [SensorPersistenceLimit(column="RH1_Avg", min_run=4)]
+    )
 
     assert removed == 6
     assert frame["RH1_Avg"].notna().tolist() == [True] + [False] * 6 + [True]
@@ -83,7 +85,9 @@ def test_a_run_longer_than_the_column_tolerates_is_masked():
 def test_a_run_at_the_tolerated_length_survives():
     frame = _frame("RH1_Avg", [50.0] + [72.47] * 4 + [55.0])
 
-    _frame_out, removed = mask_persistent_runs(frame, [SensorPersistenceLimit(column="RH1_Avg", min_run=4)])
+    _frame_out, removed = mask_persistent_runs(
+        frame, [SensorPersistenceLimit(column="RH1_Avg", min_run=4)]
+    )
 
     assert removed == 0
 
@@ -92,7 +96,9 @@ def test_a_gap_breaks_a_run_rather_than_bridging_it():
     """Identical values either side of missing hours are not evidence of a rail."""
     frame = _frame("RH1_Avg", [72.47] * 6, freq="1h")
 
-    _frame_out, removed = mask_persistent_runs(frame, [SensorPersistenceLimit(column="RH1_Avg", min_run=4)])
+    _frame_out, removed = mask_persistent_runs(
+        frame, [SensorPersistenceLimit(column="RH1_Avg", min_run=4)]
+    )
 
     assert removed == 0
 
@@ -101,7 +107,9 @@ def test_an_anemometer_frozen_above_calm_is_masked_despite_the_exemption():
     """The 18-day rail this test exists for sat at 0.281 m/s, not at zero."""
     frame = _frame("WS_ms_S_WVT", [0.281] * 8)
 
-    _frame_out, removed = mask_persistent_runs(frame, [SensorPersistenceLimit(column="WS_ms_S_WVT", min_run=4)])
+    _frame_out, removed = mask_persistent_runs(
+        frame, [SensorPersistenceLimit(column="WS_ms_S_WVT", min_run=4)]
+    )
 
     assert removed == 8
 
@@ -115,7 +123,9 @@ def test_a_reading_frozen_at_the_calm_level_is_still_masked():
     """
     frame = _frame("WS_WXT_Avg", [0.0] * 8)
 
-    _frame_out, removed = mask_persistent_runs(frame, [SensorPersistenceLimit(column="WS_WXT_Avg", min_run=4)])
+    _frame_out, removed = mask_persistent_runs(
+        frame, [SensorPersistenceLimit(column="WS_WXT_Avg", min_run=4)]
+    )
 
     assert removed == 8
 
@@ -152,7 +162,8 @@ def test_an_excursion_window_shorter_than_one_sample_is_refused():
 
     with pytest.raises(ValueError, match="max_len must be at least 1"):
         mask_step_excursions(
-            frame, [SensorStepLimit(column="BP1_mbar_Avg", threshold=1.0, return_tol=1.0, max_len=0)]
+            frame,
+            [SensorStepLimit(column="BP1_mbar_Avg", threshold=1.0, return_tol=1.0, max_len=0)],
         )
 
 
@@ -171,7 +182,9 @@ def test_the_reported_count_never_includes_a_cell_that_was_already_missing():
 def test_missing_samples_neither_start_nor_extend_a_run():
     frame = _frame("RH1_Avg", [72.47, np.nan, 72.47, 72.47, 72.47, 72.47])
 
-    _frame_out, removed = mask_persistent_runs(frame, [SensorPersistenceLimit(column="RH1_Avg", min_run=3)])
+    _frame_out, removed = mask_persistent_runs(
+        frame, [SensorPersistenceLimit(column="RH1_Avg", min_run=3)]
+    )
 
     assert removed == 4
 

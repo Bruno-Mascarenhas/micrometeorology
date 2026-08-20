@@ -15,11 +15,50 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import yaml
+from pydantic import BaseModel, ConfigDict
+
+
+class DatedColumnRecord(BaseModel):
+    """One raw column over one inclusive date window.
+
+    Both dates are optional and inclusive at day granularity: ``null`` start
+    means "from the beginning of the dataset", ``null`` end "until the end of
+    it". The window is resolved against the frame being processed, so the same
+    record yields different bounds on different frames.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    column: str
+    start_date: str | None = None
+    end_date: str | None = None
+    description: str = ""
+
+
+class CalibrationRecord(DatedColumnRecord):
+    """A column's multiplicative correction over one window.
+
+    ``factor`` carries the unit ratio the instrument's sensitivity revision
+    implies; ``None`` instead declares the data invalid over the period and
+    blanks it, which is a decision about the window rather than an omission.
+    """
+
+    factor: float | None = None
+
+
+class SensorSwitch(BaseModel):
+    """Which raw column carries one unified variable, and when."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    unified_name: str
+    mappings: tuple[DatedColumnRecord, ...]
+
 
 logger = logging.getLogger(__name__)
 
 
-def load_calibrations(config_path: str | Path) -> list[dict[str, Any]]:
+def load_calibrations(config_path: str | Path) -> list[CalibrationRecord]:
     """Load calibration records from a YAML file.
 
     Parameters
@@ -29,9 +68,10 @@ def load_calibrations(config_path: str | Path) -> list[dict[str, Any]]:
 
     Returns
     -------
-    list of dict
-        The ``calibrations`` list as written, each record carrying ``column``,
-        optional ``start_date`` / ``end_date``, ``factor`` and ``description``.
+    list of CalibrationRecord
+        The ``calibrations`` list as written, validated at the boundary: a key
+        the gates do not read, or a record missing its column, fails here rather
+        than deep inside the frame walk.
         A missing file yields an empty list and a warning. That warning is the
         only signal: nothing downstream distinguishes "no calibrations were
         declared" from "none were needed", since a column carrying no record is
@@ -41,10 +81,9 @@ def load_calibrations(config_path: str | Path) -> list[dict[str, Any]]:
     if not path.exists():
         logger.warning("Calibration config not found: %s", path)
         return []
-    with open(path, encoding="utf-8") as fh:
+    with path.open(encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
-    records: list[dict[str, Any]] = data.get("calibrations", [])
-    return records
+    return [CalibrationRecord.model_validate(record) for record in data.get("calibrations", [])]
 
 
 def _resolve_inclusive_end(value: Any, fallback: pd.Timestamp) -> pd.Timestamp:
@@ -69,19 +108,18 @@ def _resolve_inclusive_end(value: Any, fallback: pd.Timestamp) -> pd.Timestamp:
 _ResolvedRange = tuple[str, pd.Timestamp, pd.Timestamp]
 
 
-def _describe_record(record: dict[str, Any]) -> str:
+def _describe_record(record: DatedColumnRecord) -> str:
     """Return a record's identity — column, date range, description — for error messages."""
-    start = record.get("start_date") or "dataset-start"
-    end = record.get("end_date") or "dataset-end"
-    parts = [str(record["column"]), f"{start} -> {end}"]
-    description = record.get("description")
-    if description:
-        parts.append(str(description))
+    start = record.start_date or "dataset-start"
+    end = record.end_date or "dataset-end"
+    parts = [record.column, f"{start} -> {end}"]
+    if record.description:
+        parts.append(record.description)
     return " | ".join(parts)
 
 
 def _resolve_record_range(
-    record: dict[str, Any], df: pd.DataFrame
+    record: DatedColumnRecord, df: pd.DataFrame
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
     """Resolve a record's inclusive ``[start, end]`` bounds against *df*'s index.
 
@@ -89,12 +127,8 @@ def _resolve_record_range(
     first index timestamp and ``end_date`` goes through
     :func:`_resolve_inclusive_end` identically wherever a record is applied.
     """
-    start = (
-        pd.Timestamp(record["start_date"])
-        if record.get("start_date")
-        else pd.Timestamp(df.index.min())
-    )
-    end = _resolve_inclusive_end(record.get("end_date"), df.index.max())
+    start = pd.Timestamp(record.start_date) if record.start_date else pd.Timestamp(df.index.min())
+    end = _resolve_inclusive_end(record.end_date, df.index.max())
     return start, end
 
 
@@ -144,7 +178,7 @@ def _overlap_error(
 
 def apply_calibrations(
     df: pd.DataFrame,
-    calibrations: list[dict[str, Any]],
+    calibrations: list[CalibrationRecord],
 ) -> pd.DataFrame:
     """Apply calibration corrections to a DataFrame in-place.
 
@@ -153,8 +187,7 @@ def apply_calibrations(
     df:
         DataFrame with a naive station-local ``DatetimeIndex``.
     calibrations:
-        List of calibration records, each with keys:
-        ``column``, ``start_date``, ``end_date``, ``factor``, ``description``.
+        The calibration records, as :func:`load_calibrations` returns them.
         ``factor`` multiplies the raw column, so it carries the unit ratio the
         instrument's sensitivity revision implies; a null ``factor`` instead
         declares the data invalid over the period and blanks it.
@@ -181,25 +214,26 @@ def apply_calibrations(
     """
     ranges_by_column: dict[str, list[_ResolvedRange]] = {}
     for record in calibrations:
-        column = record["column"]
-        if column not in df.columns:
+        if record.column not in df.columns:
             continue
         start, end = _resolve_record_range(record, df)
-        ranges_by_column.setdefault(column, []).append((_describe_record(record), start, end))
+        ranges_by_column.setdefault(record.column, []).append(
+            (_describe_record(record), start, end)
+        )
     for column, ranges in ranges_by_column.items():
         overlap = _find_overlapping_pair(ranges)
         if overlap is not None:
             raise _overlap_error("calibrations", column, *overlap)
 
     for record in calibrations:
-        column = record["column"]
+        column = record.column
         if column not in df.columns:
             logger.debug("Skipping calibration for missing column: %s", column)
             continue
 
         start, end = _resolve_record_range(record, df)
-        factor = record.get("factor")
-        description = record.get("description", "")
+        factor = record.factor
+        description = record.description
 
         mask = (df.index >= start) & (df.index <= end)
 
@@ -235,7 +269,7 @@ def apply_calibrations(
     return df
 
 
-def load_sensor_switches(config_path: str | Path) -> list[dict[str, Any]]:
+def load_sensor_switches(config_path: str | Path) -> list[SensorSwitch]:
     """Load sensor-switch definitions from the calibrations YAML.
 
     Sensor switches define which raw column maps to a unified variable
@@ -249,24 +283,23 @@ def load_sensor_switches(config_path: str | Path) -> list[dict[str, Any]]:
 
     Returns
     -------
-    list of dict
-        The ``sensor_switches`` list as written, each entry carrying a
-        ``unified_name`` and its ``mappings``. A missing file yields an empty
+    list of SensorSwitch
+        The ``sensor_switches`` list as written, validated at the boundary. A
+        missing file yields an empty
         list, silently: the unification step then simply creates no unified
         column, which the caller sees directly.
     """
     path = Path(config_path)
     if not path.exists():
         return []
-    with open(path, encoding="utf-8") as fh:
+    with path.open(encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
-    switches: list[dict[str, Any]] = data.get("sensor_switches", [])
-    return switches
+    return [SensorSwitch.model_validate(switch) for switch in data.get("sensor_switches", [])]
 
 
 def resolve_mapping_windows(
     df: pd.DataFrame,
-    switches: list[dict[str, Any]],
+    switches: list[SensorSwitch],
     unified_names: Sequence[str],
 ) -> dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]]:
     """Which raw column fed each unified name, and over which inclusive window.
@@ -298,22 +331,20 @@ def resolve_mapping_windows(
     wanted = set(unified_names)
     windows: dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]] = {}
     for switch in switches:
-        unified_name = switch["unified_name"]
-        if unified_name not in wanted:
+        if switch.unified_name not in wanted:
             continue
-        for mapping in switch["mappings"]:
-            column = mapping["column"]
-            if column not in df.columns:
+        for mapping in switch.mappings:
+            if mapping.column not in df.columns:
                 continue
             start, end = _resolve_record_range(mapping, df)
-            windows.setdefault(unified_name, []).append((column, start, end))
+            windows.setdefault(switch.unified_name, []).append((mapping.column, start, end))
     return windows
 
 
 def uncalibrated_mapping_windows(
     df: pd.DataFrame,
-    calibrations: list[dict[str, Any]],
-    switches: list[dict[str, Any]],
+    calibrations: list[CalibrationRecord],
+    switches: list[SensorSwitch],
 ) -> list[tuple[str, str, pd.Timestamp, pd.Timestamp]]:
     """Windows where a column feeds a unified series with no calibration covering it.
 
@@ -347,18 +378,17 @@ def uncalibrated_mapping_windows(
     """
     covered: dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
     for record in calibrations:
-        column = record["column"]
-        if column not in df.columns:
+        if record.column not in df.columns:
             continue
         start, end = _resolve_record_range(record, df)
         if start <= end:
-            covered.setdefault(column, []).append((start, end))
+            covered.setdefault(record.column, []).append((start, end))
 
     gaps: list[tuple[str, str, pd.Timestamp, pd.Timestamp]] = []
     for switch in switches:
-        unified_name = switch["unified_name"]
-        for mapping in switch["mappings"]:
-            column = mapping["column"]
+        unified_name = switch.unified_name
+        for mapping in switch.mappings:
+            column = mapping.column
             if column not in df.columns or column not in covered:
                 continue
             start, end = _resolve_record_range(mapping, df)
@@ -382,7 +412,7 @@ def uncalibrated_mapping_windows(
 
 def unify_sensor_columns(
     df: pd.DataFrame,
-    switches: list[dict[str, Any]],
+    switches: list[SensorSwitch],
 ) -> pd.DataFrame:
     """Create unified columns from sensor-switch definitions.
 
@@ -419,11 +449,11 @@ def unify_sensor_columns(
     no hole; an explicit time keeps exact ``<= end`` semantics.
     """
     for switch in switches:
-        unified_name = switch["unified_name"]
+        unified_name = switch.unified_name
         mapping_ranges = [
             (_describe_record(mapping), *_resolve_record_range(mapping, df))
-            for mapping in switch["mappings"]
-            if mapping["column"] in df.columns
+            for mapping in switch.mappings
+            if mapping.column in df.columns
         ]
         overlap = _find_overlapping_pair(mapping_ranges)
         if overlap is not None:
@@ -431,8 +461,8 @@ def unify_sensor_columns(
 
         series_parts: list[pd.Series] = []
 
-        for mapping in switch["mappings"]:
-            column = mapping["column"]
+        for mapping in switch.mappings:
+            column = mapping.column
             if column not in df.columns:
                 logger.warning("Column %s not found for unified variable %s", column, unified_name)
                 continue
