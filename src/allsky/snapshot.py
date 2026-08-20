@@ -14,17 +14,15 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, TypeIs, runtime_checkable
+from typing import Any, Protocol, TypeIs, runtime_checkable
 
 import numpy as np
 import pandas as pd
 
 from allsky.atomic import atomic_write, atomic_write_json
 from allsky.config import SITE_TZ, SITE_UTC_OFFSET_HOURS, ExperimentConfig, SiteConfig
+from allsky.embeddings.backbone import VisualBackbone
 from allsky.provenance import code_version
-
-if TYPE_CHECKING:
-    from allsky.embeddings.backbone import VisualBackbone
 
 logger = logging.getLogger(__name__)
 
