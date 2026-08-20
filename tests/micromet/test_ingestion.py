@@ -6,6 +6,7 @@ from typing import ClassVar
 import pandas as pd
 import pytest
 
+from micrometeorology.common.config import SensorRangeLimit
 from micrometeorology.sensors.ingestion import (
     apply_physical_limits,
     merge_dat_files,
@@ -164,7 +165,9 @@ class TestTheGateAlsoHoldsAfterCalibration:
     value, so the number that actually gets written must be re-checked too.
     """
 
-    LIMITS: ClassVar[list[dict]] = [{"column": "CM3Up_Wm2_Avg", "lower": -20.0, "upper": 1500.0}]
+    LIMITS: ClassVar[list[SensorRangeLimit]] = [
+        SensorRangeLimit(column="CM3Up_Wm2_Avg", lower=-20.0, upper=1500.0)
+    ]
 
     def test_a_calibrated_boundary_value_is_reported(self):
         frame = pd.DataFrame({"CM3Up_Wm2_Avg": [1000.0, 1500.0 * 1.0058, 1490.0]})

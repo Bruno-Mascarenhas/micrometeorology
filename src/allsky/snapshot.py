@@ -243,7 +243,7 @@ def _screened_for_plausibility(row: pd.DataFrame) -> pd.DataFrame:
     # CMP21_Wm2_Avg, CM3Up_Wm2_Avg, PSP1_Wm2_Avg and PSP_Wm2_Avg — broadband
     # radiometry, every one of them a FORBIDDEN_FEATURES column no feature set
     # can read. Raw and calibrated coincide for the channels served here.
-    declared = [str(limit["column"]) for limit in limits if limit["column"] in row.columns]
+    declared = [limit.column for limit in limits if limit.column in row.columns]
     ungated = [
         column
         for column in row.columns

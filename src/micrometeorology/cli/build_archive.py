@@ -279,7 +279,7 @@ def run(
         # so counting which gates actually FIRED is what proves the rule ran.
         before = qc.notna().sum()
         limits_absent_columns = [
-            limit["column"] for limit in settings.sensor_limits if limit["column"] not in qc.columns
+            limit.column for limit in settings.sensor_limits if limit.column not in qc.columns
         ]
         qc = apply_physical_limits(qc, settings.sensor_limits)
         cut = before - qc.notna().sum()

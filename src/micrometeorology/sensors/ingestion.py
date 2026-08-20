@@ -26,6 +26,8 @@ from typing import TypedDict, Unpack
 import numpy as np
 import pandas as pd
 
+from micrometeorology.common.config import SensorRangeLimit
+
 logger = logging.getLogger(__name__)
 
 
@@ -218,7 +220,7 @@ def merge_dat_files(
 
 def apply_physical_limits(
     df: pd.DataFrame,
-    limits: list[dict],
+    limits: list[SensorRangeLimit],
 ) -> pd.DataFrame:
     """Apply quality-control limits, setting out-of-range values to NaN.
 
@@ -227,10 +229,10 @@ def apply_physical_limits(
     df:
         Input DataFrame.
     limits:
-        List of dicts with keys ``column``, ``lower``, ``upper``. The bounds are
-        in the RAW logger units the gate was written for, several of them
-        millivolts, so they are applied before any calibration factor.
-        Columns that don't exist in the DataFrame are skipped (dynamic headers).
+        The declared range gates. Their bounds are in the RAW logger units the
+        gate was written for, several of them millivolts, so they are applied
+        before any calibration factor. Columns that don't exist in the DataFrame
+        are skipped (dynamic headers).
 
     Returns
     -------
@@ -240,19 +242,25 @@ def apply_physical_limits(
         missing rather than becoming the threshold.
     """
     for lim in limits:
-        col = lim["column"]
-        if col not in df.columns:
+        if lim.column not in df.columns:
             continue
-        lower, upper = lim["lower"], lim["upper"]
-        mask = (df[col] < lower) | (df[col] > upper)
+        mask = (df[lim.column] < lim.lower) | (df[lim.column] > lim.upper)
         n_bad = mask.sum()
         if n_bad > 0:
-            logger.debug("  %s: %d values outside [%.1f, %.1f] -> NaN", col, n_bad, lower, upper)
-            df.loc[mask, col] = np.nan
+            logger.debug(
+                "  %s: %d values outside [%.1f, %.1f] -> NaN",
+                lim.column,
+                n_bad,
+                lim.lower,
+                lim.upper,
+            )
+            df.loc[mask, lim.column] = np.nan
     return df
 
 
-def values_outside_declared_limits(df: pd.DataFrame, limits: list[dict]) -> dict[str, int]:
+def values_outside_declared_limits(
+    df: pd.DataFrame, limits: list[SensorRangeLimit]
+) -> dict[str, int]:
     """Columns still holding values their own declared gate rejects.
 
     The gates run on the RAW signal, before the instrument factors, so a value
@@ -272,11 +280,10 @@ def values_outside_declared_limits(df: pd.DataFrame, limits: list[dict]) -> dict
     """
     outside: dict[str, int] = {}
     for lim in limits:
-        col = lim["column"]
-        if col not in df.columns:
+        if lim.column not in df.columns:
             continue
-        values = df[col]
-        count = int(((values < lim["lower"]) | (values > lim["upper"])).sum())
+        values = df[lim.column]
+        count = int(((values < lim.lower) | (values > lim.upper)).sum())
         if count:
-            outside[str(col)] = count
+            outside[lim.column] = count
     return outside
