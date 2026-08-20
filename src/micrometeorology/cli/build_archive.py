@@ -187,6 +187,12 @@ def run(
     else:
         typer.echo("\n>> Merge confere com a auditoria: nenhuma linha perdida ou duplicada")
 
+    # --strict sai UMA vez, no fim, depois de todos os artefatos e do manifesto.
+    # Sair no meio deixava em disco só station_5min_raw, sem o frame com QC, sem o
+    # horário e sem o relatório — justamente o que o operador precisa para
+    # diagnosticar a reprovação.
+    blocking: list[str] = []
+
     typer.echo("\nArtefatos:")
     _write(raw, out / "station_5min_raw", output_format)
 
@@ -210,8 +216,9 @@ def run(
         )
         for day, ratio in unshaded[:8]:
             typer.echo(f"    {day}  razao {ratio:.2f}")
-        if strict:
-            raise typer.Exit(code=1)
+        blocking.append(
+            f"{len(unshaded)} dia(s) de difusa sem sombreamento fora de INVALID_WINDOWS"
+        )
 
     # A blocked funnel and a dry spell are the same run of zeros to every gate
     # here; only the length parts them, and the curated window that covers the
@@ -255,8 +262,7 @@ def run(
                 f"  ! {len(limits_absent_columns)} limite(s) nomeiam coluna ausente: "
                 f"{', '.join(limits_absent_columns[:6])}"
             )
-            if strict:
-                raise typer.Exit(code=1)
+            blocking.append(f"{len(limits_absent_columns)} limite(s) nomeiam coluna ausente")
     calibrations_path = settings.configs_dir / "calibrations.yaml"
     sources: dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]] = {}
     if calibrations_path.is_file():
@@ -387,10 +393,11 @@ def run(
         for column, statistic in offsets.items()
         for month, median in statistic.drift_alarms
     ]
+    # Reportados e arquivados em nocturnal_offset_monitor, nunca fatais: são
+    # episódios datados do próprio registro, permanentes, e reprovar a construção
+    # por eles faria --strict nunca passar — o portão que grita sempre não verifica.
     for column, month, median in alarms:
         typer.echo(f"  ! deriva de offset em {column} ({month}): mediana {median:+.3f} W/m2")
-    if alarms and strict:
-        raise typer.Exit(code=1)
     for day, count in sorted(corrupted, key=lambda item: -item[1])[:8]:
         typer.echo(
             f"  {day}  {count} amostra(s) acima de {NIGHT_CORRUPTION_FLUX_WM2:.0f} W/m2 de madrugada"
@@ -497,6 +504,13 @@ def run(
     report_path = out / "archive_report.json"
     report_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     typer.echo(f"  [ok] {report_path.name}")
+
+    if blocking:
+        typer.echo(f"\n! {len(blocking)} verificacao(oes) reprovaram:")
+        for problem in blocking:
+            typer.echo(f"    {problem}")
+        if strict:
+            raise typer.Exit(code=1)
 
 
 def main() -> None:

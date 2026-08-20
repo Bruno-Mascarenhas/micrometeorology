@@ -808,9 +808,31 @@ labmim-monitoring -i output/archive -o ../site-labmim/site/Monitoramento \
     -w data/series/labmim_series_operacional.dat
 ```
 
+**It reads the archive; it does not build it.** `-i` points at the directory
+`labmim-archive` wrote, and the command loads `station_5min_qc.parquet` and
+`station_hourly.parquet` from there — never `station_5min_raw.parquet`, so no
+ungated sample reaches the page. The window is anchored on the newest sample IN
+THAT ARCHIVE, not on the server clock, which makes the order mandatory for any
+scheduled run:
+
+```bash
+labmim-archive    -d data -o output/archive          # re-merge and re-run QC
+labmim-monitoring -i output/archive -o ../site-labmim/site/Monitoramento
+```
+
+Run the second without the first and the payload is regenerated from the same
+seven days for ever: the page keeps rendering, the timestamps never advance, and
+nothing errors. Measured on the full archive, the pair costs 18.9 s and 0.9 s,
+with a 4.7 GB peak in the build — comfortably inside an hourly slot.
+
+The QC is not re-applied here; it is inherited, and it is genuinely in the window
+rather than only in the history. Measured over one seven-day window, the raw
+barometer carried 2,017 samples and 436 survived to the payload.
+
 One JSON carries all nine charts in the three layers the researcher asked for —
-the raw 5-minute samples, the hourly means over them, and the WRF series where
-the model has that variable. About 133 kB for a fully instrumented week, against
+the five-minute samples, the hourly means over them, and the WRF series where
+the model has that variable. The five-minute layer is labelled "raw" for its
+RESOLUTION, not its provenance: it is `station_5min_qc`, after every gate. About 133 kB for a fully instrumented week, against
 the ~380 kB of PNGs it replaces, and it arrives as numbers the reader can hover,
 toggle and download. The time axis is published as `start` + `step_minutes` +
 `count` instead of one stamp per sample; that alone is worth ~50 kB.
