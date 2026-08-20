@@ -39,11 +39,12 @@ mask_step_excursions             839       ← statistical
 mask_persistent_runs             60,824    ← statistical
 unify_sensor_columns                                 era-to-era channel unification (COPIES)
 close_net_radiation              36,241 recomposed
-mask_night_corrupted_days        187,826             53 days of timestamp corruption
+mask_night_corrupted_days        195,833             55 days of timestamp corruption
 nocturnal_offset_statistics      0 (measures only)   drift monitor, read before BOTH masks below
-mask_impossible_shortwave                            BSRN ceiling, BSRN floor, and the daylight sign rule
-mask_nocturnal_shortwave                             shortwave with the sun below the horizon
-apply_physical_limits (2nd)      579                 re-check in calibrated units
+mask_impossible_shortwave        89,672              BSRN ceiling, BSRN floor, and the daylight sign rule
+mask_nocturnal_shortwave         3,627,765           shortwave with the sun below the horizon
+close_nocturnal_net_radiation    395,040 recomposed  the night saldo is the longwave difference alone
+apply_physical_limits (2nd)      631                 re-check in calibrated units
   └─ write station_5min_qc
 aggregate_to_hourly                                  means, sums, vector means
   └─ write station_hourly        86,579 hours
@@ -208,6 +209,16 @@ correction was in large part the missing shade-ring factor, not the models.
 A missing factor raises `MissingShadeRingFactorError` rather than becoming NaN or
 1.0: the first would erase a measurement in silence and the second would publish
 uncorrected diffuse under the corrected channel's name.
+
+**The factor is scoped by era, not by elevation**, so it also multiplies the
+nocturnal diffuse — where there is no diffuse to restore, only the thermopile's
+own zero-offset. Nothing reaches the published frame, because
+`mask_nocturnal_shortwave` blanks those samples a few stages later, but two
+derived quantities carry it: the drift monitor reads `fc x offset` on `Sw_dif`
+(median -2.01 W/m2 against the -1.70 the literature review measured without the
+ring), and the clock-slip detector, whose witness is nocturnal irradiance above
+50 W/m2, flags 55 days where it flagged 53. Scoping the factor to elevation above
+the horizon would remove both effects and change no published value.
 
 ---
 
