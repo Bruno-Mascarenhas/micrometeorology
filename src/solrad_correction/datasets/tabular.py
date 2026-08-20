@@ -9,7 +9,7 @@ import pandas as pd
 from solrad_correction.utils.memory import dataframe_to_float32_numpy, series_to_float32_numpy
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TabularDataset:
     """Holds feature matrix X, target vector y, and metadata.
 

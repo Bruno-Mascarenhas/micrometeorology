@@ -39,9 +39,11 @@ def test_get_settings_accepts_the_shipped_default_yaml() -> None:
     assert {"WD_WXT_Avg", "WindDir_D1_WVT", "WindDir1_GMX"} <= set(settings.sensor_wind_dir_columns)
 
 
-def test_shipped_limits_carry_the_keys_apply_physical_limits_reads() -> None:
+def test_shipped_limits_declare_a_range_that_can_reject_something() -> None:
+    """The model makes the three fields mandatory; their ORDER it cannot."""
     for limit in get_settings().sensor_limits:
-        assert {"column", "lower", "upper"} <= limit.keys()
+        assert limit.column
+        assert limit.lower < limit.upper, limit.column
 
 
 def test_environment_variables_outrank_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,3 +60,21 @@ def test_yaml_keys_the_model_does_not_declare_are_still_rejected() -> None:
 
     with pytest.raises(ValidationError):
         Settings(**misspelled_yaml)
+
+
+def test_a_limit_key_the_gate_does_not_read_is_rejected_at_load() -> None:
+    """``exempt_at_or_below`` was documented for years and read by nothing."""
+    with pytest.raises(ValidationError):
+        Settings.model_validate(
+            {
+                "sensor_persistence_limits": [
+                    {"column": "Temp1_Avg", "min_run": 36, "exempt_at_or_below": 0.5}
+                ]
+            }
+        )
+
+
+def test_a_limit_missing_a_field_the_gate_reads_fails_at_load_not_mid_run() -> None:
+    """A ``min_run`` left out used to surface as a KeyError deep inside the mask."""
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"sensor_persistence_limits": [{"column": "Temp1_Avg"}]})

@@ -12,6 +12,11 @@ Two documents, both written into the site's ``Ceu/`` directory:
 Both derive from the same hourly database and the same solar geometry as the
 climatology export, so a reader can put the three pages side by side.
 
+The hourly database is indexed by naive station-local stamps, from the
+datalogger's own clock; the solar geometry behind both documents takes its
+offset from the pinned :data:`~micrometeorology.common.site.STATION_UTC_OFFSET_HOURS`
+rather than the host's zone.
+
 Examples
 --------
 ::
@@ -33,6 +38,7 @@ from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.stats import ktkd as ktkd_stats
 from micrometeorology.stats.climatology_export import write_json
 from micrometeorology.stats.sky_condition import (
+    KT_CUMULATIVE_EDGES,
     build_kt_cumulative_payload,
     sky_condition_summary,
 )
@@ -98,7 +104,7 @@ def build_payloads(hourly: pd.DataFrame, *, version: str) -> dict[str, Any]:
     prepared = ktkd_stats.prepare_ktkd(
         hourly, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
     )
-    kt, kd = prepared["kt"], prepared["kd"]
+    kt, kd = prepared.kt, prepared.kd
     if kt.empty:
         raise ValueError("no hour survived the gates; refusing to publish empty sky artifacts")
 
@@ -111,8 +117,8 @@ def build_payloads(hourly: pd.DataFrame, *, version: str) -> dict[str, Any]:
         _seasonal_samples(clearness), SUBSET_LABELS, version=version, caveats=CUMULATIVE_CAVEATS
     )
 
-    predictors = (prepared["ast"], prepared["elevation"], prepared["daily_kt"], prepared["psi"])
-    edges = np.asarray([round(0.02 * step, 2) for step in range(51)], dtype=float)
+    predictors = (prepared.ast, prepared.elevation, prepared.daily_kt, prepared.psi)
+    edges = np.asarray(KT_CUMULATIVE_EDGES, dtype=float)
     ktkd_payload = ktkd_stats.build_ktkd_payload(
         kt,
         kd,
@@ -132,7 +138,7 @@ def build_payloads(hourly: pd.DataFrame, *, version: str) -> dict[str, Any]:
             "timezone": "America/Bahia",
         },
         sources=["station_hourly.parquet"],
-        filters=prepared["filters"],
+        filters=prepared.filters,
         caveats=KTKD_CAVEATS,
         version=version,
     )

@@ -76,7 +76,6 @@ def train_one_epoch(
         if scaler is not None:
             scaler.scale(loss).backward()
 
-            # Gradient clipping requires unscaling first
             if clip_val is not None:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)

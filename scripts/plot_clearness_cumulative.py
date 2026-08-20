@@ -7,6 +7,10 @@ bounds, so a figure in a paper and the curve on the site cannot disagree.
 Every number comes from :mod:`micrometeorology.stats.sky_condition` and the
 exporter's own spec — this file only arranges axes and labels.
 
+The hourly database read here is indexed by naive station-local stamps, from the
+datalogger's own clock; the daylight gate takes its offset from the pinned
+``STATION_UTC_OFFSET_HOURS`` rather than the host's zone.
+
 Usage
 -----
 ::
@@ -15,10 +19,9 @@ Usage
         -i output/archive/station_hourly.parquet -o output/figures/
 """
 
-import argparse
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import matplotlib
 
@@ -26,6 +29,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import typer
 
 from micrometeorology.common.git import run_git, source_root
 from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
@@ -36,6 +40,8 @@ from micrometeorology.stats.sky_condition import (
     cumulative_fractions,
     sky_condition_summary,
 )
+
+app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
 logger = logging.getLogger(__name__)
 
@@ -130,16 +136,21 @@ def render(input_path: Path, output_dir: Path) -> Path:
     return destination
 
 
-def main() -> None:
-    """Parse the arguments and render the figure."""
+@app.command()
+def run(
+    input_path: Annotated[Path, typer.Option("-i", "--input", help="Hourly parquet database.")],
+    output_dir: Annotated[Path, typer.Option("-o", "--output", help="Directory for the PNG.")],
+) -> None:
+    """Render the figure for the hourly database into the output directory."""
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
     )
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-i", "--input", type=Path, required=True, help="Hourly parquet database.")
-    parser.add_argument("-o", "--output", type=Path, required=True, help="Directory for the PNG.")
-    arguments = parser.parse_args()
-    render(arguments.input, arguments.output)
+    render(input_path, output_dir)
+
+
+def main() -> None:
+    """Entry point for ``python scripts/plot_clearness_cumulative.py``."""
+    app()
 
 
 if __name__ == "__main__":

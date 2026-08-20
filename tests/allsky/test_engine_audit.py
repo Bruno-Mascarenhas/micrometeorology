@@ -21,6 +21,7 @@ from allsky.training.engine import (
     _MetricAccumulator,
     run_experiment,
 )
+from allsky.training.errors import TrainingError
 from tests.allsky.test_engine import _cfg, _make_dataset, _reader
 
 
@@ -309,7 +310,7 @@ def test_a_fresh_run_that_dies_before_its_first_best_leaves_the_previous_one_in_
     )
     preserved_epoch = load_checkpoint(run_dir / "best.ckpt")["epoch"]
 
-    with pytest.raises(KeyError, match="typo_metric"):
+    with pytest.raises(TrainingError, match="typo_metric"):
         run_experiment(
             _cfg(root, epochs=2, monitor="val_typo_metric"),
             data_root=root,

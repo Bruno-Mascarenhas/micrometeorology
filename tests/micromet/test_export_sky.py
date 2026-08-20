@@ -46,7 +46,7 @@ def test_the_cumulative_covers_hours_the_kt_kd_plane_cannot():
     )
     paired = ktkd_stats.prepare_ktkd(
         frame, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
-    )["kt"]
+    ).kt
 
     assert len(clearness) > len(paired)
 

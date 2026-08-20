@@ -341,8 +341,8 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
             t_sorted = sorted_times[start:stop]
             low = np.searchsorted(t_sorted, t_sorted - half_ns, side="left")
             high = np.searchsorted(t_sorted, t_sorted + half_ns, side="right")
-            for k in range(stop - start):
-                windows[int(idx_sorted[k])] = idx_sorted[low[k] : high[k]].tolist()
+            for row, window_start, window_stop in zip(idx_sorted, low, high, strict=True):
+                windows[int(row)] = idx_sorted[window_start:window_stop].tolist()
         return windows
 
     def _read(self, sample_id: str) -> np.ndarray:

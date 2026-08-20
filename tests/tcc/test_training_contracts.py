@@ -745,3 +745,57 @@ class TestResumePreprocessingGuard:
 
         metadata = load_torch_checkpoint(tmp_path / "last.pt")["metadata"]
         assert metadata["preprocessing_fingerprint"] == fingerprint
+
+
+def test_a_checkpoint_without_its_config_section_is_refused(tmp_path: Path) -> None:
+    """Rebuilding at a default width would silently resume a different model."""
+    torch = pytest.importorskip("torch")
+
+    from solrad_correction.models.lstm import LSTMRegressor
+
+    path = tmp_path / "sem_config.pt"
+    torch.save({"model_state_dict": {}}, path)
+
+    with pytest.raises(KeyError, match="config"):
+        LSTMRegressor.load(path)
+
+
+@pytest.mark.parametrize(
+    ("factory", "kwargs"),
+    [
+        ("lstm", {"input_size": 4, "hidden_size": 8, "num_layers": 1, "dropout": 0.37}),
+        (
+            "transformer",
+            {
+                "input_size": 4,
+                "d_model": 8,
+                "nhead": 2,
+                "num_encoder_layers": 1,
+                "dim_feedforward": 16,
+                "dropout": 0.37,
+            },
+        ),
+    ],
+)
+def test_a_config_missing_an_architecture_field_is_refused(
+    tmp_path: Path, factory: str, kwargs: dict[str, Any]
+) -> None:
+    """``dropout`` never reaches the ``state_dict``, so only ``config`` carries it.
+
+    A default here would resume under a regularization nobody chose, and
+    ``load_state_dict`` would not object.
+    """
+    torch = pytest.importorskip("torch")
+
+    from solrad_correction.models.lstm import LSTMRegressor
+    from solrad_correction.models.transformer import TransformerRegressor
+
+    model_class = LSTMRegressor if factory == "lstm" else TransformerRegressor
+    path = tmp_path / f"{factory}.pt"
+    model_class(**kwargs).save(path)
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    del checkpoint["config"]["dropout"]
+    torch.save(checkpoint, path)
+
+    with pytest.raises(KeyError, match="dropout"):
+        model_class.load(path)

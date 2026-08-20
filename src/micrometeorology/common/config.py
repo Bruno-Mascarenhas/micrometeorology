@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -60,6 +60,49 @@ def _load_named_yaml(path: Path, variable: str) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"{variable} points to {path}, which is not a file")
     return _load_yaml(path)
+
+
+class SensorRangeLimit(BaseModel):
+    """One column's quality-control range gate.
+
+    The bounds are in the RAW logger units the gate was written for, several of
+    them millivolts, so they apply before any calibration factor.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    column: str
+    lower: float
+    upper: float
+
+
+class SensorStepLimit(BaseModel):
+    """One column's excursion (spike/dip) test.
+
+    Rejects the improbable, which a range gate structurally cannot: a barometer
+    dropping 17 hPa for one sample and returning stays inside every bound. The
+    RETURN is the discriminator — an excursion leaves and comes back inside
+    ``return_tol`` within ``max_len`` samples.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    column: str
+    threshold: float
+    return_tol: float
+    max_len: int
+
+
+class SensorPersistenceLimit(BaseModel):
+    """One column's exact-repeat run test.
+
+    Catches a railed sensor, which reads inside every bound forever.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    column: str
+    min_run: int
 
 
 class Settings(BaseSettings):
@@ -106,26 +149,17 @@ class Settings(BaseSettings):
             "operator needs a way to turn off a guard that only looks like one."
         ),
     )
-    sensor_limits: list[dict[str, Any]] = Field(
+    sensor_limits: list[SensorRangeLimit] = Field(
         default_factory=list,
-        description="Quality-control ranges, one dict per column: {column, lower, upper}",
+        description="Quality-control ranges, one per column.",
     )
-    sensor_step_limits: list[dict[str, Any]] = Field(
+    sensor_step_limits: list[SensorStepLimit] = Field(
         default_factory=list,
-        description=(
-            "Excursion (spike/dip) tests, one dict per column: "
-            "{column, threshold, return_tol, max_len}. These reject the improbable, "
-            "which the ranges above structurally cannot: a barometer dropping 17 hPa "
-            "for one sample and returning stays inside every bound."
-        ),
+        description="Excursion (spike/dip) tests, one per column.",
     )
-    sensor_persistence_limits: list[dict[str, Any]] = Field(
+    sensor_persistence_limits: list[SensorPersistenceLimit] = Field(
         default_factory=list,
-        description=(
-            "Exact-repeat run tests, one dict per column: "
-            "{column, min_run, exempt_at_or_below}. These catch a railed sensor, "
-            "which reads inside every bound forever."
-        ),
+        description="Exact-repeat run tests, one per column.",
     )
     sensor_sum_columns: list[str] = Field(
         default_factory=list,

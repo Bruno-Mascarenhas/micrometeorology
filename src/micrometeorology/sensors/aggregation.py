@@ -13,6 +13,7 @@ import logging
 
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 from micrometeorology.sensors.wind import (
     wind_components,
@@ -109,19 +110,30 @@ def aggregate_to_hourly(
         if dir_col not in df.columns:
             continue
         speed_col = speed_column_map.get(dir_col)
-        if speed_col and speed_col in df.columns:
-            u, v = wind_components(df[speed_col].to_numpy(), df[dir_col].to_numpy())
-        else:
-            u, v = wind_components(np.ones(len(df)), df[dir_col].to_numpy())
 
-        df_uv = pd.DataFrame({"u": u, "v": v}, index=df.index)
-        uv_resampled = df_uv.resample(freq)
-        uv_counts = uv_resampled["u"].count()
-        uv_means = uv_resampled.mean()
+        def directional_mean(weights: NDArray, column: str = dir_col) -> pd.DataFrame:
+            u, v = wind_components(weights, df[column].to_numpy())
+            return pd.DataFrame({"u": u, "v": v}, index=df.index).resample(freq).mean()
+
+        if speed_col is not None and speed_col in df.columns:
+            uv_means = directional_mean(df[speed_col].to_numpy())
+            # Where the speed is too sparse to weight with, fall back to the
+            # unit-weight directional mean: losing the weight beats losing the hour.
+            sparse = (resampler[speed_col].count() < min_samples).reindex(
+                uv_means.index, fill_value=True
+            )
+            if sparse.any():
+                uv_means = uv_means.mask(sparse, directional_mean(np.ones(len(df))))
+        else:
+            uv_means = directional_mean(np.ones(len(df)))
+
+        # Completeness is judged on the DIRECTION channel, not on the u component,
+        # which is NaN whenever the paired speed is.
+        dir_counts = resampler[dir_col].count()
 
         dirs = wind_direction_from_components(uv_means["u"].to_numpy(), uv_means["v"].to_numpy())
         dir_series = pd.Series(dirs, index=uv_means.index)
-        dir_series[uv_counts < min_samples] = np.nan
+        dir_series[dir_counts.reindex(dir_series.index) < min_samples] = np.nan
         results[dir_col] = dir_series
 
     out = pd.DataFrame(results)

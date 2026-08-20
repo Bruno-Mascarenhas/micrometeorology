@@ -7,6 +7,7 @@ time and code that needs the module goes through :func:`preload_torch`.
 
 import os
 import sys
+from pathlib import Path
 
 _CONFIGURED = False
 _DLL_HANDLES: list[object] = []
@@ -43,9 +44,9 @@ def configure_torch_runtime() -> None:
     conda_prefix = os.environ.get("CONDA_PREFIX")
     if not conda_prefix:
         return
-    lib_bin = os.path.join(conda_prefix, "Library", "bin")
-    if os.path.isdir(lib_bin):
-        _DLL_HANDLES.append(os.add_dll_directory(lib_bin))
+    lib_bin = Path(conda_prefix) / "Library" / "bin"
+    if lib_bin.is_dir():
+        _DLL_HANDLES.append(os.add_dll_directory(str(lib_bin)))
 
 
 def preload_torch() -> object:

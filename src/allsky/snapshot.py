@@ -14,17 +14,15 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, TypeIs, runtime_checkable
+from typing import Any, Protocol, TypeIs, runtime_checkable
 
 import numpy as np
 import pandas as pd
 
 from allsky.atomic import atomic_write, atomic_write_json
 from allsky.config import SITE_TZ, SITE_UTC_OFFSET_HOURS, ExperimentConfig, SiteConfig
+from allsky.embeddings.backbone import VisualBackbone
 from allsky.provenance import code_version
-
-if TYPE_CHECKING:
-    from allsky.embeddings.backbone import VisualBackbone
 
 logger = logging.getLogger(__name__)
 
@@ -245,7 +243,7 @@ def _screened_for_plausibility(row: pd.DataFrame) -> pd.DataFrame:
     # CMP21_Wm2_Avg, CM3Up_Wm2_Avg, PSP1_Wm2_Avg and PSP_Wm2_Avg — broadband
     # radiometry, every one of them a FORBIDDEN_FEATURES column no feature set
     # can read. Raw and calibrated coincide for the channels served here.
-    declared = [str(limit["column"]) for limit in limits if limit["column"] in row.columns]
+    declared = [limit.column for limit in limits if limit.column in row.columns]
     ungated = [
         column
         for column in row.columns

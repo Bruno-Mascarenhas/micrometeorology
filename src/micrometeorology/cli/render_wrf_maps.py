@@ -30,6 +30,7 @@ from numpy.typing import NDArray
 
 from micrometeorology.common.cli_options import parse_csv, parse_int_csv
 from micrometeorology.common.logging import setup_logging
+from micrometeorology.common.physics import PASCAL_PER_HECTOPASCAL
 from micrometeorology.common.types import (
     VARIABLE_COLORMAPS,
     VARIABLE_NETCDF_MAP,
@@ -211,7 +212,7 @@ def _build_tasks_for_domain(
         # a temperature figure to draw, and `get_variable` is a bare dict lookup
         # whose KeyError would take every later variable and domain with it.
         surface_pressure_hpa = (
-            ds.get_variable("PSFC") / 100.0
+            ds.get_variable("PSFC") / PASCAL_PER_HECTOPASCAL
             if var_name == WRFVariable.TEMPERATURE and ds.has_variable("PSFC")
             else None
         )

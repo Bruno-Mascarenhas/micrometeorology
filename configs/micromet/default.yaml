@@ -191,6 +191,14 @@ sensor_persistence_limits:
   - { column: WD_WXT_Avg, min_run: 36 }
   - { column: WindDir1_GMX, min_run: 36 }
   - { column: WindDir2_GMX, min_run: 36 }
+  # 0 samples today, and the gap they close is the one that matters: WindDir
+  # carries 100% of the unified WD from 2024-07-19 to the end of the archive,
+  # and was the only current-era direction channel outside this gate while its
+  # paired speed WS_ms sat inside it. Longest identical run measured on WindDir
+  # is 3 samples, so 36 clears it with the same margin as the entries above.
+  - { column: WindDir, min_run: 36 }
+  - { column: WindDir_GMX, min_run: 36 }
+  - { column: WS_ms_GMX, min_run: 36 }
   # 2,265 samples: 146 h frozen at 72.47 %RH from 2018-08-21 and 42.7 h at
   # 48.3 %RH from 2023-03-08, both of which survive the range gate today. The
   # window is four times temperature's because RH, RH1 and RH2 are

@@ -173,7 +173,7 @@ from solrad_correction.experiments.runner import run_experiment
 
 config = ExperimentConfig.from_yaml("configs/tcc/experiments/my_experiment.yaml")
 report = run_experiment(config)
-report.print_summary()
+print(report.summary())
 ```
 
 ### 3. Output Structure
@@ -541,11 +541,15 @@ Run them all with `make bench`, or individually (a smoke test in
 `tests/tcc/test_benchmarks_smoke.py` keeps them working against the current APIs):
 
 ```bash
-python benchmarks/solrad_correction/loading.py --rows 10000 --features 16
-python benchmarks/solrad_correction/preprocessing.py --rows 20000 --features 24
-python benchmarks/solrad_correction/sequence_dataloader.py --rows 50000 --features 24 --sequence-length 24
-python benchmarks/solrad_correction/artifact_checkpoint.py --hidden-size 32 --layers 2
+uv run --no-sync python benchmarks/solrad_correction/loading.py --rows 10000 --features 16
+uv run --no-sync python benchmarks/solrad_correction/preprocessing.py --rows 20000 --features 24
+uv run --no-sync python benchmarks/solrad_correction/sequence_dataloader.py --rows 50000 --features 24 --sequence-length 24
+uv run --no-sync python benchmarks/solrad_correction/artifact_checkpoint.py --hidden-size 32 --layers 2
 ```
+
+Through `uv run`, not a bare `python`: the benchmarks import `solrad_correction`
+from the environment `make install-dev` maintains, and the interpreter first on
+PATH is usually the Conda `base` one, which carries none of it.
 
 ---
 

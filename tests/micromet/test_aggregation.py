@@ -221,3 +221,67 @@ class TestShippedConfigDrivesSpecialAggregation:
         )
 
         assert not unpaired, f"direction columns with no speed pairing: {sorted(unpaired)}"
+
+
+def test_a_complete_direction_hour_survives_a_dead_anemometer() -> None:
+    """Completeness is judged on the direction channel, not on the u component.
+
+    u is NaN whenever the speed is NaN, so gating the vector mean on it threw
+    away hours whose directional record was complete. Measured on the archive,
+    2,619 such hours were published as NaN, 1,701 of them in 2018.
+    """
+    stamps = pd.date_range("2024-06-15 00:00", periods=12, freq="5min")
+    frame = pd.DataFrame(
+        {"WindDir": [90.0] * 12, "WS_ms": [float("nan")] * 12},
+        index=stamps,
+    )
+
+    hourly = aggregate_to_hourly(
+        frame,
+        min_samples=6,
+        sum_columns=[],
+        wind_dir_columns=["WindDir"],
+        wind_speed_column_map={"WindDir": "WS_ms"},
+    )
+
+    assert hourly["WindDir"].iloc[0] == pytest.approx(90.0)
+
+
+def test_a_sparse_direction_hour_is_still_rejected() -> None:
+    """The gate still fires — on the quantity it is about."""
+    stamps = pd.date_range("2024-06-15 00:00", periods=12, freq="5min")
+    directions = [90.0] * 3 + [float("nan")] * 9
+    frame = pd.DataFrame({"WindDir": directions, "WS_ms": [2.0] * 12}, index=stamps)
+
+    hourly = aggregate_to_hourly(
+        frame,
+        min_samples=6,
+        sum_columns=[],
+        wind_dir_columns=["WindDir"],
+        wind_speed_column_map={"WindDir": "WS_ms"},
+    )
+
+    assert np.isnan(hourly["WindDir"].iloc[0])
+
+
+def test_speed_weighting_still_applies_when_the_anemometer_is_present() -> None:
+    """Falling back to unit weight must not cost the weighting where it exists.
+
+    Six samples due north at 10 m/s and six due east at 1 m/s: the speed-weighted
+    mean leans north, the unweighted one would sit near the bisector at 45 deg.
+    """
+    stamps = pd.date_range("2024-06-15 00:00", periods=12, freq="5min")
+    frame = pd.DataFrame(
+        {"WindDir": [0.0] * 6 + [90.0] * 6, "WS_ms": [10.0] * 6 + [1.0] * 6},
+        index=stamps,
+    )
+
+    hourly = aggregate_to_hourly(
+        frame,
+        min_samples=6,
+        sum_columns=[],
+        wind_dir_columns=["WindDir"],
+        wind_speed_column_map={"WindDir": "WS_ms"},
+    )
+
+    assert hourly["WindDir"].iloc[0] == pytest.approx(5.71, abs=0.1)

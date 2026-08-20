@@ -9,16 +9,10 @@ Run with custom parameters:
     python benchmarks/solrad_correction/sequence_dataloader.py --rows 100000 --batch-size 256
 """
 
-import sys
 import time
-from pathlib import Path
 from typing import Annotated
 
 import typer
-
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src"))
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -33,6 +27,7 @@ def run(
     max_batches: Annotated[int, typer.Option(help="Batches to iterate.")] = 20,
 ) -> None:
     """Benchmark lazy sequence DataLoader throughput."""
+    import numpy as np
     import torch
     from torch.utils.data import DataLoader
 
@@ -40,8 +35,6 @@ def run(
         WindowedSequenceDataset,
         collate_sequence_batch,
     )
-
-    np = __import__("numpy")
 
     rng = np.random.default_rng(44)
     feat_data = rng.normal(size=(rows, features)).astype("float32")

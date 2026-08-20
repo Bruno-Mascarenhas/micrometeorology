@@ -1,12 +1,16 @@
 """Tests for calibration application."""
 
-from typing import Any
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from micrometeorology.sensors import calibration
 from micrometeorology.sensors.calibration import (
+    CalibrationRecord,
+    DatedColumnRecord,
+    SensorSwitch,
     apply_calibrations,
     uncalibrated_mapping_windows,
     unify_sensor_columns,
@@ -31,13 +35,13 @@ def sample_data() -> pd.DataFrame:
 class TestApplyCalibrations:
     def test_multiplicative_factor(self, sample_data):
         cals = [
-            {
-                "column": "CM3Up_Wm2_Avg",
-                "start_date": "2018-06-01",
-                "end_date": "2018-12-31",
-                "factor": 0.5,
-                "description": "test",
-            }
+            CalibrationRecord(
+                column="CM3Up_Wm2_Avg",
+                start_date="2018-06-01",
+                end_date="2018-12-31",
+                factor=0.5,
+                description="test",
+            )
         ]
         original = sample_data["CM3Up_Wm2_Avg"].copy()
         apply_calibrations(sample_data, cals)
@@ -72,13 +76,13 @@ class TestBoundaryDayCalibration:
         apply_calibrations(
             five_min_data,
             [
-                {
-                    "column": "CM3Up_Wm2_Avg",
-                    "start_date": "2018-12-30",
-                    "end_date": "2018-12-31",
-                    "factor": 0.5,
-                    "description": "boundary",
-                }
+                CalibrationRecord(
+                    column="CM3Up_Wm2_Avg",
+                    start_date="2018-12-30",
+                    end_date="2018-12-31",
+                    factor=0.5,
+                    description="boundary",
+                )
             ],
         )
         end_day = five_min_data.loc["2018-12-31", "CM3Up_Wm2_Avg"]
@@ -90,13 +94,13 @@ class TestBoundaryDayCalibration:
         apply_calibrations(
             five_min_data,
             [
-                {
-                    "column": "CM3Up_Wm2_Avg",
-                    "start_date": None,
-                    "end_date": "2018-12-31",
-                    "factor": None,
-                    "description": "invalid",
-                }
+                CalibrationRecord(
+                    column="CM3Up_Wm2_Avg",
+                    start_date=None,
+                    end_date="2018-12-31",
+                    factor=None,
+                    description="invalid",
+                )
             ],
         )
         assert five_min_data.loc["2018-12-31", "CM3Up_Wm2_Avg"].isna().all()
@@ -106,13 +110,13 @@ class TestBoundaryDayCalibration:
         apply_calibrations(
             five_min_data,
             [
-                {
-                    "column": "CM3Up_Wm2_Avg",
-                    "start_date": "2018-12-31 00:00",
-                    "end_date": "2018-12-31 12:00",
-                    "factor": 0.5,
-                    "description": "explicit",
-                }
+                CalibrationRecord(
+                    column="CM3Up_Wm2_Avg",
+                    start_date="2018-12-31 00:00",
+                    end_date="2018-12-31 12:00",
+                    factor=0.5,
+                    description="explicit",
+                )
             ],
         )
         assert five_min_data.loc["2018-12-31 12:00", "CM3Up_Wm2_Avg"] == 50.0
@@ -125,13 +129,17 @@ class TestBoundaryDayCalibration:
         unify_sensor_columns(
             five_min_data,
             [
-                {
-                    "unified_name": "U",
-                    "mappings": [
-                        {"column": "A", "start_date": "2018-12-30", "end_date": "2018-12-31"},
-                        {"column": "B", "start_date": "2019-01-01", "end_date": "2019-01-02"},
-                    ],
-                }
+                SensorSwitch(
+                    unified_name="U",
+                    mappings=(
+                        DatedColumnRecord(
+                            column="A", start_date="2018-12-30", end_date="2018-12-31"
+                        ),
+                        DatedColumnRecord(
+                            column="B", start_date="2019-01-01", end_date="2019-01-02"
+                        ),
+                    ),
+                )
             ],
         )
         assert five_min_data.loc["2018-12-31", "U"].notna().all()
@@ -144,40 +152,40 @@ class TestOverlapGuard:
 
     def test_same_day_abutment_raises_clear_error(self, sample_data):
         cals = [
-            {
-                "column": "CM3Up_Wm2_Avg",
-                "start_date": "2018-06-01",
-                "end_date": "2018-12-31",
-                "factor": 0.5,
-                "description": "first",
-            },
-            {
-                "column": "CM3Up_Wm2_Avg",
-                "start_date": "2018-12-31",
-                "end_date": "2019-06-01",
-                "factor": 0.9,
-                "description": "second",
-            },
+            CalibrationRecord(
+                column="CM3Up_Wm2_Avg",
+                start_date="2018-06-01",
+                end_date="2018-12-31",
+                factor=0.5,
+                description="first",
+            ),
+            CalibrationRecord(
+                column="CM3Up_Wm2_Avg",
+                start_date="2018-12-31",
+                end_date="2019-06-01",
+                factor=0.9,
+                description="second",
+            ),
         ]
         with pytest.raises(ValueError, match=r"Overlapping calibrations.*2018-12-31"):
             apply_calibrations(sample_data, cals)
 
     def test_next_day_abutment_is_clean(self, sample_data):
         cals = [
-            {
-                "column": "CM3Up_Wm2_Avg",
-                "start_date": "2018-06-01",
-                "end_date": "2018-12-31",
-                "factor": 0.5,
-                "description": "first",
-            },
-            {
-                "column": "CM3Up_Wm2_Avg",
-                "start_date": "2019-01-01",
-                "end_date": "2019-06-01",
-                "factor": 0.9,
-                "description": "second",
-            },
+            CalibrationRecord(
+                column="CM3Up_Wm2_Avg",
+                start_date="2018-06-01",
+                end_date="2018-12-31",
+                factor=0.5,
+                description="first",
+            ),
+            CalibrationRecord(
+                column="CM3Up_Wm2_Avg",
+                start_date="2019-01-01",
+                end_date="2019-06-01",
+                factor=0.9,
+                description="second",
+            ),
         ]
         original = sample_data["CM3Up_Wm2_Avg"].copy()
         apply_calibrations(sample_data, cals)
@@ -190,13 +198,17 @@ class TestOverlapGuard:
     def test_unify_same_day_abutment_raises(self, sample_data):
         df = sample_data.rename(columns={"CM3Up_Wm2_Avg": "sensor_A", "PSP1_Wm2_Avg": "sensor_B"})
         switches = [
-            {
-                "unified_name": "unified",
-                "mappings": [
-                    {"column": "sensor_A", "start_date": "2018-06-01", "end_date": "2018-12-31"},
-                    {"column": "sensor_B", "start_date": "2018-12-31", "end_date": "2019-06-01"},
-                ],
-            }
+            SensorSwitch(
+                unified_name="unified",
+                mappings=(
+                    DatedColumnRecord(
+                        column="sensor_A", start_date="2018-06-01", end_date="2018-12-31"
+                    ),
+                    DatedColumnRecord(
+                        column="sensor_B", start_date="2018-12-31", end_date="2019-06-01"
+                    ),
+                ),
+            )
         ]
         with pytest.raises(ValueError, match="Overlapping sensor-switch mappings"):
             unify_sensor_columns(df, switches)
@@ -219,21 +231,21 @@ class TestARecordThatClosesBeforeTheDataBegins:
         return pd.DataFrame({"CMP21_Wm2_Avg": np.full(48, 100.0)}, index=index)
 
     def test_the_empty_record_does_not_raise_a_spurious_overlap(self) -> None:
-        calibrations: list[dict[str, Any]] = [
+        calibrations: list[CalibrationRecord] = [
             # Closes six years before this frame starts: empty here.
-            {
-                "column": "CMP21_Wm2_Avg",
-                "end_date": "2019-10-12",
-                "factor": None,
-                "description": "not installed yet",
-            },
+            CalibrationRecord(
+                column="CMP21_Wm2_Avg",
+                end_date="2019-10-12",
+                factor=None,
+                description="not installed yet",
+            ),
             # The one that actually applies.
-            {
-                "column": "CMP21_Wm2_Avg",
-                "start_date": "2019-10-13",
-                "factor": 0.985,
-                "description": "sensitivity correction",
-            },
+            CalibrationRecord(
+                column="CMP21_Wm2_Avg",
+                start_date="2019-10-13",
+                factor=0.985,
+                description="sensitivity correction",
+            ),
         ]
 
         result = apply_calibrations(self._frame().copy(), calibrations)
@@ -245,20 +257,20 @@ class TestARecordThatClosesBeforeTheDataBegins:
         """The guard must not be weakened: two records that really do cover the
         same day are still a configuration error."""
         # Both resolve to real intervals inside the 48-hour frame, sharing 2025-05-14.
-        calibrations: list[dict[str, Any]] = [
-            {
-                "column": "CMP21_Wm2_Avg",
-                "start_date": "2025-05-14",
-                "end_date": "2025-05-14",
-                "factor": 1.0,
-                "description": "a",
-            },
-            {
-                "column": "CMP21_Wm2_Avg",
-                "start_date": "2025-05-14",
-                "factor": 2.0,
-                "description": "b",
-            },
+        calibrations: list[CalibrationRecord] = [
+            CalibrationRecord(
+                column="CMP21_Wm2_Avg",
+                start_date="2025-05-14",
+                end_date="2025-05-14",
+                factor=1.0,
+                description="a",
+            ),
+            CalibrationRecord(
+                column="CMP21_Wm2_Avg",
+                start_date="2025-05-14",
+                factor=2.0,
+                description="b",
+            ),
         ]
 
         with pytest.raises(ValueError, match="Overlapping"):
@@ -301,10 +313,10 @@ class TestACalibrationSurvivesAColumnRename:
         records = load_calibrations(path)
 
         factors = {
-            record["column"]: record["factor"]
+            record.column: record.factor
             for record in records
-            if record["column"] in {"PSP1_Wm2_Avg", "PSP_Wm2_Avg"}
-            and record.get("start_date", "") >= "2019"
+            if record.column in {"PSP1_Wm2_Avg", "PSP_Wm2_Avg"}
+            and (record.start_date or "") >= "2019"
         }
 
         assert "PSP_Wm2_Avg" in factors, "the renamed channel carries no calibration"
@@ -316,14 +328,14 @@ class TestACalibrationSurvivesAColumnRename:
         """'Declared' and 'applied' must be distinguishable in the output."""
         index = pd.date_range("2025-01-01", periods=4, freq="h")
         frame = pd.DataFrame({"PSP_Wm2_Avg": [1.0, 2.0, 3.0, 4.0]}, index=index)
-        records: list[dict[str, Any]] = [
-            {
-                "column": "PSP_Wm2_Avg",
-                "start_date": "2019-01-01",
-                "end_date": "2019-12-31",
-                "factor": 2.0,
-                "description": "window with no data here",
-            }
+        records: list[CalibrationRecord] = [
+            CalibrationRecord(
+                column="PSP_Wm2_Avg",
+                start_date="2019-01-01",
+                end_date="2019-12-31",
+                factor=2.0,
+                description="window with no data here",
+            )
         ]
 
         with caplog.at_level("WARNING"):
@@ -349,21 +361,25 @@ class TestUncalibratedMappingWindows:
         return pd.DataFrame({"PSP1_Wm2_Avg": 1.0, "Temp1_Avg": 25.0}, index=index)
 
     @staticmethod
-    def _switches() -> list[dict[str, Any]]:
+    def _switches() -> list[SensorSwitch]:
         return [
-            {
-                "unified_name": "Sw_dw",
-                "mappings": [{"column": "PSP1_Wm2_Avg", "start_date": None, "end_date": None}],
-            },
-            {
-                "unified_name": "T",
-                "mappings": [{"column": "Temp1_Avg", "start_date": None, "end_date": None}],
-            },
+            SensorSwitch(
+                unified_name="Sw_dw",
+                mappings=(
+                    DatedColumnRecord(column="PSP1_Wm2_Avg", start_date=None, end_date=None),
+                ),
+            ),
+            SensorSwitch(
+                unified_name="T",
+                mappings=(DatedColumnRecord(column="Temp1_Avg", start_date=None, end_date=None),),
+            ),
         ]
 
     def test_the_half_covered_window_is_reported(self):
         calibrations = [
-            {"column": "PSP1_Wm2_Avg", "start_date": "2018-01-01", "end_date": None, "factor": 0.94}
+            CalibrationRecord(
+                column="PSP1_Wm2_Avg", start_date="2018-01-01", end_date=None, factor=0.94
+            )
         ]
 
         gaps = uncalibrated_mapping_windows(self._frame(), calibrations, self._switches())
@@ -381,25 +397,25 @@ class TestUncalibratedMappingWindows:
         non-findings.
         """
         calibrations = [
-            {"column": "PSP1_Wm2_Avg", "start_date": None, "end_date": None, "factor": 0.94}
+            CalibrationRecord(column="PSP1_Wm2_Avg", start_date=None, end_date=None, factor=0.94)
         ]
 
         assert uncalibrated_mapping_windows(self._frame(), calibrations, self._switches()) == []
 
     def test_a_hole_between_two_records_is_reported(self):
         calibrations = [
-            {
-                "column": "PSP1_Wm2_Avg",
-                "start_date": None,
-                "end_date": "2016-12-31",
-                "factor": 0.94,
-            },
-            {
-                "column": "PSP1_Wm2_Avg",
-                "start_date": "2018-01-01",
-                "end_date": None,
-                "factor": 1.09,
-            },
+            CalibrationRecord(
+                column="PSP1_Wm2_Avg",
+                start_date=None,
+                end_date="2016-12-31",
+                factor=0.94,
+            ),
+            CalibrationRecord(
+                column="PSP1_Wm2_Avg",
+                start_date="2018-01-01",
+                end_date=None,
+                factor=1.09,
+            ),
         ]
 
         gaps = uncalibrated_mapping_windows(self._frame(), calibrations, self._switches())
@@ -411,19 +427,128 @@ class TestUncalibratedMappingWindows:
 
     def test_a_null_factor_record_counts_as_covered(self):
         """`factor: null` is a decision about the window, not an absence of one."""
-        calibrations: list[dict[str, Any]] = [
-            {
-                "column": "PSP1_Wm2_Avg",
-                "start_date": None,
-                "end_date": "2017-12-31",
-                "factor": None,
-            },
-            {
-                "column": "PSP1_Wm2_Avg",
-                "start_date": "2018-01-01",
-                "end_date": None,
-                "factor": 0.94,
-            },
+        calibrations: list[CalibrationRecord] = [
+            CalibrationRecord(
+                column="PSP1_Wm2_Avg",
+                start_date=None,
+                end_date="2017-12-31",
+                factor=None,
+            ),
+            CalibrationRecord(
+                column="PSP1_Wm2_Avg",
+                start_date="2018-01-01",
+                end_date=None,
+                factor=0.94,
+            ),
         ]
 
         assert uncalibrated_mapping_windows(self._frame(), calibrations, self._switches()) == []
+
+
+class TestShadeRingCorrection:
+    """O anel de sombreamento oculta parte do domo, e a difusa medida sob ele subestima.
+
+    Medido neste acervo antes da correção: a fração difusa satura em 0,81 sob céu
+    encoberto (Kt < 0,10), quando a física exige que tenda a 1. Com o fator
+    geométrico aplicado ela vai a 0,97.
+    """
+
+    @staticmethod
+    def _fatores(stamps: pd.DatetimeIndex, valor: float = 1.2) -> pd.Series:
+        return pd.Series([valor] * len(stamps), index=stamps)
+
+    def test_a_difusa_dentro_da_janela_e_escalada(self) -> None:
+        stamps = pd.DatetimeIndex(["2021-06-15 12:00"])
+        frame = pd.DataFrame({"CMP21_Wm2_Avg": [100.0]}, index=stamps)
+        janelas = [("CMP21_Wm2_Avg", pd.Timestamp("2020-06-01"), pd.Timestamp("2025-03-12"))]
+
+        corrigido, contagem = calibration.apply_shade_ring_correction(
+            frame, self._fatores(stamps), janelas
+        )
+
+        assert corrigido["CMP21_Wm2_Avg"].iloc[0] == pytest.approx(120.0)
+        assert contagem == {"CMP21_Wm2_Avg": 1}
+
+    def test_a_mesma_coluna_fora_da_janela_fica_intocada(self) -> None:
+        """Fora da janela o instrumento mede o GLOBAL, e escalá-lo corromperia Sw_dw."""
+        stamps = pd.DatetimeIndex(["2017-06-15 12:00"])
+        frame = pd.DataFrame({"PSP_Wm2_Avg": [800.0]}, index=stamps)
+        janelas = [("PSP_Wm2_Avg", pd.Timestamp("2025-05-14"), pd.Timestamp("2026-08-15"))]
+
+        corrigido, contagem = calibration.apply_shade_ring_correction(
+            frame, self._fatores(stamps), janelas
+        )
+
+        assert corrigido["PSP_Wm2_Avg"].iloc[0] == pytest.approx(800.0)
+        assert contagem == {}
+
+    def test_fator_ausente_levanta_em_vez_de_apagar_a_medida(self) -> None:
+        """Um fator ausente que virasse NaN apagaria a difusa em silêncio."""
+        stamps = pd.DatetimeIndex(["2021-06-15 12:00"])
+        frame = pd.DataFrame({"CMP21_Wm2_Avg": [100.0]}, index=stamps)
+        janelas = [("CMP21_Wm2_Avg", pd.Timestamp("2020-06-01"), pd.Timestamp("2025-03-12"))]
+        vazios = pd.Series(dtype="float64", index=pd.DatetimeIndex([]))
+
+        with pytest.raises(calibration.MissingShadeRingFactorError):
+            calibration.apply_shade_ring_correction(frame, vazios, janelas)
+
+    def test_uma_hora_sem_difusa_nao_exige_fator(self) -> None:
+        stamps = pd.DatetimeIndex(["2021-06-15 12:00"])
+        frame = pd.DataFrame({"CMP21_Wm2_Avg": [float("nan")]}, index=stamps)
+        janelas = [("CMP21_Wm2_Avg", pd.Timestamp("2020-06-01"), pd.Timestamp("2025-03-12"))]
+        vazios = pd.Series(dtype="float64", index=pd.DatetimeIndex([]))
+
+        _corrigido, contagem = calibration.apply_shade_ring_correction(frame, vazios, janelas)
+
+        assert contagem == {}
+
+
+class TestSolarGeometryParquet:
+    """The lab's 203 MB CSV, rewritten in the shape the rest of the archive uses.
+
+    Measured on the real table: 29 MB against 203, and 0.037 s against 1.42 s to
+    answer for one column — which the hourly window job pays every run.
+    """
+
+    @staticmethod
+    def _csv(path: Path) -> Path:
+        path.write_text(
+            "lon,lat,ano_i,mes_i,dia_i,hor_i,min_i,oc_topo,fc\n"
+            "-38.5,-13.0,2026,8,15,12,0,1200.5,1.1802\n"
+            "-38.5,-13.0,2026,8,15,12,5,1201.0,1.1803\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_the_derived_table_carries_the_factor_unchanged(self, tmp_path) -> None:
+        """``fc`` multiplies the measured diffuse, so single precision is not an
+        option: its 5.4e-08 relative error would move every corrected value."""
+        origem = self._csv(tmp_path / calibration.SHADE_RING_FACTOR_FILE)
+        destino = tmp_path / calibration.SHADE_RING_FACTOR_PARQUET
+
+        calibration.solar_geometry_to_parquet(origem, destino)
+        derivado = pd.read_parquet(destino)
+
+        assert derivado["fc"].tolist() == [1.1802, 1.1803]
+        assert derivado.index.tolist() == [
+            pd.Timestamp("2026-08-15 12:00"),
+            pd.Timestamp("2026-08-15 12:05"),
+        ]
+
+    def test_the_loader_prefers_the_derived_table(self, tmp_path) -> None:
+        origem = self._csv(tmp_path / calibration.SHADE_RING_FACTOR_FILE)
+        calibration.solar_geometry_to_parquet(
+            origem, tmp_path / calibration.SHADE_RING_FACTOR_PARQUET
+        )
+        origem.unlink()
+
+        fatores = calibration.load_shade_ring_factors(origem)
+
+        assert fatores.tolist() == [1.1802, 1.1803]
+
+    def test_the_csv_remains_the_fallback(self, tmp_path) -> None:
+        origem = self._csv(tmp_path / calibration.SHADE_RING_FACTOR_FILE)
+
+        fatores = calibration.load_shade_ring_factors(origem)
+
+        assert fatores.tolist() == [1.1802, 1.1803]

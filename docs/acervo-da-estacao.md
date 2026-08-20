@@ -113,13 +113,13 @@ passarem desapercebidos:
 |---|---|---|---|---|
 | `Lw_dw` | 975,129 | 93.9% | 57 dias | 2018-08-20 23:55 |
 | `Lw_up` | 785,257 | 95.3% | 17 dias | 2019-02-26 09:30 |
-| `Net_CNR1` | 783,548 | 95.1% | 17 dias | 2019-02-26 09:30 |
+| `Net_CNR1` | 780,993 | 94.8% | 17 dias | 2019-02-26 09:35 |
 | `Net_NRLite` | 481,458 | 82.8% | 206 dias | 2018-08-20 23:55 |
-| `Sw_dif` | 720,751 | 88.3% | 87 dias | 2020-03-05 23:55 |
-| `Sw_dw` | 986,659 | 95.0% | 57 dias | 2018-08-20 23:55 |
-| `Sw_par` | 933,288 | 89.8% | 113 dias | 2017-05-18 10:00 |
-| `Sw_up` | 798,416 | 96.9% | 17 dias | 2019-02-26 09:30 |
-| `Sw_uv` | 142,724 | 96.3% | 10 dias | 2026-04-14 05:45 |
+| `Sw_dif` ¹ | 359,022 | 88.1% | 87 dias | 2020-03-06 |
+| `Sw_dw` ¹ | 489,924 | 94.4% | 56 dias | 2018-08-21 |
+| `Sw_par` ¹ | 457,794 | 88.2% | 112 dias | 2017-05-19 |
+| `Sw_up` ¹ | 398,179 | 96.7% | 16 dias | 2019-02-27 |
+| `Sw_uv` ¹ | 70,467 | 96.4% | 9 dias | 2026-04-15 |
 | `T` | 906,939 | 89.8% | 112 dias | 2024-11-27 05:45 |
 | `Tbody` | 988,815 | 95.2% | 56 dias | 2018-08-21 08:25 |
 | `Td` | 79,292 | 66.5% | 67 dias | 2025-12-21 18:50 |
@@ -133,6 +133,24 @@ A cobertura é medida contra a grade de 5 minutos entre a primeira e a última
 amostra de cada variável, no frame com controle de qualidade aplicado — ou seja,
 já descontando o que o QC removeu. `docs/controle-de-qualidade.md` descreve o que
 cada etapa remove e por quê.
+
+¹ **Onda curta: contada só no dia.** A partir de `mask_nocturnal_shortwave` a hora
+noturna não existe nestes canais — um piranômetro com o sol abaixo do horizonte
+reporta o próprio offset térmico, não um fluxo — então tanto as amostras quanto o
+denominador cobrem apenas os instantes com o sol acima do horizonte. É por isso que
+a contagem de amostras destas cinco linhas é cerca de metade da das demais enquanto
+a cobertura permanece comparável: o que saiu foi a noite, dos dois lados da fração.
+A lacuna destas linhas é medida em dias corridos sem nenhuma amostra diurna válida,
+não em minutos consecutivos ausentes, que para um canal sem noite contaria cada
+madrugada como interrupção. `Net_CNR1` cai de 783,548 para 780,993 porque o piso
+BSRN e a regra de sinal, ao rejeitarem um componente, rejeitam o saldo derivado
+dele. `Sw_par` cai 1,5 pp a mais que os outros canais porque carregava 7,812
+zeros exatos em pleno dia — sensor quântico lendo nada com o sol acima do
+horizonte.
+
+Médias de onda curta calculadas sobre este acervo são médias **diurnas** e não são
+comparáveis a médias de 24 h publicadas antes desta mudança; um total diário de
+insolação exige repor as horas noturnas como zero antes de integrar.
 
 ---
 

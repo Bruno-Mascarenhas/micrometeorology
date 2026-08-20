@@ -131,11 +131,11 @@ def test_the_gates_keep_only_daylight_hours_with_a_physical_ratio():
         _daylight_frame(), site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
     )
 
-    assert len(prepared["kt"]) > 0
-    assert prepared["kt"].between(0.0, ktkd.MAX_RATIO).all()
-    assert prepared["kd"].between(0.0, ktkd.MAX_RATIO).all()
-    assert len(prepared["ast"]) == len(prepared["kt"])
-    assert len(prepared["psi"]) == len(prepared["kt"])
+    assert len(prepared.kt) > 0
+    assert prepared.kt.between(0.0, ktkd.MAX_RATIO).all()
+    assert prepared.kd.between(0.0, ktkd.MAX_RATIO).all()
+    assert len(prepared.ast) == len(prepared.kt)
+    assert len(prepared.psi) == len(prepared.kt)
 
 
 def test_the_payload_declares_the_published_schema_and_both_model_kinds():
@@ -144,8 +144,8 @@ def test_the_payload_declares_the_published_schema_and_both_model_kinds():
     prepared = ktkd.prepare_ktkd(
         _daylight_frame(), site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
     )
-    kt, kd = prepared["kt"], prepared["kd"]
-    predictors = (prepared["ast"], prepared["elevation"], prepared["daily_kt"], prepared["psi"])
+    kt, kd = prepared.kt, prepared.kd
+    predictors = (prepared.ast, prepared.elevation, prepared.daily_kt, prepared.psi)
     edges = np.round(np.arange(0.0, 1.02, 0.02), 2)
 
     payload = ktkd.build_ktkd_payload(
@@ -161,7 +161,7 @@ def test_the_payload_declares_the_published_schema_and_both_model_kinds():
         kd_edges=edges,
         station={"name": "LabMiM"},
         sources=["station_hourly.parquet"],
-        filters=prepared["filters"],
+        filters=prepared.filters,
         caveats=["teste"],
         version="t",
     )
@@ -194,11 +194,11 @@ def test_the_published_payload_carries_no_non_finite_number():
     prepared = ktkd.prepare_ktkd(
         _daylight_frame(), site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
     )
-    kt = prepared["kt"]
+    kt = prepared.kt
     edges = np.round(np.arange(0.0, 1.02, 0.02), 2)
     payload = ktkd.build_ktkd_payload(
         kt,
-        prepared["kd"],
+        prepared.kd,
         models={"marques_filho_2016": ktkd.marques_filho_2016(kt.to_numpy())},
         sky_conditions=sky_condition_summary(kt.to_numpy()),
         kt_edges=edges,

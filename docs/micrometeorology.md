@@ -808,9 +808,78 @@ labmim-monitoring -i output/archive -o ../site-labmim/site/Monitoramento \
     -w data/series/labmim_series_operacional.dat
 ```
 
+**It reads the archive; it does not build it.** `-i` points at the directory
+`labmim-archive` wrote, and the command loads `station_5min_qc.parquet` and
+`station_hourly.parquet` from there — never `station_5min_raw.parquet`, so no
+ungated sample reaches the page. The window is anchored on the newest sample IN
+THAT ARCHIVE, not on the server clock, which makes the order mandatory for any
+scheduled run:
+
+For an hourly job, re-merging ten years to publish seven days is the wrong unit
+of work. `labmim-archive --source` builds the window straight from the tables the
+datalogger is writing now, skipping the manifest and the audit comparison, and
+running the SAME quality-control chain — there is no second copy of it:
+
+```bash
+labmim-archive --source data/LBM_lenta_2025.dat --source data/LBM_rain_2025.dat \
+    -d data -o /var/tmp/labmim-janela
+labmim-monitoring -i /var/tmp/labmim-janela -o ../site-labmim/site/Monitoramento
+```
+
+Both `--source` files matter: the rain table is where `precip` comes from, and
+the precipitation card is one of the nine. `-d` still points at `data/` because
+the shade-ring factors are read from the solar-geometry table there.
+
+That table ships as a 203 MB CSV whose five leading integer columns spell out a
+timestamp, and the pipeline reads six of its twenty columns. Rewritten once in
+the shape the rest of the archive uses — one `DatetimeIndex` in naive local time,
+`float64`, zstd — it is 29 MB and answers in 0.037 s against 1.42 s:
+
+```bash
+uv run python scripts/converter_teorica.py --data data
+```
+
+`load_shade_ring_factors` prefers `teorica_2016-2030.parquet` when it sits beside
+the CSV and falls back to the CSV otherwise, so the step is an optimisation and
+never a prerequisite. The CSV stays the source of truth and is not modified. Run
+it once per machine, and again whenever the lab replaces the CSV — on the server
+it takes the window build from 3.6 s to **2.2 s** and its peak from 563 MB to
+473 MB, and leaves the published archive byte for byte identical.
+
+`float64` rather than `float32` is deliberate. Single precision would shrink the
+file by a further 3 MB and introduce a 5.4e-08 relative error in `fc`, which
+multiplies the measured diffuse — every corrected value in the archive would move.
+
+Measured on this archive, the window pair costs **3.6 s and 0.9 s with a 563 MB
+peak**, against **18.9 s and 0.9 s with a 4.7 GB peak** for the full rebuild —
+and the payload is identical field for field. The live tables carry 458 days,
+far more lead-in than the three hours `mask_persistent_runs` needs to judge a
+rail that began before the window.
+
+The full rebuild stays the right command for the record itself — it is what runs
+the manifest, the audit comparison and the whole-record detectors — but it
+belongs on a daily or on-demand schedule, not hourly:
+
+```bash
+labmim-archive -d data -o output/archive --strict
+```
+
+The window mode skips what a seven-day slice cannot answer: `verify_frame`
+compares against constants measured over the whole record, and the absent-column
+warning is expected there, since the live table carries 35 columns against the
+88 the historical eras used together. Whatever the mode, running
+`labmim-monitoring` without rebuilding first regenerates the payload from the
+same seven days for ever: the page keeps rendering, the timestamps never
+advance, and nothing errors.
+
+The QC is not re-applied here; it is inherited, and it is genuinely in the window
+rather than only in the history. Measured over one seven-day window, the raw
+barometer carried 2,017 samples and 436 survived to the payload.
+
 One JSON carries all nine charts in the three layers the researcher asked for —
-the raw 5-minute samples, the hourly means over them, and the WRF series where
-the model has that variable. About 133 kB for a fully instrumented week, against
+the five-minute samples, the hourly means over them, and the WRF series where
+the model has that variable. The five-minute layer is labelled "raw" for its
+RESOLUTION, not its provenance: it is `station_5min_qc`, after every gate. About 133 kB for a fully instrumented week, against
 the ~380 kB of PNGs it replaces, and it arrives as numbers the reader can hover,
 toggle and download. The time axis is published as `start` + `step_minutes` +
 `count` instead of one stamp per sample; that alone is worth ~50 kB.

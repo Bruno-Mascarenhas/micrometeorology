@@ -8,6 +8,12 @@ The artifacts are **not** committed to the site repository: they derive from the
 laboratory's non-public sensor archive, so like the WRF map data they are
 gitignored there and attached at deploy time.
 
+The hourly database and the WRF series both enter as naive station-local stamps,
+each carrying its instrument's own clock. This module is the manifest boundary:
+the ``UTC-03`` it stamps into the published artifacts comes from the pinned
+:data:`~micrometeorology.common.site.STATION_UTC_OFFSET_HOURS`, never from the
+host's zone.
+
 Examples
 --------
 Publish straight into a checkout of the site::

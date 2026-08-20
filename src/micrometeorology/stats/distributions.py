@@ -124,6 +124,14 @@ _MAX_SHAPE = 1e4
 # precision, so the cap is not an approximation of anything representable.
 _LOG_MAX_DOUBLE = float(np.log(np.finfo(float).max))
 
+# Denominators of the gaussian-mixture EM step. The first is the smallest
+# positive normal double, so dividing by it cannot overflow while a genuinely
+# zero mass still yields a finite value; the second floors the variance, which
+# carries the square of the variable's own unit, at a sigma of 1e-6 in that unit
+# so a component collapsed onto a single sample cannot divide by zero.
+_DENSITY_FLOOR = 1e-300
+_VARIANCE_FLOOR = 1e-12
+
 # Bracket for the Hollands-Huget lambda. The density is monotone in lambda and
 # the physically meaningful range is roughly [-20, 20]; the wider bracket costs
 # a few bisection steps and never binds on real data.
@@ -892,15 +900,15 @@ def _em_normal_mixture(sample: NDArray, components: int) -> dict[str, list[float
         # A point can sit far from every component early on; sharing it equally
         # keeps the responsibilities a probability instead of producing NaN.
         responsibility = np.where(
-            total > 0.0, densities / np.maximum(total, 1e-300), 1.0 / components
+            total > 0.0, densities / np.maximum(total, _DENSITY_FLOOR), 1.0 / components
         )
         mass = responsibility.sum(axis=0)
         weights = mass / values.size
-        means = (responsibility * values[:, None]).sum(axis=0) / np.maximum(mass, 1e-300)
+        means = (responsibility * values[:, None]).sum(axis=0) / np.maximum(mass, _DENSITY_FLOOR)
         variance = (responsibility * (values[:, None] - means) ** 2).sum(axis=0) / np.maximum(
-            mass, 1e-300
+            mass, _DENSITY_FLOOR
         )
-        sigmas = np.sqrt(np.maximum(variance, 1e-12))
+        sigmas = np.sqrt(np.maximum(variance, _VARIANCE_FLOOR))
 
     order = np.argsort(means)
     return {

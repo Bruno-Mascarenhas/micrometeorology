@@ -9,6 +9,10 @@ Lemos et al. (2017) and the BRL of Ridley, Boland & Lauret (2010) read four more
 predictors, so at one Kt they predict a spread: they are drawn as a median with a
 p10-p90 envelope, never as a line.
 
+The hourly database read here is indexed by naive station-local stamps, from the
+datalogger's own clock; the solar geometry takes its offset from the pinned
+``STATION_UTC_OFFSET_HOURS`` rather than the host's zone.
+
 Usage
 -----
 ::
@@ -17,10 +21,9 @@ Usage
         -i output/archive/station_hourly.parquet -o output/figures/
 """
 
-import argparse
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import matplotlib
 
@@ -28,12 +31,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import typer
 from matplotlib.colors import LogNorm
 
 from micrometeorology.common.git import run_git, source_root
 from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.stats import ktkd as ktkd_stats
 from micrometeorology.stats.sky_condition import sky_condition_summary
+
+app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +73,11 @@ def build_figure(hourly: pd.DataFrame) -> tuple[plt.Figure, dict[str, Any]]:
     prepared = ktkd_stats.prepare_ktkd(
         hourly, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
     )
-    kt, kd = prepared["kt"], prepared["kd"]
+    kt, kd = prepared.kt, prepared.kd
     if kt.empty:
         raise ValueError("no Kt-Kd pair survived the gates; nothing to plot")
 
-    predictors = (prepared["ast"], prepared["elevation"], prepared["daily_kt"], prepared["psi"])
+    predictors = (prepared.ast, prepared.elevation, prepared.daily_kt, prepared.psi)
     predictions = {
         "marques_filho_2016": ktkd_stats.marques_filho_2016(kt.to_numpy()),
         "lemos_2017": ktkd_stats.lemos_2017(kt.to_numpy(), *predictors),
@@ -163,16 +169,21 @@ def render(input_path: Path, output_dir: Path) -> Path:
     return destination
 
 
-def main() -> None:
-    """Parse the arguments and render the figure."""
+@app.command()
+def run(
+    input_path: Annotated[Path, typer.Option("-i", "--input", help="Hourly parquet database.")],
+    output_dir: Annotated[Path, typer.Option("-o", "--output", help="Directory for the PNG.")],
+) -> None:
+    """Render the figure for the hourly database into the output directory."""
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
     )
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-i", "--input", type=Path, required=True, help="Hourly parquet database.")
-    parser.add_argument("-o", "--output", type=Path, required=True, help="Directory for the PNG.")
-    arguments = parser.parse_args()
-    render(arguments.input, arguments.output)
+    render(input_path, output_dir)
+
+
+def main() -> None:
+    """Entry point for ``python scripts/plot_ktkd.py``."""
+    app()
 
 
 if __name__ == "__main__":

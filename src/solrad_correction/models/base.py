@@ -17,7 +17,7 @@ from solrad_correction.datasets.tabular import TabularDataset
 from solrad_correction.evaluation.metrics import REGRESSION_METRICS, MetricFn
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TrainingResult:
     """Result of a model training session.
 

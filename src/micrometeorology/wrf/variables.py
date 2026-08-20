@@ -25,7 +25,13 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from allsky.solar import SOLAR_CONSTANT_WM2, eccentricity_correction
-from micrometeorology.common.physics import STEFAN_BOLTZMANN
+from micrometeorology.common.physics import (
+    KELVIN_AT_ZERO_CELSIUS,
+    PASCAL_PER_HECTOPASCAL,
+    STEFAN_BOLTZMANN,
+    saturation_vapor_pressure,
+    vapor_pressure,
+)
 from micrometeorology.wrf.reader import WRFDataset
 from micrometeorology.wrf.safety import assert_reasonable_array_size
 
@@ -144,15 +150,15 @@ def extract_temperature(ds: WRFDataset) -> tuple[NDArray, float, float]:
     t2 = ds.get_variable("T2")
 
     t_min, t_max = percentile_scale_bounds(t2)
-    t_min -= 273.15
-    t_max -= 273.15
+    t_min -= KELVIN_AT_ZERO_CELSIUS
+    t_max -= KELVIN_AT_ZERO_CELSIUS
 
     return t2, t_min, t_max
 
 
 def extract_temperature_step(t2_step: NDArray) -> NDArray:
     """Convert a single time-step of T2 from Kelvin to Celsius."""
-    return squeeze_array(t2_step) - 273.15
+    return squeeze_array(t2_step) - KELVIN_AT_ZERO_CELSIUS
 
 
 def extract_skin_temperature(ds: WRFDataset) -> tuple[NDArray, float, float]:
@@ -164,14 +170,18 @@ def extract_skin_temperature(ds: WRFDataset) -> tuple[NDArray, float, float]:
     """
     tsk = ds.get_variable("TSK")
     t_min, t_max = percentile_scale_bounds(tsk)
-    return tsk, t_min - 273.15, t_max - 273.15
+    return tsk, t_min - KELVIN_AT_ZERO_CELSIUS, t_max - KELVIN_AT_ZERO_CELSIUS
 
 
 def extract_pressure(ds: WRFDataset) -> tuple[NDArray, float, float]:
     """Extract surface pressure (hPa)."""
     psfc = ds.get_variable("PSFC")
     p_min, p_max = percentile_scale_bounds(psfc)
-    return psfc / 100.0, p_min / 100.0, p_max / 100.0
+    return (
+        psfc / PASCAL_PER_HECTOPASCAL,
+        p_min / PASCAL_PER_HECTOPASCAL,
+        p_max / PASCAL_PER_HECTOPASCAL,
+    )
 
 
 def extract_vapor(ds: WRFDataset) -> tuple[NDArray, float, float]:
@@ -188,19 +198,20 @@ def compute_relative_humidity(q2: NDArray, t2: NDArray, psfc: NDArray) -> NDArra
     """Compute 2-m relative humidity from ``Q2`` (kg/kg), ``T2`` (K) and ``PSFC`` (Pa).
 
     Formula
-        ``100 * e / es`` with vapor pressure ``e = q * p / (epsilon + q)``,
-        ``epsilon = 0.622`` — that denominator assumes Q2 is a mixing ratio,
-        matching WRF's QV convention — over the Bolton/Tetens saturation
-        ``es = 611.2 * exp(17.67 * Tc / (Tc + 243.5))``.
+        ``100 * e / es``, with both terms from
+        :mod:`micrometeorology.common.physics`: the mixing-ratio vapour pressure
+        — that denominator assumes Q2 is a mixing ratio, matching WRF's QV
+        convention — over the Bolton saturation. The point extraction of the
+        operational record reads the same two functions, so the mapped field and
+        the published series cannot drift apart.
     Output
         Percent, clipped to the physical display range 0-100%.
     """
-    epsilon = 0.622
-    temp_c = t2 - 273.15
-    vapor_pressure = q2 * psfc / (epsilon + q2)
-    saturation_pressure = 611.2 * np.exp((17.67 * temp_c) / (temp_c + 243.5))
+    temp_c = t2 - KELVIN_AT_ZERO_CELSIUS
+    vapor_pressure_pa = vapor_pressure(q2, psfc)
+    saturation_pressure_pa = saturation_vapor_pressure(temp_c)
     with np.errstate(invalid="ignore", divide="ignore"):
-        rh = 100.0 * (vapor_pressure / saturation_pressure)
+        rh = 100.0 * (vapor_pressure_pa / saturation_pressure_pa)
     clipped: NDArray = np.clip(rh, 0.0, 100.0)
     return clipped
 

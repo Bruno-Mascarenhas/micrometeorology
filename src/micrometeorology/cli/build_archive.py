@@ -49,31 +49,41 @@ from micrometeorology.sensors.archive import (
     LENTA_MANIFEST,
     NIGHT_CORRUPTION_CHANNELS,
     NIGHT_CORRUPTION_FLUX_WM2,
+    NOCTURNAL_SHORTWAVE_CHANNELS,
     RAIN_MANIFEST,
     STATUS_COLUMNS,
+    UNGATED_RADIATION_TWINS,
     ArchiveReport,
     blocked_gauge_runs,
     build_five_minute_frame,
     close_net_radiation,
+    close_nocturnal_net_radiation,
     mask_impossible_shortwave,
     mask_night_corrupted_days,
+    mask_nocturnal_shortwave,
     mask_sentinels,
     months_never_reaching_saturation,
     night_corrupted_days,
+    nocturnal_offset_statistics,
+    station_elevation_deg,
     unquantised_rain_samples,
     unshaded_diffuse_days,
     verify_frame,
 )
 from micrometeorology.sensors.calibration import (
+    SHADE_RING_FACTOR_FILE,
     apply_calibrations,
+    apply_shade_ring_correction,
     load_calibrations,
     load_sensor_switches,
+    load_shade_ring_factors,
     resolve_mapping_windows,
     uncalibrated_mapping_windows,
     unify_sensor_columns,
 )
 from micrometeorology.sensors.ingestion import (
     apply_physical_limits,
+    merge_dat_files,
     values_outside_declared_limits,
 )
 from micrometeorology.sensors.quality import mask_persistent_runs, mask_step_excursions
@@ -138,6 +148,17 @@ def run(
             help="Exit non-zero if the merge does not reproduce the audited row counts.",
         ),
     ] = False,
+    source_files: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--source",
+            help=(
+                "Build the window from these .dat files instead of the historical "
+                "manifest. Repeatable. For the rolling monitoring window, where "
+                "re-merging ten years to publish seven days is the wrong unit of work."
+            ),
+        ),
+    ] = None,
     log_level: Annotated[str, typer.Option(help="Logging level.")] = "INFO",
 ) -> None:
     """Merge, verify and aggregate the station archive into one database.
@@ -156,19 +177,54 @@ def run(
     staging = staging_dir or (out / "_staged")
 
     typer.echo("Merge do acervo (manifesto explicito):")
-    lenta = build_five_minute_frame(LENTA_MANIFEST, data_dir, Path(staging) / "lenta")
-    rain = build_five_minute_frame(RAIN_MANIFEST, data_dir, Path(staging) / "rain")
+    if source_files:
+        # The logger's live tables, read as they are: no manifest, because the
+        # manifest is the HISTORY — every entry unique coverage or a documented
+        # repair, and it fails hard on a missing one. A rolling window is a
+        # different question, asked of the files the datalogger is writing now.
+        lenta = merge_dat_files(
+            [path for path in source_files if "lenta" in path.name.lower()],
+            text_columns=list(STATUS_COLUMNS),
+        )
+        rain_paths = [path for path in source_files if "rain" in path.name.lower()]
+        rain = (
+            merge_dat_files(rain_paths, text_columns=list(STATUS_COLUMNS))
+            if rain_paths
+            else pd.DataFrame(index=lenta.index[:0])
+        )
+        typer.echo(
+            f"Janela a partir de {len(source_files)} arquivo(s) do registrador "
+            f"(sem manifesto, sem verificacao contra a auditoria do acervo)"
+        )
+        reports = []
+    else:
+        lenta = build_five_minute_frame(LENTA_MANIFEST, data_dir, Path(staging) / "lenta")
+        rain = build_five_minute_frame(RAIN_MANIFEST, data_dir, Path(staging) / "rain")
 
-    typer.echo("\nVerificacao contra a auditoria do acervo:")
-    reports = [verify_frame(lenta, "lenta"), verify_frame(rain, "rain")]
-    for report in reports:
-        _echo_report(report)
+        typer.echo("\nVerificacao contra a auditoria do acervo:")
+        reports = [verify_frame(lenta, "lenta"), verify_frame(rain, "rain")]
+        for report in reports:
+            _echo_report(report)
 
     # The rain logger is a separate table on the same 5-minute grid: JOINED, not
     # concatenated, which would double the index.
     rain_columns = [column for column in rain.columns if column not in lenta.columns]
     raw = lenta.join(rain[rain_columns], how="outer")
     typer.echo(f"\nBase unificada de 5 min: {len(raw):,} linhas x {len(raw.columns)} colunas")
+
+    failed = [problem for report in reports for problem in report.problems]
+    if failed:
+        typer.echo(f"\n! {len(failed)} divergencia(s) em relacao a auditoria do acervo")
+        if strict:
+            raise typer.Exit(code=1)
+    elif reports:
+        typer.echo("\n>> Merge confere com a auditoria: nenhuma linha perdida ou duplicada")
+
+    # --strict sai UMA vez, no fim, depois de todos os artefatos e do manifesto.
+    # Sair no meio deixava em disco só station_5min_raw, sem o frame com QC, sem o
+    # horário e sem o relatório — justamente o que o operador precisa para
+    # diagnosticar a reprovação.
+    blocking: list[str] = []
 
     typer.echo("\nArtefatos:")
     _write(raw, out / "station_5min_raw", output_format)
@@ -193,8 +249,9 @@ def run(
         )
         for day, ratio in unshaded[:8]:
             typer.echo(f"    {day}  razao {ratio:.2f}")
-        if strict:
-            raise typer.Exit(code=1)
+        blocking.append(
+            f"{len(unshaded)} dia(s) de difusa sem sombreamento fora de INVALID_WINDOWS"
+        )
 
     # A blocked funnel and a dry spell are the same run of zeros to every gate
     # here; only the length parts them, and the curated window that covers the
@@ -213,14 +270,16 @@ def run(
     gaps: list[tuple[str, str, pd.Timestamp, pd.Timestamp]] = []
     net_gained = net_dropped = 0
     step_excursions_removed = persistence_runs_removed = 0
+    shade_ring_corrected: dict[str, int] = {}
     invalidated: dict[str, int] = {}
+    outside_after_calibration: dict[str, int] = {}
 
     if settings.sensor_limits:
         # apply_physical_limits skips a limit naming an absent column in silence,
         # so counting which gates actually FIRED is what proves the rule ran.
         before = qc.notna().sum()
         limits_absent_columns = [
-            limit["column"] for limit in settings.sensor_limits if limit["column"] not in qc.columns
+            limit.column for limit in settings.sensor_limits if limit.column not in qc.columns
         ]
         qc = apply_physical_limits(qc, settings.sensor_limits)
         cut = before - qc.notna().sum()
@@ -236,8 +295,7 @@ def run(
                 f"  ! {len(limits_absent_columns)} limite(s) nomeiam coluna ausente: "
                 f"{', '.join(limits_absent_columns[:6])}"
             )
-            if strict:
-                raise typer.Exit(code=1)
+            blocking.append(f"{len(limits_absent_columns)} limite(s) nomeiam coluna ausente")
     calibrations_path = settings.configs_dir / "calibrations.yaml"
     sources: dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]] = {}
     if calibrations_path.is_file():
@@ -250,6 +308,24 @@ def run(
             for column, count in (before_calibration - qc.notna().sum()).items()
             if int(count) > 0
         }
+        switches = load_sensor_switches(calibrations_path)
+        # Resolved once, before the copy: the windows are read off the RAW columns
+        # and the frame's own bounds, neither of which unification changes.
+        sources = resolve_mapping_windows(
+            qc, switches, (*NIGHT_CORRUPTION_CHANNELS, *NOCTURNAL_SHORTWAVE_CHANNELS)
+        )
+        qc, shade_ring_corrected = apply_shade_ring_correction(
+            qc,
+            load_shade_ring_factors(data_dir / SHADE_RING_FACTOR_FILE),
+            sources.get("Sw_dif", ()),
+        )
+        if shade_ring_corrected:
+            typer.echo(
+                f"\nCorrecao do anel de sombreamento aplicada a "
+                f"{sum(shade_ring_corrected.values()):,} amostras de difusa "
+                f"em {len(shade_ring_corrected)} coluna(s)"
+            )
+
         # Statistical QC runs HERE, after calibration and before unification.
         # After calibration because the thresholds are in physical units, the same
         # reason the second apply_physical_limits pass exists; before unification
@@ -259,14 +335,31 @@ def run(
         qc, step_excursions_removed = mask_step_excursions(qc, settings.sensor_step_limits)
         qc, persistence_runs_removed = mask_persistent_runs(qc, settings.sensor_persistence_limits)
 
+        # The gate runs twice: the first pass on the RAW signal keeps the
+        # calibration from scaling a never-physical value, the second because a
+        # value sitting AT the boundary crosses it once scaled — as the Eppley
+        # PSP factor declared in this same config does.
+        # Before unify_sensor_columns: sensor_limits names raw columns only, so a
+        # sample rejected after the copy stays published under the unified name.
+        outside_after_calibration = values_outside_declared_limits(qc, settings.sensor_limits)
+        if outside_after_calibration:
+            qc = apply_physical_limits(qc, settings.sensor_limits)
+            typer.echo(
+                f"\nLimites reaplicados apos calibracao: "
+                f"{sum(outside_after_calibration.values()):,} amostra(s) "
+                f"em {len(outside_after_calibration)} coluna(s) cruzaram o portao ao serem escaladas"
+            )
+            for column, count in sorted(
+                outside_after_calibration.items(), key=lambda item: -item[1]
+            )[:8]:
+                typer.echo(f"  {column:22s} {count:,}")
+
         # Without this the sensor_switches block parses and does nothing, and
         # every era-spanning variable has to be reassembled by hand downstream.
-        switches = load_sensor_switches(calibrations_path)
         qc = unify_sensor_columns(qc, switches)
         # Unification COPIES: each unified channel keeps a raw twin under the
         # logger's own name, and the masks below must reach both or the artifact
         # publishes the rejected value under the other name.
-        sources = resolve_mapping_windows(qc, switches, NIGHT_CORRUPTION_CHANNELS)
 
         qc, net_gained, net_dropped = close_net_radiation(qc)
         if net_gained or net_dropped:
@@ -294,9 +387,20 @@ def run(
     # Radiation in deep night is a slipped clock, not a sky, and the flat gates
     # of default.yaml pass 1313 W/m2 at 04h — so the day is removed whole from
     # the two channels it invalidates.
+    # Computed once for the four stages below: a second call is a second
+    # definition of "night", free to drift from the first without failing.
+    elevation = station_elevation_deg(pd.DatetimeIndex(qc.index))
     corrupted = night_corrupted_days(qc)
     qc, night_masked = mask_night_corrupted_days(qc, corrupted, sources)
+    # The order of the four stages below is load-bearing and every way of getting
+    # it wrong fails silently; test_the_pipeline_calls_its_radiation_stages_in_the
+    # _load_bearing_order pins it and docs/controle-de-qualidade.md explains it.
+    offsets = nocturnal_offset_statistics(qc, elevation_deg=elevation)
     qc, impossible = mask_impossible_shortwave(qc, sources)
+    qc, nocturnal = mask_nocturnal_shortwave(qc, sources, elevation_deg=elevation)
+    qc, nocturnal_net = close_nocturnal_net_radiation(qc, elevation_deg=elevation)
+    if nocturnal_net:
+        typer.echo(f"Saldo noturno recomposto so da onda longa: {nocturnal_net:,} amostras")
     typer.echo(
         f"\nDias com carimbo de tempo corrompido: {len(corrupted)} "
         f"({sum(night_masked.values()):,} amostras mascaradas em {len(night_masked)} colunas)"
@@ -306,27 +410,31 @@ def run(
             f"Irradiancia impossivel para a posicao do sol (limite BSRN): "
             f"{sum(impossible.values()):,} amostras em {len(impossible)} colunas"
         )
+    if nocturnal:
+        typer.echo(
+            f"Onda curta com o sol abaixo do horizonte (offset termico, nao fluxo): "
+            f"{sum(nocturnal.values()):,} amostras em {len(nocturnal)} colunas"
+        )
+    for column, statistic in offsets.items():
+        if statistic.median_wm2 is not None:
+            typer.echo(
+                f"  offset noturno {column:8s} mediana {statistic.median_wm2:+7.3f} W/m2 "
+                f"({statistic.night_samples:,} amostras)"
+            )
+    alarms = [
+        (column, month, median)
+        for column, statistic in offsets.items()
+        for month, median in statistic.drift_alarms
+    ]
+    # Reportados e arquivados em nocturnal_offset_monitor, nunca fatais: são
+    # episódios datados do próprio registro, permanentes, e reprovar a construção
+    # por eles faria --strict nunca passar — o portão que grita sempre não verifica.
+    for column, month, median in alarms:
+        typer.echo(f"  ! deriva de offset em {column} ({month}): mediana {median:+.3f} W/m2")
     for day, count in sorted(corrupted, key=lambda item: -item[1])[:8]:
         typer.echo(
             f"  {day}  {count} amostra(s) acima de {NIGHT_CORRUPTION_FLUX_WM2:.0f} W/m2 de madrugada"
         )
-
-    # The gate runs twice: the first pass on the RAW signal keeps the calibration
-    # from scaling a never-physical value, the second because a value sitting AT
-    # the boundary crosses it once scaled — as the Eppley PSP factor declared in
-    # this same config does.
-    outside_after_calibration = values_outside_declared_limits(qc, settings.sensor_limits)
-    if outside_after_calibration:
-        qc = apply_physical_limits(qc, settings.sensor_limits)
-        typer.echo(
-            f"\nLimites reaplicados apos calibracao: "
-            f"{sum(outside_after_calibration.values()):,} amostra(s) "
-            f"em {len(outside_after_calibration)} coluna(s) cruzaram o portao ao serem escaladas"
-        )
-        for column, count in sorted(outside_after_calibration.items(), key=lambda item: -item[1])[
-            :8
-        ]:
-            typer.echo(f"  {column:22s} {count:,}")
 
     # AFTER unification, deliberately: the one channel this matters most for is
     # the unified ``ur``, which does not exist before it. The fault family is the
@@ -344,7 +452,15 @@ def run(
     # ``float64``: ``aggregate_to_hourly`` keeps only
     # ``select_dtypes(include="number")`` columns, which matches neither bool nor
     # the object dtype a null introduces. ``qc_flag`` is the unified spelling.
-    hourly_input = qc.copy()
+    # An hourly mean of a monotonic counter is not a record number.
+    discarded = [
+        column
+        for column in qc.columns
+        if column in {"RECORD", *UNGATED_RADIATION_TWINS}
+        or str(column).startswith("rtime")
+        or str(column).endswith("_mv_Avg")
+    ]
+    hourly_input = qc.drop(columns=discarded)
     for column in (*STATUS_COLUMNS, "qc_flag"):
         if column in hourly_input.columns:
             flag = hourly_input.pop(column)
@@ -389,6 +505,7 @@ def run(
         "physical_limits_absent_columns": limits_absent_columns,
         "physical_limits_after_calibration": outside_after_calibration,
         "calibration_invalidated": invalidated,
+        "shade_ring_corrected": shade_ring_corrected,
         "blocked_gauge_runs": [
             {"column": column, "first": first, "last": last, "days": days}
             for column, first, last, days in blocked
@@ -400,6 +517,10 @@ def run(
         "step_excursions_removed": step_excursions_removed,
         "persistence_runs_removed": persistence_runs_removed,
         "impossible_shortwave_removed": impossible,
+        "nocturnal_shortwave_masked": nocturnal,
+        "nocturnal_offset_monitor": {
+            column: statistic.as_report() for column, statistic in offsets.items()
+        },
         # Dated, so the episode stays auditable after the samples are gone.
         "timestamp_corrupted_days": [day for day, _count in corrupted],
         "timestamp_corruption_masked": night_masked,
@@ -407,19 +528,22 @@ def run(
             {"unified": unified, "column": column, "start": str(start), "end": str(end)}
             for unified, column, start, end in gaps
         ],
-        "net_radiation_recomposed": {"gained": net_gained, "dropped": net_dropped},
+        "net_radiation_recomposed": {
+            "gained": net_gained,
+            "dropped": net_dropped,
+            "nocturnal_longwave_only": nocturnal_net,
+        },
     }
     report_path = out / "archive_report.json"
     report_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     typer.echo(f"  [ok] {report_path.name}")
 
-    failed = [problem for report in reports for problem in report.problems]
-    if failed:
-        typer.echo(f"\n! {len(failed)} divergencia(s) em relacao a auditoria do acervo")
+    if blocking:
+        typer.echo(f"\n! {len(blocking)} verificacao(oes) reprovaram:")
+        for problem in blocking:
+            typer.echo(f"    {problem}")
         if strict:
             raise typer.Exit(code=1)
-    else:
-        typer.echo("\n>> Merge confere com a auditoria: nenhuma linha perdida ou duplicada")
 
 
 def main() -> None:

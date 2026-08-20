@@ -29,11 +29,11 @@ climate genuinely holds still longer than the continental stations those criteri
 were written for.
 """
 
-from typing import Any
-
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+
+from micrometeorology.common.config import SensorPersistenceLimit, SensorStepLimit
 
 #: Longest hop between two samples still differenced against each other, as a
 #: multiple of the sampling interval: one masked or missing sample between them is
@@ -100,7 +100,7 @@ def _reachable(stamps: NDArray, reach: pd.Timedelta) -> NDArray:
 
 
 def mask_step_excursions(
-    frame: pd.DataFrame, limits: list[dict[str, Any]]
+    frame: pd.DataFrame, limits: list[SensorStepLimit]
 ) -> tuple[pd.DataFrame, int]:
     """Mask samples that leave the series and return within *max_len* samples.
 
@@ -126,12 +126,12 @@ def mask_step_excursions(
     removed = 0
 
     for limit in limits:
-        column = limit["column"]
+        column = limit.column
         if column not in frame.columns:
             continue
-        threshold = float(limit["threshold"])
-        return_tol = float(limit["return_tol"])
-        max_len = int(limit["max_len"])
+        threshold = limit.threshold
+        return_tol = limit.return_tol
+        max_len = limit.max_len
         if max_len < 1:
             raise ValueError(
                 f"{column}: max_len must be at least 1, got {max_len}. A shorter one "
@@ -151,7 +151,8 @@ def mask_step_excursions(
         departures = np.flatnonzero(adjacent & (np.abs(steps) > threshold))
 
         excursion = np.zeros(values.size, dtype=bool)
-        for start in departures:
+        for departure in departures:
+            start = int(departure)
             # On a double dip the sample that RECOVERS one excursion is also a
             # departure from it, and its baseline would be the rejected value. That
             # inverts the test: the ambient reading becomes the excursion and gets
@@ -190,7 +191,7 @@ def _run_starts(values: NDArray, on_grid: NDArray) -> NDArray:
 
 
 def mask_persistent_runs(
-    frame: pd.DataFrame, limits: list[dict[str, Any]]
+    frame: pd.DataFrame, limits: list[SensorPersistenceLimit]
 ) -> tuple[pd.DataFrame, int]:
     """Mask runs of bitwise-identical values longer than a column tolerates.
 
@@ -217,10 +218,10 @@ def mask_persistent_runs(
     removed = 0
 
     for limit in limits:
-        column = limit["column"]
+        column = limit.column
         if column not in frame.columns:
             continue
-        min_run = int(limit["min_run"])
+        min_run = limit.min_run
 
         values = frame[column].to_numpy(dtype=float)
         runs = _run_starts(values, on_grid)

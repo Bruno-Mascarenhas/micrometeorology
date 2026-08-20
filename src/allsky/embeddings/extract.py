@@ -36,6 +36,7 @@ this module never pulls it.
 """
 
 import logging
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -229,7 +230,7 @@ def extract_embeddings(
     }
 
     if dry_run:
-        planned_shards = -(-len(samples) // shard_size)  # ceil division
+        planned_shards = math.ceil(len(samples) / shard_size)
         logger.info(
             "extract_embeddings[dry-run]: %d sample(s) total, %d already done, "
             "%d to encode -> ~%d new shard(s); writing nothing",

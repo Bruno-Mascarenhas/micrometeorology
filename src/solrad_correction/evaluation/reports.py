@@ -14,7 +14,7 @@ from solrad_correction.utils.io import save_json, save_predictions
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ExperimentReport:
     """Container for experiment results.
 
@@ -70,15 +70,21 @@ class ExperimentReport:
 
         logger.info("Report saved to %s", layout.root)
 
-    def print_summary(self) -> None:
-        """Print a terminal-friendly summary of the run's metrics."""
-        print(f"\n{'=' * 50}")
-        print(f"  Experiment: {self.experiment_name}")
-        print(f"  Model:      {self.model_name}")
-        print(f"{'-' * 50}")
-        for name, value in self.metrics.items():
-            print(f"  {name:>8s}: {value:.6f}")
-        print(f"{'=' * 50}")
+    def summary(self) -> str:
+        """Render a terminal-friendly summary of the run's metrics.
+
+        Returns the text rather than printing it: the entry point owns stdout,
+        so a notebook or a batch job can keep the summary and stay quiet.
+        """
+        lines = [
+            f"\n{'=' * 50}",
+            f"  Experiment: {self.experiment_name}",
+            f"  Model:      {self.model_name}",
+            f"{'-' * 50}",
+            *(f"  {name:>8s}: {value:.6f}" for name, value in self.metrics.items()),
+            f"{'=' * 50}",
+        ]
+        return "\n".join(lines)
 
 
 def save_experiment_results(

@@ -100,7 +100,7 @@ _REGRESSION_TARGETS: dict[str, str] = {
 }
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class EvaluationResult:
     """Outcome of :func:`evaluate_checkpoint`.
 

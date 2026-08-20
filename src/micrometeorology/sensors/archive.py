@@ -37,7 +37,7 @@ Relationship to the neighbouring modules
 
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from itertools import pairwise
 from pathlib import Path
@@ -53,30 +53,41 @@ from micrometeorology.common.paths import ensure_dir
 # the same angle in both places.
 from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.sensors.ingestion import merge_dat_files
+from micrometeorology.sensors.quality import SAMPLING_INTERVAL
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "ARCHIVE_END",
     "ARCHIVE_START",
+    "DIFFUSE_EXCEEDS_GLOBAL_TOLERANCE",
     "DIFFUSE_RATIO_LIMIT",
     "EXPECTED_LENTA_ROWS",
     "EXPECTED_RAIN_ROWS",
     "LENTA_MANIFEST",
     "NIGHT_CORRUPTION_CHANNELS",
     "NIGHT_CORRUPTION_FLUX_WM2",
+    "NOCTURNAL_SHORTWAVE_CHANNELS",
+    "OFFSET_DRIFT_ALARM_WM2",
     "RAIN_MANIFEST",
+    "SAMPLING_INTERVAL",
     "STATUS_COLUMNS",
+    "UNGATED_RADIATION_TWINS",
     "ArchiveFile",
     "ArchiveReport",
+    "NocturnalOffset",
     "blocked_gauge_runs",
     "build_five_minute_frame",
     "close_net_radiation",
+    "close_nocturnal_net_radiation",
     "mask_impossible_shortwave",
     "mask_night_corrupted_days",
+    "mask_nocturnal_shortwave",
     "mask_sentinels",
     "night_corrupted_days",
+    "nocturnal_offset_statistics",
     "stage_archive",
+    "station_elevation_deg",
     "unquantised_rain_samples",
     "unshaded_diffuse_days",
     "verify_frame",
@@ -428,15 +439,26 @@ def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
     duplicated = int(index.duplicated().sum())
     monotonic = bool(index.is_monotonic_increasing)
 
+    # The station keeps recording after the audit, so the invariant is growth and
+    # not equality: the surplus must be the sampling grid between the two ends.
     problems: list[str] = []
-    if len(frame) != expected:
+    surplus = len(frame) - expected
+    if surplus < 0:
         problems.append(
-            f"{kind}: {len(frame)} rows, audit measured {expected} ({len(frame) - expected:+d})"
+            f"{kind}: {len(frame)} rows, audit measured {expected} ({surplus:+d}); "
+            "the record cannot shrink"
         )
     if first is not None and first != ARCHIVE_START:
         problems.append(f"{kind}: starts {first}, audit measured {ARCHIVE_START}")
-    if last is not None and last != ARCHIVE_END:
-        problems.append(f"{kind}: ends {last}, audit measured {ARCHIVE_END}")
+    if last is not None and last < ARCHIVE_END:
+        problems.append(f"{kind}: ends {last}, before the audited {ARCHIVE_END}")
+    if last is not None and last > ARCHIVE_END and surplus >= 0:
+        grid = int((last - ARCHIVE_END) / SAMPLING_INTERVAL)
+        if surplus != grid:
+            problems.append(
+                f"{kind}: {surplus} rows past the audited end, but {ARCHIVE_END} to {last} "
+                f"spans {grid} sampling intervals"
+            )
     if duplicated:
         problems.append(f"{kind}: {duplicated} duplicated timestamps")
     if not monotonic:
@@ -966,6 +988,22 @@ BSRN_CEILING_OFFSET_WM2 = 100.0
 
 IMPOSSIBLE_SHORTWAVE_CHANNELS = ("Sw_dw", "Net_CNR1")
 
+#: Radiation channels carrying the sensor's raw count or bridge voltage rather
+#: than a flux. They have no range gate, no BSRN envelope and no nocturnal mask,
+#: because every one of those is written against the ``_Wm2_`` twin — so they
+#: reach the hourly artifact unfiltered, indistinguishable there from the
+#: channels that were filtered. Dropped before aggregation for that reason.
+UNGATED_RADIATION_TWINS = (
+    "CMP21_Avg",
+    "CMP22_Avg",
+    "CUV5_Avg",
+    "NRLite_Avg",
+    "PAR_Den_Avg",
+    "PIR1_Avg",
+    "PSP1_Avg",
+    "PSP_Avg",
+)
+
 #: BSRN physically-possible ceilings as ``(gain, offset)`` in
 #: ``Sa * gain * mu0**1.2 + offset`` (Long & Shi 2008, tab. 1). One pair per
 #: component, because a shaded pyranometer and an upward-facing one cannot reach
@@ -982,6 +1020,46 @@ BSRN_PPL_COEFFICIENTS: dict[str, tuple[float, float]] = {
         BSRN_CEILING_OFFSET_WM2 * _PAR_SPECTRAL_FRACTION,
     ),
 }
+
+#: BSRN physically-possible FLOOR, the lower half of the same Long & Shi 2008
+#: tab. 1 prescription the ceilings above transcribe: -4 W/m2 for every
+#: shortwave component. Its absence is what let the archive publish 36,202
+#: negative hours of ``Sw_dw``: a thermopile reads its own zero-offset, and the
+#: flat ``[-20, 1500]`` gate in ``default.yaml`` was written wide enough to pass
+#: it. PAR is scaled by the same spectral fraction as its ceiling; measured, that
+#: gate is inert because the quantum sensor is already clipped at zero upstream,
+#: and it is declared anyway so the channel is not the one component of the set
+#: with no floor at all.
+BSRN_PPL_FLOOR_WM2 = -4.0
+
+#: The BSRN "extremely rare" minimum, the second tier Long & Shi 2008 defines
+#: below the physically-possible one. Never a mask here: it is the level the
+#: nocturnal-offset monitor reports against.
+BSRN_PPL_EXTREMELY_RARE_WM2 = -2.0
+
+#: Shortwave channels blanked while the sun is below the horizon, and the
+#: elevation that defines "below". Distinct from
+#: :data:`NIGHT_CORRUPTION_COLUMNS`, which uses -10 degrees to find a slipped
+#: clock: this one is the horizon itself, because the quantity being rejected is
+#: not a fault but the ABSENCE of a measurable signal. A pyranometer at night
+#: reports its zero-offset and nothing else — measured on this archive, a median
+#: of -1.478 W/m2 on ``Sw_dw`` and +2.620 on ``Sw_up``, the sign following which
+#: way the dome faces — so the reading carries instrument state, not irradiance.
+#: ``Sw_uv`` is here and in neither list above: 5,175 of its 11,900 valid hours
+#: are negative, all nocturnal.
+NOCTURNAL_SHORTWAVE_CHANNELS = ("Sw_dw", "Sw_dif", "Sw_up", "Sw_par", "Sw_uv")
+NOCTURNAL_ELEVATION_DEG = 0.0
+
+#: Fraction by which the diffuse must exceed the global before the comparison is
+#: called a fault. A bare ``>`` was defensible while the diffuse was published as
+#: the pyranometer read it; since :func:`~micrometeorology.sensors.calibration.apply_shade_ring_correction`
+#: returns the sky the ring occults, the two channels carry the combined error of
+#: two instruments plus the isotropic ring model, and equality is no longer
+#: exact. Measured on this archive, the bare rule fires on 3,048 samples of which
+#: 3,018 exceed the global by less than 2%; at this tolerance 447 remain. The
+#: value is the one this repository already measured as the right level in
+#: docs/arqueologia/qc/med-fault-detection.md ("Dif/Global > 1.05").
+DIFFUSE_EXCEEDS_GLOBAL_TOLERANCE = 1.05
 
 #: Global irradiance above which ``Sw_dif > Sw_dw`` is a real inconsistency
 #: rather than thermal offset. Below it the two channels differ by a couple of
@@ -1013,11 +1091,18 @@ def _mask_column(frame: pd.DataFrame, column: str, mask: NDArray, removed: dict[
 def mask_impossible_shortwave(
     frame: pd.DataFrame, sources: SourceWindows | None = None
 ) -> tuple[pd.DataFrame, dict[str, int]]:
-    """Blank global irradiance that the sun's position cannot produce.
+    """Blank irradiance outside what the sun's position can produce, both ways.
 
     Per SAMPLE, unlike :func:`mask_night_corrupted_days`, because this catches
     the residue rather than the episode. ``Net_CNR1`` follows the same sample
     because the logger derives it from the four components.
+
+    The gate has three parts: the geometric ceiling per component, the flat
+    :data:`BSRN_PPL_FLOOR_WM2` beneath every one of them, and the sign rule that
+    no shortwave flux is zero or negative while the sun is above the horizon.
+    Only the ceiling existed until the other two were added, which is why
+    negative shortwave reached the published hourly means — a one-sided
+    "physically possible" limit passes half of what the prescription rejects.
 
     Pass *sources* (from :func:`~micrometeorology.sensors.calibration.resolve_mapping_windows`)
     to blank the raw column each unified channel was copied from on the same
@@ -1059,29 +1144,39 @@ def mask_impossible_shortwave(
             within = (index >= start) & (index <= end)
             _mask_column(frame, source, offending & within, removed)
 
+    daylight = mu0 > 0.0
     for column, (gain, offset) in BSRN_PPL_COEFFICIENTS.items():
         if column not in frame.columns:
             continue
         flux = frame[column]
-        above = (flux.notna() & (flux > geometry * gain + offset)).to_numpy()
-        if not above.any():
+        floor = BSRN_PPL_FLOOR_WM2 * (_PAR_SPECTRAL_FRACTION if column == "Sw_par" else 1.0)
+        # Rayleigh scattering alone puts the diffuse above zero whenever the sun
+        # is up, so a non-positive daylight flux is offset or a stuck channel.
+        daytime_fault = (
+            flux.notna() & ((flux > geometry * gain + offset) | (daylight & (flux <= 0.0)))
+        ).to_numpy()
+        outside = daytime_fault | (flux.notna() & (flux < floor)).to_numpy()
+        if not outside.any():
             continue
-        _blank(column, above)
+        _blank(column, outside)
         # The net is not an independent measurement: the logger derives it from
         # the four components, so a component the sun cannot produce is inside it.
+        # Only the daytime verdicts: the floor fires on the nocturnal offset, over
+        # a component whose true value is zero, and the night net is longwave.
         if column == "Sw_dw":
-            _blank("Net_CNR1", above)
+            _blank("Net_CNR1", daytime_fault)
 
     # A shaded sensor measures a subset of what the unshaded one sees, so this is
     # impossible at any level — but only above the offset floor is the comparison
-    # meaningful at all.
+    # meaningful at all, and only beyond the tolerance is it a fault rather than
+    # the two instruments disagreeing inside their combined error.
     if "Sw_dif" in frame.columns:
         global_flux, diffuse = frame["Sw_dw"], frame["Sw_dif"]
         inconsistent = (
             global_flux.notna()
             & diffuse.notna()
             & (global_flux > DIFFUSE_EXCEEDS_GLOBAL_MIN_WM2)
-            & (diffuse > global_flux)
+            & (diffuse > global_flux * DIFFUSE_EXCEEDS_GLOBAL_TOLERANCE)
         ).to_numpy()
         if inconsistent.any():
             _blank("Sw_dif", inconsistent)
@@ -1178,6 +1273,198 @@ def mask_night_corrupted_days(
     return frame, removed
 
 
+#: Elevation below which the nocturnal offset is measured, i.e. SZA > 100 deg as
+#: docs/arqueologia/qc/lit-radiation-qc.md specifies for the drift monitor. Deeper
+#: than :data:`NOCTURNAL_ELEVATION_DEG`, which is the horizon itself: the statistic
+#: wants samples with no twilight contamination at all, while the mask wants every
+#: sample the sun cannot reach.
+OFFSET_MONITOR_ELEVATION_DEG = -10.0
+
+#: Month-on-month change in the nocturnal offset median that raises a drift alarm,
+#: against a trailing 12-month baseline (lit-radiation-qc.md). A step in this
+#: number warns of ventilator failure, dome degradation or a wiring fault months
+#: before it distorts a daytime statistic.
+OFFSET_DRIFT_ALARM_WM2 = 1.5
+OFFSET_DRIFT_BASELINE_MONTHS = 12
+
+
+@dataclass(frozen=True, slots=True)
+class NocturnalOffset:
+    """One channel's thermopile zero-offset, as the drift monitor records it.
+
+    Attributes
+    ----------
+    night_samples:
+        Deep-night samples the statistic was measured on. Zero means the channel
+        was measured and had none, which a reader must be able to tell from a
+        channel that was never looked at — hence the record exists either way.
+    median_wm2, p5_wm2, p95_wm2:
+        Offset level and spread, W/m2. ``None`` when *night_samples* is zero.
+    fraction_below_bsrn_floor, fraction_below_extremely_rare:
+        Share of deep-night samples under the two Long & Shi 2008 minima.
+    yearly_median_wm2, monthly_median_wm2:
+        Offset median per calendar year and per month, W/m2, keyed by ISO period.
+    drift_alarms:
+        ``(month, median)`` for each month departing from its trailing baseline
+        by more than :data:`OFFSET_DRIFT_ALARM_WM2`.
+    """
+
+    night_samples: int
+    median_wm2: float | None = None
+    p5_wm2: float | None = None
+    p95_wm2: float | None = None
+    fraction_below_bsrn_floor: float | None = None
+    fraction_below_extremely_rare: float | None = None
+    yearly_median_wm2: Mapping[str, float] = field(default_factory=dict)
+    monthly_median_wm2: Mapping[str, float] = field(default_factory=dict)
+    drift_alarms: Sequence[tuple[str, float]] = ()
+
+    def as_report(self) -> dict[str, object]:
+        """JSON-ready mapping for ``archive_report.json``."""
+        if not self.night_samples:
+            return {"night_samples": 0}
+        report = asdict(self)
+        report["drift_alarms"] = [
+            {"month": month, "median_wm2": median} for month, median in self.drift_alarms
+        ]
+        return report
+
+
+def nocturnal_offset_statistics(
+    frame: pd.DataFrame,
+    columns: Sequence[str] = NOCTURNAL_SHORTWAVE_CHANNELS,
+    elevation_deg: NDArray | None = None,
+) -> dict[str, NocturnalOffset]:
+    """Thermopile zero-offset per channel, measured in deep night.
+
+    MUST be called before BOTH :func:`mask_impossible_shortwave` and
+    :func:`mask_nocturnal_shortwave`. The second is what makes this function
+    exist; the first is what silently empties it, because the BSRN floor removes
+    precisely the samples whose share ``fraction_below_bsrn_floor`` reports —
+    measured afterwards it is 0.0 for every channel, a statistic that reports
+    success while measuring nothing. The nocturnal offset is the only pyranometer health
+    diagnostic available without a calibration lab (Dutton et al. 2001; QCRad,
+    in Long & Shi 2008), and masking the samples that carry it would retire that
+    diagnostic silently. Persisting the statistic keeps the monitor after the
+    samples themselves leave the published frame.
+
+    Parameters
+    ----------
+    frame:
+        5-minute frame in W/m2 with a naive station-local index, before any
+        nocturnal masking.
+    columns:
+        Shortwave channels to measure. A column absent from *frame* is skipped.
+
+    Returns
+    -------
+    dict
+        ``{column: NocturnalOffset}``. A channel with no deep-night sample gets a
+        record reporting zero rather than being omitted, so a reader can tell
+        "measured, nothing there" from "never looked".
+    """
+    if elevation_deg is None:
+        elevation_deg = station_elevation_deg(pd.DatetimeIndex(frame.index))
+    deep_night = elevation_deg < OFFSET_MONITOR_ELEVATION_DEG
+    statistics: dict[str, NocturnalOffset] = {}
+    for column in columns:
+        if column not in frame.columns:
+            continue
+        values = frame.loc[deep_night, column].dropna()
+        if values.empty:
+            statistics[column] = NocturnalOffset(night_samples=0)
+            continue
+        stamps = pd.DatetimeIndex(values.index)
+        monthly = values.groupby(stamps.to_period("M")).median()
+        baseline = monthly.rolling(OFFSET_DRIFT_BASELINE_MONTHS, min_periods=3).median().shift(1)
+        drift = (monthly - baseline).abs() > OFFSET_DRIFT_ALARM_WM2
+        statistics[column] = NocturnalOffset(
+            night_samples=int(values.shape[0]),
+            median_wm2=float(values.median()),
+            p5_wm2=float(values.quantile(0.05)),
+            p95_wm2=float(values.quantile(0.95)),
+            fraction_below_bsrn_floor=float((values < BSRN_PPL_FLOOR_WM2).mean()),
+            fraction_below_extremely_rare=float((values < BSRN_PPL_EXTREMELY_RARE_WM2).mean()),
+            yearly_median_wm2={
+                str(year): float(median)
+                for year, median in values.groupby(stamps.year).median().items()
+            },
+            monthly_median_wm2={str(month): float(median) for month, median in monthly.items()},
+            drift_alarms=[
+                (str(month), float(monthly[month])) for month in monthly.index[drift.fillna(False)]
+            ],
+        )
+    return statistics
+
+
+def station_elevation_deg(index: pd.DatetimeIndex) -> NDArray:
+    """Solar elevation over *index*, from the pinned site and UTC offset.
+
+    One spelling for every stage that needs it: a second copy of the call is a
+    second definition of "night", free to drift from the first without failing.
+
+    Parameters
+    ----------
+    index:
+        Naive station-local stamps, ``(N,)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Degrees above the local horizon, ``(N,)``.
+    """
+    return solar_elevation_deg(index, STATION_SITE, STATION_UTC_OFFSET_HOURS)
+
+
+def mask_nocturnal_shortwave(
+    frame: pd.DataFrame,
+    sources: SourceWindows | None = None,
+    elevation_deg: NDArray | None = None,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Blank shortwave recorded while the sun is below the horizon.
+
+    What a pyranometer reports at night is its own thermal zero-offset, not
+    irradiance, and the sign follows which way the dome faces. The value is
+    masked, never clamped to zero: zero is a valid irradiance and would enter
+    every downstream mean as an observation. After this stage a shortwave mean is
+    a DAYLIGHT mean, and a daily insolation total needs the nocturnal hours
+    restored as zero before integrating.
+
+    Must run after :func:`night_corrupted_days`, which finds a slipped logger
+    clock BY the irradiance recorded at night. The raw twins are masked over the
+    whole record rather than per era window: the sun's elevation belongs to the
+    timestamp, not to the instrument.
+
+    Parameters
+    ----------
+    frame:
+        5-minute frame in W/m2 with a naive station-local index, against which
+        the sun's elevation is computed from :data:`STATION_SITE` and the pinned
+        :data:`STATION_UTC_OFFSET_HOURS` — never the host time zone, which would
+        displace the terminator by hours without raising.
+    sources:
+        Raw columns per unified channel, or ``None`` to mask the unified columns
+        alone.
+
+    Returns
+    -------
+    tuple
+        The same frame, mutated in place, and a ``{column: samples masked}``
+        tally in the shape :func:`mask_sentinels` reports.
+    """
+    removed: dict[str, int] = {}
+    if elevation_deg is None:
+        elevation_deg = station_elevation_deg(pd.DatetimeIndex(frame.index))
+    below = elevation_deg < NOCTURNAL_ELEVATION_DEG
+    if not below.any():
+        return frame, removed
+    for column in NOCTURNAL_SHORTWAVE_CHANNELS:
+        _mask_column(frame, column, below, removed)
+        for source, _start, _end in (sources or {}).get(column, ()):
+            _mask_column(frame, source, below, removed)
+    return frame, removed
+
+
 NET_RADIATION_COMPONENTS = ("Sw_dw", "Sw_up", "Lw_dw", "Lw_up")
 
 
@@ -1219,6 +1506,42 @@ def close_net_radiation(frame: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
     dropped = int((closed.isna() & previous.notna()).sum())
     frame["Net_CNR1"] = closed
     return frame, gained, dropped
+
+
+def close_nocturnal_net_radiation(
+    frame: pd.DataFrame, elevation_deg: NDArray | None = None
+) -> tuple[pd.DataFrame, int]:
+    """Recompose the net with the sun down, where the shortwave terms are zero.
+
+    :func:`close_net_radiation` runs before :func:`mask_nocturnal_shortwave` and
+    folds the nocturnal thermopile offset into the published net — measured here,
+    a median of -3.85 W/m2 against a nocturnal net of -49.1. With the sun below
+    the horizon the shortwave terms are ZERO, not the offset, so the nocturnal
+    net is the longwave difference alone.
+
+    Parameters
+    ----------
+    frame:
+        Frame in W/m2 with a naive station-local index, holding ``Lw_dw``,
+        ``Lw_up`` and ``Net_CNR1``.
+
+    Returns
+    -------
+    tuple
+        The same frame, mutated in place, and the samples recomposed.
+    """
+    needed = ("Lw_dw", "Lw_up", "Net_CNR1")
+    if not all(column in frame.columns for column in needed):
+        return frame, 0
+    if elevation_deg is None:
+        elevation_deg = station_elevation_deg(pd.DatetimeIndex(frame.index))
+    below = elevation_deg < NOCTURNAL_ELEVATION_DEG
+    longwave = frame["Lw_dw"] - frame["Lw_up"]
+    target = below & longwave.notna().to_numpy()
+    if not target.any():
+        return frame, 0
+    frame.loc[target, "Net_CNR1"] = longwave[target]
+    return frame, int(target.sum())
 
 
 def mask_sentinels(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:

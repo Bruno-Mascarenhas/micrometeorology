@@ -633,5 +633,4 @@ def run_pipeline(config: ExperimentConfig) -> ExperimentReport:
         result=experiment_result,
         profile=pipeline_profile,
     )
-    experiment_report.print_summary()
     return experiment_report

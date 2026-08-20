@@ -63,7 +63,9 @@ def wind_direction_from_components(u: NDArray | float, v: NDArray | float) -> ND
         confident 270° (or 90°, depending on the operands' sign bits) for a calm
         window or a stalled anemometer.
     """
-    mathematical_angle = np.arctan2(v, u)
-    direction = np.fmod(3.0 * (np.pi / 2.0) - mathematical_angle, 2.0 * np.pi) * (180.0 / np.pi)
+    mathematical_angle_rad = np.arctan2(v, u)
+    direction_deg = np.fmod(3.0 * (np.pi / 2.0) - mathematical_angle_rad, 2.0 * np.pi) * (
+        180.0 / np.pi
+    )
     resultant_magnitude = np.hypot(u, v)
-    return np.where(resultant_magnitude == 0.0, np.nan, direction % 360.0)
+    return np.where(resultant_magnitude == 0.0, np.nan, direction_deg % 360.0)

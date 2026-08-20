@@ -18,6 +18,7 @@ trunk output:
 **normalized-space** values (the engine denormalizes).
 """
 
+import itertools
 from typing import cast
 
 from torch import Tensor, nn
@@ -92,7 +93,8 @@ class Trunk(nn.Module):
             raise ValueError(f"n_layers must be positive, got {n_layers}")
         dims = [in_dim] + [hidden_dim] * n_layers
         self.blocks = nn.ModuleList(
-            _TrunkBlock(dims[i], dims[i + 1], dropout) for i in range(n_layers)
+            _TrunkBlock(in_width, out_width, dropout)
+            for in_width, out_width in itertools.pairwise(dims)
         )
         self._out_dim = hidden_dim
 

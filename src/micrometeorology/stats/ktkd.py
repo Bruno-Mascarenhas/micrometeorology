@@ -18,14 +18,21 @@ assert a determinism the model does not have.
 The solar geometry is not recomputed here: :mod:`allsky.solar` owns it, and the
 extraterrestrial term behind Kt is the same one the climatology exporter divides
 by.
+
+Timestamps are naive station-local, as they arrive from the datalogger's own
+clock; the apparent solar time derived here takes its offset from the
+``utc_offset_hours`` parameter, never from the host's zone.
 """
 
+import itertools
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from allsky.config import SiteConfig
 from allsky.solar import hour_angle_deg, solar_elevation_deg
 from micrometeorology.stats.daylight import elevation_bounds
 
@@ -33,6 +40,7 @@ __all__ = [
     "KTKD_SCHEMA",
     "MODEL_LABELS",
     "MODEL_REFERENCES",
+    "PreparedKtKd",
     "apparent_solar_time_hours",
     "daily_clearness_index",
     "density_2d",
@@ -201,7 +209,29 @@ def lemos_2017(
     daily_kt: NDArray,
     persistence: NDArray,
 ) -> NDArray:
-    """BRL diffuse fraction with the Brazilian coefficients of Lemos et al. (2017)."""
+    """BRL diffuse fraction with the Brazilian coefficients of Lemos et al. (2017).
+
+    Parameters
+    ----------
+    kt:
+        Hourly clearness index, ``(N,)`` ``float64``, dimensionless.
+    apparent_solar_time:
+        Apparent solar time, ``(N,)`` ``float64``, in hours on ``[0, 24)`` as
+        :func:`apparent_solar_time_hours` produces it.
+    elevation_deg:
+        Solar elevation, ``(N,)`` ``float64``, in **degrees** above the horizon.
+    daily_kt:
+        Daily clearness index broadcast over the day's hours, ``(N,)``
+        ``float64``, dimensionless.
+    persistence:
+        Persistence index of the neighbouring hours, ``(N,)`` ``float64``,
+        dimensionless.
+
+    Returns
+    -------
+    numpy.ndarray
+        Modelled diffuse fraction Kd, ``(N,)`` ``float64``, dimensionless.
+    """
     # Lemos et al. (2017), the BRL form refitted to Brazilian stations.
     return _logistic_brl(
         kt,
@@ -220,7 +250,29 @@ def ridley_brl_2010(
     daily_kt: NDArray,
     persistence: NDArray,
 ) -> NDArray:
-    """BRL diffuse fraction with the original coefficients of Ridley et al. (2010)."""
+    """BRL diffuse fraction with the original coefficients of Ridley et al. (2010).
+
+    Parameters
+    ----------
+    kt:
+        Hourly clearness index, ``(N,)`` ``float64``, dimensionless.
+    apparent_solar_time:
+        Apparent solar time, ``(N,)`` ``float64``, in hours on ``[0, 24)`` as
+        :func:`apparent_solar_time_hours` produces it.
+    elevation_deg:
+        Solar elevation, ``(N,)`` ``float64``, in **degrees** above the horizon.
+    daily_kt:
+        Daily clearness index broadcast over the day's hours, ``(N,)``
+        ``float64``, dimensionless.
+    persistence:
+        Persistence index of the neighbouring hours, ``(N,)`` ``float64``,
+        dimensionless.
+
+    Returns
+    -------
+    numpy.ndarray
+        Modelled diffuse fraction Kd, ``(N,)`` ``float64``, dimensionless.
+    """
     # Ridley, Boland & Lauret (2010), the generic all-site BRL fit.
     return _logistic_brl(
         kt,
@@ -234,6 +286,18 @@ def ridley_brl_2010(
 
 def density_2d(kt: NDArray, kd: NDArray, kt_edges: NDArray, kd_edges: NDArray) -> dict[str, Any]:
     """Two-dimensional histogram of the Kt-Kd plane, in the page's orientation.
+
+    Parameters
+    ----------
+    kt:
+        Hourly clearness index, ``(N,)`` ``float64``, dimensionless.
+    kd:
+        Hourly diffuse fraction, ``(N,)`` ``float64``, dimensionless, aligned
+        one-to-one with *kt*.
+    kt_edges:
+        Bin edges along Kt, ``(Bkt + 1,)`` ``float64``, strictly increasing.
+    kd_edges:
+        Bin edges along Kd, ``(Bkd + 1,)`` ``float64``, strictly increasing.
 
     Returns
     -------
@@ -265,11 +329,29 @@ def model_band(
 ) -> dict[str, Any]:
     """Median and p10-p90 of a multi-predictor model, per Kt bin.
 
-    A bin holding fewer than *min_samples_per_bin* observations publishes
-    ``None`` for its three quantiles rather than a summary of two points.  Its
-    ``n_per_bin`` still reports the real count, so a consumer must decide on
-    ``median is None`` and never on a zero count: a suppressed bin almost always
-    holds a non-zero number of samples.
+    Parameters
+    ----------
+    kt:
+        Hourly clearness index, ``(N,)`` ``float64``, dimensionless.
+    predicted:
+        Modelled diffuse fraction, ``(N,)`` ``float64``, dimensionless, aligned
+        one-to-one with *kt*.
+    kt_edges:
+        Bin edges along Kt, ``(B + 1,)`` ``float64``, strictly increasing, as
+        :func:`numpy.digitize` requires.
+    min_samples_per_bin:
+        Fewest observations a bin may hold and still publish its quantiles.
+
+    Returns
+    -------
+    dict
+        ``kt`` the bin centres, ``median``, ``p10`` and ``p90`` the quantiles of
+        the modelled Kd and ``n_per_bin`` the counts, each ``(B,)``.  A bin
+        holding fewer than *min_samples_per_bin* observations publishes ``None``
+        for its three quantiles rather than a summary of two points.  Its
+        ``n_per_bin`` still reports the real count, so a consumer must decide on
+        ``median is None`` and never on a zero count: a suppressed bin almost
+        always holds a non-zero number of samples.
     """
     kt_values = np.asarray(kt, dtype=np.float64)
     predicted_values = np.asarray(predicted, dtype=np.float64)
@@ -282,9 +364,9 @@ def model_band(
     p10: list[float | None] = []
     p90: list[float | None] = []
     per_bin: list[int] = []
-    for bin_index in range(len(edges) - 1):
+    for bin_index, (low_edge, high_edge) in enumerate(itertools.pairwise(edges)):
         selected = predicted_values[finite][index == bin_index]
-        centres.append(float((edges[bin_index] + edges[bin_index + 1]) / 2.0))
+        centres.append(float((low_edge + high_edge) / 2.0))
         per_bin.append(int(selected.size))
         if selected.size < min_samples_per_bin:
             medians.append(None)
@@ -308,7 +390,25 @@ def model_band(
 
 
 def regression_scores(observed: NDArray, predicted: NDArray) -> dict[str, Any]:
-    """RMSE, MBE, MAE and the pair count, over the rows where both are finite."""
+    """RMSE, MBE, MAE and the pair count, over the rows where both are finite.
+
+    Parameters
+    ----------
+    observed:
+        Measured values, ``(N,)``, coerced to ``float64``; here the diffuse
+        fraction Kd, dimensionless.
+    predicted:
+        Modelled values in the same unit, ``(N,)``, aligned one-to-one with
+        *observed*.
+
+    Returns
+    -------
+    dict
+        ``rmse``, ``mbe`` and ``mae`` in the unit of the inputs, and ``n`` the
+        number of pairs where both are finite.  With no finite pair the three
+        scores are ``None`` and ``n`` is ``0`` — this family reports absence as
+        ``None``, not as the ``NaN`` :mod:`micrometeorology.stats.metrics` uses.
+    """
     observed_values = np.asarray(observed, dtype=np.float64)
     predicted_values = np.asarray(predicted, dtype=np.float64)
     paired = np.isfinite(observed_values) & np.isfinite(predicted_values)
@@ -336,7 +436,7 @@ MIN_GLOBAL_WM2 = 50.0
 def prepare_clearness(
     hourly: pd.DataFrame,
     *,
-    site: Any,
+    site: SiteConfig,
     utc_offset_hours: float,
     min_elevation_deg: float = 10.0,
     global_column: str = "Sw_dw",
@@ -376,15 +476,52 @@ def prepare_clearness(
     return (global_flux / extraterrestrial).where(usable).dropna()
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedKtKd:
+    """The gated Kt-Kd pairs and the four predictors the models read.
+
+    Attributes
+    ----------
+    kt:
+        Clearness index on the surviving hours, ``(N,)`` ``float64``,
+        dimensionless, indexed by naive station-local stamps.
+    kd:
+        Diffuse fraction on the same index, ``(N,)`` ``float64``, dimensionless.
+    ast:
+        Apparent solar time at each window's midpoint, ``(N,)`` ``float64``, in
+        hours on ``[0, 24)``.
+    elevation:
+        Solar elevation at each window's midpoint, ``(N,)`` ``float64``, in
+        **degrees** above the horizon.
+    daily_kt:
+        The day's clearness index broadcast over its hours, ``(N,)``
+        ``float64``, dimensionless.
+    psi:
+        Persistence index of the neighbouring hours, ``(N,)`` ``float64``,
+        dimensionless.
+    filters:
+        The gate descriptions the artifact publishes, so a reader knows what the
+        cloud of points was conditioned on.
+    """
+
+    kt: pd.Series
+    kd: pd.Series
+    ast: NDArray
+    elevation: NDArray
+    daily_kt: NDArray
+    psi: NDArray
+    filters: list[str]
+
+
 def prepare_ktkd(
     hourly: pd.DataFrame,
     *,
-    site: Any,
+    site: SiteConfig,
     utc_offset_hours: float,
     min_elevation_deg: float = 10.0,
     global_column: str = "Sw_dw",
     diffuse_column: str = "Sw_dif",
-) -> dict[str, Any]:
+) -> PreparedKtKd:
     """Gate the hourly record down to usable Kt-Kd pairs and their predictors.
 
     The extraterrestrial denominator is evaluated at the averaging window's
@@ -394,11 +531,8 @@ def prepare_ktkd(
 
     Returns
     -------
-    dict
-        ``kt`` and ``kd`` Series on the surviving index, the model predictor
-        arrays (``ast``, ``elevation``, ``daily_kt``, ``psi``), and ``filters``:
-        the gate descriptions the artifact publishes so a reader knows what the
-        cloud of points was conditioned on.
+    PreparedKtKd
+        The surviving pairs, their predictors and the gates applied.
     """
     from allsky.solar import extraterrestrial_ghi
 
@@ -425,22 +559,22 @@ def prepare_ktkd(
     kd = kd_all[keep]
     kept_index = pd.DatetimeIndex(kt.index)
     kept_midpoint = kept_index + pd.Timedelta(minutes=30)
-    return {
-        "kt": kt,
-        "kd": kd,
-        "ast": apparent_solar_time_hours(kept_midpoint, site.longitude, utc_offset_hours),
-        "elevation": solar_elevation_for(
+    return PreparedKtKd(
+        kt=kt,
+        kd=kd,
+        ast=apparent_solar_time_hours(kept_midpoint, site.longitude, utc_offset_hours),
+        elevation=solar_elevation_for(
             kept_midpoint, site.latitude, site.longitude, utc_offset_hours
         ),
-        "daily_kt": daily_clearness_index(global_flux, extraterrestrial)[kt.index].to_numpy(),
-        "psi": persistence_index(kt_all)[kt.index].to_numpy(),
-        "filters": [
+        daily_kt=daily_clearness_index(global_flux, extraterrestrial)[kt.index].to_numpy(),
+        psi=persistence_index(kt_all)[kt.index].to_numpy(),
+        filters=[
             f"irradiancia global acima de {MIN_GLOBAL_WM2:.0f} W/m2",
             f"elevacao solar acima de {min_elevation_deg:.0f} graus em toda a hora",
             f"Kt e Kd dentro de [0, {MAX_RATIO}]",
             "denominador extraterrestre no ponto medio da janela horaria (BSRN)",
         ],
-    }
+    )
 
 
 def build_ktkd_payload(
