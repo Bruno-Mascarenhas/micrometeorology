@@ -25,6 +25,7 @@ clock; the apparent solar time derived here takes its offset from the
 """
 
 import itertools
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -39,6 +40,7 @@ __all__ = [
     "KTKD_SCHEMA",
     "MODEL_LABELS",
     "MODEL_REFERENCES",
+    "PreparedKtKd",
     "apparent_solar_time_hours",
     "daily_clearness_index",
     "density_2d",
@@ -474,6 +476,43 @@ def prepare_clearness(
     return (global_flux / extraterrestrial).where(usable).dropna()
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedKtKd:
+    """The gated Kt-Kd pairs and the four predictors the models read.
+
+    Attributes
+    ----------
+    kt:
+        Clearness index on the surviving hours, ``(N,)`` ``float64``,
+        dimensionless, indexed by naive station-local stamps.
+    kd:
+        Diffuse fraction on the same index, ``(N,)`` ``float64``, dimensionless.
+    ast:
+        Apparent solar time at each window's midpoint, ``(N,)`` ``float64``, in
+        hours on ``[0, 24)``.
+    elevation:
+        Solar elevation at each window's midpoint, ``(N,)`` ``float64``, in
+        **degrees** above the horizon.
+    daily_kt:
+        The day's clearness index broadcast over its hours, ``(N,)``
+        ``float64``, dimensionless.
+    psi:
+        Persistence index of the neighbouring hours, ``(N,)`` ``float64``,
+        dimensionless.
+    filters:
+        The gate descriptions the artifact publishes, so a reader knows what the
+        cloud of points was conditioned on.
+    """
+
+    kt: pd.Series
+    kd: pd.Series
+    ast: NDArray
+    elevation: NDArray
+    daily_kt: NDArray
+    psi: NDArray
+    filters: list[str]
+
+
 def prepare_ktkd(
     hourly: pd.DataFrame,
     *,
@@ -482,7 +521,7 @@ def prepare_ktkd(
     min_elevation_deg: float = 10.0,
     global_column: str = "Sw_dw",
     diffuse_column: str = "Sw_dif",
-) -> dict[str, Any]:
+) -> PreparedKtKd:
     """Gate the hourly record down to usable Kt-Kd pairs and their predictors.
 
     The extraterrestrial denominator is evaluated at the averaging window's
@@ -492,11 +531,8 @@ def prepare_ktkd(
 
     Returns
     -------
-    dict
-        ``kt`` and ``kd`` Series on the surviving index, the model predictor
-        arrays (``ast``, ``elevation``, ``daily_kt``, ``psi``), and ``filters``:
-        the gate descriptions the artifact publishes so a reader knows what the
-        cloud of points was conditioned on.
+    PreparedKtKd
+        The surviving pairs, their predictors and the gates applied.
     """
     from allsky.solar import extraterrestrial_ghi
 
@@ -523,22 +559,22 @@ def prepare_ktkd(
     kd = kd_all[keep]
     kept_index = pd.DatetimeIndex(kt.index)
     kept_midpoint = kept_index + pd.Timedelta(minutes=30)
-    return {
-        "kt": kt,
-        "kd": kd,
-        "ast": apparent_solar_time_hours(kept_midpoint, site.longitude, utc_offset_hours),
-        "elevation": solar_elevation_for(
+    return PreparedKtKd(
+        kt=kt,
+        kd=kd,
+        ast=apparent_solar_time_hours(kept_midpoint, site.longitude, utc_offset_hours),
+        elevation=solar_elevation_for(
             kept_midpoint, site.latitude, site.longitude, utc_offset_hours
         ),
-        "daily_kt": daily_clearness_index(global_flux, extraterrestrial)[kt.index].to_numpy(),
-        "psi": persistence_index(kt_all)[kt.index].to_numpy(),
-        "filters": [
+        daily_kt=daily_clearness_index(global_flux, extraterrestrial)[kt.index].to_numpy(),
+        psi=persistence_index(kt_all)[kt.index].to_numpy(),
+        filters=[
             f"irradiancia global acima de {MIN_GLOBAL_WM2:.0f} W/m2",
             f"elevacao solar acima de {min_elevation_deg:.0f} graus em toda a hora",
             f"Kt e Kd dentro de [0, {MAX_RATIO}]",
             "denominador extraterrestre no ponto medio da janela horaria (BSRN)",
         ],
-    }
+    )
 
 
 def build_ktkd_payload(

@@ -73,11 +73,11 @@ def build_figure(hourly: pd.DataFrame) -> tuple[plt.Figure, dict[str, Any]]:
     prepared = ktkd_stats.prepare_ktkd(
         hourly, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
     )
-    kt, kd = prepared["kt"], prepared["kd"]
+    kt, kd = prepared.kt, prepared.kd
     if kt.empty:
         raise ValueError("no Kt-Kd pair survived the gates; nothing to plot")
 
-    predictors = (prepared["ast"], prepared["elevation"], prepared["daily_kt"], prepared["psi"])
+    predictors = (prepared.ast, prepared.elevation, prepared.daily_kt, prepared.psi)
     predictions = {
         "marques_filho_2016": ktkd_stats.marques_filho_2016(kt.to_numpy()),
         "lemos_2017": ktkd_stats.lemos_2017(kt.to_numpy(), *predictors),

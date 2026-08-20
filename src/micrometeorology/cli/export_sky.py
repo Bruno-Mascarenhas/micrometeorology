@@ -104,7 +104,7 @@ def build_payloads(hourly: pd.DataFrame, *, version: str) -> dict[str, Any]:
     prepared = ktkd_stats.prepare_ktkd(
         hourly, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
     )
-    kt, kd = prepared["kt"], prepared["kd"]
+    kt, kd = prepared.kt, prepared.kd
     if kt.empty:
         raise ValueError("no hour survived the gates; refusing to publish empty sky artifacts")
 
@@ -117,7 +117,7 @@ def build_payloads(hourly: pd.DataFrame, *, version: str) -> dict[str, Any]:
         _seasonal_samples(clearness), SUBSET_LABELS, version=version, caveats=CUMULATIVE_CAVEATS
     )
 
-    predictors = (prepared["ast"], prepared["elevation"], prepared["daily_kt"], prepared["psi"])
+    predictors = (prepared.ast, prepared.elevation, prepared.daily_kt, prepared.psi)
     edges = np.asarray(KT_CUMULATIVE_EDGES, dtype=float)
     ktkd_payload = ktkd_stats.build_ktkd_payload(
         kt,
@@ -138,7 +138,7 @@ def build_payloads(hourly: pd.DataFrame, *, version: str) -> dict[str, Any]:
             "timezone": "America/Bahia",
         },
         sources=["station_hourly.parquet"],
-        filters=prepared["filters"],
+        filters=prepared.filters,
         caveats=KTKD_CAVEATS,
         version=version,
     )
