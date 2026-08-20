@@ -1,28 +1,36 @@
 .PHONY: install-uv require-conda install install-dev install-cuda fix check typecheck test test-verbose audit lock-check bench clean all
 
 # Variables
-PYTHON ?= python
+CONDA_ENV_NAME ?= micrometeorology
+PYTHON ?= $(CONDA_PREFIX)/bin/python
 UV ?= uv
 UV_PIP = $(UV) pip install --system
 
-# Lint, type and test through the PROJECT ENVIRONMENT, never through PATH.
-# pyproject relies on ruff 0.16's expanded default rule set (see the
-# `extend-select` comment there), so an older ruff first on PATH — the miniforge
-# base build, say — disagrees about which rules exist: it reports this tree's
-# real `# noqa: BLE001` / `# noqa: TRY004` directives as unused RUF100 and
-# `make fix` DELETES them, exiting 0, after which CI's pinned 0.16.1 fails on
-# violations the developer never wrote. `--no-sync` pins the resolution without
-# touching the environment; `UV_PROJECT_ENVIRONMENT` is honoured when exported,
-# so the Conda flow above still works.
-RUN = $(UV) run --no-sync
+# Lint, type and test through the $(CONDA_ENV_NAME) ENVIRONMENT, never through
+# PATH and never through a second one. pyproject relies on ruff 0.16's expanded
+# default rule set (see the `extend-select` comment there), so an older ruff —
+# the miniforge base build, say — disagrees about which rules exist: it reports
+# this tree's real `# noqa: BLE001` / `# noqa: TRY004` directives as unused
+# RUF100 and `make fix` DELETES them, exiting 0, after which CI's pinned ruff
+# fails on violations the developer never wrote.
+#
+# `--no-sync` pins the resolution without touching the environment. Naming the
+# environment explicitly is what stops `uv run` from creating its own in .venv/
+# and running everything there: that one is invisible to `make install-dev`, so
+# it drifts, and the ruff it holds is not the ruff the floor above pins.
+RUN = UV_PROJECT_ENVIRONMENT="$(CONDA_PREFIX)" $(UV) run --no-sync
 TORCH_BACKEND ?= cu130
 TORCH_VERSION ?= 2.13.0
 
-install-uv:
+install-uv: require-conda
 	$(PYTHON) -m pip install uv
 
+# Checks the env by NAME, not merely that some env is active: the miniforge
+# `base` env satisfies "CONDA_PREFIX is set" and carries none of this project,
+# which is how `make bench` came to run against a python without numpy.
 require-conda:
-	@test -n "$(CONDA_PREFIX)" || (echo "Activate the micrometeorology Conda environment first." && exit 1)
+	@test "$(notdir $(CONDA_PREFIX))" = "$(CONDA_ENV_NAME)" || \
+		(echo "Activate the $(CONDA_ENV_NAME) Conda environment first (active: $(if $(CONDA_PREFIX),$(notdir $(CONDA_PREFIX)),none))." && exit 1)
 
 install: require-conda
 	UV_PROJECT_ENVIRONMENT="$(CONDA_PREFIX)" $(UV) sync --locked --inexact
@@ -34,17 +42,17 @@ install-cuda: require-conda
 	UV_PROJECT_ENVIRONMENT="$(CONDA_PREFIX)" $(UV) sync --locked --inexact --extra tcc-cuda --extra allsky --no-install-package torch
 	$(UV_PIP) --reinstall --torch-backend $(TORCH_BACKEND) "torch==$(TORCH_VERSION)"
 
-fix:
+fix: require-conda
 	$(RUN) ruff format .
 	$(RUN) ruff check --fix .
 
-typecheck:
+typecheck: require-conda
 	$(RUN) mypy src tests
 
-test:
+test: require-conda
 	$(RUN) pytest -n auto tests/
 
-test-verbose:
+test-verbose: require-conda
 	$(RUN) pytest -n auto -v tests/
 
 # Mirrors the CI vulnerability gate so advisory failures surface before a push.
@@ -62,11 +70,11 @@ lock-check:
 	$(UV) lock --check
 
 # Synthetic perf harnesses for the solrad hot paths (no data/ needed).
-bench:
-	$(PYTHON) benchmarks/solrad_correction/loading.py --rows 10000 --features 16
-	$(PYTHON) benchmarks/solrad_correction/preprocessing.py --rows 20000 --features 24
-	$(PYTHON) benchmarks/solrad_correction/sequence_dataloader.py --rows 50000 --features 24 --sequence-length 24
-	$(PYTHON) benchmarks/solrad_correction/artifact_checkpoint.py --hidden-size 32 --layers 2
+bench: require-conda
+	$(RUN) python benchmarks/solrad_correction/loading.py --rows 10000 --features 16
+	$(RUN) python benchmarks/solrad_correction/preprocessing.py --rows 20000 --features 24
+	$(RUN) python benchmarks/solrad_correction/sequence_dataloader.py --rows 50000 --features 24 --sequence-length 24
+	$(RUN) python benchmarks/solrad_correction/artifact_checkpoint.py --hidden-size 32 --layers 2
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
@@ -76,7 +84,7 @@ clean:
 	find . -type d -name ".mypy_cache" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
 
-check: lock-check
+check: require-conda lock-check
 	$(RUN) ruff format --check .
 	$(RUN) ruff check .
 	$(RUN) mypy src tests
