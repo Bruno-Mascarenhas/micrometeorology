@@ -91,6 +91,7 @@ def build_manifest(
     max_kindex: float | None = None,
     far_distance_minutes: float | None = None,
     extra_features: Iterable[str] = (),
+    sensor_timestamp_offset_minutes: float = 0.0,
     config_sha256: str | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Build the v2 manifest DataFrame and its sidecar meta dict.
@@ -142,6 +143,12 @@ def build_manifest(
         half the strategy's ``max_distance_minutes``.
     extra_features:
         Extra engineered feature names appended to the resolved set.
+    sensor_timestamp_offset_minutes:
+        Minutes added to every sensor stamp before pairing, in minutes. The
+        Campbell logger end-stamps its block averages, so ``-2.5`` moves a
+        5-minute row to the time centroid of the window it actually averages;
+        ``0.0`` keeps the raw-stamp join. Shifts only which row a frame is
+        paired to and the recorded ``distance_minutes`` — never the values.
     config_sha256:
         Optional hash of the originating config, stored in the meta.
 
@@ -201,7 +208,9 @@ def build_manifest(
         raise KeyError(f"sensor frame is missing the configured diffuse column {diffuse_column!r}")
 
     frame_times = pd.DatetimeIndex(frames["timestamp"])
-    sensor_index = pd.DatetimeIndex(sensors.index)
+    sensor_index = pd.DatetimeIndex(sensors.index) + pd.Timedelta(
+        minutes=sensor_timestamp_offset_minutes
+    )
 
     pairing = strategy.pair(frame_times, sensor_index)
     keep = pairing.matched
@@ -352,6 +361,7 @@ def build_manifest(
             "night_min_elevation_deg": night_min_elevation_deg,
             "max_kindex": max_kindex,
             "far_distance_minutes": far_distance_minutes,
+            "sensor_timestamp_offset_minutes": sensor_timestamp_offset_minutes,
         },
     )
     logger.info(
@@ -413,6 +423,7 @@ def build_manifest_from_prepare_config(
         kindex_kind=cfg.targets.kindex_kind,
         alignment=alignment,
         night_min_elevation_deg=cfg.night_filter.min_solar_elevation_deg,
+        sensor_timestamp_offset_minutes=cfg.sensor.timestamp_offset_minutes,
         config_sha256=config_sha256,
     )
 

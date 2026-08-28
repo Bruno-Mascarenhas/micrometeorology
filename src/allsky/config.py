@@ -386,6 +386,18 @@ class PrepareSensorConfig(BaseModel):
     ghi_column: str = "CM3Up_Wm2_Avg"
     column_map: dict[str, str] = Field(default_factory=dict)
     tolerance_minutes: float = 5.0
+    #: Minutes added to every logger stamp before a frame is paired to it.
+    #: The CR5000 END-stamps its averages: the row written at ``t`` is the mean
+    #: over ``(t - 5min, t]``, verified against the 1-minute ``LBM_solar_2024``
+    #: table over their 2024-03..07 overlap (RMS 0.083 W/m2, r = 1.000000,
+    #: n = 35,492, against 64.79 W/m2 for the begin-stamped reading). Pairing a
+    #: frame to the raw stamp therefore labels it with an average whose time
+    #: centroid sits 2.5 min earlier. Measured on 79,860 daylight 1-minute GHI
+    #: samples, the raw-stamp join carries 94.00 W/m2 of label noise against
+    #: 74.99 W/m2 for ``-2.5`` (-20.2%). Left at 0.0 so an existing dataset
+    #: rebuilds unchanged; it is part of the manifest resume hash, so a change
+    #: invalidates the manifest instead of being silently reused.
+    timestamp_offset_minutes: float = 0.0
 
 
 class PrepareTargetsConfig(BaseModel):

@@ -43,6 +43,14 @@ sensor:
   ghi_column: "CM3Up_Wm2_Avg"    # drives k-index + Erbs pseudo-target; FORBIDDEN as a feature
   column_map: {}                 # optional {logger_column: policy_source_name} renames
   tolerance_minutes: 5.0         # image<->sensor max pairing distance (alignment "far" threshold)
+  # The CR5000 END-stamps its 5-min averages: the row at t is the mean over
+  # (t-5min, t], verified against the 1-minute LBM_solar_2024 overlap at
+  # RMS 0.083 W/m2 / r = 1.000000. -2.5 moves each row to the time centroid of
+  # the window it averages. The offset sweep against that 1-minute truth bottoms
+  # out at exactly -2.50 (94.00 -> 74.99 W/m2 of label noise on GHI, -20.2%;
+  # 21.66 -> 15.35 on diffuse, -29.1%), and the downstream factorial measured
+  # -2.89 +- 0.22 W/m2 of test DHI RMSE. See docs/allsky-join-de-rotulo.md.
+  timestamp_offset_minutes: -2.5
 
 targets:
   diffuse_column: "PSP_Wm2_Avg"  # live diffuse sensor; null -> Erbs pseudo (target_source flags it)
