@@ -9,9 +9,9 @@ seed: 42
 features:
   # Must match the set the manifest was BUILT with — the engine resolves the
   # feature columns from here and fails on the ones the manifest lacks. Kept in
-  # step with configs/allsky/data/local_prepare.yaml, which dropped to `minimal`
-  # while the Gill MetSENS1 thermohygrometer is railed. Still NO radiometry.
-  set: minimal
+  # step with configs/allsky/data/local_prepare.yaml, which dropped to `bare`
+  # when the MetSENS1 fault took the barometer as well. Still NO radiometry.
+  set: bare
 
 data:
   # manifest / embeddings_dir / split_artifact are BARE names resolved against

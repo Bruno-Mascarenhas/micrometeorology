@@ -6,7 +6,10 @@ import pytest
 
 from allsky.config import SiteConfig
 from allsky.features import (
+    BARE_FEATURES,
+    BAROMETER_FEATURES,
     EXTENDED_FEATURES,
+    MINIMAL_FEATURES,
     SAFE_FEATURES,
     THERMOHYGROMETER_FEATURES,
     FeatureNormalizer,
@@ -16,6 +19,7 @@ from allsky.features import (
     build_feature_frame,
     fit_target_normalizers,
     resolve_feature_set,
+    source_column,
     validate_features,
 )
 
@@ -120,6 +124,38 @@ class TestFeaturePolicy:
         assert "temperature" not in groups
         assert "humidity" not in groups
         assert "radiometry_aux" not in groups
+
+    def test_resolve_bare_is_minimal_without_the_barometer(self):
+        assert resolve_feature_set("bare") == [
+            name for name in MINIMAL_FEATURES if name not in BAROMETER_FEATURES
+        ]
+
+    def test_bare_drops_the_pressure_channel_the_metsens1_fault_took(self):
+        assert "pressure_mbar" not in resolve_feature_set("bare")
+
+    def test_bare_keeps_the_mechanical_anemometer(self):
+        resolved = resolve_feature_set("bare")
+        assert {"wind_speed_ms", "wind_dir_sin", "wind_dir_cos"} <= set(resolved)
+
+    def test_bare_carries_no_logger_channel_outside_the_anemometer(self):
+        columns = {source_column(name) for name in BARE_FEATURES} - {None}
+        assert columns == {"WS_ms", "WindDir"}
+
+    def test_bare_features_pass_validation(self):
+        validate_features(resolve_feature_set("bare"))  # must not raise
+
+    def test_groups_cover_exactly_resolved_bare(self):
+        groups = active_feature_groups("bare")
+        covered = [f for members in groups.values() for f in members]
+        assert covered == resolve_feature_set("bare")
+        assert "pressure" not in groups
+        assert "temperature" not in groups
+        assert "humidity" not in groups
+        assert "radiometry_aux" not in groups
+
+    def test_an_unknown_set_names_every_tier_it_accepts(self):
+        with pytest.raises(ValueError, match="'bare', 'minimal', 'safe' or 'extended'"):
+            resolve_feature_set("barometric")
 
 
 # ---------------------------------------------------------------------------

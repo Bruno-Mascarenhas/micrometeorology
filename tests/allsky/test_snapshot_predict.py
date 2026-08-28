@@ -116,8 +116,8 @@ def test_a_capture_without_a_sensor_export_imputes_instead_of_raising(
 
     assert np.isfinite(prediction["predictions"]["dhi"])
     imputed = prediction["features"]["imputed"]
-    assert "pressure_mbar" in imputed
     assert "wind_speed_ms" in imputed
+    assert "wind_dir_sin" in imputed
     # Solar geometry comes from the timestamp, so it is never imputed.
     assert "solar_elevation" not in imputed
 

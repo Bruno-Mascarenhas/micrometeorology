@@ -15,11 +15,13 @@ site:
   longitude: -38.51              # UTC-3 fixed
 
 features:
-  # geometry + barometer + anemometer; NO radiometry (anti-leakage). Not `safe`:
-  # the Gill MetSENS1 thermohygrometer has been railed since 2025-12-19, so the
-  # three channels safe adds are NaN across the whole camera archive and would
-  # take 99.98% of the paired rows with them.
-  set: minimal
+  # geometry + MECHANICAL anemometer; NO radiometry (anti-leakage). Not `safe`:
+  # the Gill MetSENS1 thermohygrometer has been railed since 2025-12-19. Not
+  # `minimal` either: on 2026-08-10 13:05 the same instrument moved to a single
+  # "Unknown Fault" fill state that took the barometer with it (BP1 is a
+  # constant 2.62 hPa), and the row-wise finite filter would drop every frame
+  # from that timestamp on -- the whole overlap with the new camera days.
+  set: bare
 
 mask:
   path: null                     # static horizon/obstruction mask; null -> auto

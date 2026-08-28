@@ -74,7 +74,8 @@ def test_local_prepare_config_loads() -> None:
     # Not `safe`: the Gill MetSENS1 thermohygrometer has been railed since
     # 2025-12-19, so the three channels safe adds are NaN across the camera
     # archive and the row-wise finite filter would drop 99.98% of the dataset.
-    assert cfg.features.feature_set == "minimal"
+    # Not `minimal` either: the same fault took the barometer on 2026-08-10.
+    assert cfg.features.feature_set == "bare"
     assert cfg.sensor.ghi_column == "CM3Up_Wm2_Avg"
     assert cfg.targets.diffuse_column == "PSP_Wm2_Avg"
     assert cfg.targets.kindex_kind == "kstar"
@@ -93,7 +94,7 @@ def test_the_experiments_train_on_the_set_the_prepare_config_builds() -> None:
 
     The engine resolves its feature columns from the EXPERIMENT config while the
     manifest carries the ones the PREPARE config asked for, and nothing
-    reconciles them: dropping only the prepare side to ``minimal`` cost a full
+    reconciles them: dropping only the prepare side to ``bare`` cost a full
     dataset build before ``manifest is missing feature columns`` surfaced.
     """
     prepared = load_prepare_config(_CONFIGS / "data" / "local_prepare.yaml")
@@ -117,7 +118,7 @@ def test_experiment_loads_and_names_a_real_model(experiment: Path) -> None:
     assert cfg.seed == 42
     # Has to be the set data/local_prepare.yaml BUILDS with, or the engine asks
     # the manifest for feature columns it does not carry.
-    assert cfg.features.feature_set == "minimal"
+    assert cfg.features.feature_set == "bare"
     assert cfg.model.name in MODEL_BUILDERS, cfg.model.name
     assert cfg.output_dir == f"output/allsky-mm/experiments/{experiment.stem}"
     # The default embedding path, plus the one image-mode finetune experiment.
