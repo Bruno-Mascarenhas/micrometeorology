@@ -57,6 +57,7 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 from allsky.atomic import atomic_write, atomic_write_json
+from allsky.augmentation import AugmentationPipeline
 from allsky.config import ExperimentConfig, SchedulerConfig, TargetsConfig
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
@@ -69,6 +70,7 @@ from allsky.embeddings.backbone import Pooling
 from allsky.features.normalization import TargetNormalizer
 from allsky.features.policy import active_feature_groups, resolve_feature_set
 from allsky.modeling.baselines import ClimatologyModel
+from allsky.preprocessing import PreprocessingPipeline
 from allsky.training.checkpointing import (
     BEST_CHECKPOINT,
     LAST_CHECKPOINT,
@@ -353,6 +355,10 @@ def run_experiment(
         try:
             for epoch in range(start_epoch, cfg.train.epochs):
                 train_sampler_generator.manual_seed(cfg.seed * 100003 + epoch)
+                # Augmentation seeds on (seed, epoch, idx); without advancing
+                # this, every epoch would replay the identical draw per sample.
+                if hasattr(train_ds, "epoch"):
+                    train_ds.epoch = epoch
                 lrs = _current_lrs(optimizer, lr_labels)
                 train_metrics, global_step = _train_epoch(
                     model=model,
@@ -573,8 +579,23 @@ def _build_datasets(
         return train_ds, val_ds, embedding_dim
 
     image_size = int(_model_param(cfg, "image_size", 224))
+    # Field names match one-for-one on both sides, so a new config key reaches
+    # the pipeline instead of being silently dropped by a hand-written mapping.
+    pipeline = AugmentationPipeline(**cfg.augmentation.model_dump())
+    if pipeline.enabled:
+        logger.info("augmentation: %s", pipeline)
+    preprocess = PreprocessingPipeline(**cfg.preprocessing.model_dump())
+    if preprocess.enabled:
+        logger.info("preprocessing %s: %s", preprocess.identity, preprocess)
     image_train = MultimodalImageDataset(
-        train_df, feature_columns, data_root=root, image_size=image_size, train=True
+        train_df,
+        feature_columns,
+        data_root=root,
+        image_size=image_size,
+        train=True,
+        augment=pipeline,
+        preprocess=preprocess,
+        seed=cfg.seed,
     )
     image_val = MultimodalImageDataset(
         val_df,
@@ -583,6 +604,7 @@ def _build_datasets(
         image_size=image_size,
         train=False,
         stats=image_train.stats,
+        preprocess=preprocess,
     )
     return image_train, image_val, None
 

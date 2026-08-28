@@ -15,6 +15,7 @@ from allsky.config import SiteConfig
 from allsky.data.datasets import MultimodalEmbeddingDataset, MultimodalImageDataset
 from allsky.data.manifest import build_manifest
 from allsky.features import resolve_feature_set
+from allsky.preprocessing import IMAGENET_MEAN, IMAGENET_STD, imagenet_standardize
 
 type TorchDataset = Any  # runtime type: torch.utils.data.Dataset[dict[str, Any]]
 
@@ -134,7 +135,20 @@ class TestImageDatasetContract:
         assert item["features"].shape == (len(features),)
         assert item["features"].dtype == torch.float32
         assert item["image"].shape == (3, 16, 16)
-        assert 0.0 <= float(item["image"].min()) <= float(item["image"].max()) <= 1.0
+        # Standardized by the DINOv2 channel stats, so the range is the [0, 1]
+        # frame mapped through (x - mean) / std, not [0, 1].
+        bounds = np.array(
+            [
+                (lim - m) / sd
+                for lim in (0.0, 1.0)
+                for m, sd in zip(IMAGENET_MEAN, IMAGENET_STD, strict=True)
+            ],
+            dtype=np.float32,
+        )
+        assert float(item["image"].min()) == pytest.approx(float(bounds.min()), abs=1e-5) or (
+            float(bounds.min()) <= float(item["image"].min())
+        )
+        assert float(item["image"].max()) <= float(bounds.max()) + 1e-5
         assert item["dhi"].dtype == torch.float32
         assert item["kindex"].dtype == torch.float32
         assert item["sky_class"].dtype == torch.long
@@ -262,7 +276,8 @@ class TestImageDecoding:
                 Image.fromarray(image).resize((size, size), Image.Resampling.BILINEAR)
             )
         scaled = image.astype(np.float32) / 255.0
-        return np.ascontiguousarray(scaled.transpose(2, 0, 1))
+        chw = np.ascontiguousarray(scaled.transpose(2, 0, 1))
+        return np.ascontiguousarray(imagenet_standardize(chw))
 
     @pytest.mark.usefixtures("torch")
     def test_matches_imageio_recipe_on_rgb_jpeg(self, tmp_path: Path):
@@ -275,6 +290,35 @@ class TestImageDecoding:
             expected = self._imageio_recipe(root / str(path), 32)
             assert loaded.dtype == expected.dtype
             np.testing.assert_array_equal(loaded, expected)
+
+    @pytest.mark.usefixtures("torch")
+    def test_image_mode_feeds_the_backbone_what_the_embedding_path_feeds_it(self, tmp_path: Path):
+        """Both routes into DINOv2 must standardize identically.
+
+        The offline embedding path standardizes by the ImageNet channel stats
+        while image-mode training fed a raw [0, 1] frame, so a finetune ran
+        about 1.3 sigma off the distribution the backbone was pretrained on and
+        its features were not comparable with the frozen ones it was measured
+        against.
+        """
+        import imageio.v3 as iio_local
+
+        from allsky.embeddings.backbone import DinoV2Backbone
+
+        manifest, root = _build(tmp_path, n=1, image_size=32)
+        path = root / str(manifest["image_path"].iloc[0])
+        dataset = MultimodalImageDataset(
+            manifest, resolve_feature_set("safe"), data_root=root, image_size=32, train=True
+        )
+
+        # transform() only reads self.image_size, so the hub weights stay unloaded.
+        stub = DinoV2Backbone.__new__(DinoV2Backbone)
+        stub.image_size = 32
+
+        from_dataset = dataset._load_image(str(manifest["image_path"].iloc[0]))
+        from_backbone = stub.transform([iio_local.imread(path)])[0].numpy().astype(np.float32)
+
+        np.testing.assert_allclose(from_dataset, from_backbone, rtol=0, atol=1e-6)
 
     @pytest.mark.usefixtures("torch")
     def test_grayscale_is_channel_replicated(self, tmp_path: Path):

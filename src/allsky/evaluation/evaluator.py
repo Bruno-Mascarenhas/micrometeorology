@@ -54,6 +54,7 @@ from allsky.evaluation.metrics import (
     skill_score,
 )
 from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
+from allsky.preprocessing import PreprocessingPipeline
 from allsky.solar import SOLAR_CONSTANT_WM2, eccentricity_correction
 
 logger = logging.getLogger(__name__)
@@ -539,6 +540,8 @@ def _build_split_dataset(
         return dataset, embedding_dim
 
     image_size = int(dict(cfg.model.model_dump()).get("image_size", 224))
+    # `cfg` is rebuilt from checkpoint["config"], and --config overrides only
+    # data.data_root, so this pipeline is by construction the one training used.
     dataset = MultimodalImageDataset(
         split_df,
         feature_columns,
@@ -546,6 +549,7 @@ def _build_split_dataset(
         image_size=image_size,
         train=False,
         stats=feature_normalizer,
+        preprocess=PreprocessingPipeline(**cfg.preprocessing.model_dump()),
     )
     return dataset, None
 

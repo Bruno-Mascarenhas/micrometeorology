@@ -4,7 +4,8 @@ Two datasets share one batch contract (see :class:`MultimodalImageDataset`):
 
 - :class:`MultimodalImageDataset` loads sky JPEGs (paths relative to
   ``data_root``) end-to-end with a PIL decode -> RGB -> bilinear resize -> CHW
-  float32 in ``[0, 1]`` recipe.
+  float32 recipe, standardized by the DINOv2 channel statistics so the image
+  path feeds the backbone what the offline embedding path feeds it.
 - :class:`MultimodalEmbeddingDataset` reads a precomputed visual embedding per
   sample through an :class:`EmbeddingReader`, the minimal
   ``sample_id -> np.ndarray`` protocol that
@@ -202,38 +203,92 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         image_size: int = 224,
         train: bool = True,
         stats: FeatureNormalizer | None = None,
+        augment: Any | None = None,
+        preprocess: Any | None = None,
+        seed: int = 0,
     ) -> None:
         super().__init__(manifest, feature_columns, train=train, stats=stats)
         self.data_root = data_root
         self.image_size = image_size
         self._paths = [str(p) for p in self.manifest["image_path"]]
+        # Augmentation is a training-split transform by definition: applying it
+        # to val/test would measure the model on pixels the sensor never saw.
+        self.augment = augment if train else None
+        #: Mixed into the per-sample seed. Without it every epoch would draw the
+        #: SAME gain, noise field and erase rectangle for a given sample — a
+        #: fixed perturbation of the dataset, which the model can memorise, and
+        #: not augmentation at all. The engine advances it each epoch.
+        self.epoch = 0
+        # Preprocessing is NOT gated on `train`: it must be identical wherever
+        # the model runs, or inference sees pixels training never produced.
+        self.preprocess = preprocess
+        self._seed = int(seed)
 
-    def _load_image(self, relative_path: str) -> np.ndarray:
-        """Load a JPEG as float32 CHW in [0, 1], resized to ``image_size``.
+    def _load_image(self, relative_path: str, idx: int = 0) -> np.ndarray:
+        """Load a JPEG as a standardized float32 CHW array, resized to ``image_size``.
+
+        The chain is decode -> ``[0, 1]`` -> preprocess -> resize -> augment
+        -> standardize.
+
+        Preprocessing runs at NATIVE resolution, before the resize: filling the
+        timestamp band after downscaling leaves glyph pixels smeared into the
+        sky rows below it (measured on this camera: up to 0.031 of residual in
+        the six rows under the band). Augmentation runs on the ``[0, 1]`` frame
+        because every transform in :mod:`allsky.augmentation` is defined there,
+        and standardisation stays last so the backbone always receives its
+        pretraining distribution. ``idx`` seeds the augmentation together with the seed and the epoch.
 
         PIL decode -> RGB (``convert`` channel-replicates grayscale) -> bilinear
         resize; resolves the manifest's relative POSIX path against
-        ``data_root``.  Decoding straight with PIL is pixel-identical to reading
-        through imageio and wrapping the array back into an image to resize it,
-        without the two full-frame numpy<->PIL copies.
+        ``data_root``.  On the no-preprocessing path, decoding straight with PIL
+        is pixel-identical to reading through imageio and wrapping the array back
+        into an image to resize it, without the two full-frame numpy<->PIL
+        copies; the preprocessing path necessarily pays them, because the stage
+        is defined on float CHW and PIL cannot bilinear-resize one.
         """
+        # Imported here for the same reason PIL is: allsky.preprocessing reaches
+        # back into allsky.data.contracts, so a module-level import would close a
+        # cycle through this package's __init__.
         from PIL import Image
+
+        from allsky.preprocessing import imagenet_standardize
 
         full = resolve(relative_path, self.data_root)
         size = self.image_size
         with Image.open(full) as handle:
             frame = handle.convert("RGB")
+        preprocess = self.preprocess
+        if preprocess is not None and preprocess.enabled:
+            native = np.asarray(frame, dtype=np.uint8).astype(np.float32) / 255.0
+            processed = preprocess(native.transpose(2, 0, 1))
+            frame = Image.fromarray((processed.transpose(1, 2, 0) * 255.0).round().astype(np.uint8))
         if frame.size != (size, size):
             frame = frame.resize((size, size), Image.Resampling.BILINEAR)
         scaled = np.asarray(frame, dtype=np.uint8).astype(np.float32) / 255.0
-        return np.ascontiguousarray(scaled.transpose(2, 0, 1))
+        chw = np.ascontiguousarray(scaled.transpose(2, 0, 1))
+        return imagenet_standardize(self._augmented(chw, idx))
+
+    def _augmented(self, chw: np.ndarray, idx: int) -> np.ndarray:
+        """Augment one frame with a per-sample seeded generator.
+
+        The generator is derived from ``(seed, epoch, idx)`` rather than drawn
+        from a shared stream, so a dataloader worker cannot change which
+        transform a sample gets — the engine's own docstring warns that worker
+        RNG would otherwise leak into the batch — while the epoch term keeps the
+        draw varying across passes.
+        """
+        if self.augment is None or not self.augment.enabled:
+            return chw
+        rng = np.random.default_rng((self._seed, self.epoch, idx))
+        augmented: np.ndarray = self.augment(chw, rng)
+        return augmented
 
     def __getitem__(self, idx: int) -> SampleTensors:
         """Row *idx*: the shared target tensors plus ``image`` ``(3, H, W)`` float32."""
         import torch
 
         item = self._target_item(idx)
-        item["image"] = torch.from_numpy(self._load_image(self._paths[idx]))
+        item["image"] = torch.from_numpy(self._load_image(self._paths[idx], idx))
         return item
 
 
