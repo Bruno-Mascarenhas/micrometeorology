@@ -13,8 +13,11 @@ from allsky.config import SiteConfig
 
 __all__ = ["STATION_SITE", "STATION_UTC_OFFSET_HOURS"]
 
-#: LabMiM tower, Instituto de Física, UFBA — Ondina, Salvador.
-STATION_SITE = SiteConfig(latitude=-13.0055, longitude=-38.5089)
+#: LabMiM tower, Instituto de Física, UFBA — Ondina, Salvador. The numbers live
+#: in :class:`allsky.config.SiteConfig`'s defaults, which every package reads
+#: through this name; repeating them here is how the three packages ended up
+#: with three different latitudes for one tower.
+STATION_SITE = SiteConfig()
 
 #: Salvador keeps UTC-3 all year — DST never applied to Bahia and Brazil
 #: abolished it in 2019 — so a fixed offset is exact, not an approximation.

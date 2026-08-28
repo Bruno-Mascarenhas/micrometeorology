@@ -73,8 +73,8 @@ UTC_OFFSET_HOURS = STATION_UTC_OFFSET_HOURS
 STATION = {
     "name": "Estação Micrometeorológica LabMiM",
     "institution": "Instituto de Física — UFBA",
-    "latitude": -13.0055,
-    "longitude": -38.5089,
+    "latitude": SITE.latitude,
+    "longitude": SITE.longitude,
     "elevation_m": 46.0,
     "timezone": "America/Bahia",
 }

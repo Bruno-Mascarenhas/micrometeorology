@@ -85,8 +85,12 @@ DATASET_SPLIT_FILENAME = "splits.json"
 class SiteConfig(BaseModel):
     """Observation site (LabMiM/UFBA, Salvador-BA by default)."""
 
-    latitude: float = -13.00
-    longitude: float = -38.51
+    #: LabMiM tower, Instituto de Fisica, UFBA — Ondina, Salvador. These are the
+    #: canonical coordinates for the station: every package reads them from here,
+    #: through :data:`micrometeorology.common.site.STATION_SITE`, so a surveyed
+    #: correction reaches all of them at once.
+    latitude: float = -13.0055
+    longitude: float = -38.5089
 
 
 #: The window modes a dataset can build. This module is the single owner of the

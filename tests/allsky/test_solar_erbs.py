@@ -10,7 +10,7 @@ from allsky.config import SiteConfig
 
 @pytest.fixture
 def site() -> SiteConfig:
-    """Default site: LabMiM/UFBA, Salvador-BA (lat -13.00, lon -38.51)."""
+    """Default site: LabMiM/UFBA, Salvador-BA (lat -13.0055, lon -38.5089)."""
     return SiteConfig()
 
 

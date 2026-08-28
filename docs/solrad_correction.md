@@ -119,8 +119,8 @@ data:
     - T2
     - Q2
     - PSFC
-  station_lat: -12.95
-  station_lon: -38.51
+  station_lat: -13.0055
+  station_lon: -38.5089
 
 split:
   train_ratio: 0.7

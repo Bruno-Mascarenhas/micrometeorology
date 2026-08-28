@@ -11,8 +11,8 @@ video:
   minutes_per_frame: 1.0
 
 site:
-  latitude: -13.00               # LabMiM/UFBA, Salvador-BA
-  longitude: -38.51              # UTC-3 fixed
+  latitude: -13.0055             # LabMiM/UFBA, Salvador-BA
+  longitude: -38.5089            # UTC-3 fixed
 
 features:
   # geometry + MECHANICAL anemometer; NO radiometry (anti-leakage). Not `safe`:
