@@ -59,14 +59,12 @@ receives the distribution it was pretrained on.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
 
 import numpy as np
 
 __all__ = [
     "AugmentationPipeline",
     "SunProjection",
-    "Transform",
     "exposure_jitter",
     "polar_unwrap",
     "random_erasing",
@@ -77,13 +75,6 @@ __all__ = [
 #: sRGB display gamma. Exposure is a linear-space operation, so a gain applied
 #: to gamma-encoded pixels would not be a gain at all.
 SRGB_GAMMA = 2.2
-
-
-@runtime_checkable
-class Transform(Protocol):
-    """A CHW float32 ``[0, 1]`` frame in, one out, given a seeded generator."""
-
-    def __call__(self, chw: np.ndarray, rng: np.random.Generator) -> np.ndarray: ...
 
 
 def exposure_jitter(

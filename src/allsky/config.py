@@ -243,14 +243,21 @@ class TargetsConfig(BaseModel):
 #: :func:`allsky.preprocessing.remove_timestamp_band`.
 OverlayPolicy = Literal["keep", "fill", "inpaint", "crop"]
 
+#: Fraction of the frame height the camera's burned-in overlay occupies.
+#: Measured over eight frames spanning 2026-05-08..08-01: the text reaches
+#: y=75 of 512 (0.1465) at its tallest. 0.16 adds a margin. It lives here, in
+#: the leaf module, so the config default and
+#: :mod:`allsky.preprocessing` cannot drift apart.
+TIMESTAMP_BAND_FRACTION = 0.16
+
 
 class PreprocessingConfig(BaseModel):
     """Deterministic image preprocessing, applied to EVERY split.
 
     Unlike :class:`AugmentationConfig`, which is random and training-only, these
-    transforms must be identical at training and inference. The resolved
-    pipeline's ``identity`` is written into the run so a mismatch is loud rather
-    than silent.
+    transforms must be identical at training and inference, so they travel in
+    ``checkpoint["config"]`` and every path that turns a frame into model input
+    rebuilds the pipeline from there.
 
     ``overlay="keep"`` and no ROI is the historical behaviour and the default.
     """
@@ -258,7 +265,7 @@ class PreprocessingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     overlay: OverlayPolicy = "keep"
-    band_fraction: float = 0.16
+    band_fraction: float = TIMESTAMP_BAND_FRACTION
     roi_radius_fraction: float | None = None
 
 

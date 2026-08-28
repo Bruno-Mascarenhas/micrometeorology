@@ -1,7 +1,7 @@
 """Tests for the deterministic preprocessing pipeline.
 
 The contract that matters is symmetry: preprocessing must be applied identically
-at training and inference, and its identity must change whenever the pixels do.
+at training and inference, so the settings travel in the checkpoint's config.
 """
 
 import numpy as np
@@ -89,25 +89,6 @@ class TestPreprocessingPipeline:
         pipeline = PreprocessingPipeline(overlay="inpaint", roi_radius_fraction=0.98)
 
         np.testing.assert_array_equal(pipeline(frame), pipeline(frame))
-
-    def test_the_identity_changes_with_every_setting(self):
-        identities = {
-            PreprocessingPipeline().identity,
-            PreprocessingPipeline(overlay="inpaint").identity,
-            PreprocessingPipeline(overlay="fill").identity,
-            PreprocessingPipeline(overlay="inpaint", band_fraction=0.2).identity,
-            PreprocessingPipeline(overlay="inpaint", roi_radius_fraction=0.98).identity,
-        }
-
-        assert len(identities) == 5
-
-    def test_the_identity_is_stable_across_instances(self):
-        """It is written into the run and compared at load, so it must not
-        depend on object identity or on dict ordering."""
-        assert (
-            PreprocessingPipeline(overlay="inpaint").identity
-            == PreprocessingPipeline(overlay="inpaint").identity
-        )
 
     def test_the_roi_zeroes_the_corners_and_keeps_the_dome(self, frame: np.ndarray):
         out = PreprocessingPipeline(roi_radius_fraction=0.95)(frame)

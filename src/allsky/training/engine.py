@@ -357,8 +357,7 @@ def run_experiment(
                 train_sampler_generator.manual_seed(cfg.seed * 100003 + epoch)
                 # Augmentation seeds on (seed, epoch, idx); without advancing
                 # this, every epoch would replay the identical draw per sample.
-                if hasattr(train_ds, "epoch"):
-                    train_ds.epoch = epoch
+                train_ds.set_epoch(epoch)
                 lrs = _current_lrs(optimizer, lr_labels)
                 train_metrics, global_step = _train_epoch(
                     model=model,
@@ -586,7 +585,7 @@ def _build_datasets(
         logger.info("augmentation: %s", pipeline)
     preprocess = PreprocessingPipeline(**cfg.preprocessing.model_dump())
     if preprocess.enabled:
-        logger.info("preprocessing %s: %s", preprocess.identity, preprocess)
+        logger.info("preprocessing: %s", preprocess)
     image_train = MultimodalImageDataset(
         train_df,
         feature_columns,

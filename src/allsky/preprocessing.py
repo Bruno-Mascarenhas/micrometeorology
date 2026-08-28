@@ -22,14 +22,18 @@ frames that are unusable for radiometric reasons:
 Everything is pure numpy + PIL: importing this module never pulls torch.
 """
 
-import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 
-from allsky.config import CropConfig, OverlayPolicy, PrepareConfig
+from allsky.config import (
+    TIMESTAMP_BAND_FRACTION,
+    CropConfig,
+    OverlayPolicy,
+    PrepareConfig,
+)
 from allsky.data.contracts import QCFlag
 
 __all__ = [
@@ -84,13 +88,6 @@ def imagenet_standardize(chw: np.ndarray) -> np.ndarray:
     return standardized.astype(np.float32, copy=False)
 
 
-#: Fraction of the frame height the burned-in timestamp overlay occupies.
-#: Measured over eight frames spanning 2026-05-08..08-01: the blue overlay text
-#: reaches y=75 of 512 (0.1465) at its tallest, x 4..449. 0.16 adds a margin so
-#: a longer string on some future day still falls inside the band.
-TIMESTAMP_BAND_FRACTION = 0.16
-
-
 def remove_timestamp_band(
     chw: np.ndarray,
     *,
@@ -113,8 +110,10 @@ def remove_timestamp_band(
     policy:
         ``keep`` leaves the frame untouched (historical default).
 
-        ``fill`` paints the band with :data:`IMAGENET_MEAN`, chosen so the region
-        is exactly ``0`` after standardisation. **This is the recommended
+        ``fill`` paints the band with :data:`IMAGENET_MEAN`, which standardises
+        to ``0``. Exactly ``0`` only on the direct path: the dataset re-quantises
+        through uint8 and resizes before standardising, which leaves the band at
+        about 8e-3 instead (measured), and blurs its lower edge. **This is the recommended
         setting.** It removes the glyphs, fabricates nothing, and leaves the rest
         of the geometry intact. It does create a hard horizontal edge, but a ViT
         reads that as a set of constant tokens, which is far more benign than it
@@ -185,10 +184,11 @@ class PreprocessingPipeline:
 
     This is the difference from :class:`allsky.augmentation.AugmentationPipeline`:
     augmentation is random and training-only, preprocessing is fixed and must be
-    byte-identical wherever the model runs. This project has twice shipped a
-    transform on one side of that line and not the other — the ImageNet
-    standardisation, and the sensor pairing offset — so :attr:`identity` exists
-    to be written into the checkpoint and compared at load time.
+    byte-identical wherever the model runs. This project has shipped a transform
+    on one side of that line and not the other three times — the ImageNet
+    standardisation, the sensor pairing offset, and the live snapshot path — so
+    the settings travel in ``checkpoint["config"]`` and every path that turns a
+    frame into model input rebuilds this pipeline from there.
 
     Every field defaults to the historical behaviour, so a config that does not
     mention preprocessing reproduces the numbers it reproduced before.
@@ -216,19 +216,6 @@ class PreprocessingPipeline:
     def enabled(self) -> bool:
         """True when the pipeline changes any pixel."""
         return self.overlay != "keep" or self.roi_radius_fraction is not None
-
-    @property
-    def identity(self) -> str:
-        """Stable short hash of the settings, for the run log.
-
-        The settings themselves travel in ``checkpoint["config"]`` and the
-        evaluator rebuilds the pipeline from there, so train/serve cannot
-        diverge; this is the short form a human can compare across two runs.
-        """
-        payload = (
-            f"overlay={self.overlay}:band={self.band_fraction:.4f}:roi={self.roi_radius_fraction}"
-        )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
     def __call__(self, chw: np.ndarray) -> np.ndarray:
         """Apply the pipeline to one ``(3, H, W)`` float32 frame in ``[0, 1]``."""

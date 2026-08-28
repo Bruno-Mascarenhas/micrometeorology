@@ -26,7 +26,7 @@ import itertools
 import math
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Protocol, get_args, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, get_args, runtime_checkable
 
 import numpy as np
 import pandas as pd
@@ -34,6 +34,12 @@ import pandas as pd
 from allsky.config import AlignmentStrategyName
 from allsky.data.contracts import NS_PER_MINUTE, resolve
 from allsky.features.normalization import FeatureNormalizer
+
+if TYPE_CHECKING:
+    # allsky.preprocessing reaches back into allsky.data.contracts, so importing
+    # it at runtime would close a cycle through this package's __init__.
+    from allsky.augmentation import AugmentationPipeline
+    from allsky.preprocessing import PreprocessingPipeline
 
 __all__ = [
     "EmbeddingReader",
@@ -84,6 +90,7 @@ class _BaseMultimodalDataset:
         self.manifest = manifest.reset_index(drop=True)
         self.feature_columns = list(feature_columns)
         self.train = train
+        self.epoch = 0
         if not self.feature_columns:
             raise ValueError("feature_columns must be non-empty")
         missing = [c for c in self.feature_columns if c not in self.manifest.columns]
@@ -112,6 +119,17 @@ class _BaseMultimodalDataset:
         self._sky_class = self.manifest["sky_class"].to_numpy(dtype=np.int64, copy=True)
         self._sample_ids = [str(s) for s in self.manifest["sample_id"]]
         self._columns: SampleTensors | None = None
+
+    def set_epoch(self, epoch: int) -> None:
+        """Tell the dataset which pass over the data it is on.
+
+        Only the image dataset reads it — its augmentation seeds on
+        ``(seed, epoch, idx)`` — but the training loop calls this on whatever
+        dataset it was handed, so the attribute lives here rather than the loop
+        asking which kind it holds. Probing for it instead would let a rename
+        silently freeze augmentation on the first epoch.
+        """
+        self.epoch = epoch
 
     def _raw_target(self, column: str) -> np.ndarray:
         """Raw physical target column as float32 (NaN preserved as missing).
@@ -203,8 +221,8 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         image_size: int = 224,
         train: bool = True,
         stats: FeatureNormalizer | None = None,
-        augment: Any | None = None,
-        preprocess: Any | None = None,
+        augment: AugmentationPipeline | None = None,
+        preprocess: PreprocessingPipeline | None = None,
         seed: int = 0,
     ) -> None:
         super().__init__(manifest, feature_columns, train=train, stats=stats)
@@ -214,11 +232,6 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         # Augmentation is a training-split transform by definition: applying it
         # to val/test would measure the model on pixels the sensor never saw.
         self.augment = augment if train else None
-        #: Mixed into the per-sample seed. Without it every epoch would draw the
-        #: SAME gain, noise field and erase rectangle for a given sample — a
-        #: fixed perturbation of the dataset, which the model can memorise, and
-        #: not augmentation at all. The engine advances it each epoch.
-        self.epoch = 0
         # Preprocessing is NOT gated on `train`: it must be identical wherever
         # the model runs, or inference sees pixels training never produced.
         self.preprocess = preprocess
