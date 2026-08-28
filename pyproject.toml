@@ -220,6 +220,11 @@ convention = "numpy"
 # production ones; its docstring forbids editing the body.
 "tests/micromet/_reference.py" = ["BLE001"]
 "notebooks/*.ipynb" = ["S603", "S607"]
+# A verification harness. S101: its `assert`s ARE its output, and a notebook
+# never runs under `python -O`, so what the rule guards against cannot happen.
+# S603/S607: it shells out to rclone, resolved from a variable rather than a
+# string literal, which is the one shape S603 can never accept.
+"notebooks/exploratory/03_verifica_bundle_no_drive.ipynb" = ["S101", "S603", "S607"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["allsky", "micrometeorology", "solrad_correction"]
