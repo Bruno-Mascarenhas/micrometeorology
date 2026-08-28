@@ -425,13 +425,11 @@ def _image_as_chw(image_path: str | Path, size: int, cfg: ExperimentConfig) -> n
         frame = handle.convert("RGB")
     preprocess = PreprocessingPipeline(**cfg.preprocessing.model_dump())
     if preprocess.enabled:
-        native = np.asarray(frame, dtype=np.uint8).astype(np.float32) / 255.0
-        processed = preprocess(native.transpose(2, 0, 1))
-        frame = Image.fromarray((processed.transpose(1, 2, 0) * 255.0).round().astype(np.uint8))
+        frame = Image.fromarray(preprocess.apply_uint8_hwc(np.asarray(frame, dtype=np.uint8)))
     if frame.size != (size, size):
         frame = frame.resize((size, size), Image.Resampling.BILINEAR)
     scaled = np.asarray(frame, dtype=np.uint8).astype(np.float32) / 255.0
-    return imagenet_standardize(np.ascontiguousarray(scaled.transpose(2, 0, 1)))
+    return imagenet_standardize(np.ascontiguousarray(scaled.transpose(2, 0, 1)), copy=False)
 
 
 class _EmbeddingStoreUnreachableError(ValueError):

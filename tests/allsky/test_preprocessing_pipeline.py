@@ -102,3 +102,58 @@ class TestPreprocessingPipeline:
         assert out.shape == frame.shape
         assert out.dtype == np.float32
         assert out.flags["C_CONTIGUOUS"]
+
+
+class TestUint8Route:
+    """The fast route the dataloader takes must be the slow route's twin."""
+
+    @pytest.mark.parametrize("overlay", ["keep", "fill", "inpaint", "crop"])
+    @pytest.mark.parametrize("roi", [None, 0.5, 0.98])
+    def test_it_produces_the_same_pixels_as_the_float_route(
+        self, overlay: OverlayPolicy, roi: float | None
+    ) -> None:
+        """Every stage is a constant write, a data move, or a multiply by exactly
+        0 or 1, so the two routes agree on pixels rather than merely on looks."""
+        hwc = np.random.default_rng(5).integers(0, 256, (96, 64, 3), dtype=np.uint8)
+        pipeline = PreprocessingPipeline(overlay=overlay, roi_radius_fraction=roi)
+
+        native = hwc.astype(np.float32) / 255.0
+        through_float = (
+            (pipeline(native.transpose(2, 0, 1)).transpose(1, 2, 0) * 255.0)
+            .round()
+            .astype(np.uint8)
+        )
+
+        np.testing.assert_array_equal(pipeline.apply_uint8_hwc(hwc), through_float)
+
+    def test_it_never_mutates_the_frame_it_was_given(self) -> None:
+        hwc = np.random.default_rng(6).integers(0, 256, (48, 48, 3), dtype=np.uint8)
+        before = hwc.copy()
+
+        PreprocessingPipeline(overlay="fill", roi_radius_fraction=0.9).apply_uint8_hwc(hwc)
+
+        np.testing.assert_array_equal(hwc, before)
+
+    def test_a_disabled_pipeline_hands_the_frame_straight_back(self) -> None:
+        hwc = np.zeros((8, 8, 3), dtype=np.uint8)
+
+        assert PreprocessingPipeline().apply_uint8_hwc(hwc) is hwc
+
+
+class TestInPlaceStandardisation:
+    def test_it_matches_the_copying_form_bit_for_bit(self) -> None:
+        frame = np.random.default_rng(7).random((3, 32, 32), dtype=np.float32)
+
+        np.testing.assert_array_equal(
+            imagenet_standardize(frame.copy()),
+            imagenet_standardize(frame.copy(), copy=False),
+        )
+
+    def test_it_writes_into_the_buffer_it_was_given(self) -> None:
+        frame = np.random.default_rng(8).random((3, 8, 8), dtype=np.float32)
+
+        assert imagenet_standardize(frame, copy=False) is frame
+
+    def test_it_refuses_a_dtype_it_cannot_standardize_in_place(self) -> None:
+        with pytest.raises(TypeError, match="float32"):
+            imagenet_standardize(np.zeros((3, 4, 4), dtype=np.float64), copy=False)

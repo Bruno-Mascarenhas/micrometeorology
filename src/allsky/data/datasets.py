@@ -272,14 +272,13 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
             frame = handle.convert("RGB")
         preprocess = self.preprocess
         if preprocess is not None and preprocess.enabled:
-            native = np.asarray(frame, dtype=np.uint8).astype(np.float32) / 255.0
-            processed = preprocess(native.transpose(2, 0, 1))
-            frame = Image.fromarray((processed.transpose(1, 2, 0) * 255.0).round().astype(np.uint8))
+            frame = Image.fromarray(preprocess.apply_uint8_hwc(np.asarray(frame, dtype=np.uint8)))
         if frame.size != (size, size):
             frame = frame.resize((size, size), Image.Resampling.BILINEAR)
         scaled = np.asarray(frame, dtype=np.uint8).astype(np.float32) / 255.0
         chw = np.ascontiguousarray(scaled.transpose(2, 0, 1))
-        return imagenet_standardize(self._augmented(chw, idx))
+        # `chw` was allocated here, so standardising in place costs no copy.
+        return imagenet_standardize(self._augmented(chw, idx), copy=False)
 
     def _augmented(self, chw: np.ndarray, idx: int) -> np.ndarray:
         """Augment one frame with a per-sample seeded generator.
