@@ -49,7 +49,7 @@ WHAT IS LEGAL, AND WHY
     becomes translational invariance, and the circumsolar annulus — which
     governs the diffuse/direct split — is magnified. **Requires the lens
     projection**, so it stays inert until a calibration supplies the sun's pixel
-    position; see :class:`SunProjection`.
+    position; see :class:`~allsky.lens.LensCalibration`.
 
 All functions take and return ``(3, H, W)`` float32 CHW arrays in ``[0, 1]`` —
 BEFORE the DINOv2 standardisation, which must stay last so the backbone always
@@ -62,9 +62,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from allsky.lens import LensCalibration
+
 __all__ = [
     "AugmentationPipeline",
-    "SunProjection",
+    "LensCalibration",
     "exposure_jitter",
     "polar_unwrap",
     "random_erasing",
@@ -205,54 +207,6 @@ def translate(chw: np.ndarray, rng: np.random.Generator, *, max_shift: int = 4) 
     return np.ascontiguousarray(padded[:, top : top + height, left : left + width])
 
 
-@dataclass(frozen=True, slots=True)
-class SunProjection:
-    """Lens projection mapping solar zenith/azimuth to a pixel in the frame.
-
-    ``centre_row``/``centre_col`` are the optical axis and ``radius_px`` the
-    pixel radius of the 90-degree zenith circle. ``equidistant`` selects the
-    ``r = f * theta`` fisheye law; the alternative is the equisolid
-    ``r = 2f sin(theta/2)``.
-
-    A camera that looks up sees the sky mirrored east-west against a map drawn
-    looking down: with north toward the top of the frame, east falls to the
-    **left**. Fitting the Planetario sun track both ways settles it — mirrored
-    gives a 6.67 px median residual and an optical centre inside the frame,
-    unmirrored gives 31.69 px and a centre 9 px above the top edge. No azimuth
-    offset can convert one into the other; they differ by a reflection.
-
-    ``azimuth_offset_rad`` absorbs the camera's rotation about the optical axis,
-    which is a property of the mount rather than of the lens.
-
-    This site's lens is **not characterised yet in the shipped configs**, so
-    nothing constructs one of these by default and :func:`polar_unwrap` stays
-    unused until it is. Fit it the way Sec. 3.4 of arXiv:2503.21966 does, or by
-    least squares against the sun's known position on clear frames.
-    """
-
-    centre_row: float
-    centre_col: float
-    radius_px: float
-    equidistant: bool = True
-    azimuth_offset_rad: float = 0.0
-
-    def pixel_of(self, zenith_rad: float, azimuth_rad: float) -> tuple[float, float]:
-        """Pixel ``(row, col)`` of a sky direction.
-
-        Azimuth is measured clockwise from north, i.e. the convention the
-        station's solar geometry already uses.
-        """
-        if self.equidistant:
-            r = self.radius_px * (zenith_rad / (np.pi / 2.0))
-        else:
-            r = self.radius_px * (np.sin(zenith_rad / 2.0) / np.sin(np.pi / 4.0))
-        bearing = azimuth_rad + self.azimuth_offset_rad
-        return (
-            self.centre_row - r * float(np.cos(bearing)),
-            self.centre_col - r * float(np.sin(bearing)),
-        )
-
-
 def polar_unwrap(
     chw: np.ndarray,
     *,
@@ -277,7 +231,7 @@ def polar_unwrap(
     chw:
         ``(3, H, W)`` float32 in ``[0, 1]``.
     sun_row, sun_col:
-        The sun's pixel position, from :meth:`SunProjection.pixel_of`.
+        The sun's pixel position, from :meth:`LensCalibration.pixel_of`.
     out_shape:
         ``(angles, radii)``; defaults to the input's own ``(H, W)``.
 
@@ -331,7 +285,7 @@ class AugmentationPipeline:
     -----
     :func:`random_erasing` is called WITHOUT ``keep_solar_disc``: protecting the
     sun needs its pixel position, which needs the lens projection this site does
-    not have yet (see :class:`SunProjection`). Until then an erased rectangle
+    not have yet (see :class:`~allsky.lens.LensCalibration`). Until then an erased rectangle
     can land on the solar disc, which changes the physics rather than adding a
     nuisance — so ``p_erase`` should stay low, and the guard should be wired
     through the moment a calibration exists.

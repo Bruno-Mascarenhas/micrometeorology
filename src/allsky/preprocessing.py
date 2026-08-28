@@ -35,6 +35,7 @@ from allsky.config import (
     PrepareConfig,
 )
 from allsky.data.contracts import QCFlag
+from allsky.lens import LensCalibration
 
 __all__ = [
     "DARK_LUMINANCE_THRESHOLD",
@@ -293,6 +294,10 @@ def estimate_circular_mask(
     A disc of radius ``radius_fraction * min(H, W) / 2`` centred on the image
     (or on *center* ``(row, col)``) is kept; everything outside is dropped.
 
+    Thin wrapper over :meth:`allsky.lens.LensCalibration.centred_in`, which owns
+    the geometry — the same description of the optics that
+    :meth:`~allsky.lens.LensCalibration.pixel_of` uses to place the sun.
+
     Parameters
     ----------
     shape:
@@ -311,19 +316,12 @@ def estimate_circular_mask(
 
     Limitation
     ----------
-    This is a **heuristic** for the common all-sky geometry where the fisheye
-    projection fills the shorter image dimension and is roughly centred.  It
-    does not account for a decentred optical axis, lens vignetting, static
-    horizon obstructions (buildings, the mount arm) or a non-circular sensor
-    crop — supply a measured PNG mask (:func:`load_mask`) for those.
+    This is a **heuristic**; see
+    :meth:`~allsky.lens.LensCalibration.centred_in` for what it assumes and what
+    it cannot represent.
     """
-    height, width = int(shape[0]), int(shape[1])
-    cy, cx = (height / 2.0, width / 2.0) if center is None else (float(center[0]), float(center[1]))
-    radius = radius_fraction * min(height, width) / 2.0
-    rows = np.arange(height)[:, None]
-    cols = np.arange(width)[None, :]
-    dist_sq = (rows - cy) ** 2 + (cols - cx) ** 2
-    return dist_sq <= radius**2
+    calibration = LensCalibration.centred_in(shape, radius_fraction=radius_fraction, centre=center)
+    return calibration.keep_mask(shape)
 
 
 def apply_static_mask(

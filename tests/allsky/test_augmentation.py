@@ -10,7 +10,6 @@ import pytest
 
 from allsky.augmentation import (
     AugmentationPipeline,
-    SunProjection,
     exposure_jitter,
     polar_unwrap,
     random_erasing,
@@ -108,45 +107,6 @@ class TestTranslate:
 
     def test_zero_max_shift_is_the_identity(self, frame: np.ndarray):
         assert np.array_equal(translate(frame, np.random.default_rng(4), max_shift=0), frame)
-
-
-class TestSunProjection:
-    def test_the_zenith_maps_to_the_optical_centre(self):
-        proj = SunProjection(centre_row=112.0, centre_col=112.0, radius_px=100.0)
-
-        assert proj.pixel_of(0.0, 0.0) == pytest.approx((112.0, 112.0))
-
-    def test_the_horizon_maps_to_the_edge_of_the_dome(self):
-        proj = SunProjection(centre_row=112.0, centre_col=112.0, radius_px=100.0)
-
-        row, col = proj.pixel_of(np.pi / 2, 0.0)
-        assert (row, col) == pytest.approx((12.0, 112.0))
-
-    def test_east_falls_to_the_left_because_the_camera_looks_up(self):
-        """A dome seen from below is mirrored against a map seen from above.
-        Fitting the Planetario sun track unmirrored puts the optical centre
-        outside the frame and quintuples the residual."""
-        proj = SunProjection(centre_row=112.0, centre_col=112.0, radius_px=100.0)
-
-        assert proj.pixel_of(np.pi / 2, np.pi / 2) == pytest.approx((112.0, 12.0))
-
-    def test_the_mount_rotation_is_a_separate_parameter_from_the_lens(self):
-        straight = SunProjection(centre_row=112.0, centre_col=112.0, radius_px=100.0)
-        turned = SunProjection(
-            centre_row=112.0, centre_col=112.0, radius_px=100.0, azimuth_offset_rad=np.pi / 2
-        )
-
-        assert turned.pixel_of(np.pi / 2, 0.0) == pytest.approx(
-            straight.pixel_of(np.pi / 2, np.pi / 2)
-        )
-
-    def test_the_two_projection_laws_differ_away_from_the_centre(self):
-        common = {"centre_row": 100.0, "centre_col": 100.0, "radius_px": 90.0}
-        equidistant = SunProjection(**common, equidistant=True)
-        equisolid = SunProjection(**common, equidistant=False)
-
-        assert equidistant.pixel_of(np.pi / 4, 0.0) != equisolid.pixel_of(np.pi / 4, 0.0)
-        assert equidistant.pixel_of(0.0, 0.0) == equisolid.pixel_of(0.0, 0.0)
 
 
 class TestPolarUnwrap:
