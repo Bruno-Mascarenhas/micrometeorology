@@ -130,13 +130,6 @@ class TestFeaturePolicy:
             name for name in MINIMAL_FEATURES if name not in BAROMETER_FEATURES
         ]
 
-    def test_bare_drops_the_pressure_channel_the_metsens1_fault_took(self):
-        assert "pressure_mbar" not in resolve_feature_set("bare")
-
-    def test_bare_keeps_the_mechanical_anemometer(self):
-        resolved = resolve_feature_set("bare")
-        assert {"wind_speed_ms", "wind_dir_sin", "wind_dir_cos"} <= set(resolved)
-
     def test_bare_carries_no_logger_channel_outside_the_anemometer(self):
         columns = {source_column(name) for name in BARE_FEATURES} - {None}
         assert columns == {"WS_ms", "WindDir"}
