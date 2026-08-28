@@ -223,16 +223,27 @@ class SunProjection:
     ``r = f * theta`` fisheye law; the alternative is the equisolid
     ``r = 2f sin(theta/2)``.
 
-    This site's lens is **not characterised yet**, so nothing constructs one of
-    these by default and :func:`polar_unwrap` stays unused until it is. Fit it
-    the way Sec. 3.4 of arXiv:2503.21966 does — two parameters, tuned against
-    the sun's known position on clear frames.
+    A camera that looks up sees the sky mirrored east-west against a map drawn
+    looking down: with north toward the top of the frame, east falls to the
+    **left**. Fitting the Planetario sun track both ways settles it — mirrored
+    gives a 6.67 px median residual and an optical centre inside the frame,
+    unmirrored gives 31.69 px and a centre 9 px above the top edge. No azimuth
+    offset can convert one into the other; they differ by a reflection.
+
+    ``azimuth_offset_rad`` absorbs the camera's rotation about the optical axis,
+    which is a property of the mount rather than of the lens.
+
+    This site's lens is **not characterised yet in the shipped configs**, so
+    nothing constructs one of these by default and :func:`polar_unwrap` stays
+    unused until it is. Fit it the way Sec. 3.4 of arXiv:2503.21966 does, or by
+    least squares against the sun's known position on clear frames.
     """
 
     centre_row: float
     centre_col: float
     radius_px: float
     equidistant: bool = True
+    azimuth_offset_rad: float = 0.0
 
     def pixel_of(self, zenith_rad: float, azimuth_rad: float) -> tuple[float, float]:
         """Pixel ``(row, col)`` of a sky direction.
@@ -244,9 +255,10 @@ class SunProjection:
             r = self.radius_px * (zenith_rad / (np.pi / 2.0))
         else:
             r = self.radius_px * (np.sin(zenith_rad / 2.0) / np.sin(np.pi / 4.0))
+        bearing = azimuth_rad + self.azimuth_offset_rad
         return (
-            self.centre_row - r * float(np.cos(azimuth_rad)),
-            self.centre_col + r * float(np.sin(azimuth_rad)),
+            self.centre_row - r * float(np.cos(bearing)),
+            self.centre_col - r * float(np.sin(bearing)),
         )
 
 
