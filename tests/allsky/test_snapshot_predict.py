@@ -129,6 +129,27 @@ def test_the_backbone_is_fed_the_layout_its_transform_documents(sky_image: Path)
     assert frame.shape == (64, 64, 3)
 
 
+def test_the_live_frame_is_standardized_the_way_the_training_frames_are(sky_image: Path) -> None:
+    """Serving fed the backbone raw ``[0, 1]`` while the dataset fed it
+    standardized pixels — a silent train/serve skew that yields plausible wrong
+    numbers rather than an error."""
+    from PIL import Image
+
+    from allsky.config import ExperimentConfig
+    from allsky.preprocessing import imagenet_standardize
+    from allsky.snapshot import _image_as_chw
+
+    served = _image_as_chw(sky_image, 64, ExperimentConfig())
+
+    with Image.open(sky_image) as handle:
+        pixels = np.asarray(handle.convert("RGB"), dtype=np.uint8)
+    unit = pixels.astype(np.float32) / 255.0
+    expected = imagenet_standardize(np.ascontiguousarray(unit.transpose(2, 0, 1)))
+
+    np.testing.assert_allclose(served, expected, rtol=1e-6, atol=1e-6)
+    assert served.min() < 0.0, "standardized pixels straddle zero; raw [0, 1] never would"
+
+
 @pytest.mark.parametrize(
     ("column", "railed_value", "feature", "feature_set"),
     [

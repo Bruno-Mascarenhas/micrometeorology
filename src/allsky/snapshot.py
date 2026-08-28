@@ -393,15 +393,45 @@ def _image_as_hwc(image_path: str | Path) -> np.ndarray:
         return np.asarray(handle.convert("RGB"), dtype=np.uint8)
 
 
-def _image_as_chw(image_path: str | Path, size: int) -> np.ndarray:
+def _image_as_chw(image_path: str | Path, size: int, cfg: ExperimentConfig) -> np.ndarray:
+    """Decode one live frame the way :class:`MultimodalImageDataset` decodes a training one.
+
+    This is the serving side of the train/serve pair, so the chain has to match
+    the dataset's exactly: decode -> ``[0, 1]`` -> preprocess at native
+    resolution -> resize -> standardize. Augmentation is training-only and has
+    no counterpart here.
+
+    Parameters
+    ----------
+    image_path:
+        Frame to read; any PIL-readable format.
+    size:
+        Side of the square the model expects, in pixels.
+    cfg:
+        The checkpoint's own config, which carries the preprocessing settings
+        the model was trained under.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(3, size, size)`` float32, standardized by the DINOv2 channel stats —
+        dimensionless, not ``[0, 1]``.
+    """
     from PIL import Image
+
+    from allsky.preprocessing import PreprocessingPipeline, imagenet_standardize
 
     with Image.open(image_path) as handle:
         frame = handle.convert("RGB")
+    preprocess = PreprocessingPipeline(**cfg.preprocessing.model_dump())
+    if preprocess.enabled:
+        native = np.asarray(frame, dtype=np.uint8).astype(np.float32) / 255.0
+        processed = preprocess(native.transpose(2, 0, 1))
+        frame = Image.fromarray((processed.transpose(1, 2, 0) * 255.0).round().astype(np.uint8))
     if frame.size != (size, size):
         frame = frame.resize((size, size), Image.Resampling.BILINEAR)
     scaled = np.asarray(frame, dtype=np.uint8).astype(np.float32) / 255.0
-    return np.ascontiguousarray(scaled.transpose(2, 0, 1))
+    return imagenet_standardize(np.ascontiguousarray(scaled.transpose(2, 0, 1)))
 
 
 class _EmbeddingStoreUnreachableError(ValueError):
@@ -665,7 +695,7 @@ def predict_snapshot(
     if cfg.data.input_mode == "image":
         image_backbone = _default_image_backbone_builder(cfg, device)()
         batch["image"] = (
-            torch.from_numpy(_image_as_chw(image_path, image_size)).unsqueeze(0).to(device)
+            torch.from_numpy(_image_as_chw(image_path, image_size, cfg)).unsqueeze(0).to(device)
         )
     else:
         from allsky.embeddings.storage import META_FILENAME
