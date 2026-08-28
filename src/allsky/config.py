@@ -239,6 +239,50 @@ class TargetsConfig(BaseModel):
     cloud_fraction: CloudFractionTargetConfig = Field(default_factory=CloudFractionTargetConfig)
 
 
+#: How the burned-in timestamp band is handled; see
+#: :func:`allsky.preprocessing.remove_timestamp_band`.
+OverlayPolicy = Literal["keep", "fill", "inpaint", "crop"]
+
+
+class PreprocessingConfig(BaseModel):
+    """Deterministic image preprocessing, applied to EVERY split.
+
+    Unlike :class:`AugmentationConfig`, which is random and training-only, these
+    transforms must be identical at training and inference. The resolved
+    pipeline's ``identity`` is written into the run so a mismatch is loud rather
+    than silent.
+
+    ``overlay="keep"`` and no ROI is the historical behaviour and the default.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    overlay: OverlayPolicy = "keep"
+    band_fraction: float = 0.16
+    roi_radius_fraction: float | None = None
+
+
+class AugmentationConfig(BaseModel):
+    """Image augmentation, applied to the TRAINING split only.
+
+    Every probability defaults to ``0.0``, so an experiment that does not
+    mention this section trains on exactly the pixels it trained on before.
+    The transforms and the physical argument for each live in
+    :mod:`allsky.augmentation`; flips and frame-centred rotations are absent on
+    purpose, because they move the sun while the geometry features stay put.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    p_exposure: float = 0.0
+    exposure_log2: float = 0.35
+    p_noise: float = 0.0
+    noise_sigma: float = 0.01
+    p_translate: float = 0.0
+    translate_px: int = 4
+    p_erase: float = 0.0
+
+
 class ExperimentModelConfig(BaseModel):
     """Model architecture selector.
 
@@ -343,6 +387,8 @@ class ExperimentConfig(BaseModel):
     targets: TargetsConfig = Field(default_factory=TargetsConfig)
     model: ExperimentModelConfig = Field(default_factory=ExperimentModelConfig)
     train: ExperimentTrainConfig = Field(default_factory=ExperimentTrainConfig)
+    augmentation: AugmentationConfig = Field(default_factory=AugmentationConfig)
+    preprocessing: PreprocessingConfig = Field(default_factory=PreprocessingConfig)
 
 
 class MaskConfig(BaseModel):

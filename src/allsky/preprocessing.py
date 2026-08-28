@@ -22,26 +22,221 @@ frames that are unusable for radiometric reasons:
 Everything is pure numpy + PIL: importing this module never pulls torch.
 """
 
+import hashlib
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 
-from allsky.config import CropConfig, PrepareConfig
+from allsky.config import CropConfig, OverlayPolicy, PrepareConfig
 from allsky.data.contracts import QCFlag
 
 __all__ = [
     "DARK_LUMINANCE_THRESHOLD",
+    "IMAGENET_MEAN",
+    "IMAGENET_STD",
     "SATURATED_FRACTION_THRESHOLD",
     "SATURATED_LEVEL",
+    "TIMESTAMP_BAND_FRACTION",
+    "OverlayPolicy",
+    "PreprocessingPipeline",
     "apply_static_mask",
     "center_crop",
     "estimate_circular_mask",
+    "imagenet_standardize",
     "load_mask",
     "process_frame",
+    "remove_timestamp_band",
     "resize_image",
     "resolve_mask",
     "visual_qc",
 ]
+
+#: Channel mean/std DINOv2 was pretrained with. Every path that feeds the
+#: backbone must standardize with these: the model was trained on inputs with
+#: roughly zero mean and unit variance per channel, and a raw ``[0, 1]`` frame
+#: sits about 1.3 sigma low on red with a quarter of the expected spread.
+IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
+IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
+
+# Broadcast-shaped once at import: this runs per sample in the dataloader.
+_IMAGENET_MEAN_CHW = np.asarray(IMAGENET_MEAN, dtype=np.float32).reshape(3, 1, 1)
+_IMAGENET_STD_CHW = np.asarray(IMAGENET_STD, dtype=np.float32).reshape(3, 1, 1)
+_IMAGENET_MEAN_CHW.flags.writeable = False
+_IMAGENET_STD_CHW.flags.writeable = False
+
+
+def imagenet_standardize(chw: np.ndarray) -> np.ndarray:
+    """Standardize a CHW float array in ``[0, 1]`` by the DINOv2 channel stats.
+
+    Parameters
+    ----------
+    chw:
+        ``(3, H, W)`` float32 array scaled to ``[0, 1]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(3, H, W)`` float32, dimensionless, standardized per channel.
+    """
+    standardized = (chw - _IMAGENET_MEAN_CHW) / _IMAGENET_STD_CHW
+    return standardized.astype(np.float32, copy=False)
+
+
+#: Fraction of the frame height the burned-in timestamp overlay occupies.
+#: Measured over eight frames spanning 2026-05-08..08-01: the blue overlay text
+#: reaches y=75 of 512 (0.1465) at its tallest, x 4..449. 0.16 adds a margin so
+#: a longer string on some future day still falls inside the band.
+TIMESTAMP_BAND_FRACTION = 0.16
+
+
+def remove_timestamp_band(
+    chw: np.ndarray,
+    *,
+    policy: OverlayPolicy = "fill",
+    band_fraction: float = TIMESTAMP_BAND_FRACTION,
+    fill_value: tuple[float, float, float] = IMAGENET_MEAN,
+) -> np.ndarray:
+    """Deal with the camera's burned-in timestamp at the top of the frame.
+
+    The overlay is static furniture: it is not sky, it carries no irradiance
+    information, and at 224 px it covers four of the sixteen patch rows. An
+    occlusion probe on a trained checkpoint measured the band at 1.4-1.6x the
+    weight of an equal-area sky band — real, but far from the dominant signal,
+    so do not expect removing it to transform the model.
+
+    Parameters
+    ----------
+    chw:
+        ``(3, H, W)`` float32 in ``[0, 1]``.
+    policy:
+        ``keep`` leaves the frame untouched (historical default).
+
+        ``fill`` paints the band with :data:`IMAGENET_MEAN`, chosen so the region
+        is exactly ``0`` after standardisation. **This is the recommended
+        setting.** It removes the glyphs, fabricates nothing, and leaves the rest
+        of the geometry intact. It does create a hard horizontal edge, but a ViT
+        reads that as a set of constant tokens, which is far more benign than it
+        would be for a CNN.
+
+        ``inpaint`` mirrors the rows below the band back over it. The seam is
+        smoother, but that smoothness is the problem: a diffuse-irradiance
+        regressor consumes cloud texture, and mirroring fabricates plausible sky
+        texture across 14.6 % of the frame — a systematic, deterministic
+        hallucination the model will read as real cloud. Offered for ablation.
+
+        ``crop`` removes the band and pads at the bottom. It discards physics:
+        those rows are genuine low-elevation dome, and horizon brightness is a
+        real contributor to DHI. Ablation only.
+    band_fraction:
+        Height of the band as a fraction of the frame. Measured on this camera:
+        the overlay reaches y=75 of 512 (0.1465); the default adds a margin.
+    fill_value:
+        Per-channel constant for ``fill``; defaults to :data:`IMAGENET_MEAN`.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(3, H, W)`` float32; the same array when *policy* is ``keep``.
+    """
+    if policy == "keep":
+        return chw
+    _, height, _ = chw.shape
+    band = max(1, round(band_fraction * height))
+    if band >= height:
+        raise ValueError(f"band {band} covers the whole frame of height {height}")
+    if policy == "fill":
+        out = chw.copy()
+        out[:, :band, :] = np.asarray(fill_value, dtype=np.float32).reshape(3, 1, 1)
+        return out
+    if policy == "inpaint":
+        # Mirror the rows immediately below the band back up over it: the sky
+        # gradient continues instead of stopping at a synthetic edge.
+        source = chw[:, band : 2 * band, :]
+        if source.shape[1] < band:
+            source = np.repeat(chw[:, band : band + 1, :], band, axis=1)
+        out = chw.copy()
+        out[:, :band, :] = source[:, ::-1, :]
+        return out
+    if policy == "crop":
+        cropped = chw[:, band:, :]
+        pad = np.repeat(cropped[:, -1:, :], band, axis=1)
+        return np.ascontiguousarray(np.concatenate([cropped, pad], axis=1))
+    raise ValueError(f"unknown overlay policy {policy!r}")
+
+
+@lru_cache(maxsize=8)
+def _roi_keep(height: int, width: int, radius_fraction: float) -> np.ndarray:
+    """Read-only ``(H, W)`` float32 keep-mask, built once per geometry.
+
+    The disc depends only on the frame shape and the radius, all fixed for a
+    run, but this is called once per sample in the dataloader.
+    """
+    keep = estimate_circular_mask((height, width), radius_fraction=radius_fraction)
+    as_float = keep.astype(np.float32)
+    as_float.flags.writeable = False
+    return as_float
+
+
+@dataclass(frozen=True, slots=True)
+class PreprocessingPipeline:
+    """Deterministic transforms applied to EVERY split, train and inference alike.
+
+    This is the difference from :class:`allsky.augmentation.AugmentationPipeline`:
+    augmentation is random and training-only, preprocessing is fixed and must be
+    byte-identical wherever the model runs. This project has twice shipped a
+    transform on one side of that line and not the other — the ImageNet
+    standardisation, and the sensor pairing offset — so :attr:`identity` exists
+    to be written into the checkpoint and compared at load time.
+
+    Every field defaults to the historical behaviour, so a config that does not
+    mention preprocessing reproduces the numbers it reproduced before.
+
+    Attributes
+    ----------
+    overlay:
+        What to do with the burned-in timestamp band; see
+        :func:`remove_timestamp_band`.
+    band_fraction:
+        Height of that band as a fraction of the frame.
+    roi_radius_fraction:
+        When set, keep only a centred disc of this fraction of ``min(H, W) / 2``
+        and zero the rest — the sky dome, without the frame furniture around it.
+        ``None`` disables it. The lens is not characterised at this site, so the
+        disc is centred on the image; a fitted centre belongs in
+        :class:`allsky.augmentation.SunProjection` once a calibration exists.
+    """
+
+    overlay: OverlayPolicy = "keep"
+    band_fraction: float = TIMESTAMP_BAND_FRACTION
+    roi_radius_fraction: float | None = None
+
+    @property
+    def enabled(self) -> bool:
+        """True when the pipeline changes any pixel."""
+        return self.overlay != "keep" or self.roi_radius_fraction is not None
+
+    @property
+    def identity(self) -> str:
+        """Stable short hash of the settings, for the run log.
+
+        The settings themselves travel in ``checkpoint["config"]`` and the
+        evaluator rebuilds the pipeline from there, so train/serve cannot
+        diverge; this is the short form a human can compare across two runs.
+        """
+        payload = (
+            f"overlay={self.overlay}:band={self.band_fraction:.4f}:roi={self.roi_radius_fraction}"
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+    def __call__(self, chw: np.ndarray) -> np.ndarray:
+        """Apply the pipeline to one ``(3, H, W)`` float32 frame in ``[0, 1]``."""
+        out = remove_timestamp_band(chw, policy=self.overlay, band_fraction=self.band_fraction)
+        if self.roi_radius_fraction is not None:
+            out = out * _roi_keep(out.shape[1], out.shape[2], self.roi_radius_fraction)
+        return np.ascontiguousarray(out, dtype=np.float32)
+
 
 #: BT.601 luminance weights (R, G, B) used by :func:`visual_qc`.
 _LUMINANCE_WEIGHTS = np.array([0.299, 0.587, 0.114], dtype=np.float64)
