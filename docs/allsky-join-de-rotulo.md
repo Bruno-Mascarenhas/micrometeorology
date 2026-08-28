@@ -329,7 +329,38 @@ construído no mesmo diretório e renomeado. Os rótulos, os splits e o `split_i
 são os mesmos que a receita acima produz; o que o atalho poupou foi reextrair
 46 mil frames.
 
-**Gap conhecido, não corrigido aqui:** `allsky.snapshot._sensor_row_near` pareia
+### A padronização ImageNet: defeito real, correção que piorou
+
+Medido em 3 sementes de cada lado, na configuração vencedora:
+
+| entrada | RMSE | MAE | MBE |
+|---|---|---|---|
+| `[0,1]` cru (como todo run até 2026-08-28) | **20,74 ± 0,33** | 14,44 | −7,57 |
+| padronizada pelas estatísticas do DINOv2 | 21,35 ± 0,22 | 14,56 | −7,34 |
+
+A discordância entre os dois caminhos era real — o de embedding padronizava, o de
+imagem não. Mas **corrigi-la custou +0,61 W/m²**, cerca de 2,7σ do erro-padrão da
+diferença. Confundidor conhecido e não controlado: `backbone_lr = 1e-5` e
+`lr = 3e-4` foram escolhidos no regime não-padronizado, e padronizar multiplica a
+escala da entrada por 4–8×. O experimento que decide é re-afinar `backbone_lr`
+sob padronização; até lá, "correto" e "melhor" não coincidem aqui.
+
+**Segundo gap, criado pela padronização de 2026-08-28:**
+`allsky.snapshot._image_as_chw` devolve o frame em `[0, 1]` cru e o entrega
+direto ao modelo quando `data.input_mode == "image"`. O treino em modo imagem
+passou a padronizar pelas estatísticas de canal do DINOv2; a inferência por
+snapshot não. É a mesma divergência de ~1,3σ no vermelho que a correção existe
+para eliminar, reintroduzida na hora de servir.
+
+Não foi corrigido junto porque o valor certo **depende da safra do checkpoint**:
+todo checkpoint em modo imagem produzido até 2026-08-28 foi treinado com a
+entrada crua, e servi-lo padronizado estaria errado. Pior, não há como despachar
+pela safra — `training/checkpointing.py` grava `backbone_info` com nome,
+revisão, pooling, dim e frozen, e nada disso distingue as duas receitas de
+entrada. A ordem correta é: primeiro gravar a receita de entrada no
+`backbone_info`, depois padronizar o caminho de snapshot.
+
+**Gap conhecido, anterior a essa mudança:** `allsky.snapshot._sensor_row_near` pareia
 a linha do sensor pelo carimbo cru e não conhece
 `timestamp_offset_minutes`, então o caminho de inferência não reproduz o join do
 treino. Não foi corrigido junto porque o offset correto ali depende da convenção
