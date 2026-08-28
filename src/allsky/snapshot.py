@@ -453,9 +453,9 @@ def _embedding_store_meta(
     ``model.backbone_pooling``: the representation is whatever
     ``precompute-embeddings`` wrote, recorded nowhere but this sidecar. Re-encoding
     a live frame under any other recipe changes the representation silently — the
-    checkpoint carries no backbone identity in embedding mode, and ``cls`` and
-    ``mean`` pooling are both 384-dimensional, so a mismatch survives
-    ``load_state_dict`` and comes out as a plausible number.
+    checkpoint carries no backbone identity in embedding mode, and for a given
+    model ``cls`` and ``mean`` pooling are the same width, so a mismatch
+    survives ``load_state_dict`` and comes out as a plausible number.
 
     Parameters
     ----------
