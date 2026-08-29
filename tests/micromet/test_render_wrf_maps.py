@@ -13,7 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from micrometeorology.cli import render_wrf_maps
-from micrometeorology.wrf import jobs, reader, value_source
+from micrometeorology.wrf import batch, jobs, reader, value_source
 from micrometeorology.wrf.batch import FigureTask
 from micrometeorology.wrf.value_source import ValueFrameSource
 from tests.micromet.test_wrf_jobs import NT, _write_full_wrf_file
@@ -21,7 +21,7 @@ from tests.micromet.test_wrf_jobs import NT, _write_full_wrf_file
 
 def _build_tasks(wrf_path: Path, var_list: list[str], output_dir: Path) -> list[FigureTask]:
     with reader.WRFDataset(wrf_path) as ds:
-        return render_wrf_maps._build_tasks_for_domain(
+        return batch.build_tasks_for_domain(
             ds,
             var_list,
             output_dir,
@@ -164,7 +164,7 @@ def test_skip_first_drops_leading_steps(tmp_path, monkeypatch):
     _write_full_wrf_file(wrf, seed=5)
 
     with reader.WRFDataset(wrf) as ds:
-        tasks = render_wrf_maps._build_tasks_for_domain(
+        tasks = batch.build_tasks_for_domain(
             ds, ["temperature"], tmp_path / "figs", None, skip_first=2, dpi=100
         )
 
@@ -203,7 +203,7 @@ def test_figure_values_come_from_the_shared_value_frame_source(tmp_path, monkeyp
 
     sentinel_frame = np.arange(20, dtype=np.float64).reshape(4, 5)
     monkeypatch.setattr(
-        render_wrf_maps,
+        batch,
         "build_value_frame_source",
         lambda _dataset, _variable_name: ValueFrameSource(
             frame_for_step=lambda _index: sentinel_frame,
@@ -295,7 +295,7 @@ def test_a_mis_cased_request_is_folded_to_the_spelling_every_branch_compares_wit
     requested, canonical
 ):
     """A raw NetCDF field such as ``T2`` names no variable and stays untouched."""
-    assert render_wrf_maps._normalize_var_list(requested) == canonical
+    assert jobs.normalize_var_list(requested, collapse_heights=True) == canonical
 
 
 def test_a_mis_cased_swdown_still_drops_the_night_steps(tmp_path, monkeypatch):
@@ -309,7 +309,9 @@ def test_a_mis_cased_swdown_still_drops_the_night_steps(tmp_path, monkeypatch):
     wrf = tmp_path / "wrfout_d02_mis_cased.nc"
     _write_full_wrf_file(wrf, seed=31, start_hour_utc=19)
 
-    tasks = _build_tasks(wrf, render_wrf_maps._normalize_var_list(["swdown"]), tmp_path / "figs")
+    tasks = _build_tasks(
+        wrf, jobs.normalize_var_list(["swdown"], collapse_heights=True), tmp_path / "figs"
+    )
 
     assert [Path(task.output_path).name for task in tasks] == [
         f"SWDOWN_D02_{i:03d}.png" for i in range(3)

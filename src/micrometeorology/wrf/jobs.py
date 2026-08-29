@@ -78,6 +78,72 @@ def values_output_id(variable: str) -> str:
     return VARIABLE_NETCDF_MAP.get(variable, variable.upper())
 
 
+#: Output file id -> the input variable that owns it, for every derived variable
+#: whose input spelling is a DIFFERENT word. Passing one of these as ``-v``
+#: reaches the raw-NetCDF passthrough and publishes unconverted values into the
+#: files the derived variable owns.
+OUTPUT_ID_OWNERS: dict[str, str] = {
+    netcdf_id.upper(): str(variable)
+    for variable, netcdf_id in VARIABLE_NETCDF_MAP.items()
+    if str(variable).casefold() != netcdf_id.casefold()
+}
+
+
+def output_id_owner(variable: str) -> str | None:
+    """The input variable *variable* is the output file id of, or ``None``.
+
+    ``-v TSK`` falls through to the raw-NetCDF passthrough and writes Kelvin
+    into the very ``D0X_TSK_*.json`` files ``skin_temperature`` publishes in
+    °C. Naming the owner lets the caller refuse with the token to pass instead.
+    """
+    return OUTPUT_ID_OWNERS.get(variable.upper())
+
+
+def normalize_var_list(var_list: Sequence[str], *, collapse_heights: bool) -> list[str]:
+    """Canonicalize a ``-v`` selection and settle what the poteolico heights mean.
+
+    Case is folded to the canonical spelling first, because every downstream
+    branch compares against ``WRFVariable`` values with ``==``: a mis-cased
+    ``-v swdown`` would otherwise miss its own handling (including the daylight
+    gate) and fall through to the raw-NetCDF passthrough. Tokens naming no known
+    variable are left untouched — raw NetCDF fields such as ``T2`` are a
+    supported passthrough.
+
+    Parameters
+    ----------
+    var_list:
+        Variable tokens as the operator spelled them.
+    collapse_heights:
+        ``True`` folds every ``poteolico<h>`` into a single ``poteolico``: the
+        figure renderer has no per-height arm, so the heights would each render
+        the same PNG. ``False`` keeps them, because they select which JSON files
+        exist — there a bare ``poteolico`` supersedes the height requests
+        instead, since it already covers all of them.
+
+    Returns
+    -------
+    list[str]
+        Canonical names, deduplicated, in first-request order.
+    """
+    names = [CANONICAL_VARIABLES.get(v.casefold(), v) for v in var_list]
+    if collapse_heights:
+        names = ["poteolico" if _is_poteolico_height(v) else v for v in names]
+    elif "poteolico" in names:
+        names = [v for v in names if not _is_poteolico_height(v)]
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for name in names:
+        if name not in seen:
+            normalized.append(name)
+            seen.add(name)
+    return normalized
+
+
+def _is_poteolico_height(name: str) -> bool:
+    """True for ``poteolico50`` and friends, false for the bare ``poteolico``."""
+    return name.startswith("poteolico") and name != "poteolico"
+
+
 def poteolico_output_id(height: int) -> str:
     """The ``{D}_{ID}_{NNN}.json`` id one wind-potential target height publishes under."""
     return f"POT_EOLICO_{height}M"
@@ -237,7 +303,7 @@ def _atomic_values_json(
     date_str: str,
     wind_data: dict | None,
 ) -> str:
-    tmp = output_path.with_name(f".{output_path.name}.tmp-{os.getpid()}")
+    tmp = _staging_path(output_path)
     write_values_json_stream(tmp, data, vmin, vmax, date_str, wind_data)
     os.replace(tmp, output_path)
     return str(output_path)
@@ -262,9 +328,20 @@ def _staged_bytes(output_path: Path, payload: bytes) -> Path:
     before replacing either.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = output_path.with_name(f".{output_path.name}.tmp-{os.getpid()}")
+    tmp = _staging_path(output_path)
     tmp.write_bytes(payload)
     return tmp
+
+
+def _staging_path(output_path: Path) -> Path:
+    """Hidden sibling of *output_path* to write before the atomic swap.
+
+    Same directory, because ``os.replace`` is only atomic within one
+    filesystem; the pid keeps two concurrent writers of the same artifact off
+    each other's staging file. Creating the parent is NOT part of this: the
+    two callers differ on whether the directory is theirs to make.
+    """
+    return output_path.with_name(f".{output_path.name}.tmp-{os.getpid()}")
 
 
 def _atomic_json_dump(output_path: Path, payload: dict) -> str:
@@ -607,7 +684,7 @@ def _run_grid_geojson_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[st
     grid_level = dataset.grid_level.value
     output_path = Path(unit.geojson_dir) / f"{grid_level}.geojson"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = output_path.with_name(f".{output_path.name}.tmp-{os.getpid()}")
+    tmp = _staging_path(output_path)
     geojson.write_grid_geojson_stream(tmp, lon, lat, dataset.dx, dataset.dy)
     os.replace(tmp, output_path)
     logger.info("Saved GeoJSON: %s", output_path)
@@ -615,7 +692,7 @@ def _run_grid_geojson_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[st
     # Compact companion preferred by the site front-end (which falls back to
     # the legacy .geojson above); a fraction of the size on the wire.
     compact = Path(unit.geojson_dir) / f"{grid_level}.grid.json"
-    compact_tmp = compact.with_name(f".{compact.name}.tmp-{os.getpid()}")
+    compact_tmp = _staging_path(compact)
     geojson.write_grid_compact_json_stream(compact_tmp, lon, lat, dataset.dx, dataset.dy)
     os.replace(compact_tmp, compact)
     return [str(output_path), str(compact)], []

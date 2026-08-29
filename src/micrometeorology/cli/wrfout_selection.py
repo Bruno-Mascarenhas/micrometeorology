@@ -12,13 +12,15 @@ Imports typer, since ``BadParameter`` is interface vocabulary, plus the reader â
 and no command, so nothing here can close a cycle back into ``cli``.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import typer
 
+from micrometeorology.wrf.jobs import output_id_owner
 from micrometeorology.wrf.reader import resolve_wrfout_paths
 
-__all__ = ["glob_wrfout_day"]
+__all__ = ["glob_wrfout_day", "reject_output_id_variables"]
 
 
 def glob_wrfout_day(wrf_dir: Path | str, date: str, domains: tuple[int, ...] = ()) -> list[Path]:
@@ -50,3 +52,26 @@ def glob_wrfout_day(wrf_dir: Path | str, date: str, domains: tuple[int, ...] = (
         return resolve_wrfout_paths(wrf_dir, date, domains or None)
     except ValueError as invalid_date:
         raise typer.BadParameter(str(invalid_date)) from invalid_date
+
+
+def reject_output_id_variables(var_list: Sequence[str]) -> None:
+    """Refuse a ``-v`` token that names an OUTPUT file id instead of an input variable.
+
+    The three WRF commands share the refusal so an operator gets the same
+    message and the same exit code from all of them; which ids these are is
+    :data:`~micrometeorology.wrf.jobs.OUTPUT_ID_OWNERS`, and this is only the
+    translation of that fact into usage vocabulary.
+
+    Raises
+    ------
+    typer.BadParameter
+        On the first offending token, naming the variable to pass instead.
+        These ids cannot produce correct site bytes, so they fail loudly rather
+        than silently mislabelling the map.
+    """
+    for variable in var_list:
+        owner = output_id_owner(variable)
+        if owner:
+            raise typer.BadParameter(
+                f"{variable} is the output file id of {owner}; pass -v {owner}"
+            )

@@ -24,6 +24,7 @@ import shutil
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
@@ -33,9 +34,18 @@ from typing import Literal, NamedTuple, cast
 import numpy as np
 from numpy.typing import NDArray
 
+from micrometeorology.common.physics import PASCAL_PER_HECTOPASCAL
+from micrometeorology.common.types import (
+    VARIABLE_COLORMAPS,
+    VARIABLE_NETCDF_MAP,
+    WRFVariable,
+)
+from micrometeorology.wrf import reader
+from micrometeorology.wrf import variables as vmod
 from micrometeorology.wrf.safety import (
     assert_reasonable_array_size,
 )
+from micrometeorology.wrf.value_source import build_value_frame_source, publishes_step
 
 logger = logging.getLogger(__name__)
 MAX_TASKS_PER_CHILD = int(os.environ.get("LABMIM_MAX_TASKS_PER_CHILD", "64"))
@@ -302,6 +312,155 @@ def _render_figure_memmap(task: FigureMemmapTask) -> str:
             saturation=task.saturation,
         )
     )
+
+
+VARIABLES_WITHOUT_FIGURE_RENDERER = {"poteolico", "weibull"}
+
+# The phrase each variable's figure title opens with. A variable absent from
+# this table titles from its NetCDF output suffix (HFX, PRES, VAPOR, GLW, LH),
+# which is what the published PNGs carry.
+FIGURE_TITLES: dict[str, str] = {
+    WRFVariable.TEMPERATURE: "Temperature (°C)",
+    WRFVariable.SKIN_TEMPERATURE: "Skin Temperature (°C)",
+    WRFVariable.RELATIVE_HUMIDITY: "Relative Humidity 2m (%)",
+    WRFVariable.WIND: "Wind 10m (m/s)",
+    WRFVariable.RAIN: "Rain (mm)",
+    WRFVariable.SWDOWN: "SWDOWN (W/m²)",
+    WRFVariable.WIND_POWER_DENSITY_10M: "Wind Power Density 10m (W/m²)",
+    WRFVariable.LWUP: "Upwelling Longwave (W/m²)",
+    WRFVariable.SWUP: "Reflected Shortwave (W/m²)",
+    WRFVariable.LWNET: "Net Longwave (W/m²)",
+    WRFVariable.SWNET: "Net Shortwave (W/m²)",
+    WRFVariable.RNET: "Net Radiation (W/m²)",
+    WRFVariable.SKY_EMISSIVITY: "Effective Sky Emissivity (-)",
+    WRFVariable.CLEARNESS_INDEX: "Clearness Index kt (-)",
+}
+
+# Surface-pressure contours drawn over the temperature field, in hPa.
+PRESSURE_CONTOUR_LEVELS: list[float] = [880, 900, 950, 1000, 1013]
+
+
+def build_tasks_for_domain(
+    ds: reader.WRFDataset,
+    var_list: list[str],
+    output_dir: Path | str,
+    shapes_dir: Path | str | None,
+    skip_first: int,
+    dpi: int,
+    task_sink: Callable[[list[FigureTask], str], None] | None = None,
+    task_batch_size: int = 16,
+    warn: Callable[[str], None] = logger.warning,
+) -> list[FigureTask]:
+    """Build all FigureTasks for a single domain file.
+
+    Values and colour-scale bounds come from
+    :func:`~micrometeorology.wrf.value_source.build_value_frame_source`, the
+    same dispatcher the values-JSON work units use, so a variable is renderable
+    here exactly when it is exportable there. Only the figure decoration —
+    title phrase, colormap, pressure contours and wind quiver — is decided here.
+
+    Parameters
+    ----------
+    warn:
+        Called with a one-line message for each variable skipped — one with no
+        figure renderer, one absent from the dataset. Neither is fatal, so the
+        run continues; the three WRF commands pass ``typer.echo``, because a
+        silently skipped variable is a missing figure the operator has to be
+        able to see on the console.
+    """
+    lon, lat = ds.read_grid()
+    bounds = (
+        float(np.amin(lon)),
+        float(np.amax(lon)),
+        float(np.amin(lat)),
+        float(np.amax(lat)),
+    )
+    grid = ds.grid_level.value
+    map_config = build_map_config(grid, bounds, str(shapes_dir) if shapes_dir else None)
+    time_meta = ds.build_date_metadata(skip_first_n=skip_first)
+
+    tasks: list[FigureTask] = []
+    scheduled_output_paths: set[str] = set()
+
+    for var_name in var_list:
+
+        def add_task(task: FigureTask, label: str = var_name) -> None:
+            # Two requests for the same frame would race on the non-atomic
+            # savefig and duplicate the frame in the WebM.
+            if task.output_path in scheduled_output_paths:
+                return
+            scheduled_output_paths.add(task.output_path)
+            tasks.append(task)
+            if task_sink is not None and len(tasks) >= task_batch_size:
+                task_sink(tasks, label)
+                tasks.clear()
+
+        if var_name in VARIABLES_WITHOUT_FIGURE_RENDERER:
+            warn(f"  ⚠ Skipping {var_name} (no figure renderer)")
+            continue
+        frame_source = build_value_frame_source(ds, var_name)
+        if frame_source is None:
+            warn(f"  ⚠ Variable {var_name.upper()} not found in dataset — skipping")
+            continue
+
+        nc_suffix = VARIABLE_NETCDF_MAP.get(var_name, var_name.upper())
+        title_prefix = FIGURE_TITLES.get(var_name, nc_suffix)
+        cmap = VARIABLE_COLORMAPS.get(var_name, "viridis")
+        # Hoisted out of the step loop: the whole PSFC time axis is one eager
+        # read either way. Presence-checked because this is the contour OVERLAY
+        # and not the mapped field — a wrfout carrying T2 without PSFC still has
+        # a temperature figure to draw, and `get_variable` is a bare dict lookup
+        # whose KeyError would take every later variable and domain with it.
+        surface_pressure_hpa = (
+            ds.get_variable("PSFC") / PASCAL_PER_HECTOPASCAL
+            if var_name == WRFVariable.TEMPERATURE and ds.has_variable("PSFC")
+            else None
+        )
+
+        for meta in time_meta:
+            if meta.get("skip"):
+                continue
+            if not publishes_step(var_name, meta):
+                continue
+            step = meta["index"]
+            u: NDArray | None
+            v: NDArray | None
+            if frame_source.vector_for_step is not None:
+                u, v = frame_source.vector_for_step(step)
+                data = np.hypot(u, v)
+            else:
+                u = v = None
+                data = frame_source.frame_for_step(step)
+            overlay_data = (
+                vmod.materialize_2d(surface_pressure_hpa[step : step + 1, :, :])
+                if surface_pressure_hpa is not None
+                else None
+            )
+            add_task(
+                FigureTask(
+                    lon=lon,
+                    lat=lat,
+                    data=data,
+                    vmin=frame_source.scale_min,
+                    vmax=frame_source.scale_max,
+                    cmap_name=cmap,
+                    overlay_data=overlay_data,
+                    overlay_levels=PRESSURE_CONTOUR_LEVELS if overlay_data is not None else None,
+                    u=u,
+                    v=v,
+                    title=f"{title_prefix}{meta['label']}",
+                    output_path=str(Path(output_dir) / f"{nc_suffix}_{meta['name_suffix']}.png"),
+                    map_config=map_config,
+                    dpi=dpi,
+                    saturation=2.0,
+                )
+            )
+
+        if task_sink is not None and tasks:
+            task_sink(tasks, var_name)
+            tasks.clear()
+
+    return tasks
 
 
 def build_map_config(

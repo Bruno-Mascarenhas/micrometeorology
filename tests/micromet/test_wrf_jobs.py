@@ -13,7 +13,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from micrometeorology.cli.export_wrf_geojson import _normalize_var_list
 from micrometeorology.wrf import jobs
 from micrometeorology.wrf.value_source import ValueFrameSource, build_value_frame_source
 from tests.micromet import _reference
@@ -426,7 +425,9 @@ def test_poteolico_bare_name_writes_all_three_heights(tmp_path):
 
 
 def test_poteolico_duplicates_normalize_to_all_heights_once(tmp_path):
-    var_list = _normalize_var_list(["poteolico100", "poteolico", "poteolico100"])
+    var_list = jobs.normalize_var_list(
+        ["poteolico100", "poteolico", "poteolico100"], collapse_heights=False
+    )
     assert var_list == ["poteolico"]
 
     wrf = tmp_path / "wrfout_d02_jobs_potdup.nc"
@@ -448,12 +449,16 @@ def test_poteolico_duplicates_normalize_to_all_heights_once(tmp_path):
 
 
 def test_normalize_var_list_keeps_single_height_requests_distinct():
-    assert _normalize_var_list(["poteolico100"]) == ["poteolico100"]
-    assert _normalize_var_list(["poteolico50", "poteolico150", "poteolico50"]) == [
+    assert jobs.normalize_var_list(["poteolico100"], collapse_heights=False) == ["poteolico100"]
+    assert jobs.normalize_var_list(
+        ["poteolico50", "poteolico150", "poteolico50"], collapse_heights=False
+    ) == [
         "poteolico50",
         "poteolico150",
     ]
-    assert _normalize_var_list(["temperature", "poteolico100", "poteolico"]) == [
+    assert jobs.normalize_var_list(
+        ["temperature", "poteolico100", "poteolico"], collapse_heights=False
+    ) == [
         "temperature",
         "poteolico",
     ]
