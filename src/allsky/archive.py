@@ -490,11 +490,11 @@ class ExtractionParams:
     names a frame after that frame's own capture time, so the two clocks produce
     different filenames for the same day.
 
-    The three fields were compared one by one in three places and written in
-    two. A fourth parameter added to the extraction had to be remembered in all
-    five, and forgetting one makes the ledger answer "already done" for frames
-    that are not the ones asked for — visible only as stale frames surviving in
-    the directory.
+    This type is the single owner of the extraction identity: the ledger compares
+    and stores exactly these fields, so a new extraction parameter reaches every
+    comparison by being added here. One left out of the comparison makes the
+    ledger answer "already done" for frames that are not the ones asked for —
+    visible only as stale frames surviving in the directory.
 
     Attributes
     ----------

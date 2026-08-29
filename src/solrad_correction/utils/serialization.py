@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 #: Attribute a ``torch.compile`` wrapper exposes its inner module under, and the
 #: prefix that wrapper puts on every ``state_dict`` key. Both are torch's
-#: convention rather than ours; five places used to know them independently.
+#: convention rather than ours, so they are written down once here.
 COMPILED_ATTRIBUTE = "_orig_mod"
 COMPILED_PREFIX = f"{COMPILED_ATTRIBUTE}."
 

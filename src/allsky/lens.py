@@ -7,18 +7,15 @@ Both are answered by the optical centre, the pixel radius of the horizon and the
 projection law, so :class:`LensCalibration` answers both and nothing else
 describes the lens.
 
-Keeping them apart is how a calibration gets written down twice, in two
-conventions, and drifts. This module imports only numpy, so both
-:mod:`allsky.preprocessing` (deterministic, every split) and
-:mod:`allsky.augmentation` (random, training only) can depend on it without
-either depending on the other.
+A measured calibration is written once, in one convention. This module imports
+only numpy, so both :mod:`allsky.preprocessing` (deterministic, every split) and
+:mod:`allsky.augmentation` (random, training only) depend on it without either
+depending on the other.
 
 Pixel coordinates are image ``(row, col)``, origin at the top-left. Angles are
 radians: zenith measured from straight up, azimuth clockwise from north — the
 convention the station's solar geometry already uses.
 """
-
-from __future__ import annotations
 
 from dataclasses import dataclass
 

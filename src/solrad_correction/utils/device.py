@@ -1,18 +1,12 @@
 """Which device a run executes on — one answer for the whole package.
 
-There used to be two. ``utils.seeds.get_device()`` had no ``"auto"`` sentinel
-and returned ``"cuda"`` or ``"cpu"`` silently, so a model built without an
-explicit device fell back to the CPU on a machine with an idle GPU and nothing
-said so. ``training.dataloaders.resolve_device()`` refused instead. The refusing
-one is right — a run that asks for the GPU and quietly gets the CPU reports
-timings, and through AMP numerics, that belong to a different machine — so it is
-the one that survived, and it lives here rather than inside the dataloader
-module because the models need it too.
+An explicit ``"cuda"`` request fails rather than falling back: a run that asks
+for the GPU and quietly gets the CPU reports timings and, through AMP, numerics
+that belong to a different machine. It lives here rather than inside the
+dataloader module because the models resolve their device too.
 
 torch is imported inside the function, so importing this module never pulls it.
 """
-
-from __future__ import annotations
 
 __all__ = ["resolve_device"]
 

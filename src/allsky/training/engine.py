@@ -1003,15 +1003,15 @@ class _MetricAccumulator:
     Every component :class:`~allsky.training.losses.MultitaskLoss` returns is a
     mean over the rows whose target is present, so each batch is folded in
     weighted by *its own* count of present rows and divided by the epoch's count
-    for that head — not by the batch row count, which made the epoch metrics
-    depend on ``train.batch_size`` whenever labels were missing (an all-missing
-    batch contributed an exact 0 with full weight).  The reported ``loss`` is
+    for that head — not by the batch row count, which would make the epoch metrics
+    depend on ``train.batch_size`` whenever labels are missing (an all-missing
+    batch contributing an exact 0 with full weight).  The reported ``loss`` is
     likewise rebuilt from the per-head epoch means and *component_weights* — the
     same weighted sum the loss module computes per batch — instead of averaging
     the per-batch totals.
 
-    Only the reported metrics changed: ``losses["loss"]`` still drives
-    ``backward()`` per batch, unweighted by anything here.
+    ``losses["loss"]`` drives ``backward()`` per batch, unweighted by anything
+    here.
 
     A head with no present row in the whole epoch keeps its ``loss_<head>`` key
     (metrics.csv has a column for it and it is a legal early-stopping monitor)

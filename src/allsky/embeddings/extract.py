@@ -14,7 +14,7 @@ Guarantees
   only the missing ids.
 - **Incremental index** — each shard flush writes a small per-shard *part* file
   holding only that shard's rows (``O(shard_size)``), instead of rewriting the
-  whole index every flush (which was ``O(N^2 / shard_size)`` over a run); the
+  whole index every flush (which would be ``O(N^2 / shard_size)`` over a run); the
   parts are consolidated into a single ``index.parquet`` atomically at
   completion and then removed.  The final consolidated index equals the union of
   all parts (plus any prior consolidated rows).

@@ -1,24 +1,18 @@
 """Decoding and resizing an all-sky frame, in one place.
 
-Four modules need to turn a file (or a JPEG payload) into an ``(H, W, 3)``
-``uint8`` RGB array, and to bilinear-resize one: :mod:`allsky.video` at
-extraction time, :mod:`allsky.preprocessing` when a frame is reprocessed,
+Four modules turn a file (or a JPEG payload) into an ``(H, W, 3)`` ``uint8`` RGB
+array and bilinear-resize one: :mod:`allsky.video` at extraction time,
+:mod:`allsky.preprocessing` when a frame is reprocessed,
 :mod:`allsky.embeddings.backbone` before encoding, and :mod:`allsky.snapshot`
-when a live frame is scored. They used to carry a copy each, and
-:mod:`allsky.overlay` reached into :mod:`allsky.video` for a private name —
-the sign that the address did not exist yet.
+when a live frame is scored.
 
 The frames have to come out **byte-identical** across those paths: a JPEG
 written at extraction and the same frame resized later must agree, or the stored
-embeddings stop describing the images the manifest points at. That promise was
-being kept by copying a recipe, which is how it drifts.
+embeddings stop describing the images the manifest points at.
 
-Like :mod:`allsky.lens`, this module imports nothing from ``allsky`` — only
-numpy and PIL — so every one of those modules can depend on it without
-depending on each other.
+This module imports nothing from ``allsky`` — only numpy and PIL — so all four
+depend on it without depending on each other.
 """
-
-from __future__ import annotations
 
 from pathlib import Path
 

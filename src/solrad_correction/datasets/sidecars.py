@@ -2,15 +2,12 @@
 
 ``data.npz`` holds the numbers; the feature names and the timestamp index live
 next to it as CSV so they survive a round trip that numpy alone cannot express.
-Two modules wrote and read that layout with the same lines, which is how a
-sidecar gets renamed on one side only and the other silently reads a dataset
-with no index.
+The sequence dataset and its serialiser both address the layout through these
+names, so a sidecar cannot be renamed on one side and leave the other silently
+reading a dataset with no index.
 
-Only pandas and pathlib here, so both the sequence dataset and its serialiser
-can depend on this without depending on each other.
+Only pandas and pathlib here, so neither has to depend on the other.
 """
-
-from __future__ import annotations
 
 from pathlib import Path
 
@@ -33,7 +30,7 @@ INDEX_FILENAME = "index.csv"
 
 
 def write_feature_names(directory: Path, feature_names: list[str]) -> None:
-    """Write the feature-name sidecar into *directory*."""
+    """Write ``feature_names.csv``: one name per row, in the order given."""
     pd.DataFrame({"feature_names": feature_names}).to_csv(
         directory / FEATURE_NAMES_FILENAME, index=False
     )

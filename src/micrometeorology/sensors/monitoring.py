@@ -20,8 +20,8 @@ Why the WRF column is a LIST of candidates
 ORDERED TUPLE of candidate column names and the exporter resolves whichever one
 the file actually carries; a variable the extraction does not write yet is
 declared so the payload can say the layer is absent instead of rendering a
-silently short legend. Precipitation is the case that exercised it -- it arrived
-as ``precip_mm`` and lit its chart with no change here.
+silently short legend. ``precip_mm`` is the live case: the column enters the tuple
+and lights its chart with no change here.
 
 The tuples carry only names the record can actually hold. A file still on the v1
 schema is renamed to v2 by

@@ -362,9 +362,9 @@ def _as_uint8_tensor(value: Any) -> Any:
 
 #: Keys of the ``normalizers`` sub-payload. The writer here and the two readers
 #: (the evaluator and the live snapshot) are the only paths that turn a model
-#: output back into W/m2, and they used to agree on these names by convention
-#: alone: a drift makes ``target_normalizers.get(name)`` return None and the
-#: snapshot publishes the NORMALIZED value as if it were a physical unit.
+#: output back into W/m2, and all three read the names from here: a drift makes
+#: ``target_normalizers.get(name)`` return None and the snapshot publishes the
+#: NORMALIZED value as if it were a physical unit.
 FEATURE_NORMALIZER_KEY = "feature_normalizer"
 TARGET_NORMALIZERS_KEY = "target_normalizers"
 

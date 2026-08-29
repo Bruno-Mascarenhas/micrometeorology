@@ -56,8 +56,6 @@ BEFORE the DINOv2 standardisation, which must stay last so the backbone always
 receives the distribution it was pretrained on.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 import numpy as np

@@ -81,8 +81,8 @@ FRAME_PIXEL_SECTIONS = ("mask", "crop", "resize")
 DATASET_MANIFEST_FILENAME = "manifest.parquet"
 
 #: The provenance sidecar sits beside the manifest parquet under the parquet's
-#: own name plus this suffix. Eight call sites used to rebuild that address by
-#: string concatenation; the writer and the readers now agree by construction.
+#: own name plus this suffix. The writer and every reader address it through
+#: :func:`manifest_meta_path`, so they cannot disagree about where it is.
 MANIFEST_META_SUFFIX = ".meta.json"
 
 
@@ -279,9 +279,9 @@ TIMESTAMP_BAND_FRACTION = 0.16
 
 #: Side of the square the visual backbone is fed, in pixels. DINOv2's patch grid
 #: is 14 px, and 224 = 16 x 14 is the resolution its weights were trained at.
-#: Five call sites used to carry this default independently, so a run whose
-#: config omitted ``model.image_size`` could be trained, evaluated and served at
-#: three different resolutions without anything failing.
+#: The training engine, the evaluator and the live snapshot all read the default
+#: from here, so a run whose config omits ``model.image_size`` is trained,
+#: evaluated and served at the same resolution.
 DEFAULT_IMAGE_SIZE = 224
 
 

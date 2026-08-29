@@ -3,16 +3,11 @@
 ``series_operacional.dat`` is written by
 :data:`micrometeorology.wrf.operational_record.OPERATIONAL_CATALOG` and read by
 the climatology export, the two station-graph CLIs and the monitoring export.
-Those readers used to name the columns with string literals, so a rename in the
-producer reached none of them: the overlay simply stopped appearing, with no
-error and no failing test.
-
-Nothing is imported here on purpose — the producer builds its catalog from these
+Nothing is imported here on purpose: the producer builds its catalog from these
 names and every consumer refers to them, so the link is checked when the module
-loads rather than when a plot comes out empty.
+loads. A column named by a string literal instead would break in silence — the
+overlay stops appearing, with no error and no failing test.
 """
-
-from __future__ import annotations
 
 __all__ = [
     "ALBEDO",

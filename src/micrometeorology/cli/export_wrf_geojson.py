@@ -73,10 +73,9 @@ def _domain_token(path: Path) -> str | None:
 
     Delegates to :func:`micrometeorology.wrf.reader.detect_grid_level` so the
     selection here and the names the batch writes agree on what "which domain
-    is this" means. A local regex used to answer it too, and the two disagreed:
-    ``wrfout_d06_`` matched the regex but has no ``GridLevel``, and
-    ``wrfout_d1_`` matched as ``d1``, which never equals the ``d01`` this
-    compares against — so domain 1 was reported missing when it was present.
+    is this" means. A regex over the file name does not answer it: ``wrfout_d06_``
+    matches such a pattern but has no ``GridLevel``, and ``wrfout_d1_`` matches as
+    ``d1``, which never equals the ``d01`` compared against here.
     """
     level = detect_grid_level(path)
     return level.value.lower() if level is not None else None

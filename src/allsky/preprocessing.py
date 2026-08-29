@@ -229,11 +229,9 @@ class PreprocessingPipeline:
 
     This is the difference from :class:`allsky.augmentation.AugmentationPipeline`:
     augmentation is random and training-only, preprocessing is fixed and must be
-    byte-identical wherever the model runs. This project has shipped a transform
-    on one side of that line and not the other three times — the ImageNet
-    standardisation, the sensor pairing offset, and the live snapshot path — so
-    the settings travel in ``checkpoint["config"]`` and every path that turns a
-    frame into model input rebuilds this pipeline from there.
+    byte-identical wherever the model runs. The settings therefore travel in
+    ``checkpoint["config"]``, and every path that turns a frame into model input
+    rebuilds this pipeline from there.
 
     Every field defaults to the historical behaviour, so a config that does not
     mention preprocessing reproduces the numbers it reproduced before.
@@ -337,8 +335,7 @@ def model_input_frame(
     short of :func:`imagenet_standardize` because the training dataset augments
     between the two and the serving path does not — that one step is the only
     difference the two sides are allowed to have, and keeping the rest here is
-    what stops them drifting. The project has already shipped a transform on one
-    side of that line and not the other three times.
+    what stops them drifting.
 
     The preprocessing runs before the resize on purpose: the overlay band is a
     fixed fraction of the *native* frame, and a bilinear resize would smear its

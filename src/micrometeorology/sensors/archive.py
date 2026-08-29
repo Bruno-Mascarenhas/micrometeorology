@@ -1100,9 +1100,9 @@ def mask_impossible_shortwave(
     The gate has three parts: the geometric ceiling per component, the flat
     :data:`BSRN_PPL_FLOOR_WM2` beneath every one of them, and the sign rule that
     no shortwave flux is zero or negative while the sun is above the horizon.
-    Only the ceiling existed until the other two were added, which is why
-    negative shortwave reached the published hourly means — a one-sided
-    "physically possible" limit passes half of what the prescription rejects.
+    A one-sided "physically possible" limit passes half of what the
+    prescription rejects: without the floor and the sign rule, negative
+    shortwave reaches the published hourly means.
 
     Pass *sources* (from :func:`~micrometeorology.sensors.calibration.resolve_mapping_windows`)
     to blank the raw column each unified channel was copied from on the same

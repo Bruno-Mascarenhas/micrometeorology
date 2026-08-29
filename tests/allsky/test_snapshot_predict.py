@@ -1,18 +1,15 @@
 """Prediction path of ``allsky snapshot --checkpoint``.
 
-Nothing exercised :func:`allsky.snapshot.predict_snapshot` before, and two
-defects rode along in it:
+Two contracts of :func:`allsky.snapshot.predict_snapshot` are pinned here
+because failing either yields a number rather than an error:
 
-- a capture with no ``--sensor-csv`` — the documented fallback, where every
-  sensor-derived feature is meant to be imputed at its training mean — died on
-  ``KeyError: sensor frame is missing required feature columns``, because
-  ``build_feature_frame`` refuses an absent source column and the empty frame
-  supplied every one of them absent;
-- the embedding branch handed the ``(3, S, S)`` float array of the image branch
-  straight to ``backbone.encode``, skipping the ``transform`` its contract
-  requires. Against DINOv2 that raised ``AttributeError: 'numpy.ndarray' object
-  has no attribute 'to'``, so every embedding-mode checkpoint (V0-V5, V7) could
-  not predict at all.
+- a capture with no ``--sensor-csv`` must impute every sensor-derived feature at
+  its training mean, the documented fallback. ``build_feature_frame`` refuses an
+  absent source column, so the empty frame has to reach it already filled;
+- the embedding branch must run the frame through ``backbone.transform`` before
+  ``backbone.encode``, as the backbone contract requires. Handing ``encode`` the
+  ``(3, S, S)`` float array of the image branch skips the preparation every
+  embedding-mode checkpoint (V0-V5, V7) was fitted under.
 
 Offline: the deterministic ``fake`` backbone and the synthetic dataset fixture.
 Note the fake backbone casts whatever layout it is handed, so it cannot tell the
@@ -130,8 +127,8 @@ def test_the_backbone_is_fed_the_layout_its_transform_documents(sky_image: Path)
 
 
 def test_the_live_frame_is_standardized_the_way_the_training_frames_are(sky_image: Path) -> None:
-    """Serving fed the backbone raw ``[0, 1]`` while the dataset fed it
-    standardized pixels — a silent train/serve skew that yields plausible wrong
+    """Serving must standardize exactly as the dataset does: feeding the backbone
+    raw ``[0, 1]`` is a silent train/serve skew that yields plausible wrong
     numbers rather than an error."""
     from PIL import Image
 

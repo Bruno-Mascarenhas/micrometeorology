@@ -506,8 +506,8 @@ def _run_extract_step(
     skip is named again on the next run.  The overlay reader refuses a day it
     cannot timestamp — the 2026-06-04 archive video steps its clock 7 s backwards
     at frame 851 — and that refusal is right, but it describes ONE day: letting
-    it end the loop threw away the other 95 days of a two-hour extraction, and
-    would have stopped the daily job in ``docs/allsky-archive.md`` permanently.
+    it end the loop throws away the other 95 days of a two-hour extraction and
+    stops the daily job in ``docs/allsky-archive.md`` permanently.
     A skipped day contributes no manifest rows, which is what a night-only day
     already does.  The exit code stays zero for the same reason: the fault is a
     permanent property of that day's bytes, so a run that failed on it will fail

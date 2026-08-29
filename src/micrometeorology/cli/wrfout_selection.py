@@ -1,11 +1,7 @@
 """The one wrfout glob the WRF commands share, with usage errors as usage errors.
 
-Four commands select wrfout files, and each wrote its own wrapper around
-:func:`micrometeorology.wrf.reader.resolve_wrfout_paths` — so a mistyped
-``--date`` was translated into a :class:`typer.BadParameter` four times, and
-``run_wrf_pipeline`` reached into ``render_wrf_maps`` for a *private* name to
-avoid writing it a fifth. A private import between sibling commands is the sign
-that the shared piece has no address of its own.
+Four commands select wrfout files and all of them glob through here, so a
+mistyped ``--date`` becomes the same :class:`typer.BadParameter` in every one.
 
 Only the glob and the error translation live here. What each command does around
 them stays with the command, because those tails are deliberately different: one
@@ -15,8 +11,6 @@ warns. Folding those together would change what an operator sees.
 Imports typer, since ``BadParameter`` is interface vocabulary, plus the reader —
 and no command, so nothing here can close a cycle back into ``cli``.
 """
-
-from __future__ import annotations
 
 from pathlib import Path
 

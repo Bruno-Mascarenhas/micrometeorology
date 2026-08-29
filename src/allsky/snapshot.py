@@ -711,9 +711,8 @@ def predict_snapshot(
         # contract takes a SEQUENCE of (H, W, 3) uint8 HWC frames and does its
         # own resize, ImageNet normalisation and stacking, and that is the
         # recipe precompute-embeddings fed the training store. Handing it the
-        # (3, S, S) float array the image branch uses died on the raw ndarray
-        # and, had it survived, would have embedded a differently prepared
-        # image than the model was fitted on.
+        # Handing it the (3, S, S) float array the image branch uses would embed
+        # an image prepared differently from the vectors the model was fitted on.
         vector = np.asarray(backbone.encode(backbone.transform([_image_as_hwc(image_path)])))
         embedding = np.reshape(vector, (1, -1)).astype(np.float32)
         embedding_dim = int(embedding.shape[1])

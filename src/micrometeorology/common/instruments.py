@@ -9,8 +9,6 @@ Each entry carries the measurement or the specification it came from, because a
 value whose provenance is lost cannot be revised with confidence later.
 """
 
-from __future__ import annotations
-
 __all__ = ["RAIN_TIP_DEPTH_MM"]
 
 #: One tip of the LabMiM tipping-bucket gauge, in millimetres — 0.01 inch.
@@ -21,8 +19,8 @@ __all__ = ["RAIN_TIP_DEPTH_MM"]
 #: 1.09e9 mm of rain in five minutes on 2018-06-10 09:10, a corrupted field
 #: rather than weather.
 #:
-#: It decides two different things, which is why it was written down twice and
-#: has to be written down once: the quantisation check that validates the raw
+#: It decides two different things, which is why it lives in one place: the
+#: quantisation check that validates the raw
 #: record, and the wet/dry threshold plus narrowest honest histogram bin in the
 #: climatology export. A gauge with a different bucket invalidates both at once.
 RAIN_TIP_DEPTH_MM = 0.254

@@ -262,8 +262,8 @@ def _elevation_bounds_of(stamps: bytes, stamps_dtype: str) -> tuple[np.ndarray, 
     """The bracket for one block of stamps, memoized on the stamps themselves.
 
     Every published variable asks the same gates about the same handful of blocks
-    — the whole record and its seasonal slices — so an export recomputed this
-    around 200 times over 61k rows, some 10 s of arithmetic for a dozen distinct
+    — the whole record and its seasonal slices — so without the memoization an export does this
+    around 200 times over 61k rows — some 10 s of arithmetic for a dozen distinct
     answers.  The key is the block's own stamps, so a cache hit is the same
     question and never a near-miss; the results are frozen before being handed
     out, since every caller of a shared array gets the same object.

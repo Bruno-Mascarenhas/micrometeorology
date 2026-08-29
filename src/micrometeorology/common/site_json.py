@@ -1,25 +1,21 @@
 """The byte contract of every JSON this project publishes to the site.
 
-Compact separators, UTF-8 without escapes, and ``allow_nan=False`` — the same
-three kwargs appeared at five points across three modules, so the "contract" was
-guarded nowhere: an edit to one of them left the others untouched and out of the
-diff. They live here now, as one constant.
+Compact separators, UTF-8 without escapes and ``allow_nan=False`` are one
+constant here, and every writer takes the encoding from it, so the published
+files cannot disagree about the contract.
 
 ``allow_nan=False`` is the load-bearing one: ``NaN`` is not valid JSON and a
 browser parser rejects the *whole file*, so a non-finite number has to become
-``null`` before it is written. :func:`finite` and :func:`rounded` are that step,
-and they were being rewritten per consumer too.
+``null`` before it is written. :func:`finite` and :func:`rounded` are that step.
 
-The writer that stages atomically also lives here rather than inside a 1200-line
-climatology module, which two exporters with nothing climatological about them
-were importing — and paying its import-time bibliography validation for.
+The writer that stages atomically lives here rather than inside the 1200-line
+climatology module, so exporters with nothing climatological about them do not
+pay its import-time bibliography validation.
 
 Depends only on the standard library and :mod:`allsky.atomic`. Modules with
 their own I/O (the streaming GeoJSON writer, the measured dumps-then-write in
 the WRF batch) import :data:`JSON_ENCODING` alone and keep their own writing.
 """
-
-from __future__ import annotations
 
 import json
 import logging
