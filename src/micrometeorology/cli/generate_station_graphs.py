@@ -117,14 +117,25 @@ def _plot_wrf_overlay(
     label: str = "wrf 1h",
     linestyle: str = "--",
     color: str = "black",
+    marker: str | None = None,
 ) -> None:
-    """Add a WRF overlay line if data is available.
+    """Add a WRF overlay to *ax* if the column is available.
 
     A figure carrying two model curves must give them different strokes: two
     dashed black lines on one axes are indistinguishable, which is exactly how
     the model's global flux came to be read as its diffuse.
+
+    Parameters
+    ----------
+    marker:
+        Draw markers instead of a joined line. A circular quantity needs this:
+        joining a 350 deg hour to the 10 deg hour after it sweeps the axis
+        through every bearing between them, none of which the model produced.
     """
     if wrf is None or col not in wrf.columns:
+        return
+    if marker is not None:
+        ax.plot(wrf.index, wrf[col], marker=marker, linestyle="none", color=color, label=label)
         return
     ax.plot(wrf.index, wrf[col], linestyle=linestyle, color=color, label=label)
 
@@ -143,13 +154,29 @@ def _plot_radiacao_difusa(
     col_diffuse = "CMP21_Wm2_Avg"
     col_diffuse_psp = "PSP_Wm2_Avg"
 
+    # Named per instrument, as every other graph here already does: three clouds
+    # sharing one "Media 5 min" entry left the reader unable to tell the global
+    # pyranometer from the two diffuse ones on the figure they disagree on.
+    # Short spellings because eight entries have to fit the fixed-height bar.
     if col_sw in raw.columns:
-        ax.plot(raw.index, raw[col_sw], "o", color="yellow", markersize=6, label="Media 5 min")
+        ax.plot(raw.index, raw[col_sw], "o", color="yellow", markersize=6, label="5 min (CM3Up)")
     if col_diffuse in raw.columns:
-        ax.plot(raw.index, raw[col_diffuse], "o", color="silver", markersize=6, label="Media 5 min")
+        ax.plot(
+            raw.index,
+            raw[col_diffuse],
+            "o",
+            color="silver",
+            markersize=6,
+            label="5 min (CMP21)",
+        )
     if col_diffuse_psp in raw.columns:
         ax.plot(
-            raw.index, raw[col_diffuse_psp], "o", color="silver", markersize=6, label="Media 5 min"
+            raw.index,
+            raw[col_diffuse_psp],
+            "o",
+            color="darkseagreen",
+            markersize=6,
+            label="5 min (PSP)",
         )
     if col_sw in hourly.columns:
         ax.plot(hourly.index, hourly[col_sw], "-vr", label="SW_dw 1h")
@@ -572,7 +599,7 @@ def _plot_direcao(
     if col_wd2 in hourly.columns:
         ax.plot(hourly.index, hourly[col_wd2], "*g", label="WindDir 1h")
 
-    _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["direcao"])
+    _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["direcao"], marker="x")
 
     setup_date_axis(ax)
     plt.ylabel(
