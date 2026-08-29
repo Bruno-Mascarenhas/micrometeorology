@@ -51,12 +51,13 @@ from micrometeorology.sensors.plotting import (
 from micrometeorology.wrf.columns import (
     PSFC_HPA,
     RH_PCT,
+    SWDDIF_W_M2,
     SWDOWN_W_M2,
     T2_C,
     WIND_DIR_DEG,
     WIND_SPEED_M_S,
 )
-from micrometeorology.wrf.operational_record import rename_v1_columns
+from micrometeorology.wrf.operational_record import read_wrf_series
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -94,8 +95,13 @@ RAIN_COLUMN = "PL01_mm_Tot"
 RH_WXT_OFFSET = 10.339
 
 # Graph name -> column of series_operacional.dat carrying the model series.
+# The solar graph draws BOTH shortwave channels, so it carries its own two
+# entries: keying a graph named "difusa" to the global flux alone left the only
+# model curve on the figure being the global one, which a reader comparing it
+# against the measured diffuse below it has no way to tell apart.
 WRF_COLUMNS = {
-    "radiacao_difusa": SWDOWN_W_M2,
+    "radiacao_global": SWDOWN_W_M2,
+    "radiacao_difusa": SWDDIF_W_M2,
     "temperatura": T2_C,
     "umidade": RH_PCT,
     "pressao": PSFC_HPA,
@@ -104,48 +110,23 @@ WRF_COLUMNS = {
 }
 
 
-def read_wrf_series(path: str | Path) -> pd.DataFrame:
-    """Read a WRF ``series_operacional.dat`` file.
+def _plot_wrf_overlay(
+    ax,
+    wrf: pd.DataFrame | None,
+    col: str,
+    label: str = "wrf 1h",
+    linestyle: str = "--",
+    color: str = "black",
+) -> None:
+    """Add a WRF overlay line if data is available.
 
-    The file is a CSV whose first four columns are year, month, day and hour;
-    they become the DatetimeIndex. The remaining columns are hourly model
-    variables (``t2_c``, ``rh_pct``, ``psfc_hpa``, ``swdown_w_m2``, ...). A file
-    still on the v1 schema is read under the v2 names, so a caller names its
-    columns once either way.
-
-    Parameters
-    ----------
-    path:
-        The ``series_operacional.dat`` written by the operational extraction.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Indexed by naive station-local hours, matching the datalogger frames it
-        is overlaid on. Rows are left in file order and duplicates are kept —
-        this reader feeds an overlay line only. The defensive reader that sorts,
-        de-duplicates and drops the spin-up hour is
-        :func:`micrometeorology.cli.export_climatology.read_wrf_series`.
+    A figure carrying two model curves must give them different strokes: two
+    dashed black lines on one axes are indistinguishable, which is exactly how
+    the model's global flux came to be read as its diffuse.
     """
-    source = Path(path)
-    logger.info("Reading WRF series: %s", source.name)
-
-    wrf = rename_v1_columns(pd.read_csv(source, sep=","))
-
-    datetime_parts = wrf.iloc[:, :4]
-    datetime_parts.columns = ["year", "month", "day", "hour"]
-    wrf.index = pd.to_datetime(datetime_parts)
-    wrf.index.name = None
-
-    logger.info("  -> %d rows, columns: %s", len(wrf), list(wrf.columns[4:]))
-    return wrf
-
-
-def _plot_wrf_overlay(ax, wrf: pd.DataFrame | None, col: str, label: str = "wrf 1h") -> None:
-    """Add a dashed black WRF overlay line if data is available."""
     if wrf is None or col not in wrf.columns:
         return
-    ax.plot(wrf.index, wrf[col], "--", color="black", label=label)
+    ax.plot(wrf.index, wrf[col], linestyle=linestyle, color=color, label=label)
 
 
 def _plot_radiacao_difusa(
@@ -177,7 +158,15 @@ def _plot_radiacao_difusa(
     if col_diffuse_psp in hourly.columns:
         ax.plot(hourly.index, hourly[col_diffuse_psp], "-dg", label="SW_df 1h (PSP)")
 
-    _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["radiacao_difusa"], label="SW_dw-wrf 1h")
+    _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["radiacao_global"], label="SW_dw-wrf 1h")
+    _plot_wrf_overlay(
+        ax,
+        wrf,
+        WRF_COLUMNS["radiacao_difusa"],
+        label="SW_df-wrf 1h",
+        linestyle="-.",
+        color="#e07a1f",
+    )
 
     if not ax.get_lines():
         logger.warning("No solar radiation columns found -- skipping radiacao_difusa.png")
