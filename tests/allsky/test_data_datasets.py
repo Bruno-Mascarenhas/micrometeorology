@@ -286,7 +286,7 @@ class TestImageDecoding:
             manifest, resolve_feature_set("safe"), data_root=root, image_size=32, train=True
         )
         for path in manifest["image_path"]:
-            loaded = dataset._load_image(str(path))
+            loaded = dataset._load_image(root / str(path))
             expected = self._imageio_recipe(root / str(path), 32)
             assert loaded.dtype == expected.dtype
             np.testing.assert_array_equal(loaded, expected)
@@ -315,7 +315,7 @@ class TestImageDecoding:
         stub = DinoV2Backbone.__new__(DinoV2Backbone)
         stub.image_size = 32
 
-        from_dataset = dataset._load_image(str(manifest["image_path"].iloc[0]))
+        from_dataset = dataset._load_image(root / str(manifest["image_path"].iloc[0]))
         from_backbone = stub.transform([iio_local.imread(path)])[0].numpy().astype(np.float32)
 
         np.testing.assert_allclose(from_dataset, from_backbone, rtol=0, atol=1e-6)
@@ -329,7 +329,7 @@ class TestImageDecoding:
         dataset = MultimodalImageDataset(
             manifest, resolve_feature_set("safe"), data_root=root, image_size=16, train=True
         )
-        loaded = dataset._load_image("frames/gray.jpg")
+        loaded = dataset._load_image(gray)
         assert loaded.shape == (3, 16, 16)
         np.testing.assert_array_equal(loaded, self._imageio_recipe(gray, 16))
 
@@ -343,7 +343,7 @@ class TestImageDecoding:
         dataset = MultimodalImageDataset(
             manifest, resolve_feature_set("safe"), data_root=root, image_size=16, train=True
         )
-        assert dataset._load_image("frames/rgba.png").shape == (3, 16, 16)
+        assert dataset._load_image(rgba).shape == (3, 16, 16)
 
 
 class TestEmbeddingDatasetContract:

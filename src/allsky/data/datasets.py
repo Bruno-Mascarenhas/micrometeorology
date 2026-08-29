@@ -228,7 +228,10 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         super().__init__(manifest, feature_columns, train=train, stats=stats)
         self.data_root = data_root
         self.image_size = image_size
-        self._paths = [str(p) for p in self.manifest["image_path"]]
+        # Resolved once here rather than per __getitem__: the join rebuilds a
+        # PurePosixPath and two Paths, and a dataloader worker pays it on every
+        # sample of every epoch.
+        self._paths = [resolve(str(p), self.data_root) for p in self.manifest["image_path"]]
         # Augmentation is a training-split transform by definition: applying it
         # to val/test would measure the model on pixels the sensor never saw.
         self.augment = augment if train else None
@@ -237,7 +240,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         self.preprocess = preprocess
         self._seed = int(seed)
 
-    def _load_image(self, relative_path: str, idx: int = 0) -> np.ndarray:
+    def _load_image(self, image_path: Path, idx: int = 0) -> np.ndarray:
         """Load a JPEG as a standardized float32 CHW array, resized to ``image_size``.
 
         The chain is decode -> ``[0, 1]`` -> preprocess -> resize -> augment
@@ -252,12 +255,12 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         pretraining distribution. ``idx`` seeds the augmentation together with the seed and the epoch.
 
         PIL decode -> RGB (``convert`` channel-replicates grayscale) -> bilinear
-        resize; resolves the manifest's relative POSIX path against
-        ``data_root``.  On the no-preprocessing path, decoding straight with PIL
-        is pixel-identical to reading through imageio and wrapping the array back
-        into an image to resize it, without the two full-frame numpy<->PIL
-        copies; the preprocessing path necessarily pays them, because the stage
-        is defined on float CHW and PIL cannot bilinear-resize one.
+        resize. ``image_path`` is already resolved against ``data_root``. On the
+        no-preprocessing path, decoding straight with PIL is pixel-identical to
+        reading through imageio and wrapping the array back into an image to
+        resize it, without the two full-frame numpy<->PIL copies; the
+        preprocessing path necessarily pays them, because the stage is defined
+        on float CHW and PIL cannot bilinear-resize one.
         """
         # Imported here because allsky.preprocessing reaches back into
         # allsky.data.contracts, so a module-level import would close a cycle
@@ -265,7 +268,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         from allsky.preprocessing import imagenet_standardize, model_input_frame
 
         chw = model_input_frame(
-            resolve(relative_path, self.data_root),
+            image_path,
             size=self.image_size,
             preprocess=self.preprocess,
         )

@@ -31,13 +31,14 @@ import numpy as np
 from allsky.config import (
     TIMESTAMP_BAND_FRACTION,
     CropConfig,
+    ExperimentConfig,
     OverlayPolicy,
     PadConfig,
     PrepareConfig,
 )
 from allsky.data.contracts import QCFlag
 from allsky.frame_pixels import as_rgb_uint8 as _as_rgb_uint8
-from allsky.frame_pixels import decode_rgb, resize_bilinear
+from allsky.frame_pixels import decode_rgb, decode_rgb_resized, resize_bilinear
 from allsky.lens import LensCalibration
 
 __all__ = [
@@ -257,6 +258,17 @@ class PreprocessingPipeline:
     band_fraction: float = TIMESTAMP_BAND_FRACTION
     roi_radius_fraction: float | None = None
 
+    @classmethod
+    def from_config(cls, cfg: ExperimentConfig) -> PreprocessingPipeline:
+        """The pipeline *cfg* declares, as every path that scores a frame rebuilds it.
+
+        Training, offline evaluation and live snapshot scoring must each hold
+        the same transforms or the model sees pixels it was not fitted on, and
+        nothing reports the difference. One reader, so a field added to
+        :class:`~allsky.config.PreprocessingConfig` reaches all three at once.
+        """
+        return cls(**cfg.preprocessing.model_dump())
+
     @property
     def enabled(self) -> bool:
         """True when the pipeline changes any pixel."""
@@ -359,13 +371,16 @@ def model_input_frame(
         ``(3, size, size)`` float32 in ``[0, 1]``, C-contiguous and freshly
         allocated — so the caller may standardize it in place.
     """
-    arr = decode_rgb(source)
     if preprocess is not None and preprocess.enabled:
-        arr = preprocess.apply_uint8_hwc(arr)
-    if arr.shape[0] != size or arr.shape[1] != size:
-        arr = resize_bilinear(arr, size)
-    scaled = np.asarray(arr, dtype=np.uint8).astype(np.float32) / 255.0
-    return np.ascontiguousarray(scaled.transpose(2, 0, 1))
+        arr = preprocess.apply_uint8_hwc(decode_rgb(source))
+        if arr.shape[0] != size or arr.shape[1] != size:
+            arr = resize_bilinear(arr, size)
+    else:
+        arr = decode_rgb_resized(source, size)
+    chw = np.ascontiguousarray(np.asarray(arr, dtype=np.uint8).transpose(2, 0, 1))
+    scaled = chw.astype(np.float32)
+    scaled /= 255.0
+    return scaled
 
 
 #: BT.601 luminance weights (R, G, B) used by :func:`visual_qc`.
