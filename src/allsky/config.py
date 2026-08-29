@@ -199,6 +199,11 @@ class FeaturesConfig(BaseModel):
 
     feature_set: Literal["bare", "minimal", "safe", "extended"] = Field(default="safe", alias="set")
 
+    #: Feature names appended verbatim to the resolved set, for ablations over a
+    #: column the tiers do not name. The manifest must already carry them: the
+    #: engine resolves feature columns from here and fails on any it lacks.
+    extra: list[str] = Field(default_factory=list)
+
 
 class DHITargetConfig(BaseModel):
     """Diffuse horizontal irradiance target head."""
@@ -464,6 +469,29 @@ class CropConfig(BaseModel):
     width: int | None = None
 
 
+class PadConfig(BaseModel):
+    """Pixel padding applied after the crop and before the resize.
+
+    The four sides are given separately because the sky disc is not concentric
+    with the sensor: making it concentric with the output square takes unequal
+    padding, and the amounts come from a lens calibration rather than from the
+    frame's own dimensions.
+
+    ``fill`` is the level written into the padded rows and columns, on the same
+    0-255 scale as the frame. It is sky the camera does not image, not sky that
+    is dark, so nothing downstream should read it as a measurement.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    top: int = Field(default=0, ge=0)
+    bottom: int = Field(default=0, ge=0)
+    left: int = Field(default=0, ge=0)
+    right: int = Field(default=0, ge=0)
+    fill: int = Field(default=0, ge=0, le=255)
+
+
 class NightFilterConfig(BaseModel):
     """Drop frames whose solar elevation is below ``min_solar_elevation_deg``."""
 
@@ -588,6 +616,7 @@ class PrepareConfig(BaseModel):
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     mask: MaskConfig = Field(default_factory=MaskConfig)
     crop: CropConfig = Field(default_factory=CropConfig)
+    pad: PadConfig = Field(default_factory=PadConfig)
     resize: int | None = None
     night_filter: NightFilterConfig = Field(default_factory=NightFilterConfig)
     sensor: PrepareSensorConfig = Field(default_factory=PrepareSensorConfig)

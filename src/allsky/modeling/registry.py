@@ -197,7 +197,7 @@ def _multimodal_builder(fusion_name: str) -> ModelBuilder:
         params = _params(cfg)
         feature_set = cfg.features.feature_set
         return MultimodalNet(
-            feature_columns=resolve_feature_set(feature_set),
+            feature_columns=resolve_feature_set(feature_set, cfg.features.extra),
             targets=cfg.targets,
             fusion_name=fusion_name,
             input_mode=cfg.data.input_mode,

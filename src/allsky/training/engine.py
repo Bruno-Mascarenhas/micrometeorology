@@ -218,7 +218,7 @@ def run_experiment(
     train_df, val_df = _select_splits(manifest, split)
     logger.info("split %s: %d train / %d val rows", split.split_id[:12], len(train_df), len(val_df))
 
-    feature_columns = resolve_feature_set(cfg.features.feature_set)
+    feature_columns = resolve_feature_set(cfg.features.feature_set, cfg.features.extra)
     target_normalizers = _fit_target_normalizers(train_df)
     train_ds, val_ds, embedding_dim = _build_datasets(
         cfg,

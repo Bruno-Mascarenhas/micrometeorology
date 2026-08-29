@@ -32,6 +32,7 @@ from allsky.config import (
     TIMESTAMP_BAND_FRACTION,
     CropConfig,
     OverlayPolicy,
+    PadConfig,
     PrepareConfig,
 )
 from allsky.data.contracts import QCFlag
@@ -54,6 +55,7 @@ __all__ = [
     "imagenet_standardize",
     "load_mask",
     "model_input_frame",
+    "pad_frame",
     "process_frame",
     "remove_timestamp_band",
     "resize_image",
@@ -651,6 +653,34 @@ def resolve_mask(cfg: PrepareConfig) -> np.ndarray | None:
     return keep
 
 
+def pad_frame(image: np.ndarray, pad: PadConfig) -> np.ndarray:
+    """Pad an RGB frame on each side with a constant level; a no-op when disabled.
+
+    Parameters
+    ----------
+    image:
+        ``(H, W, 3)`` ``uint8`` RGB frame.
+    pad:
+        Per-side pixel counts and the fill level.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(H + top + bottom, W + left + right, 3)`` ``uint8``; the input array
+        itself when ``pad.enabled`` is False.
+    """
+    arr = _as_rgb_uint8(image)
+    if not pad.enabled:
+        return arr
+    padded: np.ndarray = np.pad(
+        arr,
+        ((pad.top, pad.bottom), (pad.left, pad.right), (0, 0)),
+        mode="constant",
+        constant_values=pad.fill,
+    )
+    return padded
+
+
 def process_frame(
     image: np.ndarray, cfg: PrepareConfig, *, mask: np.ndarray | None = None
 ) -> np.ndarray:
@@ -691,6 +721,7 @@ def process_frame(
     elif cfg.mask.path is not None:
         out = apply_static_mask(out, cfg.mask.path, threshold=cfg.mask.threshold)
     out = center_crop(out, cfg.crop)
+    out = pad_frame(out, cfg.pad)
     if cfg.resize is not None:
         out = resize_image(out, cfg.resize)
     return out
