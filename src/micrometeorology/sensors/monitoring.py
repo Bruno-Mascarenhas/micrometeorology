@@ -37,6 +37,18 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from micrometeorology.wrf.columns import (
+    GLW_W_M2,
+    PRECIP_MM,
+    PSFC_HPA,
+    RH_PCT,
+    SWDDIF_W_M2,
+    SWDOWN_W_M2,
+    T2_C,
+    WIND_DIR_DEG,
+    WIND_SPEED_M_S,
+)
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -132,7 +144,7 @@ class MonitoringChart:
 # exactly that reason), while this card's station layers are the rain of each
 # interval. Nothing on the way to the chart differences a resolved column, so an
 # accumulation would be drawn against per-interval totals under the same unit.
-_WRF_RAIN_CANDIDATES = ("precip_mm",)
+_WRF_RAIN_CANDIDATES = (PRECIP_MM,)
 
 MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
     MonitoringChart(
@@ -140,7 +152,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         title="Temperatura do ar",
         unit="°C",
         kind="line",
-        series=(MonitoringSeries("t", "Temperatura", "T", ("t2_c",)),),
+        series=(MonitoringSeries("t", "Temperatura", "T", (T2_C,)),),
         y_limits=(10.0, 40.0),
     ),
     MonitoringChart(
@@ -148,7 +160,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         title="Umidade relativa",
         unit="%",
         kind="line",
-        series=(MonitoringSeries("ur", "Umidade relativa", "ur", ("rh_pct",)),),
+        series=(MonitoringSeries("ur", "Umidade relativa", "ur", (RH_PCT,)),),
         # 0-105, not 0-100: the model value is published unclipped, so a WRF
         # hour CAN land above saturation and a 0-100 frame would push it off the
         # axis without a trace. The 322 such rows -- 314 distinct hours -- the v1
@@ -163,7 +175,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         title="Pressão atmosférica",
         unit="hPa",
         kind="line",
-        series=(MonitoringSeries("pressure", "Pressão", "pressure", ("psfc_hpa",)),),
+        series=(MonitoringSeries("pressure", "Pressão", "pressure", (PSFC_HPA,)),),
         caveats=(
             "O WRF traz um deslocamento sistemático de cerca de +2 hPa em relação à estação, que é diferença de redução ao nível da estação e não ruído.",
         ),
@@ -184,7 +196,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         title="Velocidade do vento",
         unit="m/s",
         kind="line",
-        series=(MonitoringSeries("ws", "Velocidade", "WS", ("wind_speed_m_s",)),),
+        series=(MonitoringSeries("ws", "Velocidade", "WS", (WIND_SPEED_M_S,)),),
         y_limits=(0.0, 15.0),
         caveats=(
             "O WRF é sistematicamente mais ventoso que a estação — cerca de +1,3 m/s nesta janela, mais da metade da média observada. A linha do modelo não é uma correção da medida.",
@@ -195,7 +207,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         title="Direção do vento",
         unit="°",
         kind="scatter",
-        series=(MonitoringSeries("wd", "Direção", "WD", ("wind_dir_deg",)),),
+        series=(MonitoringSeries("wd", "Direção", "WD", (WIND_DIR_DEG,)),),
         y_limits=(0.0, 360.0),
         caveats=(
             "Todas as camadas são pontos, inclusive a do WRF: direção é circular, e uma linha ligando 350° a 10° varreria o gráfico inteiro passando por um rumo que nunca ocorreu.",
@@ -214,7 +226,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
                 "sw_down",
                 "Onda curta ↓",
                 "Sw_dw",
-                ("swdown_w_m2",),
+                (SWDOWN_W_M2,),
                 hue="shortwave",
                 direction="down",
             ),
@@ -223,7 +235,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
                 "lw_down",
                 "Onda longa ↓",
                 "Lw_dw",
-                ("glw_w_m2",),
+                (GLW_W_M2,),
                 hue="longwave",
                 direction="down",
             ),
@@ -239,7 +251,7 @@ MONITORING_CHARTS: tuple[MonitoringChart, ...] = (
         title="Radiação difusa",
         unit="W/m²",
         kind="line",
-        series=(MonitoringSeries("sw_dif", "Difusa", "Sw_dif", ("swddif_w_m2",), hue="shortwave"),),
+        series=(MonitoringSeries("sw_dif", "Difusa", "Sw_dif", (SWDDIF_W_M2,), hue="shortwave"),),
         caveats=(
             "A difusa migrou do CMP21 para o PSP em 14/05/2025; janelas anteriores a essa data vêm do outro instrumento.",
         ),

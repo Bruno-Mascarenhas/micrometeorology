@@ -48,6 +48,14 @@ from micrometeorology.sensors.plotting import (
     save_figure,
     setup_date_axis,
 )
+from micrometeorology.wrf.columns import (
+    PSFC_HPA,
+    RH_PCT,
+    SWDOWN_W_M2,
+    T2_C,
+    WIND_DIR_DEG,
+    WIND_SPEED_M_S,
+)
 from micrometeorology.wrf.operational_record import rename_v1_columns
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
@@ -87,12 +95,12 @@ RH_WXT_OFFSET = 10.339
 
 # Graph name -> column of series_operacional.dat carrying the model series.
 WRF_COLUMNS = {
-    "radiacao_difusa": "swdown_w_m2",
-    "temperatura": "t2_c",
-    "umidade": "rh_pct",
-    "pressao": "psfc_hpa",
-    "velocidade": "wind_speed_m_s",
-    "direcao": "wind_dir_deg",
+    "radiacao_difusa": SWDOWN_W_M2,
+    "temperatura": T2_C,
+    "umidade": RH_PCT,
+    "pressao": PSFC_HPA,
+    "velocidade": WIND_SPEED_M_S,
+    "direcao": WIND_DIR_DEG,
 }
 
 

@@ -91,6 +91,40 @@ from micrometeorology.common.physics import (
 )
 from micrometeorology.common.site import STATION_SITE
 from micrometeorology.sensors.wind import wind_direction_from_components
+from micrometeorology.wrf.columns import (
+    ALBEDO,
+    E_HPA,
+    EMISSIVITY,
+    ES_PA,
+    GLW_W_M2,
+    GRDFLX_W_M2,
+    HFX_W_M2,
+    LH_W_M2,
+    LWDNB_W_M2,
+    LWUP_AIR_W_M2,
+    LWUP_W_M2,
+    PBLH_M,
+    PRECIP_MM,
+    PSFC_HPA,
+    Q2_G_KG,
+    RH_PCT,
+    SST_C,
+    SWDDIF_FARMS_W_M2,
+    SWDDIF_W_M2,
+    SWDDIR_FARMS_W_M2,
+    SWDDIR_W_M2,
+    SWDNB_W_M2,
+    SWDOWN_FARMS_W_M2,
+    SWDOWN_W_M2,
+    SWUP_W_M2,
+    SWUPB_W_M2,
+    T2_C,
+    U10_M_S,
+    USTAR_M_S,
+    V10_M_S,
+    WIND_DIR_DEG,
+    WIND_SPEED_M_S,
+)
 from micrometeorology.wrf.variables import (
     compute_upwelling_longwave,
     compute_upwelling_shortwave,
@@ -390,60 +424,60 @@ _WIND_SOURCES = ("U10", "V10", "COSALPHA", "SINALPHA")
 #: receives them. The first four fields of a row are :data:`TIME_COLUMNS` and are
 #: not listed here: they are the stamp, not a measurement.
 OPERATIONAL_CATALOG: tuple[SeriesColumn, ...] = (
-    SeriesColumn("t2_c", ("T2",), _temperature_celsius),
-    SeriesColumn("rh_pct", ("T2", "PSFC", "Q2"), _relative_humidity_percent),
-    SeriesColumn("psfc_hpa", ("PSFC",), _pressure_hpa),
-    SeriesColumn("e_hpa", ("PSFC", "Q2"), _vapor_pressure_hpa),
-    SeriesColumn("es_pa", ("T2",), _saturation_vapor_pressure_pa),
-    SeriesColumn("q2_g_kg", ("Q2",), _mixing_ratio_g_kg),
-    SeriesColumn("wind_speed_m_s", _WIND_SOURCES, _wind_speed),
-    SeriesColumn("wind_dir_deg", _WIND_SOURCES, _wind_direction_deg),
-    SeriesColumn("u10_m_s", _WIND_SOURCES, _wind_east),
-    SeriesColumn("v10_m_s", _WIND_SOURCES, _wind_north),
-    SeriesColumn("swdown_w_m2", ("SWDOWN",), _passthrough("SWDOWN"), cold_start_blank=True),
-    SeriesColumn("swdnb_w_m2", ("SWDNB",), _passthrough("SWDNB"), cold_start_blank=True),
-    SeriesColumn("swdown_farms_w_m2", (), _no_source, cold_start_blank=True),
-    SeriesColumn("swupb_w_m2", ("SWUPB",), _passthrough("SWUPB"), cold_start_blank=True),
+    SeriesColumn(T2_C, ("T2",), _temperature_celsius),
+    SeriesColumn(RH_PCT, ("T2", "PSFC", "Q2"), _relative_humidity_percent),
+    SeriesColumn(PSFC_HPA, ("PSFC",), _pressure_hpa),
+    SeriesColumn(E_HPA, ("PSFC", "Q2"), _vapor_pressure_hpa),
+    SeriesColumn(ES_PA, ("T2",), _saturation_vapor_pressure_pa),
+    SeriesColumn(Q2_G_KG, ("Q2",), _mixing_ratio_g_kg),
+    SeriesColumn(WIND_SPEED_M_S, _WIND_SOURCES, _wind_speed),
+    SeriesColumn(WIND_DIR_DEG, _WIND_SOURCES, _wind_direction_deg),
+    SeriesColumn(U10_M_S, _WIND_SOURCES, _wind_east),
+    SeriesColumn(V10_M_S, _WIND_SOURCES, _wind_north),
+    SeriesColumn(SWDOWN_W_M2, ("SWDOWN",), _passthrough("SWDOWN"), cold_start_blank=True),
+    SeriesColumn(SWDNB_W_M2, ("SWDNB",), _passthrough("SWDNB"), cold_start_blank=True),
+    SeriesColumn(SWDOWN_FARMS_W_M2, (), _no_source, cold_start_blank=True),
+    SeriesColumn(SWUPB_W_M2, ("SWUPB",), _passthrough("SWUPB"), cold_start_blank=True),
     SeriesColumn(
-        "swup_w_m2",
+        SWUP_W_M2,
         ("ALBEDO", "SWDOWN"),
         _upwelling_shortwave_from_albedo,
         cold_start_blank=True,
     ),
-    SeriesColumn("swddif_w_m2", ("SWDDIF",), _passthrough("SWDDIF"), cold_start_blank=True),
-    SeriesColumn("swddif_farms_w_m2", (), _no_source, cold_start_blank=True),
-    SeriesColumn("swddir_w_m2", ("SWDDIR",), _passthrough("SWDDIR"), cold_start_blank=True),
-    SeriesColumn("swddir_farms_w_m2", (), _no_source, cold_start_blank=True),
-    SeriesColumn("glw_w_m2", ("GLW",), _passthrough("GLW"), cold_start_blank=True),
+    SeriesColumn(SWDDIF_W_M2, ("SWDDIF",), _passthrough("SWDDIF"), cold_start_blank=True),
+    SeriesColumn(SWDDIF_FARMS_W_M2, (), _no_source, cold_start_blank=True),
+    SeriesColumn(SWDDIR_W_M2, ("SWDDIR",), _passthrough("SWDDIR"), cold_start_blank=True),
+    SeriesColumn(SWDDIR_FARMS_W_M2, (), _no_source, cold_start_blank=True),
+    SeriesColumn(GLW_W_M2, ("GLW",), _passthrough("GLW"), cold_start_blank=True),
     SeriesColumn(
-        "lwdnb_w_m2",
+        LWDNB_W_M2,
         ("GLW",),
         _downwelling_longwave_bottom,
         optional_sources=("LWDNB",),
         cold_start_blank=True,
     ),
     SeriesColumn(
-        "lwup_w_m2",
+        LWUP_W_M2,
         ("EMISS", "TSK", "GLW"),
         _upwelling_longwave,
         optional_sources=("LWUPB",),
         cold_start_blank=True,
     ),
     SeriesColumn(
-        "lwup_air_w_m2",
+        LWUP_AIR_W_M2,
         ("EMISS", "T2"),
         _upwelling_longwave_from_air,
         cold_start_blank=True,
     ),
-    SeriesColumn("albedo", ("ALBEDO",), _passthrough("ALBEDO"), cold_start_blank=True),
-    SeriesColumn("emissivity", ("EMISS",), _passthrough("EMISS"), cold_start_blank=True),
-    SeriesColumn("hfx_w_m2", ("HFX",), _passthrough("HFX"), cold_start_blank=True),
-    SeriesColumn("lh_w_m2", ("LH",), _passthrough("LH"), cold_start_blank=True),
-    SeriesColumn("grdflx_w_m2", ("GRDFLX",), _passthrough("GRDFLX"), cold_start_blank=True),
-    SeriesColumn("ustar_m_s", ("UST",), _passthrough("UST"), cold_start_blank=True),
-    SeriesColumn("pblh_m", ("PBLH",), _passthrough("PBLH"), cold_start_blank=True),
-    SeriesColumn("sst_c", ("SST",), _sea_surface_temperature_celsius),
-    SeriesColumn("precip_mm", (), _precipitation_mm, increments=("RAINC", "RAINNC")),
+    SeriesColumn(ALBEDO, ("ALBEDO",), _passthrough("ALBEDO"), cold_start_blank=True),
+    SeriesColumn(EMISSIVITY, ("EMISS",), _passthrough("EMISS"), cold_start_blank=True),
+    SeriesColumn(HFX_W_M2, ("HFX",), _passthrough("HFX"), cold_start_blank=True),
+    SeriesColumn(LH_W_M2, ("LH",), _passthrough("LH"), cold_start_blank=True),
+    SeriesColumn(GRDFLX_W_M2, ("GRDFLX",), _passthrough("GRDFLX"), cold_start_blank=True),
+    SeriesColumn(USTAR_M_S, ("UST",), _passthrough("UST"), cold_start_blank=True),
+    SeriesColumn(PBLH_M, ("PBLH",), _passthrough("PBLH"), cold_start_blank=True),
+    SeriesColumn(SST_C, ("SST",), _sea_surface_temperature_celsius),
+    SeriesColumn(PRECIP_MM, (), _precipitation_mm, increments=("RAINC", "RAINNC")),
 )
 
 #: Header a file created by this module receives.
@@ -462,37 +496,37 @@ V1_TO_V2: tuple[tuple[str, str], ...] = (
     ("month", "month"),
     ("day", "day"),
     ("hour", "hour"),
-    ("T", "t2_c"),
-    ("ur", "rh_pct"),
-    ("pressure", "psfc_hpa"),
-    ("e", "e_hpa"),
-    ("es", "es_pa"),
-    ("q", "q2_g_kg"),
-    ("WS", "wind_speed_m_s"),
-    ("WD", "wind_dir_deg"),
-    ("u", "u10_m_s"),
-    ("v", "v10_m_s"),
-    ("Swdw", "swdown_w_m2"),
-    ("Swdw_b", "swdnb_w_m2"),
-    ("Swdw_farms", "swdown_farms_w_m2"),
-    ("Swup_b", "swupb_w_m2"),
-    ("Swup_calc", "swup_w_m2"),
-    ("Swdf", "swddif_w_m2"),
-    ("Swdf_farms", "swddif_farms_w_m2"),
-    ("Swdr", "swddir_w_m2"),
-    ("Swdr_farms", "swddir_farms_w_m2"),
-    ("Lwdw_glw", "glw_w_m2"),
-    ("Lwdw_b", "lwdnb_w_m2"),
-    ("Lwup_b", "lwup_w_m2"),
-    ("Lwup_calc", "lwup_air_w_m2"),
-    ("ALBD", "albedo"),
-    ("EMISS", "emissivity"),
-    ("H", "hfx_w_m2"),
-    ("LE", "lh_w_m2"),
-    ("G", "grdflx_w_m2"),
-    ("ustar", "ustar_m_s"),
-    ("PBLH", "pblh_m"),
-    ("TSM", "sst_c"),
+    ("T", T2_C),
+    ("ur", RH_PCT),
+    ("pressure", PSFC_HPA),
+    ("e", E_HPA),
+    ("es", ES_PA),
+    ("q", Q2_G_KG),
+    ("WS", WIND_SPEED_M_S),
+    ("WD", WIND_DIR_DEG),
+    ("u", U10_M_S),
+    ("v", V10_M_S),
+    ("Swdw", SWDOWN_W_M2),
+    ("Swdw_b", SWDNB_W_M2),
+    ("Swdw_farms", SWDOWN_FARMS_W_M2),
+    ("Swup_b", SWUPB_W_M2),
+    ("Swup_calc", SWUP_W_M2),
+    ("Swdf", SWDDIF_W_M2),
+    ("Swdf_farms", SWDDIF_FARMS_W_M2),
+    ("Swdr", SWDDIR_W_M2),
+    ("Swdr_farms", SWDDIR_FARMS_W_M2),
+    ("Lwdw_glw", GLW_W_M2),
+    ("Lwdw_b", LWDNB_W_M2),
+    ("Lwup_b", LWUP_W_M2),
+    ("Lwup_calc", LWUP_AIR_W_M2),
+    ("ALBD", ALBEDO),
+    ("EMISS", EMISSIVITY),
+    ("H", HFX_W_M2),
+    ("LE", LH_W_M2),
+    ("G", GRDFLX_W_M2),
+    ("ustar", USTAR_M_S),
+    ("PBLH", PBLH_M),
+    ("TSM", SST_C),
 )
 
 #: The v1 header, in its own order.
@@ -1110,3 +1144,45 @@ def rename_v1_columns(frame: pd.DataFrame) -> pd.DataFrame:
         return frame
     logger.info("v1 column names found, reading them as v2: %s", ", ".join(sorted(present)))
     return frame.rename(columns=present)
+
+
+def read_wrf_series(path: str | Path) -> pd.DataFrame:
+    """Read ``series_operacional.dat`` defensively.
+
+    The file is an append-only log of successive operational runs: **not**
+    chronologically sorted, with duplicated timestamps and twelve trailing
+    anonymous fields that only the oldest rows fill. Reading with the full header
+    and sorting afterwards is the only order that does not misalign columns —
+    ``names=`` turns the surplus fields into a twelve-level MultiIndex.
+
+    Hour 21 local is 00 UTC, each run's initialisation hour, where surface fluxes
+    and boundary-layer height are identically zero; those rows are dropped
+    wholesale so one uniform rule can be stated on the page.
+
+    Parameters
+    ----------
+    path:
+        The ``series_operacional.dat`` the operational extraction appends to.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Hourly model variables on a sorted, de-duplicated
+        :class:`~pandas.DatetimeIndex` of naive station-local hours (UTC-03),
+        with the spin-up hour removed. A repeated timestamp keeps the LAST row,
+        which is the most recent run's value for that hour.
+    """
+    frame = pd.read_csv(path)
+    frame = frame.drop(columns=[c for c in frame.columns if str(c).startswith("Unnamed")])
+    frame = rename_v1_columns(frame)
+    stamps = pd.to_datetime(frame[["year", "month", "day", "hour"]])
+    frame.index = pd.DatetimeIndex(stamps)
+    frame = frame.drop(columns=["year", "month", "day", "hour"])
+    frame = frame.loc[~frame.index.duplicated(keep="last")].sort_index()
+    index = frame.index
+    if not isinstance(index, pd.DatetimeIndex):
+        raise TypeError(f"the hourly database must be indexed by time, got {type(index).__name__}")
+    spin_up = index.hour == 21
+    logger.info("WRF: %d rows, dropping %d spin-up rows at hour 21", len(frame), int(spin_up.sum()))
+    trimmed: pd.DataFrame = frame.loc[~spin_up]
+    return trimmed
