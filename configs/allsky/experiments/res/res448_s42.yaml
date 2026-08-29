@@ -1,0 +1,23 @@
+# Resolution probe: 448px (1024 patches) on the winning config.
+# batch_size scaled down to fit 8 GB; attention is quadratic in token count.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: res448_s42
+output_dir: output/allsky-mm/experiments/res/res448_s42
+seed: 42
+data:
+  data_root: output/allsky-mm/dataset
+  input_mode: image
+targets:
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  image_size: 448
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  batch_size: 16
+  num_workers: 8

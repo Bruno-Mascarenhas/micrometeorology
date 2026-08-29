@@ -1,0 +1,45 @@
+# The camera's own light meter, as two scalars beside the image.
+#
+# The auto-exposure spans 1340x over a day (211 us at noon, 282.95 ms at 17:41),
+# so the pixels the model sees carry almost no absolute radiance: mean brightness
+# is ANTI-correlated with DHI (r = -0.564, negative in every elevation band).
+# The exposure time the camera burns into each frame recovers it. With
+# log2_relative_radiance = log2(linear luma / exposure_s):
+#
+#   r with DHI:  solar elevation +0.489 | log2_exposure_s -0.834 | radiance +0.903
+#
+# and, unlike every other predictor measured here, the relation is STATIONARY
+# across the temporal splits — DHI = a * log2(radiance) + b fits a = 75.9 (train),
+# 73.3 (val), 74.7 (test), a 3.4 % spread, while the same fit on solar elevation
+# drifts 20 % (3.14 -> 2.72 -> 2.50) as the season advances. That is the defect
+# this arm targets: 31.6 % of the test rows sit above the train p95 elevation, and
+# a predictor whose slope survives that shift is what the network lacks.
+#
+# It is measurably absent from the trained model: the residual of loss_mae still
+# correlates with radiance at r = -0.50 (s42) and -0.36 (s43).
+#
+# Everything else is held at the control (loss_mae, 19.63 +/- 0.60 over three
+# seeds), so a difference here is attributable to the two features.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: control_s43
+output_dir: output/allsky-mm/experiments/control/control_s43
+seed: 43
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset
+  input_mode: image
+targets:
+  dhi:
+    loss: mae
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  num_workers: 8
