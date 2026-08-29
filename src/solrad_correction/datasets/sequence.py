@@ -9,6 +9,13 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset, default_collate
 
+from solrad_correction.datasets.sidecars import (
+    FEATURE_NAMES_FILENAME,
+    read_feature_names,
+    read_optional_index,
+    write_feature_names,
+    write_optional_index,
+)
 from solrad_correction.utils.memory import assert_array_size
 
 SequenceArray = np.ndarray | np.memmap | torch.Tensor
@@ -516,10 +523,8 @@ class WindowedSequenceDatasetMeta:
             ),
             format_version=np.array([1]),
         )
-        meta = pd.DataFrame({"feature_names": self.feature_names})
-        meta.to_csv(p / "feature_names.csv", index=False)
-        if self.index is not None:
-            pd.Series(self.index).to_csv(p / "index.csv", index=False)
+        write_feature_names(p, self.feature_names)
+        write_optional_index(p, self.index)
 
     @classmethod
     def load(cls, path: str | Path) -> WindowedSequenceDatasetMeta:
@@ -536,22 +541,10 @@ class WindowedSequenceDatasetMeta:
         seq_len = int(data["sequence_length"][0])
         target_offset = int(data["target_offset"][0])
 
-        feature_names: list[str] = []
-        meta_path = p / "feature_names.csv"
-        if meta_path.exists():
-            meta = pd.read_csv(meta_path)
-            feature_names = meta["feature_names"].tolist()
-
-        index = None
-        idx_path = p / "index.csv"
-        if idx_path.exists():
-            idx_df = pd.read_csv(idx_path)
-            # ``pd.to_datetime`` of a column returns a Series; wrap it so the
-            # field holds the ``DatetimeIndex`` it is declared to hold. Both
-            # readers of the field already funnel through ``pd.DatetimeIndex``
-            # (``to_torch_dataset``) or ``pd.Series`` (``save``), which carry the
-            # column name across identically either way.
-            index = pd.DatetimeIndex(pd.to_datetime(idx_df.iloc[:, 0]))
+        feature_names: list[str] = (
+            read_feature_names(p) if (p / FEATURE_NAMES_FILENAME).exists() else []
+        )
+        index = read_optional_index(p)
 
         return cls(
             features=features,
