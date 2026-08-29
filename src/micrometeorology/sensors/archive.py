@@ -1184,7 +1184,9 @@ def mask_impossible_shortwave(
 
 
 def night_corrupted_days(
-    frame: pd.DataFrame, columns: Sequence[str] = NIGHT_CORRUPTION_COLUMNS
+    frame: pd.DataFrame,
+    columns: Sequence[str] = NIGHT_CORRUPTION_COLUMNS,
+    elevation_deg: NDArray | None = None,
 ) -> list[tuple[str, int]]:
     """Days whose timestamps are shifted, found by irradiance recorded at night.
 
@@ -1202,6 +1204,11 @@ def night_corrupted_days(
     columns:
         Shortwave channels to witness the fault on. Longwave must stay out: a
         pyrgeometer reads 300-400 W/m2 all night by design.
+    elevation_deg:
+        Solar elevation over *frame*'s index in degrees, ``(N,)``, when the
+        caller already holds it; computed here otherwise. A pipeline that runs
+        several elevation-gated stages passes one array to all of them so a
+        second definition of "night" cannot drift from the first.
 
     Returns
     -------
@@ -1214,9 +1221,9 @@ def night_corrupted_days(
     if not present:
         return []
     index = pd.DatetimeIndex(frame.index)
-    deep_night = solar_elevation_deg(index, STATION_SITE, STATION_UTC_OFFSET_HOURS) < (
-        NIGHT_CORRUPTION_ELEVATION_DEG
-    )
+    if elevation_deg is None:
+        elevation_deg = station_elevation_deg(index)
+    deep_night = elevation_deg < NIGHT_CORRUPTION_ELEVATION_DEG
     offending = np.zeros(len(frame), dtype=bool)
     for column in present:
         values = frame[column]
