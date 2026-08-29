@@ -289,6 +289,23 @@ def test_wind_figure_with_pressure_overlay_renders_end_to_end(tmp_path):
     assert batch._render_figure(task) == str(out_path)
     assert out_path.stat().st_size > 0
 
+    # The forecast hour lives ONLY in the title: a map that loses it is a
+    # temperature field with nothing on the image saying when it is valid.
+    # A cartopy GeoAxes carrying an extent renders nothing for ax.set_title, so
+    # the published maps shipped untitled. Measured against the same figure
+    # drawn with an empty title, which is the only way to tell the title's ink
+    # apart from the map's.
+    from PIL import Image
+
+    untitled_path = tmp_path / "WIND_D05_000_untitled.png"
+    batch._render_figure(task._replace(title="", output_path=str(untitled_path)))
+
+    def ink(path: Path) -> int:
+        rendered = np.asarray(Image.open(path).convert("L"))
+        return int((rendered[: rendered.shape[0] // 5] < 200).sum())
+
+    assert ink(out_path) > ink(untitled_path), "the figure was saved without a visible title"
+
 
 def test_render_figure_closes_its_pyplot_figure_when_the_render_fails(tmp_path):
     """pyplot's global registry holds a strong reference to every open figure."""

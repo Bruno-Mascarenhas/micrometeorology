@@ -272,7 +272,11 @@ def _render_figure(task: FigureTask) -> str:
             )
             ax.clabel(cs, colors="black", fmt="%.0f")
 
-        ax.set_title(task.title, fontsize=9)
+        # On the figure, not on the axes: a cartopy GeoAxes carrying an extent
+        # and drawn gridlines reports a layout box that leaves ax.set_title with
+        # nowhere to render, and the published maps shipped with no title at all
+        # — no forecast hour anywhere on the image but the file name's index.
+        fig.suptitle(task.title, fontsize=9, y=0.98)
 
         out = Path(task.output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
