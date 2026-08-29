@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Protocol, get_args, runtime_checkable
 import numpy as np
 import pandas as pd
 
-from allsky.config import AlignmentStrategyName
+from allsky.config import DEFAULT_IMAGE_SIZE, AlignmentStrategyName
 from allsky.data.contracts import NS_PER_MINUTE, resolve
 from allsky.features.normalization import FeatureNormalizer
 
@@ -218,7 +218,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         feature_columns: Sequence[str],
         *,
         data_root: str | Path,
-        image_size: int = 224,
+        image_size: int = DEFAULT_IMAGE_SIZE,
         train: bool = True,
         stats: FeatureNormalizer | None = None,
         augment: AugmentationPipeline | None = None,
@@ -259,25 +259,17 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         copies; the preprocessing path necessarily pays them, because the stage
         is defined on float CHW and PIL cannot bilinear-resize one.
         """
-        # Imported here for the same reason PIL is: allsky.preprocessing reaches
-        # back into allsky.data.contracts, so a module-level import would close a
-        # cycle through this package's __init__.
-        from PIL import Image
+        # Imported here because allsky.preprocessing reaches back into
+        # allsky.data.contracts, so a module-level import would close a cycle
+        # through this package's __init__.
+        from allsky.preprocessing import imagenet_standardize, model_input_frame
 
-        from allsky.preprocessing import imagenet_standardize
-
-        full = resolve(relative_path, self.data_root)
-        size = self.image_size
-        with Image.open(full) as handle:
-            frame = handle.convert("RGB")
-        preprocess = self.preprocess
-        if preprocess is not None and preprocess.enabled:
-            frame = Image.fromarray(preprocess.apply_uint8_hwc(np.asarray(frame, dtype=np.uint8)))
-        if frame.size != (size, size):
-            frame = frame.resize((size, size), Image.Resampling.BILINEAR)
-        scaled = np.asarray(frame, dtype=np.uint8).astype(np.float32) / 255.0
-        chw = np.ascontiguousarray(scaled.transpose(2, 0, 1))
-        # `chw` was allocated here, so standardising in place costs no copy.
+        chw = model_input_frame(
+            resolve(relative_path, self.data_root),
+            size=self.image_size,
+            preprocess=self.preprocess,
+        )
+        # `chw` was allocated there, so standardising in place costs no copy.
         return imagenet_standardize(self._augmented(chw, idx), copy=False)
 
     def _augmented(self, chw: np.ndarray, idx: int) -> np.ndarray:

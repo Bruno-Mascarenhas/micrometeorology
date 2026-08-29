@@ -20,9 +20,18 @@ import numpy as np
 import pandas as pd
 
 from allsky.atomic import atomic_write, atomic_write_json
-from allsky.config import SITE_TZ, SITE_UTC_OFFSET_HOURS, ExperimentConfig, SiteConfig
+from allsky.config import (
+    DEFAULT_IMAGE_SIZE,
+    SITE_TZ,
+    SITE_UTC_OFFSET_HOURS,
+    ExperimentConfig,
+    SiteConfig,
+    model_param,
+)
 from allsky.embeddings.backbone import VisualBackbone
+from allsky.frame_pixels import decode_rgb
 from allsky.provenance import code_version
+from allsky.training.checkpointing import normalizers_from_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -387,10 +396,7 @@ def _feature_vector(
 
 def _image_as_hwc(image_path: str | Path) -> np.ndarray:
     """Read a frame as ``(H, W, 3)`` ``uint8`` RGB — what a visual backbone's transform takes."""
-    from PIL import Image
-
-    with Image.open(image_path) as handle:
-        return np.asarray(handle.convert("RGB"), dtype=np.uint8)
+    return decode_rgb(image_path)
 
 
 def _image_as_chw(image_path: str | Path, size: int, cfg: ExperimentConfig) -> np.ndarray:
@@ -417,19 +423,14 @@ def _image_as_chw(image_path: str | Path, size: int, cfg: ExperimentConfig) -> n
         ``(3, size, size)`` float32, standardized by the DINOv2 channel stats —
         dimensionless, not ``[0, 1]``.
     """
-    from PIL import Image
+    from allsky.preprocessing import PreprocessingPipeline, imagenet_standardize, model_input_frame
 
-    from allsky.preprocessing import PreprocessingPipeline, imagenet_standardize
-
-    with Image.open(image_path) as handle:
-        frame = handle.convert("RGB")
-    preprocess = PreprocessingPipeline(**cfg.preprocessing.model_dump())
-    if preprocess.enabled:
-        frame = Image.fromarray(preprocess.apply_uint8_hwc(np.asarray(frame, dtype=np.uint8)))
-    if frame.size != (size, size):
-        frame = frame.resize((size, size), Image.Resampling.BILINEAR)
-    scaled = np.asarray(frame, dtype=np.uint8).astype(np.float32) / 255.0
-    return imagenet_standardize(np.ascontiguousarray(scaled.transpose(2, 0, 1)), copy=False)
+    chw = model_input_frame(
+        image_path,
+        size=size,
+        preprocess=PreprocessingPipeline(**cfg.preprocessing.model_dump()),
+    )
+    return imagenet_standardize(chw, copy=False)
 
 
 class _EmbeddingStoreUnreachableError(ValueError):
@@ -653,10 +654,9 @@ def predict_snapshot(
     import torch
 
     from allsky.data.contracts import SKY_CLASS_NAMES
-    from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
     from allsky.modeling.registry import build_model, temporal_pooling_for_strategy
     from allsky.training.checkpointing import load_checkpoint
-    from allsky.training.engine import _default_image_backbone_builder, _model_param
+    from allsky.training.engine import _default_image_backbone_builder
 
     checkpoint = load_checkpoint(
         checkpoint_path, map_location=device, trust_pickle=trust_checkpoint
@@ -668,12 +668,7 @@ def predict_snapshot(
             "which encodes the live frame with its own backbone and reads no embedding store"
         )
     feature_columns: list[str] = list(checkpoint["feature_columns"])
-    normalizers = checkpoint["normalizers"]
-    feature_normalizer = FeatureNormalizer.from_dict(normalizers["feature_normalizer"])
-    target_normalizers = {
-        key: TargetNormalizer.from_dict(value)
-        for key, value in normalizers["target_normalizers"].items()
-    }
+    feature_normalizer, target_normalizers = normalizers_from_checkpoint(checkpoint)
 
     raw_values, imputed = _feature_vector(
         timestamp,
@@ -685,7 +680,7 @@ def predict_snapshot(
         training_means=feature_normalizer.mean,
     )
     standardized = feature_normalizer.transform(pd.DataFrame([raw_values], columns=feature_columns))
-    image_size = int(_model_param(cfg, "image_size", 224))
+    image_size = int(model_param(cfg, "image_size", DEFAULT_IMAGE_SIZE))
 
     batch: dict[str, Any] = {"features": torch.from_numpy(standardized).to(device)}
     image_backbone = None

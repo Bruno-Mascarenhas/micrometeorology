@@ -27,6 +27,8 @@ from typing import Any, Literal, Protocol, get_args, runtime_checkable
 
 import numpy as np
 
+from allsky.config import DEFAULT_IMAGE_SIZE
+from allsky.frame_pixels import resize_bilinear
 from allsky.preprocessing import IMAGENET_MEAN, IMAGENET_STD
 
 #: ``torch.hub`` GitHub repo hosting the DINOv2 entrypoints.
@@ -142,10 +144,7 @@ def _resize_uint8(image: np.ndarray, size: int) -> np.ndarray:
     arr = arr.astype(np.uint8, copy=False)
     if arr.shape[0] == size and arr.shape[1] == size:
         return np.ascontiguousarray(arr)
-    from PIL import Image
-
-    resized = Image.fromarray(arr).resize((size, size), Image.Resampling.BILINEAR)
-    return np.ascontiguousarray(np.asarray(resized, dtype=np.uint8))
+    return np.ascontiguousarray(resize_bilinear(arr, size), dtype=np.uint8)
 
 
 class DinoV2Backbone:
@@ -186,7 +185,7 @@ class DinoV2Backbone:
         pooling: Pooling = "cls",
         device: str = "auto",
         dtype: Literal["fp16", "fp32"] = "fp16",
-        image_size: int = 224,
+        image_size: int = DEFAULT_IMAGE_SIZE,
     ) -> None:
         if image_size % 14 != 0:
             raise ValueError(f"image_size {image_size} must be a multiple of the patch size (14)")

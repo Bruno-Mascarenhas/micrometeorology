@@ -35,6 +35,8 @@ from allsky.config import (
     PrepareConfig,
 )
 from allsky.data.contracts import QCFlag
+from allsky.frame_pixels import as_rgb_uint8 as _as_rgb_uint8
+from allsky.frame_pixels import decode_rgb, resize_bilinear
 from allsky.lens import LensCalibration
 
 __all__ = [
@@ -51,6 +53,7 @@ __all__ = [
     "estimate_circular_mask",
     "imagenet_standardize",
     "load_mask",
+    "model_input_frame",
     "process_frame",
     "remove_timestamp_band",
     "resize_image",
@@ -321,6 +324,51 @@ class PreprocessingPipeline:
         return np.ascontiguousarray(out)
 
 
+def model_input_frame(
+    source: str | Path | bytes,
+    *,
+    size: int,
+    preprocess: PreprocessingPipeline | None = None,
+) -> np.ndarray:
+    """Decode one frame into the array a visual backbone is fed, minus the standardisation.
+
+    This is the whole train/serve chain in one place: decode -> preprocess at
+    **native** resolution -> resize -> ``[0, 1]`` CHW. It deliberately stops
+    short of :func:`imagenet_standardize` because the training dataset augments
+    between the two and the serving path does not — that one step is the only
+    difference the two sides are allowed to have, and keeping the rest here is
+    what stops them drifting. The project has already shipped a transform on one
+    side of that line and not the other three times.
+
+    The preprocessing runs before the resize on purpose: the overlay band is a
+    fixed fraction of the *native* frame, and a bilinear resize would smear its
+    edge into the sky below it.
+
+    Parameters
+    ----------
+    source:
+        Path to the frame, or its encoded bytes.
+    size:
+        Side of the square the model expects, in pixels.
+    preprocess:
+        Deterministic pipeline from the run's config; ``None`` or a disabled one
+        leaves the pixels alone.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(3, size, size)`` float32 in ``[0, 1]``, C-contiguous and freshly
+        allocated — so the caller may standardize it in place.
+    """
+    arr = decode_rgb(source)
+    if preprocess is not None and preprocess.enabled:
+        arr = preprocess.apply_uint8_hwc(arr)
+    if arr.shape[0] != size or arr.shape[1] != size:
+        arr = resize_bilinear(arr, size)
+    scaled = np.asarray(arr, dtype=np.uint8).astype(np.float32) / 255.0
+    return np.ascontiguousarray(scaled.transpose(2, 0, 1))
+
+
 #: BT.601 luminance weights (R, G, B) used by :func:`visual_qc`.
 _LUMINANCE_WEIGHTS = np.array([0.299, 0.587, 0.114], dtype=np.float64)
 
@@ -336,24 +384,6 @@ SATURATED_FRACTION_THRESHOLD = 0.2
 
 #: Grayscale threshold used to binarize a PNG mask when the config leaves it auto.
 _DEFAULT_MASK_THRESHOLD = 127.0
-
-
-def _as_rgb_uint8(image: np.ndarray) -> np.ndarray:
-    """Validate *image* is an ``(H, W, 3)`` ``uint8`` RGB array and return it.
-
-    Raises
-    ------
-    ValueError
-        If the array is not 3-D with a trailing size-3 channel axis.
-    TypeError
-        If the dtype is not ``uint8``.
-    """
-    arr = np.asarray(image)
-    if arr.ndim != 3 or arr.shape[2] != 3:
-        raise ValueError(f"expected an (H, W, 3) RGB image, got shape {arr.shape}")
-    if arr.dtype != np.uint8:
-        raise TypeError(f"expected a uint8 image, got dtype {arr.dtype}")
-    return arr
 
 
 def load_mask(path: str | Path, *, threshold: float | None = None) -> np.ndarray:
@@ -522,12 +552,7 @@ def resize_image(image: np.ndarray, size: int | tuple[int, int]) -> np.ndarray:
     numpy.ndarray
         Resized frame, shape ``(height, width, 3)``, ``uint8``.
     """
-    from PIL import Image
-
-    arr = _as_rgb_uint8(image)
-    target = (size, size) if isinstance(size, int) else size
-    resized = Image.fromarray(arr).resize(target, Image.Resampling.BILINEAR)
-    return np.asarray(resized)
+    return resize_bilinear(_as_rgb_uint8(image), size)
 
 
 def visual_qc(

@@ -58,6 +58,7 @@ from allsky.embeddings.storage import (
     write_index,
     write_meta,
 )
+from allsky.frame_pixels import decode_rgb
 
 logger = logging.getLogger(__name__)
 
@@ -70,19 +71,6 @@ _INDEX_PART_GLOB = "index.part-*.parquet"
 def _index_part_path(out: Path, shard_index: int) -> Path:
     """Path to the per-shard index part for *shard_index* inside *out*."""
     return out / f"index.part-{shard_index:05d}.parquet"
-
-
-def _load_uint8(path: Path) -> np.ndarray:
-    """Load an image as a ``uint8`` HWC RGB array (grayscale -> 3-channel).
-
-    Decoding straight with PIL is byte-identical to reading through imageio
-    (which decodes with PIL anyway) and skips its per-call plugin dispatch, so
-    previously extracted stores stay valid.
-    """
-    from PIL import Image
-
-    with Image.open(path) as handle:
-        return np.asarray(handle.convert("RGB"), dtype=np.uint8)
 
 
 def _encode_batch(backbone: VisualBackbone, images: list[np.ndarray]) -> np.ndarray:
@@ -322,7 +310,7 @@ def extract_embeddings(
             batch = samples[start : start + batch_size]
             images = list(
                 decode_pool.map(
-                    lambda path: _load_uint8(resolve(path, data_root)),
+                    lambda path: decode_rgb(resolve(path, data_root)),
                     [path for _, path in batch],
                 )
             )
