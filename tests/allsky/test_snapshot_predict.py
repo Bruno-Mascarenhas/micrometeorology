@@ -19,7 +19,6 @@ pins the helper's contract instead.
 
 import shutil
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -36,6 +35,7 @@ from allsky.snapshot import (
     _feature_vector,
     _image_as_hwc,
     _sensor_row_near,
+    _shipped_sensor_limits,
     predict_snapshot,
 )
 from allsky.solar import solar_elevation_deg
@@ -108,6 +108,7 @@ def test_a_capture_without_a_sensor_export_imputes_instead_of_raising(
         embedding_checkpoint,
         timestamp=pd.Timestamp("2026-01-01 12:00:00"),
         sensor_csv=None,
+        sensor_limits=[],
         trust_checkpoint=True,
     )
 
@@ -169,6 +170,7 @@ def test_a_railed_logger_channel_is_imputed_instead_of_fed_as_a_measurement(
         feature_set=feature_set,
         site=SiteConfig(),
         sensor_csv=sensor_csv,
+        sensor_limits=_shipped_sensor_limits(),
         tolerance=DEFAULT_SENSOR_TOLERANCE,
         training_means=np.array([1014.93], dtype=np.float32),
     )
@@ -202,6 +204,7 @@ def test_an_implausible_exported_value_is_refused_instead_of_served_as_a_measure
         feature_set="safe",
         site=SiteConfig(),
         sensor_csv=sensor_csv,
+        sensor_limits=_shipped_sensor_limits(),
         tolerance=DEFAULT_SENSOR_TOLERANCE,
         training_means=np.array([3.7], dtype=np.float32),
     )
@@ -220,6 +223,7 @@ def test_a_plausible_exported_value_is_served_as_measured(tmp_path: Path) -> Non
         feature_set="safe",
         site=SiteConfig(),
         sensor_csv=sensor_csv,
+        sensor_limits=_shipped_sensor_limits(),
         tolerance=DEFAULT_SENSOR_TOLERANCE,
         training_means=np.array([25.0], dtype=np.float32),
     )
@@ -229,17 +233,15 @@ def test_a_plausible_exported_value_is_served_as_measured(tmp_path: Path) -> Non
 
 
 def test_a_configuration_declaring_no_plausibility_gate_refuses_to_serve_a_sensor_row(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     sensor_csv = tmp_path / "station-hourly.csv"
     sensor_csv.write_text("timestamp,AirT1_C_Avg\n2026-08-14 12:00:00,27.4\n", encoding="utf-8")
-    monkeypatch.setattr(
-        "micrometeorology.common.config.get_settings",
-        lambda: SimpleNamespace(sensor_limits=[]),
-    )
 
     with pytest.raises(ValueError, match="sensor_limits"):
-        _sensor_row_near(sensor_csv, pd.Timestamp("2026-08-14 12:00:00"), DEFAULT_SENSOR_TOLERANCE)
+        _sensor_row_near(
+            sensor_csv, pd.Timestamp("2026-08-14 12:00:00"), DEFAULT_SENSOR_TOLERANCE, []
+        )
 
 
 def test_an_offset_carrying_sensor_export_is_matched_on_site_local_wall_clock(
@@ -252,7 +254,10 @@ def test_an_offset_carrying_sensor_export_is_matched_on_site_local_wall_clock(
     )
 
     row = _sensor_row_near(
-        sensor_csv, pd.Timestamp("2026-08-14 12:00:00"), DEFAULT_SENSOR_TOLERANCE
+        sensor_csv,
+        pd.Timestamp("2026-08-14 12:00:00"),
+        DEFAULT_SENSOR_TOLERANCE,
+        _shipped_sensor_limits(),
     )
 
     assert float(row["AirT1_C_Avg"].iloc[0]) == pytest.approx(29.0)
@@ -268,6 +273,7 @@ def test_solar_geometry_is_built_on_the_pinned_site_offset_the_manifest_trains_w
         feature_set="minimal",
         site=site,
         sensor_csv=None,
+        sensor_limits=[],
         tolerance=DEFAULT_SENSOR_TOLERANCE,
         training_means=np.zeros(1, dtype=np.float32),
     )

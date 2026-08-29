@@ -36,7 +36,7 @@ import numpy as np
 import pandas as pd
 
 from allsky.clearsky import haurwitz_ghi_from_cos_zenith
-from allsky.config import DEFAULT_IMAGE_SIZE, ExperimentConfig, model_param
+from allsky.config import ExperimentConfig, image_size_of
 from allsky.data.contracts import SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES, sky_class_name
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
@@ -430,8 +430,7 @@ def _run_inference(
     import torch
     from torch.utils.data import DataLoader
 
-    from allsky.modeling.registry import build_model, temporal_pooling_for_strategy
-    from allsky.training.engine import _default_image_backbone_builder
+    from allsky.modeling.registry import restore_model
 
     dataset, embedding_dim = _build_split_dataset(
         cfg,
@@ -442,26 +441,14 @@ def _run_inference(
         embedding_reader=embedding_reader,
     )
 
-    image_backbone = None
-    if cfg.data.input_mode == "image":
-        # As in training: with no injected builder the rebuilt model still needs
-        # the backbone architecture to load_state_dict, so default to the
-        # config-named backbone. The injection hook still wins.
-        builder = image_backbone_builder or _default_image_backbone_builder(cfg, device)
-        image_backbone = builder()
-    # Rebuild with the same temporal pooler the checkpoint was trained with, or
-    # load_state_dict would reject an attention-pooled model's extra weights.
-    temporal_pooling = temporal_pooling_for_strategy(cfg.data.alignment.strategy)
-    model = build_model(
+    model = restore_model(
         cfg,
+        checkpoint,
         len(feature_columns),
         embedding_dim=embedding_dim,
-        image_backbone=image_backbone,
-        temporal_pooling=temporal_pooling,
+        device=device,
+        image_backbone_builder=image_backbone_builder,
     )
-    model.load_state_dict(checkpoint["model_state"])
-    model = model.to(device)
-    model.eval()
 
     # Evaluation never shuffles and uses no sampler, so the worker count cannot
     # reorder samples: every emitted prediction row is identical at any setting.
@@ -535,7 +522,7 @@ def _build_split_dataset(
         embedding_dim = int(getattr(reader, "dim", 0)) or int(dataset.embedding_dim)
         return dataset, embedding_dim
 
-    image_size = int(model_param(cfg, "image_size", DEFAULT_IMAGE_SIZE))
+    image_size = image_size_of(cfg)
     # `cfg` is rebuilt from checkpoint["config"], and --config overrides only
     # data.data_root, so this pipeline is by construction the one training used.
     dataset = MultimodalImageDataset(
@@ -545,7 +532,7 @@ def _build_split_dataset(
         image_size=image_size,
         train=False,
         stats=feature_normalizer,
-        preprocess=PreprocessingPipeline(**cfg.preprocessing.model_dump()),
+        preprocess=PreprocessingPipeline.from_config(cfg),
     )
     return dataset, None
 

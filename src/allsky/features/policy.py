@@ -31,6 +31,7 @@ __all__ = [
     "BAROMETER_FEATURES",
     "EXTENDED_FEATURES",
     "FEATURE_GROUPS",
+    "FEATURE_SET_TIERS",
     "FORBIDDEN_FEATURES",
     "MINIMAL_FEATURES",
     "SAFE_FEATURES",
@@ -182,6 +183,17 @@ def source_column(name: str) -> str | None:
     raise KeyError(f"unknown engineered feature {name!r}")
 
 
+#: Each named tier as its ordered feature tuple. Declaration order here is the
+#: canonical feature-column order for the whole stack, so a tier is a slice of
+#: these mappings rather than a hand-kept list.
+FEATURE_SET_TIERS: Mapping[str, tuple[str, ...]] = {
+    "bare": tuple(BARE_FEATURES),
+    "minimal": tuple(MINIMAL_FEATURES),
+    "safe": tuple(SAFE_FEATURES),
+    "extended": (*SAFE_FEATURES, *EXTENDED_FEATURES),
+}
+
+
 def resolve_feature_set(name: FeatureSet | str, extra: Iterable[str] = ()) -> list[str]:
     """Resolve a feature-set name to its ordered engineered-feature list.
 
@@ -204,18 +216,12 @@ def resolve_feature_set(name: FeatureSet | str, extra: Iterable[str] = ()) -> li
         If *name* is none of ``"bare"``, ``"minimal"``, ``"safe"`` or
         ``"extended"``.
     """
-    if name == "bare":
-        resolved = list(BARE_FEATURES)
-    elif name == "minimal":
-        resolved = list(MINIMAL_FEATURES)
-    elif name == "safe":
-        resolved = list(SAFE_FEATURES)
-    elif name == "extended":
-        resolved = [*SAFE_FEATURES, *EXTENDED_FEATURES]
-    else:
+    tier = FEATURE_SET_TIERS.get(name)
+    if tier is None:
         raise ValueError(
             f"unknown feature set {name!r}; expected 'bare', 'minimal', 'safe' or 'extended'"
         )
+    resolved = list(tier)
     for feature in extra:
         if feature not in resolved:
             resolved.append(feature)

@@ -25,6 +25,7 @@ import numpy as np
 
 from allsky.atomic import atomic_write
 from allsky.data.contracts import DATASET_VERSION
+from allsky.provenance import canonical_config_json
 
 __all__ = [
     "SPLIT_NAMES",
@@ -394,7 +395,7 @@ def _split_id(
     gap_days: int,
 ) -> str:
     """sha256 over the canonical (sorted) assignment and split parameters."""
-    canonical = json.dumps(
+    canonical = canonical_config_json(
         {
             "assignment": dict(sorted(assignment.items())),
             "seed": seed,
@@ -402,8 +403,6 @@ def _split_id(
             "test_fraction": test_fraction,
             "strategy": strategy,
             "gap_days": gap_days,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
+        }
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

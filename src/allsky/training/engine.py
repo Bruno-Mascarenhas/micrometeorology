@@ -41,11 +41,8 @@ lazily (from the CLI or via :func:`allsky.training.__getattr__`), so
 """
 
 import contextlib
-import csv
-import json
 import logging
 import math
-import os
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -56,13 +53,13 @@ import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
-from allsky.atomic import atomic_write, atomic_write_json
+from allsky.atomic import atomic_write_json
 from allsky.augmentation import AugmentationPipeline
 from allsky.config import (
-    DEFAULT_IMAGE_SIZE,
     ExperimentConfig,
     SchedulerConfig,
     TargetsConfig,
+    image_size_of,
     model_param,
 )
 from allsky.data.datasets import EmbeddingReader
@@ -72,7 +69,6 @@ from allsky.data.loading import (
     load_split,
     resolve_against_root,
 )
-from allsky.embeddings.backbone import Pooling
 from allsky.features.normalization import TargetNormalizer
 from allsky.features.policy import active_feature_groups, resolve_feature_set
 from allsky.modeling.baselines import ClimatologyModel
@@ -88,14 +84,21 @@ from allsky.training.checkpointing import (
     save_checkpoint,
 )
 from allsky.training.errors import TrainingError
+from allsky.training.run_dir import (
+    MONITOR_CHANGE_SUFFIX,
+    STALE_RUN_SUFFIX,
+    append_csv,
+    csv_fields,
+    reset_stale_run_artifacts,
+    resolve_resume_path,
+    rotate_best,
+    truncate_metrics,
+)
 from solrad_correction.utils.seeds import set_global_seed
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["resolve_run_device", "run_experiment"]
-
-MONITOR_CHANGE_SUFFIX = ".stale-monitor"
-STALE_RUN_SUFFIX = ".stale"
 
 
 def resolve_run_device(requested: str) -> str:
@@ -175,7 +178,8 @@ def run_experiment(
         payload outside the allowlist is refused rather than executed.
     image_backbone_builder:
         Zero-arg factory returning the image backbone for ``input_mode="image"``
-        visual models.  When omitted, :func:`_default_image_backbone_builder`
+        visual models.  When omitted,
+        :func:`allsky.modeling.registry.default_image_backbone_builder`
         constructs the backbone the model config names (``model.backbone``,
         default ``dinov2_vits14``) on the run device, which may download hub
         weights; tests inject a tiny stub to avoid that.
@@ -241,11 +245,15 @@ def run_experiment(
     )
     val_loader = _make_loader(val_ds, cfg, resolved_device, batch_size, shuffle=False)
 
-    from allsky.modeling.registry import build_model, temporal_pooling_for_strategy
+    from allsky.modeling.registry import (
+        build_model,
+        default_image_backbone_builder,
+        temporal_pooling_for_strategy,
+    )
 
     image_backbone = None
     if cfg.data.input_mode == "image":
-        builder = image_backbone_builder or _default_image_backbone_builder(cfg, resolved_device)
+        builder = image_backbone_builder or default_image_backbone_builder(cfg, resolved_device)
         image_backbone = builder()
     temporal_pooling = temporal_pooling_for_strategy(cfg.data.alignment.strategy)
     model = build_model(
@@ -277,14 +285,14 @@ def run_experiment(
 
     loss_fn = MultitaskLoss(cfg.targets, target_normalizers).to(resolved_device)
 
-    fields = _csv_fields(cfg)
+    fields = csv_fields(cfg)
     start_epoch = 0
     global_step = 0
     best_value: float | None = None
     best_epoch: int | None = None
     epochs_no_improve = 0
     history: list[dict[str, Any]] = []
-    resume_path = _resume_path(resume, run_dir)
+    resume_path = resolve_resume_path(resume, run_dir)
     if resume_path is not None:
         checkpoint = load_checkpoint(
             resume_path, map_location=resolved_device, trust_pickle=trust_checkpoint
@@ -325,18 +333,22 @@ def run_experiment(
                 best_epoch,
             )
             best_value, best_epoch, epochs_no_improve = None, None, 0
-            _rotate_stale_best(run_dir)
+            rotate_best(
+                run_dir,
+                suffix=MONITOR_CHANGE_SUFFIX,
+                reason="it was selected under the previous monitor",
+            )
         _reconcile_cosine_horizon(scheduler, optimizer, cfg)
-        history = _truncate_metrics(run_dir, fields, start_epoch)
+        history = truncate_metrics(run_dir, fields, start_epoch)
         logger.info(
             "resumed from %s at epoch %d (global_step %d, epochs_no_improve %d)",
-            resume_path,
+            resolve_resume_path,
             start_epoch,
             global_step,
             epochs_no_improve,
         )
     else:
-        _reset_stale_run_artifacts(run_dir)
+        reset_stale_run_artifacts(run_dir)
     superseded_best_pending = resume_path is None and (run_dir / BEST_CHECKPOINT).exists()
 
     from torch.utils.tensorboard import SummaryWriter
@@ -420,7 +432,7 @@ def run_experiment(
 
                 _log_epoch(writer, epoch, lrs, train_metrics, val_metrics)
                 row = _epoch_row(fields, epoch + 1, lrs, train_metrics, val_metrics)
-                _append_csv(run_dir / "metrics.csv", fields, row)
+                append_csv(run_dir / "metrics.csv", fields, row)
                 history.append(row)
                 atomic_write_json(run_dir / "metrics.json", history)
 
@@ -449,8 +461,16 @@ def run_experiment(
                     **common,
                 )
                 if improved:
+                    # Deferred from _reset_stale_run_artifacts to the first
+                    # improving epoch: rotating at the start of a fresh run
+                    # leaves the directory with no best.ckpt at all for a run
+                    # that then dies, which is when the previous best matters most.
                     if superseded_best_pending:
-                        _rotate_superseded_best(run_dir)
+                        rotate_best(
+                            run_dir,
+                            suffix=STALE_RUN_SUFFIX,
+                            reason="a previous run wrote it",
+                        )
                         superseded_best_pending = False
                     save_checkpoint(
                         run_dir / BEST_CHECKPOINT,
@@ -584,13 +604,13 @@ def _build_datasets(
         embedding_dim = int(getattr(reader, "dim", 0)) or int(train_ds.embedding_dim)
         return train_ds, val_ds, embedding_dim
 
-    image_size = int(model_param(cfg, "image_size", DEFAULT_IMAGE_SIZE))
+    image_size = image_size_of(cfg)
     # Field names match one-for-one on both sides, so a new config key reaches
     # the pipeline instead of being silently dropped by a hand-written mapping.
     pipeline = AugmentationPipeline(**cfg.augmentation.model_dump())
     if pipeline.enabled:
         logger.info("augmentation: %s", pipeline)
-    preprocess = PreprocessingPipeline(**cfg.preprocessing.model_dump())
+    preprocess = PreprocessingPipeline.from_config(cfg)
     if preprocess.enabled:
         logger.info("preprocessing: %s", preprocess)
     image_train = MultimodalImageDataset(
@@ -681,66 +701,6 @@ def _make_loader(
         drop_last=False,
         generator=loader_generator,
     )
-
-
-def _default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Callable[[], nn.Module]:
-    """Build the default image backbone factory for ``input_mode='image'``.
-
-    When no ``image_backbone_builder`` is injected, image-mode training must still
-    build a real visual backbone or the shipped v6 config cannot run.  The factory
-    constructs the backbone named by the model config (``model.backbone``, default
-    ``dinov2_vits14``; ``model.backbone_pooling``, default ``cls``) on the run
-    device via :func:`allsky.embeddings.backbone.build_backbone`, then coerces it
-    into a trainable ``nn.Module`` (:func:`allsky.modeling.visual_encoder.coerce_image_backbone`
-    wraps the DINOv2 extraction wrapper; an ``nn.Module`` — e.g. a test stub, or a
-    monkeypatched ``build_backbone`` — passes straight through).  Construction is
-    deferred to call time and any failure is re-raised with a message naming the
-    config knobs to fix.  ``build_backbone`` is imported inside the factory, not
-    at module scope, so a test that monkeypatches
-    ``allsky.embeddings.backbone.build_backbone`` is honoured.
-    """
-
-    def build() -> nn.Module:
-        from allsky.embeddings.backbone import build_backbone
-        from allsky.modeling.visual_encoder import coerce_image_backbone
-
-        params = dict(cfg.model.model_dump())
-        name = str(params.get("backbone", "dinov2_vits14"))
-        pooling = str(params.get("backbone_pooling", "cls"))
-        try:
-            backbone = build_backbone(name, pooling=_backbone_pooling(pooling), device=device)
-            return coerce_image_backbone(backbone, pooling=pooling)
-        except Exception as exc:
-            raise TrainingError(
-                "failed to construct the default image backbone for input_mode='image' "
-                f"(model.backbone={name!r}, model.backbone_pooling={pooling!r}, "
-                f"train.device={device!r}); fix those config knobs or inject an "
-                f"image_backbone_builder. Cause: {exc}"
-            ) from exc
-
-    return build
-
-
-def _backbone_pooling(value: str) -> Pooling:
-    """Narrow the free-form ``model.backbone_pooling`` string to the backbone's literal.
-
-    ``ExperimentModelConfig`` is ``extra="allow"``, so the knob arrives as an
-    arbitrary string while :func:`allsky.embeddings.backbone.build_backbone` accepts
-    only these three names.  Rejecting anything else here does not change what a bad
-    value does to a run — it already ended as the ``RuntimeError``
-    :func:`_default_image_backbone_builder` raises, since the only backbone that
-    reads ``pooling`` (``DinoV2Backbone``) rejects an unknown one, and the other
-    (``fake``) is not an ``nn.Module`` and exposes no ``load_torch_module``, so
-    ``coerce_image_backbone`` refuses it regardless of pooling.  It only moves the
-    failure one call earlier, onto a message that names the knob.
-    """
-    if value == "cls":
-        return "cls"
-    if value == "mean":
-        return "mean"
-    if value == "cls+mean":
-        return "cls+mean"
-    raise ValueError(f"unknown backbone pooling {value!r}; expected 'cls', 'mean' or 'cls+mean'")
 
 
 def _fit_climatology(
@@ -1136,22 +1096,6 @@ def _mae_terms(pred: Tensor, target: Tensor, mean: float, std: float) -> tuple[T
     return error.to(_accumulation_dtype(error)).sum(), mask.sum()
 
 
-def _resume_path(resume: str | Path | None, run_dir: Path) -> Path | None:
-    """Resolve the checkpoint to resume from (``"auto"`` finds ``last.ckpt``)."""
-    if resume is None:
-        return None
-    if isinstance(resume, str) and resume == "auto":
-        candidate = run_dir / LAST_CHECKPOINT
-        if candidate.exists():
-            return candidate
-        logger.info("resume='auto' but %s does not exist; starting fresh", candidate)
-        return None
-    path = Path(resume)
-    if not path.exists():
-        raise FileNotFoundError(f"resume checkpoint not found: {path}")
-    return path
-
-
 def _check_resume_provenance(
     checkpoint: Mapping[str, Any],
     *,
@@ -1347,68 +1291,6 @@ def _reconcile_cosine_horizon(
     scheduler._last_lr = list(lrs)
 
 
-def _rotate_stale_best(run_dir: Path) -> None:
-    """Move an existing ``best.ckpt`` aside when a monitor change invalidates it.
-
-    Mirrors :func:`_reset_stale_run_artifacts`: once the stored best is discarded the
-    first resumed epoch unconditionally improves on ``None`` and rewrites
-    ``best.ckpt``, which would destroy the previous monitor's best weights with no
-    record of them.
-
-    The destination is ``best.ckpt.stale-monitor``, distinct from the
-    ``best.ckpt.stale`` a fresh run into the same directory writes: sharing one
-    name would let that fresh run replace the only surviving copy of the previous
-    monitor's weights, the one artifact in the run directory nothing can recompute.
-    A second monitor change gets its own numbered destination for the same reason:
-    every monitor a run directory has been through keeps its own best.
-    """
-    path = run_dir / BEST_CHECKPOINT
-    if not path.exists():
-        return
-    backup = _free_rotation_destination(path.with_name(f"{BEST_CHECKPOINT}{MONITOR_CHANGE_SUFFIX}"))
-    os.replace(path, backup)
-    logger.warning(
-        "resume: rotated %s aside to %s (it was selected under the previous monitor)",
-        path,
-        backup.name,
-    )
-
-
-def _free_rotation_destination(preferred: Path) -> Path:
-    """*preferred* if free, else the first ``<preferred>.<n>`` (n from 2) that is.
-
-    A rotation destination is never overwritten: the weights it holds were selected
-    under a monitor no later run recomputes.
-    """
-    destination = preferred
-    ordinal = 2
-    while destination.exists():
-        destination = preferred.with_name(f"{preferred.name}.{ordinal}")
-        ordinal += 1
-    return destination
-
-
-def _rotate_superseded_best(run_dir: Path) -> None:
-    """Move the previous run's ``best.ckpt`` aside now that a fresh one replaces it.
-
-    Deferred from :func:`_reset_stale_run_artifacts` to the first epoch that
-    actually improves: rotating at the start of a fresh run leaves the directory
-    with no ``best.ckpt`` at all for a run that then dies (an unresolvable monitor,
-    a divergent first epoch), which is when the previous best matters most.
-
-    The destination is taken through :func:`_free_rotation_destination` for the
-    same reason a monitor change is: two fresh runs in one directory would
-    otherwise rotate onto the same name, and the second would delete the weights
-    the first preserved.
-    """
-    path = run_dir / BEST_CHECKPOINT
-    backup = _free_rotation_destination(path.with_name(f"{BEST_CHECKPOINT}{STALE_RUN_SUFFIX}"))
-    os.replace(path, backup)
-    logger.warning(
-        "fresh run: rotated stale %s aside to %s (a previous run wrote it)", path, backup.name
-    )
-
-
 def _checkpoint_common(
     *,
     cfg: ExperimentConfig,
@@ -1517,27 +1399,6 @@ def _stats_or_identity(
     return float(normalizer.mean), float(normalizer.std)
 
 
-def _csv_fields(cfg: ExperimentConfig) -> list[str]:
-    """Stable, config-derived CSV column order (identical across resumes).
-
-    ``lr_backbone`` is always emitted rather than made to depend on the optimizer's
-    group count: the header must not change mid-run, and a run without a separate
-    backbone rate simply leaves the cell blank.
-    """
-    fields = ["epoch", "lr", "lr_backbone"]
-    for split in ("train", "val"):
-        fields.append(f"{split}_loss")
-        if cfg.targets.dhi.enabled:
-            fields += [f"{split}_loss_dhi", f"{split}_dhi_mae"]
-        if cfg.targets.kindex.enabled:
-            fields += [f"{split}_loss_kindex", f"{split}_kindex_mae"]
-        if cfg.targets.sky.enabled:
-            fields += [f"{split}_loss_sky", f"{split}_sky_acc"]
-        if cfg.targets.cloud_fraction.enabled:
-            fields.append(f"{split}_loss_cloud_fraction")
-    return fields
-
-
 def _epoch_row(
     fields: list[str],
     epoch: int,
@@ -1574,87 +1435,3 @@ def _log_epoch(
         writer.add_scalar(f"train/{key}", value, epoch)
     for key, value in val_metrics.items():
         writer.add_scalar(f"val/{key}", value, epoch)
-
-
-def _append_csv(path: Path, fields: list[str], row: Mapping[str, Any]) -> None:
-    """Append *row* to the metrics CSV (writing the header only when new)."""
-    exists = path.exists()
-    with open(path, "a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
-        if not exists:
-            writer.writeheader()
-        writer.writerow(row)
-
-
-def _rewrite_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> None:
-    """Atomically rewrite the metrics CSV as *fields* header + *rows*."""
-
-    def _write(tmp: Path) -> None:
-        with open(tmp, "w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(rows)
-
-    atomic_write(path, _write)
-
-
-def _truncate_metrics(run_dir: Path, fields: list[str], resumed_epoch: int) -> list[dict[str, Any]]:
-    """Drop metrics rows past *resumed_epoch* and rewrite CSV + JSON from the rest.
-
-    ``metrics.csv``/``metrics.json`` are written before ``last.ckpt`` each epoch,
-    so a crash in that gap can leave rows for an epoch the resumed checkpoint never
-    completed.  Only rows with ``epoch <= resumed_epoch`` (completed epochs) are
-    kept; both files are atomically rewritten from them and the truncated history
-    is returned for the loop to keep appending to.  ``metrics.json`` is the source
-    of truth (it is always present once a checkpoint exists); if it is somehow
-    absent the files are left untouched rather than risking data loss.
-    """
-    metrics_json = run_dir / "metrics.json"
-    metrics_csv = run_dir / "metrics.csv"
-    if not metrics_json.exists():
-        if metrics_csv.exists():
-            logger.warning(
-                "resume: metrics.json is missing but metrics.csv is present; leaving the "
-                "metrics files untouched (cannot safely truncate without the JSON history)"
-            )
-        return []
-    loaded = json.loads(metrics_json.read_text(encoding="utf-8"))
-    history = [row for row in loaded if int(row.get("epoch", 0)) <= resumed_epoch]
-    dropped = len(loaded) - len(history)
-    if dropped:
-        logger.info("resume: dropped %d stale metrics row(s) past epoch %d", dropped, resumed_epoch)
-    _rewrite_csv(metrics_csv, fields, history)
-    atomic_write_json(metrics_json, history)
-    return history
-
-
-def _reset_stale_run_artifacts(run_dir: Path) -> None:
-    """Rotate a previous run's metrics and checkpoints aside on a fresh run.
-
-    A fresh (non-resume) run into a reused run directory must not append to the
-    previous run's metrics.  Each stale file is renamed to
-    ``<name>.stale`` (replacing an older backup) rather than deleted, so the prior
-    run's numbers are still recoverable; the fresh run then re-creates the files
-    from scratch.
-
-    ``last.ckpt`` is rotated with them: it is overwritten at the end of epoch 1,
-    which would leave the preserved metrics describing weights that no longer
-    exist anywhere.  ``best.ckpt`` is *not* rotated here —
-    :func:`_rotate_superseded_best` does it at the first epoch that improves, so a
-    fresh run that dies before producing a replacement leaves the previous best
-    where it is instead of emptying the directory.
-
-    Only these three names are rotated, and only onto their own ``.stale``
-    destination: the ``best.ckpt.stale-monitor`` :func:`_rotate_stale_best` wrote
-    under an earlier monitor is left untouched.
-    """
-    for name in ("metrics.csv", "metrics.json", LAST_CHECKPOINT):
-        path = run_dir / name
-        if path.exists():
-            backup = path.with_name(f"{name}{STALE_RUN_SUFFIX}")
-            os.replace(path, backup)
-            logger.warning(
-                "fresh run: rotated stale %s aside to %s (a previous run wrote it)",
-                path,
-                backup.name,
-            )

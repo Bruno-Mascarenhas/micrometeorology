@@ -19,20 +19,28 @@ does not recognise — cheap typo protection (e.g. ``droput`` silently ignored).
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Literal, cast
 
 from torch import nn
 
 from allsky.config import ExperimentConfig
+from allsky.embeddings.backbone import Pooling
 from allsky.features.policy import resolve_feature_set
 from allsky.modeling.baselines import ClimatologyModel, ImageOnlyModel, SensorOnlyModel
 from allsky.modeling.multimodal import MultimodalNet
 from allsky.modeling.visual_encoder import build_visual_encoder
+from allsky.training.errors import TrainingError
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["MODEL_BUILDERS", "build_model", "temporal_pooling_for_strategy"]
+__all__ = [
+    "MODEL_BUILDERS",
+    "build_model",
+    "default_image_backbone_builder",
+    "restore_model",
+    "temporal_pooling_for_strategy",
+]
 
 #: Builder signature (positional):
 #: ``(cfg, n_features, embedding_dim, image_backbone, temporal_pooling) -> nn.Module``.
@@ -56,7 +64,7 @@ _COMMON_PARAMS = frozenset({"sensor_hidden", "trunk_hidden", "trunk_layers", "dr
 # Visual knobs the training/evaluation pipeline reads rather than the builder
 # here — legitimate keys that must not warn: ``image_size`` in
 # ``engine._build_datasets`` and the evaluator, ``backbone`` /
-# ``backbone_pooling`` in ``engine._default_image_backbone_builder`` (which also
+# ``backbone_pooling`` in :func:`default_image_backbone_builder` (which also
 # runs on evaluate).  They are not in ``_COMMON_PARAMS``: ``sensor_only`` and
 # ``climatology`` never build an image backbone, so those must keep warning.
 _PIPELINE_VISUAL_PARAMS = frozenset({"image_size", "backbone", "backbone_pooling"})
@@ -281,6 +289,126 @@ def build_model(
         raise ValueError(f"unknown model {name!r}; available: {available}") from None
     _warn_unknown_params(name, experiment_cfg)
     return builder(experiment_cfg, n_features, embedding_dim, image_backbone, temporal_pooling)
+
+
+def default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Callable[[], nn.Module]:
+    """Build the default image backbone factory for ``input_mode='image'``.
+
+    When no ``image_backbone_builder`` is injected, image-mode training must still
+    build a real visual backbone or the shipped v6 config cannot run.  The factory
+    constructs the backbone named by the model config (``model.backbone``, default
+    ``dinov2_vits14``; ``model.backbone_pooling``, default ``cls``) on the run
+    device via :func:`allsky.embeddings.backbone.build_backbone`, then coerces it
+    into a trainable ``nn.Module`` (:func:`allsky.modeling.visual_encoder.coerce_image_backbone`
+    wraps the DINOv2 extraction wrapper; an ``nn.Module`` — e.g. a test stub, or a
+    monkeypatched ``build_backbone`` — passes straight through).  Construction is
+    deferred to call time and any failure is re-raised with a message naming the
+    config knobs to fix.  ``build_backbone`` is imported inside the factory, not
+    at module scope, so a test that monkeypatches
+    ``allsky.embeddings.backbone.build_backbone`` is honoured.
+    """
+
+    def build() -> nn.Module:
+        from allsky.embeddings.backbone import build_backbone
+        from allsky.modeling.visual_encoder import coerce_image_backbone
+
+        params = dict(cfg.model.model_dump())
+        name = str(params.get("backbone", "dinov2_vits14"))
+        pooling = str(params.get("backbone_pooling", "cls"))
+        try:
+            backbone = build_backbone(name, pooling=_backbone_pooling(pooling), device=device)
+            return coerce_image_backbone(backbone, pooling=pooling)
+        except Exception as exc:
+            raise TrainingError(
+                "failed to construct the default image backbone for input_mode='image' "
+                f"(model.backbone={name!r}, model.backbone_pooling={pooling!r}, "
+                f"train.device={device!r}); fix those config knobs or inject an "
+                f"image_backbone_builder. Cause: {exc}"
+            ) from exc
+
+    return build
+
+
+def _backbone_pooling(value: str) -> Pooling:
+    """Narrow the free-form ``model.backbone_pooling`` string to the backbone's literal.
+
+    ``ExperimentModelConfig`` is ``extra="allow"``, so the knob arrives as an
+    arbitrary string while :func:`allsky.embeddings.backbone.build_backbone` accepts
+    only these three names.  Rejecting anything else here does not change what a bad
+    value does to a run — it already ended as the ``RuntimeError``
+    :func:`default_image_backbone_builder` raises, since the only backbone that
+    reads ``pooling`` (``DinoV2Backbone``) rejects an unknown one, and the other
+    (``fake``) is not an ``nn.Module`` and exposes no ``load_torch_module``, so
+    ``coerce_image_backbone`` refuses it regardless of pooling.  It only moves the
+    failure one call earlier, onto a message that names the knob.
+    """
+    if value == "cls":
+        return "cls"
+    if value == "mean":
+        return "mean"
+    if value == "cls+mean":
+        return "cls+mean"
+    raise ValueError(f"unknown backbone pooling {value!r}; expected 'cls', 'mean' or 'cls+mean'")
+
+
+def restore_model(
+    cfg: ExperimentConfig,
+    checkpoint: Mapping[str, Any],
+    n_features: int,
+    *,
+    embedding_dim: int | None,
+    device: str,
+    image_backbone_builder: Callable[[], nn.Module] | None = None,
+) -> nn.Module:
+    """Rebuild the model a checkpoint was trained as and load its weights into it.
+
+    The two consumers of a trained checkpoint — offline evaluation and live
+    snapshot scoring — must rebuild the SAME architecture the run trained, or
+    ``load_state_dict`` rejects the weights: the temporal pooler is taken from
+    ``cfg.data.alignment.strategy`` because an attention-pooled model carries
+    extra weights a mean-pooled one has no slot for, and an ``input_mode="image"``
+    checkpoint needs the visual backbone present for the same reason, even though
+    nothing here is training it.
+
+    Parameters
+    ----------
+    cfg:
+        The checkpoint's own config, as validated from ``checkpoint["config"]``.
+    checkpoint:
+        Loaded checkpoint mapping; ``model_state`` is read and loaded strictly,
+        so a mismatched architecture raises rather than silently dropping weights.
+    n_features:
+        Width of the tabular feature vector the run was fitted with.
+    embedding_dim:
+        Width of the stored embedding for ``input_mode="embedding"``; ``None``
+        for image mode.
+    device:
+        Device to move the restored model to.
+    image_backbone_builder:
+        Injection hook for the visual backbone, so a test can supply a stub
+        instead of downloading hub weights. ``None`` falls back to
+        :func:`default_image_backbone_builder`, the backbone the config names.
+
+    Returns
+    -------
+    torch.nn.Module
+        The model in ``eval()`` mode on *device*, weights loaded.
+    """
+    image_backbone = None
+    if cfg.data.input_mode == "image":
+        builder = image_backbone_builder or default_image_backbone_builder(cfg, device)
+        image_backbone = builder()
+    model = build_model(
+        cfg,
+        n_features,
+        embedding_dim=embedding_dim,
+        image_backbone=image_backbone,
+        temporal_pooling=temporal_pooling_for_strategy(cfg.data.alignment.strategy),
+    )
+    model.load_state_dict(checkpoint["model_state"])
+    model = model.to(device)
+    model.eval()
+    return model
 
 
 def _warn_unknown_params(name: str, experiment_cfg: ExperimentConfig) -> None:

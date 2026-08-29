@@ -131,5 +131,7 @@ def build_feature_frame(
         else:
             columns[name] = met[source_column(name)].to_numpy(dtype=np.float64)
 
-    frame = pd.DataFrame(columns, index=index)
-    return frame.loc[:, resolved]
+    # `columns` was filled iterating `resolved`, which resolve_feature_set
+    # returns without duplicates, so the dict already carries exactly those
+    # names in that order; reindexing would only copy the (N, F) frame again.
+    return pd.DataFrame(columns, index=index)

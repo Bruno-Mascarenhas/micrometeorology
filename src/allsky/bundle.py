@@ -58,17 +58,6 @@ BUNDLE_README_NAME = "BUNDLE_README.md"
 _EMBEDDINGS_DIRNAME = "embeddings"
 
 
-def _content_sha256(manifest: pd.DataFrame) -> str:
-    """Manifest content hash — delegates to :func:`allsky.provenance.content_sha256`.
-
-    The shared implementation is what
-    :func:`allsky.data.manifest.write_manifest_parquet` records as
-    ``manifest_sha256``, so a bundle's manifest can be re-hashed and checked
-    against the value its sidecar meta stored at write time.
-    """
-    return content_sha256(manifest)
-
-
 def _safe_arcname(name: str) -> str:
     """Return *name* if it is a relative POSIX path, else raise.
 
@@ -215,7 +204,7 @@ def validate_bundle(path: str | Path) -> dict[str, Any]:
 
     Reads members through :meth:`tarfile.TarFile.extractfile` only (never
     extracting to disk) and rejects any absolute or ``..`` member name.  The
-    manifest parquet is read back and re-hashed with :func:`_content_sha256`;
+    manifest parquet is read back and re-hashed with :func:`allsky.provenance.content_sha256`;
     the result is compared against ``manifest_sha256`` in the sidecar meta.
 
     Returns
@@ -245,7 +234,7 @@ def validate_bundle(path: str | Path) -> dict[str, Any]:
         meta = json.loads(_read_member(tar, meta_member).decode("utf-8"))
 
     manifest = pd.read_parquet(io.BytesIO(manifest_bytes))
-    recomputed = _content_sha256(manifest)
+    recomputed = content_sha256(manifest)
     expected = meta.get("manifest_sha256")
     ok = expected is not None and recomputed == expected
     if not ok:

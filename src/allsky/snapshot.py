@@ -14,24 +14,26 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, TypeIs, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeIs, runtime_checkable
 
 import numpy as np
 import pandas as pd
 
 from allsky.atomic import atomic_write, atomic_write_json
 from allsky.config import (
-    DEFAULT_IMAGE_SIZE,
     SITE_TZ,
     SITE_UTC_OFFSET_HOURS,
     ExperimentConfig,
     SiteConfig,
-    model_param,
+    image_size_of,
 )
 from allsky.embeddings.backbone import VisualBackbone
 from allsky.frame_pixels import decode_rgb
 from allsky.provenance import code_version
 from allsky.training.checkpointing import normalizers_from_checkpoint
+
+if TYPE_CHECKING:
+    from micrometeorology.common.config import SensorRangeLimit
 
 logger = logging.getLogger(__name__)
 
@@ -110,16 +112,10 @@ def _naive_site_time_from_http_date(headers: dict[str, str]) -> pd.Timestamp | N
 
 
 def _overlay_timestamp(payload: bytes) -> tuple[pd.Timestamp | None, str | None]:
-    import io
-
-    from PIL import Image
-
     from allsky.overlay import read_frame_timestamp
 
     try:
-        with Image.open(io.BytesIO(payload)) as handle:
-            frame = np.asarray(handle.convert("RGB"))
-        reading = read_frame_timestamp(frame)
+        reading = read_frame_timestamp(decode_rgb(payload))
     except (OSError, ValueError) as exc:
         logger.warning("could not read the timestamp overlay off the live frame: %s", exc)
         return None, None
@@ -212,7 +208,9 @@ def capture_snapshot(
     )
 
 
-def _screened_for_plausibility(row: pd.DataFrame) -> pd.DataFrame:
+def _screened_for_plausibility(
+    row: pd.DataFrame, sensor_limits: list[SensorRangeLimit]
+) -> pd.DataFrame:
     """Narrow *row* to the columns with a declared plausibility gate, NaN-ing what fails it.
 
     Parameters
@@ -221,6 +219,10 @@ def _screened_for_plausibility(row: pd.DataFrame) -> pd.DataFrame:
         One-row frame taken from the operator's station export, carrying that
         export's own published units — degC, %, mbar, m s-1, degrees, W m-2 —
         at whatever averaging interval it was written on.
+    sensor_limits:
+        The declared gates, passed in rather than read off the process-wide
+        settings: this is a domain module, and a caller scoring against a
+        different station's limits must not have to mutate a global to do it.
 
     Returns
     -------
@@ -236,10 +238,9 @@ def _screened_for_plausibility(row: pd.DataFrame) -> pd.DataFrame:
         If the shipped configuration declares no ``sensor_limits``, leaving
         nothing to screen a live reading against.
     """
-    from micrometeorology.common.config import get_settings
     from micrometeorology.sensors.ingestion import apply_physical_limits
 
-    limits = get_settings().sensor_limits
+    limits = sensor_limits
     if not limits:
         raise ValueError(
             "the shipped configuration declares no sensor_limits, so a live sensor reading "
@@ -285,7 +286,10 @@ def _screened_for_plausibility(row: pd.DataFrame) -> pd.DataFrame:
 
 
 def _sensor_row_near(
-    sensor_csv: str | Path, timestamp: pd.Timestamp, tolerance: pd.Timedelta
+    sensor_csv: str | Path,
+    timestamp: pd.Timestamp,
+    tolerance: pd.Timedelta,
+    sensor_limits: list[SensorRangeLimit],
 ) -> pd.DataFrame:
     """Row of *sensor_csv* nearest *timestamp*, relabelled to it, or an empty frame.
 
@@ -327,7 +331,7 @@ def _sensor_row_near(
         return frame.iloc[0:0]
     # Screened after the row is chosen, not before: every gate is row-wise, so
     # the outcome is identical, and the nearest-row lookup reads the index only.
-    row = _screened_for_plausibility(frame.iloc[[position]])
+    row = _screened_for_plausibility(frame.iloc[[position]], sensor_limits)
     row.index = pd.DatetimeIndex([timestamp])
     return row
 
@@ -367,11 +371,12 @@ def _feature_vector(
     sensor_csv: str | Path | None,
     tolerance: pd.Timedelta,
     training_means: np.ndarray,
+    sensor_limits: list[SensorRangeLimit],
 ) -> tuple[np.ndarray, list[str]]:
     from allsky.features.engineering import build_feature_frame
 
     sensor = (
-        _sensor_row_near(sensor_csv, timestamp, tolerance)
+        _sensor_row_near(sensor_csv, timestamp, tolerance, sensor_limits)
         if sensor_csv is not None
         else pd.DataFrame(index=pd.DatetimeIndex([]))
     )
@@ -428,7 +433,7 @@ def _image_as_chw(image_path: str | Path, size: int, cfg: ExperimentConfig) -> n
     chw = model_input_frame(
         image_path,
         size=size,
-        preprocess=PreprocessingPipeline(**cfg.preprocessing.model_dump()),
+        preprocess=PreprocessingPipeline.from_config(cfg),
     )
     return imagenet_standardize(chw, copy=False)
 
@@ -579,6 +584,18 @@ def _backbone_matching_recipe(source: str, meta: dict[str, Any], device: str) ->
     return backbone
 
 
+def _shipped_sensor_limits() -> list[SensorRangeLimit]:
+    """The plausibility gates the shipped configuration declares.
+
+    Reading the process-wide settings is the CLI's job, not the domain's, so it
+    happens here at the public boundary and only when a caller supplied none.
+    """
+    from micrometeorology.common.config import get_settings
+
+    limits: list[SensorRangeLimit] = get_settings().sensor_limits
+    return limits
+
+
 def predict_snapshot(
     image_path: str | Path,
     checkpoint_path: str | Path,
@@ -590,6 +607,7 @@ def predict_snapshot(
     device: str = "cpu",
     trust_checkpoint: bool = False,
     embeddings_dir: str | Path | None = None,
+    sensor_limits: list[SensorRangeLimit] | None = None,
 ) -> dict[str, Any]:
     """Run a trained checkpoint over one sky image and return physical-unit predictions.
 
@@ -654,9 +672,8 @@ def predict_snapshot(
     import torch
 
     from allsky.data.contracts import SKY_CLASS_NAMES
-    from allsky.modeling.registry import build_model, temporal_pooling_for_strategy
+    from allsky.modeling.registry import restore_model
     from allsky.training.checkpointing import load_checkpoint
-    from allsky.training.engine import _default_image_backbone_builder
 
     checkpoint = load_checkpoint(
         checkpoint_path, map_location=device, trust_pickle=trust_checkpoint
@@ -678,15 +695,14 @@ def predict_snapshot(
         sensor_csv=sensor_csv,
         tolerance=tolerance,
         training_means=feature_normalizer.mean,
+        sensor_limits=sensor_limits if sensor_limits is not None else _shipped_sensor_limits(),
     )
     standardized = feature_normalizer.transform(pd.DataFrame([raw_values], columns=feature_columns))
-    image_size = int(model_param(cfg, "image_size", DEFAULT_IMAGE_SIZE))
+    image_size = image_size_of(cfg)
 
     batch: dict[str, Any] = {"features": torch.from_numpy(standardized).to(device)}
-    image_backbone = None
     embedding_dim = None
     if cfg.data.input_mode == "image":
-        image_backbone = _default_image_backbone_builder(cfg, device)()
         batch["image"] = (
             torch.from_numpy(_image_as_chw(image_path, image_size, cfg)).unsqueeze(0).to(device)
         )
@@ -718,16 +734,9 @@ def predict_snapshot(
         embedding_dim = int(embedding.shape[1])
         batch["embedding"] = torch.from_numpy(embedding).to(device)
 
-    model = build_model(
-        cfg,
-        len(feature_columns),
-        embedding_dim=embedding_dim,
-        image_backbone=image_backbone,
-        temporal_pooling=temporal_pooling_for_strategy(cfg.data.alignment.strategy),
+    model = restore_model(
+        cfg, checkpoint, len(feature_columns), embedding_dim=embedding_dim, device=device
     )
-    model.load_state_dict(checkpoint["model_state"])
-    model = model.to(device)
-    model.eval()
     with torch.no_grad():
         outputs = model(batch)
 

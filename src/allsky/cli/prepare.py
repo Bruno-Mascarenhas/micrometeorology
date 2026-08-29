@@ -35,6 +35,7 @@ from allsky.config import (
     load_prepare_config,
     manifest_meta_path,
 )
+from allsky.frame_pixels import decode_rgb
 
 logger = logging.getLogger(__name__)
 
@@ -680,7 +681,7 @@ def _extract_and_qc(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDa
 
     qc_flags: list[int] = []
     for frame_path in frame_manifest["frame_path"]:
-        image = np.asarray(iio.imread(frame_path), dtype=np.uint8)
+        image = decode_rgb(frame_path)
         bits = 0
         for flag in visual_qc(image):
             bits |= int(flag)

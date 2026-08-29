@@ -197,6 +197,10 @@ class FeaturesConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
+    # Spelled out rather than imported from allsky.features.policy, which owns
+    # the tiers: allsky.features.__init__ eagerly imports engineering, which
+    # imports this module, so the import that would remove the copy closes a
+    # cycle. tests/allsky/test_config.py pins the two spellings equal.
     feature_set: Literal["bare", "minimal", "safe", "extended"] = Field(default="safe", alias="set")
 
     #: Feature names appended verbatim to the resolved set, for ablations over a
@@ -446,6 +450,16 @@ def model_param(cfg: ExperimentConfig, key: str, default: Any) -> Any:
     and only one of them should own it.
     """
     return dict(cfg.model.model_dump()).get(key, default)
+
+
+def image_size_of(cfg: ExperimentConfig) -> int:
+    """Side of the square frame *cfg* feeds the visual backbone, in pixels.
+
+    The training engine, the evaluator and the live snapshot must all resize to
+    the same number or a checkpoint scores frames at a resolution it was never
+    fitted on, which no error reports.
+    """
+    return int(model_param(cfg, "image_size", DEFAULT_IMAGE_SIZE))
 
 
 class MaskConfig(BaseModel):

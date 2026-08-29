@@ -171,3 +171,19 @@ def test_is_experiment_config_from_path_resolves_extends(tmp_path):
     assert is_experiment_config(tmp_path / "top.yaml") is True
     (tmp_path / "legacy.yaml").write_text("video:\n  start_time: '06:00'\n", encoding="utf-8")
     assert is_experiment_config(tmp_path / "legacy.yaml") is False
+
+
+def test_the_feature_set_literal_lists_exactly_the_tiers_policy_declares():
+    """The copy in config.py cannot be an import: it would close a cycle.
+
+    ``allsky.features.__init__`` eagerly imports ``engineering``, which imports
+    ``allsky.config``, so ``config`` importing the tier names back is a circular
+    import. The two spellings are pinned equal here instead.
+    """
+    from typing import get_args
+
+    from allsky.config import FeaturesConfig
+    from allsky.features.policy import FEATURE_SET_TIERS, FeatureSet
+
+    declared = get_args(FeaturesConfig.model_fields["feature_set"].annotation)
+    assert set(declared) == set(get_args(FeatureSet)) == set(FEATURE_SET_TIERS)
