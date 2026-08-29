@@ -92,7 +92,7 @@ def run(
     """Run WRF processing locally: figures + GeoJSON + WebM."""
     setup_logging(log_level)
     from micrometeorology.cli.export_wrf_geojson import _reject_output_id_variables
-    from micrometeorology.cli.render_wrf_maps import _resolve_wrfout_paths
+    from micrometeorology.cli.render_wrf_maps import resolve_selection
     from micrometeorology.wrf import reader as wrf_reader
 
     base_out = Path(output)
@@ -116,7 +116,7 @@ def run(
     # phases and publishes unconverted Kelvin into the PNGs and JSONs that
     # skin_temperature owns, so it is refused before a frame is rendered.
     _reject_output_id_variables(var_list)
-    paths = _resolve_wrfout_paths(wrf_dir, date, parse_int_csv(domains), dataset)
+    paths = resolve_selection(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")
         return

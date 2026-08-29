@@ -28,6 +28,7 @@ import numpy as np
 import typer
 from numpy.typing import NDArray
 
+from micrometeorology.cli.wrfout_selection import glob_wrfout_day
 from micrometeorology.common.cli_options import parse_csv, parse_int_csv
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.physics import PASCAL_PER_HECTOPASCAL
@@ -45,7 +46,6 @@ from micrometeorology.wrf.batch import (
     default_workers,
     run_figure_tasks,
 )
-from micrometeorology.wrf.reader import resolve_wrfout_paths
 from micrometeorology.wrf.value_source import build_value_frame_source, publishes_step
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
@@ -99,7 +99,7 @@ def _normalize_var_list(var_list: list[str]) -> list[str]:
     return normalized
 
 
-def _resolve_wrfout_paths(
+def resolve_selection(
     wrf_dir: Path | str | None,
     date: str | None,
     domains: tuple[int, ...],
@@ -117,10 +117,7 @@ def _resolve_wrfout_paths(
     if not wrf_dir or not date:
         raise typer.BadParameter("Provide either --dataset or --wrf-dir + --date")
 
-    try:
-        paths = resolve_wrfout_paths(wrf_dir, date, domains or None)
-    except ValueError as invalid_date:
-        raise typer.BadParameter(str(invalid_date)) from invalid_date
+    paths = glob_wrfout_day(wrf_dir, date, domains)
     if not paths:
         typer.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
     return paths
@@ -306,7 +303,7 @@ def run(
     # passthrough and publish unconverted KELVIN into TSK_D0X_nnn.png, the exact
     # filenames skin_temperature publishes in °C.
     _reject_output_id_variables(var_list)
-    paths = _resolve_wrfout_paths(wrf_dir, date, parse_int_csv(domains), dataset)
+    paths = resolve_selection(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")
         return
