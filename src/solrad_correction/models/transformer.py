@@ -257,30 +257,13 @@ class TransformerRegressor(TorchRegressorModel):
             dropout=cfg["dropout"],
         )
         instance._module.load_state_dict(checkpoint["model_state_dict"])
-        instance._start_epoch = checkpoint.get("epoch", 0)
-        instance._optimizer_state = checkpoint.get("optimizer_state_dict")
-        instance._scheduler_state = checkpoint.get("scheduler_state_dict")
-        instance._scaler_state = checkpoint.get("scaler_state_dict")
-        instance._best_metric = None
-        instance._best_epoch = None
-        instance._dataloader_settings = None
+        instance._restore_training_state(checkpoint)
         return instance
 
-    def save(self, path: str | Path) -> None:
-        """Save weights plus the architecture arguments ``load`` needs.
+    def _checkpoint_config(self) -> Any:
+        """The architecture arguments captured at construction.
 
-        The ``_config_kwargs`` captured at construction — not the experiment
-        config — are what travel with the weights, so the checkpoint always
-        describes the module that was actually built.
+        Not the experiment config: ``load`` rebuilds the module from these, so
+        the checkpoint always describes the module that was actually built.
         """
-        from solrad_correction.utils.serialization import save_torch_checkpoint
-
-        save_torch_checkpoint(
-            model_state=self._module.state_dict(),
-            optimizer_state=getattr(self, "_optimizer_state", None),
-            config=self._config_kwargs,
-            epoch=self._start_epoch,
-            path=path,
-            scheduler_state=getattr(self, "_scheduler_state", None),
-            scaler_state=getattr(self, "_scaler_state", None),
-        )
+        return self._config_kwargs

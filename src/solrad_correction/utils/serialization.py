@@ -9,6 +9,12 @@ from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
+#: Attribute a ``torch.compile`` wrapper exposes its inner module under, and the
+#: prefix that wrapper puts on every ``state_dict`` key. Both are torch's
+#: convention rather than ours; five places used to know them independently.
+COMPILED_ATTRIBUTE = "_orig_mod"
+COMPILED_PREFIX = f"{COMPILED_ATTRIBUTE}."
+
 
 class ModelIntegrityError(RuntimeError):
     """Raised when a pickled artifact fails its manifest checksum verification."""
@@ -29,9 +35,23 @@ def save_sklearn_model(model: object, path: str | Path) -> None:
     logger.info("Saved sklearn model: %s", p)
 
 
-def _sha256_file(path: Path) -> str:
+MANIFEST_FILENAME = "manifest.json"
+"""Name of the checksummed inventory an experiment directory carries.
+
+The writer in :mod:`solrad_correction.experiments.artifacts` and the upward
+walk here both address this file; a rename that reached only one would leave the
+verifier reporting "no manifest.json found" for every run.
+"""
+
+
+def sha256_file(path: Path) -> str:
+    """Hex sha256 of a file's bytes — the one digest the manifest is built on."""
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    return sha256_file(path)
 
 
 class ManifestLookup(NamedTuple):
@@ -58,7 +78,7 @@ def _find_manifest(path: Path) -> ManifestLookup:
     """
     unusable: tuple[Path, str] | None = None
     for parent in path.resolve().parents:
-        candidate = parent / "manifest.json"
+        candidate = parent / MANIFEST_FILENAME
         if not candidate.is_file():
             continue
         try:
@@ -318,11 +338,22 @@ def _strip_compiled_prefix(state: dict) -> dict:
     keys that cannot be loaded into a plain module. New checkpoints are saved
     unwrapped; this keeps previously written ones loadable.
     """
-    prefix = "_orig_mod."
-    if not any(key.startswith(prefix) for key in state):
+    if not any(key.startswith(COMPILED_PREFIX) for key in state):
         return state
     logger.info("Normalizing torch.compile-prefixed state_dict keys")
-    return {key.removeprefix(prefix): value for key, value in state.items()}
+    return {key.removeprefix(COMPILED_PREFIX): value for key, value in state.items()}
+
+
+def unwrap_compiled(module: Any) -> Any:
+    """Return the plain module underneath a ``torch.compile`` wrapper.
+
+    ``OptimizedModule`` exposes the wrapped module as ``_orig_mod`` and shares
+    its parameters, so persisting the unwrapped one keeps checkpoint keys free
+    of :data:`COMPILED_PREFIX` and loadable into an uncompiled module. The
+    attribute name is torch's, not ours, which is exactly why it should be
+    written down once.
+    """
+    return getattr(module, COMPILED_ATTRIBUTE, module)
 
 
 def load_torch_checkpoint(path: str | Path) -> dict:

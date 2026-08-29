@@ -15,7 +15,7 @@ from solrad_correction.datasets.sequence import (
     collate_sequence_batch,
 )
 from solrad_correction.training.callbacks import EarlyStopping
-from solrad_correction.training.checkpoints import CheckpointManager
+from solrad_correction.training.checkpoints import BEST_CHECKPOINT, CheckpointManager
 from solrad_correction.training.dataloaders import DataLoaderSettings, resolve_dataloader_settings
 from solrad_correction.training.factories import (
     create_criterion,
@@ -26,20 +26,13 @@ from solrad_correction.training.factories import (
 from solrad_correction.training.loops import evaluate_epoch, train_one_epoch
 from solrad_correction.training.progress import TrainingProgress
 from solrad_correction.training.state import BestModelState, TrainingPlan, TrainingState
-from solrad_correction.utils.serialization import load_torch_checkpoint, restore_rng_state
+from solrad_correction.utils.serialization import (
+    load_torch_checkpoint,
+    restore_rng_state,
+    unwrap_compiled,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def _unwrap_compiled(module: nn.Module) -> nn.Module:
-    """Return the original module underneath a ``torch.compile`` wrapper.
-
-    Compiled modules (``OptimizedModule``) expose the wrapped module as
-    ``_orig_mod`` and share its parameters. Persisting the unwrapped module
-    keeps checkpoint/state-dict keys free of the ``_orig_mod.`` prefix so
-    they load back into plain (uncompiled) modules.
-    """
-    return getattr(module, "_orig_mod", module)
 
 
 class Trainer:
@@ -176,7 +169,7 @@ class Trainer:
         -----
         ``torch.compile`` is typed as returning a bare callable, so module
         identity is re-established with an ``isinstance`` check before the rest
-        of the loop (``.to``, ``.parameters()``, ``_unwrap_compiled``) uses it;
+        of the loop (``.to``, ``.parameters()``, ``unwrap_compiled``) uses it;
         anything else it returns leaves the eager model in place.
 
         The TensorBoard writer is released in a ``finally`` so a raise
@@ -250,7 +243,7 @@ class Trainer:
                         type(compiled).__name__,
                     )
 
-        plain_model = _unwrap_compiled(self.model)
+        plain_model = unwrap_compiled(self.model)
 
         if self._resume_rng_state:
             restore_rng_state(self._resume_rng_state)
@@ -415,7 +408,7 @@ class Trainer:
             and checkpoint_manager.enabled
             and checkpoint_manager.directory is not None
         ):
-            best_path = checkpoint_manager.directory / "best.pt"
+            best_path = checkpoint_manager.directory / BEST_CHECKPOINT
             if best_path.exists():
                 checkpoint = load_torch_checkpoint(best_path)
                 plain_model.load_state_dict(checkpoint["model_state_dict"])

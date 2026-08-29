@@ -11,6 +11,12 @@ from solrad_correction.config import RuntimeConfig
 from solrad_correction.training.dataloaders import DataLoaderSettings
 from solrad_correction.utils.serialization import capture_rng_state, save_torch_checkpoint
 
+#: Names the checkpoint manager writes under. The reader in
+#: :mod:`solrad_correction.models.torch_base` and the trainer's best-model
+#: reload both address these files, so the strings live here, next to the writer.
+BEST_CHECKPOINT = "best.pt"
+LAST_CHECKPOINT = "last.pt"
+
 
 @dataclass(slots=True)
 class CheckpointManager:
@@ -100,7 +106,7 @@ class CheckpointManager:
         improvement.
         """
         self.save(
-            "best.pt",
+            BEST_CHECKPOINT,
             epoch=epoch,
             model=model,
             optimizer=optimizer,
@@ -135,7 +141,7 @@ class CheckpointManager:
         they belong to some earlier epoch.
         """
         self.save(
-            "last.pt",
+            LAST_CHECKPOINT,
             epoch=epoch,
             model=model,
             optimizer=optimizer,
