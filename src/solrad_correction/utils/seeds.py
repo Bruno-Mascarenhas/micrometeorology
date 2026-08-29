@@ -42,22 +42,3 @@ def set_global_seed(seed: int = 42) -> None:
             torch.backends.cudnn.benchmark = False
     except ImportError:
         pass
-
-
-def get_device() -> str:
-    """Auto-detect the best available device (cuda or cpu).
-
-    Returns
-    -------
-    {"cuda", "cpu"}
-        ``"cuda"`` only when torch is installed and reports a usable device;
-        an install without torch falls back to ``"cpu"`` rather than raising.
-    """
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            return "cuda"
-    except ImportError:
-        pass
-    return "cpu"

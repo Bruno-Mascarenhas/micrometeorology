@@ -15,10 +15,15 @@ from solrad_correction.datasets.sequence import (
     collate_sequence_batch,
 )
 from solrad_correction.models.base import SequenceRegressorModel, TrainingResult
+from solrad_correction.training.checkpoints import BEST_CHECKPOINT
 from solrad_correction.training.dataloaders import DataLoaderSettings
+from solrad_correction.utils.device import resolve_device
 from solrad_correction.utils.memory import assert_array_size
-from solrad_correction.utils.seeds import get_device
-from solrad_correction.utils.serialization import load_torch_checkpoint, save_torch_checkpoint
+from solrad_correction.utils.serialization import (
+    load_torch_checkpoint,
+    save_torch_checkpoint,
+    unwrap_compiled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +53,7 @@ class TorchRegressorModel(SequenceRegressorModel):
     _start_epoch: int
 
     def __init__(self, device: str | None = None) -> None:
-        self._device = device or get_device()
+        self._device = device or resolve_device("auto")
         self._start_epoch = 0
         self._optimizer_state: dict[str, Any] | None = None
         self._scheduler_state: dict[str, Any] | None = None
@@ -115,7 +120,7 @@ class TorchRegressorModel(SequenceRegressorModel):
         if metadata.get("checkpoint_kind") == "best":
             return metadata.get("monitor_metric"), checkpoint.get("epoch")
 
-        best_path = Path(path).parent / "best.pt"
+        best_path = Path(path).parent / BEST_CHECKPOINT
         if best_path.exists():
             best_checkpoint = load_torch_checkpoint(best_path)
             best_metadata = best_checkpoint.get("metadata") or {}
@@ -361,6 +366,38 @@ class TorchRegressorModel(SequenceRegressorModel):
 
         return np.concatenate(all_preds)
 
+    def _checkpoint_config(self) -> Any:
+        """What travels with the weights as ``config``.
+
+        Subclasses that rebuild their module from architecture arguments
+        override this to persist those instead: their ``load`` reads
+        ``checkpoint["config"]["input_size"]`` and friends, which the experiment
+        config cannot supply.
+        """
+        import dataclasses
+
+        if getattr(self, "_config", None) is None:
+            return None
+        return (
+            dataclasses.asdict(self._config)
+            if dataclasses.is_dataclass(self._config)
+            else self._config
+        )
+
+    def _restore_training_state(self, checkpoint: dict) -> None:
+        """Adopt the optimiser/scheduler/scaler states and epoch a checkpoint carries.
+
+        Every torch model restores the same five fields the same way; writing it
+        per subclass is how one of them silently stops resuming.
+        """
+        self._start_epoch = checkpoint.get("epoch", 0)
+        self._optimizer_state = checkpoint.get("optimizer_state_dict")
+        self._scheduler_state = checkpoint.get("scheduler_state_dict")
+        self._scaler_state = checkpoint.get("scaler_state_dict")
+        self._best_metric = None
+        self._best_epoch = None
+        self._dataloader_settings = None
+
     def save(self, path: str | Path) -> None:
         """Save model checkpoint (state_dict + config for transfer learning).
 
@@ -368,17 +405,8 @@ class TorchRegressorModel(SequenceRegressorModel):
         prefix state_dict keys with ``_orig_mod.``, which plain modules cannot
         load back.
         """
-        import dataclasses
-
-        config_dict = None
-        if hasattr(self, "_config") and self._config is not None:
-            config_dict = (
-                dataclasses.asdict(self._config)
-                if dataclasses.is_dataclass(self._config)
-                else self._config
-            )
-
-        module = getattr(self._module, "_orig_mod", self._module)
+        config_dict = self._checkpoint_config()
+        module = unwrap_compiled(self._module)
         save_torch_checkpoint(
             model_state=module.state_dict(),
             optimizer_state=getattr(self, "_optimizer_state", None),
@@ -399,7 +427,7 @@ class TorchRegressorModel(SequenceRegressorModel):
         """
         checkpoint = load_torch_checkpoint(path)
         instance = cls.__new__(cls)
-        instance._device = get_device()
+        instance._device = resolve_device("auto")
         instance._start_epoch = checkpoint.get("epoch", 0)
         instance._optimizer_state = checkpoint.get("optimizer_state_dict")
         instance._scheduler_state = checkpoint.get("scheduler_state_dict")
