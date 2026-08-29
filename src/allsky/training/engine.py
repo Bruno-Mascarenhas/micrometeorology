@@ -58,7 +58,13 @@ from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 from allsky.atomic import atomic_write, atomic_write_json
 from allsky.augmentation import AugmentationPipeline
-from allsky.config import ExperimentConfig, SchedulerConfig, TargetsConfig
+from allsky.config import (
+    DEFAULT_IMAGE_SIZE,
+    ExperimentConfig,
+    SchedulerConfig,
+    TargetsConfig,
+    model_param,
+)
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
     default_embedding_reader,
@@ -77,6 +83,7 @@ from allsky.training.checkpointing import (
     capture_rng_state,
     code_version,
     load_checkpoint,
+    normalizers_payload,
     restore_rng_state,
     save_checkpoint,
 )
@@ -577,7 +584,7 @@ def _build_datasets(
         embedding_dim = int(getattr(reader, "dim", 0)) or int(train_ds.embedding_dim)
         return train_ds, val_ds, embedding_dim
 
-    image_size = int(_model_param(cfg, "image_size", 224))
+    image_size = int(model_param(cfg, "image_size", DEFAULT_IMAGE_SIZE))
     # Field names match one-for-one on both sides, so a new config key reaches
     # the pipeline instead of being silently dropped by a hand-written mapping.
     pipeline = AugmentationPipeline(**cfg.augmentation.model_dump())
@@ -674,11 +681,6 @@ def _make_loader(
         drop_last=False,
         generator=loader_generator,
     )
-
-
-def _model_param(cfg: ExperimentConfig, key: str, default: Any) -> Any:
-    """Read an architecture hyper-parameter off the permissive model config."""
-    return dict(cfg.model.model_dump()).get(key, default)
 
 
 def _default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Callable[[], nn.Module]:
@@ -1422,10 +1424,7 @@ def _checkpoint_common(
     image_backbone: nn.Module | None,
 ) -> dict[str, Any]:
     """Assemble the checkpoint fields shared by last.ckpt and best.ckpt."""
-    normalizers = {
-        "feature_normalizer": feature_normalizer.to_dict(),
-        "target_normalizers": {k: v.to_dict() for k, v in target_normalizers.items()},
-    }
+    normalizers = normalizers_payload(feature_normalizer, target_normalizers)
     backbone_info = None
     if cfg.data.input_mode == "image" and image_backbone is not None:
         backbone_info = {
@@ -1433,7 +1432,7 @@ def _checkpoint_common(
             "revision": getattr(image_backbone, "revision", None),
             "pooling": getattr(image_backbone, "pooling", None),
             "dim": getattr(image_backbone, "dim", None),
-            "frozen": bool(_model_param(cfg, "backbone_frozen", False)),
+            "frozen": bool(model_param(cfg, "backbone_frozen", False)),
         }
     elif cfg.data.input_mode == "embedding":
         backbone_info = _embedding_recipe(cfg)

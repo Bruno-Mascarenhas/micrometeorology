@@ -36,7 +36,7 @@ import numpy as np
 import pandas as pd
 
 from allsky.clearsky import haurwitz_ghi_from_cos_zenith
-from allsky.config import ExperimentConfig
+from allsky.config import DEFAULT_IMAGE_SIZE, ExperimentConfig, model_param
 from allsky.data.contracts import SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES, sky_class_name
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
@@ -56,6 +56,7 @@ from allsky.evaluation.metrics import (
 from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
 from allsky.preprocessing import PreprocessingPipeline
 from allsky.solar import SOLAR_CONSTANT_WM2, eccentricity_correction
+from allsky.training.checkpointing import normalizers_from_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -240,12 +241,7 @@ def evaluate_checkpoint(
     split_df = _select_split_rows(manifest, split_obj, split)
 
     feature_columns: list[str] = list(checkpoint["feature_columns"])
-    normalizers = checkpoint["normalizers"]
-    feature_normalizer = FeatureNormalizer.from_dict(normalizers["feature_normalizer"])
-    target_normalizers = {
-        key: TargetNormalizer.from_dict(value)
-        for key, value in normalizers["target_normalizers"].items()
-    }
+    feature_normalizer, target_normalizers = normalizers_from_checkpoint(checkpoint)
 
     enabled_targets = _enabled_targets(cfg)
     predictions = _run_inference(
@@ -539,7 +535,7 @@ def _build_split_dataset(
         embedding_dim = int(getattr(reader, "dim", 0)) or int(dataset.embedding_dim)
         return dataset, embedding_dim
 
-    image_size = int(dict(cfg.model.model_dump()).get("image_size", 224))
+    image_size = int(model_param(cfg, "image_size", DEFAULT_IMAGE_SIZE))
     # `cfg` is rebuilt from checkpoint["config"], and --config overrides only
     # data.data_root, so this pipeline is by construction the one training used.
     dataset = MultimodalImageDataset(

@@ -37,7 +37,13 @@ import pandas as pd
 import yaml
 
 from allsky.atomic import atomic_write
-from allsky.config import DATASET_MANIFEST_FILENAME, DATASET_SPLIT_FILENAME, PrepareConfig
+from allsky.config import (
+    DATASET_MANIFEST_FILENAME,
+    DATASET_SPLIT_FILENAME,
+    MANIFEST_META_SUFFIX,
+    PrepareConfig,
+    manifest_meta_path,
+)
 from allsky.provenance import content_sha256
 
 logger = logging.getLogger(__name__)
@@ -148,7 +154,9 @@ def export_colab_bundle(
     root = PurePosixPath(bundle_name)
     file_members: dict[str, Path] = {
         _safe_arcname((root / DATASET_MANIFEST_FILENAME).as_posix()): manifest_file,
-        _safe_arcname((root / f"{DATASET_MANIFEST_FILENAME}.meta.json").as_posix()): meta_file,
+        _safe_arcname(
+            (root / f"{DATASET_MANIFEST_FILENAME}{MANIFEST_META_SUFFIX}").as_posix()
+        ): meta_file,
     }
     if split_file is not None and split_file.exists():
         file_members[_safe_arcname((root / DATASET_SPLIT_FILENAME).as_posix())] = split_file
@@ -227,7 +235,7 @@ def validate_bundle(path: str | Path) -> dict[str, Any]:
             _safe_arcname(name)
 
         manifest_member = _find_member(names, DATASET_MANIFEST_FILENAME)
-        meta_member = _find_member(names, f"{DATASET_MANIFEST_FILENAME}.meta.json")
+        meta_member = _find_member(names, f"{DATASET_MANIFEST_FILENAME}{MANIFEST_META_SUFFIX}")
         if manifest_member is None:
             raise ValueError(f"bundle {path} has no {DATASET_MANIFEST_FILENAME} member")
         if meta_member is None:
@@ -273,11 +281,7 @@ def _resolve_sources(
     else:
         raise ValueError("no manifest_path given and no prepare_cfg to derive one from")
 
-    meta_file = (
-        Path(meta_path)
-        if meta_path is not None
-        else manifest_file.with_name(f"{manifest_file.name}.meta.json")
-    )
+    meta_file = Path(meta_path) if meta_path is not None else manifest_meta_path(manifest_file)
 
     if split_path is not None:
         split_file: Path | None = Path(split_path)

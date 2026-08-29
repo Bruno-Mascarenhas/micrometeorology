@@ -79,6 +79,29 @@ FRAME_PIXEL_SECTIONS = ("mask", "crop", "resize")
 #: longer produces. Declared here rather than in ``allsky.data.contracts``
 #: because importing that package pulls pandas, which the CLI modules must not.
 DATASET_MANIFEST_FILENAME = "manifest.parquet"
+
+#: The provenance sidecar sits beside the manifest parquet under the parquet's
+#: own name plus this suffix. Eight call sites used to rebuild that address by
+#: string concatenation; the writer and the readers now agree by construction.
+MANIFEST_META_SUFFIX = ".meta.json"
+
+
+def manifest_meta_path(manifest_path: Path) -> Path:
+    """Path of the provenance sidecar beside *manifest_path*.
+
+    Parameters
+    ----------
+    manifest_path:
+        Path to the manifest parquet.
+
+    Returns
+    -------
+    pathlib.Path
+        ``<manifest name>.meta.json`` in the same directory.
+    """
+    return manifest_path.with_name(f"{manifest_path.name}{MANIFEST_META_SUFFIX}")
+
+
 DATASET_SPLIT_FILENAME = "splits.json"
 
 
@@ -254,6 +277,13 @@ OverlayPolicy = Literal["keep", "fill", "inpaint", "crop"]
 #: :mod:`allsky.preprocessing` cannot drift apart.
 TIMESTAMP_BAND_FRACTION = 0.16
 
+#: Side of the square the visual backbone is fed, in pixels. DINOv2's patch grid
+#: is 14 px, and 224 = 16 x 14 is the resolution its weights were trained at.
+#: Five call sites used to carry this default independently, so a run whose
+#: config omitted ``model.image_size`` could be trained, evaluated and served at
+#: three different resolutions without anything failing.
+DEFAULT_IMAGE_SIZE = 224
+
 
 class PreprocessingConfig(BaseModel):
     """Deterministic image preprocessing, applied to EVERY split.
@@ -400,6 +430,17 @@ class ExperimentConfig(BaseModel):
     train: ExperimentTrainConfig = Field(default_factory=ExperimentTrainConfig)
     augmentation: AugmentationConfig = Field(default_factory=AugmentationConfig)
     preprocessing: PreprocessingConfig = Field(default_factory=PreprocessingConfig)
+
+
+def model_param(cfg: ExperimentConfig, key: str, default: Any) -> Any:
+    """Read an architecture hyper-parameter off the permissive model config.
+
+    ``ExperimentModelConfig`` accepts unknown keys on purpose, so a missing one
+    falls back rather than raising. It lives here, beside the config it reads,
+    because the training engine, the evaluator and the live snapshot all need it
+    and only one of them should own it.
+    """
+    return dict(cfg.model.model_dump()).get(key, default)
 
 
 class MaskConfig(BaseModel):

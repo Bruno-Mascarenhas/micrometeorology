@@ -35,7 +35,14 @@ import pandas as pd
 
 from allsky.atomic import atomic_write, atomic_write_json
 from allsky.clearsky import clear_sky_index
-from allsky.config import SITE_TZ, SITE_TZ_NAME, SITE_UTC_OFFSET_HOURS, PrepareConfig, SiteConfig
+from allsky.config import (
+    SITE_TZ,
+    SITE_TZ_NAME,
+    SITE_UTC_OFFSET_HOURS,
+    PrepareConfig,
+    SiteConfig,
+    manifest_meta_path,
+)
 from allsky.data.alignment import CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
@@ -463,7 +470,7 @@ def write_manifest_parquet(
     written_meta = {**meta, "manifest_sha256": sha, "row_count": len(manifest)}
 
     atomic_write(out, lambda tmp: manifest.to_parquet(tmp, index=False))
-    atomic_write_json(out.with_name(f"{out.name}.meta.json"), written_meta)
+    atomic_write_json(manifest_meta_path(out), written_meta)
 
     logger.info(
         "write_manifest_parquet: wrote %s (%d rows, sha256=%s)", out, len(manifest), sha[:12]
@@ -505,7 +512,7 @@ def attach_split_column(
     """
     out = Path(manifest_path)
     manifest = pd.read_parquet(out)
-    meta_path = out.with_name(f"{out.name}.meta.json")
+    meta_path = manifest_meta_path(out)
     meta: dict[str, Any] = {}
     if meta_path.exists():
         with open(meta_path, encoding="utf-8") as handle:
