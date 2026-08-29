@@ -35,8 +35,8 @@ import typer
 
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
+from micrometeorology.common.site_json import write_json
 from micrometeorology.stats import ktkd as ktkd_stats
-from micrometeorology.stats.climatology_export import write_json
 from micrometeorology.stats.sky_condition import (
     KT_CUMULATIVE_EDGES,
     build_kt_cumulative_payload,

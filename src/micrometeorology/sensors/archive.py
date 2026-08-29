@@ -47,6 +47,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from allsky.solar import cos_zenith, eccentricity_correction, solar_elevation_deg
+from micrometeorology.common import instruments
 from micrometeorology.common.paths import ensure_dir
 
 # The same solar geometry the climatology exporter uses, so "deep night" means
@@ -724,11 +725,10 @@ def _unshaded_diffuse_days_in_era(frame: pd.DataFrame, column: str) -> list[tupl
 #: simpler reason: they count impacts, not depth.
 RAIN_DEPTH_COLUMNS: tuple[str, ...] = ("PL01_mm_Tot",)
 
-#: One tip of the bucket, 0.01 inch. Every positive interval total is an integer
-#: multiple of it: 21,443 of 21,444 positive samples over ten years, worst
-#: deviation 4e-06. The one exception is the point — 1.09e9 mm of rain in five
-#: minutes, on 2018-06-10 09:10, which is a corrupted field rather than weather.
-RAIN_TIP_DEPTH_MM = 0.254
+#: One tip of the bucket. The value and the measurement behind it live in
+#: :mod:`micrometeorology.common.instruments`; the climatology export needs the
+#: same number for its wet/dry threshold.
+RAIN_TIP_DEPTH_MM = instruments.RAIN_TIP_DEPTH_MM
 
 #: Tolerance the multiple is checked to. Floored at 1e-5 deliberately: at 1e-6
 #: four samples fail on float storage alone (8.636001, 9.398001), which is the

@@ -28,6 +28,7 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from micrometeorology.common.site_json import JSON_ENCODING
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import geojson, isobars, sea_level_pressure, variables
 from micrometeorology.wrf.batch import _max_tasks_per_child
@@ -250,9 +251,7 @@ def _compact_json_bytes(payload: dict) -> bytes:
     because ``json.dump(obj, fp)`` never reaches the C encoder and costs 3x for
     the same bytes on a wind-vector payload.
     """
-    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode(
-        "utf-8"
-    )
+    return json.dumps(payload, **JSON_ENCODING).encode("utf-8")
 
 
 def _staged_bytes(output_path: Path, payload: bytes) -> Path:

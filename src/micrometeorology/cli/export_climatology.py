@@ -40,7 +40,7 @@ import typer
 # allsky.solar is pure numpy/pandas (no torch) and ships in the same wheel, so
 # this CLI reuses NOAA's formulas without pulling a training dependency in.
 from allsky.solar import extraterrestrial_ghi
-from micrometeorology.common.git import run_git, source_root
+from micrometeorology.common.git import short_commit
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.stats import distributions as dist
@@ -58,7 +58,16 @@ from micrometeorology.stats.daylight import (
     MIN_SOLAR_ELEVATION_DEG,
     elevation_bounds,
 )
-from micrometeorology.wrf.operational_record import rename_v1_columns
+from micrometeorology.wrf.columns import (
+    GLW_W_M2,
+    PSFC_HPA,
+    RH_PCT,
+    SWDOWN_W_M2,
+    T2_C,
+    WIND_DIR_DEG,
+    WIND_SPEED_M_S,
+)
+from micrometeorology.wrf.operational_record import read_wrf_series
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -107,14 +116,14 @@ OBSERVED_COLUMN = {
 # Same, for the WRF point extraction. A variable absent here simply has no model
 # subset — the page renders the observed ones and says so.
 WRF_COLUMN = {
-    "air_temperature": "t2_c",
-    "relative_humidity": "rh_pct",
-    "pressure": "psfc_hpa",
-    "wind_speed": "wind_speed_m_s",
-    "wind_direction": "wind_dir_deg",
-    "clearness_index": "swdown_w_m2",
-    "shortwave_down": "swdown_w_m2",
-    "longwave_down": "glw_w_m2",
+    "air_temperature": T2_C,
+    "relative_humidity": RH_PCT,
+    "pressure": PSFC_HPA,
+    "wind_speed": WIND_SPEED_M_S,
+    "wind_direction": WIND_DIR_DEG,
+    "clearness_index": SWDOWN_W_M2,
+    "shortwave_down": SWDOWN_W_M2,
+    "longwave_down": GLW_W_M2,
 }
 
 # One date, two instruments. The PAR sensor changed here and the later era's
@@ -188,45 +197,6 @@ CALM_THRESHOLD_MS = 0.281
 # Relative humidity at or above this is the sensor's saturation clip, an atom the
 # beta family cannot represent.
 SATURATION_RH = 99.5
-
-
-def read_wrf_series(path: str | Path) -> pd.DataFrame:
-    """Read ``series_operacional.dat`` defensively.
-
-    The file is an append-only log of successive operational runs: **not**
-    chronologically sorted, with duplicated timestamps and twelve trailing
-    anonymous fields that only the oldest rows fill. Reading with the full header
-    and sorting afterwards is the only order that does not misalign columns —
-    ``names=`` turns the surplus fields into a twelve-level MultiIndex.
-
-    Hour 21 local is 00 UTC, each run's initialisation hour, where surface fluxes
-    and boundary-layer height are identically zero; those rows are dropped
-    wholesale so one uniform rule can be stated on the page.
-
-    Parameters
-    ----------
-    path:
-        The ``series_operacional.dat`` the operational extraction appends to.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Hourly model variables on a sorted, de-duplicated
-        :class:`~pandas.DatetimeIndex` of naive station-local hours (UTC-03),
-        with the spin-up hour removed. A repeated timestamp keeps the LAST row,
-        which is the most recent run's value for that hour.
-    """
-    frame = pd.read_csv(path)
-    frame = frame.drop(columns=[c for c in frame.columns if str(c).startswith("Unnamed")])
-    frame = rename_v1_columns(frame)
-    stamps = pd.to_datetime(frame[["year", "month", "day", "hour"]])
-    frame.index = pd.DatetimeIndex(stamps)
-    frame = frame.drop(columns=["year", "month", "day", "hour"])
-    frame = frame.loc[~frame.index.duplicated(keep="last")].sort_index()
-    spin_up = _times(frame).hour == 21
-    logger.info("WRF: %d rows, dropping %d spin-up rows at hour 21", len(frame), int(spin_up.sum()))
-    trimmed: pd.DataFrame = frame.loc[~spin_up]
-    return trimmed
 
 
 def _times(frame: pd.DataFrame) -> pd.DatetimeIndex:
@@ -891,7 +861,7 @@ def _subset_label(source: str, season: str) -> str:
 
 def _commit() -> str | None:
     """Short commit of the checkout that produced these bytes, for provenance."""
-    return run_git(["rev-parse", "--short", "HEAD"], cwd=source_root())
+    return short_commit()
 
 
 def _package_version() -> str | None:
