@@ -470,11 +470,31 @@ def _par_sample_mask(series: pd.Series, global_flux: pd.Series) -> pd.Series:
     One definition for both the fitted sample and the estimator of the curve's one
     free parameter, so the two can never disagree on the population.
     """
+    zeros, impossible = _par_atom_masks(series, global_flux)
+    return ~(zeros | impossible)
+
+
+def _par_atom_masks(series: pd.Series, global_flux: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """The two instrument-state masks the PAR gate is built from.
+
+    Parameters
+    ----------
+    series:
+        PAR flux in W/m2, indexed like *global_flux*.
+    global_flux:
+        Global horizontal flux in W/m2, the band PAR is a sub-band of.
+
+    Returns
+    -------
+    tuple of pandas.Series
+        ``(zeros, impossible)``, both boolean and already ``fillna(False)`` —
+        the logger's daylight zeros, and the samples whose PAR/global ratio no
+        atmosphere produces. The gate and the two reported atoms derive from
+        this one pair, so they cannot disagree on which samples they describe.
+    """
     with np.errstate(invalid="ignore", divide="ignore"):
         fraction = series / global_flux.where(global_flux > RATIO_DENOMINATOR_FLOOR)
-    zeros = series <= 0.0
-    impossible = (fraction > MAX_PAR_FRACTION).fillna(False)
-    return ~(zeros | impossible)
+    return series <= 0.0, (fraction > MAX_PAR_FRACTION).fillna(False)
 
 
 def _par_sample(series: pd.Series, frame: pd.DataFrame) -> tuple[np.ndarray, list[Atom]]:
@@ -489,11 +509,8 @@ def _par_sample(series: pd.Series, frame: pd.DataFrame) -> tuple[np.ndarray, lis
     if not total:
         return np.array([]), []
     global_flux = frame[OBSERVED_COLUMN["shortwave_down"]].reindex(series.index)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        fraction = series / global_flux.where(global_flux > RATIO_DENOMINATOR_FLOOR)
-    zeros = series <= 0.0
-    impossible = fraction > MAX_PAR_FRACTION
-    kept = series.loc[_par_sample_mask(series, global_flux)]
+    zeros, impossible = _par_atom_masks(series, global_flux)
+    kept = series.loc[~(zeros | impossible)]
     return kept.to_numpy(), [
         Atom("daytime_zero", "Zeros diurnos do registrador", float(zeros.mean()), int(zeros.sum())),
         Atom(
@@ -501,8 +518,8 @@ def _par_sample(series: pd.Series, frame: pd.DataFrame) -> tuple[np.ndarray, lis
             f"Razão PAR/global acima de {MAX_PAR_FRACTION:.1f}, fisicamente impossível".replace(
                 ".", ","
             ),
-            float(impossible.fillna(False).mean()),
-            int(impossible.fillna(False).sum()),
+            float(impossible.mean()),
+            int(impossible.sum()),
         ),
     ]
 

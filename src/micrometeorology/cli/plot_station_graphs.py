@@ -466,10 +466,8 @@ def _wrf_series(
     """First model column present for this graph, with the name that resolved."""
     if wrf is None or wrf.empty:
         return None, None
-    for candidate in candidates.get(key, ()):
-        if candidate in wrf.columns:
-            return wrf[candidate], candidate
-    return None, None
+    name = resolve_column(wrf, candidates.get(key, ()))
+    return (None, None) if name is None else (wrf[name], name)
 
 
 def render_site_graphs(

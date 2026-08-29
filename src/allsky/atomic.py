@@ -111,11 +111,17 @@ def atomic_write_strict_json(path: str | Path, obj: Any) -> Path:
     Same encoding and signature as :func:`atomic_write_json` plus
     ``allow_nan=False``, so a non-finite float raises :class:`ValueError` and
     nothing is published: the destination keeps its previous contents and the
-    temp file is removed.  This is the writer for every payload the public site
-    fetches, whose consumers parse with a strict ``response.json()`` that fails
-    the ENTIRE document on a bare ``NaN``/``Infinity`` token — indistinguishable,
-    to a visitor, from a page that was never deployed.  A missing measurement
-    must therefore reach this writer already encoded as ``None``.
+    temp file is removed.  A strict ``response.json()`` fails the ENTIRE
+    document on a bare ``NaN``/``Infinity`` token — indistinguishable, to a
+    visitor, from a page that was never deployed — so a missing measurement
+    must reach this writer already encoded as ``None``.
+
+    This is the ``indent=2`` writer, for the all-sky artifacts a person reads
+    by eye. The site's own JSON has a DIFFERENT byte contract — compact
+    separators, no indentation — and is written by
+    :func:`micrometeorology.common.site_json.write_json`. The two are not
+    interchangeable: swapping one for the other rewrites every byte of the
+    published payload.
 
     The guard covers Python floats and their subclasses (``numpy.float64``);
     types the encoder cannot serialize still go through ``default=str``, so a

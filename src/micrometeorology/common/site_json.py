@@ -1,8 +1,14 @@
-"""The byte contract of every JSON this project publishes to the site.
+"""The byte contract of the JSON this project publishes to the SITE.
 
 Compact separators, UTF-8 without escapes and ``allow_nan=False`` are one
-constant here, and every writer takes the encoding from it, so the published
-files cannot disagree about the contract.
+constant here, and every site writer takes the encoding from it, so the
+published files cannot disagree about the contract.
+
+Scope is the site payloads and nothing else. The all-sky artifacts a person
+reads by eye — manifests, run metrics, evaluation reports — are written
+``indent=2`` by :mod:`allsky.atomic`, which shares the ``allow_nan`` discipline
+and not the encoding. Neither writer may stand in for the other: the choice is
+a byte contract a consumer already depends on, not a formatting preference.
 
 ``allow_nan=False`` is the load-bearing one: ``NaN`` is not valid JSON and a
 browser parser rejects the *whole file*, so a non-finite number has to become
