@@ -179,7 +179,9 @@ def clear_sky_index(
 
 
 def clearsky_ghi_and_kt(
-    solar_zenith_deg: ArrayLike, times: pd.Series
+    solar_zenith_deg: ArrayLike,
+    times: pd.Series,
+    utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Haurwitz clear-sky GHI and its clearness index, per sample.
 
@@ -189,6 +191,12 @@ def clearsky_ghi_and_kt(
         ``(N,)`` solar zenith angle in degrees.
     times:
         ``(N,)`` timezone-aware timestamps, one per sample.
+    utc_offset_hours:
+        Fixed offset of the site's own clock, which the eccentricity correction
+        reads a day-of-year from. It defaults to this station's, but it is a
+        PARAMETER because this function is shared physics: pinning it to Salvador
+        while every sibling in this module takes a site is how a second station —
+        Folsom runs at UTC-8 — gets this one's clock without failing anywhere.
 
     Returns
     -------
@@ -199,7 +207,7 @@ def clearsky_ghi_and_kt(
     """
     cos_zenith_values = np.cos(np.radians(np.asarray(solar_zenith_deg, dtype=np.float64)))
     ghi_clear = haurwitz_ghi_from_cos_zenith(cos_zenith_values)
-    local = times.dt.tz_convert(timezone(timedelta(hours=STATION_UTC_OFFSET_HOURS)))
+    local = times.dt.tz_convert(timezone(timedelta(hours=utc_offset_hours)))
     extraterrestrial = (
         SOLAR_CONSTANT_WM2
         * eccentricity_correction(local.dt.tz_localize(None))
@@ -210,7 +218,11 @@ def clearsky_ghi_and_kt(
     return ghi_clear, np.asarray(kt_clear, dtype=np.float64)
 
 
-def clearsky_diffuse(solar_zenith_deg: ArrayLike, times: pd.Series) -> np.ndarray:
+def clearsky_diffuse(
+    solar_zenith_deg: ArrayLike,
+    times: pd.Series,
+    utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
+) -> np.ndarray:
     """Diffuse irradiance a cloudless sky would produce, in W m-2.
 
     Haurwitz clear-sky GHI decomposed by Erbs at the clear-sky clearness index —
@@ -224,6 +236,8 @@ def clearsky_diffuse(solar_zenith_deg: ArrayLike, times: pd.Series) -> np.ndarra
         ``(N,)`` solar zenith angle in degrees.
     times:
         ``(N,)`` timezone-aware timestamps.
+    utc_offset_hours:
+        The site's own fixed clock offset; see :func:`clearsky_ghi_and_kt`.
 
     Returns
     -------
@@ -232,5 +246,5 @@ def clearsky_diffuse(solar_zenith_deg: ArrayLike, times: pd.Series) -> np.ndarra
     """
     from allsky.erbs import pseudo_diffuse
 
-    ghi_clear, kt_clear = clearsky_ghi_and_kt(solar_zenith_deg, times)
+    ghi_clear, kt_clear = clearsky_ghi_and_kt(solar_zenith_deg, times, utc_offset_hours)
     return np.asarray(pseudo_diffuse(ghi_clear, kt_clear), dtype=np.float64)

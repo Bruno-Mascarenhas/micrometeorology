@@ -245,6 +245,11 @@ class _BaseMultimodalDataset:
         from allsky.clearsky import clearsky_diffuse
 
         times = pd.to_datetime(self.manifest["timestamp_utc"], utc=True)
+        # The station's own offset. A manifest from another site would want its
+        # own, which this layer cannot see — it holds the frame, not the sidecar
+        # that records it. The offset only reaches the eccentricity correction's
+        # day-of-year, so the error is a fraction of a percent, but the
+        # assumption is written down rather than left to be discovered.
         scale = clearsky_diffuse(self.manifest["solar_zenith"], times)
         if not np.all(np.isfinite(scale)) or float(np.min(scale)) <= 0.0:
             raise ValueError(
