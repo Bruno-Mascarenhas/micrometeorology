@@ -1,0 +1,59 @@
+# Where the sun is, drawn into the frame's own pixels.
+#
+# The model this arm modifies has never been told where the sun is. Solar
+# geometry only ever reached it as manifest columns, and `image_only` ignores
+# `batch["features"]` by construction (allsky/modeling/baselines.py), so every
+# image arm to date inferred elevation and azimuth from the pixels alone. The
+# tabular route was measured on the same 7,138 test rows and is worse: the
+# `concat` arm scored 22.39 +/- 1.45 W/m2 against 19.94 +/- 0.35 here.
+#
+# So the geometry enters as three extra image planes instead
+# (allsky/geometry.py): cosine of the pixel-to-sun angle, cosine of the pixel's
+# own zenith, and a soft solar disc. They are built through the lens
+# calibration, which is analytic on the isotropic re-extraction and was checked
+# against the sun itself — 192 clear frames stratified by azimuth, median error
+# 1.6 degrees over the least-glare quartile, which is the saturated core's own
+# centroid noise rather than the projection's.
+#
+# The channels reach a ZERO-INITIALISED convolution parallel to the pretrained
+# patch projection, not a widened one (allsky/modeling/geometry_adapter.py).
+# DINOv2's `patch_embed` sits outside `blocks`, so `unfreeze_last_n: 12` never
+# unfreezes it: widening it in place would leave the new weights frozen at zero,
+# the channels structurally inert, and the arm would return the control's number
+# as if the physics had been tested. The parallel branch is trainable by
+# construction, adds 225,792 parameters (1.0 %), and reproduces the pretrained
+# forward exactly at step 0.
+#
+# Control: the `iso` arm — same data_root, same model, same loss, same schedule,
+# same seeds, same 7,138 test rows, differing only in `geometry_channels`.
+#
+#   iso  19.94 +/- 0.35 W/m2 test DHI RMSE   MAE 13.94   MBE -8.30
+#
+# The defect this targets is the MBE: the residual drifts with solar elevation,
+# and 31.6 % of the test rows sit above the train p95 elevation, so the arm asks
+# whether an explicit, spatial statement of the geometry survives that shift
+# where an inferred one does not.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: sunmap_s44
+output_dir: output/allsky-mm/experiments/sunmap/sunmap_s44
+seed: 44
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso
+  input_mode: image
+targets:
+  dhi:
+    loss: mae
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  geometry_channels: true
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  num_workers: 8
