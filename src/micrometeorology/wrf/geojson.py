@@ -136,7 +136,9 @@ def create_wind_vectors_json(
     Parameters
     ----------
     u, v:
-        2-D arrays of wind components (m/s) for a single time step.
+        2-D arrays of wind components (m/s) for a single time step. The
+        trigonometry runs in their own dtype, so a float32 WRF grid is not
+        promoted; only the rounding that produces the payload is float64.
     date_time:
         Forecast datetime (local).
     downsampling:
@@ -156,8 +158,14 @@ def create_wind_vectors_json(
     ValueError
         When *u* and *v* have different shapes.
     """
-    u = np.asarray(u, dtype=np.float64)
-    v = np.asarray(v, dtype=np.float64)
+    # Normalize the MaskedArray the WRF reader hands back WITHOUT changing the
+    # dtype: a float32 grid stays float32, the same rule _grid_cell_corner_arrays
+    # follows. Promoting to float64 here would do the trigonometry at a precision
+    # the source data does not have, and would put this payload at a different
+    # precision from every other consumer of the same grids
+    # (wrf.operational_record's direction is float32 end to end).
+    u = np.asarray(u)
+    v = np.asarray(v)
     if u.shape != v.shape:
         raise ValueError(f"wind vector shapes differ: {u.shape!r} vs {v.shape!r}")
     assert_reasonable_array_size(
@@ -178,11 +186,19 @@ def create_wind_vectors_json(
     magnitude = np.hypot(u_sampled, v_sampled)
     # Blows-TOWARD convention, unlike sensors.wind.wind_direction_from_components,
     # which returns the meteorological comes-FROM bearing.
-    flow_bearing_deg = np.degrees(np.arctan2(u_sampled, v_sampled))
+    #
+    # Written as `* 180.0 / np.pi` in this operand order, and not as np.degrees,
+    # to be bit-identical to the recipe this payload has to reproduce: in float32
+    # the two differ by an ULP (70.34617 vs 70.346176), which lands on a
+    # different side of the 1-decimal rounding for a handful of cells.
+    flow_bearing_deg = np.arctan2(u_sampled, v_sampled) * 180.0 / np.pi
     flow_bearing_deg = np.where(flow_bearing_deg < 0, flow_bearing_deg + 360.0, flow_bearing_deg)
 
-    angles_sampled = np.round(flow_bearing_deg, 1).ravel()
-    mags_sampled = np.round(magnitude, 2).ravel()
+    # float64 only to round and serialize: np.round on a float32 array returns
+    # float32, whose nearest value to 70.3 serializes as 70.30000305175781 and
+    # would both bloat the payload and read as broken to the front end.
+    angles_sampled = np.round(flow_bearing_deg.astype(np.float64, copy=False), 1).ravel()
+    mags_sampled = np.round(magnitude.astype(np.float64, copy=False), 2).ravel()
     linear_indices = (
         np.arange(0, ny, downsampling)[:, np.newaxis] * nx
         + np.arange(0, nx, downsampling)[np.newaxis, :]
