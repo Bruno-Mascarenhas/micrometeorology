@@ -15,7 +15,7 @@ import pandas as pd
 import pytest
 
 from allsky.data.folsom import (
-    FOLSOM_MAX_TIMESTAMP_DISAGREEMENT_S,
+    FOLSOM_LOST_TIMESTAMPS_S,
     FOLSOM_SITE,
     FOLSOM_TIMESTAMP_OFFSET_S,
     folsom_sensor_at,
@@ -76,31 +76,32 @@ class TestFrameTimestamps:
         expected = (named[0] + pd.Timedelta(seconds=12)).tz_convert(None) + UTC_MINUS_8
         assert frames["timestamp"].iloc[0] == expected
 
-    def test_frames_whose_two_clocks_disagree_are_dropped(self, tmp_path: Path):
-        """The disagreement grows to about 700 s across this dataset's three
-        years, which is a clock never resynchronised, not noise."""
+    def test_a_drifting_clock_keeps_every_frame_by_default(self, tmp_path: Path):
+        """Measured on the extracted 2014 archive: the two clocks already differ
+        by a median of 14 s and a p95 of 34 s in the opening days, and the
+        published Fig. 7 has that growing to ~700 s by late 2016. A 30 s filter
+        would delete most of the archive in silence, so the default keeps
+        everything — the modification time IS the capture instant, so there is
+        nothing to arbitrate."""
         named = pd.date_range("2014-06-01 18:00:00", periods=6, freq="1min", tz="UTC")
-        drift = np.array([1.0, 2.0, 900.0, 3.0, -700.0, 4.0])
-        _write_frames(tmp_path, named, drift)
+        _write_frames(tmp_path, named, np.array([1.0, 2.0, 300.0, 3.0, -700.0, 4.0]))
 
-        frames = read_folsom_frames(tmp_path)
+        assert len(read_folsom_frames(tmp_path)) == 6
 
-        assert len(frames) == 4
-
-    def test_keeping_every_frame_is_possible_but_not_the_default(self, tmp_path: Path):
+    def test_a_per_frame_gate_is_available_when_asked_for(self, tmp_path: Path):
         named = pd.date_range("2014-06-01 18:00:00", periods=3, freq="1min", tz="UTC")
         _write_frames(tmp_path, named, np.array([1.0, 900.0, 2.0]))
 
-        assert len(read_folsom_frames(tmp_path, max_disagreement_s=None)) == 3
-        assert len(read_folsom_frames(tmp_path)) == 2
+        assert len(read_folsom_frames(tmp_path, max_disagreement_s=30.0)) == 2
 
     def test_an_archive_extracted_without_its_times_fails_loudly(self, tmp_path: Path):
         """``tar -m`` discards modification times, which would silently leave
-        every frame stamped with the extraction moment."""
+        every frame stamped with the extraction moment. Hours of disagreement is
+        that, not a drifting camera clock."""
         named = pd.date_range("2014-06-01 18:00:00", periods=4, freq="1min", tz="UTC")
         _write_frames(tmp_path, named, np.full(4, 86_400.0))
 
-        with pytest.raises(ValueError, match="without its modification times"):
+        with pytest.raises(ValueError, match="extracted without its modification times"):
             read_folsom_frames(tmp_path)
 
     def test_a_directory_with_no_frames_is_refused(self, tmp_path: Path):
@@ -148,5 +149,7 @@ class TestFolsomSite:
         assert FOLSOM_SITE.utc_offset_hours == -8.0
         assert FOLSOM_SITE.latitude == pytest.approx(38.642)
 
-    def test_the_disagreement_gate_matches_the_published_one(self):
-        assert FOLSOM_MAX_TIMESTAMP_DISAGREEMENT_S == 30.0
+    def test_the_lost_timestamp_threshold_is_coarse_on_purpose(self):
+        """It answers "did the archive keep its times", not "which timestamp is
+        right" — the second question is already answered."""
+        assert FOLSOM_LOST_TIMESTAMPS_S >= 3600.0

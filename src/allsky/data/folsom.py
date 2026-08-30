@@ -45,7 +45,7 @@ import pandas as pd
 from labmim_core.site import SiteConfig
 
 __all__ = [
-    "FOLSOM_MAX_TIMESTAMP_DISAGREEMENT_S",
+    "FOLSOM_LOST_TIMESTAMPS_S",
     "FOLSOM_SITE",
     "FOLSOM_TIMESTAMP_OFFSET_S",
     "FOLSOM_UTC_OFFSET_HOURS",
@@ -57,11 +57,22 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: Largest disagreement tolerated between a frame's two timestamps, in seconds.
-#: Varaschin & Silva (2025, arXiv:2503.21966, sec. 3.6) drop the pairs beyond it,
-#: retaining 65,202 of 66,908 — about 2.5 % discarded to buy an alignment that is
-#: worth 25 W/m2 of RMSE.
-FOLSOM_MAX_TIMESTAMP_DISAGREEMENT_S = 30.0
+#: Disagreement above which the archive is judged to have LOST its modification
+#: times rather than to carry a drifting clock, in seconds.
+#:
+#: This is deliberately not the 30 s per-frame filter of Varaschin & Silva (2025,
+#: sec. 3.6). Measured on the extracted 2014 archive, over its first 6,683
+#: frames, the disagreement is already **median 14 s, p95 34 s**, so a 30 s gate
+#: discards 12 % of the year's opening days — and their own Fig. 7 has the drift
+#: growing to roughly 700 s by the end of 2016, which the same gate would erase
+#: almost entirely, in silence. Their 2.5 % discard rate describes the subset
+#: they worked on, not a whole-archive ingest.
+#:
+#: Since the modification time IS the capture instant, no per-frame arbitration
+#: is needed; what a check is still worth is catching an extraction that threw
+#: the times away (``tar -m``), which shows up as a disagreement of hours or
+#: days, not seconds.
+FOLSOM_LOST_TIMESTAMPS_S = 6 * 3600.0
 
 #: Shift applied to the irradiance clock, in seconds. The same work optimised it
 #: per dataset by cross-validation and measured -20 s as Folsom's best, worth
@@ -140,7 +151,7 @@ def read_folsom_frames(
     frames_dir: str | Path,
     *,
     pattern: str = "**/*.jpg",
-    max_disagreement_s: float | None = FOLSOM_MAX_TIMESTAMP_DISAGREEMENT_S,
+    max_disagreement_s: float | None = None,
 ) -> pd.DataFrame:
     """The extracted Folsom frames as the frame manifest the builder takes.
 
@@ -169,9 +180,11 @@ def read_folsom_frames(
     pattern:
         Glob for the image files, relative to *frames_dir*.
     max_disagreement_s:
-        Drop frames whose two timestamps differ by more than this, in seconds.
-        ``None`` keeps every frame. The default follows the same work, which
-        discards about 2.5 % of pairs on this gate.
+        Optional per-frame gate, in seconds, dropping frames whose two
+        timestamps differ by more than this. **Off by default**, and see
+        :data:`FOLSOM_LOST_TIMESTAMPS_S` for why: the modification time is the
+        capture instant, so there is nothing to arbitrate, and a tight gate
+        silently deletes the years where the two clocks drifted furthest apart.
 
     Returns
     -------
@@ -197,25 +210,29 @@ def read_folsom_frames(
     modified = pd.to_datetime([path.stat().st_mtime for path in paths], unit="s", utc=True)
     disagreement = (modified - named).total_seconds()
 
+    typical = float(np.median(np.abs(disagreement)))
+    if typical > FOLSOM_LOST_TIMESTAMPS_S:
+        raise ValueError(
+            f"the {len(paths)} frames under {root} disagree with their file names by a median "
+            f"of {typical / 3600:.1f} h. A drifting camera clock is seconds to minutes; hours "
+            "means the archive was extracted without its modification times (tar -m discards "
+            "them), which would stamp every frame with the moment of extraction"
+        )
+
     keep = np.ones(len(paths), dtype=bool)
     if max_disagreement_s is not None:
         keep = np.abs(disagreement.to_numpy()) <= float(max_disagreement_s)
         if not keep.any():
             raise ValueError(
-                f"every one of {len(paths)} frames under {root} disagrees with its file name "
-                f"by more than {max_disagreement_s} s (median "
-                f"{np.median(np.abs(disagreement)):.0f} s). Either the archive was extracted "
-                "without its modification times (tar -m discards them) or this is not the "
-                "Folsom layout"
+                f"the {max_disagreement_s} s gate rejected every one of {len(paths)} frames "
+                f"under {root} (median disagreement {typical:.0f} s)"
             )
-        logger.info(
-            "Folsom timestamps: median |date-modified - file-name| = %.1f s; dropped %d of %d "
-            "frames over the %.0f s gate",
-            float(np.median(np.abs(disagreement))),
-            int((~keep).sum()),
-            len(paths),
-            max_disagreement_s,
-        )
+    logger.info(
+        "Folsom timestamps: median |date-modified - file-name| = %.1f s over %d frames; kept %d",
+        typical,
+        len(paths),
+        int(keep.sum()),
+    )
 
     frame = pd.DataFrame(
         {
