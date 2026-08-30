@@ -9,7 +9,7 @@ module exists to prevent.
 import numpy as np
 import pytest
 
-from allsky.lens import LensCalibration
+from allsky.lens import PLANETARIO_NATIVE, LensCalibration, isotropic_calibration
 
 
 @pytest.fixture
@@ -73,3 +73,52 @@ class TestKeepMask:
         assert keep[20, 40]
         assert not keep[0, 0]
         assert keep.sum() < 40 * 80
+
+
+class TestDirectionOf:
+    def test_it_inverts_pixel_of_everywhere_inside_the_dome(self, lente: LensCalibration):
+        """A second implementation of the projection is how the east-west
+        reflection creeps back in, so the inverse is required to agree with the
+        forward map rather than merely to look plausible."""
+        directions = lente.direction_of((224, 224))
+        keep = lente.keep_mask((224, 224))
+        rows, cols = np.nonzero(keep)
+
+        worst = 0.0
+        for row, col in zip(rows[::53], cols[::53], strict=True):
+            x, y, z = directions[:, row, col]
+            zenith = float(np.arccos(np.clip(z, -1.0, 1.0)))
+            azimuth = float(np.arctan2(y, x))
+            back_row, back_col = lente.pixel_of(zenith, azimuth)
+            worst = max(worst, float(np.hypot(back_row - row, back_col - col)))
+
+        assert worst < 1e-3
+
+    def test_the_optical_centre_points_at_the_zenith(self, lente: LensCalibration):
+        directions = lente.direction_of((224, 224))
+
+        assert directions[:, 112, 112] == pytest.approx([0.0, 0.0, 1.0], abs=1e-6)
+
+    def test_a_pixel_left_of_centre_looks_east_because_the_camera_looks_up(
+        self, lente: LensCalibration
+    ):
+        directions = lente.direction_of((224, 224))
+
+        east = directions[1, 112, 62]
+        assert east > 0.0
+        assert directions[1, 112, 162] < 0.0
+
+
+class TestIsotropicCalibration:
+    def test_the_disc_is_concentric_and_inscribed_at_any_frame_size(self):
+        for size in (224, 512):
+            calibration = isotropic_calibration(size)
+
+            assert calibration.centre_row == pytest.approx(size / 2, abs=0.2)
+            assert calibration.centre_col == pytest.approx(size / 2, abs=0.2)
+            assert calibration.radius_px == pytest.approx(size / 2, abs=0.05)
+
+    def test_it_keeps_the_mount_rotation_the_native_fit_measured(self):
+        assert isotropic_calibration(224).azimuth_offset_rad == pytest.approx(
+            PLANETARIO_NATIVE.azimuth_offset_rad
+        )
