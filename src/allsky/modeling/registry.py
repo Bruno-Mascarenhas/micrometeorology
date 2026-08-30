@@ -24,7 +24,7 @@ from typing import Any, Literal, cast
 
 from torch import nn
 
-from allsky.config import ExperimentConfig
+from allsky.config import ExperimentConfig, geometry_channels_of
 from allsky.embeddings.backbone import Pooling
 from allsky.features.policy import resolve_feature_set
 from allsky.modeling.baselines import ClimatologyModel, ImageOnlyModel, SensorOnlyModel
@@ -69,7 +69,15 @@ _COMMON_PARAMS = frozenset({"sensor_hidden", "trunk_hidden", "trunk_layers", "dr
 # ``climatology`` never build an image backbone, so those must keep warning.
 _PIPELINE_VISUAL_PARAMS = frozenset({"image_size", "backbone", "backbone_pooling"})
 _VISUAL_PARAMS = (
-    frozenset({"visual_out_dim", "backbone_frozen", "unfreeze_last_n", "temporal_pooling"})
+    frozenset(
+        {
+            "visual_out_dim",
+            "backbone_frozen",
+            "unfreeze_last_n",
+            "temporal_pooling",
+            "geometry_channels",
+        }
+    )
     | _PIPELINE_VISUAL_PARAMS
 )
 _CROSS_ATTENTION_PARAMS = frozenset({"num_heads", "token_dim"})
@@ -164,6 +172,15 @@ def _build_sensor_only(
     )
 
 
+def _extra_input_channels(cfg: ExperimentConfig) -> int:
+    """Image planes beyond RGB the visual encoder must be widened for.
+
+    Reads the same config key the dataset does, so the frame the loader emits and
+    the projection the model builds cannot disagree.
+    """
+    return len(geometry_channels_of(cfg))
+
+
 def _build_image_only(
     cfg: ExperimentConfig,
     _n_features: int,
@@ -181,6 +198,7 @@ def _build_image_only(
         unfreeze_last_n=int(params.get("unfreeze_last_n", 0)),
         dropout=float(params.get("dropout", 0.1)),
         temporal_pooling=_temporal_pooling(params, temporal_pooling),
+        extra_input_channels=_extra_input_channels(cfg),
     )
     return ImageOnlyModel(
         visual,
@@ -221,6 +239,7 @@ def _multimodal_builder(fusion_name: str) -> ModelBuilder:
             token_dim=params.get("token_dim"),
             backbone_frozen=bool(params.get("backbone_frozen", False)),
             unfreeze_last_n=int(params.get("unfreeze_last_n", 0)),
+            extra_input_channels=_extra_input_channels(cfg),
             temporal_pooling=_temporal_pooling(params, temporal_pooling),
             backbone_lr=cfg.train.backbone_lr,
         )

@@ -1,0 +1,60 @@
+# Só o ângulo até o sol: separa a geometria útil do relógio.
+#
+# O braço sunmap deu à rede os três mapas de geometria e o resultado foi uma
+# troca: o viés por banda de elevação melhorou muito — a amplitude entre bandas
+# caiu de 17,47 para 8,46 W/m2, que era exatamente o defeito visado — enquanto o
+# erro global piorou de 19,94 +/- 0,35 para 20,91 +/- 0,85 e a dispersão entre
+# sementes dobrou. Duas das três sementes também treinaram bem mais fundo antes
+# do early stopping (31 e 27 épocas contra 13 e 18 do controle).
+#
+# A hipótese, NÃO medida, é que os mapas entregam um relógio e um calendário
+# exatos: são função determinística do timestamp, e num split cronológico
+# memorizar o instante ajuda no treino sem transferir para dias futuros.
+#
+# Este braço fica só com `cos_sun_angle`, que é onde mora a informação espacial
+# de onde o sol está no frame, e tira os dois canais mais próximos de uma
+# assinatura do instante:
+#
+#   cos_pixel_zenith  é CONSTANTE na câmera fixa — não carrega informação entre
+#                     amostras, só age como viés indutivo espacial;
+#   solar_disc        é o mais localizado dos três, e portanto o mais capaz de
+#                     marcar de forma única a posição do sol num dado minuto.
+#
+# Leitura: se a melhora no viés por banda sobreviver e a dispersão global não, a
+# hipótese do relógio se confirma e `cos_sun_angle` sozinho é o canal a manter.
+# Se o viés voltar ao do controle, a melhora vinha dos canais removidos e a troca
+# é intrínseca à geometria explícita, não ao excesso dela.
+#
+# Controle: o braço `iso` (19,94 +/- 0,35 W/m2, MAE 13,94, MBE -8,30), mesmas
+# 7.138 linhas de teste, diferindo só em `geometry_channels`. O `sunmap` é a
+# referência intermediária.
+#
+# `epochs: 40` fica igual aos dois de propósito. O teto nunca prendeu: as SEIS
+# execuções dos dois braços pararam em melhor+8, a paciência configurada. Subir o
+# teto seria inerte e não neutro — o horizonte do cosine está preso a
+# train.epochs (engine._reconcile_cosine_horizon), então mexer nele mudaria a
+# trajetória do learning rate e quebraria a comparação.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: sunangle_s43
+output_dir: output/allsky-mm/experiments/sunangle/sunangle_s43
+seed: 43
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso
+  input_mode: image
+targets:
+  dhi:
+    loss: mae
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  geometry_channels: [cos_sun_angle]
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  num_workers: 8

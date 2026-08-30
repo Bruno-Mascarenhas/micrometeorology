@@ -21,7 +21,19 @@ from dataclasses import dataclass
 
 import numpy as np
 
-__all__ = ["LensCalibration"]
+__all__ = [
+    "ISOTROPIC_FRAME_PX",
+    "PLANETARIO_NATIVE",
+    "LensCalibration",
+    "isotropic_calibration",
+]
+
+#: Absolute column and row the isotropic re-extraction starts from, derived from
+#: the crop/pad of ``local_prepare_iso.yaml``: ``center_crop`` centres a
+#: 1711-wide box in the 1920-wide frame and shifts it by ``left=12``, so the
+#: first kept column is ``(1920 - 1711) // 2 + 12``.
+_ISOTROPIC_CROP_LEFT = 116
+_ISOTROPIC_PAD_TOP = 254
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,3 +158,96 @@ class LensCalibration:
         cols = np.arange(width)[None, :]
         dist_sq = (rows - self.centre_row) ** 2 + (cols - self.centre_col) ** 2
         return dist_sq <= self.radius_px**2
+
+    def direction_of(self, shape: tuple[int, ...]) -> np.ndarray:
+        """Unit vector toward the sky direction each pixel of *shape* images.
+
+        The inverse of :meth:`pixel_of`, vectorised over a whole frame. It lives
+        here, beside the forward map, because a second implementation of the
+        projection is how the east-west reflection creeps back in: the mirror and
+        the mount rotation are applied once, in one place, and both maps read the
+        same fields.
+
+        Parameters
+        ----------
+        shape:
+            Image shape; only the leading ``(H, W)`` entries are read.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``(3, H, W)`` float32 unit vectors in the station's horizontal frame:
+            ``x`` toward north, ``y`` toward east, ``z`` toward the zenith.
+            Pixels beyond the horizon extrapolate past ``zenith = pi/2`` and
+            carry a negative ``z``; mask them with :meth:`keep_mask` when that
+            matters.
+        """
+        height, width = int(shape[0]), int(shape[1])
+        d_row = np.arange(height, dtype=np.float64)[:, None] - self.centre_row
+        d_col = np.arange(width, dtype=np.float64)[None, :] - self.centre_col
+        radius = np.hypot(d_row, d_col)
+        # pixel_of places a direction at (centre - r cos b, centre - r sin b), so
+        # the bearing of a pixel is the arctangent of the NEGATED offsets.
+        bearing = np.arctan2(-d_col, -d_row) - self.azimuth_offset_rad
+        if self.equidistant:
+            zenith = radius / self.radius_px * (np.pi / 2.0)
+        else:
+            ratio = np.clip(radius / self.radius_px * np.sin(np.pi / 4.0), -1.0, 1.0)
+            zenith = 2.0 * np.arcsin(ratio)
+        sin_z = np.sin(zenith)
+        return np.stack([sin_z * np.cos(bearing), sin_z * np.sin(bearing), np.cos(zenith)]).astype(
+            np.float32
+        )
+
+
+#: Fisheye calibration of the Planetario all-sky camera in its NATIVE 1920x1080
+#: frame, fitted to 415 compact sun detections over 9 days (equidistant law,
+#: 6.7 px median residual; the equisolid, stereographic and orthographic laws
+#: all fit worse). The optical axis is 62 px below the sensor centre and the
+#: mount is rotated ~18 degrees, which the camera's own page does not report
+#: (it declares ``az: 0``). The lens specification does not reproduce this:
+#: 1.8 mm equidistant with 2x2 binning would give r(90 deg) ~ 707 px against the
+#: measured 855.5, so the empirical fit is the authority.
+PLANETARIO_NATIVE = LensCalibration(
+    centre_row=601.7,
+    centre_col=971.7,
+    radius_px=855.5,
+    equidistant=True,
+    azimuth_offset_rad=np.radians(17.9),
+)
+
+#: Side of the square frame the isotropic re-extraction produces before the
+#: resize (``configs/allsky/data/local_prepare_iso.yaml``: crop 1080x1711 at
+#: left offset 12, pad 254 above and 377 below). The crop and the padding are
+#: chosen so the disc comes out concentric and inscribed, which is what makes
+#: :func:`isotropic_calibration` analytic.
+ISOTROPIC_FRAME_PX = 1711
+
+
+def isotropic_calibration(size: int) -> LensCalibration:
+    """Calibration of an isotropically re-extracted frame resized to *size*.
+
+    The re-extraction centres the disc and inscribes it, so centre and radius
+    follow from *size* alone and only the mount rotation stays a fitted term.
+    Measured against the sun in the re-extracted 512 px frames: median error
+    1.6 degrees over the least-glare quartile of 192 clear frames, which is the
+    saturated core's own centroid noise rather than the projection's.
+
+    Parameters
+    ----------
+    size:
+        Side of the square frame, in pixels.
+
+    Returns
+    -------
+    LensCalibration
+        Equidistant, with the Planetario mount rotation.
+    """
+    scale = size / ISOTROPIC_FRAME_PX
+    return LensCalibration(
+        centre_row=(PLANETARIO_NATIVE.centre_row + _ISOTROPIC_PAD_TOP) * scale,
+        centre_col=(PLANETARIO_NATIVE.centre_col - _ISOTROPIC_CROP_LEFT) * scale,
+        radius_px=PLANETARIO_NATIVE.radius_px * scale,
+        equidistant=PLANETARIO_NATIVE.equidistant,
+        azimuth_offset_rad=PLANETARIO_NATIVE.azimuth_offset_rad,
+    )

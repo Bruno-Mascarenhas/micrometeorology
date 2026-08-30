@@ -58,6 +58,7 @@ from allsky.config import (
     ExperimentConfig,
     SchedulerConfig,
     TargetsConfig,
+    geometry_channels_of,
     image_size_of,
     model_param,
 )
@@ -342,7 +343,7 @@ def run_experiment(
         history = truncate_metrics(run_dir, fields, start_epoch)
         logger.info(
             "resumed from %s at epoch %d (global_step %d, epochs_no_improve %d)",
-            resolve_resume_path,
+            resume_path,
             start_epoch,
             global_step,
             epochs_no_improve,
@@ -622,6 +623,7 @@ def _build_datasets(
         augment=pipeline,
         preprocess=preprocess,
         seed=cfg.seed,
+        geometry_channels=geometry_channels_of(cfg),
     )
     image_val = MultimodalImageDataset(
         val_df,
@@ -631,6 +633,7 @@ def _build_datasets(
         train=False,
         stats=image_train.stats,
         preprocess=preprocess,
+        geometry_channels=geometry_channels_of(cfg),
     )
     return image_train, image_val, None
 

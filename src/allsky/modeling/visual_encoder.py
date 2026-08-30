@@ -31,6 +31,11 @@ from typing import Any, Literal, cast
 import torch
 from torch import Tensor, nn
 
+from allsky.modeling.geometry_adapter import (
+    GeometryPatchProjection,
+    attach_extra_input_channels,
+)
+
 logger = logging.getLogger(__name__)
 
 #: Temporal pooling modes for a windowed ``embedding_seq``.
@@ -213,8 +218,9 @@ class ImageEncoder(nn.Module):
     Parameters
     ----------
     backbone:
-        Any module mapping ``(B, 3, H, W) -> (B, backbone.dim)`` and exposing
-        an integer ``dim`` attribute (e.g. the DINOv2 wrapper, or a conv stub).
+        Any module mapping ``(B, C, H, W) -> (B, backbone.dim)`` and exposing
+        an integer ``dim`` attribute (e.g. the DINOv2 wrapper, or a conv stub);
+        ``C`` is 3 unless *extra_input_channels* widens it.
     frozen:
         Freeze every backbone parameter (``requires_grad=False``).
     unfreeze_last_n:
@@ -231,6 +237,14 @@ class ImageEncoder(nn.Module):
         identity passthrough.
     dropout:
         Dropout inside the projection block (unused when identity).
+    extra_input_channels:
+        When ``> 0``, wrap the backbone's patch projection so it also consumes
+        that many channels beyond its own (see
+        :class:`~allsky.modeling.geometry_adapter.GeometryPatchProjection`).  The
+        wrap happens **after** the freeze sweep, so the added branch is trainable
+        whatever *frozen* and *unfreeze_last_n* did to the backbone: a patch
+        projection frozen at its zero initialisation would make the extra
+        channels inert and the experiment unfalsifiable.
     """
 
     def __init__(
@@ -241,6 +255,7 @@ class ImageEncoder(nn.Module):
         unfreeze_last_n: int = 0,
         out_dim: int | None = None,
         dropout: float = 0.0,
+        extra_input_channels: int = 0,
     ) -> None:
         super().__init__()
         dim = getattr(backbone, "dim", None)
@@ -253,6 +268,11 @@ class ImageEncoder(nn.Module):
                 param.requires_grad_(False)
         if unfreeze_last_n > 0:
             self._unfreeze_last_blocks(unfreeze_last_n)
+        self.extra_channel_projection: GeometryPatchProjection | None = (
+            attach_extra_input_channels(backbone, extra_input_channels)
+            if extra_input_channels > 0
+            else None
+        )
         self.projection, self._out_dim = _projection(int(dim), out_dim, dropout)
 
     def _unfreeze_last_blocks(self, n: int) -> None:
@@ -292,8 +312,10 @@ class ImageEncoder(nn.Module):
         Parameters
         ----------
         batch:
-            Batch dict whose ``image`` entry is ``(B, 3, H, W)`` float32,
-            channels-first and normalized (dimensionless).
+            Batch dict whose ``image`` entry is ``(B, C, H, W)`` float32,
+            channels-first: the first three planes are the normalized RGB frame
+            and any further ones are the extra maps the patch projection was
+            widened for (all dimensionless).
 
         Returns
         -------
@@ -319,12 +341,25 @@ class ImageEncoder(nn.Module):
             parameters at ``lr=backbone_lr``, then everything else (the
             projection) with no per-group override.  Frozen parameters are
             omitted, so a wholly frozen backbone yields no backbone group.
+
+            The extra-channel branch is physically inside the backbone but is
+            reported with the "everything else" group: it is a freshly
+            zero-initialised module, not a pretrained one, so the small backbone
+            rate that protects pretrained weights would only starve it.
         """
-        backbone_params = [p for p in self.backbone.parameters() if p.requires_grad]
+        extra_branch = (
+            self.extra_channel_projection.extra_proj.parameters()
+            if self.extra_channel_projection is not None
+            else ()
+        )
+        extra_ids = {id(p) for p in extra_branch}
+        backbone_params = [
+            p for p in self.backbone.parameters() if p.requires_grad and id(p) not in extra_ids
+        ]
         other_params = [
             p
             for name, p in self.named_parameters()
-            if p.requires_grad and not name.startswith("backbone.")
+            if p.requires_grad and (not name.startswith("backbone.") or id(p) in extra_ids)
         ]
         groups: list[dict[str, Any]] = []
         if backbone_params:
@@ -490,6 +525,7 @@ def build_visual_encoder(
     unfreeze_last_n: int = 0,
     dropout: float = 0.0,
     temporal_pooling: TemporalPooling = "mean",
+    extra_input_channels: int = 0,
 ) -> nn.Module:
     """Build the visual source for *input_mode* (``embedding`` or ``image``).
 
@@ -513,6 +549,10 @@ def build_visual_encoder(
     temporal_pooling:
         How a windowed ``embedding_seq`` is pooled in embedding mode (``"mean"``
         or learned ``"attention"``); inert in image mode.
+    extra_input_channels:
+        Image-mode channels appended to the frame beyond RGB (see
+        :class:`ImageEncoder`); inert in embedding mode, where the backbone has
+        already run.
 
     Returns
     -------
@@ -541,5 +581,6 @@ def build_visual_encoder(
             unfreeze_last_n=unfreeze_last_n,
             out_dim=out_dim,
             dropout=dropout,
+            extra_input_channels=extra_input_channels,
         )
     raise ValueError(f"unknown input_mode {input_mode!r}; expected 'image' or 'embedding'")
