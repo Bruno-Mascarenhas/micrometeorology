@@ -1,28 +1,15 @@
 """Reading the UCSD-Folsom sky-image dataset into this project's manifest.
 
-Folsom is the transfer-learning source this station starts from: three years of
-1-minute GHI/DNI/DHI beside a **fisheye** sky camera, at Folsom, California
-(38.642 N, 121.148 W). The camera matters more than the climate here — the
-circumsolar region governs the diffuse split, and the ARM archives, whose
-tropical sites match this station's latitude far better, image through a total
-sky imager whose shadow band OCCLUDES the sun. A backbone pre-trained on skies
-with no visible sun cannot learn the feature this task most depends on.
-
 Format, from the dataset's own files (Zenodo DOI 10.5281/zenodo.2826939,
 CC BY-NC 4.0; Pedro, Larson & Coimbra, *A comprehensive dataset for the
 accelerated development and benchmarking of solar forecasting methods*, Journal
 of Renewable and Sustainable Energy 11(3), 036102, 2019):
 
 - ``Folsom_irradiance.csv`` — ``timeStamp,ghi,dni,dhi``, one row per minute, W/m2,
-  timestamps in **UTC**. Measured here: 1,552,320 rows from 2014-01-02 08:00 to
-  2016-12-31 07:59, 618 NaN in ``dhi``, 732,122 rows above 20 W/m2 of GHI.
+  timestamps in **UTC**.
 - ``Folsom_weather.csv`` — ``timeStamp,air_temp,relhum,press,windsp,winddir,
   max_windsp,precipitation``, same cadence and clock.
 - ``Folsom_sky_images_<year>.tar.bz2`` — daytime frames at 1-minute intervals.
-
-Nothing else in the record is used: the pre-extracted image and satellite
-features, the NAM forecasts and the ``Target_*`` files serve forecasting with a
-horizon, while this project estimates at t=0 and extracts its own features.
 
 **Time convention.** This project's manifest builder takes naive times on the
 instrument's own clock and stamps UTC from the site's fixed offset. Folsom
@@ -68,11 +55,6 @@ logger = logging.getLogger(__name__)
 #: growing to roughly 700 s by the end of 2016, which the same gate would erase
 #: almost entirely, in silence. Their 2.5 % discard rate describes the subset
 #: they worked on, not a whole-archive ingest.
-#:
-#: Since the modification time IS the capture instant, no per-frame arbitration
-#: is needed; what a check is still worth is catching an extraction that threw
-#: the times away (``tar -m``), which shows up as a disagreement of hours or
-#: days, not seconds.
 FOLSOM_LOST_TIMESTAMPS_S = 6 * 3600.0
 
 #: Shift applied to the irradiance clock, in seconds. The same work optimised it
@@ -94,9 +76,6 @@ FOLSOM_SITE = SiteConfig(
     utc_offset_hours=FOLSOM_UTC_OFFSET_HOURS,
 )
 
-#: Folsom column -> the name this project's feature policy looks for. The `bare`
-#: tier wants the mechanical anemometer, which Folsom's weather file carries
-#: under its own names.
 SENSOR_COLUMN_MAP: dict[str, str] = {
     "windsp": "WS_ms",
     "winddir": "WindDir",
@@ -159,17 +138,7 @@ def read_folsom_frames(
     single most consequential choice in this module, and it is measured rather
     than preferred: Varaschin & Silva (2025, arXiv:2503.21966, sec. 5.2.1) trained
     and tested the same model under all four combinations and found file-name
-    alignment costs **62.52 W/m2 of RMSE against 37.21** for date-modified — a
-    25 W/m2 gap, larger than the entire spread between the ten architectures they
-    benchmarked.
-
-    Two independent facts say which one is the capture instant. The daily mean
-    disagreement between the two drifts with time, from about zero in early 2014
-    to roughly **700 s** by the end of 2016 (their Fig. 7), which is a clock that
-    was never resynchronised rather than noise. And the file-name seconds pile up
-    on ``:00`` and ``:59`` while the modification seconds spread evenly over all
-    sixty (their Fig. 8) — the name is an assigned label, the mtime is when the
-    file was written.
+    alignment costs **62.52 W/m2 of RMSE against 37.21** for date-modified.
 
     Parameters
     ----------
@@ -271,24 +240,6 @@ def folsom_sensor_at(sensor: pd.DataFrame, frames: pd.DataFrame) -> pd.DataFrame
 
 
 def _named_timestamps(paths: list[Path]) -> pd.DatetimeIndex:
-    """The instants the frame FILENAMES encode, read in one vectorised pass.
-
-    Read only to check the modification times against
-    :data:`FOLSOM_LOST_TIMESTAMPS_S`; see :func:`read_folsom_frames` for why the
-    name is not the frame's time.
-
-    ``pd.to_datetime`` with an explicit ``format`` both vectorises the parse —
-    250k frames in one call rather than one object each — and refuses malformed
-    input, because ``errors`` defaults to ``raise`` and a fixed format closes the
-    free-interpretation path where a bare parse would resolve something
-    plausible and wrong.
-
-    Raises
-    ------
-    ValueError
-        If a filename carries no 14-digit ``YYYYMMDDHHMMSS`` stamp, or one that
-        is not a real instant.
-    """
     digits = [("".join(ch for ch in path.stem if ch.isdigit()))[:14] for path in paths]
     short = [path.name for path, text in zip(paths, digits, strict=True) if len(text) < 14]
     if short:
@@ -300,18 +251,13 @@ def _named_timestamps(paths: list[Path]) -> pd.DatetimeIndex:
 
 
 def _to_site_clock(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    """UTC instants as naive times on Folsom's fixed clock."""
     aware = index if index.tz is not None else index.tz_localize("UTC")
     site_tz = timezone(timedelta(hours=FOLSOM_UTC_OFFSET_HOURS))
     return aware.tz_convert(site_tz).tz_localize(None)
 
 
 def folsom_manifest_kwargs() -> dict[str, Any]:
-    """The :func:`allsky.data.manifest.build_manifest` arguments Folsom needs.
-
-    Spelled out here rather than in a caller so the column names travel with the
-    parser that knows them.
-    """
+    """The :func:`allsky.data.manifest.build_manifest` arguments Folsom needs."""
     return {
         "site": FOLSOM_SITE,
         "ghi_column": "ghi",

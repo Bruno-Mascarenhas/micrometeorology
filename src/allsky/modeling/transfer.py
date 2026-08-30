@@ -1,24 +1,8 @@
 """Starting a run from weights another run learned, on other data.
 
-This is not ``--resume``. A resume continues one run: same dataset, same
-optimizer state, same epoch counter, same schedule. Transfer takes only the
-**weights** from a source run — typically one trained on a larger, external sky
-archive — and starts a fresh run on this station's data with its own optimizer,
-its own schedule and its own normalizers.
-
-The literature this follows is explicit that this is the strategy worth the
-effort: Nie et al. (2022, arXiv:2211.02108) compared training locally, training
-jointly on fused datasets, and pre-training then transferring, and found the
-third superior — reaching the local baseline's performance with 80 % less target
-data. That last clause is why it matters here: this station has 55 training
-days.
-
-The whole risk of the idea is silent partial loading. ``load_state_dict`` with
-``strict=False`` will happily accept a checkpoint that shares three tensors with
-the model and drop the rest, and the run then trains a nearly-random network
-while its log says it transferred. So nothing here is skipped without being
-counted and named, and a mismatch inside the backbone — which means the source
-was a different architecture, not a different task — is an error rather than a
+This is not ``--resume``: only the **weights** move, and the fresh run brings
+its own optimizer, schedule and normalizers. Nothing is skipped without being
+counted and named, and a mismatch inside the backbone is an error rather than a
 line in a report.
 """
 

@@ -70,12 +70,7 @@ from labmim_core.solar import clearness_index, solar_azimuth_deg, solar_elevatio
 
 logger = logging.getLogger(__name__)
 
-#: How a frame's timestamp becomes its ``sample_id``. Minute resolution, because
-#: this station's camera writes one frame a minute and the identifier reads
-#: better without the seconds. A source whose frames land anywhere inside the
-#: minute — Folsom's do, once they are stamped by modification time — needs a
-#: finer format, and a prefix of its own so two archives can never produce the
-#: same identifier for different skies.
+#: Minute resolution: this station's camera writes one frame a minute.
 DEFAULT_SAMPLE_ID_FORMAT = "allsky-%Y%m%d-%H%M"
 
 __all__ = [
@@ -93,27 +88,13 @@ TARGET_SOURCE_ERBS = "erbs_pseudo"
 
 
 def _timezone_meta(site: SiteConfig) -> dict[str, Any]:
-    """Sidecar timezone block for *site*.
-
-    The station keeps its named zone; any other site is recorded by its offset
-    alone, because a fixed instrument offset is what this pipeline consumes and
-    naming a zone it never resolved would be an assertion nobody checked — and
-    the check is on the whole site, not the offset alone, because another site
-    three hours west of UTC is not Bahia.
-    """
     if site == STATION_SITE:
         return {"name": SITE_TZ_NAME, "utc_offset_hours": SITE_UTC_OFFSET_HOURS}
     return {"name": None, "utc_offset_hours": float(site.utc_offset_hours)}
 
 
 def site_utc_offset_hours(meta: Mapping[str, Any]) -> float:
-    """The fixed clock offset the manifest in *meta* was built against.
-
-    Every consumer that recomputes solar geometry from a manifest needs it, and
-    the sidecar is the only place that records which site produced the rows. A
-    manifest whose sidecar was lost falls back to this station's offset, loudly:
-    guessing silently is how a Folsom manifest would get Salvador's clock.
-    """
+    """The fixed clock offset, in hours, the manifest in *meta* was built against."""
     timezone_meta = meta.get("timezone")
     if isinstance(timezone_meta, Mapping) and "utc_offset_hours" in timezone_meta:
         return float(timezone_meta["utc_offset_hours"])
@@ -604,7 +585,6 @@ def _split_assignment_and_id(
 
 
 def _check_sample_id_unique(sample_ids: list[str], sample_id_format: str) -> None:
-    """Raise if two frames produce the same ``sample_id`` under *sample_id_format*."""
     index = pd.Index(sample_ids)
     duplicated = index[index.duplicated(keep=False)]
     if len(duplicated) == 0:

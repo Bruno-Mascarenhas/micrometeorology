@@ -412,3 +412,103 @@ For CPU or a smoke run, swap `--device cuda --amp` for `--device cpu --no-amp`.
   all-sky video is **2026-06** — there is no temporal overlap yet, so a real
   paired dataset needs logger files covering the camera dates.
 ```
+
+## Geometria solar como canais da imagem
+
+A geometria solar chega ao modelo de duas formas: como escalar ao lado da
+imagem, ou como canal extra — um valor por pixel, nas coordenadas do quadro,
+dizendo para onde aquele pixel aponta em relação ao sol. Um tokenizador
+convolucional lê a segunda e não lê a primeira: um escalar é constante ao longo
+do quadro, então não carrega informação sobre *qual patch* contém a região
+circunsolar que governa a partição difusa.
+
+Todo mapa é construído através de `allsky.lens.LensCalibration`, que detém a
+projeção, o espelhamento leste-oeste e a rotação da montagem. `allsky.geometry`
+não re-deriva nenhum dos três.
+
+O canal `cos_pixel_zenith` é fixo para uma câmera fixa: ele não carrega
+informação *entre* amostras e age só como prior espacial. Registrar isso importa
+para ler um resultado nulo com honestidade.
+
+## Como canais extras entram num backbone pré-treinado
+
+Um backbone DINOv2 tokeniza com uma única `Conv2d(3, embed_dim, patch, patch)`
+em `patch_embed.proj`. Os canais extras precisam passar por ela, e as duas rotas
+óbvias falham:
+
+- **alargar a convolução** e zerar as fatias novas põe os pesos novos *dentro*
+  do backbone, onde o `ImageEncoder` os congela. `patch_embed` não faz parte de
+  `blocks`, então `unfreeze_last_n` nunca o alcança. Peso inicializado em zero e
+  congelado em zero deixa os canais **estruturalmente inertes**: o braço devolve
+  o resultado do controle, e o experimento é lido como achado nulo sobre os
+  canais quando é achado sobre a fiação;
+- **inicializar aleatório** perturba a tokenização pré-treinada desde o passo 0,
+  e o fine-tune parte de um backbone que já não é o que o pré-treino produziu.
+
+`GeometryPatchProjection` evita as duas: a convolução pré-treinada mantém os
+próprios pesos e o próprio `requires_grad`, uma convolução **separada**
+inicializada em zero lê os canais extras, e as saídas são somadas. Na
+inicialização a soma é exatamente a projeção pré-treinada, e a convolução nova é
+um módulo treinável comum que nenhuma varredura de congelamento possui.
+
+Verificação de que os canais chegam à rede: o peso do adaptador sai de
+exatamente 0,0 e vai a |w| = 445,93 após uma época.
+
+## O que o fine-tuning pede de cada família de backbone
+
+Três perguntas são feitas a um backbone de imagem, e um ViT e uma rede
+convolucional respondem cada uma de forma diferente:
+
+1. **pooling** — como um quadro `(B, C, H, W)` vira um embedding `(B, dim)`. Um
+   ViT DINOv2 devolve token CLS e tokens de patch por `forward_features`; um
+   ResNet não tem nenhum dos dois e faz pooling do último mapa de features.
+2. **estágios** — o que `unfreeze_last_n` conta. Bloco de transformer e estágio
+   residual não são a mesma unidade, e uma rodada que descongelou "os últimos 2"
+   de um pensando ter feito o do outro reporta uma profundidade de fine-tune que
+   nunca usou. Achatar `Sequential` faz o ResNet50 dar 16 blocos, o ViT 12 e a
+   EfficientNetV2-S 8.
+3. **a primeira convolução** — onde os canais extras se conectam.
+   `patch_embed.proj` num ViT, `conv1` num ResNet, o stem de `features` numa
+   EfficientNet.
+
+Uma família que não sabe responder uma delas levanta `BackboneCapabilityError`
+em vez de adivinhar. Um config pedindo canais de geometria a um backbone que os
+descartaria em silêncio, ou `unfreeze_last_n` a um sem estágios para contar, é o
+defeito de entrada inerte: o modelo treina, o número volta, e responde a uma
+pergunta que ninguém fez.
+
+`build_backbone` e `family_for` mantêm duas tabelas para a mesma pergunta
+nome→família, e não podem ser fundidas sem import circular.
+
+## Transfer learning: por que, e qual é o risco
+
+Transferência não é `--resume`. Um resume continua uma rodada: mesmo dataset,
+mesmo estado de otimizador, mesmo contador de época, mesmo schedule.
+Transferência leva só os **pesos** de uma rodada fonte — tipicamente treinada num
+acervo de céu externo e maior — e começa uma rodada nova sobre o dado desta
+estação, com otimizador, schedule e normalizadores próprios.
+
+Nie et al. (2022, arXiv:2211.02108) compararam treinar local, treinar junto sobre
+datasets fundidos, e pré-treinar e transferir, e acharam o terceiro superior —
+alcançando o desempenho do baseline local com **80 % menos dado alvo**. É essa
+última cláusula que importa aqui: esta estação tem 55 dias de treino.
+
+O risco inteiro da ideia é carga parcial silenciosa. `load_state_dict` com
+`strict=False` aceita alegremente um checkpoint que compartilha três tensores com
+o modelo e descarta o resto, e a rodada treina uma rede quase aleatória enquanto
+o log diz que transferiu. Por isso nada é pulado sem ser contado e nomeado, e um
+descasamento *dentro* do backbone — que significa arquitetura fonte diferente,
+não tarefa diferente — é erro, não linha de relatório.
+
+Amarra de direção: Folsom é sempre a fonte, esta estação é sempre o alvo. Um
+braço da estação que pré-treinasse outro braço da estação reportaria ganho de
+transferência que é na verdade schedule mais longo; um braço Folsom que
+inicializasse de qualquer lugar deixaria de ser reprodutível a partir de dado
+público. Nenhuma das duas falhas se anuncia numa métrica.
+
+## Janela temporal: o custo
+
+O cap de quadros por janela existe para o caminho de imagem e não para o de
+embedding. Um embedding é uma leitura de 384 floats; um quadro é um decode mais
+um forward de backbone. Uma janela de dez minutos na cadência de um quadro por
+minuto desta câmera seria onze forwards por amostra.

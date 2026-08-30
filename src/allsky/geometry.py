@@ -1,16 +1,5 @@
 """Solar geometry rendered into the frame's own pixels.
 
-The station's solar geometry reaches a model either as scalars beside the image
-or, here, as extra image channels: one value per pixel, in the frame's
-coordinates, saying where that pixel points relative to the sun. A convolutional
-tokeniser can read the second and cannot read the first — a scalar is constant
-across the frame, so it carries no information about *which patch* holds the
-circumsolar region that governs the diffuse split.
-
-Every map is built through :class:`allsky.lens.LensCalibration`, which owns the
-projection, the east-west mirror and the mount rotation. Nothing here re-derives
-them.
-
 Angles are radians and the coordinate frame is the station's horizontal one:
 ``x`` toward north, ``y`` toward east, ``z`` toward the zenith.
 """
@@ -29,10 +18,6 @@ __all__ = [
     "solar_geometry_maps",
 ]
 
-#: Every channel :func:`solar_geometry_maps` can build, in the order it stacks
-#: them. A run selects a subset through ``model.geometry_channels``, and the
-#: experiment config travels inside the checkpoint, so a reloaded model is always
-#: rebuilt for the channels it was trained on.
 GEOMETRY_CHANNEL_NAMES: tuple[str, ...] = (
     "cos_sun_angle",
     "cos_pixel_zenith",
@@ -49,12 +34,6 @@ SOLAR_DISC_SIGMA_RAD: float = np.radians(5.0)
 
 @lru_cache(maxsize=8)
 def _pixel_directions(calibration: LensCalibration, height: int, width: int) -> np.ndarray:
-    """Cached read-only ``(3, H, W)`` unit vectors for one calibration and size.
-
-    The frame geometry is fixed for a whole run, so this is computed once per
-    ``(calibration, shape)`` and shared by every sample rather than recomputed
-    per item in each data-loader worker.
-    """
     directions = calibration.direction_of((height, width))
     directions.flags.writeable = False
     return directions
@@ -98,9 +77,7 @@ def solar_geometry_maps(
         - ``cos_sun_angle`` in ``[-1, 1]`` — cosine of the angle between the
           pixel's direction and the sun's;
         - ``cos_pixel_zenith`` in ``[-1, 1]`` — cosine of the pixel's own zenith
-          angle, negative outside the horizon. Fixed for a given camera, so it
-          carries no information *between* samples and acts only as a spatial
-          prior;
+          angle, negative outside the horizon;
         - ``solar_disc`` in ``(0, 1]`` — a Gaussian of angular distance to the
           sun with width :data:`SOLAR_DISC_SIGMA_RAD`, peaking at 1 on the solar
           direction.
@@ -126,10 +103,6 @@ def solar_geometry_maps(
     if "solar_disc" in selected:
         angle_to_sun = np.arccos(np.clip(cos_sun_angle, -1.0, 1.0))
         built["solar_disc"] = np.exp(-0.5 * (angle_to_sun / SOLAR_DISC_SIGMA_RAD) ** 2)
-    # copy=False because every plane is already float32: `direction_of` returns
-    # float32 and nothing here widens it. The default would copy the whole
-    # (C, H, W) stack again, once per frame — and a windowed run calls this once
-    # per frame IN the window.
     return np.stack([built[name] for name in selected]).astype(np.float32, copy=False)
 
 
@@ -152,8 +125,7 @@ def resolve_geometry_channels(requested: bool | Sequence[str] | None) -> tuple[s
     ------
     ValueError
         If a name is unknown, if the same one is asked for twice, or if the
-        sequence is empty — an empty list is an ambiguity wearing a config key,
-        not a way to switch the feature off.
+        sequence is empty.
     """
     if requested is None or requested is False:
         return ()

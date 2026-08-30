@@ -67,17 +67,7 @@ class TestAlignmentStrategy:
             PrepareConfig.model_validate({"alignment": {"strategy": "attention"}})
 
 
-class TestWindowedPoolingNeedsEmbeddingMode:
-    """Only the LEARNED pooler is embedding-only, and asking for it must not be silent.
-
-    Image mode gained a real window: the dataset stacks the frames and the
-    encoder folds them into the batch and takes the masked mean. What image mode
-    still has no equivalent of is ``attention_pooling``'s single-query pooler,
-    which lives on ``PrecomputedEmbedding``. Accepting it there would train a
-    model whose pooling is not the one the config names — the same defect this
-    guard was written for when NO windowing existed in image mode.
-    """
-
+class TestOnlyTheLearnedPoolerNeedsEmbeddingMode:
     def test_the_learned_pooler_is_rejected_in_image_mode(self):
         with pytest.raises(ValidationError, match="learned pooler"):
             ExperimentConfig.model_validate(

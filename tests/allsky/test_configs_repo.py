@@ -194,15 +194,6 @@ def test_experiment_builds_and_forwards(experiment: Path) -> None:
 
 
 class TestTransferDirection:
-    """Folsom is always the source, this station is always the target.
-
-    The direction is an invariant of the experimental design, not a habit. A
-    station arm that pre-trained another station arm would report a transfer
-    gain that is really a longer schedule; a Folsom arm that initialised from
-    anywhere would stop being reproducible from public data alone. Neither
-    failure announces itself in a metric, so it is asserted here.
-    """
-
     @staticmethod
     def _arms(family: str) -> list[Path]:
         return sorted((_CONFIGS / "experiments" / family).glob("*.yaml"))
@@ -237,8 +228,6 @@ class TestTransferDirection:
             assert cfg.data.data_root.endswith("dataset-iso"), path.name
 
     def test_no_station_arm_outside_the_transfer_family_initialises_from_anything(self):
-        """A control that quietly started from someone else's weights is not a
-        control, and the whole comparison rests on `iso` being one."""
         for path in sorted((_CONFIGS / "experiments").glob("*/*.yaml")):
             if path.parent.name in {"transfer", "folsom"}:
                 continue

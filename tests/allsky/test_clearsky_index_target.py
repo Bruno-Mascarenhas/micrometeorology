@@ -69,8 +69,6 @@ def _dataset(manifest: pd.DataFrame, root: Path, parameterization: str) -> Multi
 
 class TestClearSkyIndexTarget:
     def test_the_raw_path_keeps_a_scale_of_exactly_one(self, tmp_path: Path):
-        """Multiplying by one has to be exact, or every existing arm's metrics
-        would shift by rounding under a change that was meant to add an option."""
         manifest, root = _manifest(tmp_path)
 
         item = _dataset(manifest, root, "raw")[0]
@@ -88,8 +86,6 @@ class TestClearSkyIndexTarget:
             assert recovered == pytest.approx(float(manifest["target_dhi"].iloc[idx]), rel=1e-6)
 
     def test_the_scale_is_the_reference_the_evaluator_scores_against(self, tmp_path: Path):
-        """The target is normalized by exactly the clear-sky baseline that
-        produces ``skill_clearsky``, not by a second, parallel definition."""
         manifest, root = _manifest(tmp_path)
         expected = clearsky_diffuse(
             manifest["solar_zenith"], pd.to_datetime(manifest["timestamp_utc"], utc=True)

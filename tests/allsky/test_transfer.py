@@ -22,9 +22,7 @@ PATCH = 8
 FRAME = 32
 
 
-class _Backbone(nn.Module):
-    """Stands in for the wrapped hub module: a stem plus two blocks."""
-
+class _HubBackboneStub(nn.Module):
     def __init__(self, width: int = 6) -> None:
         super().__init__()
         self.model: Any = nn.Module()
@@ -39,7 +37,7 @@ class _Model(nn.Module):
     def __init__(self, *, width: int = 6, head_out: int = 1, extra_channels: int = 0) -> None:
         super().__init__()
         self.visual_encoder: Any = nn.Module()
-        self.visual_encoder.backbone = _Backbone(width)
+        self.visual_encoder.backbone = _HubBackboneStub(width)
         if extra_channels:
             proj = self.visual_encoder.backbone.model.patch_embed.proj
             adapter = GeometryPatchProjection(proj, extra_channels)
@@ -69,8 +67,6 @@ class TestTransfer:
         )
 
     def test_a_different_head_is_skipped_and_named(self, tmp_path: Path):
-        """A source trained for another target has another head. That is the
-        normal case for transfer, so it is a report line and not an error."""
         checkpoint = _write_checkpoint(tmp_path / "source.ckpt", _Model(head_out=4))
 
         report = load_transferable_weights(_Model(head_out=1), checkpoint, trust_pickle=True)
@@ -79,18 +75,12 @@ class TestTransfer:
         assert any(name.startswith("visual_encoder.backbone.") for name in report.loaded)
 
     def test_a_backbone_of_another_width_is_refused(self, tmp_path: Path):
-        """Same names, different shapes: the source is a bigger model of the same
-        family, and loading around it would leave most of the backbone at its
-        initialisation."""
         checkpoint = _write_checkpoint(tmp_path / "source.ckpt", _Model(width=6))
 
         with pytest.raises(TransferMismatchError, match="describes a different backbone"):
             load_transferable_weights(_Model(width=10), checkpoint, trust_pickle=True)
 
     def test_a_source_sharing_only_the_head_is_refused(self, tmp_path: Path):
-        """The defect this module exists for: a checkpoint from another
-        architecture shares no backbone tensor NAME at all, matches a couple of
-        head tensors, and ``strict=False`` would call that a transfer."""
         other = _Model()
         other.visual_encoder.backbone = nn.Sequential(nn.Conv2d(3, 6, 3), nn.ReLU())
         checkpoint = _write_checkpoint(tmp_path / "source.ckpt", other)
@@ -99,9 +89,6 @@ class TestTransfer:
             load_transferable_weights(_Model(), checkpoint, trust_pickle=True)
 
     def test_the_wrapped_patch_convolution_still_finds_its_source(self, tmp_path: Path):
-        """The geometry adapter renames the convolution it wraps. Without the
-        alias the patch embedding — the layer every pixel passes through — would
-        silently stay at its initialisation."""
         source = _Model()
         checkpoint = _write_checkpoint(tmp_path / "source.ckpt", source)
         target = _Model(extra_channels=2)

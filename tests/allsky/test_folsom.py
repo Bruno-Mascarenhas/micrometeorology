@@ -35,8 +35,9 @@ def _write_irradiance(path: Path, periods: int = 240) -> Path:
     return path
 
 
-def _write_frames(root: Path, named_utc: pd.DatetimeIndex, drift_s: np.ndarray) -> Path:
-    """Frames whose NAME says one time and whose mtime says that plus *drift_s*."""
+def _write_frames_with_mtime_drift(
+    root: Path, named_utc: pd.DatetimeIndex, drift_s: np.ndarray
+) -> Path:
     day = root / "20140601"
     day.mkdir(parents=True, exist_ok=True)
     for stamp, drift in zip(named_utc, drift_s, strict=True):
@@ -65,11 +66,9 @@ class TestFolsomSensor:
 
 class TestFrameTimestamps:
     def test_the_frame_time_is_the_modification_time_not_the_name(self, tmp_path: Path):
-        """File-name alignment costs 62.52 W/m2 of RMSE against 37.21 for
-        date-modified on this very dataset. The name is an assigned label."""
         named = pd.date_range("2014-06-01 18:00:00", periods=5, freq="1min", tz="UTC")
         drift = np.full(5, 12.0)
-        _write_frames(tmp_path, named, drift)
+        _write_frames_with_mtime_drift(tmp_path, named, drift)
 
         frames = read_folsom_frames(tmp_path)
 
@@ -84,27 +83,25 @@ class TestFrameTimestamps:
         everything — the modification time IS the capture instant, so there is
         nothing to arbitrate."""
         named = pd.date_range("2014-06-01 18:00:00", periods=6, freq="1min", tz="UTC")
-        _write_frames(tmp_path, named, np.array([1.0, 2.0, 300.0, 3.0, -700.0, 4.0]))
+        _write_frames_with_mtime_drift(
+            tmp_path, named, np.array([1.0, 2.0, 300.0, 3.0, -700.0, 4.0])
+        )
 
         assert len(read_folsom_frames(tmp_path)) == 6
 
-    def test_a_filename_without_a_stamp_is_refused(self, tmp_path: Path):
-        """The name is not the frame's time, but it is what the archive-integrity
-        check compares the modification time against — without it there is
-        nothing to check."""
+    def test_a_filename_without_a_stamp_is_refused_because_the_check_compares_against_it(
+        self, tmp_path: Path
+    ):
         named = pd.date_range("2014-06-01 18:00:00", periods=2, freq="1min", tz="UTC")
-        _write_frames(tmp_path, named, np.zeros(2))
+        _write_frames_with_mtime_drift(tmp_path, named, np.zeros(2))
         (tmp_path / "20140601" / "semdata.jpg").write_bytes(b"\xff\xd8\xff\xd9")
 
         with pytest.raises(ValueError, match="no YYYYMMDDHHMMSS stamp"):
             read_folsom_frames(tmp_path)
 
-    def test_an_archive_extracted_without_its_times_fails_loudly(self, tmp_path: Path):
-        """``tar -m`` discards modification times, which would silently leave
-        every frame stamped with the extraction moment. Hours of disagreement is
-        that, not a drifting camera clock."""
+    def test_an_archive_extracted_with_tar_m_fails_loudly(self, tmp_path: Path):
         named = pd.date_range("2014-06-01 18:00:00", periods=4, freq="1min", tz="UTC")
-        _write_frames(tmp_path, named, np.full(4, 86_400.0))
+        _write_frames_with_mtime_drift(tmp_path, named, np.full(4, 86_400.0))
 
         with pytest.raises(ValueError, match="extracted without its modification times"):
             read_folsom_frames(tmp_path)
@@ -116,11 +113,9 @@ class TestFrameTimestamps:
 
 class TestIrradianceInterpolation:
     def test_the_irradiance_is_evaluated_at_the_frame_instant(self, tmp_path: Path):
-        """A frame taken at :30 paired with the :00 sample is half a minute off,
-        and that error is largest exactly when cloud moves fastest."""
         sensor = read_folsom_sensor(_write_irradiance(tmp_path / "irr.csv"))
         named = pd.date_range("2014-06-01 14:10:00", periods=3, freq="1min", tz="UTC")
-        _write_frames(tmp_path / "frames", named, np.full(3, 30.0))
+        _write_frames_with_mtime_drift(tmp_path / "frames", named, np.full(3, 30.0))
         frames = read_folsom_frames(tmp_path / "frames")
 
         aligned = folsom_sensor_at(sensor, frames)
@@ -132,14 +127,11 @@ class TestIrradianceInterpolation:
     def test_the_measured_clock_offset_is_applied(self, tmp_path: Path):
         sensor = read_folsom_sensor(_write_irradiance(tmp_path / "irr.csv"))
         named = pd.date_range("2014-06-01 14:10:00", periods=1, freq="1min", tz="UTC")
-        _write_frames(tmp_path / "frames", named, np.zeros(1))
+        _write_frames_with_mtime_drift(tmp_path / "frames", named, np.zeros(1))
         frames = read_folsom_frames(tmp_path / "frames")
 
         aligned = folsom_sensor_at(sensor, frames)
 
-        # The frame sits on a whole minute; with the irradiance shifted by
-        # FOLSOM_TIMESTAMP_OFFSET_S it no longer coincides with a sample, so the
-        # value is interpolated and lands between the two neighbours.
         moment = pd.Timestamp(frames["timestamp"].iloc[0])
         neighbours = sensor["ghi"].reindex([moment, moment + pd.Timedelta("1min")], method="ffill")
         low, high = float(neighbours.iloc[0]), float(neighbours.iloc[1])
@@ -149,12 +141,8 @@ class TestIrradianceInterpolation:
 
 class TestFolsomSite:
     def test_the_site_carries_its_own_clock_not_the_stations(self):
-        """The offset travels with the coordinates precisely so this cannot
-        compute California geometry on a Salvador clock."""
         assert FOLSOM_SITE.utc_offset_hours == -8.0
         assert FOLSOM_SITE.latitude == pytest.approx(38.642)
 
-    def test_the_lost_timestamp_threshold_is_coarse_on_purpose(self):
-        """It answers "did the archive keep its times", not "which timestamp is
-        right" — the second question is already answered."""
+    def test_the_lost_timestamp_threshold_only_asks_whether_the_archive_kept_its_times(self):
         assert FOLSOM_LOST_TIMESTAMPS_S >= 3600.0

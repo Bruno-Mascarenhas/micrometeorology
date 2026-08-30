@@ -76,8 +76,6 @@ class _Stub(nn.Module):
 
 class TestWindowResolution:
     def test_a_window_never_crosses_a_day_boundary(self, tmp_path: Path):
-        """The night gap between the last frame of one day and the first of the
-        next is not a neighbourhood."""
         first, _root = _manifest(tmp_path / "a", periods=4)
         second, _ = _manifest(tmp_path / "b", periods=4)
         second["day_id"] = "other-day"
@@ -137,9 +135,7 @@ class TestWindowedImageDataset:
         assert item["frame_mask"].shape == (4,)
         assert bool(item["frame_mask"][0])
 
-    def test_the_padding_slots_are_marked_false(self, tmp_path: Path):
-        """The first row of a day has no earlier neighbour, so its window is
-        short and the empty slots must not read as sky."""
+    def test_a_days_first_row_has_its_padding_slots_marked_false(self, tmp_path: Path):
         manifest, root = _manifest(tmp_path)
         dataset = MultimodalImageDataset(
             manifest,
@@ -173,8 +169,6 @@ class TestWindowedImageDataset:
 
 class TestWindowedEncoder:
     def test_the_pooled_window_equals_the_mean_of_its_valid_frames(self):
-        """The whole point of folding the window into the batch is speed, not a
-        different answer."""
         encoder = ImageEncoder(_Stub()).eval()
         torch.manual_seed(0)
         window = torch.randn(3, 4, 3, 32, 32)
@@ -196,8 +190,6 @@ class TestWindowedEncoder:
         assert torch.allclose(pooled, expected, atol=1e-6)
 
     def test_padding_does_not_leak_into_the_pooled_embedding(self):
-        """A row with one real frame must equal that frame encoded alone,
-        whatever the padded slots contain."""
         encoder = ImageEncoder(_Stub()).eval()
         torch.manual_seed(1)
         window = torch.randn(1, 4, 3, 32, 32)

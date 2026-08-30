@@ -89,10 +89,6 @@ def resolve_time_windows(
     time order.  The row's own position is always included (distance zero), so a
     window is never empty.
 
-    All rows are resolved in one lexsort (day, then time, then original position)
-    rather than by rescanning the day column per day: each day's bounds are then a
-    pair of searchsorted calls over its sorted times.
-
     Parameters
     ----------
     manifest:
@@ -101,11 +97,7 @@ def resolve_time_windows(
         Full width of the window, in minutes.
     max_frames:
         Cap on members per row, evenly subsampled and always keeping the first
-        and last. ``None`` keeps every member. The image path needs this and the
-        embedding path does not: an embedding is a 384-float read, while a frame
-        is a decode plus a backbone forward, so a ten-minute window at this
-        camera's one-frame-per-minute cadence would be eleven forwards per
-        sample.
+        and last. ``None`` keeps every member.
 
     Returns
     -------
@@ -136,11 +128,8 @@ def resolve_time_windows(
 
 
 def _subsample_window(members: list[int], max_frames: int | None) -> list[int]:
-    """At most *max_frames* members, evenly spaced, keeping the ends."""
     if max_frames is None or len(members) <= max_frames:
         return members
-    # linspace over more members than picks steps by strictly more than one, so
-    # the rounded indices are strictly increasing and cannot repeat.
     picks = np.linspace(0, len(members) - 1, max_frames).round().astype(int)
     return [members[i] for i in picks.tolist()]
 
@@ -194,15 +183,7 @@ class _BaseMultimodalDataset:
 
     @property
     def served_targets(self) -> dict[str, np.ndarray]:
-        """The regression target arrays this dataset actually serves.
-
-        The target normalizer is fitted from HERE rather than from the manifest
-        column, so it is by construction the same quantity the head sees. Fitting
-        it from ``target_dhi`` while the dataset served ``DHI / DHI_clearsky``
-        denormalized a ratio with W/m2 statistics — the physical MAE came back as
-        274 W/m2 after one epoch against the raw arm's 29, which is how the defect
-        was found.
-        """
+        """The regression target arrays this dataset actually serves."""
         return {"dhi": self._dhi, "kindex": self._kindex}
 
     def set_epoch(self, epoch: int) -> None:
@@ -217,29 +198,6 @@ class _BaseMultimodalDataset:
         self.epoch = epoch
 
     def _dhi_scale_column(self, parameterization: str, utc_offset_hours: float) -> np.ndarray:
-        """Per-row divisor turning the DHI target into what the head fits.
-
-        ``raw`` gives exactly ``1.0``, so the raw path is unchanged bit for bit —
-        dividing and later multiplying by one is exact in floating point, and the
-        alternative, branching everywhere on the parameterization, is how the two
-        paths drift apart.
-
-        ``clearsky_index`` gives each row's clear-sky DHI
-        (:func:`allsky.clearsky.clearsky_diffuse`), so the head fits
-        ``DHI / DHI_clearsky`` and the engine and evaluator multiply back to
-        W m-2. That is the reference ``skill_clearsky`` is already scored
-        against, so the target is normalized by exactly the baseline it is
-        compared to.
-
-        Raises
-        ------
-        ValueError
-            If the manifest lacks the columns the reference needs, or if any row
-            would divide by a non-positive clear-sky DHI. The dataset's
-            ``min_solar_elevation_deg`` floor keeps the reference well above zero
-            (measured: 61.5 W m-2 at the 10-degree floor), so a non-positive value
-            means the manifest is not what this parameterization assumes.
-        """
         ones = np.ones(len(self.manifest), dtype=np.float32)
         if parameterization != "clearsky_index":
             return ones
@@ -408,7 +366,6 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
             raise ValueError(f"window_max_frames must be at least 1, got {window_max_frames}")
         self.window = window
         self.window_minutes = float(window_minutes)
-        #: Fixed padded window length ``T``, so the default collation can stack.
         self.seq_len = int(window_max_frames)
         self._windows: list[list[int]] = (
             resolve_time_windows(manifest, self.window_minutes, max_frames=self.seq_len)
@@ -425,16 +382,6 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
     def _geometry_source(
         self, manifest: pd.DataFrame, augment: AugmentationPipeline | None
     ) -> tuple[LensCalibration, np.ndarray, np.ndarray]:
-        """Calibration and per-row solar angles (degrees) for the geometry maps.
-
-        Raises
-        ------
-        ValueError
-            If the manifest lacks the solar angles or carries a non-finite one —
-            a NaN would silently become a NaN channel and poison the batch — or
-            if the augmentation translates the frame, which would move the image
-            under maps that do not move with it.
-        """
         missing = [c for c in ("solar_zenith", "solar_azimuth") if c not in manifest.columns]
         if missing:
             raise ValueError(
@@ -519,9 +466,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
 
         Under ``center_frame`` the item carries ``image`` ``(C, H, W)``. Under any
         windowed strategy it carries ``image_seq`` ``(T, C, H, W)`` zero-padded to
-        ``seq_len`` and ``frame_mask`` ``(T,)`` bool marking the real frames, the
-        same shape contract the embedding dataset uses — so one temporal pooler
-        serves both.
+        ``seq_len`` and ``frame_mask`` ``(T,)`` bool marking the real frames.
         """
         import torch
 
@@ -540,7 +485,6 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         return item
 
     def _frame_shape(self) -> tuple[int, int, int]:
-        """``(C, H, W)`` of one loaded frame, RGB plus any geometry channels."""
         return (3 + len(self._geometry_channels), self.image_size, self.image_size)
 
 
@@ -629,7 +573,6 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         return self._embedding_dim
 
     def _resolve_windows(self) -> list[list[int]]:
-        """This dataset's per-row windows (see :func:`resolve_time_windows`)."""
         return resolve_time_windows(self.manifest, self.window_minutes)
 
     def _read(self, sample_id: str) -> np.ndarray:

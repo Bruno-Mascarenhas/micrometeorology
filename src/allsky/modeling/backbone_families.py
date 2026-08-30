@@ -1,24 +1,10 @@
 """What fine-tuning needs from a backbone, per architecture family.
 
-Three things are asked of an image backbone here, and each is answered
-differently by a vision transformer and by a convolutional network:
-
-1. **pooling** — how a ``(B, C, H, W)`` frame becomes a ``(B, dim)`` embedding.
-   A DINOv2 ViT hands back a CLS token and patch tokens from
-   ``forward_features``; a ResNet has neither and pools its last feature map.
-2. **stages** — what ``unfreeze_last_n`` counts. Transformer blocks and residual
-   stages are not the same unit, and a run that unfroze "the last 2" of one
-   thinking it got the other would report a fine-tuning depth it never used.
-3. **the first convolution** — where extra input channels attach
-   (:mod:`allsky.modeling.geometry_adapter`). ``patch_embed.proj`` on a ViT,
-   ``conv1`` on a ResNet, the stem of ``features`` on an EfficientNet.
-
-A family that cannot answer one of them raises
-:class:`BackboneCapabilityError` rather than guessing. That is the whole point
-of the type: a config asking for geometry channels on a backbone that would
-silently drop them, or for ``unfreeze_last_n`` on one with no stages to count,
-is the inert-input defect this project has already paid for once — the model
-trains, the number comes back, and it answers a question nobody asked.
+A vision transformer and a convolutional network answer three questions
+differently: how a ``(B, C, H, W)`` frame becomes a ``(B, dim)`` embedding, what
+``unfreeze_last_n`` counts, and where extra input channels attach. A family that
+cannot answer one of them raises :class:`BackboneCapabilityError` rather than
+guessing.
 """
 
 from collections.abc import Sequence

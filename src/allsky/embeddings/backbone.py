@@ -58,14 +58,6 @@ Pooling = Literal["cls", "mean", "cls+mean"]
 #: Pooling names understood by every DINOv2 entrypoint.
 POOLINGS: tuple[str, ...] = get_args(Pooling)
 
-#: Backbone names the CLI / :func:`build_backbone` understands.
-#: Every backbone :func:`build_backbone` understands, across families. Derived
-#: from the same tables the builder dispatches on, so a new entrypoint cannot be
-#: accepted by the builder while the CLI's advertised list and the "available
-#: backbones" error message stay unaware of it. Defined after the classes for
-#: that reason.
-AVAILABLE_BACKBONES: tuple[str, ...] = ()
-
 
 def embedding_dim(model: str, pooling: str) -> int:
     """Output width of *model* under *pooling*.
@@ -235,7 +227,6 @@ class _TorchModuleBackbone:
         )
 
     def _build_module(self) -> Any:
-        """Construct the underlying torch module (subclass responsibility)."""
         raise NotImplementedError
 
     @property
@@ -245,7 +236,6 @@ class _TorchModuleBackbone:
         return family_for(self.name, self.pooling)
 
     def _ensure_model(self) -> None:
-        """Build the module once and move it to the resolved device."""
         if self._model is not None:
             return
         import torch
@@ -259,7 +249,6 @@ class _TorchModuleBackbone:
         self._model = model
 
     def load_torch_module(self) -> Any:
-        """The raw module, for gradient-carrying image-mode training."""
         self._ensure_model()
         return self._model
 
@@ -341,7 +330,6 @@ class DinoV2Backbone(_TorchModuleBackbone):
         super().__init__(pooling=pooling, device=device, dtype=dtype, image_size=image_size)
 
     def _build_module(self) -> Any:
-        """Fetch the pinned hub revision and build the model."""
         import torch
 
         return torch.hub.load(
@@ -409,7 +397,6 @@ class TorchvisionBackbone(_TorchModuleBackbone):
         super().__init__(pooling=pooling, device=device, dtype=dtype, image_size=image_size)
 
     def _build_module(self) -> Any:
-        """Build the network with its head replaced by an identity."""
         import torchvision.models as tvm
         from torch import nn
 
@@ -523,7 +510,6 @@ class Dinov3Backbone(_TorchModuleBackbone):
         super().__init__(pooling=pooling, device=device, dtype=dtype, image_size=image_size)
 
     def _build_module(self) -> Any:
-        """Import the backbone entrypoint from *repo_dir* and build it."""
         import importlib
         import sys
 
@@ -543,7 +529,6 @@ class Dinov3Backbone(_TorchModuleBackbone):
 
 
 def _default_dinov3_repo_dir() -> Path:
-    """Where ``torch.hub`` would have unpacked the DINOv3 source tree."""
     import torch
 
     return Path(torch.hub.get_dir()) / "facebookresearch_dinov3_main"
@@ -597,6 +582,7 @@ class FakeBackbone:
         return torch.from_numpy(vectors)
 
 
+#: Backbone names the CLI / :func:`build_backbone` understands.
 AVAILABLE_BACKBONES = (
     *_TOKEN_DIM,
     *Dinov3Backbone.TOKEN_DIM,

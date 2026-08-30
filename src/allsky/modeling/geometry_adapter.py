@@ -1,25 +1,13 @@
-"""Feeding extra channels to a pretrained ViT without disturbing its RGB weights.
+"""Feeding extra channels to a pretrained backbone without disturbing its RGB weights.
 
-A DINOv2 backbone tokenises with a single ``Conv2d(3, embed_dim, patch, patch)``
-in ``patch_embed.proj``. Extra input channels have to pass through it, and the
-two obvious routes both fail:
-
-- widening that convolution and zero-initialising the new slices puts the new
-  weights inside the backbone, where :class:`allsky.modeling.visual_encoder.ImageEncoder`
-  freezes them — ``patch_embed`` is not part of ``blocks``, so ``unfreeze_last_n``
-  never reaches it. Weights initialised at zero and frozen at zero make the extra
-  channels **structurally inert**: the arm returns the control's result and the
-  experiment reads as a null finding about the channels rather than about the
-  wiring;
-- initialising them randomly instead perturbs the pretrained tokenisation from
-  step 0, so the fine-tune starts from a backbone that is no longer the one the
-  pretraining produced.
-
-:class:`GeometryPatchProjection` avoids both: the pretrained convolution keeps
-its own weights and its own ``requires_grad``, a **separate** zero-initialised
-convolution reads the extra channels, and their outputs are summed. At
-initialisation the sum equals the pretrained projection exactly, and the new
-convolution is a normal trainable module that no backbone freeze sweep owns.
+Widening the pretrained convolution would put the new weights inside the
+backbone, where the freeze sweep owns them — ``patch_embed`` is not part of
+``blocks``, so ``unfreeze_last_n`` never reaches it, and channels initialised at
+zero and frozen at zero are structurally inert.
+:class:`GeometryPatchProjection` instead leaves the pretrained convolution
+untouched and sums a **separate** zero-initialised one reading the extra
+channels: at initialisation the sum equals the pretrained projection exactly,
+and the new convolution is a normal trainable module no freeze sweep owns.
 """
 
 import logging
@@ -46,7 +34,7 @@ def _pair(value: Any) -> tuple[int, int]:
 
 
 class PatchProjectionNotFoundError(TypeError):
-    """Raised when a backbone exposes no ``patch_embed.proj`` convolution to wrap."""
+    """Raised when a backbone exposes no first convolution to wrap."""
 
 
 class GeometryPatchProjection(nn.Module):

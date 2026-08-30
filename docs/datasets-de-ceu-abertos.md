@@ -77,3 +77,55 @@ Medido no `Folsom_irradiance.csv`: **1.552.320 linhas**, de 2014-01-02 08:00 a
 2016-12-31 07:59 UTC, cadência de 1 min, 618 NaN em `dhi` e **732.122 linhas com
 GHI > 20 W/m²**. Contra as 46.014 linhas em 81 dias desta estação, um ano de
 Folsom já é uma ordem de grandeza a mais.
+
+## O relógio do Folsom: qual timestamp é o instante de captura
+
+Cada quadro do Folsom carrega dois tempos que discordam: o do **nome do
+arquivo** e o da **data de modificação**. A escolha entre eles é a decisão mais
+consequente da ingestão, e é medida, não preferida.
+
+Varaschin & Silva (2025, arXiv:2503.21966, sec. 5.2.1) treinaram e testaram o
+mesmo modelo sob as quatro combinações e mediram que o alinhamento por nome de
+arquivo custa **62,52 W/m² de RMSE contra 37,21** do date-modified — 25 W/m² de
+diferença, maior que todo o espalhamento entre as dez arquiteturas que eles
+compararam.
+
+Dois fatos independentes dizem qual dos dois é o instante de captura:
+
+1. A discordância média diária entre os dois **deriva com o tempo**, de cerca de
+   zero no início de 2014 até uns **700 s** no fim de 2016 (Fig. 7 deles). Isso é
+   um relógio que nunca foi ressincronizado, não ruído.
+2. Os segundos do nome de arquivo **se acumulam em `:00` e `:59`** enquanto os
+   segundos da modificação se espalham uniformemente pelos sessenta (Fig. 8
+   deles). O nome é um rótulo atribuído; o mtime é quando o arquivo foi escrito.
+
+Medido no acervo de 2014 extraído aqui, sobre 250.609 quadros: mediana de 29,0 s
+de discordância, com degrau mensal (−79,2 s em junho). **45,7 % dos quadros
+pareariam com o minuto errado** se o nome fosse usado.
+
+### Por que não há filtro de 30 s
+
+`FOLSOM_LOST_TIMESTAMPS_S` é 6 h, não os 30 s por quadro de Varaschin & Silva
+(2025, sec. 3.6). Medido no acervo de 2014 extraído, sobre os primeiros 6.683
+quadros, a discordância já é **mediana 14 s, p95 34 s** — um portão de 30 s
+descartaria 12 % dos dias de abertura do ano, e com a deriva chegando a ~700 s no
+fim de 2016 o mesmo portão apagaria quase tudo, em silêncio. A taxa de descarte
+de 2,5 % que eles relatam descreve o subconjunto com que trabalharam, não uma
+ingestão de acervo inteiro.
+
+Como a data de modificação **é** o instante de captura, não há arbitragem por
+quadro a fazer. O que um teste ainda vale é pegar uma extração que jogou os
+tempos fora (`tar -m`), que aparece como discordância de horas ou dias, não de
+segundos.
+
+### Deslocamento do relógio de irradiância
+
+`FOLSOM_TIMESTAMP_OFFSET_S = -20,0 s`. O mesmo trabalho otimizou o deslocamento
+por dataset via validação cruzada e mediu −20 s como o melhor para Folsom, valendo
+40,24 → 37,21 W/m² de RMSE de teste. É pequeno ao lado do defeito do nome de
+arquivo, e está incluído por ser medido, não chutado.
+
+### O que foi ingerido
+
+230.791 linhas sobre 351 dias, elevação solar máxima de 74,8° — condizente com a
+teoria para 38,642°N.

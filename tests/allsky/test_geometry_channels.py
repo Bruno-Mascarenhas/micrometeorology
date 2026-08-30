@@ -89,12 +89,9 @@ class TestSolarGeometryMaps:
         assert disc.max() == pytest.approx(disc[round(row), round(col)], abs=1e-3)
         assert disc.min() < disc.max()
 
-    def test_the_zenith_channel_does_not_depend_on_where_the_sun_is(
+    def test_the_zenith_channel_is_a_fixed_spatial_prior_not_a_per_sample_signal(
         self, calibration: LensCalibration
     ):
-        """It is fixed for a fixed camera, so it is a spatial prior and not a
-        per-sample signal. Stating that here keeps a later reading of a null
-        result honest."""
         index = GEOMETRY_CHANNEL_NAMES.index("cos_pixel_zenith")
         morning = solar_geometry_maps(
             calibration, (FRAME_PX, FRAME_PX), sun_zenith_rad=1.2, sun_azimuth_rad=1.5
@@ -122,9 +119,6 @@ class TestChannelSelection:
         assert resolve_geometry_channels(None) == ()
 
     def test_a_subset_comes_back_in_the_canonical_order_however_it_was_asked_for(self):
-        """The plane a trained weight belongs to must not depend on the order
-        someone typed the names in, or a checkpoint would reload onto a
-        different channel than it was fitted on."""
         assert resolve_geometry_channels(["solar_disc", "cos_sun_angle"]) == (
             "cos_sun_angle",
             "solar_disc",
@@ -219,9 +213,6 @@ class _StubViT(nn.Module):
 
 class TestImageEncoderWiring:
     def test_the_extra_branch_trains_even_when_the_backbone_is_frozen(self):
-        """The failure this guards is silent: a zero-initialised projection that
-        the freeze sweep also owns leaves the channels inert, and the arm then
-        reports the control's error as evidence against the physics."""
         encoder = ImageEncoder(_StubViT(), frozen=True, unfreeze_last_n=1, extra_input_channels=3)
         adapter = encoder.extra_channel_projection
 
@@ -423,15 +414,6 @@ class TestConfigFlow:
 
 
 class TestBackboneFamilies:
-    """The families exist so a new architecture cannot be wired in silently wrong.
-
-    What is asserted here is refusal: a convolutional network asked for a token
-    pooling it does not have, a family nobody wrote, a backbone that cannot say
-    where the frame enters. Each of those, answered with a guess instead of an
-    error, produces a run that trains and reports a number for a question nobody
-    asked — which is the defect this project has already paid for once.
-    """
-
     def test_a_convolutional_family_refuses_token_pooling(self):
         with pytest.raises(BackboneCapabilityError, match="produces no tokens"):
             family_for("resnet50", "cls")
