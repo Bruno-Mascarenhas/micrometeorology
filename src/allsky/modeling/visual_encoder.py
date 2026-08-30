@@ -452,6 +452,12 @@ class _HubVisualBackbone(nn.Module):
         # which makes forward_features(...) un-analyzable. Runtime registration as a
         # submodule still happens because the assigned value *is* an nn.Module.
         self.model: Any = loader()
+        # Carried through so the checkpoint records WHICH architecture trained
+        # it. Without them the provenance said `_HubVisualBackbone` with a null
+        # revision — the wrapper's own class name — and a checkpoint could not
+        # say whether it was a DINOv2, a DINOv3, a ResNet or an EfficientNet.
+        self.name = str(getattr(backbone, "name", "") or type(backbone).__name__)
+        self.revision = getattr(backbone, "revision", None)
         self.family = self._family_of(backbone)
         self._warn_if_blocks_are_chunked()
 
