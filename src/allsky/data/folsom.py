@@ -304,6 +304,10 @@ def folsom_manifest_kwargs() -> dict[str, Any]:
         "diffuse_column": "dhi",
         "feature_set": "bare",
         "kindex_kind": "kstar",
+        # Seconds because Folsom's frames, stamped by modification time, land
+        # anywhere inside the minute; and its own prefix so a row from here can
+        # never be mistaken for one of the station's in a transfer workflow.
+        "sample_id_format": "folsom-%Y%m%d-%H%M%S",
     }
 
 

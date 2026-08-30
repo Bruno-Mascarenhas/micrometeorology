@@ -69,6 +69,14 @@ from labmim_core.solar import clearness_index, solar_azimuth_deg, solar_elevatio
 
 logger = logging.getLogger(__name__)
 
+#: How a frame's timestamp becomes its ``sample_id``. Minute resolution, because
+#: this station's camera writes one frame a minute and the identifier reads
+#: better without the seconds. A source whose frames land anywhere inside the
+#: minute — Folsom's do, once they are stamped by modification time — needs a
+#: finer format, and a prefix of its own so two archives can never produce the
+#: same identifier for different skies.
+DEFAULT_SAMPLE_ID_FORMAT = "allsky-%Y%m%d-%H%M"
+
 __all__ = [
     "TARGET_SOURCE_ERBS",
     "TARGET_SOURCE_MEASURED",
@@ -112,6 +120,7 @@ def build_manifest(
     far_distance_minutes: float | None = None,
     extra_features: Iterable[str] = (),
     sensor_timestamp_offset_minutes: float = 0.0,
+    sample_id_format: str = DEFAULT_SAMPLE_ID_FORMAT,
     config_sha256: str | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Build the v2 manifest DataFrame and its sidecar meta dict.
@@ -163,6 +172,11 @@ def build_manifest(
         half the strategy's ``max_distance_minutes``.
     extra_features:
         Extra engineered feature names appended to the resolved set.
+    sample_id_format:
+        ``strftime`` pattern building each row's ``sample_id`` from its frame
+        time. The default is this station's minute-resolution identifier; a
+        source with sub-minute frame times needs seconds in it, and one that may
+        be merged with another needs its own prefix.
     sensor_timestamp_offset_minutes:
         Minutes added to every sensor stamp before pairing, in minutes. The
         Campbell logger end-stamps its block averages, so ``-2.5`` moves a
@@ -328,8 +342,8 @@ def build_manifest(
         far_distance_minutes=far_distance_minutes,
     )
 
-    sample_id = [f"allsky-{ts:%Y%m%d-%H%M}" for ts in frame_times]
-    _check_sample_id_unique(sample_id)
+    sample_id = [format(ts, sample_id_format) for ts in frame_times]
+    _check_sample_id_unique(sample_id, sample_id_format)
     day_id = frame_times.strftime("%Y-%m-%d")
     site_tz = timezone(timedelta(hours=site.utc_offset_hours))
     timestamp_utc = frame_times.tz_localize(site_tz).tz_convert("UTC").as_unit("ns")
@@ -567,8 +581,8 @@ def _split_assignment_and_id(
     )
 
 
-def _check_sample_id_unique(sample_ids: list[str]) -> None:
-    """Raise if minute-resolution ``sample_id`` values collide (naming the minute)."""
+def _check_sample_id_unique(sample_ids: list[str], sample_id_format: str) -> None:
+    """Raise if two frames produce the same ``sample_id`` under *sample_id_format*."""
     index = pd.Index(sample_ids)
     duplicated = index[index.duplicated(keep=False)]
     if len(duplicated) == 0:
@@ -576,10 +590,9 @@ def _check_sample_id_unique(sample_ids: list[str]) -> None:
     colliding = sorted(set(duplicated))
     shown = ", ".join(colliding[:10]) + (" ..." if len(colliding) > 10 else "")
     raise ValueError(
-        f"duplicate sample_id after minute-resolution binning: {shown}. "
-        "sample_id is 'allsky-YYYYMMDD-HHMM' (minute cadence), so two frames in the "
-        "same minute collide. Space frames >= 1 min apart, or extend sample_id to "
-        "sub-minute resolution before building the manifest."
+        f"duplicate sample_id under {sample_id_format!r}: {shown}. Two frames fell in the "
+        "same bin, so the identifier no longer names one image. Give sample_id_format a "
+        "finer resolution, or space the frames further apart."
     )
 
 
