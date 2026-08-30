@@ -78,6 +78,70 @@ class EmbeddingReader(Protocol):
         ...
 
 
+def resolve_time_windows(
+    manifest: pd.DataFrame, window_minutes: float, *, max_frames: int | None = None
+) -> list[list[int]]:
+    """Per-row positional window members: same ``day_id``, within the window.
+
+    For each row the members are the positions whose ``day_id`` matches and whose
+    ``timestamp_utc`` is within ``window_minutes / 2`` of the row's own time, in
+    time order.  The row's own position is always included (distance zero), so a
+    window is never empty.
+
+    All rows are resolved in one lexsort (day, then time, then original position)
+    rather than by rescanning the day column per day: each day's bounds are then a
+    pair of searchsorted calls over its sorted times.
+
+    Parameters
+    ----------
+    manifest:
+        Frame carrying ``day_id`` and ``timestamp_utc``.
+    window_minutes:
+        Full width of the window, in minutes.
+    max_frames:
+        Cap on members per row, evenly subsampled and always keeping the first
+        and last. ``None`` keeps every member. The image path needs this and the
+        embedding path does not: an embedding is a 384-float read, while a frame
+        is a decode plus a backbone forward, so a ten-minute window at this
+        camera's one-frame-per-minute cadence would be eleven forwards per
+        sample.
+
+    Returns
+    -------
+    list of list of int
+        One list of manifest positions per row, in time order.
+    """
+    index = pd.DatetimeIndex(manifest["timestamp_utc"]).tz_convert("UTC").tz_localize(None)
+    times_ns = index.as_unit("ns").to_numpy().astype("int64")
+    day_codes = pd.factorize(manifest["day_id"].astype(str), sort=False)[0]
+    half_ns = round(window_minutes / 2.0 * NS_PER_MINUTE)
+    n_rows = len(manifest)
+    windows: list[list[int]] = [[] for _ in range(n_rows)]
+    order = np.lexsort((np.arange(n_rows), times_ns, day_codes))
+    sorted_days = day_codes[order]
+    sorted_times = times_ns[order]
+    day_starts = np.concatenate(
+        ([0], np.flatnonzero(sorted_days[1:] != sorted_days[:-1]) + 1, [n_rows])
+    )
+    for start, stop in itertools.pairwise(day_starts):
+        idx_sorted = order[start:stop]
+        t_sorted = sorted_times[start:stop]
+        low = np.searchsorted(t_sorted, t_sorted - half_ns, side="left")
+        high = np.searchsorted(t_sorted, t_sorted + half_ns, side="right")
+        for row, window_start, window_stop in zip(idx_sorted, low, high, strict=True):
+            members = idx_sorted[window_start:window_stop].tolist()
+            windows[int(row)] = _subsample_window(members, max_frames)
+    return windows
+
+
+def _subsample_window(members: list[int], max_frames: int | None) -> list[int]:
+    """At most *max_frames* members, evenly spaced, keeping the ends."""
+    if max_frames is None or len(members) <= max_frames:
+        return members
+    picks = np.linspace(0, len(members) - 1, max_frames).round().astype(int)
+    return [members[i] for i in dict.fromkeys(picks.tolist())]
+
+
 class _BaseMultimodalDataset:
     """Shared feature/target handling for the multimodal datasets."""
 
@@ -244,7 +308,9 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
     Each item is a dict of torch tensors:
 
     - ``features`` — float32 ``(F,)`` standardized sensor vector;
-    - ``image`` — float32 ``(C, H, W)``, resized to *image_size*: three
+    - ``image`` — float32 ``(C, H, W)`` under ``center_frame``, or ``image_seq``
+      ``(T, C, H, W)`` plus ``frame_mask`` ``(T,)`` under a windowed strategy;
+      resized to *image_size*, with three
       standardized RGB planes, plus the
       :data:`~allsky.geometry.GEOMETRY_CHANNEL_NAMES` maps when
       *geometry_channels* is set;
@@ -304,6 +370,9 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         seed: int = 0,
         geometry_channels: Sequence[str] = (),
         dhi_parameterization: str = "raw",
+        window: WindowMode = "center_frame",
+        window_minutes: float = 10.0,
+        window_max_frames: int = 5,
     ) -> None:
         super().__init__(
             manifest,
@@ -325,6 +394,19 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         # the model runs, or inference sees pixels training never produced.
         self.preprocess = preprocess
         self._seed = int(seed)
+        if window not in _WINDOW_MODES:
+            raise ValueError(f"window must be one of {_WINDOW_MODES}, got {window!r}")
+        if window_max_frames < 1:
+            raise ValueError(f"window_max_frames must be at least 1, got {window_max_frames}")
+        self.window = window
+        self.window_minutes = float(window_minutes)
+        #: Fixed padded window length ``T``, so the default collation can stack.
+        self.seq_len = int(window_max_frames)
+        self._windows: list[list[int]] = (
+            resolve_time_windows(manifest, self.window_minutes, max_frames=self.seq_len)
+            if window != "center_frame"
+            else []
+        )
         self._geometry_channels = tuple(geometry_channels)
         self._geometry = (
             self._geometry_source(manifest, augment if train else None)
@@ -425,12 +507,33 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         return augmented
 
     def __getitem__(self, idx: int) -> SampleTensors:
-        """Row *idx*: the shared target tensors plus ``image`` ``(C, H, W)`` float32."""
+        """Row *idx*: the shared targets plus its frame, or its window of frames.
+
+        Under ``center_frame`` the item carries ``image`` ``(C, H, W)``. Under any
+        windowed strategy it carries ``image_seq`` ``(T, C, H, W)`` zero-padded to
+        ``seq_len`` and ``frame_mask`` ``(T,)`` bool marking the real frames, the
+        same shape contract the embedding dataset uses — so one temporal pooler
+        serves both.
+        """
         import torch
 
         item = self._target_item(idx)
-        item["image"] = torch.from_numpy(self._load_image(self._paths[idx], idx))
+        if self.window == "center_frame":
+            item["image"] = torch.from_numpy(self._load_image(self._paths[idx], idx))
+            return item
+        members = self._windows[idx][: self.seq_len]
+        frames = np.zeros((self.seq_len, *self._frame_shape()), dtype=np.float32)
+        mask = np.zeros(self.seq_len, dtype=bool)
+        for slot, position in enumerate(members):
+            frames[slot] = self._load_image(self._paths[position], position)
+            mask[slot] = True
+        item["image_seq"] = torch.from_numpy(frames)
+        item["frame_mask"] = torch.from_numpy(mask)
         return item
+
+    def _frame_shape(self) -> tuple[int, int, int]:
+        """``(C, H, W)`` of one loaded frame, RGB plus any geometry channels."""
+        return (3 + len(self._geometry_channels), self.image_size, self.image_size)
 
 
 class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
@@ -516,37 +619,8 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         return self._embedding_dim
 
     def _resolve_windows(self) -> list[list[int]]:
-        """Per-row positional window members (same day_id, within window, ordered).
-
-        For each row the members are the positions whose ``day_id`` matches and
-        whose ``timestamp_utc`` is within ``window_minutes / 2`` of the row's own
-        time, in time order.  The row's own position is always included (distance
-        zero), so a window is never empty.
-
-        All rows are resolved in one lexsort (day, then time, then original
-        position) rather than by rescanning the day column per day: each day's
-        bounds are then a pair of searchsorted calls over its sorted times.
-        """
-        index = pd.DatetimeIndex(self.manifest["timestamp_utc"]).tz_convert("UTC").tz_localize(None)
-        times_ns = index.as_unit("ns").to_numpy().astype("int64")
-        day_codes = pd.factorize(self.manifest["day_id"].astype(str), sort=False)[0]
-        half_ns = round(self.window_minutes / 2.0 * NS_PER_MINUTE)
-        n_rows = len(self.manifest)
-        windows: list[list[int]] = [[] for _ in range(n_rows)]
-        order = np.lexsort((np.arange(n_rows), times_ns, day_codes))
-        sorted_days = day_codes[order]
-        sorted_times = times_ns[order]
-        day_starts = np.concatenate(
-            ([0], np.flatnonzero(sorted_days[1:] != sorted_days[:-1]) + 1, [n_rows])
-        )
-        for start, stop in itertools.pairwise(day_starts):
-            idx_sorted = order[start:stop]
-            t_sorted = sorted_times[start:stop]
-            low = np.searchsorted(t_sorted, t_sorted - half_ns, side="left")
-            high = np.searchsorted(t_sorted, t_sorted + half_ns, side="right")
-            for row, window_start, window_stop in zip(idx_sorted, low, high, strict=True):
-                windows[int(row)] = idx_sorted[window_start:window_stop].tolist()
-        return windows
+        """This dataset's per-row windows (see :func:`resolve_time_windows`)."""
+        return resolve_time_windows(self.manifest, self.window_minutes)
 
     def _read(self, sample_id: str) -> np.ndarray:
         """Read + validate the ``(D,)`` float32 embedding for *sample_id*."""

@@ -147,8 +147,10 @@ class DataSourceConfig(BaseModel):
     keep the lazy LRU path (e.g. when the store does not fit in memory).
 
     Windowed pooling is implemented for ``embedding`` mode only, so a windowed
-    ``alignment.strategy`` combined with ``input_mode: image`` is rejected rather
-    than silently reduced to a single centre frame.
+    A windowed ``alignment.strategy`` works in both modes — the image dataset
+    stacks the frames and the encoder mean-pools them — except
+    ``attention_pooling``, whose learned pooler exists only on the embedding
+    source and is rejected rather than silently replaced by the mean.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -162,13 +164,24 @@ class DataSourceConfig(BaseModel):
     alignment: AlignmentConfig = Field(default_factory=AlignmentConfig)
 
     @model_validator(mode="after")
-    def _windowed_pooling_needs_embedding_mode(self) -> DataSourceConfig:
-        if self.input_mode == "image" and self.alignment.strategy != "center_frame":
+    def _learned_pooling_needs_embedding_mode(self) -> DataSourceConfig:
+        """Refuse ``attention_pooling`` in image mode, where no pooler learns.
+
+        The mean-pooled window IS available for images: the dataset stacks the
+        frames and :class:`~allsky.modeling.visual_encoder.ImageEncoder` folds
+        them into the batch, runs the backbone once and takes the masked mean.
+        What image mode has no equivalent of is the LEARNED pooler — the
+        single-query attention that ``attention_pooling`` selects lives on
+        :class:`~allsky.modeling.visual_encoder.PrecomputedEmbedding`, and asking
+        for it here would train a model whose pooling is not the one the config
+        names.
+        """
+        if self.input_mode == "image" and self.alignment.strategy == "attention_pooling":
             raise ValueError(
-                f"alignment.strategy {self.alignment.strategy!r} pools every frame in the "
-                "window, which is implemented for input_mode 'embedding' only: the image "
-                "dataset has no windowing and the visual encoder ignores temporal_pooling "
-                "in image mode. Use input_mode: embedding, or strategy: center_frame."
+                "alignment.strategy 'attention_pooling' uses a learned pooler that exists "
+                "only on the precomputed-embedding source; image mode pools its window with "
+                "the mask-aware mean. Use input_mode: embedding, or strategy: "
+                "mean_embedding / center_frame."
             )
         return self
 

@@ -52,8 +52,38 @@ __all__ = [
     "PrecomputedEmbedding",
     "build_visual_encoder",
     "coerce_image_backbone",
+    "masked_mean_pool",
     "split_backbone_param_groups",
 ]
+
+
+def masked_mean_pool(sequence: Tensor, mask: Tensor | None) -> Tensor:
+    """Mean over ``T`` of a ``(B, T, D)`` window, ignoring masked-out steps.
+
+    Shared by the precomputed-embedding source and the windowed image encoder:
+    a window of frames and a window of embeddings are the same shape once the
+    backbone has run, so they pool the same way and cannot drift apart.
+
+    Parameters
+    ----------
+    sequence:
+        ``(B, T, D)`` float32.
+    mask:
+        ``(B, T)`` bool, True where the step is real; ``None`` pools everything.
+
+    Returns
+    -------
+    Tensor
+        ``(B, D)`` float32.
+    """
+    if mask is None:
+        pooled: Tensor = sequence.mean(dim=1)
+        return pooled
+    weights = mask.unsqueeze(-1).to(sequence.dtype)
+    summed = (sequence * weights).sum(dim=1)
+    count = weights.sum(dim=1).clamp_min(1.0)
+    masked: Tensor = summed / count
+    return masked
 
 
 def _projection(in_dim: int, out_dim: int | None, dropout: float) -> tuple[nn.Module, int]:
@@ -140,14 +170,7 @@ class PrecomputedEmbedding(nn.Module):
     @staticmethod
     def _pool(sequence: Tensor, mask: Tensor | None) -> Tensor:
         """Mean-pool a ``(B, T, D)`` window over ``T`` (masked when *mask* given)."""
-        if mask is None:
-            pooled: Tensor = sequence.mean(dim=1)
-            return pooled
-        weights = mask.unsqueeze(-1).to(sequence.dtype)
-        summed = (sequence * weights).sum(dim=1)
-        count = weights.sum(dim=1).clamp_min(1.0)
-        masked: Tensor = summed / count
-        return masked
+        return masked_mean_pool(sequence, mask)
 
     def _attention_pool(self, sequence: Tensor, mask: Tensor | None) -> Tensor:
         """Learned single-query attention pool of a ``(B, T, D)`` window over ``T``.
@@ -321,16 +344,39 @@ class ImageEncoder(nn.Module):
             Batch dict whose ``image`` entry is ``(B, C, H, W)`` float32,
             channels-first: the first three planes are the normalized RGB frame
             and any further ones are the extra maps the patch projection was
-            widened for (all dimensionless).
+            widened for (all dimensionless).  A windowed dataset sends
+            ``image_seq`` ``(B, T, C, H, W)`` and ``frame_mask`` ``(B, T)``
+            instead, and the window is mean-pooled after the backbone.
 
         Returns
         -------
         Tensor
             ``(B, out_dim)`` float32 visual embedding (dimensionless).
         """
-        features = self.backbone(batch["image"])
+        if "image_seq" in batch:
+            features = self._encode_window(batch["image_seq"], batch.get("frame_mask"))
+        else:
+            features = self.backbone(batch["image"])
         out: Tensor = self.projection(features)
         return out
+
+    def _encode_window(self, window: Tensor, mask: Tensor | None) -> Tensor:
+        """Encode a ``(B, T, C, H, W)`` window and mean-pool it to ``(B, dim)``.
+
+        The window is folded into the batch so the backbone runs ONCE over
+        ``B * T`` frames rather than T times over B — the cost is the same
+        arithmetic either way, but one launch keeps the GPU busy where T launches
+        of a B-sized batch would not.
+
+        Padded steps are encoded and then discarded by the mask rather than being
+        skipped: which steps are padding varies per row, so skipping them would
+        make the batch shape data-dependent and synchronise the device on every
+        forward.
+        """
+        batch_size, steps = window.shape[0], window.shape[1]
+        folded = window.reshape(batch_size * steps, *window.shape[2:])
+        encoded = self.backbone(folded).reshape(batch_size, steps, -1)
+        return masked_mean_pool(encoded, mask)
 
     def param_groups(self, backbone_lr: float) -> list[dict[str, Any]]:
         """Optimizer parameter groups putting the backbone on its own learning rate.

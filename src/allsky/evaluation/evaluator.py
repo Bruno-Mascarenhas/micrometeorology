@@ -542,6 +542,8 @@ def _build_split_dataset(
         preprocess=PreprocessingPipeline.from_config(cfg),
         geometry_channels=geometry_channels_of(cfg),
         dhi_parameterization=cfg.targets.dhi.parameterization,
+        window=cfg.data.alignment.strategy,
+        window_minutes=cfg.data.alignment.window_minutes,
     )
     return dataset, None
 

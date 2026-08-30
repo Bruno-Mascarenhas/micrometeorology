@@ -1,0 +1,47 @@
+# Cinco frames em vez de um: movimento de nuvem.
+#
+# O que governa a variabilidade da difusa e a nuvem se movendo, e um frame
+# sozinho nao mostra movimento. Este braco da a rede uma janela de ate 5 frames
+# centrada na amostra, dentro de 5 minutos e do MESMO dia, e faz a media
+# mascarada das codificacoes.
+#
+# CUSTO: o backbone roda uma vez por frame. Na RTX 2060 a epoca do controle e de
+# ~114 s, entao este braco deve ficar perto de 570 s — cerca de 9,5 min por
+# epoca, ou ~6 h para as 40. E o candidato natural ao Colab.
+#
+# A janela nunca cruza a fronteira do dia: o intervalo noturno entre o ultimo
+# frame de um dia e o primeiro do seguinte nao e vizinhanca. Linhas no comeco do
+# dia tem janela curta, e os slots vazios sao zerados E marcados na mascara, para
+# nao entrarem na media como se fossem ceu.
+#
+# `window_max_frames: 5` limita o custo: a 1 frame por minuto, uma janela de 5
+# minutos daria 6 membros, e a subamostragem mantem as pontas e afina o meio.
+#
+# Controle: o braco `iso` — mesma rede, mesmo alvo, mesmas 7.138 linhas,
+# diferindo so em data.alignment.strategy.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: janela_s42
+output_dir: output/allsky-mm/experiments/janela/janela_s42
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso
+  input_mode: image
+  alignment:
+    strategy: mean_embedding
+    window_minutes: 5.0
+targets:
+  dhi:
+    loss: mae
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  num_workers: 8

@@ -68,20 +68,33 @@ class TestAlignmentStrategy:
 
 
 class TestWindowedPoolingNeedsEmbeddingMode:
-    """Image mode has no windowing, so asking for it must not be silent.
+    """Only the LEARNED pooler is embedding-only, and asking for it must not be silent.
 
-    ``MultimodalImageDataset`` never windows and ``build_visual_encoder`` ignores
-    ``temporal_pooling`` in image mode, so ``mean_embedding`` + ``input_mode:
-    image`` used to train a plain centre-frame model while the config — and the
-    manifest meta derived from it — reported a windowed experiment.
+    Image mode gained a real window: the dataset stacks the frames and the
+    encoder folds them into the batch and takes the masked mean. What image mode
+    still has no equivalent of is ``attention_pooling``'s single-query pooler,
+    which lives on ``PrecomputedEmbedding``. Accepting it there would train a
+    model whose pooling is not the one the config names — the same defect this
+    guard was written for when NO windowing existed in image mode.
     """
 
-    @pytest.mark.parametrize("strategy", ["mean_embedding", "attention_pooling"])
-    def test_windowed_strategy_with_image_mode_is_rejected(self, strategy):
-        with pytest.raises(ValidationError, match="input_mode 'embedding' only"):
+    def test_the_learned_pooler_is_rejected_in_image_mode(self):
+        with pytest.raises(ValidationError, match="learned pooler"):
             ExperimentConfig.model_validate(
-                {"data": {"input_mode": "image", "alignment": {"strategy": strategy}}}
+                {
+                    "data": {
+                        "input_mode": "image",
+                        "alignment": {"strategy": "attention_pooling"},
+                    }
+                }
             )
+
+    def test_the_mean_pooled_window_is_accepted_in_image_mode(self):
+        cfg = ExperimentConfig.model_validate(
+            {"data": {"input_mode": "image", "alignment": {"strategy": "mean_embedding"}}}
+        )
+
+        assert cfg.data.alignment.strategy == "mean_embedding"
 
     def test_windowed_strategy_with_embedding_mode_is_accepted(self):
         cfg = ExperimentConfig.model_validate(

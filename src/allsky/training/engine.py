@@ -635,6 +635,8 @@ def _build_datasets(
         seed=cfg.seed,
         geometry_channels=geometry_channels_of(cfg),
         dhi_parameterization=cfg.targets.dhi.parameterization,
+        window=cfg.data.alignment.strategy,
+        window_minutes=cfg.data.alignment.window_minutes,
     )
     image_val = MultimodalImageDataset(
         val_df,
@@ -646,6 +648,8 @@ def _build_datasets(
         preprocess=preprocess,
         geometry_channels=geometry_channels_of(cfg),
         dhi_parameterization=cfg.targets.dhi.parameterization,
+        window=cfg.data.alignment.strategy,
+        window_minutes=cfg.data.alignment.window_minutes,
     )
     return image_train, image_val, None
 
