@@ -47,9 +47,15 @@ WHAT IS LEGAL, AND WHY
     Sun-centred polar re-parameterisation (SPIN, Paletta et al., CVPR 2022
     OmniCV workshop, arXiv:2111.14507). Rotational invariance about the sun
     becomes translational invariance, and the circumsolar annulus — which
-    governs the diffuse/direct split — is magnified. **Requires the lens
-    projection**, so it stays inert until a calibration supplies the sun's pixel
-    position; see :class:`~allsky.lens.LensCalibration`.
+    governs the diffuse/direct split — is magnified. **Requires the sun's pixel
+    position**, which :meth:`~allsky.lens.LensCalibration.pixel_of` computes from
+    a calibration and a solar direction. The calibration exists — 415 sun
+    detections over 9 days, equidistant law, 6.67 px median residual, recorded in
+    ``configs/allsky/data/local_prepare_iso.yaml`` — and the isotropic
+    re-extraction makes it analytic in model coordinates (concentric disc, radius
+    = half the frame). What is still missing is the plumbing: no caller hands a
+    :class:`~allsky.lens.LensCalibration` and a per-sample sun direction to this
+    module, so the function stays unused by the training path.
 
 All functions take and return ``(3, H, W)`` float32 CHW arrays in ``[0, 1]`` —
 BEFORE the DINOv2 standardisation, which must stay last so the backbone always
@@ -282,11 +288,13 @@ class AugmentationPipeline:
     Notes
     -----
     :func:`random_erasing` is called WITHOUT ``keep_solar_disc``: protecting the
-    sun needs its pixel position, which needs the lens projection this site does
-    not have yet (see :class:`~allsky.lens.LensCalibration`). Until then an erased rectangle
-    can land on the solar disc, which changes the physics rather than adding a
-    nuisance — so ``p_erase`` should stay low, and the guard should be wired
-    through the moment a calibration exists.
+    sun needs its pixel position, and this pipeline receives neither a
+    :class:`~allsky.lens.LensCalibration` nor a per-sample solar direction — only
+    a frame and a generator. The site's calibration is no longer the obstacle
+    (see the module docstring); the missing piece is a sun position on the call.
+    Until it arrives an erased rectangle can land on the solar disc, which
+    changes the physics rather than adding a nuisance, so ``p_erase`` should stay
+    low.
     """
 
     p_exposure: float = 0.0

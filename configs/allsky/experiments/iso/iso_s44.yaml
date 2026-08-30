@@ -1,25 +1,30 @@
-# The camera's own light meter, as two scalars beside the image.
+# The isotropic re-extraction: a fisheye disc that is actually round.
 #
-# The auto-exposure spans 1340x over a day (211 us at noon, 282.95 ms at 17:41),
-# so the pixels the model sees carry almost no absolute radiance: mean brightness
-# is ANTI-correlated with DHI (r = -0.564, negative in every elevation band).
-# The exposure time the camera burns into each frame recovers it. With
-# log2_relative_radiance = log2(linear luma / exposure_s):
+# Resizing 1920x1080 straight to 512x512 squashes the horizontal axis by 1.78,
+# so the dome reaches the model as an ellipse, and every construct that assumes
+# the optics — a circular ROI mask, the sun-centred polar unwrapping of
+# allsky.augmentation.polar_unwrap, any per-pixel geometry map — then describes
+# an image the camera never produced. This arm rebuilds the dataset through the
+# crop/pad of configs/allsky/data/local_prepare_iso.yaml, which carries the lens
+# fit (415 sun detections over 9 days, equidistant law, 6.67 px median residual)
+# and leaves the disc concentric and inscribed: radius 256 at (256, 256) in the
+# 512 px frame, and radius 112 at (112, 112) once the 224 px model input squares
+# it. In those coordinates centre and radius are analytic; the only fitted term
+# left is the mount rotation.
 #
-#   r with DHI:  solar elevation +0.489 | log2_exposure_s -0.834 | radiance +0.903
+# Held against loss_mae, which differs in data.data_root and in nothing else.
+# Three seeds each, over the SAME 7,138 test rows — compared sample id by sample
+# id, not by count. control / exposure / shuffled ran on a 7,122-row subset of
+# those rows, so they are not a valid reference for this arm:
 #
-# and, unlike every other predictor measured here, the relation is STATIONARY
-# across the temporal splits — DHI = a * log2(radiance) + b fits a = 75.9 (train),
-# 73.3 (val), 74.7 (test), a 3.4 % spread, while the same fit on solar elevation
-# drifts 20 % (3.14 -> 2.72 -> 2.50) as the season advances. That is the defect
-# this arm targets: 31.6 % of the test rows sit above the train p95 elevation, and
-# a predictor whose slope survives that shift is what the network lacks.
+#   iso       19.94 +/- 0.35 W/m2 test DHI RMSE   MAE 13.94   MBE -8.30
+#   loss_mae  19.63 +/- 0.60
 #
-# It is measurably absent from the trained model: the residual of loss_mae still
-# correlates with radiance at r = -0.50 (s42) and -0.36 (s43).
-#
-# Everything else is held at the control (loss_mae, 19.63 +/- 0.60 over three
-# seeds), so a difference here is attributable to the two features.
+# The error does not move — a fine-tuned backbone absorbs a fixed anisotropy.
+# What the arm buys is downstream: polar unwrapping, angular coordinates and
+# per-pixel geometry channels are only well defined on frames whose disc is
+# round. Note that this dataset's manifest does NOT carry log2_exposure_s /
+# log2_relative_radiance; an arm that needs the exposure has to reproduce them.
 extends: [../_base.yaml, ../../models/image_only.yaml]
 name: iso_s44
 output_dir: output/allsky-mm/experiments/iso/iso_s44
