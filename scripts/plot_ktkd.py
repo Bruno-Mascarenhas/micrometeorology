@@ -34,8 +34,8 @@ import pandas as pd
 import typer
 from matplotlib.colors import LogNorm
 
-from micrometeorology.common.git import run_git, source_root
-from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
+from labmim_core.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
+from micrometeorology.common.git import short_commit
 from micrometeorology.stats import ktkd as ktkd_stats
 from micrometeorology.stats.sky_condition import sky_condition_summary
 
@@ -148,7 +148,7 @@ def render(input_path: Path, output_dir: Path) -> Path:
     figure, scores = build_figure(hourly)
     output_dir.mkdir(parents=True, exist_ok=True)
     destination = output_dir / "ktkd.png"
-    commit = run_git(["rev-parse", "--short", "HEAD"], cwd=source_root()) or "unknown"
+    commit = short_commit() or "unknown"
     figure.savefig(
         destination,
         dpi=300,

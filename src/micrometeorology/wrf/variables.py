@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from allsky.solar import SOLAR_CONSTANT_WM2, eccentricity_correction
+from labmim_core.solar import SOLAR_CONSTANT_WM2, eccentricity_correction
 from micrometeorology.common.physics import (
     KELVIN_AT_ZERO_CELSIUS,
     PASCAL_PER_HECTOPASCAL,
@@ -491,7 +491,7 @@ def compute_clearness_index(swdown: NDArray, coszen: NDArray, eccentricity: NDAr
     Formula
         ``kt = SWDOWN / (S0 * E0 * cos(z))`` from ``SWDOWN`` (W/m2), ``COSZEN``
         and the per-step Sun-Earth distance correction — Duffie & Beckman
-        eq. (1.10.1), the same definition as :func:`allsky.solar.clearness_index`
+        eq. (1.10.1), the same definition as :func:`labmim_core.solar.clearness_index`
         so WRF and the all-sky camera pipeline share one axis. Lower case ``kt``
         is deliberate: Duffie & Beckman sect. 2.9 reserve it for the sub-daily
         index and upper-case ``K_T`` for the daily one, and this field is

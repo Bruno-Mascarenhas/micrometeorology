@@ -23,13 +23,17 @@ run in tests or CI — use :class:`FakeBackbone` there.
 
 import hashlib
 from collections.abc import Sequence
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, get_args, runtime_checkable
 
 import numpy as np
 
+from allsky.config import DEFAULT_IMAGE_SIZE
+from allsky.frame_pixels import resize_bilinear
+from allsky.preprocessing import IMAGENET_MEAN, IMAGENET_STD
+
 #: ``torch.hub`` GitHub repo hosting the DINOv2 entrypoints.
 DINOV2_REPO = "facebookresearch/dinov2"
-#: The DINOv2 ViT-S/14 entrypoint (384-dim patch/CLS tokens, patch size 14).
+#: Default DINOv2 entrypoint (ViT-S/14, 384-dim tokens, patch size 14).
 DINOV2_MODEL = "dinov2_vits14"
 #: Pinned commit of ``facebookresearch/dinov2`` (the ``main`` HEAD resolved at
 #: implementation time, 2026-07-19).  DINOv2 publishes no release tags, so a
@@ -38,17 +42,41 @@ DINOV2_MODEL = "dinov2_vits14"
 #: model code + weights reproducible across machines and time.
 DINOV2_REVISION = "7764ea0f912e53c92e82eb78a2a1631e92725fc8"
 
-#: ImageNet channel means/stds DINOv2 was trained with (RGB, [0, 1] scaled).
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
-
-#: Pooling name -> output embedding dimension for DINOv2 ViT-S/14 (384-dim).
-_POOLING_DIM = {"cls": 384, "mean": 384, "cls+mean": 768}
+#: DINOv2 entrypoint -> token width. All four share patch size 14, so
+#: ``image_size`` stays a multiple of 14 regardless of which one is selected.
+_TOKEN_DIM: dict[str, int] = {
+    "dinov2_vits14": 384,
+    "dinov2_vitb14": 768,
+    "dinov2_vitl14": 1024,
+    "dinov2_vitg14": 1536,
+}
 
 Pooling = Literal["cls", "mean", "cls+mean"]
 
+#: Pooling names understood by every DINOv2 entrypoint.
+POOLINGS: tuple[str, ...] = get_args(Pooling)
+
 #: Backbone names the CLI / :func:`build_backbone` understands.
-AVAILABLE_BACKBONES = ("dinov2_vits14", "fake")
+AVAILABLE_BACKBONES = (*_TOKEN_DIM, "fake")
+
+
+def embedding_dim(model: str, pooling: str) -> int:
+    """Output width of *model* under *pooling*.
+
+    ``cls+mean`` concatenates the CLS token with the patch-token mean, so it is
+    twice the model's token width; the other poolings are one token wide.
+
+    Raises
+    ------
+    ValueError
+        For an unknown *model* or *pooling*.
+    """
+    if model not in _TOKEN_DIM:
+        raise ValueError(f"unknown DINOv2 model {model!r}; expected one of {sorted(_TOKEN_DIM)}")
+    if pooling not in POOLINGS:
+        raise ValueError(f"unknown pooling {pooling!r}; expected one of {sorted(POOLINGS)}")
+    return _TOKEN_DIM[model] * (2 if pooling == "cls+mean" else 1)
+
 
 __all__ = [
     "AVAILABLE_BACKBONES",
@@ -57,10 +85,12 @@ __all__ = [
     "DINOV2_REVISION",
     "IMAGENET_MEAN",
     "IMAGENET_STD",
+    "POOLINGS",
     "DinoV2Backbone",
     "FakeBackbone",
     "VisualBackbone",
     "build_backbone",
+    "embedding_dim",
 ]
 
 
@@ -114,20 +144,21 @@ def _resize_uint8(image: np.ndarray, size: int) -> np.ndarray:
     arr = arr.astype(np.uint8, copy=False)
     if arr.shape[0] == size and arr.shape[1] == size:
         return np.ascontiguousarray(arr)
-    from PIL import Image
-
-    resized = Image.fromarray(arr).resize((size, size), Image.Resampling.BILINEAR)
-    return np.ascontiguousarray(np.asarray(resized, dtype=np.uint8))
+    return np.ascontiguousarray(resize_bilinear(arr, size), dtype=np.uint8)
 
 
 class DinoV2Backbone:
-    """DINOv2 ViT-S/14 backbone (``torch.hub``, pinned revision, ImageNet norm).
+    """DINOv2 ViT-*/14 backbone (``torch.hub``, pinned revision, ImageNet norm).
 
     Parameters
     ----------
+    model:
+        A DINOv2 entrypoint from :data:`AVAILABLE_BACKBONES`; every one has
+        patch size 14, so ``image_size`` stays a multiple of 14 for all of them.
     pooling:
-        Token pooling: ``"cls"`` (CLS token, 384-d), ``"mean"`` (mean of patch
-        tokens, 384-d) or ``"cls+mean"`` (concatenation, 768-d).
+        Token pooling: ``"cls"``, ``"mean"`` (both one token wide) or
+        ``"cls+mean"`` (concatenation, twice that). :func:`embedding_dim` is
+        the authority on the resulting width.
     device:
         ``"auto"`` (cuda -> mps -> cpu), or an explicit torch device string.
     dtype:
@@ -145,23 +176,23 @@ class DinoV2Backbone:
     batched precisely so no data-loader worker triggers a duplicate download.
     """
 
-    name = DINOV2_MODEL
+    name: str
 
     def __init__(
         self,
         *,
+        model: str = DINOV2_MODEL,
         pooling: Pooling = "cls",
         device: str = "auto",
         dtype: Literal["fp16", "fp32"] = "fp16",
-        image_size: int = 224,
+        image_size: int = DEFAULT_IMAGE_SIZE,
     ) -> None:
-        if pooling not in _POOLING_DIM:
-            raise ValueError(f"unknown pooling {pooling!r}; expected one of {sorted(_POOLING_DIM)}")
         if image_size % 14 != 0:
             raise ValueError(f"image_size {image_size} must be a multiple of the patch size (14)")
+        self.name = model
         self.revision = DINOV2_REVISION
         self.pooling: str = pooling
-        self.dim = _POOLING_DIM[pooling]
+        self.dim = embedding_dim(model, pooling)
         self.dtype = dtype
         self.image_size = image_size
         self._device_pref = device
@@ -182,7 +213,7 @@ class DinoV2Backbone:
         self._device = torch.device(resolve_device(self._device_pref))
         model = torch.hub.load(
             f"{DINOV2_REPO}:{DINOV2_REVISION}",
-            DINOV2_MODEL,
+            self.name,
             trust_repo=True,
         )
         model.eval()
@@ -344,8 +375,8 @@ def build_backbone(
     """
     if name == "fake":
         return FakeBackbone(dim=fake_dim)
-    if name == DINOV2_MODEL:
-        return DinoV2Backbone(pooling=pooling, device=device, dtype=dtype)
+    if name in _TOKEN_DIM:
+        return DinoV2Backbone(model=name, pooling=pooling, device=device, dtype=dtype)
     raise ValueError(
         f"unknown backbone {name!r}; available backbones: {', '.join(AVAILABLE_BACKBONES)}"
     )

@@ -22,26 +22,366 @@ frames that are unusable for radiometric reasons:
 Everything is pure numpy + PIL: importing this module never pulls torch.
 """
 
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 
-from allsky.config import CropConfig, PrepareConfig
+from allsky.config import (
+    TIMESTAMP_BAND_FRACTION,
+    CropConfig,
+    ExperimentConfig,
+    OverlayPolicy,
+    PadConfig,
+    PrepareConfig,
+)
 from allsky.data.contracts import QCFlag
+from allsky.frame_pixels import as_rgb_uint8 as _as_rgb_uint8
+from allsky.frame_pixels import decode_rgb, decode_rgb_resized, resize_bilinear
+from allsky.lens import LensCalibration
 
 __all__ = [
     "DARK_LUMINANCE_THRESHOLD",
+    "IMAGENET_MEAN",
+    "IMAGENET_STD",
     "SATURATED_FRACTION_THRESHOLD",
     "SATURATED_LEVEL",
+    "TIMESTAMP_BAND_FRACTION",
+    "OverlayPolicy",
+    "PreprocessingPipeline",
     "apply_static_mask",
     "center_crop",
     "estimate_circular_mask",
+    "imagenet_standardize",
     "load_mask",
+    "model_input_frame",
+    "pad_frame",
     "process_frame",
+    "remove_timestamp_band",
     "resize_image",
     "resolve_mask",
     "visual_qc",
 ]
+
+#: Channel mean/std DINOv2 was pretrained with. Every path that feeds the
+#: backbone must standardize with these: the model was trained on inputs with
+#: roughly zero mean and unit variance per channel, and a raw ``[0, 1]`` frame
+#: sits about 1.3 sigma low on red with a quarter of the expected spread.
+IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
+IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
+
+# Broadcast-shaped once at import: this runs per sample in the dataloader.
+_IMAGENET_MEAN_CHW = np.asarray(IMAGENET_MEAN, dtype=np.float32).reshape(3, 1, 1)
+_IMAGENET_STD_CHW = np.asarray(IMAGENET_STD, dtype=np.float32).reshape(3, 1, 1)
+_IMAGENET_MEAN_CHW.flags.writeable = False
+_IMAGENET_STD_CHW.flags.writeable = False
+
+#: The ``fill`` constant on the native uint8 scale. The float route writes
+#: :data:`IMAGENET_MEAN` and the dataset re-quantises it; these are the levels
+#: that round trip lands on, so the uint8 route writes them directly.
+_FILL_LEVELS = np.round(np.asarray(IMAGENET_MEAN, dtype=np.float64) * 255.0).astype(np.uint8)
+_FILL_LEVELS.flags.writeable = False
+
+
+def imagenet_standardize(chw: np.ndarray, *, copy: bool = True) -> np.ndarray:
+    """Standardize a CHW float array in ``[0, 1]`` by the DINOv2 channel stats.
+
+    Parameters
+    ----------
+    chw:
+        ``(3, H, W)`` float32 array scaled to ``[0, 1]``.
+    copy:
+        ``False`` standardizes in place and returns *chw* itself, which saves
+        two full-frame allocations per call — 0.5 ms on a 224 px frame, about
+        19 s of worker CPU per epoch, measured. Pass it only when the buffer is
+        yours; it requires float32, since in place there is no cast to land on.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(3, H, W)`` float32, dimensionless, standardized per channel.
+
+    Raises
+    ------
+    TypeError
+        If ``copy=False`` is passed for an array that is not float32.
+    """
+    if not copy:
+        if chw.dtype != np.float32:
+            raise TypeError(f"in-place standardisation needs float32, got {chw.dtype}")
+        chw -= _IMAGENET_MEAN_CHW
+        chw /= _IMAGENET_STD_CHW
+        return chw
+    standardized = (chw - _IMAGENET_MEAN_CHW) / _IMAGENET_STD_CHW
+    return standardized.astype(np.float32, copy=False)
+
+
+def remove_timestamp_band(
+    chw: np.ndarray,
+    *,
+    policy: OverlayPolicy = "fill",
+    band_fraction: float = TIMESTAMP_BAND_FRACTION,
+    fill_value: tuple[float, float, float] = IMAGENET_MEAN,
+) -> np.ndarray:
+    """Deal with the camera's burned-in timestamp at the top of the frame.
+
+    The overlay is static furniture: it is not sky, it carries no irradiance
+    information, and at 224 px it covers four of the sixteen patch rows. An
+    occlusion probe on a trained checkpoint measured the band at 1.4-1.6x the
+    weight of an equal-area sky band — real, but far from the dominant signal,
+    so do not expect removing it to transform the model.
+
+    Parameters
+    ----------
+    chw:
+        ``(3, H, W)`` float32 in ``[0, 1]``.
+    policy:
+        ``keep`` leaves the frame untouched (historical default).
+
+        ``fill`` paints the band with :data:`IMAGENET_MEAN`. **This is the
+        recommended setting.** It removes the glyphs, fabricates nothing, and
+        leaves the rest of the geometry intact. It does create a hard horizontal
+        edge, but a ViT reads that as a set of constant tokens, which is far more
+        benign than it would be for a CNN. The constant standardises to ``0``,
+        though exactly ``0`` only on the direct path: the dataset re-quantises
+        through uint8 and resizes first, which leaves the band near 8e-3
+        (measured) and blurs its lower edge.
+
+        ``inpaint`` mirrors the rows below the band back over it. The seam is
+        smoother, but that smoothness is the problem: a diffuse-irradiance
+        regressor consumes cloud texture, and mirroring fabricates plausible sky
+        texture across 14.6 % of the frame — a systematic, deterministic
+        hallucination the model will read as real cloud. Offered for ablation.
+
+        ``crop`` removes the band and pads at the bottom. It discards physics:
+        those rows are genuine low-elevation dome, and horizon brightness is a
+        real contributor to DHI. Ablation only.
+    band_fraction:
+        Height of the band as a fraction of the frame. Measured on this camera:
+        the overlay reaches y=75 of 512 (0.1465); the default adds a margin.
+    fill_value:
+        Per-channel constant for ``fill``; defaults to :data:`IMAGENET_MEAN`.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(3, H, W)`` float32; the same array when *policy* is ``keep``.
+    """
+    if policy == "keep":
+        return chw
+    band = _band_rows(chw.shape[1], band_fraction)
+    if policy == "fill":
+        out = chw.copy()
+        out[:, :band, :] = np.asarray(fill_value, dtype=np.float32).reshape(3, 1, 1)
+        return out
+    if policy == "inpaint":
+        # Mirror the rows immediately below the band back up over it: the sky
+        # gradient continues instead of stopping at a synthetic edge.
+        source = chw[:, band : 2 * band, :]
+        if source.shape[1] < band:
+            source = np.repeat(chw[:, band : band + 1, :], band, axis=1)
+        out = chw.copy()
+        out[:, :band, :] = source[:, ::-1, :]
+        return out
+    if policy == "crop":
+        cropped = chw[:, band:, :]
+        pad = np.repeat(cropped[:, -1:, :], band, axis=1)
+        return np.ascontiguousarray(np.concatenate([cropped, pad], axis=1))
+    raise ValueError(f"unknown overlay policy {policy!r}")
+
+
+def _band_rows(height: int, band_fraction: float) -> int:
+    """How many rows the overlay band covers, shared by both frame layouts.
+
+    Raises
+    ------
+    ValueError
+        If the band would cover the whole frame.
+    """
+    band = max(1, round(band_fraction * height))
+    if band >= height:
+        raise ValueError(f"band {band} covers the whole frame of height {height}")
+    return band
+
+
+@lru_cache(maxsize=8)
+def _roi_keep(height: int, width: int, radius_fraction: float) -> np.ndarray:
+    """Read-only ``(H, W)`` float32 keep-mask, built once per geometry.
+
+    The disc depends only on the frame shape and the radius, all fixed for a
+    run, but this is called once per sample in the dataloader.
+    """
+    keep = estimate_circular_mask((height, width), radius_fraction=radius_fraction)
+    as_float = keep.astype(np.float32)
+    as_float.flags.writeable = False
+    return as_float
+
+
+@lru_cache(maxsize=8)
+def _roi_drop_uint8(height: int, width: int, radius_fraction: float) -> np.ndarray:
+    """Read-only ``(H, W)`` bool array marking the pixels the ROI discards."""
+    drop = ~estimate_circular_mask((height, width), radius_fraction=radius_fraction)
+    drop.flags.writeable = False
+    return drop
+
+
+@dataclass(frozen=True, slots=True)
+class PreprocessingPipeline:
+    """Deterministic transforms applied to EVERY split, train and inference alike.
+
+    This is the difference from :class:`allsky.augmentation.AugmentationPipeline`:
+    augmentation is random and training-only, preprocessing is fixed and must be
+    byte-identical wherever the model runs. The settings therefore travel in
+    ``checkpoint["config"]``, and every path that turns a frame into model input
+    rebuilds this pipeline from there.
+
+    Every field defaults to the historical behaviour, so a config that does not
+    mention preprocessing reproduces the numbers it reproduced before.
+
+    Attributes
+    ----------
+    overlay:
+        What to do with the burned-in timestamp band; see
+        :func:`remove_timestamp_band`.
+    band_fraction:
+        Height of that band as a fraction of the frame.
+    roi_radius_fraction:
+        When set, keep only a centred disc of this fraction of ``min(H, W) / 2``
+        and zero the rest — the sky dome, without the frame furniture around it.
+        ``None`` disables it. The lens is not characterised at this site, so the
+        disc is centred on the image; a fitted centre belongs in
+        :class:`allsky.augmentation.SunProjection` once a calibration exists.
+    """
+
+    overlay: OverlayPolicy = "keep"
+    band_fraction: float = TIMESTAMP_BAND_FRACTION
+    roi_radius_fraction: float | None = None
+
+    @classmethod
+    def from_config(cls, cfg: ExperimentConfig) -> PreprocessingPipeline:
+        """The pipeline *cfg* declares, as every path that scores a frame rebuilds it.
+
+        Training, offline evaluation and live snapshot scoring must each hold
+        the same transforms or the model sees pixels it was not fitted on, and
+        nothing reports the difference. One reader, so a field added to
+        :class:`~allsky.config.PreprocessingConfig` reaches all three at once.
+        """
+        return cls(**cfg.preprocessing.model_dump())
+
+    @property
+    def enabled(self) -> bool:
+        """True when the pipeline changes any pixel."""
+        return self.overlay != "keep" or self.roi_radius_fraction is not None
+
+    def __call__(self, chw: np.ndarray) -> np.ndarray:
+        """Apply the pipeline to one ``(3, H, W)`` float32 frame in ``[0, 1]``."""
+        out = remove_timestamp_band(chw, policy=self.overlay, band_fraction=self.band_fraction)
+        if self.roi_radius_fraction is not None:
+            out = out * _roi_keep(out.shape[1], out.shape[2], self.roi_radius_fraction)
+        return np.ascontiguousarray(out, dtype=np.float32)
+
+    def apply_uint8_hwc(self, hwc: np.ndarray) -> np.ndarray:
+        """The same transform, on the frame as decoded — ``(H, W, 3)`` ``uint8``.
+
+        Callers that hold a decoded frame and want a decoded frame back should
+        use this instead of :meth:`__call__`: the float route costs a
+        ``[0, 1]`` conversion, a transpose, six full-frame float buffers and a
+        re-quantisation, measured at 9.13 ms per 512x512 frame against 2.61 ms
+        here, and the dataloader pays it once per sample.
+
+        It produces the **same pixels**, not merely similar ones, because every
+        stage is a constant write, a data move, or a multiply by exactly 0 or 1:
+        the ``fill`` constant ``IMAGENET_MEAN * 255`` lands on the exact levels
+        ``(124, 116, 104)`` the float route re-quantises to, ``inpaint`` and
+        ``crop`` only move pixels, and the ROI writes exact zeros.
+        ``tests/allsky/test_preprocessing_pipeline.py`` pins the equality over
+        every policy so the two routes cannot drift apart.
+
+        Parameters
+        ----------
+        hwc:
+            ``(H, W, 3)`` ``uint8`` RGB frame on the native 0-255 scale.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``(H, W, 3)`` ``uint8``; the input array itself when the pipeline is
+            disabled.
+        """
+        if not self.enabled:
+            return hwc
+        out = hwc
+        if self.overlay != "keep":
+            band = _band_rows(hwc.shape[0], self.band_fraction)
+            if self.overlay == "fill":
+                out = hwc.copy()
+                out[:band] = _FILL_LEVELS
+            elif self.overlay == "inpaint":
+                source = hwc[band : 2 * band]
+                if source.shape[0] < band:
+                    source = np.repeat(hwc[band : band + 1], band, axis=0)
+                out = hwc.copy()
+                out[:band] = source[::-1]
+            elif self.overlay == "crop":
+                cropped = hwc[band:]
+                pad = np.repeat(cropped[-1:], band, axis=0)
+                out = np.concatenate([cropped, pad], axis=0)
+            else:
+                raise ValueError(f"unknown overlay policy {self.overlay!r}")
+        if self.roi_radius_fraction is not None:
+            if out is hwc:
+                out = hwc.copy()
+            out[_roi_drop_uint8(out.shape[0], out.shape[1], self.roi_radius_fraction)] = 0
+        return np.ascontiguousarray(out)
+
+
+def model_input_frame(
+    source: str | Path | bytes,
+    *,
+    size: int,
+    preprocess: PreprocessingPipeline | None = None,
+) -> np.ndarray:
+    """Decode one frame into the array a visual backbone is fed, minus the standardisation.
+
+    This is the whole train/serve chain in one place: decode -> preprocess at
+    **native** resolution -> resize -> ``[0, 1]`` CHW. It deliberately stops
+    short of :func:`imagenet_standardize` because the training dataset augments
+    between the two and the serving path does not — that one step is the only
+    difference the two sides are allowed to have, and keeping the rest here is
+    what stops them drifting.
+
+    The preprocessing runs before the resize on purpose: the overlay band is a
+    fixed fraction of the *native* frame, and a bilinear resize would smear its
+    edge into the sky below it.
+
+    Parameters
+    ----------
+    source:
+        Path to the frame, or its encoded bytes.
+    size:
+        Side of the square the model expects, in pixels.
+    preprocess:
+        Deterministic pipeline from the run's config; ``None`` or a disabled one
+        leaves the pixels alone.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(3, size, size)`` float32 in ``[0, 1]``, C-contiguous and freshly
+        allocated — so the caller may standardize it in place.
+    """
+    if preprocess is not None and preprocess.enabled:
+        arr = preprocess.apply_uint8_hwc(decode_rgb(source))
+        if arr.shape[0] != size or arr.shape[1] != size:
+            arr = resize_bilinear(arr, size)
+    else:
+        arr = decode_rgb_resized(source, size)
+    chw = np.ascontiguousarray(np.asarray(arr, dtype=np.uint8).transpose(2, 0, 1))
+    scaled = chw.astype(np.float32)
+    scaled /= 255.0
+    return scaled
+
 
 #: BT.601 luminance weights (R, G, B) used by :func:`visual_qc`.
 _LUMINANCE_WEIGHTS = np.array([0.299, 0.587, 0.114], dtype=np.float64)
@@ -58,24 +398,6 @@ SATURATED_FRACTION_THRESHOLD = 0.2
 
 #: Grayscale threshold used to binarize a PNG mask when the config leaves it auto.
 _DEFAULT_MASK_THRESHOLD = 127.0
-
-
-def _as_rgb_uint8(image: np.ndarray) -> np.ndarray:
-    """Validate *image* is an ``(H, W, 3)`` ``uint8`` RGB array and return it.
-
-    Raises
-    ------
-    ValueError
-        If the array is not 3-D with a trailing size-3 channel axis.
-    TypeError
-        If the dtype is not ``uint8``.
-    """
-    arr = np.asarray(image)
-    if arr.ndim != 3 or arr.shape[2] != 3:
-        raise ValueError(f"expected an (H, W, 3) RGB image, got shape {arr.shape}")
-    if arr.dtype != np.uint8:
-        raise TypeError(f"expected a uint8 image, got dtype {arr.dtype}")
-    return arr
 
 
 def load_mask(path: str | Path, *, threshold: float | None = None) -> np.ndarray:
@@ -111,6 +433,10 @@ def estimate_circular_mask(
     A disc of radius ``radius_fraction * min(H, W) / 2`` centred on the image
     (or on *center* ``(row, col)``) is kept; everything outside is dropped.
 
+    Thin wrapper over :meth:`allsky.lens.LensCalibration.centred_in`, which owns
+    the geometry — the same description of the optics that
+    :meth:`~allsky.lens.LensCalibration.pixel_of` uses to place the sun.
+
     Parameters
     ----------
     shape:
@@ -129,19 +455,12 @@ def estimate_circular_mask(
 
     Limitation
     ----------
-    This is a **heuristic** for the common all-sky geometry where the fisheye
-    projection fills the shorter image dimension and is roughly centred.  It
-    does not account for a decentred optical axis, lens vignetting, static
-    horizon obstructions (buildings, the mount arm) or a non-circular sensor
-    crop — supply a measured PNG mask (:func:`load_mask`) for those.
+    This is a **heuristic**; see
+    :meth:`~allsky.lens.LensCalibration.centred_in` for what it assumes and what
+    it cannot represent.
     """
-    height, width = int(shape[0]), int(shape[1])
-    cy, cx = (height / 2.0, width / 2.0) if center is None else (float(center[0]), float(center[1]))
-    radius = radius_fraction * min(height, width) / 2.0
-    rows = np.arange(height)[:, None]
-    cols = np.arange(width)[None, :]
-    dist_sq = (rows - cy) ** 2 + (cols - cx) ** 2
-    return dist_sq <= radius**2
+    calibration = LensCalibration.centred_in(shape, radius_fraction=radius_fraction, centre=center)
+    return calibration.keep_mask(shape)
 
 
 def apply_static_mask(
@@ -247,12 +566,7 @@ def resize_image(image: np.ndarray, size: int | tuple[int, int]) -> np.ndarray:
     numpy.ndarray
         Resized frame, shape ``(height, width, 3)``, ``uint8``.
     """
-    from PIL import Image
-
-    arr = _as_rgb_uint8(image)
-    target = (size, size) if isinstance(size, int) else size
-    resized = Image.fromarray(arr).resize(target, Image.Resampling.BILINEAR)
-    return np.asarray(resized)
+    return resize_bilinear(_as_rgb_uint8(image), size)
 
 
 def visual_qc(
@@ -354,6 +668,34 @@ def resolve_mask(cfg: PrepareConfig) -> np.ndarray | None:
     return keep
 
 
+def pad_frame(image: np.ndarray, pad: PadConfig) -> np.ndarray:
+    """Pad an RGB frame on each side with a constant level; a no-op when disabled.
+
+    Parameters
+    ----------
+    image:
+        ``(H, W, 3)`` ``uint8`` RGB frame.
+    pad:
+        Per-side pixel counts and the fill level.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(H + top + bottom, W + left + right, 3)`` ``uint8``; the input array
+        itself when ``pad.enabled`` is False.
+    """
+    arr = _as_rgb_uint8(image)
+    if not pad.enabled:
+        return arr
+    padded: np.ndarray = np.pad(
+        arr,
+        ((pad.top, pad.bottom), (pad.left, pad.right), (0, 0)),
+        mode="constant",
+        constant_values=pad.fill,
+    )
+    return padded
+
+
 def process_frame(
     image: np.ndarray, cfg: PrepareConfig, *, mask: np.ndarray | None = None
 ) -> np.ndarray:
@@ -394,6 +736,7 @@ def process_frame(
     elif cfg.mask.path is not None:
         out = apply_static_mask(out, cfg.mask.path, threshold=cfg.mask.threshold)
     out = center_crop(out, cfg.crop)
+    out = pad_frame(out, cfg.pad)
     if cfg.resize is not None:
         out = resize_image(out, cfg.resize)
     return out

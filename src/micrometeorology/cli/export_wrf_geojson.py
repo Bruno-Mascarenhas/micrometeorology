@@ -16,18 +16,17 @@ Usage::
         --domains 1,4 -o output/JSON -g output/GeoJSON --workers 44
 """
 
-import re
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from micrometeorology.cli.wrfout_selection import glob_wrfout_day, reject_output_id_variables
 from micrometeorology.common.cli_options import parse_csv, parse_int_csv
 from micrometeorology.common.logging import setup_logging
-from micrometeorology.common.types import VARIABLE_NETCDF_MAP
 from micrometeorology.wrf import jobs
 from micrometeorology.wrf.batch import default_workers
-from micrometeorology.wrf.reader import resolve_wrfout_paths
+from micrometeorology.wrf.reader import detect_grid_level
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -68,56 +67,28 @@ ARTIFACT_VARIABLES: frozenset[str] = frozenset(
 )
 
 
-_WRFOUT_DOMAIN_RE = re.compile(r"^wrfout_(d\d+)_", re.IGNORECASE)
+def _domain_token(path: Path) -> str | None:
+    """The ``d0N`` token a wrfout file publishes under, or None.
 
-# Output file ids whose input spelling is a DIFFERENT word. Passing one of
-# these as ``-v`` reaches the raw-NetCDF passthrough and publishes unconverted
-# values into the files the derived variable owns.
-_OUTPUT_ID_OWNERS: dict[str, str] = {
-    netcdf_id.upper(): str(variable)
-    for variable, netcdf_id in VARIABLE_NETCDF_MAP.items()
-    if str(variable).casefold() != netcdf_id.casefold()
-}
-
-
-def _normalize_var_list(var_list: list[str]) -> list[str]:
-    """Canonicalize spelling and deduplicate; a bare ``poteolico`` supersedes height requests.
-
-    Case is folded to the canonical spelling first, because every downstream
-    branch compares against ``WRFVariable`` values with ``==``: a mis-cased
-    ``-v swdown`` would otherwise miss its own handling (including the daylight
-    gate) and fall through to the raw-NetCDF passthrough. Tokens that name no
-    known variable are left untouched — raw NetCDF fields such as ``T2`` are a
-    supported passthrough.
+    Delegates to :func:`micrometeorology.wrf.reader.detect_grid_level` so the
+    selection here and the names the batch writes agree on what "which domain
+    is this" means. A regex over the file name does not answer it: ``wrfout_d06_``
+    matches such a pattern but has no ``GridLevel``, and ``wrfout_d1_`` matches as
+    ``d1``, which never equals the ``d01`` compared against here.
     """
-    var_list = [jobs.CANONICAL_VARIABLES.get(v.casefold(), v) for v in var_list]
-    if "poteolico" in var_list:
-        var_list = [v for v in var_list if not (v.startswith("poteolico") and v != "poteolico")]
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for v in var_list:
-        if v not in seen:
-            normalized.append(v)
-            seen.add(v)
-    return normalized
+    level = detect_grid_level(path)
+    return level.value.lower() if level is not None else None
 
 
 def _missing_domains(paths: list[Path], domains: tuple[int, ...]) -> tuple[int, ...]:
     """Explicitly requested domains that no selected file provides."""
-    found = {
-        match.group(1).lower()
-        for match in (_WRFOUT_DOMAIN_RE.match(p.name) for p in paths)
-        if match is not None
-    }
+    found = {token for p in paths if (token := _domain_token(p)) is not None}
     return tuple(d for d in sorted(set(domains)) if f"d{d:02d}" not in found)
 
 
 def _matching_wrfout_paths(wrf_dir: Path | str, date: str, domains: tuple[int, ...]) -> list[Path]:
     """Glob the requested day, reporting a mistyped ``--date`` as a usage error."""
-    try:
-        return resolve_wrfout_paths(wrf_dir, date, domains or None)
-    except ValueError as invalid_date:
-        raise typer.BadParameter(str(invalid_date)) from invalid_date
+    return glob_wrfout_day(wrf_dir, date, domains)
 
 
 def _resolve_paths(
@@ -138,9 +109,7 @@ def _resolve_paths(
         if domains:
             wanted = {f"d{d:02d}" for d in domains}
             paths = [
-                p
-                for p in candidates
-                if (match := _WRFOUT_DOMAIN_RE.match(p.name)) and match.group(1).lower() in wanted
+                p for p in candidates if (token := _domain_token(p)) is not None and token in wanted
             ]
             if len(paths) != len(candidates):
                 typer.echo(
@@ -156,22 +125,6 @@ def _resolve_paths(
         if not paths:
             typer.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
     return paths, _missing_domains(paths, domains)
-
-
-def _reject_output_id_variables(var_list: list[str]) -> None:
-    """Reject tokens that name an OUTPUT file id instead of an input variable.
-
-    ``-v TSK`` falls through to the raw-NetCDF passthrough and writes Kelvin
-    into the very ``D0X_TSK_*.json`` files ``skin_temperature`` publishes in
-    °C. These ids cannot produce correct site bytes, so they fail loudly
-    instead of silently mislabelling the map.
-    """
-    for variable in var_list:
-        owner = _OUTPUT_ID_OWNERS.get(variable.upper())
-        if owner:
-            raise typer.BadParameter(
-                f"{variable} is the output file id of {owner}; pass -v {owner}"
-            )
 
 
 @app.command()
@@ -244,8 +197,8 @@ def run(
     setup_logging(log_level)
 
     var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
-    var_list = _normalize_var_list(var_list)
-    _reject_output_id_variables(var_list)
+    var_list = jobs.normalize_var_list(var_list, collapse_heights=False)
+    reject_output_id_variables(var_list)
     paths, missing_domains = _resolve_paths(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")

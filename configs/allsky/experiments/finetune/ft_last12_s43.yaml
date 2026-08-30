@@ -1,0 +1,26 @@
+# End-to-end image-mode finetune of DINOv2 ViT-S/14, every block (fully unfrozen).
+# Carries the two factors the factorial measured as real: the centroid label
+# join (-2.89 W/m2, the largest single effect) and the single-task DHI head
+# (-0.86). Pooling is not a factor here -- the backbone runs live, so there is
+# no cached readout to choose. The probe measured 68 s/epoch at 482 MiB, so
+# depth is limited by nothing on this GPU; num_workers is raised off the base
+# because the bottleneck is JPEG decode, not the 2060.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: ft_last12_s43
+output_dir: output/allsky-mm/experiments/finetune/ft_last12_s43
+seed: 43
+data:
+  data_root: output/allsky-mm/dataset
+  input_mode: image
+targets:
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  num_workers: 8

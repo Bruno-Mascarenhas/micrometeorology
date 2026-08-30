@@ -32,7 +32,8 @@ import pandas as pd
 
 from allsky.config import VideoConfig
 from allsky.data.contracts import QCFlag
-from allsky.video import JPEG_QUALITY, MANIFEST_FILENAME, _resize_image
+from allsky.frame_pixels import resize_bilinear
+from allsky.video import JPEG_QUALITY, MANIFEST_FILENAME
 from allsky.video import MANIFEST_COLUMNS as VIDEO_MANIFEST_COLUMNS
 
 logger = logging.getLogger(__name__)
@@ -523,7 +524,7 @@ def _stage_frame(
     image = np.asarray(frame, dtype=np.uint8)
     staged = staging / f"{index:08d}.jpg"
     iio.imwrite(
-        staged, image if resize is None else _resize_image(image, resize), quality=JPEG_QUALITY
+        staged, image if resize is None else resize_bilinear(image, resize), quality=JPEG_QUALITY
     )
     return staged
 

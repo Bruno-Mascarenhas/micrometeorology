@@ -13,8 +13,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from labmim_core.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.cli.export_sky import SUBSET_LABELS, build_payloads
-from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.stats import ktkd as ktkd_stats
 from micrometeorology.stats.sky_condition import KT_CUMULATIVE_EDGES
 

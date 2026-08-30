@@ -31,14 +31,7 @@ import pandas as pd
 import pytest
 
 from allsky.clearsky import haurwitz_ghi_from_cos_zenith
-from allsky.config import SITE_TZ, SITE_UTC_OFFSET_HOURS, SiteConfig
-from allsky.data.contracts import (
-    SKY_CLASS_KT_UPPER_BOUNDS,
-    SKY_CLEAR,
-    SKY_CLOUDY,
-    SKY_PARTLY_CLOUDY_CLEAR,
-    SKY_PARTLY_CLOUDY_DIFFUSE,
-)
+from allsky.config import SITE_TZ, SITE_UTC_OFFSET_HOURS
 from allsky.data.manifest import _classify_sky
 from allsky.evaluation.evaluator import (
     _add_strata,
@@ -47,7 +40,15 @@ from allsky.evaluation.evaluator import (
     _stratified_metrics,
     _target_metrics,
 )
-from allsky.solar import cos_zenith, extraterrestrial_ghi
+from labmim_core.site import SiteConfig
+from labmim_core.sky import (
+    SKY_CLASS_KT_UPPER_BOUNDS,
+    SKY_CLEAR,
+    SKY_CLOUDY,
+    SKY_PARTLY_CLOUDY_CLEAR,
+    SKY_PARTLY_CLOUDY_DIFFUSE,
+)
+from labmim_core.solar import cos_zenith, extraterrestrial_ghi
 
 _SITE = SiteConfig()
 

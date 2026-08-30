@@ -14,8 +14,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from allsky import solar
-from allsky.config import SiteConfig
 from allsky.data.alignment import CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
@@ -31,6 +29,8 @@ from allsky.data.manifest import (
     write_manifest_parquet,
 )
 from allsky.features import resolve_feature_set
+from labmim_core import solar
+from labmim_core.site import SiteConfig
 
 
 @pytest.fixture
@@ -100,6 +100,52 @@ class TestBuildManifest:
             assert str(manifest[column].dtype) == dtype
         assert meta["dataset_version"] == DATASET_VERSION
         assert meta["alignment_id"] == CenterFrame.id
+
+    def test_the_default_offset_pairs_a_frame_to_the_nearest_raw_stamp(
+        self, site: SiteConfig, tmp_path: Path
+    ):
+        sensor = make_sensor_frame(site)
+        frames = make_frames(tmp_path, ["2025-03-21 09:07"])
+
+        manifest, _ = build_manifest(frames, sensor, site=site, data_root=tmp_path)
+
+        assert manifest["target_dhi"].iloc[0] == pytest.approx(
+            sensor.loc["2025-03-21 09:05", "PSP_Wm2_Avg"]
+        )
+
+    def test_a_negative_offset_pairs_to_the_row_whose_window_centroid_is_nearest(
+        self, site: SiteConfig, tmp_path: Path
+    ):
+        """The logger end-stamps its averages, so the row written at 09:10 is the
+        mean over (09:05, 09:10] and its time centroid is 09:07:30 -- nearer to a
+        09:07 frame than the 09:05 row the raw-stamp join picks."""
+        sensor = make_sensor_frame(site)
+        frames = make_frames(tmp_path, ["2025-03-21 09:07"])
+
+        manifest, _ = build_manifest(
+            frames,
+            sensor,
+            site=site,
+            data_root=tmp_path,
+            sensor_timestamp_offset_minutes=-2.5,
+        )
+
+        assert manifest["target_dhi"].iloc[0] == pytest.approx(
+            sensor.loc["2025-03-21 09:10", "PSP_Wm2_Avg"]
+        )
+
+    def test_the_offset_is_recorded_in_the_sidecar_meta(self, site: SiteConfig, tmp_path: Path):
+        frames = make_frames(tmp_path, ["2025-03-21 09:07"])
+
+        _, meta = build_manifest(
+            frames,
+            make_sensor_frame(site),
+            site=site,
+            data_root=tmp_path,
+            sensor_timestamp_offset_minutes=-2.5,
+        )
+
+        assert meta["thresholds"]["sensor_timestamp_offset_minutes"] == pytest.approx(-2.5)
 
     def test_identity_columns(self, site: SiteConfig, tmp_path: Path):
         frames = make_frames(tmp_path, ["2025-03-21 08:00", "2025-03-21 12:00"])

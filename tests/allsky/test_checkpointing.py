@@ -127,7 +127,7 @@ class TestAtomicWrite:
         model, optimizer, scheduler = _tiny_state()
         target = tmp_path / "last.ckpt"
 
-        from allsky import atomic
+        from labmim_core import atomic
 
         def boom(*_args: Any, **_kwargs: Any) -> None:
             raise OSError("disk full")

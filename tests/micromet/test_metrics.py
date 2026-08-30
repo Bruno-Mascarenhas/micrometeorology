@@ -8,7 +8,6 @@ from micrometeorology.stats.metrics import (
     compute_all,
     correlation,
     d_index,
-    ia,
     ioa,
     is_circular_column,
     mbe,
@@ -71,11 +70,6 @@ class TestDIndex:
     def test_perfect(self):
         obs = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         assert d_index(obs, obs) == pytest.approx(1.0)
-
-    def test_ia_delegates_to_d_index(self):
-        obs = np.array([1.0, 2.0, 3.0, 4.0])
-        pred = np.array([10.0, -5.0, 20.0, -8.0])
-        assert ia(obs, pred) == d_index(obs, pred)
 
 
 class TestIOA:

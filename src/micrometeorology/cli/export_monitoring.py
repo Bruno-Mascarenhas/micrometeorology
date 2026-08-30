@@ -38,10 +38,10 @@ import numpy as np
 import pandas as pd
 import typer
 
-from micrometeorology.common.git import run_git, source_root
+from micrometeorology.common.git import short_commit
 from micrometeorology.common.logging import setup_logging
+from micrometeorology.common.site_json import write_json
 from micrometeorology.sensors.monitoring import MONITORING_CHARTS, resolve_wrf_column
-from micrometeorology.stats.climatology_export import write_json
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -217,7 +217,7 @@ def run(
     # model worth looking at.
     model_full = pd.DataFrame()
     if wrf_path is not None:
-        from micrometeorology.cli.export_climatology import read_wrf_series
+        from micrometeorology.wrf.operational_record import read_wrf_series
 
         model_full = read_wrf_series(wrf_path)
 
@@ -311,7 +311,7 @@ def run(
         "format": PAYLOAD_FORMAT,
         "version": version,
         "generated_utc": version,
-        "commit": run_git(["rev-parse", "--short", "HEAD"], cwd=source_root()),
+        "commit": short_commit(),
         "station": {"name": STATION_NAME, "timezone": "America/Bahia"},
         # `end` is the end of what this document CARRIES, which can be later than
         # the newest observation. `station_end` sits beside it because the page

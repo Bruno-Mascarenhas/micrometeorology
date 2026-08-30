@@ -7,8 +7,8 @@ extraction loop in :func:`allsky.embeddings.extract.extract_embeddings`.
 
 The backbone name ``"fake"`` selects the deterministic, network-free
 :class:`~allsky.embeddings.backbone.FakeBackbone` (a documented test/dev hook);
-``"dinov2_vits14"`` selects the real DINOv2 backbone.  Any other name fails with
-a message listing the available backbones.
+the ``dinov2_vit{s,b,l,g}14`` names select the real DINOv2 backbones.  Any other
+name fails with a message listing the available backbones.
 
 Heavy dependencies (torch, safetensors, the backbone model) are imported lazily
 inside the command, so importing :mod:`allsky.cli` never pulls them.

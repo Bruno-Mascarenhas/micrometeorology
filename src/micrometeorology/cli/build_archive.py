@@ -390,7 +390,7 @@ def run(
     # Computed once for the four stages below: a second call is a second
     # definition of "night", free to drift from the first without failing.
     elevation = station_elevation_deg(pd.DatetimeIndex(qc.index))
-    corrupted = night_corrupted_days(qc)
+    corrupted = night_corrupted_days(qc, elevation_deg=elevation)
     qc, night_masked = mask_night_corrupted_days(qc, corrupted, sources)
     # The order of the four stages below is load-bearing and every way of getting
     # it wrong fails silently; test_the_pipeline_calls_its_radiation_stages_in_the

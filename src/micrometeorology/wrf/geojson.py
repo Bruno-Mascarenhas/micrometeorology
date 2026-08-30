@@ -24,7 +24,8 @@ from typing import Any, TextIO
 import numpy as np
 from numpy.typing import NDArray
 
-from allsky.atomic import atomic_write
+from labmim_core.atomic import atomic_write
+from micrometeorology.common.site_json import JSON_ENCODING
 from micrometeorology.wrf.safety import assert_reasonable_array_size
 
 logger = logging.getLogger(__name__)
@@ -107,7 +108,7 @@ def write_values_json_stream(
 
     with open(out, "w", encoding="utf-8") as f:
         f.write('{"metadata":')
-        json.dump(metadata, f, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        json.dump(metadata, f, **JSON_ENCODING)
         f.write(',"values":[')
         _write_flat_values_chunks(f, arr, chunk_size=chunk_size)
         f.write("]}")
@@ -255,7 +256,7 @@ def write_grid_geojson_stream(
     def _stream(destination: Path) -> None:
         with open(destination, "w", encoding="utf-8") as f:
             f.write('{"type":"FeatureCollection","metadata":')
-            json.dump(metadata, f, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+            json.dump(metadata, f, **JSON_ENCODING)
             f.write(',"features":[')
             for start in range(0, n_cells, GEOJSON_FEATURE_CHUNK_SIZE):
                 stop = min(start + GEOJSON_FEATURE_CHUNK_SIZE, n_cells)
@@ -354,7 +355,7 @@ def write_grid_compact_json_stream(
 
     def _dump(destination: Path) -> None:
         with open(destination, "w", encoding="utf-8") as f:
-            json.dump(payload, f, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+            json.dump(payload, f, **JSON_ENCODING)
 
     out = atomic_write(output_path, _dump)
     logger.info("Saved compact grid JSON: %s (%s)", out, payload["format"])

@@ -12,7 +12,7 @@ from typing import Any, NoReturn
 
 import pytest
 
-from allsky.atomic import atomic_write_json, atomic_write_strict_json
+from labmim_core.atomic import atomic_write_json, atomic_write_strict_json
 
 
 def _raise_on_non_finite_token(token: str) -> NoReturn:

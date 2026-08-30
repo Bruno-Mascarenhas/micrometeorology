@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from allsky.config import VideoConfig
+from allsky.frame_pixels import resize_bilinear
 from micrometeorology.common.timeparse import parse_naive_timestamp
 
 logger = logging.getLogger(__name__)
@@ -129,16 +130,6 @@ def iter_frames(path: str | Path, cfg: VideoConfig, *, step: int = 1) -> Iterato
         )
 
 
-def _resize_image(image: np.ndarray, size: int | tuple[int, int]) -> np.ndarray:
-    """Bilinear-resize an RGB image to *size* (``int`` means square)."""
-    from PIL import Image
-
-    if isinstance(size, int):
-        size = (size, size)
-    resized = Image.fromarray(image).resize(size, Image.Resampling.BILINEAR)
-    return np.asarray(resized)
-
-
 def extract_frames(
     path: str | Path,
     out_dir: str | Path,
@@ -180,7 +171,7 @@ def extract_frames(
 
     rows: list[dict[str, object]] = []
     for record in iter_frames(path, cfg, step=step):
-        image = record.image if resize is None else _resize_image(record.image, resize)
+        image = record.image if resize is None else resize_bilinear(record.image, resize)
         frame_file = out_path / f"allsky-{record.timestamp:%Y%m%d-%H%M}.jpg"
         iio.imwrite(frame_file, image, quality=JPEG_QUALITY)
         rows.append(

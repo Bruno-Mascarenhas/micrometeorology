@@ -1,11 +1,11 @@
 """Experiment artifact layout and manifest helpers."""
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from solrad_correction.utils.io import save_json
+from solrad_correction.utils.serialization import MANIFEST_FILENAME, sha256_file
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +129,7 @@ class ArtifactLayout:
 
     @property
     def manifest(self) -> Path:
-        return self.root / "manifest.json"
+        return self.root / MANIFEST_FILENAME
 
     def ensure_directories(self) -> None:
         """Create the stable experiment directory tree, idempotently.
@@ -191,5 +191,4 @@ def write_manifest(layout: ArtifactLayout, *, extra: dict[str, Any] | None = Non
 
 
 def _sha256(path: Path) -> str:
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
+    return sha256_file(path)

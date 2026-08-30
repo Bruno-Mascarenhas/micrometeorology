@@ -31,7 +31,9 @@ from pydantic import BaseModel
 from micrometeorology.common.git import run_git, source_root
 
 __all__ = [
+    "canonical_config_json",
     "code_version",
+    "config_sha256",
     "config_subset_sha256",
     "content_sha256",
     "file_content_sha256",
@@ -92,6 +94,35 @@ def file_content_sha256(path: Path) -> str:
         return f"absent:{path}"
     with open(path, "rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def canonical_config_json(payload: Any) -> str:
+    """The one JSON encoding every provenance stamp in this project hashes.
+
+    Sorted keys and separators without whitespace, so the bytes depend on the
+    values and not on dict ordering or on a formatter. Two stamps that encode
+    differently cannot be compared, which is the whole point of stamping.
+    """
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def config_sha256(config: BaseModel) -> str:
+    """Content hash of a whole resolved config, for recording as provenance.
+
+    Parameters
+    ----------
+    config:
+        Any pydantic model; dumped in JSON mode so paths and enums encode the
+        way they will be read back.
+
+    Returns
+    -------
+    str
+        Hex sha256 of :func:`canonical_config_json` over the dumped model.
+    """
+    return hashlib.sha256(
+        canonical_config_json(config.model_dump(mode="json")).encode("utf-8")
+    ).hexdigest()
 
 
 def config_subset_sha256(
@@ -160,9 +191,7 @@ def config_subset_sha256(
     include: dict[str, Any] = dict.fromkeys(sections, True)
     for parent, names in nested.items():
         include[parent] = set(names)
-    canonical = json.dumps(
-        config.model_dump(mode="json", include=include), sort_keys=True, separators=(",", ":")
-    )
+    canonical = canonical_config_json(config.model_dump(mode="json", include=include))
     digest = hashlib.sha256(canonical.encode("utf-8"))
     for file in content_files:
         digest.update(file_content_sha256(Path(file)).encode("utf-8"))

@@ -12,7 +12,7 @@ Relationship to :mod:`allsky` (do **not** merge these)
 The all-sky ML pipeline has overlapping-sounding helpers with different roles;
 pick by what you already hold:
 
-- :func:`allsky.solar.clearness_index` computes ``Kt`` from a GHI array **plus
+- :func:`labmim_core.solar.clearness_index` computes ``Kt`` from a GHI array **plus
   timestamps and site coordinates**, deriving the extraterrestrial term
   internally via NOAA solar geometry, and returns a NumPy array. Use it in the
   feature pipeline when you only have GHI and need the horizontal-surface ``Kt``.
@@ -73,7 +73,7 @@ def clearness_index(
     ----------
     No solar geometry is computed here — the extraterrestrial term must be
     supplied. When you have only GHI and timestamps, use
-    :func:`allsky.solar.clearness_index`, which derives that term internally.
+    :func:`labmim_core.solar.clearness_index`, which derives that term internally.
     """
     with np.errstate(invalid="ignore", divide="ignore"):
         kt = global_radiation / extraterrestrial_radiation

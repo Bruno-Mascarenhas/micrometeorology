@@ -40,8 +40,9 @@ from typing import Any
 
 import numpy as np
 
-from allsky.atomic import atomic_write
+from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
 from allsky.provenance import code_version
+from labmim_core.atomic import atomic_write
 
 #: ``torch.nn.Module`` / ``torch.optim.Optimizer`` at runtime. Kept as aliases so
 #: importing this module stays torch-free (torch is imported lazily in the funcs).
@@ -357,3 +358,46 @@ def _as_uint8_tensor(value: Any) -> Any:
     if isinstance(value, torch.Tensor):
         return value.to(dtype=torch.uint8, device="cpu")
     return torch.as_tensor(value, dtype=torch.uint8)
+
+
+#: Keys of the ``normalizers`` sub-payload. The writer here and the two readers
+#: (the evaluator and the live snapshot) are the only paths that turn a model
+#: output back into W/m2, and all three read the names from here: a drift makes
+#: ``target_normalizers.get(name)`` return None and the snapshot publishes the
+#: NORMALIZED value as if it were a physical unit.
+FEATURE_NORMALIZER_KEY = "feature_normalizer"
+TARGET_NORMALIZERS_KEY = "target_normalizers"
+
+
+def normalizers_payload(
+    feature_normalizer: FeatureNormalizer,
+    target_normalizers: Mapping[str, TargetNormalizer],
+) -> dict[str, Any]:
+    """Serialise the normalizers into the checkpoint's ``normalizers`` field."""
+    return {
+        FEATURE_NORMALIZER_KEY: feature_normalizer.to_dict(),
+        TARGET_NORMALIZERS_KEY: {k: v.to_dict() for k, v in target_normalizers.items()},
+    }
+
+
+def normalizers_from_checkpoint(
+    checkpoint: Mapping[str, Any],
+) -> tuple[FeatureNormalizer, dict[str, TargetNormalizer]]:
+    """Rebuild the normalizers a checkpoint was written with.
+
+    Returns
+    -------
+    tuple
+        The feature normalizer and the per-target normalizers, keyed by target
+        name. Both are required: a checkpoint without them cannot turn a model
+        output back into a physical unit, so a missing key raises here rather
+        than yielding a plausible number in the wrong scale.
+    """
+    normalizers = checkpoint["normalizers"]
+    return (
+        FeatureNormalizer.from_dict(normalizers[FEATURE_NORMALIZER_KEY]),
+        {
+            key: TargetNormalizer.from_dict(value)
+            for key, value in normalizers[TARGET_NORMALIZERS_KEY].items()
+        },
+    )

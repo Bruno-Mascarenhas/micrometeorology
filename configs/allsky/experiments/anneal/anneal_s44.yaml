@@ -1,0 +1,56 @@
+# Three changes at once, on the winning arm (image mode, DINOv2 fully unfrozen,
+# single-task DHI, MAE). Bundled deliberately: each is cheap and none of the
+# three has ever been exercised, so a factorial would cost 24 runs to move a
+# metric whose seed spread is 0.60 W/m2.
+#
+# 1. THE COSINE NEVER ANNEALS TODAY. Measured on the three loss_mae seeds: they
+#    stopped at epochs 24, 16 and 24 of 40, so the schedule was cut while the
+#    learning rate was still near half its peak, and the annealed tail -- where a
+#    fine-tuned ViT consolidates -- never ran. Patience is raised past the
+#    horizon so the full cosine executes. Stopping on val is also the weakest
+#    signal available here: val scores RMSE 41.07 against test's 20.31 on the
+#    same checkpoint, because it carries more high-DHI days.
+#
+# 2. weight_decay 1e-4 -> 0.05. The MAE fine-tuning recipe (arXiv:2111.06377)
+#    uses 0.05 for ViT; 1e-4 is a from-scratch CNN value. Train loss reaches
+#    0.034 against a val 0.16, so the capacity is there and unregularised.
+#
+# 3. Augmentation on, exposure jitter first and wider than the default. It is
+#    the one transform this camera argues for directly: its auto-exposure spans
+#    1340x over a day (211 us at noon, 282.95 ms at 17:41), so a channel-common
+#    gain is the nuisance the sensor already applies. exposure_log2 0.6 is +/-
+#    0.6 stop, still far inside what the camera does, and the gain preserves the
+#    red/blue ratio, which is the signal that survives the auto-exposure
+#    (r with DHI rises from +0.157 to +0.738 with solar elevation).
+#    p_translate stays 0: the frames are squeezed 1.78x by the anisotropic
+#    resize, so a pixel shift is not the rigid mount shift it is meant to be.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: anneal_s44
+output_dir: output/allsky-mm/experiments/anneal/anneal_s44
+seed: 44
+data:
+  data_root: output/allsky-mm/dataset
+  input_mode: image
+targets:
+  dhi:
+    loss: mae
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+train:
+  backbone_lr: 0.00001
+  epochs: 30
+  weight_decay: 0.05
+  num_workers: 8
+  early_stopping:
+    patience: 30
+augmentation:
+  p_exposure: 0.5
+  exposure_log2: 0.6
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25

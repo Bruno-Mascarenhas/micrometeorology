@@ -91,8 +91,8 @@ def run(
 ) -> None:
     """Run WRF processing locally: figures + GeoJSON + WebM."""
     setup_logging(log_level)
-    from micrometeorology.cli.export_wrf_geojson import _reject_output_id_variables
-    from micrometeorology.cli.render_wrf_maps import _resolve_wrfout_paths
+    from micrometeorology.cli.render_wrf_maps import resolve_selection
+    from micrometeorology.cli.wrfout_selection import reject_output_id_variables
     from micrometeorology.wrf import reader as wrf_reader
 
     base_out = Path(output)
@@ -115,8 +115,8 @@ def run(
     # An output file id (-v TSK) reaches the raw-NetCDF passthrough in BOTH
     # phases and publishes unconverted Kelvin into the PNGs and JSONs that
     # skin_temperature owns, so it is refused before a frame is rendered.
-    _reject_output_id_variables(var_list)
-    paths = _resolve_wrfout_paths(wrf_dir, date, parse_int_csv(domains), dataset)
+    reject_output_id_variables(var_list)
+    paths = resolve_selection(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")
         return
@@ -132,15 +132,10 @@ def run(
     failed_figures = 0
     if not no_figures:
         typer.echo("\n── Phase 1: Figure Generation ──")
-        from micrometeorology.cli.render_wrf_maps import _build_tasks_for_domain
-        from micrometeorology.cli.render_wrf_maps import (
-            _normalize_var_list as _collapse_poteolico_heights,
-        )
-        from micrometeorology.wrf.batch import run_figure_tasks
+        from micrometeorology.wrf import jobs
+        from micrometeorology.wrf.batch import build_tasks_for_domain, run_figure_tasks
 
-        # The figure renderer has no per-height poteolico arm, so heights collapse
-        # here only. Phase 2 must keep them: they select which JSON files exist.
-        figure_var_list = _collapse_poteolico_heights(var_list)
+        figure_var_list = jobs.normalize_var_list(var_list, collapse_heights=True)
 
         # One process pool is hoisted over the figure stage so each 16-task
         # batch reuses warm workers instead of paying pool spawn overhead.
@@ -171,7 +166,7 @@ def run(
                 typer.echo(f"  Loading {wrf_path.name}...")
 
                 with wrf_reader.WRFDataset(wrf_path) as ds:
-                    _build_tasks_for_domain(
+                    build_tasks_for_domain(
                         ds,
                         figure_var_list,
                         str(figures_dir),
@@ -179,6 +174,7 @@ def run(
                         skip_first,
                         dpi,
                         task_sink=render_task_batch,
+                        warn=typer.echo,
                     )
         typer.echo(f"  ✓ {len(png_paths)} figures generated")
     else:
@@ -186,10 +182,9 @@ def run(
 
     if not no_geojson:
         typer.echo("\n── Phase 2: GeoJSON & JSON Generation ──")
-        from micrometeorology.cli.export_wrf_geojson import _normalize_var_list
         from micrometeorology.wrf import jobs
 
-        json_var_list = _normalize_var_list(var_list)
+        json_var_list = jobs.normalize_var_list(var_list, collapse_heights=False)
         try:
             units = jobs.build_units(paths, json_var_list, json_dir, geojson_dir, skip_first)
         except ValueError as invalid_selection:

@@ -11,7 +11,7 @@ gitignored there and attached at deploy time.
 The hourly database and the WRF series both enter as naive station-local stamps,
 each carrying its instrument's own clock. This module is the manifest boundary:
 the ``UTC-03`` it stamps into the published artifacts comes from the pinned
-:data:`~micrometeorology.common.site.STATION_UTC_OFFSET_HOURS`, never from the
+:data:`~labmim_core.site.STATION_UTC_OFFSET_HOURS`, never from the
 host's zone.
 
 Examples
@@ -37,12 +37,13 @@ import numpy as np
 import pandas as pd
 import typer
 
-# allsky.solar is pure numpy/pandas (no torch) and ships in the same wheel, so
+from labmim_core.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
+
+# labmim_core.solar is pure numpy/pandas (no torch) and ships in the same wheel, so
 # this CLI reuses NOAA's formulas without pulling a training dependency in.
-from allsky.solar import extraterrestrial_ghi
-from micrometeorology.common.git import run_git, source_root
+from labmim_core.solar import extraterrestrial_ghi
+from micrometeorology.common.git import short_commit
 from micrometeorology.common.logging import setup_logging
-from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.stats import distributions as dist
 from micrometeorology.stats.climatology import seasonal_groups
 from micrometeorology.stats.climatology_export import (
@@ -58,14 +59,23 @@ from micrometeorology.stats.daylight import (
     MIN_SOLAR_ELEVATION_DEG,
     elevation_bounds,
 )
-from micrometeorology.wrf.operational_record import rename_v1_columns
+from micrometeorology.wrf.columns import (
+    GLW_W_M2,
+    PSFC_HPA,
+    RH_PCT,
+    SWDOWN_W_M2,
+    T2_C,
+    WIND_DIR_DEG,
+    WIND_SPEED_M_S,
+)
+from micrometeorology.wrf.operational_record import read_wrf_series
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
 logger = logging.getLogger(__name__)
 
 #: Re-exported under this module's shorter local names; the numbers themselves
-#: live in :mod:`micrometeorology.common.site`, shared with the sensor archive's
+#: live in :mod:`labmim_core.site`, shared with the sensor archive's
 #: quality checks so the two cannot describe different towers.
 SITE = STATION_SITE
 UTC_OFFSET_HOURS = STATION_UTC_OFFSET_HOURS
@@ -73,8 +83,8 @@ UTC_OFFSET_HOURS = STATION_UTC_OFFSET_HOURS
 STATION = {
     "name": "Estação Micrometeorológica LabMiM",
     "institution": "Instituto de Física — UFBA",
-    "latitude": -13.0055,
-    "longitude": -38.5089,
+    "latitude": SITE.latitude,
+    "longitude": SITE.longitude,
     "elevation_m": 46.0,
     "timezone": "America/Bahia",
 }
@@ -107,14 +117,14 @@ OBSERVED_COLUMN = {
 # Same, for the WRF point extraction. A variable absent here simply has no model
 # subset — the page renders the observed ones and says so.
 WRF_COLUMN = {
-    "air_temperature": "t2_c",
-    "relative_humidity": "rh_pct",
-    "pressure": "psfc_hpa",
-    "wind_speed": "wind_speed_m_s",
-    "wind_direction": "wind_dir_deg",
-    "clearness_index": "swdown_w_m2",
-    "shortwave_down": "swdown_w_m2",
-    "longwave_down": "glw_w_m2",
+    "air_temperature": T2_C,
+    "relative_humidity": RH_PCT,
+    "pressure": PSFC_HPA,
+    "wind_speed": WIND_SPEED_M_S,
+    "wind_direction": WIND_DIR_DEG,
+    "clearness_index": SWDOWN_W_M2,
+    "shortwave_down": SWDOWN_W_M2,
+    "longwave_down": GLW_W_M2,
 }
 
 # One date, two instruments. The PAR sensor changed here and the later era's
@@ -190,45 +200,6 @@ CALM_THRESHOLD_MS = 0.281
 SATURATION_RH = 99.5
 
 
-def read_wrf_series(path: str | Path) -> pd.DataFrame:
-    """Read ``series_operacional.dat`` defensively.
-
-    The file is an append-only log of successive operational runs: **not**
-    chronologically sorted, with duplicated timestamps and twelve trailing
-    anonymous fields that only the oldest rows fill. Reading with the full header
-    and sorting afterwards is the only order that does not misalign columns —
-    ``names=`` turns the surplus fields into a twelve-level MultiIndex.
-
-    Hour 21 local is 00 UTC, each run's initialisation hour, where surface fluxes
-    and boundary-layer height are identically zero; those rows are dropped
-    wholesale so one uniform rule can be stated on the page.
-
-    Parameters
-    ----------
-    path:
-        The ``series_operacional.dat`` the operational extraction appends to.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Hourly model variables on a sorted, de-duplicated
-        :class:`~pandas.DatetimeIndex` of naive station-local hours (UTC-03),
-        with the spin-up hour removed. A repeated timestamp keeps the LAST row,
-        which is the most recent run's value for that hour.
-    """
-    frame = pd.read_csv(path)
-    frame = frame.drop(columns=[c for c in frame.columns if str(c).startswith("Unnamed")])
-    frame = rename_v1_columns(frame)
-    stamps = pd.to_datetime(frame[["year", "month", "day", "hour"]])
-    frame.index = pd.DatetimeIndex(stamps)
-    frame = frame.drop(columns=["year", "month", "day", "hour"])
-    frame = frame.loc[~frame.index.duplicated(keep="last")].sort_index()
-    spin_up = _times(frame).hour == 21
-    logger.info("WRF: %d rows, dropping %d spin-up rows at hour 21", len(frame), int(spin_up.sum()))
-    trimmed: pd.DataFrame = frame.loc[~spin_up]
-    return trimmed
-
-
 def _times(frame: pd.DataFrame) -> pd.DatetimeIndex:
     """Narrow the index at the boundary, the way stats.climatology already does."""
     index = frame.index
@@ -292,8 +263,8 @@ def _elevation_bounds_of(stamps: bytes, stamps_dtype: str) -> tuple[np.ndarray, 
     """The bracket for one block of stamps, memoized on the stamps themselves.
 
     Every published variable asks the same gates about the same handful of blocks
-    — the whole record and its seasonal slices — so an export recomputed this
-    around 200 times over 61k rows, some 10 s of arithmetic for a dozen distinct
+    — the whole record and its seasonal slices — so without the memoization an export does this
+    around 200 times over 61k rows — some 10 s of arithmetic for a dozen distinct
     answers.  The key is the block's own stamps, so a cache hit is the same
     question and never a near-miss; the results are frozen before being handed
     out, since every caller of a shared array gets the same object.
@@ -500,11 +471,31 @@ def _par_sample_mask(series: pd.Series, global_flux: pd.Series) -> pd.Series:
     One definition for both the fitted sample and the estimator of the curve's one
     free parameter, so the two can never disagree on the population.
     """
+    zeros, impossible = _par_atom_masks(series, global_flux)
+    return ~(zeros | impossible)
+
+
+def _par_atom_masks(series: pd.Series, global_flux: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """The two instrument-state masks the PAR gate is built from.
+
+    Parameters
+    ----------
+    series:
+        PAR flux in W/m2, indexed like *global_flux*.
+    global_flux:
+        Global horizontal flux in W/m2, the band PAR is a sub-band of.
+
+    Returns
+    -------
+    tuple of pandas.Series
+        ``(zeros, impossible)``, both boolean and already ``fillna(False)`` —
+        the logger's daylight zeros, and the samples whose PAR/global ratio no
+        atmosphere produces. The gate and the two reported atoms derive from
+        this one pair, so they cannot disagree on which samples they describe.
+    """
     with np.errstate(invalid="ignore", divide="ignore"):
         fraction = series / global_flux.where(global_flux > RATIO_DENOMINATOR_FLOOR)
-    zeros = series <= 0.0
-    impossible = (fraction > MAX_PAR_FRACTION).fillna(False)
-    return ~(zeros | impossible)
+    return series <= 0.0, (fraction > MAX_PAR_FRACTION).fillna(False)
 
 
 def _par_sample(series: pd.Series, frame: pd.DataFrame) -> tuple[np.ndarray, list[Atom]]:
@@ -519,11 +510,8 @@ def _par_sample(series: pd.Series, frame: pd.DataFrame) -> tuple[np.ndarray, lis
     if not total:
         return np.array([]), []
     global_flux = frame[OBSERVED_COLUMN["shortwave_down"]].reindex(series.index)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        fraction = series / global_flux.where(global_flux > RATIO_DENOMINATOR_FLOOR)
-    zeros = series <= 0.0
-    impossible = fraction > MAX_PAR_FRACTION
-    kept = series.loc[_par_sample_mask(series, global_flux)]
+    zeros, impossible = _par_atom_masks(series, global_flux)
+    kept = series.loc[~(zeros | impossible)]
     return kept.to_numpy(), [
         Atom("daytime_zero", "Zeros diurnos do registrador", float(zeros.mean()), int(zeros.sum())),
         Atom(
@@ -531,8 +519,8 @@ def _par_sample(series: pd.Series, frame: pd.DataFrame) -> tuple[np.ndarray, lis
             f"Razão PAR/global acima de {MAX_PAR_FRACTION:.1f}, fisicamente impossível".replace(
                 ".", ","
             ),
-            float(impossible.fillna(False).mean()),
-            int(impossible.fillna(False).sum()),
+            float(impossible.mean()),
+            int(impossible.sum()),
         ),
     ]
 
@@ -891,7 +879,7 @@ def _subset_label(source: str, season: str) -> str:
 
 def _commit() -> str | None:
     """Short commit of the checkout that produced these bytes, for provenance."""
-    return run_git(["rev-parse", "--short", "HEAD"], cwd=source_root())
+    return short_commit()
 
 
 def _package_version() -> str | None:

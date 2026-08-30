@@ -767,19 +767,56 @@ def _hollands_cdf(x: NDArray, params: Mapping[str, float]) -> NDArray:
     return bounded
 
 
-def _hollands_ppf(q: NDArray, params: Mapping[str, float]) -> NDArray:
-    """Quantiles by bisection on the closed-form CDF (no analytic inverse exists)."""
-    kt_max = params["kt_max"]
+def _bisect_quantiles(
+    cdf: Callable[[NDArray], NDArray],
+    q: NDArray,
+    *,
+    ceiling: float,
+    iterations: int,
+) -> NDArray:
+    """Invert a monotone CDF by bisection, for the families with no analytic inverse.
+
+    Parameters
+    ----------
+    cdf:
+        Cumulative distribution over ``[0, ceiling]``, evaluated on an array of
+        the same shape as *q*.
+    q:
+        Probabilities, ``(N,)``, clipped to ``[0, 1]`` here.
+    ceiling:
+        Upper bracket of the support, in the family's own unit. The lower one is
+        always zero.
+    iterations:
+        Halvings to run. Fixed rather than tolerance-based so the result is a
+        pure function of the inputs, and per-family because the supports differ
+        by three orders of magnitude.
+
+    Returns
+    -------
+    numpy.ndarray
+        Bracket midpoints after the last halving, ``(N,)`` ``float64``, in the
+        unit of *ceiling*.
+    """
     quantiles = np.clip(np.asarray(q, dtype=float), 0.0, 1.0)
     low = np.zeros_like(quantiles)
-    high = np.full_like(quantiles, kt_max)
-    for _iteration in range(64):
+    high = np.full_like(quantiles, ceiling)
+    for _iteration in range(iterations):
         middle = 0.5 * (low + high)
-        overshoot = _hollands_cdf(middle, params) > quantiles
+        overshoot = cdf(middle) > quantiles
         high = np.where(overshoot, middle, high)
         low = np.where(overshoot, low, middle)
     midpoint: NDArray = 0.5 * (low + high)
     return midpoint
+
+
+def _hollands_ppf(q: NDArray, params: Mapping[str, float]) -> NDArray:
+    """Quantiles by bisection on the closed-form CDF (no analytic inverse exists)."""
+    return _bisect_quantiles(
+        lambda middle: _hollands_cdf(middle, params),
+        q,
+        ceiling=params["kt_max"],
+        iterations=64,
+    )
 
 
 # Gauss-Legendre nodes for the net-radiation convolution. 48, 96 and 192 agree to
@@ -863,17 +900,12 @@ def _compound_ppf(q: NDArray, params: Mapping[str, Any]) -> NDArray:
     a few more.
     """
     scales, _weights = _mixture_arrays(params)
-    ceiling = float(params["kt_max"]) * float(scales.max())
-    quantiles = np.clip(np.asarray(q, dtype=float), 0.0, 1.0)
-    low = np.zeros_like(quantiles)
-    high = np.full_like(quantiles, ceiling)
-    for _iteration in range(80):
-        middle = 0.5 * (low + high)
-        overshoot = _compound_cdf(middle, params) > quantiles
-        high = np.where(overshoot, middle, high)
-        low = np.where(overshoot, low, middle)
-    midpoint: NDArray = 0.5 * (low + high)
-    return midpoint
+    return _bisect_quantiles(
+        lambda middle: _compound_cdf(middle, params),
+        q,
+        ceiling=float(params["kt_max"]) * float(scales.max()),
+        iterations=80,
+    )
 
 
 def _em_normal_mixture(sample: NDArray, components: int) -> dict[str, list[float]]:
@@ -984,22 +1016,24 @@ def _power_normal_cdf(x: NDArray, params: Mapping[str, Any]) -> NDArray:
 
 def _power_normal_ppf(q: NDArray, params: Mapping[str, Any]) -> NDArray:
     _weights, mu, sigma = _power_normal_components(params)
-    quantiles = np.clip(np.asarray(q, dtype=float), 0.0, 1.0)
-    low = np.zeros_like(quantiles)
-    high = np.full_like(quantiles, float(mu.max() + 12.0 * sigma.max()))
-    for _iteration in range(64):
-        middle = 0.5 * (low + high)
-        overshoot = (
-            np.sum(
-                np.asarray(params["weights"], dtype=float)
-                * special.ndtr((middle[..., None] - mu) / sigma),
-                axis=-1,
-            )
-            > quantiles
+
+    def temperature_cdf(middle: NDArray) -> NDArray:
+        summed: NDArray = np.sum(
+            np.asarray(params["weights"], dtype=float)
+            * special.ndtr((middle[..., None] - mu) / sigma),
+            axis=-1,
         )
-        high = np.where(overshoot, middle, high)
-        low = np.where(overshoot, low, middle)
-    inverse: NDArray = STEFAN_BOLTZMANN * (0.5 * (low + high)) ** 4
+        return summed
+
+    # Bisection runs in temperature; the Stefan-Boltzmann map to flux is applied
+    # after, so the bracket stays in the unit the mixture is defined on.
+    temperature = _bisect_quantiles(
+        temperature_cdf,
+        q,
+        ceiling=float(mu.max() + 12.0 * sigma.max()),
+        iterations=64,
+    )
+    inverse: NDArray = STEFAN_BOLTZMANN * temperature**4
     return inverse
 
 

@@ -88,7 +88,7 @@ One row per paired sample. Columns (see `data/contracts.py`):
   `solar_zenith`. Elevation/zenith double as features; azimuth is fed as the
   `azimuth_sin`/`azimuth_cos` cyclic pair.
 - **Feature columns** per the active policy set (13 for `safe`, 10 for
-  `minimal`, +4 for `extended`).
+  `minimal`, 9 for `bare`, +4 for `extended`).
 - **Targets/labels**: `target_dhi`, `target_source` (`measured`/`erbs_pseudo`),
   `target_kindex`, `kindex_kind` (`kstar`/`kt`), `sky_class`
   (`0/1/2`, `-1` = missing), `cloud_fraction` (nullable, all-NaN today),
@@ -236,6 +236,14 @@ pyranometer *is* the label), so those channels must never be model inputs.
   rail into NaN, and `build_manifest` drops those rows whole, which over the
   all-sky camera archive costs 99.98 % of the dataset. Selected by
   `features.set: minimal`; still **no radiometry**.
+- **`BARE_FEATURES`** (9): the minimal set minus `BAROMETER_FEATURES`
+  (`pressure_mbar`), again derived rather than transcribed. For periods where
+  the MetSENS1 fault has taken the barometer as well — from 2026-08-10 13:05
+  `BP1_mbar_Avg` is a constant 2.62 hPa, outside `SENTINEL_RANGES`, so
+  `mask_sentinels` NaNs it and every later row is dropped whole. What survives
+  is solar geometry plus the **mechanical** anemometer (`WS_ms`, `WindDir`),
+  a separate instrument from the Gill unit whose `WS1_ms_GMX`/`WindDir1_GMX`
+  died with it. Selected by `features.set: bare`; still **no radiometry**.
 - **`EXTENDED_FEATURES`** (ablation only, never silent): `uv_wm2`, `par_wm2`,
   `longwave_up_wm2`, `longwave_down_wm2`. Selected only by `features.set:
   extended`.
@@ -251,8 +259,9 @@ silent drop — a leakage-prone request stops the run.
 `FEATURE_GROUPS` (used for cross-attention tokens): `solar`, `temperature`,
 `humidity`, `pressure`, `wind`, and `radiometry_aux`. `active_feature_groups`
 narrows every group to the features the requested set resolves and drops the
-ones left empty, so `radiometry_aux` appears only under `extended` and
-`temperature`/`humidity` disappear under `minimal`.
+ones left empty, so `radiometry_aux` appears only under `extended`,
+`temperature`/`humidity` disappear under `minimal`, and `pressure` disappears
+under `bare` as well.
 
 ---
 

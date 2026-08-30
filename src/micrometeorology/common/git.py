@@ -20,7 +20,7 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
-__all__ = ["run_git", "source_root"]
+__all__ = ["run_git", "short_commit", "source_root"]
 
 #: Seconds before a hung git invocation is abandoned. Provenance is optional;
 #: no metadata probe may stall a training run.
@@ -89,3 +89,19 @@ def run_git(args: Sequence[str], *, cwd: Path | None = None) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip()
+
+
+def short_commit() -> str | None:
+    """Short commit of the checkout that produced these bytes, for provenance.
+
+    Anchored on :func:`source_root` rather than the working directory: this
+    laboratory keeps neighbouring checkouts side by side, and a probe with no
+    ``cwd`` stamps whichever one the operator happened to launch from.
+
+    Returns
+    -------
+    str or None
+        The abbreviated hash, or None when git cannot answer — provenance is
+        optional and never fails a run.
+    """
+    return run_git(["rev-parse", "--short", "HEAD"], cwd=source_root())

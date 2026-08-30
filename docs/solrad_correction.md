@@ -90,9 +90,9 @@ $env:UV_PYTHON = (python -c "import sys; print(sys.executable)")
 ### Check if GPU is available
 
 ```python
-from solrad_correction.utils.seeds import get_device
+from solrad_correction.utils.device import resolve_device
 
-print(get_device())  # "cuda" or "cpu"
+print(resolve_device())  # "cuda" or "cpu"
 ```
 
 ---
@@ -119,8 +119,8 @@ data:
     - T2
     - Q2
     - PSFC
-  station_lat: -12.95
-  station_lon: -38.51
+  station_lat: -13.0055
+  station_lon: -38.5089
 
 split:
   train_ratio: 0.7

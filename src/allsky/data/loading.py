@@ -18,7 +18,7 @@ from typing import Any
 
 import pandas as pd
 
-from allsky.config import ExperimentConfig
+from allsky.config import ExperimentConfig, manifest_meta_path
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.splits import DaySplit, load_split_artifact
 
@@ -57,7 +57,7 @@ def load_manifest(manifest_path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
     if not manifest_path.exists():
         raise FileNotFoundError(f"manifest parquet not found: {manifest_path}")
     manifest = pd.read_parquet(manifest_path)
-    meta_path = manifest_path.with_name(manifest_path.name + ".meta.json")
+    meta_path = manifest_meta_path(manifest_path)
     meta: dict[str, Any] = {}
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))

@@ -1,0 +1,27 @@
+# Loss arm on the winning configuration (fully unfrozen DINOv2, centroid join,
+# single-task DHI). Tests the ONE signal the finetune sweep did not move: MBE
+# stayed at -6..-11 W/m2 at every unfreeze depth, so the bias is a property of
+# the loss, not of encoder capacity.
+# mae: L1 seeks the conditional MEDIAN -- on a right-skewed target this should make the
+#   negative bias WORSE, so it is the falsification arm, not a candidate
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: loss_mae_s42
+output_dir: output/allsky-mm/experiments/loss/loss_mae_s42
+seed: 42
+data:
+  data_root: output/allsky-mm/dataset
+  input_mode: image
+targets:
+  dhi:
+    loss: mae
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  num_workers: 8

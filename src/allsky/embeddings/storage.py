@@ -31,7 +31,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from allsky.atomic import atomic_write, atomic_write_json
+from labmim_core.atomic import atomic_write, atomic_write_json
 
 logger = logging.getLogger(__name__)
 

@@ -14,7 +14,7 @@ Guarantees
   only the missing ids.
 - **Incremental index** — each shard flush writes a small per-shard *part* file
   holding only that shard's rows (``O(shard_size)``), instead of rewriting the
-  whole index every flush (which was ``O(N^2 / shard_size)`` over a run); the
+  whole index every flush (which would be ``O(N^2 / shard_size)`` over a run); the
   parts are consolidated into a single ``index.parquet`` atomically at
   completion and then removed.  The final consolidated index equals the union of
   all parts (plus any prior consolidated rows).
@@ -45,7 +45,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from allsky.atomic import atomic_write
 from allsky.data.contracts import resolve
 from allsky.embeddings.backbone import VisualBackbone
 from allsky.embeddings.storage import (
@@ -58,6 +57,8 @@ from allsky.embeddings.storage import (
     write_index,
     write_meta,
 )
+from allsky.frame_pixels import decode_rgb
+from labmim_core.atomic import atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -70,19 +71,6 @@ _INDEX_PART_GLOB = "index.part-*.parquet"
 def _index_part_path(out: Path, shard_index: int) -> Path:
     """Path to the per-shard index part for *shard_index* inside *out*."""
     return out / f"index.part-{shard_index:05d}.parquet"
-
-
-def _load_uint8(path: Path) -> np.ndarray:
-    """Load an image as a ``uint8`` HWC RGB array (grayscale -> 3-channel).
-
-    Decoding straight with PIL is byte-identical to reading through imageio
-    (which decodes with PIL anyway) and skips its per-call plugin dispatch, so
-    previously extracted stores stay valid.
-    """
-    from PIL import Image
-
-    with Image.open(path) as handle:
-        return np.asarray(handle.convert("RGB"), dtype=np.uint8)
 
 
 def _encode_batch(backbone: VisualBackbone, images: list[np.ndarray]) -> np.ndarray:
@@ -322,7 +310,7 @@ def extract_embeddings(
             batch = samples[start : start + batch_size]
             images = list(
                 decode_pool.map(
-                    lambda path: _load_uint8(resolve(path, data_root)),
+                    lambda path: decode_rgb(resolve(path, data_root)),
                     [path for _, path in batch],
                 )
             )

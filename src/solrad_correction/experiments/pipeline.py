@@ -6,6 +6,7 @@ from typing import Literal
 
 import pandas as pd
 
+from labmim_core.seeds import set_global_seed
 from solrad_correction.config import DataConfig, ExperimentConfig
 from solrad_correction.data.preprocessing import PreprocessingPipeline
 from solrad_correction.data.splits import temporal_train_val_test_split
@@ -33,7 +34,6 @@ from solrad_correction.models.registry import build_model, get_model_spec
 from solrad_correction.training.dataloaders import resolve_device
 from solrad_correction.utils.memory import dataframe_to_float32_numpy, series_to_float32_numpy
 from solrad_correction.utils.metadata import collect_run_metadata
-from solrad_correction.utils.seeds import set_global_seed
 
 logger = logging.getLogger(__name__)
 

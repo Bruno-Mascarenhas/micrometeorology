@@ -40,18 +40,17 @@ Relationship to the neighbouring modules
   (``micrometeorology.cli.export_climatology``).
 """
 
-import json
 import logging
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
-from allsky.atomic import atomic_write
+from micrometeorology.common.instruments import RAIN_TIP_DEPTH_MM
+from micrometeorology.common.site_json import finite, rounded, rounded_list, write_json
 from micrometeorology.stats import distributions as dist
 
 logger = logging.getLogger(__name__)
@@ -423,10 +422,11 @@ def _linear_edges(start: float, stop: float, step: float) -> tuple[float, ...]:
     return tuple(round(start + index * step, 6) for index in range(count + 1))
 
 
-# Tipping-bucket resolution of the LabMiM gauge: 0.254 mm is 0.01 inch. It is
-# the smallest quantity the instrument can report, hence both the wet/dry
-# threshold and the narrowest bin that is not an artefact of quantisation.
-RAIN_BUCKET_MM = 0.254
+# Tipping-bucket resolution of the LabMiM gauge: the smallest quantity the
+# instrument can report, hence both the wet/dry threshold and the narrowest bin
+# that is not an artefact of quantisation. Declared once, with its provenance,
+# in micrometeorology.common.instruments.
+RAIN_BUCKET_MM = RAIN_TIP_DEPTH_MM
 
 
 def _rain_edges(
@@ -700,26 +700,12 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
 )
 
 
-def _finite(value: float | None) -> float | None:
-    """Map a non-finite number to ``None`` so the strict JSON writer accepts it.
-
-    ``NaN`` is invalid JSON and browser parsers reject the whole file, hence the
-    writer's ``allow_nan=False``; an empty subset legitimately produces NaN
-    parameters, which travel as ``null`` instead.
-    """
-    if value is None:
-        return None
-    number = float(value)
-    return number if np.isfinite(number) else None
-
-
-def _rounded(value: float | None, decimals: int) -> float | None:
-    number = _finite(value)
-    return None if number is None else round(number, decimals)
+_finite = finite
+_rounded = rounded
 
 
 def _rounded_list(values: NDArray | Sequence[float], decimals: int) -> list[float | None]:
-    return [_rounded(float(value), decimals) for value in np.asarray(values, dtype=float)]
+    return rounded_list([float(v) for v in np.asarray(values, dtype=float)], decimals)
 
 
 def _rounded_params(params: Mapping[str, Any]) -> dict[str, Any]:
@@ -1182,26 +1168,3 @@ def build_manifest(
 
 
 _assert_references()
-
-
-def write_json(output_path: str | Path, payload: Mapping[str, Any]) -> Path:
-    """Write one artifact atomically, in the encoding the site pipeline uses.
-
-    Serialised to a private sibling and ``os.replace``-d into place by
-        :func:`allsky.atomic.atomic_write`, so a reader fetching the directory
-        mid-run sees the old file or the new one, never a truncated parse error.
-        The compact separators are this artifact's published byte contract, so the
-        encoding stays here rather than moving to a shared JSON writer.
-        ``allow_nan=False`` because ``NaN`` is not valid JSON and would fail in the
-        browser instead of here.
-
-        Raises
-        ------
-        ValueError
-            If the payload still contains a non-finite float. Route every number
-            through :func:`_finite` before calling this.
-    """
-    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    out = atomic_write(output_path, lambda tmp: tmp.write_text(encoded, encoding="utf-8"))
-    logger.info("wrote %s (%d bytes)", out, len(encoded.encode("utf-8")))
-    return out

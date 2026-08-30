@@ -1,0 +1,23 @@
+# backbone_lr = 0.0001 sob entrada PADRONIZADA.
+# A padronizacao mediu +0.61 W/m2 PIOR que a entrada crua, mas backbone_lr=1e-5
+# foi escolhido no regime cru e padronizar muda a escala do gradiente em 4-8x.
+# Esta varredura decide se a piora e da normalizacao ou do hiperparametro.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: normlr_1e4_s42
+output_dir: output/allsky-mm/experiments/normlr/normlr_1e4_s42
+seed: 42
+data:
+  data_root: output/allsky-mm/dataset
+  input_mode: image
+targets:
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+train:
+  backbone_lr: 0.0001
+  epochs: 40
+  num_workers: 8

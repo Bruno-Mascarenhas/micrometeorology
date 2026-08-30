@@ -14,7 +14,6 @@ import torch
 from torch import nn
 
 from allsky.config import ExperimentConfig, TargetsConfig, load_experiment_config
-from allsky.data.contracts import SKY_CLASS_COUNT
 from allsky.features import active_feature_groups, resolve_feature_set
 from allsky.features.normalization import TargetNormalizer
 from allsky.modeling import heads as heads_module
@@ -34,6 +33,7 @@ from allsky.modeling.registry import (
 )
 from allsky.modeling.sensor_encoder import SensorEncoder
 from allsky.modeling.visual_encoder import ImageEncoder, PrecomputedEmbedding
+from labmim_core.sky import SKY_CLASS_COUNT
 
 #: The shipped V0-V7 experiment configs, checked for registry drift below.
 SHIPPED_EXPERIMENT_CONFIGS = sorted(

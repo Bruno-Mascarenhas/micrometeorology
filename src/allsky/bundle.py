@@ -36,9 +36,15 @@ from typing import Any
 import pandas as pd
 import yaml
 
-from allsky.atomic import atomic_write
-from allsky.config import DATASET_MANIFEST_FILENAME, DATASET_SPLIT_FILENAME, PrepareConfig
+from allsky.config import (
+    DATASET_MANIFEST_FILENAME,
+    DATASET_SPLIT_FILENAME,
+    MANIFEST_META_SUFFIX,
+    PrepareConfig,
+    manifest_meta_path,
+)
 from allsky.provenance import content_sha256
+from labmim_core.atomic import atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -50,17 +56,6 @@ __all__ = [
 
 BUNDLE_README_NAME = "BUNDLE_README.md"
 _EMBEDDINGS_DIRNAME = "embeddings"
-
-
-def _content_sha256(manifest: pd.DataFrame) -> str:
-    """Manifest content hash — delegates to :func:`allsky.provenance.content_sha256`.
-
-    The shared implementation is what
-    :func:`allsky.data.manifest.write_manifest_parquet` records as
-    ``manifest_sha256``, so a bundle's manifest can be re-hashed and checked
-    against the value its sidecar meta stored at write time.
-    """
-    return content_sha256(manifest)
 
 
 def _safe_arcname(name: str) -> str:
@@ -148,7 +143,9 @@ def export_colab_bundle(
     root = PurePosixPath(bundle_name)
     file_members: dict[str, Path] = {
         _safe_arcname((root / DATASET_MANIFEST_FILENAME).as_posix()): manifest_file,
-        _safe_arcname((root / f"{DATASET_MANIFEST_FILENAME}.meta.json").as_posix()): meta_file,
+        _safe_arcname(
+            (root / f"{DATASET_MANIFEST_FILENAME}{MANIFEST_META_SUFFIX}").as_posix()
+        ): meta_file,
     }
     if split_file is not None and split_file.exists():
         file_members[_safe_arcname((root / DATASET_SPLIT_FILENAME).as_posix())] = split_file
@@ -207,7 +204,7 @@ def validate_bundle(path: str | Path) -> dict[str, Any]:
 
     Reads members through :meth:`tarfile.TarFile.extractfile` only (never
     extracting to disk) and rejects any absolute or ``..`` member name.  The
-    manifest parquet is read back and re-hashed with :func:`_content_sha256`;
+    manifest parquet is read back and re-hashed with :func:`allsky.provenance.content_sha256`;
     the result is compared against ``manifest_sha256`` in the sidecar meta.
 
     Returns
@@ -227,7 +224,7 @@ def validate_bundle(path: str | Path) -> dict[str, Any]:
             _safe_arcname(name)
 
         manifest_member = _find_member(names, DATASET_MANIFEST_FILENAME)
-        meta_member = _find_member(names, f"{DATASET_MANIFEST_FILENAME}.meta.json")
+        meta_member = _find_member(names, f"{DATASET_MANIFEST_FILENAME}{MANIFEST_META_SUFFIX}")
         if manifest_member is None:
             raise ValueError(f"bundle {path} has no {DATASET_MANIFEST_FILENAME} member")
         if meta_member is None:
@@ -237,7 +234,7 @@ def validate_bundle(path: str | Path) -> dict[str, Any]:
         meta = json.loads(_read_member(tar, meta_member).decode("utf-8"))
 
     manifest = pd.read_parquet(io.BytesIO(manifest_bytes))
-    recomputed = _content_sha256(manifest)
+    recomputed = content_sha256(manifest)
     expected = meta.get("manifest_sha256")
     ok = expected is not None and recomputed == expected
     if not ok:
@@ -273,11 +270,7 @@ def _resolve_sources(
     else:
         raise ValueError("no manifest_path given and no prepare_cfg to derive one from")
 
-    meta_file = (
-        Path(meta_path)
-        if meta_path is not None
-        else manifest_file.with_name(f"{manifest_file.name}.meta.json")
-    )
+    meta_file = Path(meta_path) if meta_path is not None else manifest_meta_path(manifest_file)
 
     if split_path is not None:
         split_file: Path | None = Path(split_path)

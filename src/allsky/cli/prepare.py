@@ -24,7 +24,6 @@ from typing import Annotated, Any
 
 import typer
 
-from allsky.atomic import atomic_write, atomic_write_json
 from allsky.cli.runtime import configure_cli_logging
 from allsky.config import (
     DATASET_MANIFEST_FILENAME,
@@ -33,7 +32,10 @@ from allsky.config import (
     VIDEO_TIME_FIELDS,
     PrepareConfig,
     load_prepare_config,
+    manifest_meta_path,
 )
+from allsky.frame_pixels import decode_rgb
+from labmim_core.atomic import atomic_write, atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +68,9 @@ def _load_prepare(config: Path | None) -> PrepareConfig:
 
 def _config_sha256(cfg: PrepareConfig) -> str:
     """Content hash of the whole resolved config, recorded as manifest provenance."""
-    canonical = json.dumps(cfg.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    from allsky.provenance import config_sha256
+
+    return config_sha256(cfg)
 
 
 #: :class:`PrepareConfig` sections that reach the manifest.  ``embeddings`` and
@@ -203,7 +206,7 @@ def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]
             f"PrepareConfig has no field(s) {unknown}; pydantic ignores bogus include keys, so "
             "the manifest inputs hash would silently stop covering them"
         )
-    from allsky.provenance import file_content_sha256
+    from allsky.provenance import canonical_config_json, file_content_sha256
 
     digest = hashlib.sha256()
     for frame in per_video:
@@ -213,7 +216,7 @@ def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]
     for sensor_path in cfg.sensor.paths:
         digest.update(file_content_sha256(Path(sensor_path)).encode("utf-8"))
     sections = cfg.model_dump(mode="json", include=set(_MANIFEST_CONFIG_SECTIONS))
-    digest.update(json.dumps(sections, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    digest.update(canonical_config_json(sections).encode("utf-8"))
     return digest.hexdigest()
 
 
@@ -266,7 +269,7 @@ def validate_dataset(
         typer.echo(f"ERROR: manifest not found: {manifest_path}")
         raise typer.Exit(1)
 
-    meta_path = manifest_path.with_name(f"{manifest_path.name}.meta.json")
+    meta_path = manifest_meta_path(manifest_path)
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
     if not meta_path.exists():
         typer.echo(f"WARNING: meta sidecar not found: {meta_path}")
@@ -342,7 +345,7 @@ def prepare_local(
     dataset_dir = Path(cfg.output.dataset_dir)
     frames_root = dataset_dir / "frames"
     manifest_path = dataset_dir / DATASET_MANIFEST_FILENAME
-    meta_path = manifest_path.with_name(f"{manifest_path.name}.meta.json")
+    meta_path = manifest_meta_path(manifest_path)
     split_path = dataset_dir / DATASET_SPLIT_FILENAME
     videos = sorted(glob.glob(cfg.video.pattern))
     config_sha = _config_sha256(cfg)
@@ -504,8 +507,8 @@ def _run_extract_step(
     skip is named again on the next run.  The overlay reader refuses a day it
     cannot timestamp — the 2026-06-04 archive video steps its clock 7 s backwards
     at frame 851 — and that refusal is right, but it describes ONE day: letting
-    it end the loop threw away the other 95 days of a two-hour extraction, and
-    would have stopped the daily job in ``docs/allsky-archive.md`` permanently.
+    it end the loop throws away the other 95 days of a two-hour extraction and
+    stops the daily job in ``docs/allsky-archive.md`` permanently.
     A skipped day contributes no manifest rows, which is what a night-only day
     already does.  The exit code stays zero for the same reason: the fault is a
     permanent property of that day's bytes, so a run that failed on it will fail
@@ -678,7 +681,7 @@ def _extract_and_qc(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDa
 
     qc_flags: list[int] = []
     for frame_path in frame_manifest["frame_path"]:
-        image = np.asarray(iio.imread(frame_path), dtype=np.uint8)
+        image = decode_rgb(frame_path)
         bits = 0
         for flag in visual_qc(image):
             bits |= int(flag)

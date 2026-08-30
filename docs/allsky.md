@@ -136,7 +136,7 @@ Campbell TOA5 `.dat` files listed in `sensor.paths` are read through `micrometeo
 
 `allsky prepare-local` aligns each frame to the nearest sensor record (see the alignment strategy in the config), derives targets, and writes the v2 manifest plus a `.meta.json` sidecar carrying a content `manifest_sha256`, dataset version, and provenance. Target columns include:
 
-- `kt` — clearness index `GHI / E0h` (extraterrestrial horizontal irradiance from the NOAA/Spencer solar-position chain in `allsky.solar`).
+- `kt` — clearness index `GHI / E0h` (extraterrestrial horizontal irradiance from the NOAA/Spencer solar-position chain in `labmim_core.solar`).
 - `dhi` — the diffuse target (see below).
 - `kindex` — the clear-sky index k\* (GHI over Haurwitz clear-sky GHI) or the clearness index k\_t, per `targets.kindex_kind`.
 - `sky_class` — weak sky-condition label from k-index bins (`-1` marks missing/unlabelable).
@@ -171,7 +171,9 @@ These are *weak* labels: Kt conflates cloudiness with turbidity and calibration 
 
 The default `safe` feature set is **solar geometry + standard meteorology only — no radiometry**. GHI, the diffuse pyranometer, and every derived target are *forbidden* as features and raise `ForbiddenFeatureError` if requested. This is the central anti-leakage guarantee of the v2 stack: a model must learn diffuse irradiance from the *sky image* and non-radiometric context, not from a radiometric shortcut. The `extended` set adds ablation-only radiometric auxiliaries and is never selected silently. `validate-dataset` fails if a forbidden feature reaches the manifest.
 
-> **`safe` needs a working thermohygrometer, and the station's has not had one since 2025-12-19.** The Gill MetSENS1 rails at 1000 °C air, 1000 °C dew point and 999 %RH; `mask_sentinels` turns each rail into NaN and `build_manifest` drops any row with a non-finite feature, so `safe` retains 0.02 % of the rows paired against the all-sky camera archive. Use `features.set: minimal` — the same set without those three channels (10 features: solar geometry, barometer, anemometer) — until the instrument is repaired. `configs/allsky/data/local_prepare.yaml` ships that way.
+> **`safe` needs a working thermohygrometer, and the station's has not had one since 2025-12-19.** The Gill MetSENS1 railed at 1000 °C air, 1000 °C dew point and 999 %RH; `mask_sentinels` turns each rail into NaN and `build_manifest` drops any row with a non-finite feature, so `safe` retains 0.02 % of the rows paired against the all-sky camera archive. `features.set: minimal` drops those three channels (10 features: solar geometry, barometer, anemometer).
+
+> **`minimal` needs a working barometer, and on 2026-08-10 13:05 the same instrument took that too.** The MetSENS1 stopped railing and moved to a single `Unknown Fault` fill state on every subsequent row: `AirT1_C_Avg` writes the literal text `NAN`, `DP1_C_Avg` 214, `RH1` 2.62, and **`BP1_mbar_Avg` a constant 2.62 hPa**. That last one falls outside `SENTINEL_RANGES["BP1_mbar_Avg"] = (950, 1100)`, so it masks to NaN and the row-wise finite filter drops every sample from that timestamp on — silently, since rows before it still pass. Use **`features.set: bare`** (9 features: solar geometry + the *mechanical* anemometer `WS_ms`/`WindDir`, a different instrument that survived both failures) until the MetSENS1 is repaired. `configs/allsky/data/local_prepare.yaml` and `configs/allsky/experiments/_base.yaml` both ship that way, and they must always agree — the engine resolves feature columns from the experiment config while the manifest carries whatever prepare built.
 
 ---
 

@@ -13,11 +13,12 @@ from pathlib import Path, PurePosixPath
 import pandas as pd
 import pytest
 
-from allsky import solar
 from allsky.bundle import _read_member, _safe_arcname, export_colab_bundle, validate_bundle
-from allsky.config import PrepareConfig, SiteConfig
+from allsky.config import PrepareConfig
 from allsky.data.manifest import build_manifest, write_manifest_parquet
 from allsky.data.splits import create_day_splits, save_split_artifact
+from labmim_core import solar
+from labmim_core.site import SiteConfig
 
 
 def _sensor_frame(site: SiteConfig, index: pd.DatetimeIndex) -> pd.DataFrame:

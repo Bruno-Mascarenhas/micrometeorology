@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 from matplotlib import pyplot as plt
 from typer.testing import CliRunner
@@ -206,3 +207,58 @@ def test_an_empty_window_honours_strict_instead_of_reporting_success(full_statio
     # Without --strict the historical behaviour is unchanged.
     lenient = _invoke(lenta, rain, out, "--start-date", "2001-01-01")
     assert lenient.exit_code == 0, lenient.output
+
+
+def test_the_diffuse_graph_draws_the_models_diffuse_and_not_only_its_global():
+    """The figure named radiacao_difusa carried one model curve, the GLOBAL flux.
+
+    Its legend said ``SW_dw-wrf``, but it was the only model line on an axes
+    whose other curves are the measured diffuse, so the site read the model's
+    global irradiance as its diffuse. Both channels are drawn now, and the two
+    shipped producers agree on which column ``radiacao_difusa`` means.
+    """
+    from micrometeorology.cli.generate_station_graphs import WRF_COLUMNS
+    from micrometeorology.cli.plot_station_graphs import DEFAULT_WRF_COLUMNS
+    from micrometeorology.wrf.columns import SWDDIF_W_M2, SWDOWN_W_M2
+
+    assert WRF_COLUMNS["radiacao_difusa"] == SWDDIF_W_M2
+    assert WRF_COLUMNS["radiacao_global"] == SWDOWN_W_M2
+    assert DEFAULT_WRF_COLUMNS["radiacao_difusa"] == (WRF_COLUMNS["radiacao_difusa"],)
+
+
+def test_two_model_curves_on_one_axes_get_different_strokes():
+    """Two dashed black lines are how the global came to be read as the diffuse."""
+    from micrometeorology.cli.generate_station_graphs import _plot_wrf_overlay
+
+    figure, axes = plt.subplots()
+    try:
+        frame = pd.DataFrame(
+            {"swdown_w_m2": [800.0, 900.0], "swddif_w_m2": [120.0, 140.0]},
+            index=pd.to_datetime(["2026-01-01 12:00", "2026-01-01 13:00"]),
+        )
+        _plot_wrf_overlay(axes, frame, "swdown_w_m2", label="SW_dw-wrf 1h")
+        _plot_wrf_overlay(
+            axes, frame, "swddif_w_m2", label="SW_df-wrf 1h", linestyle="-.", color="#e07a1f"
+        )
+        strokes = {(line.get_linestyle(), line.get_color()) for line in axes.get_lines()}
+        assert len(strokes) == 2
+    finally:
+        plt.close(figure)
+
+
+def test_the_model_overlay_never_backtracks_in_time():
+    """``series_operacional.dat`` is an append-only log of successive runs.
+
+    Read without sorting it plots a line that runs backwards every time a new
+    run is appended, with the initialisation hour's identically-zero fluxes
+    still on it.
+    """
+    from micrometeorology.cli.generate_station_graphs import read_wrf_series
+
+    source = Path("data/series_operacional.dat")
+    if not source.exists():
+        pytest.skip("the operational record is not on this machine")
+    index = pd.DatetimeIndex(read_wrf_series(source).index)
+    assert index.is_monotonic_increasing
+    assert not index.duplicated().any()
+    assert not (index.hour == 21).any()

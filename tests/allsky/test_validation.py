@@ -6,8 +6,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from allsky import solar
-from allsky.config import SiteConfig
 from allsky.data.contracts import DEGRADABLE_TARGET_COLUMNS, TARGET_COLUMNS
 from allsky.data.manifest import build_manifest, write_manifest_parquet
 from allsky.data.validation import (
@@ -15,6 +13,8 @@ from allsky.data.validation import (
     ValidationReport,
     validate_manifest,
 )
+from labmim_core import solar
+from labmim_core.site import SiteConfig
 
 _MET = {
     "AirT1_C_Avg": 25.0,

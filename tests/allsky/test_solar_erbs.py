@@ -1,16 +1,17 @@
-"""Tests for allsky.solar (NOAA solar position) and allsky.erbs (diffuse fraction)."""
+"""Tests for labmim_core.solar (NOAA solar position) and allsky.erbs (diffuse fraction)."""
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from allsky import erbs, solar
-from allsky.config import SiteConfig
+from allsky import erbs
+from labmim_core import solar
+from labmim_core.site import SiteConfig
 
 
 @pytest.fixture
 def site() -> SiteConfig:
-    """Default site: LabMiM/UFBA, Salvador-BA (lat -13.00, lon -38.51)."""
+    """Default site: LabMiM/UFBA, Salvador-BA (lat -13.0055, lon -38.5089)."""
     return SiteConfig()
 
 

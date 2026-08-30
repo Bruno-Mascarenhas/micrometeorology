@@ -9,6 +9,14 @@ from allsky.data.contracts import (
     GEOMETRY_COLUMNS,
     META_COLUMNS,
     PROVENANCE_COLUMNS,
+    TARGET_COLUMNS,
+    QCFlag,
+    manifest_column_dtypes,
+    resolve,
+    to_relative,
+)
+from allsky.features import resolve_feature_set
+from labmim_core.sky import (
     SKY_CLASS_COUNT,
     SKY_CLASS_KT_UPPER_BOUNDS,
     SKY_CLASS_MISSING,
@@ -16,14 +24,8 @@ from allsky.data.contracts import (
     SKY_CLASS_NAMES_PT,
     SKY_CLASS_REFERENCE,
     SKY_CLASS_VALUES,
-    TARGET_COLUMNS,
-    QCFlag,
-    manifest_column_dtypes,
-    resolve,
     sky_class_name,
-    to_relative,
 )
-from allsky.features import resolve_feature_set
 
 
 class TestManifestColumnDtypes:

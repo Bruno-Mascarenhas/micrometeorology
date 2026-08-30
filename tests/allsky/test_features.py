@@ -4,9 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from allsky.config import SiteConfig
 from allsky.features import (
+    BARE_FEATURES,
+    BAROMETER_FEATURES,
     EXTENDED_FEATURES,
+    MINIMAL_FEATURES,
     SAFE_FEATURES,
     THERMOHYGROMETER_FEATURES,
     FeatureNormalizer,
@@ -16,13 +18,15 @@ from allsky.features import (
     build_feature_frame,
     fit_target_normalizers,
     resolve_feature_set,
+    source_column,
     validate_features,
 )
+from labmim_core.site import SiteConfig
 
 
 @pytest.fixture
 def site() -> SiteConfig:
-    """Default site: LabMiM/UFBA, Salvador-BA (lat -13.00, lon -38.51)."""
+    """Default site: LabMiM/UFBA, Salvador-BA (lat -13.0055, lon -38.5089)."""
     return SiteConfig()
 
 
@@ -121,6 +125,31 @@ class TestFeaturePolicy:
         assert "humidity" not in groups
         assert "radiometry_aux" not in groups
 
+    def test_resolve_bare_is_minimal_without_the_barometer(self):
+        assert resolve_feature_set("bare") == [
+            name for name in MINIMAL_FEATURES if name not in BAROMETER_FEATURES
+        ]
+
+    def test_bare_carries_no_logger_channel_outside_the_anemometer(self):
+        columns = {source_column(name) for name in BARE_FEATURES} - {None}
+        assert columns == {"WS_ms", "WindDir"}
+
+    def test_bare_features_pass_validation(self):
+        validate_features(resolve_feature_set("bare"))  # must not raise
+
+    def test_groups_cover_exactly_resolved_bare(self):
+        groups = active_feature_groups("bare")
+        covered = [f for members in groups.values() for f in members]
+        assert covered == resolve_feature_set("bare")
+        assert "pressure" not in groups
+        assert "temperature" not in groups
+        assert "humidity" not in groups
+        assert "radiometry_aux" not in groups
+
+    def test_an_unknown_set_names_every_tier_it_accepts(self):
+        with pytest.raises(ValueError, match="'bare', 'minimal', 'safe' or 'extended'"):
+            resolve_feature_set("barometric")
+
 
 # ---------------------------------------------------------------------------
 # engineering.py
@@ -157,7 +186,7 @@ class TestFeatureEngineering:
     def test_geometry_columns_match_solar_module(
         self, sensor_frame: pd.DataFrame, site: SiteConfig
     ):
-        from allsky import solar
+        from labmim_core import solar
 
         index = pd.DatetimeIndex(sensor_frame.index)
         frame = build_feature_frame(sensor_frame, index, site, "safe")

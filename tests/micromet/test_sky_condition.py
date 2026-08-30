@@ -9,7 +9,7 @@ label the same clearness index differently.
 import numpy as np
 import pytest
 
-from allsky.data.contracts import SKY_CLASS_KT_UPPER_BOUNDS
+from labmim_core.sky import SKY_CLASS_KT_UPPER_BOUNDS
 from micrometeorology.stats.sky_condition import (
     classify_sky_condition,
     cumulative_fractions,

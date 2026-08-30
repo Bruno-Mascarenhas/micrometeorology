@@ -21,6 +21,8 @@ from allsky.features.normalization import (
     fit_target_normalizers,
 )
 from allsky.features.policy import (
+    BARE_FEATURES,
+    BAROMETER_FEATURES,
     EXTENDED_FEATURES,
     FEATURE_GROUPS,
     FORBIDDEN_FEATURES,
@@ -36,6 +38,8 @@ from allsky.features.policy import (
 )
 
 __all__ = [
+    "BARE_FEATURES",
+    "BAROMETER_FEATURES",
     "EXTENDED_FEATURES",
     "FEATURE_GROUPS",
     "FORBIDDEN_FEATURES",

@@ -1,18 +1,15 @@
 """Prediction path of ``allsky snapshot --checkpoint``.
 
-Nothing exercised :func:`allsky.snapshot.predict_snapshot` before, and two
-defects rode along in it:
+Two contracts of :func:`allsky.snapshot.predict_snapshot` are pinned here
+because failing either yields a number rather than an error:
 
-- a capture with no ``--sensor-csv`` — the documented fallback, where every
-  sensor-derived feature is meant to be imputed at its training mean — died on
-  ``KeyError: sensor frame is missing required feature columns``, because
-  ``build_feature_frame`` refuses an absent source column and the empty frame
-  supplied every one of them absent;
-- the embedding branch handed the ``(3, S, S)`` float array of the image branch
-  straight to ``backbone.encode``, skipping the ``transform`` its contract
-  requires. Against DINOv2 that raised ``AttributeError: 'numpy.ndarray' object
-  has no attribute 'to'``, so every embedding-mode checkpoint (V0-V5, V7) could
-  not predict at all.
+- a capture with no ``--sensor-csv`` must impute every sensor-derived feature at
+  its training mean, the documented fallback. ``build_feature_frame`` refuses an
+  absent source column, so the empty frame has to reach it already filled;
+- the embedding branch must run the frame through ``backbone.transform`` before
+  ``backbone.encode``, as the backbone contract requires. Handing ``encode`` the
+  ``(3, S, S)`` float array of the image branch skips the preparation every
+  embedding-mode checkpoint (V0-V5, V7) was fitted under.
 
 Offline: the deterministic ``fake`` backbone and the synthetic dataset fixture.
 Note the fake backbone casts whatever layout it is handed, so it cannot tell the
@@ -22,7 +19,6 @@ pins the helper's contract instead.
 
 import shutil
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -31,7 +27,7 @@ import pytest
 from typer.testing import CliRunner
 
 from allsky.cli import app
-from allsky.config import SITE_UTC_OFFSET_HOURS, ExperimentConfig, SiteConfig
+from allsky.config import SITE_UTC_OFFSET_HOURS, ExperimentConfig
 from allsky.embeddings import backbone as backbone_module
 from allsky.embeddings.storage import META_FILENAME, read_meta, write_meta
 from allsky.snapshot import (
@@ -39,10 +35,12 @@ from allsky.snapshot import (
     _feature_vector,
     _image_as_hwc,
     _sensor_row_near,
+    _shipped_sensor_limits,
     predict_snapshot,
 )
-from allsky.solar import solar_elevation_deg
 from allsky.training.checkpointing import load_checkpoint
+from labmim_core.site import SiteConfig
+from labmim_core.solar import solar_elevation_deg
 from tests.allsky import _synthetic as synthetic
 from tests.allsky.test_e2e_experiment import _REPO_V1, _write_embeddings
 
@@ -111,13 +109,14 @@ def test_a_capture_without_a_sensor_export_imputes_instead_of_raising(
         embedding_checkpoint,
         timestamp=pd.Timestamp("2026-01-01 12:00:00"),
         sensor_csv=None,
+        sensor_limits=[],
         trust_checkpoint=True,
     )
 
     assert np.isfinite(prediction["predictions"]["dhi"])
     imputed = prediction["features"]["imputed"]
-    assert "pressure_mbar" in imputed
     assert "wind_speed_ms" in imputed
+    assert "wind_dir_sin" in imputed
     # Solar geometry comes from the timestamp, so it is never imputed.
     assert "solar_elevation" not in imputed
 
@@ -127,6 +126,27 @@ def test_the_backbone_is_fed_the_layout_its_transform_documents(sky_image: Path)
 
     assert frame.dtype == np.uint8
     assert frame.shape == (64, 64, 3)
+
+
+def test_the_live_frame_is_standardized_the_way_the_training_frames_are(sky_image: Path) -> None:
+    """Serving must standardize exactly as the dataset does: feeding the backbone
+    raw ``[0, 1]`` is a silent train/serve skew that yields plausible wrong
+    numbers rather than an error."""
+    from PIL import Image
+
+    from allsky.config import ExperimentConfig
+    from allsky.preprocessing import imagenet_standardize
+    from allsky.snapshot import _image_as_chw
+
+    served = _image_as_chw(sky_image, 64, ExperimentConfig())
+
+    with Image.open(sky_image) as handle:
+        pixels = np.asarray(handle.convert("RGB"), dtype=np.uint8)
+    unit = pixels.astype(np.float32) / 255.0
+    expected = imagenet_standardize(np.ascontiguousarray(unit.transpose(2, 0, 1)))
+
+    np.testing.assert_allclose(served, expected, rtol=1e-6, atol=1e-6)
+    assert served.min() < 0.0, "standardized pixels straddle zero; raw [0, 1] never would"
 
 
 @pytest.mark.parametrize(
@@ -151,6 +171,7 @@ def test_a_railed_logger_channel_is_imputed_instead_of_fed_as_a_measurement(
         feature_set=feature_set,
         site=SiteConfig(),
         sensor_csv=sensor_csv,
+        sensor_limits=_shipped_sensor_limits(),
         tolerance=DEFAULT_SENSOR_TOLERANCE,
         training_means=np.array([1014.93], dtype=np.float32),
     )
@@ -184,6 +205,7 @@ def test_an_implausible_exported_value_is_refused_instead_of_served_as_a_measure
         feature_set="safe",
         site=SiteConfig(),
         sensor_csv=sensor_csv,
+        sensor_limits=_shipped_sensor_limits(),
         tolerance=DEFAULT_SENSOR_TOLERANCE,
         training_means=np.array([3.7], dtype=np.float32),
     )
@@ -202,6 +224,7 @@ def test_a_plausible_exported_value_is_served_as_measured(tmp_path: Path) -> Non
         feature_set="safe",
         site=SiteConfig(),
         sensor_csv=sensor_csv,
+        sensor_limits=_shipped_sensor_limits(),
         tolerance=DEFAULT_SENSOR_TOLERANCE,
         training_means=np.array([25.0], dtype=np.float32),
     )
@@ -211,17 +234,15 @@ def test_a_plausible_exported_value_is_served_as_measured(tmp_path: Path) -> Non
 
 
 def test_a_configuration_declaring_no_plausibility_gate_refuses_to_serve_a_sensor_row(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     sensor_csv = tmp_path / "station-hourly.csv"
     sensor_csv.write_text("timestamp,AirT1_C_Avg\n2026-08-14 12:00:00,27.4\n", encoding="utf-8")
-    monkeypatch.setattr(
-        "micrometeorology.common.config.get_settings",
-        lambda: SimpleNamespace(sensor_limits=[]),
-    )
 
     with pytest.raises(ValueError, match="sensor_limits"):
-        _sensor_row_near(sensor_csv, pd.Timestamp("2026-08-14 12:00:00"), DEFAULT_SENSOR_TOLERANCE)
+        _sensor_row_near(
+            sensor_csv, pd.Timestamp("2026-08-14 12:00:00"), DEFAULT_SENSOR_TOLERANCE, []
+        )
 
 
 def test_an_offset_carrying_sensor_export_is_matched_on_site_local_wall_clock(
@@ -234,7 +255,10 @@ def test_an_offset_carrying_sensor_export_is_matched_on_site_local_wall_clock(
     )
 
     row = _sensor_row_near(
-        sensor_csv, pd.Timestamp("2026-08-14 12:00:00"), DEFAULT_SENSOR_TOLERANCE
+        sensor_csv,
+        pd.Timestamp("2026-08-14 12:00:00"),
+        DEFAULT_SENSOR_TOLERANCE,
+        _shipped_sensor_limits(),
     )
 
     assert float(row["AirT1_C_Avg"].iloc[0]) == pytest.approx(29.0)
@@ -250,6 +274,7 @@ def test_solar_geometry_is_built_on_the_pinned_site_offset_the_manifest_trains_w
         feature_set="minimal",
         site=site,
         sensor_csv=None,
+        sensor_limits=[],
         tolerance=DEFAULT_SENSOR_TOLERANCE,
         training_means=np.zeros(1, dtype=np.float32),
     )

@@ -5,12 +5,11 @@ GELU -> Dropout`` blocks (``fusion_dim -> 256 -> 256``) with a residual
 connection wherever input and output widths match.  Independent heads read the
 trunk output:
 
-- :class:`DHIHead` — a single normalized DHI value.
+- :class:`ScalarHead` — one scalar under a named key: the normalized DHI, the
+  normalized k-index, or, with a sigmoid, a cloud fraction in ``[0, 1]``.
 - :class:`DHIHeteroscedasticHead` — mean and log-variance (clamped to
   ``[-10, 10]``) for a Gaussian NLL loss.
-- :class:`KIndexHead` — a single normalized k-index value.
 - :class:`SkyHead` — ``SKY_CLASS_COUNT`` class logits.
-- :class:`CloudFractionHead` — a sigmoid-bounded fraction in ``[0, 1]``.
 
 :class:`Heads` assembles exactly the heads enabled by a
 :class:`allsky.config.TargetsConfig`; its ``forward`` returns the corresponding
@@ -24,15 +23,13 @@ from typing import cast
 from torch import Tensor, nn
 
 from allsky.config import TargetsConfig
-from allsky.data.contracts import SKY_CLASS_COUNT
 from allsky.modeling.contracts import ModelOutputs
+from labmim_core.sky import SKY_CLASS_COUNT
 
 __all__ = [
-    "CloudFractionHead",
-    "DHIHead",
     "DHIHeteroscedasticHead",
     "Heads",
-    "KIndexHead",
+    "ScalarHead",
     "SkyHead",
     "Trunk",
 ]
@@ -122,21 +119,33 @@ class Trunk(nn.Module):
         return out
 
 
-class DHIHead(nn.Module):
-    """Single-value DHI regression head (normalized space).
+class ScalarHead(nn.Module):
+    """One scalar prediction from the trunk embedding, under a named key.
+
+    The three single-value heads — DHI, clear-sky index, cloud fraction —
+    differ only in the key they publish and whether the output is squashed, so
+    they are one class parameterised by both.
 
     Parameters
     ----------
     in_dim:
         Width of the trunk embedding this head reads.
+    key:
+        Name this head's scalar takes in the merged model output.
+    activation:
+        Applied to the linear output, or ``None`` to publish it raw. Bounded
+        targets pass ``nn.Sigmoid()``; targets living in normalized space do
+        not, because the engine denormalizes them.
     """
 
-    def __init__(self, in_dim: int) -> None:
+    def __init__(self, in_dim: int, key: str, *, activation: nn.Module | None = None) -> None:
         super().__init__()
+        self.key = key
         self.linear = nn.Linear(in_dim, 1)
+        self.activation = activation if activation is not None else nn.Identity()
 
     def forward(self, x: Tensor) -> dict[str, Tensor]:
-        """Predict the normalized DHI from the trunk embedding.
+        """Predict this head's scalar from the trunk embedding.
 
         Parameters
         ----------
@@ -146,10 +155,12 @@ class DHIHead(nn.Module):
         Returns
         -------
         dict[str, Tensor]
-            ``{"dhi": (B,)}`` float32 in **normalized** target space
-            (dimensionless; the engine denormalizes to W m-2).
+            ``{key: (B,)}`` float32. In **normalized** target space for the
+            unsquashed heads (the engine denormalizes ``dhi`` to W m-2;
+            ``kindex`` is a dimensionless ratio); already in ``[0, 1]`` and not
+            normalized for a head carrying a bounding activation.
         """
-        return {"dhi": self.linear(x).squeeze(-1)}
+        return {self.key: self.activation(self.linear(x)).squeeze(-1)}
 
 
 class DHIHeteroscedasticHead(nn.Module):
@@ -186,36 +197,6 @@ class DHIHeteroscedasticHead(nn.Module):
         return {"dhi": mean, "dhi_log_var": log_var}
 
 
-class KIndexHead(nn.Module):
-    """Single-value k-index regression head (normalized space).
-
-    Parameters
-    ----------
-    in_dim:
-        Width of the trunk embedding this head reads.
-    """
-
-    def __init__(self, in_dim: int) -> None:
-        super().__init__()
-        self.linear = nn.Linear(in_dim, 1)
-
-    def forward(self, x: Tensor) -> dict[str, Tensor]:
-        """Predict the normalized clear-sky index from the trunk embedding.
-
-        Parameters
-        ----------
-        x:
-            ``(B, in_dim)`` float32 trunk embedding (dimensionless).
-
-        Returns
-        -------
-        dict[str, Tensor]
-            ``{"kindex": (B,)}`` float32 in **normalized** target space (the
-            k-index itself is a dimensionless ratio).
-        """
-        return {"kindex": self.linear(x).squeeze(-1)}
-
-
 class SkyHead(nn.Module):
     """Sky-condition classification head (``SKY_CLASS_COUNT`` logits).
 
@@ -225,7 +206,7 @@ class SkyHead(nn.Module):
         Width of the trunk embedding this head reads.
     n_classes:
         Number of sky classes; defaults to
-        :data:`allsky.data.contracts.SKY_CLASS_COUNT`, the Escobedo binning
+        :data:`allsky.data.sky.SKY_CLASS_COUNT`, the Escobedo binning
         (cloudy / partly_cloudy_diffuse / partly_cloudy_clear / clear).
     """
 
@@ -248,37 +229,6 @@ class SkyHead(nn.Module):
             softmaxed).
         """
         return {"sky_logits": self.linear(x)}
-
-
-class CloudFractionHead(nn.Module):
-    """Cloud-fraction regression head bounded to ``[0, 1]`` via sigmoid.
-
-    Parameters
-    ----------
-    in_dim:
-        Width of the trunk embedding this head reads.
-    """
-
-    def __init__(self, in_dim: int) -> None:
-        super().__init__()
-        self.linear = nn.Linear(in_dim, 1)
-        self.act = nn.Sigmoid()
-
-    def forward(self, x: Tensor) -> dict[str, Tensor]:
-        """Predict the sky-covering cloud fraction from the trunk embedding.
-
-        Parameters
-        ----------
-        x:
-            ``(B, in_dim)`` float32 trunk embedding (dimensionless).
-
-        Returns
-        -------
-        dict[str, Tensor]
-            ``{"cloud_fraction": (B,)}`` float32 in ``[0, 1]``, a dimensionless
-            fraction that is **not** normalized (it is already bounded).
-        """
-        return {"cloud_fraction": self.act(self.linear(x)).squeeze(-1)}
 
 
 class Heads(nn.Module):
@@ -308,13 +258,13 @@ class Heads(nn.Module):
             if targets.dhi.loss == "heteroscedastic":
                 heads.append(DHIHeteroscedasticHead(in_dim))
             else:
-                heads.append(DHIHead(in_dim))
+                heads.append(ScalarHead(in_dim, "dhi"))
         if targets.kindex.enabled:
-            heads.append(KIndexHead(in_dim))
+            heads.append(ScalarHead(in_dim, "kindex"))
         if targets.sky.enabled:
             heads.append(SkyHead(in_dim, n_classes))
         if targets.cloud_fraction.enabled:
-            heads.append(CloudFractionHead(in_dim))
+            heads.append(ScalarHead(in_dim, "cloud_fraction", activation=nn.Sigmoid()))
         self.heads = nn.ModuleList(heads)
 
     def forward(self, x: Tensor) -> ModelOutputs:

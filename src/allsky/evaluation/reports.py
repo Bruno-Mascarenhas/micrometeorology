@@ -26,8 +26,8 @@ from typing import Any
 
 import pandas as pd
 
-from allsky.atomic import atomic_write, atomic_write_json
 from allsky.evaluation.evaluator import EvaluationResult
+from labmim_core.atomic import atomic_write, atomic_write_json
 
 __all__ = ["compare_experiments", "write_evaluation_report"]
 

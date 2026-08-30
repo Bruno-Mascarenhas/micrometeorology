@@ -46,12 +46,12 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from allsky.solar import cos_zenith, eccentricity_correction, solar_elevation_deg
-from micrometeorology.common.paths import ensure_dir
-
 # The same solar geometry the climatology exporter uses, so "deep night" means
 # the same angle in both places.
-from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
+from labmim_core.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
+from labmim_core.solar import cos_zenith, eccentricity_correction, solar_elevation_deg
+from micrometeorology.common import instruments
+from micrometeorology.common.paths import ensure_dir
 from micrometeorology.sensors.ingestion import merge_dat_files
 from micrometeorology.sensors.quality import SAMPLING_INTERVAL
 
@@ -724,11 +724,10 @@ def _unshaded_diffuse_days_in_era(frame: pd.DataFrame, column: str) -> list[tupl
 #: simpler reason: they count impacts, not depth.
 RAIN_DEPTH_COLUMNS: tuple[str, ...] = ("PL01_mm_Tot",)
 
-#: One tip of the bucket, 0.01 inch. Every positive interval total is an integer
-#: multiple of it: 21,443 of 21,444 positive samples over ten years, worst
-#: deviation 4e-06. The one exception is the point — 1.09e9 mm of rain in five
-#: minutes, on 2018-06-10 09:10, which is a corrupted field rather than weather.
-RAIN_TIP_DEPTH_MM = 0.254
+#: One tip of the bucket. The value and the measurement behind it live in
+#: :mod:`micrometeorology.common.instruments`; the climatology export needs the
+#: same number for its wet/dry threshold.
+RAIN_TIP_DEPTH_MM = instruments.RAIN_TIP_DEPTH_MM
 
 #: Tolerance the multiple is checked to. Floored at 1e-5 deliberately: at 1e-6
 #: four samples fail on float storage alone (8.636001, 9.398001), which is the
@@ -974,7 +973,7 @@ NIGHT_CORRUPTION_CHANNELS = (*NIGHT_CORRUPTION_COLUMNS, "Lw_dw", "Lw_up", "Net_C
 # 1367 is the coefficient the cited method prescribes ("Let Sa = 1367 * E0", Long
 # & Shi 2008 pp. 24-25, transcribed in docs/arqueologia/qc/lit-statistical-methods.md),
 # NOT a physical constant this repo is free to update: it is deliberately distinct
-# from ``allsky.solar.SOLAR_CONSTANT_WM2``, the Kopp & Lean TSI that scales
+# from ``labmim_core.solar.SOLAR_CONSTANT_WM2``, the Kopp & Lean TSI that scales
 # extraterrestrial irradiance and the clearness index. Two quantities, two names.
 BSRN_CEILING_SOLAR_CONSTANT_WM2 = 1367.0
 
@@ -1100,9 +1099,9 @@ def mask_impossible_shortwave(
     The gate has three parts: the geometric ceiling per component, the flat
     :data:`BSRN_PPL_FLOOR_WM2` beneath every one of them, and the sign rule that
     no shortwave flux is zero or negative while the sun is above the horizon.
-    Only the ceiling existed until the other two were added, which is why
-    negative shortwave reached the published hourly means — a one-sided
-    "physically possible" limit passes half of what the prescription rejects.
+    A one-sided "physically possible" limit passes half of what the
+    prescription rejects: without the floor and the sign rule, negative
+    shortwave reaches the published hourly means.
 
     Pass *sources* (from :func:`~micrometeorology.sensors.calibration.resolve_mapping_windows`)
     to blank the raw column each unified channel was copied from on the same
@@ -1184,7 +1183,9 @@ def mask_impossible_shortwave(
 
 
 def night_corrupted_days(
-    frame: pd.DataFrame, columns: Sequence[str] = NIGHT_CORRUPTION_COLUMNS
+    frame: pd.DataFrame,
+    columns: Sequence[str] = NIGHT_CORRUPTION_COLUMNS,
+    elevation_deg: NDArray | None = None,
 ) -> list[tuple[str, int]]:
     """Days whose timestamps are shifted, found by irradiance recorded at night.
 
@@ -1202,6 +1203,11 @@ def night_corrupted_days(
     columns:
         Shortwave channels to witness the fault on. Longwave must stay out: a
         pyrgeometer reads 300-400 W/m2 all night by design.
+    elevation_deg:
+        Solar elevation over *frame*'s index in degrees, ``(N,)``, when the
+        caller already holds it; computed here otherwise. A pipeline that runs
+        several elevation-gated stages passes one array to all of them so a
+        second definition of "night" cannot drift from the first.
 
     Returns
     -------
@@ -1214,9 +1220,9 @@ def night_corrupted_days(
     if not present:
         return []
     index = pd.DatetimeIndex(frame.index)
-    deep_night = solar_elevation_deg(index, STATION_SITE, STATION_UTC_OFFSET_HOURS) < (
-        NIGHT_CORRUPTION_ELEVATION_DEG
-    )
+    if elevation_deg is None:
+        elevation_deg = station_elevation_deg(index)
+    deep_night = elevation_deg < NIGHT_CORRUPTION_ELEVATION_DEG
     offending = np.zeros(len(frame), dtype=bool)
     for column in present:
         values = frame[column]

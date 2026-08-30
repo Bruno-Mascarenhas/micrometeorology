@@ -13,7 +13,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from micrometeorology.cli.export_wrf_geojson import _normalize_var_list
 from micrometeorology.wrf import jobs
 from micrometeorology.wrf.value_source import ValueFrameSource, build_value_frame_source
 from tests.micromet import _reference
@@ -426,7 +425,9 @@ def test_poteolico_bare_name_writes_all_three_heights(tmp_path):
 
 
 def test_poteolico_duplicates_normalize_to_all_heights_once(tmp_path):
-    var_list = _normalize_var_list(["poteolico100", "poteolico", "poteolico100"])
+    var_list = jobs.normalize_var_list(
+        ["poteolico100", "poteolico", "poteolico100"], collapse_heights=False
+    )
     assert var_list == ["poteolico"]
 
     wrf = tmp_path / "wrfout_d02_jobs_potdup.nc"
@@ -448,12 +449,16 @@ def test_poteolico_duplicates_normalize_to_all_heights_once(tmp_path):
 
 
 def test_normalize_var_list_keeps_single_height_requests_distinct():
-    assert _normalize_var_list(["poteolico100"]) == ["poteolico100"]
-    assert _normalize_var_list(["poteolico50", "poteolico150", "poteolico50"]) == [
+    assert jobs.normalize_var_list(["poteolico100"], collapse_heights=False) == ["poteolico100"]
+    assert jobs.normalize_var_list(
+        ["poteolico50", "poteolico150", "poteolico50"], collapse_heights=False
+    ) == [
         "poteolico50",
         "poteolico150",
     ]
-    assert _normalize_var_list(["temperature", "poteolico100", "poteolico"]) == [
+    assert jobs.normalize_var_list(
+        ["temperature", "poteolico100", "poteolico"], collapse_heights=False
+    ) == [
         "temperature",
         "poteolico",
     ]
@@ -1112,3 +1117,33 @@ def test_an_ordinary_magnitude_still_encodes():
     accumulator.add(0, np.array([1.5, -2.25]), "01/01/2024 00:00:00")
 
     assert accumulator.means[0] == pytest.approx(-0.38, abs=0.01)
+
+
+def test_reading_a_v1_operational_file_warns_which_columns_are_not_repaired(caplog):
+    """`rename_v1_columns` renames; it does NOT apply the v1 formula repairs.
+
+    A v1 file carries an albedo near -273 and a reflected shortwave in the
+    -1e5 W/m2, because the extraction subtracted 273.15 from dimensionless
+    values. `migrate_to_v2` inverts that. Until it runs, a consumer is reading
+    those six columns wrong, and an INFO line saying the names were mapped
+    reads as if the file had been handled.
+    """
+    import logging
+
+    from micrometeorology.wrf.operational_record import (
+        V1_UNREPAIRED_COLUMNS,
+        rename_v1_columns,
+    )
+
+    v1 = pd.DataFrame({"ALBD": [-273.01], "EMISS": [-272.27], "Swup_calc": [-294069.0]})
+
+    with caplog.at_level(logging.WARNING, logger="micrometeorology.wrf.operational_record"):
+        renamed = rename_v1_columns(v1)
+
+    assert set(renamed.columns) == {"albedo", "emissivity", "swup_w_m2"}
+    assert caplog.records, "reading an unrepaired v1 file must warn"
+    message = caplog.records[0].getMessage()
+    assert "migrate" in message
+    for column in ("albedo", "emissivity", "swup_w_m2"):
+        assert column in message
+    assert {"albedo", "emissivity", "swup_w_m2"} <= V1_UNREPAIRED_COLUMNS

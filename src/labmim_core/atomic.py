@@ -1,9 +1,9 @@
 """Atomic file writes: temp file in the same directory + ``os.replace``.
 
-Every artifact the allsky pipeline writes — parquet manifests and their meta
-sidecars, embedding shards + index + meta, training checkpoints, metrics
-CSV/JSON, evaluation reports and Colab bundles — is written through
-:func:`atomic_write`.  The payload is written to a hidden temp file *in the
+Every artifact this project publishes goes through :func:`atomic_write` — the
+all-sky parquet manifests and their meta sidecars, embedding shards, training
+checkpoints, metrics CSV/JSON, evaluation reports and Colab bundles, and on the
+micrometeorology side the site's JSON and the operational record.  The payload is written to a hidden temp file *in the
 destination directory* (``.<name>.tmp-<pid>``) and then ``os.replace``-d onto
 the final path, so a crash mid-write never leaves a half-written artifact in
 place; the temp file is removed if the writer raises.
@@ -11,8 +11,9 @@ place; the temp file is removed if the writer raises.
 Same-directory placement is deliberate: ``os.replace`` is only atomic within a
 single filesystem, so the temp file must never live in a system tempdir.
 
-Pure stdlib: importing this module never pulls torch (callers that need torch —
-e.g. checkpoint saving — import it lazily inside the writer callable).
+Pure stdlib, and it imports nothing from this project: both packages write
+through it, so it has to sit under both. Callers that need torch — checkpoint
+saving — import it lazily inside the writer callable.
 """
 
 import json
@@ -111,11 +112,17 @@ def atomic_write_strict_json(path: str | Path, obj: Any) -> Path:
     Same encoding and signature as :func:`atomic_write_json` plus
     ``allow_nan=False``, so a non-finite float raises :class:`ValueError` and
     nothing is published: the destination keeps its previous contents and the
-    temp file is removed.  This is the writer for every payload the public site
-    fetches, whose consumers parse with a strict ``response.json()`` that fails
-    the ENTIRE document on a bare ``NaN``/``Infinity`` token — indistinguishable,
-    to a visitor, from a page that was never deployed.  A missing measurement
-    must therefore reach this writer already encoded as ``None``.
+    temp file is removed.  A strict ``response.json()`` fails the ENTIRE
+    document on a bare ``NaN``/``Infinity`` token — indistinguishable, to a
+    visitor, from a page that was never deployed — so a missing measurement
+    must reach this writer already encoded as ``None``.
+
+    This is the ``indent=2`` writer, for the all-sky artifacts a person reads
+    by eye. The site's own JSON has a DIFFERENT byte contract — compact
+    separators, no indentation — and is written by
+    :func:`micrometeorology.common.site_json.write_json`. The two are not
+    interchangeable: swapping one for the other rewrites every byte of the
+    published payload.
 
     The guard covers Python floats and their subclasses (``numpy.float64``);
     types the encoder cannot serialize still go through ``default=str``, so a

@@ -18,7 +18,7 @@ portable v2 manifest pinned in :mod:`allsky.data.contracts`:
   sensor gap, far alignment, k-index artifact).
 
 Diffuse/kt/Erbs derivation reuses the physics helpers in :mod:`allsky.erbs`,
-:mod:`allsky.solar` and :mod:`allsky.clearsky`.  :func:`write_manifest_parquet`
+:mod:`labmim_core.solar` and :mod:`allsky.clearsky`.  :func:`write_manifest_parquet`
 writes the parquet and its ``<name>.meta.json`` sidecar atomically and records a
 content ``manifest_sha256``.
 """
@@ -33,13 +33,29 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from allsky.atomic import atomic_write, atomic_write_json
 from allsky.clearsky import clear_sky_index
-from allsky.config import SITE_TZ, SITE_TZ_NAME, SITE_UTC_OFFSET_HOURS, PrepareConfig, SiteConfig
+from allsky.config import (
+    SITE_TZ,
+    SITE_TZ_NAME,
+    SITE_UTC_OFFSET_HOURS,
+    PrepareConfig,
+    SiteConfig,
+    manifest_meta_path,
+)
 from allsky.data.alignment import CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
     GEOMETRY_COLUMNS,
+    QCFlag,
+    manifest_column_dtypes,
+    to_relative,
+)
+from allsky.data.splits import DaySplit
+from allsky.erbs import pseudo_diffuse
+from allsky.features import build_feature_frame, resolve_feature_set, validate_features
+from allsky.provenance import code_version, content_sha256
+from labmim_core.atomic import atomic_write, atomic_write_json
+from labmim_core.sky import (
     SKY_CLASS_KT_UPPER_BOUNDS,
     SKY_CLASS_MISSING,
     SKY_CLASS_NAMES,
@@ -49,15 +65,8 @@ from allsky.data.contracts import (
     SKY_CLOUDY,
     SKY_PARTLY_CLOUDY_CLEAR,
     SKY_PARTLY_CLOUDY_DIFFUSE,
-    QCFlag,
-    manifest_column_dtypes,
-    to_relative,
 )
-from allsky.data.splits import DaySplit
-from allsky.erbs import pseudo_diffuse
-from allsky.features import build_feature_frame, resolve_feature_set, validate_features
-from allsky.provenance import code_version, content_sha256
-from allsky.solar import clearness_index, solar_azimuth_deg, solar_elevation_deg
+from labmim_core.solar import clearness_index, solar_azimuth_deg, solar_elevation_deg
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +100,7 @@ def build_manifest(
     max_kindex: float | None = None,
     far_distance_minutes: float | None = None,
     extra_features: Iterable[str] = (),
+    sensor_timestamp_offset_minutes: float = 0.0,
     config_sha256: str | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Build the v2 manifest DataFrame and its sidecar meta dict.
@@ -142,6 +152,12 @@ def build_manifest(
         half the strategy's ``max_distance_minutes``.
     extra_features:
         Extra engineered feature names appended to the resolved set.
+    sensor_timestamp_offset_minutes:
+        Minutes added to every sensor stamp before pairing, in minutes. The
+        Campbell logger end-stamps its block averages, so ``-2.5`` moves a
+        5-minute row to the time centroid of the window it actually averages;
+        ``0.0`` keeps the raw-stamp join. Shifts only which row a frame is
+        paired to and the recorded ``distance_minutes`` — never the values.
     config_sha256:
         Optional hash of the originating config, stored in the meta.
 
@@ -201,7 +217,9 @@ def build_manifest(
         raise KeyError(f"sensor frame is missing the configured diffuse column {diffuse_column!r}")
 
     frame_times = pd.DatetimeIndex(frames["timestamp"])
-    sensor_index = pd.DatetimeIndex(sensors.index)
+    sensor_index = pd.DatetimeIndex(sensors.index) + pd.Timedelta(
+        minutes=sensor_timestamp_offset_minutes
+    )
 
     pairing = strategy.pair(frame_times, sensor_index)
     keep = pairing.matched
@@ -352,6 +370,7 @@ def build_manifest(
             "night_min_elevation_deg": night_min_elevation_deg,
             "max_kindex": max_kindex,
             "far_distance_minutes": far_distance_minutes,
+            "sensor_timestamp_offset_minutes": sensor_timestamp_offset_minutes,
         },
     )
     logger.info(
@@ -413,6 +432,7 @@ def build_manifest_from_prepare_config(
         kindex_kind=cfg.targets.kindex_kind,
         alignment=alignment,
         night_min_elevation_deg=cfg.night_filter.min_solar_elevation_deg,
+        sensor_timestamp_offset_minutes=cfg.sensor.timestamp_offset_minutes,
         config_sha256=config_sha256,
     )
 
@@ -452,7 +472,7 @@ def write_manifest_parquet(
     written_meta = {**meta, "manifest_sha256": sha, "row_count": len(manifest)}
 
     atomic_write(out, lambda tmp: manifest.to_parquet(tmp, index=False))
-    atomic_write_json(out.with_name(f"{out.name}.meta.json"), written_meta)
+    atomic_write_json(manifest_meta_path(out), written_meta)
 
     logger.info(
         "write_manifest_parquet: wrote %s (%d rows, sha256=%s)", out, len(manifest), sha[:12]
@@ -494,7 +514,7 @@ def attach_split_column(
     """
     out = Path(manifest_path)
     manifest = pd.read_parquet(out)
-    meta_path = out.with_name(f"{out.name}.meta.json")
+    meta_path = manifest_meta_path(out)
     meta: dict[str, Any] = {}
     if meta_path.exists():
         with open(meta_path, encoding="utf-8") as handle:

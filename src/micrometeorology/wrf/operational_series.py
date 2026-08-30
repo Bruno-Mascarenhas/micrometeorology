@@ -9,7 +9,7 @@ stack, so the CLIs that only read the record do not pay for one.
 **Timestamps are naive station-local (UTC-03).** WRF's ``Times`` are UTC by
 construction and :meth:`~micrometeorology.wrf.reader.WRFDataset.parse_times`
 returns them aware; the conversion to local happens once, here, using the pinned
-:data:`~micrometeorology.common.site.STATION_UTC_OFFSET_HOURS` rather than the
+:data:`~labmim_core.site.STATION_UTC_OFFSET_HOURS` rather than the
 host's zone. Hour 21 local is 00 UTC, each run's initialisation step, where the
 physics has not been called yet and every flux column is no-value.
 """
@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from micrometeorology.common.site import STATION_UTC_OFFSET_HOURS
+from labmim_core.site import STATION_UTC_OFFSET_HOURS
 from micrometeorology.wrf.operational_record import (
     OPERATIONAL_CATALOG,
     PointSample,

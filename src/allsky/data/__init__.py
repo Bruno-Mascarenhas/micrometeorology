@@ -25,20 +25,10 @@ from allsky.data.contracts import (
     DATASET_VERSION,
     GEOMETRY_COLUMNS,
     META_COLUMNS,
-    SKY_CLASS_COUNT,
-    SKY_CLASS_KT_UPPER_BOUNDS,
-    SKY_CLASS_MISSING,
-    SKY_CLASS_NAMES,
-    SKY_CLASS_VALUES,
-    SKY_CLEAR,
-    SKY_CLOUDY,
-    SKY_PARTLY_CLOUDY_CLEAR,
-    SKY_PARTLY_CLOUDY_DIFFUSE,
     TARGET_COLUMNS,
     QCFlag,
     manifest_column_dtypes,
     resolve,
-    sky_class_name,
     to_relative,
 )
 from allsky.data.datasets import (
@@ -63,6 +53,18 @@ from allsky.data.validation import (
     ManifestValidationError,
     ValidationReport,
     validate_manifest,
+)
+from labmim_core.sky import (
+    SKY_CLASS_COUNT,
+    SKY_CLASS_KT_UPPER_BOUNDS,
+    SKY_CLASS_MISSING,
+    SKY_CLASS_NAMES,
+    SKY_CLASS_VALUES,
+    SKY_CLEAR,
+    SKY_CLOUDY,
+    SKY_PARTLY_CLOUDY_CLEAR,
+    SKY_PARTLY_CLOUDY_DIFFUSE,
+    sky_class_name,
 )
 
 __all__ = [

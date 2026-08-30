@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass, field
 
+from labmim_core.site import STATION_SITE
+
 
 @dataclass(slots=True)
 class DataConfig:
@@ -38,5 +40,5 @@ class DataConfig:
     resample_freq: str | None = None
     sensor_min_samples: int = 6
 
-    station_lat: float = -12.95
-    station_lon: float = -38.51
+    station_lat: float = STATION_SITE.latitude
+    station_lon: float = STATION_SITE.longitude

@@ -15,14 +15,14 @@ import ssl
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 from urllib.parse import urljoin
 
-from allsky.atomic import atomic_write, atomic_write_json
+from labmim_core.atomic import atomic_write, atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -481,6 +481,56 @@ def _utc_now() -> str:
     return dt.datetime.now(tz=dt.UTC).isoformat(timespec="seconds")
 
 
+@dataclass(frozen=True, slots=True)
+class ExtractionParams:
+    """What makes one extraction of a day different from another.
+
+    Frames extracted under a different *step* or *resize* are a different
+    artifact; so are frames stamped by a different clock, because each writer
+    names a frame after that frame's own capture time, so the two clocks produce
+    different filenames for the same day.
+
+    This type is the single owner of the extraction identity: the ledger compares
+    and stores exactly these fields, so a new extraction parameter reaches every
+    comparison by being added here. One left out of the comparison makes the
+    ledger answer "already done" for frames that are not the ones asked for —
+    visible only as stale frames surviving in the directory.
+
+    Attributes
+    ----------
+    step:
+        Frame stride the extraction used.
+    resize:
+        Square side the frames were written at, or None for native size.
+    timestamps:
+        Which clock stamped the frames, as the ledger spells it.
+    """
+
+    step: int
+    resize: int | None
+    timestamps: str
+
+    def matches(self, record: Mapping[str, Any]) -> bool:
+        """True when *record* was filed under exactly these parameters.
+
+        A record missing a field counts as a mismatch: its parameter is unknown,
+        and re-extracting is the only way to learn it.
+        """
+        return (
+            record.get("step") == self.step
+            and record.get("resize") == self.resize
+            and record.get("timestamps") == self.timestamps
+        )
+
+    def as_record(self) -> dict[str, Any]:
+        """The fields as the ledger stores them on disk.
+
+        The key spelling is the on-disk contract: renaming one invalidates every
+        existing ledger and re-extracts and re-uploads the whole archive.
+        """
+        return {"step": self.step, "resize": self.resize, "timestamps": self.timestamps}
+
+
 class Ledger:
     """Append-only record of the days downloaded, extracted and uploaded.
 
@@ -623,11 +673,7 @@ class Ledger:
         stored = self.frames(key)
         if stored is None:
             return False
-        return (
-            stored.get("step") == step
-            and stored.get("resize") == resize
-            and stored.get("timestamps") == timestamps
-        )
+        return ExtractionParams(step, resize, timestamps).matches(stored)
 
     def record_extraction_fault(
         self, key: str, *, reason: str, step: int, resize: int | None, timestamps: str
@@ -642,9 +688,7 @@ class Ledger:
         stored = self.video(key) or {}
         self.entry(key)["extraction_fault"] = {
             "reason": reason,
-            "step": step,
-            "resize": resize,
-            "timestamps": timestamps,
+            **ExtractionParams(step, resize, timestamps).as_record(),
             "video_sha256": stored.get("sha256", ""),
             "recorded_at": _utc_now(),
         }
@@ -660,12 +704,9 @@ class Ledger:
         if not isinstance(stored, dict):
             return None
         video = self.video(key) or {}
-        matches = (
-            stored.get("step") == step
-            and stored.get("resize") == resize
-            and stored.get("timestamps") == timestamps
-            and stored.get("video_sha256") == video.get("sha256", "")
-        )
+        matches = ExtractionParams(step, resize, timestamps).matches(stored) and stored.get(
+            "video_sha256"
+        ) == video.get("sha256", "")
         reason: str | None = stored.get("reason") if matches else None
         return reason
 
@@ -727,9 +768,7 @@ class Ledger:
         self.entry(key)["frames"] = {
             "dir": Path(directory).as_posix(),
             "count": count,
-            "step": step,
-            "resize": resize,
-            "timestamps": timestamps,
+            **ExtractionParams(step, resize, timestamps).as_record(),
             "extracted_at": _utc_now(),
         }
         uploads: dict[str, Any] = self.entry(key).get("uploads", {})

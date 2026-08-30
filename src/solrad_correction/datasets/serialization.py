@@ -6,6 +6,11 @@ import numpy as np
 import pandas as pd
 
 from solrad_correction.datasets.sequence import WindowedSequenceDataset, WindowedSequenceDatasetMeta
+from solrad_correction.datasets.sidecars import (
+    read_optional_index,
+    write_feature_names,
+    write_optional_index,
+)
 from solrad_correction.datasets.tabular import TabularDataset
 
 
@@ -50,12 +55,8 @@ def save_tabular_dataset(dataset: TabularDataset, path: str | Path) -> None:
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     np.savez(p / "data.npz", X=dataset.X, y=dataset.y)
-    pd.DataFrame({"feature_names": dataset.feature_names}).to_csv(
-        p / "feature_names.csv",
-        index=False,
-    )
-    if dataset.index is not None:
-        pd.Series(dataset.index).to_csv(p / "index.csv", index=False)
+    write_feature_names(p, dataset.feature_names)
+    write_optional_index(p, dataset.index)
 
 
 def load_tabular_dataset(path: str | Path) -> TabularDataset:
@@ -97,7 +98,4 @@ def load_windowed_sequence_dataset(path: str | Path) -> WindowedSequenceDataset:
 
 
 def _load_optional_index(path: Path) -> pd.DatetimeIndex | None:
-    if not path.exists():
-        return None
-    idx_df = pd.read_csv(path)
-    return pd.DatetimeIndex(pd.to_datetime(idx_df.iloc[:, 0]))
+    return read_optional_index(path.parent)

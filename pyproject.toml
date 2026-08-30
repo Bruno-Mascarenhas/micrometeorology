@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "labmim-micrometeorology"
-version = "1.3.1"
+version = "1.4.0"
 description = "LabMiM/UFBA micrometeorology data processing, WRF output analysis, solar radiation bias correction, and ML-based model evaluation."
 readme = "README.md"
 license = {text = "MIT"}
@@ -100,7 +100,7 @@ solrad-run = "solrad_correction.cli:main"
 solrad-colab = "solrad_correction.cli_colab:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/micrometeorology", "src/solrad_correction", "src/allsky"]
+packages = ["src/labmim_core", "src/micrometeorology", "src/solrad_correction", "src/allsky"]
 
 # Without this the installed CLI resolves the QC limits, aggregation columns and
 # calibration table to their empty defaults and exports unfiltered, uncalibrated
@@ -198,7 +198,7 @@ convention = "numpy"
 [tool.ruff.lint.per-file-ignores]
 # Seeds the legacy GLOBAL stream on purpose — the one sklearn, torch's DataLoader
 # and every bare `np.random.*` call draw from. `default_rng` has no such reach.
-"src/solrad_correction/utils/seeds.py" = ["NPY002"]
+"src/labmim_core/seeds.py" = ["NPY002"]
 # A test's NAME is its documentation here, so a required docstring would restate
 # it. `assert` is pytest's assertion API. Benchmarks are `__main__` scripts.
 "tests/**" = ["D101", "D103", "S101"]
@@ -220,6 +220,15 @@ convention = "numpy"
 # production ones; its docstring forbids editing the body.
 "tests/micromet/_reference.py" = ["BLE001"]
 "notebooks/*.ipynb" = ["S603", "S607"]
+# Spawns this package's own `allsky` CLI, resolved from the venv this notebook
+# just built and prepended to PATH. S603/S607 are silent only when every argv
+# element is a string literal, which a per-run config path can never be.
+"notebooks/colab/_colab_runner.py" = ["S603", "S607"]
+# A verification harness. S101: its `assert`s ARE its output, and a notebook
+# never runs under `python -O`, so what the rule guards against cannot happen.
+# S603/S607: it shells out to rclone, resolved from a variable rather than a
+# string literal, which is the one shape S603 can never accept.
+"notebooks/exploratory/03_verifica_bundle_no_drive.ipynb" = ["S101", "S603", "S607"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["allsky", "micrometeorology", "solrad_correction"]

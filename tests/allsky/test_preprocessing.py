@@ -9,13 +9,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from allsky.config import CropConfig, PrepareConfig
+from allsky.config import CropConfig, PadConfig, PrepareConfig
 from allsky.data.contracts import QCFlag
 from allsky.preprocessing import (
     apply_static_mask,
     center_crop,
     estimate_circular_mask,
     load_mask,
+    pad_frame,
     process_frame,
     resize_image,
     resolve_mask,
@@ -270,3 +271,31 @@ class TestResolveMask:
         for _ in range(5):
             process_frame(_rgb(16, 16, fill=210), cfg, mask=mask)
         assert decodes == 1
+
+
+class TestPadFrame:
+    def test_a_disabled_pad_hands_the_frame_straight_back(self) -> None:
+        frame = np.zeros((4, 6, 3), dtype=np.uint8)
+
+        assert pad_frame(frame, PadConfig()) is frame
+
+    def test_each_side_grows_by_its_own_amount(self) -> None:
+        """The four sides are independent because the sky disc is not concentric
+        with the sensor: centring it in the output takes unequal padding."""
+        frame = np.full((10, 20, 3), 7, dtype=np.uint8)
+
+        padded = pad_frame(frame, PadConfig(enabled=True, top=3, bottom=5, left=1, right=2))
+
+        assert padded.shape == (18, 23, 3)
+        assert padded[3, 1, 0] == 7
+        assert padded[0, 0, 0] == 0
+
+    def test_the_fill_level_is_written_not_the_edge_pixel(self) -> None:
+        """Padded rows are sky the camera does not image, so they must not
+        replicate a measured pixel that a reader could take for one."""
+        frame = np.full((4, 4, 3), 200, dtype=np.uint8)
+
+        padded = pad_frame(frame, PadConfig(enabled=True, top=2, fill=13))
+
+        assert padded[0, 0, 0] == 13
+        assert padded[1, 3, 2] == 13

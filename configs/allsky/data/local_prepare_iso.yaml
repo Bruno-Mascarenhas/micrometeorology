@@ -1,0 +1,106 @@
+# PrepareConfig — LOCAL dataset preparation for the multimodal (v2) pipeline.
+# Drives: allsky prepare-local / validate-dataset / precompute-embeddings /
+# export-colab-bundle. Loads via allsky.config.load_prepare_config (extra=forbid,
+# so a typo fails loudly). All timestamps are naive local America/Bahia
+# (fixed UTC-3, no DST since 2019).
+
+video:
+  pattern: "data/all-sky/videos/allsky-*.mp4"
+  filename_date_format: "allsky-%Y%m%d"
+  start_time: "06:00"            # local time of frame 0 — match the camera schedule
+  minutes_per_frame: 1.0
+
+site:
+  latitude: -13.0055             # LabMiM/UFBA, Salvador-BA
+  longitude: -38.5089            # UTC-3 fixed
+
+features:
+  # geometry + MECHANICAL anemometer; NO radiometry (anti-leakage). Not `safe`:
+  # the Gill MetSENS1 thermohygrometer has been railed since 2025-12-19. Not
+  # `minimal` either: on 2026-08-10 13:05 the same instrument moved to a single
+  # "Unknown Fault" fill state that took the barometer with it (BP1 is a
+  # constant 2.62 hPa), and the row-wise finite filter would drop every frame
+  # from that timestamp on -- the whole overlap with the new camera days.
+  set: bare
+
+mask:
+  path: null                     # static horizon/obstruction mask; null -> auto
+  threshold: null
+
+# Reextracao isotropica. O resize direto de 1920x1080 para 512x512 esmaga o eixo
+# horizontal por 1.78, e o disco fisheye sai eliptico: mascara de ROI circular e
+# desenrolamento polar centrado no sol passam a descrever uma optica que a imagem
+# nao tem. Os numeros abaixo vem do ajuste da lente pelo rastro do sol (415
+# deteccoes, 9 dias, lei equidistante, residuo mediano 6.67 px): centro optico em
+# (linha 601.7, coluna 971.7) e raio do horizonte 855.5 px no frame nativo.
+#
+# O recorte pega a extensao horizontal do disco (colunas 116..1827) e o
+# preenchimento leva a altura de 1080 a 1711 de forma ASSIMETRICA, porque o eixo
+# optico esta 61.7 px abaixo do centro do sensor. Resultado: disco concentrico e
+# inscrito num quadrado, e o resize para 512 devolve raio 256 no centro (256, 256).
+#
+# As faixas preenchidas sao ceu que a camera NAO imageia: o corte 16:9 do sensor
+# deixa 90 graus de zenital a leste/oeste mas so 60.9 ao norte e 48.4 ao sul, um
+# terco do domo. Preencher com 0 nao inventa medida, marca ausencia.
+crop:
+  enabled: true
+  height: 1080
+  width: 1711
+  left: 12
+pad:
+  enabled: true
+  top: 254
+  bottom: 377
+  fill: 0
+
+resize: 512                      # the sync-archive house size (docs/allsky-archive.md); the
+                                 # DINOv2 transform squares the frame at embed time regardless,
+                                 # so storing 1920x1080 costs ~5x the disk for no extra pixels
+
+night_filter:
+  min_solar_elevation_deg: 10.0  # drop near-horizon / night frames (k-index noise-dominated)
+
+sensor:
+  paths:
+    - "data/LBM_lenta_2025.dat"
+  ghi_column: "CM3Up_Wm2_Avg"    # drives k-index + Erbs pseudo-target; FORBIDDEN as a feature
+  column_map: {}                 # optional {logger_column: policy_source_name} renames
+  tolerance_minutes: 5.0         # image<->sensor max pairing distance (alignment "far" threshold)
+  # The CR5000 END-stamps its 5-min averages: the row at t is the mean over
+  # (t-5min, t], verified against the 1-minute LBM_solar_2024 overlap at
+  # RMS 0.083 W/m2 / r = 1.000000. -2.5 moves each row to the time centroid of
+  # the window it averages. The offset sweep against that 1-minute truth bottoms
+  # out at exactly -2.50 (94.00 -> 74.99 W/m2 of label noise on GHI, -20.2%;
+  # 21.66 -> 15.35 on diffuse, -29.1%), and the downstream factorial measured
+  # -2.89 +- 0.22 W/m2 of test DHI RMSE. See docs/allsky-join-de-rotulo.md.
+  timestamp_offset_minutes: -2.5
+
+targets:
+  diffuse_column: "PSP_Wm2_Avg"  # live diffuse sensor; null -> Erbs pseudo (target_source flags it)
+  kindex_kind: "kstar"           # k* = GHI / Haurwitz clear-sky GHI
+  # sky_class is not configurable: the four published conditions are binned on
+  # Kt by allsky.data.contracts.SKY_CLASS_KT_UPPER_BOUNDS.
+
+alignment:
+  strategy: "center_frame"       # nearest frame to the window centre (build-time pairing)
+  window_minutes: 5.0
+
+output:
+  dataset_dir: "output/allsky-mm/dataset-iso"
+  dataset_version: "2"
+
+embeddings:
+  backbone: "dinov2_vits14"      # ViT-S/14; use "fake" for offline dev/tests
+  revision: "main"               # actual torch.hub commit pin lives in a module constant
+  pooling: "cls"                 # 384-d CLS token
+  batch_size: 64
+  device: "auto"
+  shard_size: 2048               # sample_ids per safetensors shard
+  dtype: "fp16"
+
+splits:
+  val_fraction: 0.15
+  test_fraction: 0.15
+  seed: 42                       # only moves strategy: random
+  strategy: "chronological"      # earliest days train, latest test
+  gap_days: 1                    # dropped at each boundary; adjacent days are near-duplicates

@@ -38,12 +38,11 @@ from allsky.data.contracts import (
     DATASET_VERSION,
     DEGRADABLE_TARGET_COLUMNS,
     META_COLUMNS,
-    SKY_CLASS_MISSING,
-    SKY_CLASS_VALUES,
     TARGET_COLUMNS,
     resolve,
 )
 from allsky.features.policy import FORBIDDEN_FEATURES
+from labmim_core.sky import SKY_CLASS_MISSING, SKY_CLASS_VALUES
 
 __all__ = ["ManifestValidationError", "ValidationReport", "validate_manifest"]
 

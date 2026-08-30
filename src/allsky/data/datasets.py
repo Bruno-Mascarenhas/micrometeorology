@@ -4,7 +4,8 @@ Two datasets share one batch contract (see :class:`MultimodalImageDataset`):
 
 - :class:`MultimodalImageDataset` loads sky JPEGs (paths relative to
   ``data_root``) end-to-end with a PIL decode -> RGB -> bilinear resize -> CHW
-  float32 in ``[0, 1]`` recipe.
+  float32 recipe, standardized by the DINOv2 channel statistics so the image
+  path feeds the backbone what the offline embedding path feeds it.
 - :class:`MultimodalEmbeddingDataset` reads a precomputed visual embedding per
   sample through an :class:`EmbeddingReader`, the minimal
   ``sample_id -> np.ndarray`` protocol that
@@ -25,14 +26,20 @@ import itertools
 import math
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Protocol, get_args, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, get_args, runtime_checkable
 
 import numpy as np
 import pandas as pd
 
-from allsky.config import AlignmentStrategyName
+from allsky.config import DEFAULT_IMAGE_SIZE, AlignmentStrategyName
 from allsky.data.contracts import NS_PER_MINUTE, resolve
 from allsky.features.normalization import FeatureNormalizer
+
+if TYPE_CHECKING:
+    # allsky.preprocessing reaches back into allsky.data.contracts, so importing
+    # it at runtime would close a cycle through this package's __init__.
+    from allsky.augmentation import AugmentationPipeline
+    from allsky.preprocessing import PreprocessingPipeline
 
 __all__ = [
     "EmbeddingReader",
@@ -83,6 +90,7 @@ class _BaseMultimodalDataset:
         self.manifest = manifest.reset_index(drop=True)
         self.feature_columns = list(feature_columns)
         self.train = train
+        self.epoch = 0
         if not self.feature_columns:
             raise ValueError("feature_columns must be non-empty")
         missing = [c for c in self.feature_columns if c not in self.manifest.columns]
@@ -111,6 +119,17 @@ class _BaseMultimodalDataset:
         self._sky_class = self.manifest["sky_class"].to_numpy(dtype=np.int64, copy=True)
         self._sample_ids = [str(s) for s in self.manifest["sample_id"]]
         self._columns: SampleTensors | None = None
+
+    def set_epoch(self, epoch: int) -> None:
+        """Tell the dataset which pass over the data it is on.
+
+        Only the image dataset reads it — its augmentation seeds on
+        ``(seed, epoch, idx)`` — but the training loop calls this on whatever
+        dataset it was handed, so the attribute lives here rather than the loop
+        asking which kind it holds. Probing for it instead would let a rename
+        silently freeze augmentation on the first epoch.
+        """
+        self.epoch = epoch
 
     def _raw_target(self, column: str) -> np.ndarray:
         """Raw physical target column as float32 (NaN preserved as missing).
@@ -199,41 +218,84 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         feature_columns: Sequence[str],
         *,
         data_root: str | Path,
-        image_size: int = 224,
+        image_size: int = DEFAULT_IMAGE_SIZE,
         train: bool = True,
         stats: FeatureNormalizer | None = None,
+        augment: AugmentationPipeline | None = None,
+        preprocess: PreprocessingPipeline | None = None,
+        seed: int = 0,
     ) -> None:
         super().__init__(manifest, feature_columns, train=train, stats=stats)
         self.data_root = data_root
         self.image_size = image_size
-        self._paths = [str(p) for p in self.manifest["image_path"]]
+        # Resolved once here rather than per __getitem__: the join rebuilds a
+        # PurePosixPath and two Paths, and a dataloader worker pays it on every
+        # sample of every epoch.
+        self._paths = [resolve(str(p), self.data_root) for p in self.manifest["image_path"]]
+        # Augmentation is a training-split transform by definition: applying it
+        # to val/test would measure the model on pixels the sensor never saw.
+        self.augment = augment if train else None
+        # Preprocessing is NOT gated on `train`: it must be identical wherever
+        # the model runs, or inference sees pixels training never produced.
+        self.preprocess = preprocess
+        self._seed = int(seed)
 
-    def _load_image(self, relative_path: str) -> np.ndarray:
-        """Load a JPEG as float32 CHW in [0, 1], resized to ``image_size``.
+    def _load_image(self, image_path: Path, idx: int = 0) -> np.ndarray:
+        """Load a JPEG as a standardized float32 CHW array, resized to ``image_size``.
+
+        The chain is decode -> ``[0, 1]`` -> preprocess -> resize -> augment
+        -> standardize.
+
+        Preprocessing runs at NATIVE resolution, before the resize: filling the
+        timestamp band after downscaling leaves glyph pixels smeared into the
+        sky rows below it (measured on this camera: up to 0.031 of residual in
+        the six rows under the band). Augmentation runs on the ``[0, 1]`` frame
+        because every transform in :mod:`allsky.augmentation` is defined there,
+        and standardisation stays last so the backbone always receives its
+        pretraining distribution. ``idx`` seeds the augmentation together with the seed and the epoch.
 
         PIL decode -> RGB (``convert`` channel-replicates grayscale) -> bilinear
-        resize; resolves the manifest's relative POSIX path against
-        ``data_root``.  Decoding straight with PIL is pixel-identical to reading
-        through imageio and wrapping the array back into an image to resize it,
-        without the two full-frame numpy<->PIL copies.
+        resize. ``image_path`` is already resolved against ``data_root``. On the
+        no-preprocessing path, decoding straight with PIL is pixel-identical to
+        reading through imageio and wrapping the array back into an image to
+        resize it, without the two full-frame numpy<->PIL copies; the
+        preprocessing path necessarily pays them, because the stage is defined
+        on float CHW and PIL cannot bilinear-resize one.
         """
-        from PIL import Image
+        # Imported here because allsky.preprocessing reaches back into
+        # allsky.data.contracts, so a module-level import would close a cycle
+        # through this package's __init__.
+        from allsky.preprocessing import imagenet_standardize, model_input_frame
 
-        full = resolve(relative_path, self.data_root)
-        size = self.image_size
-        with Image.open(full) as handle:
-            frame = handle.convert("RGB")
-        if frame.size != (size, size):
-            frame = frame.resize((size, size), Image.Resampling.BILINEAR)
-        scaled = np.asarray(frame, dtype=np.uint8).astype(np.float32) / 255.0
-        return np.ascontiguousarray(scaled.transpose(2, 0, 1))
+        chw = model_input_frame(
+            image_path,
+            size=self.image_size,
+            preprocess=self.preprocess,
+        )
+        # `chw` was allocated there, so standardising in place costs no copy.
+        return imagenet_standardize(self._augmented(chw, idx), copy=False)
+
+    def _augmented(self, chw: np.ndarray, idx: int) -> np.ndarray:
+        """Augment one frame with a per-sample seeded generator.
+
+        The generator is derived from ``(seed, epoch, idx)`` rather than drawn
+        from a shared stream, so a dataloader worker cannot change which
+        transform a sample gets — the engine's own docstring warns that worker
+        RNG would otherwise leak into the batch — while the epoch term keeps the
+        draw varying across passes.
+        """
+        if self.augment is None or not self.augment.enabled:
+            return chw
+        rng = np.random.default_rng((self._seed, self.epoch, idx))
+        augmented: np.ndarray = self.augment(chw, rng)
+        return augmented
 
     def __getitem__(self, idx: int) -> SampleTensors:
         """Row *idx*: the shared target tensors plus ``image`` ``(3, H, W)`` float32."""
         import torch
 
         item = self._target_item(idx)
-        item["image"] = torch.from_numpy(self._load_image(self._paths[idx]))
+        item["image"] = torch.from_numpy(self._load_image(self._paths[idx], idx))
         return item
 
 

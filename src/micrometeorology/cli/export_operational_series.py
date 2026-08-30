@@ -55,6 +55,7 @@ from typing import Annotated
 
 import typer
 
+from micrometeorology.cli.wrfout_selection import glob_wrfout_day
 from micrometeorology.common.cli_options import parse_csv, parse_int_csv
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.wrf.operational_record import (
@@ -78,7 +79,7 @@ from micrometeorology.wrf.operational_series import (
     assign_domains,
     extract_operational_block,
 )
-from micrometeorology.wrf.reader import WRFDataset, resolve_wrfout_paths
+from micrometeorology.wrf.reader import WRFDataset
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -96,10 +97,7 @@ def _resolve_datasets(
         return list(datasets)
     if wrf_dir is None or date is None:
         raise typer.BadParameter("give either -d/--dataset, or --wrf-dir together with --date")
-    try:
-        paths = resolve_wrfout_paths(wrf_dir, date, domains or None)
-    except ValueError as error:
-        raise typer.BadParameter(str(error)) from None
+    paths = glob_wrfout_day(wrf_dir, date, domains)
     if not paths:
         raise typer.BadParameter(f"no wrfout for {date} in {wrf_dir}")
     return paths

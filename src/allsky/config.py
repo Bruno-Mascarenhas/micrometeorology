@@ -21,6 +21,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from labmim_core.site import SiteConfig
+
 #: Fixed UTC offset of the LabMiM camera and datalogger clocks. Pinned rather
 #: than read from the host TZ: a UTC-configured container would otherwise shift
 #: every capture time by three hours while the instruments keep stamping local
@@ -79,14 +81,30 @@ FRAME_PIXEL_SECTIONS = ("mask", "crop", "resize")
 #: longer produces. Declared here rather than in ``allsky.data.contracts``
 #: because importing that package pulls pandas, which the CLI modules must not.
 DATASET_MANIFEST_FILENAME = "manifest.parquet"
+
+#: The provenance sidecar sits beside the manifest parquet under the parquet's
+#: own name plus this suffix. The writer and every reader address it through
+#: :func:`manifest_meta_path`, so they cannot disagree about where it is.
+MANIFEST_META_SUFFIX = ".meta.json"
+
+
+def manifest_meta_path(manifest_path: Path) -> Path:
+    """Path of the provenance sidecar beside *manifest_path*.
+
+    Parameters
+    ----------
+    manifest_path:
+        Path to the manifest parquet.
+
+    Returns
+    -------
+    pathlib.Path
+        ``<manifest name>.meta.json`` in the same directory.
+    """
+    return manifest_path.with_name(f"{manifest_path.name}{MANIFEST_META_SUFFIX}")
+
+
 DATASET_SPLIT_FILENAME = "splits.json"
-
-
-class SiteConfig(BaseModel):
-    """Observation site (LabMiM/UFBA, Salvador-BA by default)."""
-
-    latitude: float = -13.00
-    longitude: float = -38.51
 
 
 #: The window modes a dataset can build. This module is the single owner of the
@@ -158,10 +176,11 @@ class DataSourceConfig(BaseModel):
 class FeaturesConfig(BaseModel):
     """Sensor feature policy selector.
 
-    ``set`` (``minimal`` | ``safe`` | ``extended``) maps to
-    :data:`allsky.features.policy.MINIMAL_FEATURES` / ``SAFE_FEATURES`` /
-    ``EXTENDED_FEATURES``. The minimal set drops the thermohygrometer channels
-    for periods where that instrument is down; the extended set adds
+    ``set`` (``bare`` | ``minimal`` | ``safe`` | ``extended``) maps to
+    :data:`allsky.features.policy.BARE_FEATURES` / ``MINIMAL_FEATURES`` /
+    ``SAFE_FEATURES`` / ``EXTENDED_FEATURES``. The minimal set drops the
+    thermohygrometer channels for periods where that instrument is down and the
+    bare set drops the barometer too; the extended set adds
     ablation-only radiometric auxiliaries and is never selected silently. The
     Python attribute is ``feature_set`` (``set`` is the YAML key, exposed via
     alias) to avoid shadowing the builtin.
@@ -169,7 +188,16 @@ class FeaturesConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    feature_set: Literal["minimal", "safe", "extended"] = Field(default="safe", alias="set")
+    # Spelled out rather than imported from allsky.features.policy, which owns
+    # the tiers: allsky.features.__init__ eagerly imports engineering, which
+    # imports this module, so the import that would remove the copy closes a
+    # cycle. tests/allsky/test_config.py pins the two spellings equal.
+    feature_set: Literal["bare", "minimal", "safe", "extended"] = Field(default="safe", alias="set")
+
+    #: Feature names appended verbatim to the resolved set, for ablations over a
+    #: column the tiers do not name. The manifest must already carry them: the
+    #: engine resolves feature columns from here and fails on any it lacks.
+    extra: list[str] = Field(default_factory=list)
 
 
 class DHITargetConfig(BaseModel):
@@ -236,6 +264,64 @@ class TargetsConfig(BaseModel):
     kindex: KIndexTargetConfig = Field(default_factory=KIndexTargetConfig)
     sky: SkyClassTargetConfig = Field(default_factory=SkyClassTargetConfig)
     cloud_fraction: CloudFractionTargetConfig = Field(default_factory=CloudFractionTargetConfig)
+
+
+#: How the burned-in timestamp band is handled; see
+#: :func:`allsky.preprocessing.remove_timestamp_band`.
+OverlayPolicy = Literal["keep", "fill", "inpaint", "crop"]
+
+#: Fraction of the frame height the camera's burned-in overlay occupies.
+#: Measured over eight frames spanning 2026-05-08..08-01: the text reaches
+#: y=75 of 512 (0.1465) at its tallest. 0.16 adds a margin. It lives here, in
+#: the leaf module, so the config default and
+#: :mod:`allsky.preprocessing` cannot drift apart.
+TIMESTAMP_BAND_FRACTION = 0.16
+
+#: Side of the square the visual backbone is fed, in pixels. DINOv2's patch grid
+#: is 14 px, and 224 = 16 x 14 is the resolution its weights were trained at.
+#: The training engine, the evaluator and the live snapshot all read the default
+#: from here, so a run whose config omits ``model.image_size`` is trained,
+#: evaluated and served at the same resolution.
+DEFAULT_IMAGE_SIZE = 224
+
+
+class PreprocessingConfig(BaseModel):
+    """Deterministic image preprocessing, applied to EVERY split.
+
+    Unlike :class:`AugmentationConfig`, which is random and training-only, these
+    transforms must be identical at training and inference, so they travel in
+    ``checkpoint["config"]`` and every path that turns a frame into model input
+    rebuilds the pipeline from there.
+
+    ``overlay="keep"`` and no ROI is the historical behaviour and the default.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    overlay: OverlayPolicy = "keep"
+    band_fraction: float = TIMESTAMP_BAND_FRACTION
+    roi_radius_fraction: float | None = None
+
+
+class AugmentationConfig(BaseModel):
+    """Image augmentation, applied to the TRAINING split only.
+
+    Every probability defaults to ``0.0``, so an experiment that does not
+    mention this section trains on exactly the pixels it trained on before.
+    The transforms and the physical argument for each live in
+    :mod:`allsky.augmentation`; flips and frame-centred rotations are absent on
+    purpose, because they move the sun while the geometry features stay put.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    p_exposure: float = 0.0
+    exposure_log2: float = 0.35
+    p_noise: float = 0.0
+    noise_sigma: float = 0.01
+    p_translate: float = 0.0
+    translate_px: int = 4
+    p_erase: float = 0.0
 
 
 class ExperimentModelConfig(BaseModel):
@@ -342,6 +428,29 @@ class ExperimentConfig(BaseModel):
     targets: TargetsConfig = Field(default_factory=TargetsConfig)
     model: ExperimentModelConfig = Field(default_factory=ExperimentModelConfig)
     train: ExperimentTrainConfig = Field(default_factory=ExperimentTrainConfig)
+    augmentation: AugmentationConfig = Field(default_factory=AugmentationConfig)
+    preprocessing: PreprocessingConfig = Field(default_factory=PreprocessingConfig)
+
+
+def model_param(cfg: ExperimentConfig, key: str, default: Any) -> Any:
+    """Read an architecture hyper-parameter off the permissive model config.
+
+    ``ExperimentModelConfig`` accepts unknown keys on purpose, so a missing one
+    falls back rather than raising. It lives here, beside the config it reads,
+    because the training engine, the evaluator and the live snapshot all need it
+    and only one of them should own it.
+    """
+    return dict(cfg.model.model_dump()).get(key, default)
+
+
+def image_size_of(cfg: ExperimentConfig) -> int:
+    """Side of the square frame *cfg* feeds the visual backbone, in pixels.
+
+    The training engine, the evaluator and the live snapshot must all resize to
+    the same number or a checkpoint scores frames at a resolution it was never
+    fitted on, which no error reports.
+    """
+    return int(model_param(cfg, "image_size", DEFAULT_IMAGE_SIZE))
 
 
 class MaskConfig(BaseModel):
@@ -365,6 +474,29 @@ class CropConfig(BaseModel):
     width: int | None = None
 
 
+class PadConfig(BaseModel):
+    """Pixel padding applied after the crop and before the resize.
+
+    The four sides are given separately because the sky disc is not concentric
+    with the sensor: making it concentric with the output square takes unequal
+    padding, and the amounts come from a lens calibration rather than from the
+    frame's own dimensions.
+
+    ``fill`` is the level written into the padded rows and columns, on the same
+    0-255 scale as the frame. It is sky the camera does not image, not sky that
+    is dark, so nothing downstream should read it as a measurement.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    top: int = Field(default=0, ge=0)
+    bottom: int = Field(default=0, ge=0)
+    left: int = Field(default=0, ge=0)
+    right: int = Field(default=0, ge=0)
+    fill: int = Field(default=0, ge=0, le=255)
+
+
 class NightFilterConfig(BaseModel):
     """Drop frames whose solar elevation is below ``min_solar_elevation_deg``."""
 
@@ -385,6 +517,18 @@ class PrepareSensorConfig(BaseModel):
     ghi_column: str = "CM3Up_Wm2_Avg"
     column_map: dict[str, str] = Field(default_factory=dict)
     tolerance_minutes: float = 5.0
+    #: Minutes added to every logger stamp before a frame is paired to it.
+    #: The CR5000 END-stamps its averages: the row written at ``t`` is the mean
+    #: over ``(t - 5min, t]``, verified against the 1-minute ``LBM_solar_2024``
+    #: table over their 2024-03..07 overlap (RMS 0.083 W/m2, r = 1.000000,
+    #: n = 35,492, against 64.79 W/m2 for the begin-stamped reading). Pairing a
+    #: frame to the raw stamp therefore labels it with an average whose time
+    #: centroid sits 2.5 min earlier. Measured on 79,860 daylight 1-minute GHI
+    #: samples, the raw-stamp join carries 94.00 W/m2 of label noise against
+    #: 74.99 W/m2 for ``-2.5`` (-20.2%). Left at 0.0 so an existing dataset
+    #: rebuilds unchanged; it is part of the manifest resume hash, so a change
+    #: invalidates the manifest instead of being silently reused.
+    timestamp_offset_minutes: float = 0.0
 
 
 class PrepareTargetsConfig(BaseModel):
@@ -397,7 +541,7 @@ class PrepareTargetsConfig(BaseModel):
     (:func:`allsky.erbs.pseudo_diffuse`, ``target_source="erbs_pseudo"``).
 
     The sky-condition bins are not configurable: they are the published bounds
-    of :data:`allsky.data.contracts.SKY_CLASS_KT_UPPER_BOUNDS`, always applied
+    of :data:`allsky.data.sky.SKY_CLASS_KT_UPPER_BOUNDS`, always applied
     to Kt. A config carrying the retired ``class_clear``/``class_overcast`` keys
     is rejected rather than silently ignored.
     """
@@ -477,6 +621,7 @@ class PrepareConfig(BaseModel):
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     mask: MaskConfig = Field(default_factory=MaskConfig)
     crop: CropConfig = Field(default_factory=CropConfig)
+    pad: PadConfig = Field(default_factory=PadConfig)
     resize: int | None = None
     night_filter: NightFilterConfig = Field(default_factory=NightFilterConfig)
     sensor: PrepareSensorConfig = Field(default_factory=PrepareSensorConfig)

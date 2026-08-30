@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from allsky.solar import extraterrestrial_ghi, solar_elevation_deg
+from labmim_core.solar import extraterrestrial_ghi, solar_elevation_deg
 from micrometeorology.cli.export_climatology import (
     OBSERVED_COLUMN,
     SITE,

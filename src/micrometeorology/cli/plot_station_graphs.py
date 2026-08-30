@@ -73,6 +73,15 @@ from micrometeorology.sensors.plotting import (
     setup_date_axis,
 )
 from micrometeorology.sensors.wind import wind_direction_from_components
+from micrometeorology.wrf.columns import (
+    PSFC_HPA,
+    RH_PCT,
+    SWDDIF_W_M2,
+    SWDOWN_W_M2,
+    T2_C,
+    WIND_DIR_DEG,
+    WIND_SPEED_M_S,
+)
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -171,16 +180,16 @@ _WRF_COLOR = "#e07a1f"
 # a single name, because ``series_operacional.dat`` gains variables over time:
 # precipitation is absent today; the overlay appears the day it lands, no edit.
 DEFAULT_WRF_COLUMNS: dict[str, tuple[str, ...]] = {
-    "temperatura": ("t2_c",),
-    "umidade": ("rh_pct",),
-    "pressao": ("psfc_hpa",),
+    "temperatura": (T2_C,),
+    "umidade": (RH_PCT,),
+    "pressao": (PSFC_HPA,),
     "precipitacao": _WRF_RAIN_CANDIDATES,
-    "velocidade": ("wind_speed_m_s",),
-    "direcao": ("wind_dir_deg",),
-    "radiacao_difusa": ("swddif_w_m2",),
+    "velocidade": (WIND_SPEED_M_S,),
+    "direcao": (WIND_DIR_DEG,),
+    "radiacao_difusa": (SWDDIF_W_M2,),
     # Incoming shortwave only: the four-stream balance would need the model's
     # upwelling terms, which this graph has never drawn.
-    "balanco": ("swdown_w_m2",),
+    "balanco": (SWDOWN_W_M2,),
     # No PAR in the point extraction.
     "radiacao_par": (),
 }
@@ -457,10 +466,8 @@ def _wrf_series(
     """First model column present for this graph, with the name that resolved."""
     if wrf is None or wrf.empty:
         return None, None
-    for candidate in candidates.get(key, ()):
-        if candidate in wrf.columns:
-            return wrf[candidate], candidate
-    return None, None
+    name = resolve_column(wrf, candidates.get(key, ()))
+    return (None, None) if name is None else (wrf[name], name)
 
 
 def render_site_graphs(
@@ -627,7 +634,7 @@ def _load_raw_layer(path: Path, hourly: pd.DataFrame) -> pd.DataFrame:
 
 def _load_wrf(path: Path, hourly: pd.DataFrame) -> pd.DataFrame:
     """Load the model series through the shared defensive reader and clip it."""
-    from micrometeorology.cli.export_climatology import read_wrf_series
+    from micrometeorology.wrf.operational_record import read_wrf_series
 
     frame = read_wrf_series(path)
     clipped: pd.DataFrame = frame.loc[hourly.index.min() : hourly.index.max()]

@@ -12,8 +12,9 @@ import pandas as pd
 import pytest
 
 from allsky.embeddings.backbone import FakeBackbone
-from allsky.embeddings.extract import _load_uint8, extract_embeddings
+from allsky.embeddings.extract import extract_embeddings
 from allsky.embeddings.storage import SafetensorsEmbeddingReader, read_index, read_meta, shard_path
+from allsky.frame_pixels import decode_rgb
 
 pytest.importorskip("torch")  # FakeBackbone.encode builds a torch tensor
 
@@ -75,7 +76,7 @@ class TestEndToEnd:
         reader = SafetensorsEmbeddingReader(out)
         backbone = FakeBackbone(dim=8)
         for _, row in manifest.iterrows():
-            loaded = _load_uint8(tmp_path / row["image_path"])
+            loaded = decode_rgb(tmp_path / row["image_path"])
             expected = backbone._embed_one(loaded)  # verifying determinism
             np.testing.assert_allclose(
                 reader(row["sample_id"]), expected.astype(np.float16), rtol=0
@@ -96,7 +97,7 @@ class TestFrameDecoding:
         manifest = _make_dataset(tmp_path, n=3, size=32)
         for path in manifest["image_path"]:
             full = tmp_path / str(path)
-            loaded = _load_uint8(full)
+            loaded = decode_rgb(full)
             expected = self._imageio_recipe(full)
             assert loaded.dtype == expected.dtype
             assert loaded.shape == expected.shape
@@ -107,7 +108,7 @@ class TestFrameDecoding:
         gray.parent.mkdir(parents=True, exist_ok=True)
         rng = np.random.default_rng(12)
         iio.imwrite(gray, rng.integers(0, 256, (24, 24), dtype=np.uint8), quality=90)
-        loaded = _load_uint8(gray)
+        loaded = decode_rgb(gray)
         assert loaded.shape == (24, 24, 3)
         np.testing.assert_array_equal(loaded, self._imageio_recipe(gray))
 
@@ -279,7 +280,7 @@ class TestIncrementalIndex:
         reader = SafetensorsEmbeddingReader(out)
         backbone = FakeBackbone(dim=8)
         for _, row in manifest.iterrows():
-            loaded = _load_uint8(tmp_path / row["image_path"])
+            loaded = decode_rgb(tmp_path / row["image_path"])
             expected = backbone._embed_one(loaded)
             np.testing.assert_allclose(
                 reader(row["sample_id"]), expected.astype(np.float16), rtol=0
@@ -341,7 +342,7 @@ class TestCrashedOverwrite:
         reader = SafetensorsEmbeddingReader(out)
         backbone = FakeBackbone(dim=8)
         for _, row in manifest.iterrows():
-            expected = backbone._embed_one(_load_uint8(tmp_path / row["image_path"]))
+            expected = backbone._embed_one(decode_rgb(tmp_path / row["image_path"]))
             np.testing.assert_allclose(
                 reader(row["sample_id"]), expected.astype(np.float16), rtol=0
             )

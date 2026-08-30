@@ -13,11 +13,11 @@ from pathlib import Path
 import pandas as pd
 from typer.testing import CliRunner
 
-from allsky import solar
 from allsky.bundle import validate_bundle
 from allsky.cli import app
-from allsky.config import SiteConfig
 from allsky.data.manifest import build_manifest, write_manifest_parquet
+from labmim_core import solar
+from labmim_core.site import SiteConfig
 from tests.allsky._archive_fake import write_overlay_video
 
 runner = CliRunner()

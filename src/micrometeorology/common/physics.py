@@ -5,7 +5,7 @@ that lives in two modules is two things that can drift, and a value corrected in
 one copy and not the other changes a published quantity in one pipeline while
 leaving the other alone, with nothing failing.
 
-The solar constant is not redeclared here — :mod:`allsky.solar` owns it, and
+The solar constant is not redeclared here — :mod:`labmim_core.solar` owns it, and
 this package already reads the rest of its solar geometry from there.
 """
 

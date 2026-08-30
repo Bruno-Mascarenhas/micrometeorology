@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import torch
 
 from solrad_correction.config import RuntimeConfig
+from solrad_correction.utils.device import resolve_device
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,40 +61,6 @@ class DataLoaderSettings:
             "torch_compile": self.torch_compile,
             "gradient_clip": self.gradient_clip,
         }
-
-
-def resolve_device(requested: str = "auto") -> str:
-    """Resolve a user-requested device into an available torch device string.
-
-    An explicit ``"cuda"`` request is never downgraded: a run that asks for the
-    GPU and silently gets the CPU would report timings and, through AMP,
-    numerics that belong to a different machine.
-
-    Parameters
-    ----------
-    requested:
-        ``"auto"``, ``"cpu"`` or ``"cuda"``, as written in the runtime config.
-
-    Returns
-    -------
-    str
-        ``"cpu"`` or ``"cuda"``.
-
-    Raises
-    ------
-    ValueError
-        If ``"cuda"`` is requested where CUDA is unavailable, or if the request
-        is not one of the three accepted values.
-    """
-    if requested == "cpu":
-        return "cpu"
-    if requested == "cuda":
-        if not torch.cuda.is_available():
-            raise ValueError("runtime.device='cuda' was requested, but CUDA is not available")
-        return "cuda"
-    if requested != "auto":
-        raise ValueError(f"Unknown device request: {requested}")
-    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def resolve_dataloader_settings(
