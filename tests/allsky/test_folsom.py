@@ -88,11 +88,16 @@ class TestFrameTimestamps:
 
         assert len(read_folsom_frames(tmp_path)) == 6
 
-    def test_a_per_frame_gate_is_available_when_asked_for(self, tmp_path: Path):
-        named = pd.date_range("2014-06-01 18:00:00", periods=3, freq="1min", tz="UTC")
-        _write_frames(tmp_path, named, np.array([1.0, 900.0, 2.0]))
+    def test_a_filename_without_a_stamp_is_refused(self, tmp_path: Path):
+        """The name is not the frame's time, but it is what the archive-integrity
+        check compares the modification time against — without it there is
+        nothing to check."""
+        named = pd.date_range("2014-06-01 18:00:00", periods=2, freq="1min", tz="UTC")
+        _write_frames(tmp_path, named, np.zeros(2))
+        (tmp_path / "20140601" / "semdata.jpg").write_bytes(b"\xff\xd8\xff\xd9")
 
-        assert len(read_folsom_frames(tmp_path, max_disagreement_s=30.0)) == 2
+        with pytest.raises(ValueError, match="no YYYYMMDDHHMMSS stamp"):
+            read_folsom_frames(tmp_path)
 
     def test_an_archive_extracted_without_its_times_fails_loudly(self, tmp_path: Path):
         """``tar -m`` discards modification times, which would silently leave

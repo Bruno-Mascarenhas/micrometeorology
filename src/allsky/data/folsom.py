@@ -42,6 +42,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from allsky.video import MANIFEST_COLUMNS
 from labmim_core.site import SiteConfig
 
 __all__ = [
@@ -151,7 +152,6 @@ def read_folsom_frames(
     frames_dir: str | Path,
     *,
     pattern: str = "**/*.jpg",
-    max_disagreement_s: float | None = None,
 ) -> pd.DataFrame:
     """The extracted Folsom frames as the frame manifest the builder takes.
 
@@ -179,12 +179,6 @@ def read_folsom_frames(
         default; ``tar -m`` would discard exactly the timestamp this reads.
     pattern:
         Glob for the image files, relative to *frames_dir*.
-    max_disagreement_s:
-        Optional per-frame gate, in seconds, dropping frames whose two
-        timestamps differ by more than this. **Off by default**, and see
-        :data:`FOLSOM_LOST_TIMESTAMPS_S` for why: the modification time is the
-        capture instant, so there is nothing to arbitrate, and a tight gate
-        silently deletes the years where the two clocks drifted furthest apart.
 
     Returns
     -------
@@ -206,7 +200,7 @@ def read_folsom_frames(
     if not paths:
         raise FileNotFoundError(f"no Folsom frames under {root} matching {pattern!r}")
 
-    named = pd.DatetimeIndex([_timestamp_of(path) for path in paths]).tz_localize("UTC")
+    named = _named_timestamps(paths)
     modified = pd.to_datetime([path.stat().st_mtime for path in paths], unit="s", utc=True)
     disagreement = (modified - named).total_seconds()
 
@@ -219,29 +213,21 @@ def read_folsom_frames(
             "them), which would stamp every frame with the moment of extraction"
         )
 
-    keep = np.ones(len(paths), dtype=bool)
-    if max_disagreement_s is not None:
-        keep = np.abs(disagreement.to_numpy()) <= float(max_disagreement_s)
-        if not keep.any():
-            raise ValueError(
-                f"the {max_disagreement_s} s gate rejected every one of {len(paths)} frames "
-                f"under {root} (median disagreement {typical:.0f} s)"
-            )
     logger.info(
-        "Folsom timestamps: median |date-modified - file-name| = %.1f s over %d frames; kept %d",
+        "Folsom timestamps: median |date-modified - file-name| = %.1f s over %d frames",
         typical,
         len(paths),
-        int(keep.sum()),
     )
 
     frame = pd.DataFrame(
         {
-            "frame_path": [str(p) for p, k in zip(paths, keep, strict=True) if k],
-            "timestamp": _to_site_clock(modified[keep]),
-            "video": [p.parent.name for p, k in zip(paths, keep, strict=True) if k],
-        }
+            "frame_path": [str(path) for path in paths],
+            "timestamp": _to_site_clock(modified),
+            "video": [path.parent.name for path in paths],
+        },
+        columns=list(MANIFEST_COLUMNS[:3]),
     ).sort_values("timestamp", ignore_index=True)
-    frame["index"] = np.arange(len(frame), dtype=np.int64)
+    frame[MANIFEST_COLUMNS[3]] = np.arange(len(frame), dtype=np.int64)
     return frame
 
 
@@ -271,9 +257,8 @@ def folsom_sensor_at(sensor: pd.DataFrame, frames: pd.DataFrame) -> pd.DataFrame
         *sensor*'s columns, indexed at ``frames["timestamp"]``, linearly
         interpolated and never extrapolated beyond the measured span.
     """
-    shifted = sensor.copy()
-    shifted.index = pd.DatetimeIndex(shifted.index) + pd.Timedelta(
-        seconds=FOLSOM_TIMESTAMP_OFFSET_S
+    shifted = sensor.set_axis(
+        pd.DatetimeIndex(sensor.index) + pd.Timedelta(seconds=FOLSOM_TIMESTAMP_OFFSET_S)
     )
     wanted = pd.DatetimeIndex(frames["timestamp"]).unique().sort_values()
     union = shifted.index.union(wanted)
@@ -283,6 +268,35 @@ def folsom_sensor_at(sensor: pd.DataFrame, frames: pd.DataFrame) -> pd.DataFrame
         .reindex(wanted)
         .rename_axis(None)
     )
+
+
+def _named_timestamps(paths: list[Path]) -> pd.DatetimeIndex:
+    """The instants the frame FILENAMES encode, read in one vectorised pass.
+
+    Read only to check the modification times against
+    :data:`FOLSOM_LOST_TIMESTAMPS_S`; see :func:`read_folsom_frames` for why the
+    name is not the frame's time.
+
+    ``pd.to_datetime`` with an explicit ``format`` both vectorises the parse —
+    250k frames in one call rather than one object each — and refuses malformed
+    input, because ``errors`` defaults to ``raise`` and a fixed format closes the
+    free-interpretation path where a bare parse would resolve something
+    plausible and wrong.
+
+    Raises
+    ------
+    ValueError
+        If a filename carries no 14-digit ``YYYYMMDDHHMMSS`` stamp, or one that
+        is not a real instant.
+    """
+    digits = [("".join(ch for ch in path.stem if ch.isdigit()))[:14] for path in paths]
+    short = [path.name for path, text in zip(paths, digits, strict=True) if len(text) < 14]
+    if short:
+        raise ValueError(
+            f"{len(short)} Folsom frame(s) carry no YYYYMMDDHHMMSS stamp (e.g. {short[0]}), "
+            "so their modification times have nothing to be checked against"
+        )
+    return pd.DatetimeIndex(pd.to_datetime(digits, format="%Y%m%d%H%M%S")).tz_localize("UTC")
 
 
 def _to_site_clock(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
@@ -309,19 +323,3 @@ def folsom_manifest_kwargs() -> dict[str, Any]:
         # never be mistaken for one of the station's in a transfer workflow.
         "sample_id_format": "folsom-%Y%m%d-%H%M%S",
     }
-
-
-def _timestamp_of(path: Path) -> pd.Timestamp:
-    """The instant a Folsom frame FILENAME encodes.
-
-    Read only to cross-check the modification time against
-    :data:`FOLSOM_MAX_TIMESTAMP_DISAGREEMENT_S`; see
-    :func:`read_folsom_frames` for why it is not the frame's time.
-    """
-    digits = "".join(ch for ch in path.stem if ch.isdigit())
-    if len(digits) < 14:
-        raise ValueError(
-            f"{path.name} carries no YYYYMMDDHHMMSS stamp, so its modification time has "
-            "nothing to be checked against"
-        )
-    return pd.Timestamp(digits[:14], tz=None)
