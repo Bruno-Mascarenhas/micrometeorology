@@ -67,7 +67,18 @@ _COMMON_PARAMS = frozenset({"sensor_hidden", "trunk_hidden", "trunk_layers", "dr
 # ``backbone_pooling`` in :func:`default_image_backbone_builder` (which also
 # runs on evaluate).  They are not in ``_COMMON_PARAMS``: ``sensor_only`` and
 # ``climatology`` never build an image backbone, so those must keep warning.
-_PIPELINE_VISUAL_PARAMS = frozenset({"image_size", "backbone", "backbone_pooling"})
+_PIPELINE_VISUAL_PARAMS = frozenset(
+    {
+        "image_size",
+        "backbone",
+        "backbone_pooling",
+        # Where a family that ships no open weights gets them. DINOv3 requires
+        # it: those weights are licensed and the public URL answers 403. A signed
+        # URL is a credential and belongs outside a committed config.
+        "backbone_weights",
+        "backbone_repo_dir",
+    }
+)
 _VISUAL_PARAMS = (
     frozenset(
         {
@@ -335,7 +346,13 @@ def default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Callab
         name = str(params.get("backbone", "dinov2_vits14"))
         pooling = str(params.get("backbone_pooling", "cls"))
         try:
-            backbone = build_backbone(name, pooling=_backbone_pooling(pooling), device=device)
+            backbone = build_backbone(
+                name,
+                pooling=_backbone_pooling(pooling),
+                device=device,
+                weights=params.get("backbone_weights"),
+                repo_dir=params.get("backbone_repo_dir"),
+            )
             return coerce_image_backbone(backbone, pooling=pooling)
         except Exception as exc:
             raise TrainingError(

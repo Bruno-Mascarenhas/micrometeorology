@@ -454,3 +454,33 @@ class TestBackboneFamilies:
         owner, attribute = family.first_convolution(stub)
 
         assert getattr(owner, attribute) is stub.patch_embed.proj
+
+
+class TestExtraChannelsAcrossFamilies:
+    """The adapter has to survive every stem geometry, not just a ViT's.
+
+    A DINOv2 patch projection is 14x14 stride 14 with NO padding, so a copy that
+    forgot padding worked there and only broke on the first convolutional
+    backbone: a ResNet stem is 7x7 stride 2 padding 3, and the extra branch
+    produced a 109x109 map against the pretrained 112x112.
+    """
+
+    @pytest.mark.parametrize(
+        ("stem", "frame"),
+        [
+            (nn.Conv2d(3, 8, kernel_size=14, stride=14), 28),
+            (nn.Conv2d(3, 8, kernel_size=7, stride=2, padding=3), 32),
+            (nn.Conv2d(3, 8, kernel_size=3, stride=2, padding=1), 32),
+            (nn.Conv2d(3, 8, kernel_size=3, stride=1, padding=2, dilation=2), 16),
+        ],
+        ids=["vit-patch", "resnet-stem", "efficientnet-stem", "dilated"],
+    )
+    def test_the_extra_branch_matches_the_pretrained_output_grid(self, stem: nn.Conv2d, frame: int):
+        adapter = GeometryPatchProjection(stem, 2)
+        image = torch.randn(2, 5, frame, frame)
+
+        assert adapter(image).shape == stem(image[:, :3]).shape
+
+    def test_a_grouped_stem_is_refused_rather_than_silently_reinterpreted(self):
+        with pytest.raises(ValueError, match="grouped"):
+            GeometryPatchProjection(nn.Conv2d(4, 8, kernel_size=3, groups=2), 2)

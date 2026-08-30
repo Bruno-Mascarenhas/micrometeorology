@@ -23,7 +23,7 @@ convolution is a normal trainable module that no backbone freeze sweep owns.
 """
 
 import logging
-from typing import cast
+from typing import Any, cast
 
 from torch import Tensor, nn
 
@@ -36,6 +36,13 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def _pair(value: Any) -> tuple[int, int]:
+    """A Conv2d geometry parameter as the ``(h, w)`` pair torch's stubs expect."""
+    if isinstance(value, int):
+        return (value, value)
+    return (int(value[0]), int(value[1]))
 
 
 class PatchProjectionNotFoundError(TypeError):
@@ -62,8 +69,9 @@ class GeometryPatchProjection(nn.Module):
     Raises
     ------
     ValueError
-        If *extra_channels* is not positive: a zero-channel adapter would be a
-        silent no-op wearing the name of a wired one.
+        If *extra_channels* is not positive (a zero-channel adapter would be a
+        silent no-op wearing the name of a wired one), or if the wrapped
+        convolution is grouped.
     """
 
     def __init__(self, pretrained: nn.Conv2d, extra_channels: int) -> None:
@@ -72,13 +80,26 @@ class GeometryPatchProjection(nn.Module):
             raise ValueError(f"extra_channels must be positive, got {extra_channels}")
         self.pretrained = pretrained
         self.pretrained_channels = int(pretrained.in_channels)
-        kernel = (int(pretrained.kernel_size[0]), int(pretrained.kernel_size[1]))
-        stride = (int(pretrained.stride[0]), int(pretrained.stride[1]))
+        if pretrained.groups != 1:
+            raise ValueError(
+                f"the wrapped convolution is grouped (groups={pretrained.groups}); a grouped "
+                "stem ties each output channel to a subset of the input ones, so what the "
+                "extra planes should feed is a modelling decision, not a default"
+            )
+        # Every geometric parameter is copied, not just kernel and stride: a
+        # ResNet stem is 7x7 stride 2 with padding 3, and an extra branch built
+        # without that padding produces a 109x109 map against the pretrained
+        # 112x112 — measured, and it fails at the sum rather than silently.
         self.extra_proj = nn.Conv2d(
             extra_channels,
             int(pretrained.out_channels),
-            kernel_size=kernel,
-            stride=stride,
+            kernel_size=_pair(pretrained.kernel_size),
+            stride=_pair(pretrained.stride),
+            padding=pretrained.padding
+            if isinstance(pretrained.padding, str)
+            else _pair(pretrained.padding),
+            dilation=_pair(pretrained.dilation),
+            padding_mode=pretrained.padding_mode,
             bias=False,
         )
         nn.init.zeros_(self.extra_proj.weight)
