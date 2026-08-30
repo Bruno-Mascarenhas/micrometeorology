@@ -321,11 +321,14 @@ class ImageEncoder(nn.Module):
             for param in block.parameters():
                 param.requires_grad_(True)
         logger.info(
-            "image backbone %s: unfroze the last %d of %d block(s) — %d of %d backbone "
+            "image backbone %s: unfroze the last %d of %d %s(s) — %d of %d backbone "
             "parameters are trainable",
             type(self.backbone).__name__,
             len(unfrozen),
             len(list(blocks)),
+            # The unit differs by family — 12 transformer blocks, 16 residual
+            # blocks, 8 feature blocks — so the log names the one it counted.
+            getattr(getattr(self.backbone, "family", None), "stage_unit", "block"),
             sum(p.numel() for p in self.backbone.parameters() if p.requires_grad),
             sum(p.numel() for p in self.backbone.parameters()),
         )

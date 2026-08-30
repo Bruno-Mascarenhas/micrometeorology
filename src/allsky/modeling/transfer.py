@@ -122,9 +122,11 @@ def load_transferable_weights(
     Raises
     ------
     TransferMismatchError
-        If a backbone parameter exists on both sides with different shapes, or
-        if nothing at all could be transferred. Both mean the source is not what
-        the config says it is.
+        If a backbone parameter exists on both sides with different shapes, or if
+        any backbone parameter went unfilled. A model with no backbone at all —
+        ``climatology``, ``sensor_only`` — has nothing for this to check, and a
+        transfer that moved nothing there is reported in the log rather than
+        raised.
 
     Notes
     -----
@@ -181,11 +183,7 @@ def load_transferable_weights(
     # A tensor registered under two names — the geometry adapter is both a child
     # of the backbone and an attribute of the encoder — is filled once and is not
     # missing under its second name.
-    missing = tuple(
-        name
-        for name, tensor in target.items()
-        if name not in loaded and tensor.data_ptr() not in filled
-    )
+    missing = tuple(name for name, tensor in target.items() if tensor.data_ptr() not in filled)
     report = TransferReport(
         loaded=tuple(loaded),
         missing=missing,

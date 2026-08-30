@@ -22,9 +22,11 @@ trains, the number comes back, and it answers a question nobody asked.
 """
 
 from collections.abc import Sequence
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, get_args
 
 from torch import Tensor, nn
+
+from allsky.embeddings.backbone import Pooling
 
 __all__ = [
     "BackboneCapabilityError",
@@ -34,15 +36,15 @@ __all__ = [
     "family_for",
 ]
 
-#: Token poolings a vision transformer family accepts.
-VIT_POOLINGS = ("cls", "mean", "cls+mean")
+#: Token poolings a vision transformer family accepts — the same literal the
+#: extraction path narrows to, read from there so the two cannot drift.
+VIT_POOLINGS: tuple[str, ...] = get_args(Pooling)
 
 
 class BackboneCapabilityError(TypeError):
     """A backbone family cannot provide something the experiment asked for."""
 
 
-@runtime_checkable
 class BackboneFamily(Protocol):
     """How one architecture family answers the three fine-tuning questions.
 
@@ -188,7 +190,7 @@ class ConvNetFamily:
         self,
         *,
         stage_attributes: Sequence[str],
-        first_convolution_path: tuple[Sequence[str | int], str],
+        first_convolution_path: tuple[Sequence[str], str],
         stage_unit: str = "residual block",
         pooling: str = "mean",
         name: str = "convnet",
@@ -245,7 +247,7 @@ class ConvNetFamily:
         path, attribute = self.first_convolution_path
         owner: Any = model
         for step in path:
-            owner = owner[step] if isinstance(step, int) else getattr(owner, step, None)
+            owner = getattr(owner, step, None)
             if owner is None:
                 raise BackboneCapabilityError(
                     f"{self.name} has no {'.'.join(str(p) for p in path)} to reach its "
@@ -291,7 +293,10 @@ def family_for(name: str, pooling: str) -> BackboneFamily:
     if name.startswith("efficientnet"):
         return ConvNetFamily(
             stage_attributes=("features",),
-            first_convolution_path=(("features", 0), "0"),
+            # nn.Sequential registers its children under "0", "1", ... so the
+            # stem's Conv2dNormActivation and its convolution both resolve by
+            # getattr; no positional indexing is needed.
+            first_convolution_path=(("features", "0"), "0"),
             stage_unit="feature block",
             pooling=pooling,
             name=name,

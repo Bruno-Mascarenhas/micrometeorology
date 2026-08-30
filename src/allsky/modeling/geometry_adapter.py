@@ -168,14 +168,7 @@ def attach_extra_input_channels(
         is the point: silently skipping the wrap would leave the extra channels
         unconsumed and the experiment would measure nothing.
     """
-    located = _locate_first_convolution(backbone)
-    if located is None:
-        raise PatchProjectionNotFoundError(
-            f"backbone {type(backbone).__name__} exposes no first convolution to wrap; "
-            "extra input channels cannot reach a backbone whose family does not say where "
-            "the frame enters"
-        )
-    owner, attribute = located
+    owner, attribute = _locate_first_convolution(backbone)
     adapter = GeometryPatchProjection(getattr(owner, attribute), extra_channels)
     setattr(owner, attribute, adapter)
     logger.info(
@@ -188,23 +181,36 @@ def attach_extra_input_channels(
     return adapter
 
 
-def _locate_first_convolution(backbone: nn.Module) -> tuple[nn.Module, str] | None:
-    """``(owner, attribute)`` of the convolution the frame enters, or ``None``.
+def _locate_first_convolution(backbone: nn.Module) -> tuple[nn.Module, str]:
+    """``(owner, attribute)`` of the convolution the frame enters.
 
     A production backbone carries a family that answers this
     (:mod:`allsky.modeling.backbone_families`).  Test stubs do not, so a direct
     ``patch_embed.proj`` is still recognised — that path predates the families
     and the stubs are written against it.
+
+    Raises
+    ------
+    PatchProjectionNotFoundError
+        If neither route finds one. When a family was consulted and refused, its
+        own message is chained: "efficientnet_v2_s stem attribute '0' is not a
+        convolution" says what to fix, and replacing it with a generic sentence
+        would discard the diagnosis.
     """
     family = getattr(backbone, "family", None)
     model = getattr(backbone, "model", None)
-    if family is not None and model is not None:
+    if family is not None:
         try:
             return cast("tuple[nn.Module, str]", family.first_convolution(model))
-        except BackboneCapabilityError:
-            return None
+        except BackboneCapabilityError as exc:
+            raise PatchProjectionNotFoundError(
+                f"backbone {type(backbone).__name__} exposes no first convolution to wrap: {exc}"
+            ) from exc
     for candidate in (backbone, model):
         patch_embed = getattr(candidate, "patch_embed", None)
         if patch_embed is not None and isinstance(getattr(patch_embed, "proj", None), nn.Conv2d):
             return patch_embed, "proj"
-    return None
+    raise PatchProjectionNotFoundError(
+        f"backbone {type(backbone).__name__} exposes no first convolution to wrap; "
+        "extra input channels cannot reach a backbone that does not say where the frame enters"
+    )

@@ -59,17 +59,12 @@ Pooling = Literal["cls", "mean", "cls+mean"]
 POOLINGS: tuple[str, ...] = get_args(Pooling)
 
 #: Backbone names the CLI / :func:`build_backbone` understands.
-#: Every backbone :func:`build_backbone` understands, across families.
-AVAILABLE_BACKBONES = (
-    *_TOKEN_DIM,
-    "dinov3_vits16",
-    "dinov3_vits16plus",
-    "dinov3_vitb16",
-    "dinov3_vitl16",
-    "resnet50",
-    "efficientnet_v2_s",
-    "fake",
-)
+#: Every backbone :func:`build_backbone` understands, across families. Derived
+#: from the same tables the builder dispatches on, so a new entrypoint cannot be
+#: accepted by the builder while the CLI's advertised list and the "available
+#: backbones" error message stay unaware of it. Defined after the classes for
+#: that reason.
+AVAILABLE_BACKBONES: tuple[str, ...] = ()
 
 
 def embedding_dim(model: str, pooling: str) -> int:
@@ -519,7 +514,7 @@ class Dinov3Backbone(_TorchModuleBackbone):
                 "of both the secret and the machine path"
             )
         self.name = model
-        self.dim = self.TOKEN_DIM[model] * (2 if pooling == "cls+mean" else 1)
+        self.dim = embedding_dim(model, pooling)
         self._weights = weights
         self._repo_dir = Path(
             repo_dir or os.environ.get(REPO_DIR_ENV_VAR) or _default_dinov3_repo_dir()
@@ -600,6 +595,14 @@ class FakeBackbone:
 
         vectors = np.stack([self._embed_one(image) for image in batch])
         return torch.from_numpy(vectors)
+
+
+AVAILABLE_BACKBONES = (
+    *_TOKEN_DIM,
+    *Dinov3Backbone.TOKEN_DIM,
+    *TorchvisionBackbone.HEADS,
+    "fake",
+)
 
 
 def build_backbone(

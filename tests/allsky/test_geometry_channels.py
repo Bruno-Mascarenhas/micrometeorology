@@ -23,6 +23,7 @@ from allsky.augmentation import AugmentationPipeline
 from allsky.config import ExperimentConfig, geometry_channels_of
 from allsky.data.datasets import MultimodalImageDataset
 from allsky.data.manifest import build_manifest
+from allsky.embeddings.backbone import AVAILABLE_BACKBONES, POOLINGS
 from allsky.features import resolve_feature_set
 from allsky.geometry import (
     GEOMETRY_CHANNEL_NAMES,
@@ -30,7 +31,11 @@ from allsky.geometry import (
     solar_geometry_maps,
 )
 from allsky.lens import LensCalibration, isotropic_calibration
-from allsky.modeling.backbone_families import BackboneCapabilityError, family_for
+from allsky.modeling.backbone_families import (
+    VIT_POOLINGS,
+    BackboneCapabilityError,
+    family_for,
+)
 from allsky.modeling.geometry_adapter import (
     GeometryPatchProjection,
     PatchProjectionNotFoundError,
@@ -484,3 +489,25 @@ class TestExtraChannelsAcrossFamilies:
     def test_a_grouped_stem_is_refused_rather_than_silently_reinterpreted(self):
         with pytest.raises(ValueError, match="grouped"):
             GeometryPatchProjection(nn.Conv2d(4, 8, kernel_size=3, groups=2), 2)
+
+
+class TestBackboneTablesAgree:
+    """The builder and the family layer answer the same question from two tables.
+
+    ``build_backbone`` dispatches on dict membership, ``family_for`` on a name
+    prefix. They cannot be merged without a circular import, so what keeps them
+    honest is this: every name the builder advertises must resolve to a family,
+    or a config naming it would build a backbone that nothing knows how to
+    fine-tune.
+    """
+
+    def test_every_advertised_backbone_resolves_to_a_family(self):
+        for name in AVAILABLE_BACKBONES:
+            if name == "fake":
+                continue
+            pooling = "mean" if name.startswith(("resnet", "efficientnet")) else "cls"
+
+            assert family_for(name, pooling) is not None, name
+
+    def test_the_vit_poolings_are_the_extraction_path_s_own(self):
+        assert set(VIT_POOLINGS) == set(POOLINGS)

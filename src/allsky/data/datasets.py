@@ -139,8 +139,10 @@ def _subsample_window(members: list[int], max_frames: int | None) -> list[int]:
     """At most *max_frames* members, evenly spaced, keeping the ends."""
     if max_frames is None or len(members) <= max_frames:
         return members
+    # linspace over more members than picks steps by strictly more than one, so
+    # the rounded indices are strictly increasing and cannot repeat.
     picks = np.linspace(0, len(members) - 1, max_frames).round().astype(int)
-    return [members[i] for i in dict.fromkeys(picks.tolist())]
+    return [members[i] for i in picks.tolist()]
 
 
 class _BaseMultimodalDataset:
@@ -400,6 +402,8 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         self._seed = int(seed)
         if window not in _WINDOW_MODES:
             raise ValueError(f"window must be one of {_WINDOW_MODES}, got {window!r}")
+        if window_minutes <= 0:
+            raise ValueError(f"window_minutes must be positive, got {window_minutes}")
         if window_max_frames < 1:
             raise ValueError(f"window_max_frames must be at least 1, got {window_max_frames}")
         self.window = window
@@ -525,7 +529,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         if self.window == "center_frame":
             item["image"] = torch.from_numpy(self._load_image(self._paths[idx], idx))
             return item
-        members = self._windows[idx][: self.seq_len]
+        members = self._windows[idx]
         frames = np.zeros((self.seq_len, *self._frame_shape()), dtype=np.float32)
         mask = np.zeros(self.seq_len, dtype=bool)
         for slot, position in enumerate(members):
