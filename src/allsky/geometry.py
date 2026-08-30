@@ -126,7 +126,11 @@ def solar_geometry_maps(
     if "solar_disc" in selected:
         angle_to_sun = np.arccos(np.clip(cos_sun_angle, -1.0, 1.0))
         built["solar_disc"] = np.exp(-0.5 * (angle_to_sun / SOLAR_DISC_SIGMA_RAD) ** 2)
-    return np.stack([built[name] for name in selected]).astype(np.float32)
+    # copy=False because every plane is already float32: `direction_of` returns
+    # float32 and nothing here widens it. The default would copy the whole
+    # (C, H, W) stack again, once per frame — and a windowed run calls this once
+    # per frame IN the window.
+    return np.stack([built[name] for name in selected]).astype(np.float32, copy=False)
 
 
 def resolve_geometry_channels(requested: bool | Sequence[str] | None) -> tuple[str, ...]:
