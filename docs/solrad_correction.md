@@ -90,9 +90,9 @@ $env:UV_PYTHON = (python -c "import sys; print(sys.executable)")
 ### Check if GPU is available
 
 ```python
-from solrad_correction.utils.seeds import get_device
+from solrad_correction.utils.device import resolve_device
 
-print(get_device())  # "cuda" or "cpu"
+print(resolve_device())  # "cuda" or "cpu"
 ```
 
 ---

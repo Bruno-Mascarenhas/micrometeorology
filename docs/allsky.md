@@ -136,7 +136,7 @@ Campbell TOA5 `.dat` files listed in `sensor.paths` are read through `micrometeo
 
 `allsky prepare-local` aligns each frame to the nearest sensor record (see the alignment strategy in the config), derives targets, and writes the v2 manifest plus a `.meta.json` sidecar carrying a content `manifest_sha256`, dataset version, and provenance. Target columns include:
 
-- `kt` — clearness index `GHI / E0h` (extraterrestrial horizontal irradiance from the NOAA/Spencer solar-position chain in `allsky.solar`).
+- `kt` — clearness index `GHI / E0h` (extraterrestrial horizontal irradiance from the NOAA/Spencer solar-position chain in `labmim_core.solar`).
 - `dhi` — the diffuse target (see below).
 - `kindex` — the clear-sky index k\* (GHI over Haurwitz clear-sky GHI) or the clearness index k\_t, per `targets.kindex_kind`.
 - `sky_class` — weak sky-condition label from k-index bins (`-1` marks missing/unlabelable).
