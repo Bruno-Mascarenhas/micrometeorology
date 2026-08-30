@@ -200,6 +200,15 @@ class FeaturesConfig(BaseModel):
     extra: list[str] = Field(default_factory=list)
 
 
+#: How the DHI head's target is expressed. ``raw`` fits W m-2 directly.
+#: ``clearsky_index`` fits ``DHI / DHI_clearsky`` and multiplies the prediction
+#: back by each row's own clear-sky DHI, so the metrics stay in W m-2 while the
+#: network no longer spends capacity on the deterministic solar-geometry
+#: envelope — an envelope that DRIFTS between this dataset's chronological
+#: splits (the DHI-vs-elevation slope moves 20 % from train to test).
+DHIParameterization = Literal["raw", "clearsky_index"]
+
+
 class DHITargetConfig(BaseModel):
     """Diffuse horizontal irradiance target head."""
 
@@ -208,6 +217,7 @@ class DHITargetConfig(BaseModel):
     enabled: bool = True
     loss: Literal["mse", "mae", "huber", "heteroscedastic"] = "huber"
     weight: float = 1.0
+    parameterization: DHIParameterization = "raw"
 
 
 class KIndexTargetConfig(BaseModel):

@@ -625,6 +625,7 @@ def _build_datasets(
         preprocess=preprocess,
         seed=cfg.seed,
         geometry_channels=geometry_channels_of(cfg),
+        dhi_parameterization=cfg.targets.dhi.parameterization,
     )
     image_val = MultimodalImageDataset(
         val_df,
@@ -635,6 +636,7 @@ def _build_datasets(
         stats=image_train.stats,
         preprocess=preprocess,
         geometry_channels=geometry_channels_of(cfg),
+        dhi_parameterization=cfg.targets.dhi.parameterization,
     )
     return image_train, image_val, None
 
@@ -1053,7 +1055,13 @@ class _MetricAccumulator:
         if "dhi" in outputs:
             self._fold_physical(
                 "dhi_mae",
-                *_mae_terms(outputs["dhi"], batch["dhi"], self._dhi_mean, self._dhi_std),
+                *_mae_terms(
+                    outputs["dhi"],
+                    batch["dhi"],
+                    self._dhi_mean,
+                    self._dhi_std,
+                    batch.get("dhi_scale"),
+                ),
             )
         if "kindex" in outputs:
             self._fold_physical(
@@ -1100,7 +1108,9 @@ class _MetricAccumulator:
         return metrics
 
 
-def _mae_terms(pred: Tensor, target: Tensor, mean: float, std: float) -> tuple[Tensor, Tensor]:
+def _mae_terms(
+    pred: Tensor, target: Tensor, mean: float, std: float, scale: Tensor | None = None
+) -> tuple[Tensor, Tensor]:
     """One batch's physical-unit absolute-error sum and its finite-target row count.
 
     Both are zero-dim tensors on *pred*'s device: the sum of
@@ -1109,6 +1119,14 @@ def _mae_terms(pred: Tensor, target: Tensor, mean: float, std: float) -> tuple[T
     """
     physical = pred.detach().float() * std + mean
     truth = target.detach().float()
+    if scale is not None:
+        # The head may have fitted a ratio to the clear-sky reference; both sides
+        # are multiplied by the row's own reference so the reported error is in
+        # W/m2 whatever was fitted. Under the raw parameterization the scale is
+        # exactly 1.0 and this is a no-op down to the bit.
+        factor = scale.detach().float()
+        physical = physical * factor
+        truth = truth * factor
     mask = torch.isfinite(truth)
     # Masked with ``where`` rather than ``physical[mask]``: boolean-mask indexing
     # lowers to nonzero/masked_select, whose output shape is data-dependent, so it

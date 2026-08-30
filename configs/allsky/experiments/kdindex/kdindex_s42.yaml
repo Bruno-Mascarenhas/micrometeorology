@@ -1,0 +1,62 @@
+# O alvo deixa de ser W/m2 e passa a ser a razao ao ceu-claro.
+#
+# Varaschin & Silva (2025, arXiv:2503.21966) usam o indice de ceu-claro
+# k_t = I / I_clr como alvo PADRAO nos dez modelos que comparam, e explicam o
+# mecanismo do defeito que este projeto mediu:
+#
+#   "models trained to predict raw GHI values need to encode the Sun's position
+#    in the image with extreme precision in order to be able to generalize"
+#
+# E exatamente o nosso caso. Prevendo DHI bruto, a rede gasta capacidade
+# aprendendo o envelope deterministico da geometria solar — e esse envelope
+# DERIVA entre os splits cronologicos: a inclinacao DHI-vs-elevacao vai de 3,14
+# a 2,72 a 2,50 do treino ao teste, 20 % de deriva, enquanto a de logL fica em
+# 3,4 %. O braco sunangle atacou o sintoma pela ENTRADA (canal de geometria) e
+# derrubou a amplitude do vies por banda de 17,47 para 2,65 W/m2 sem mover o
+# RMSE. Este braco ataca pela SAIDA.
+#
+# k_d = DHI / DHI_ceu-claro, com a previsao multiplicada de volta pela
+# referencia da propria linha, entao as metricas seguem em W/m2 e comparaveis ao
+# iso. A referencia e Haurwitz decomposto por Erbs — a MESMA que ja produz o
+# skill_clearsky = 0,73, entao o alvo e normalizado exatamente pelo baseline
+# contra o qual e comparado.
+#
+# Medido no teste: DHI_ceu-claro entre 61,5 e 158,7 W/m2 (o piso de elevacao de
+# 10 graus ja impede divisao por perto de zero, sem clamp), e k_d com p1 0,38,
+# mediana 0,76 e p99 2,61 — passa de 1 sob nuvem quebrada, o que e fisico.
+#
+# NAO confundir com o vazamento de relogio dos canais de geometria: la a
+# informacao entrava na ENTRADA, dando calendario a rede; aqui ela SAI do alvo,
+# removendo variancia deterministica. Operacoes opostas.
+#
+# Sem canais de geometria de proposito. A secao 5.2.6 do mesmo benchmark preve
+# que mascara de sol e alvo normalizado sao SUBSTITUTOS: o canal "improves the
+# performance when the model's target variable is the unnormalized solar
+# irradiance value, but is detrimental otherwise". O cruzamento e outro braco.
+#
+# Controle: o iso — 19,94 +/- 0,35 W/m2, MAE 13,94, MBE -8,30, mesmas 7.138
+# linhas. Difere so em targets.dhi.parameterization.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: kdindex_s42
+output_dir: output/allsky-mm/experiments/kdindex/kdindex_s42
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso
+  input_mode: image
+targets:
+  dhi:
+    loss: mae
+    parameterization: clearsky_index
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  num_workers: 8

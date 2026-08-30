@@ -24,12 +24,19 @@ clear sky models: implementation and analysis. SAND2012-2389.
 """
 
 from collections.abc import Sequence
+from datetime import timedelta, timezone
 
 import numpy as np
 import pandas as pd
 
-from labmim_core.site import SiteConfig
-from labmim_core.solar import DatetimeLike, cos_zenith, solar_elevation_deg
+from labmim_core.site import STATION_UTC_OFFSET_HOURS, SiteConfig
+from labmim_core.solar import (
+    SOLAR_CONSTANT_WM2,
+    DatetimeLike,
+    cos_zenith,
+    eccentricity_correction,
+    solar_elevation_deg,
+)
 
 type ArrayLike = Sequence[float] | np.ndarray | pd.Series
 
@@ -169,3 +176,61 @@ def clear_sky_index(
     kstar = np.full_like(ghi_arr, np.nan)
     np.divide(ghi_arr, ghi_cs, out=kstar, where=valid)
     return kstar
+
+
+def clearsky_ghi_and_kt(
+    solar_zenith_deg: ArrayLike, times: pd.Series
+) -> tuple[np.ndarray, np.ndarray]:
+    """Haurwitz clear-sky GHI and its clearness index, per sample.
+
+    Parameters
+    ----------
+    solar_zenith_deg:
+        ``(N,)`` solar zenith angle in degrees.
+    times:
+        ``(N,)`` timezone-aware timestamps, one per sample.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        ``(ghi_clear, kt_clear)``, both ``(N,)`` float64: clear-sky global
+        horizontal irradiance in W m-2 and its dimensionless ratio to the
+        extraterrestrial horizontal irradiance, ``NaN`` where the sun is down.
+    """
+    cos_zenith_values = np.cos(np.radians(np.asarray(solar_zenith_deg, dtype=np.float64)))
+    ghi_clear = haurwitz_ghi_from_cos_zenith(cos_zenith_values)
+    local = times.dt.tz_convert(timezone(timedelta(hours=STATION_UTC_OFFSET_HOURS)))
+    extraterrestrial = (
+        SOLAR_CONSTANT_WM2
+        * eccentricity_correction(local.dt.tz_localize(None))
+        * np.maximum(cos_zenith_values, 0.0)
+    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kt_clear = np.where(extraterrestrial > 0.0, ghi_clear / extraterrestrial, np.nan)
+    return ghi_clear, np.asarray(kt_clear, dtype=np.float64)
+
+
+def clearsky_diffuse(solar_zenith_deg: ArrayLike, times: pd.Series) -> np.ndarray:
+    """Diffuse irradiance a cloudless sky would produce, in W m-2.
+
+    Haurwitz clear-sky GHI decomposed by Erbs at the clear-sky clearness index —
+    the same reference the evaluator scores ``skill_clearsky`` against, so a run
+    that trains on ``DHI / DHI_clear`` is normalized by exactly the baseline it
+    is compared to.
+
+    Parameters
+    ----------
+    solar_zenith_deg:
+        ``(N,)`` solar zenith angle in degrees.
+    times:
+        ``(N,)`` timezone-aware timestamps.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(N,)`` float64 clear-sky DHI in W m-2, ``NaN`` where the sun is down.
+    """
+    from allsky.erbs import pseudo_diffuse
+
+    ghi_clear, kt_clear = clearsky_ghi_and_kt(solar_zenith_deg, times)
+    return np.asarray(pseudo_diffuse(ghi_clear, kt_clear), dtype=np.float64)

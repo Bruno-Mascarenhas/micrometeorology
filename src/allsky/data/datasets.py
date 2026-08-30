@@ -88,6 +88,7 @@ class _BaseMultimodalDataset:
         *,
         train: bool = True,
         stats: FeatureNormalizer | None = None,
+        dhi_parameterization: str = "raw",
     ) -> None:
         self.manifest = manifest.reset_index(drop=True)
         self.feature_columns = list(feature_columns)
@@ -115,7 +116,8 @@ class _BaseMultimodalDataset:
         self.stats = stats
 
         self._features = stats.transform(self.manifest).astype(np.float32)
-        self._dhi = self._raw_target("target_dhi")
+        self._dhi_scale = self._dhi_scale_column(dhi_parameterization)
+        self._dhi = self._raw_target("target_dhi") / self._dhi_scale
         self._kindex = self._raw_target("target_kindex")
         self._cloud_fraction = self._raw_target("cloud_fraction")
         self._sky_class = self.manifest["sky_class"].to_numpy(dtype=np.int64, copy=True)
@@ -132,6 +134,48 @@ class _BaseMultimodalDataset:
         silently freeze augmentation on the first epoch.
         """
         self.epoch = epoch
+
+    def _dhi_scale_column(self, parameterization: str) -> np.ndarray:
+        """Per-row divisor turning the DHI target into what the head fits.
+
+        ``raw`` gives exactly ``1.0``, so the raw path is unchanged bit for bit —
+        dividing and later multiplying by one is exact in floating point, and the
+        alternative, branching everywhere on the parameterization, is how the two
+        paths drift apart.
+
+        ``clearsky_index`` gives each row's clear-sky DHI
+        (:func:`allsky.clearsky.clearsky_diffuse`), so the head fits
+        ``DHI / DHI_clearsky`` and the engine and evaluator multiply back to
+        W m-2. That is the reference ``skill_clearsky`` is already scored
+        against, so the target is normalized by exactly the baseline it is
+        compared to.
+
+        Raises
+        ------
+        ValueError
+            If the manifest lacks the columns the reference needs, or if any row
+            would divide by a non-positive clear-sky DHI. The dataset's
+            ``min_solar_elevation_deg`` floor keeps the reference well above zero
+            (measured: 61.5 W m-2 at the 10-degree floor), so a non-positive value
+            means the manifest is not what this parameterization assumes.
+        """
+        ones = np.ones(len(self.manifest), dtype=np.float32)
+        if parameterization != "clearsky_index":
+            return ones
+        missing = [c for c in ("solar_zenith", "timestamp_utc") if c not in self.manifest.columns]
+        if missing:
+            raise ValueError(f"the clear-sky-index DHI target needs the manifest columns {missing}")
+        from allsky.clearsky import clearsky_diffuse
+
+        times = pd.to_datetime(self.manifest["timestamp_utc"], utc=True)
+        scale = clearsky_diffuse(self.manifest["solar_zenith"], times)
+        if not np.all(np.isfinite(scale)) or float(np.min(scale)) <= 0.0:
+            raise ValueError(
+                "the clear-sky DHI reference is non-positive or non-finite on some rows, so "
+                "DHI / DHI_clearsky is undefined there; the night filter is what normally "
+                "keeps it away from zero"
+            )
+        return scale.astype(np.float32)
 
     def _raw_target(self, column: str) -> np.ndarray:
         """Raw physical target column as float32 (NaN preserved as missing).
@@ -162,6 +206,7 @@ class _BaseMultimodalDataset:
             self._columns = {
                 "features": torch.from_numpy(np.ascontiguousarray(self._features)),
                 "dhi": torch.from_numpy(self._dhi),
+                "dhi_scale": torch.from_numpy(self._dhi_scale),
                 "kindex": torch.from_numpy(self._kindex),
                 "sky_class": torch.from_numpy(self._sky_class),
                 "cloud_fraction": torch.from_numpy(self._cloud_fraction),
@@ -190,7 +235,12 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
       standardized RGB planes, plus the
       :data:`~allsky.geometry.GEOMETRY_CHANNEL_NAMES` maps when
       *geometry_channels* is set;
-    - ``dhi`` — float32 raw diffuse target (W/m2), NaN when missing;
+    - ``dhi`` — float32 diffuse target, NaN when missing: W/m2 under the default
+      ``raw`` parameterization, and ``DHI / DHI_clearsky`` (dimensionless) under
+      ``clearsky_index``;
+    - ``dhi_scale`` — float32 W/m2 divisor that produced ``dhi``; exactly ``1.0``
+      under ``raw``. Multiplying ``dhi`` by it always gives W/m2, which is how
+      the engine and the evaluator report one number whatever the head fitted;
     - ``kindex`` — float32 raw k-index target, NaN when missing;
     - ``sky_class`` — int64 label, ``-1`` when missing;
     - ``cloud_fraction`` — float32 in ``[0, 1]``, NaN when missing.
@@ -240,8 +290,15 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         preprocess: PreprocessingPipeline | None = None,
         seed: int = 0,
         geometry_channels: Sequence[str] = (),
+        dhi_parameterization: str = "raw",
     ) -> None:
-        super().__init__(manifest, feature_columns, train=train, stats=stats)
+        super().__init__(
+            manifest,
+            feature_columns,
+            train=train,
+            stats=stats,
+            dhi_parameterization=dhi_parameterization,
+        )
         self.data_root = data_root
         self.image_size = image_size
         # Resolved once here rather than per __getitem__: the join rebuilds a
@@ -414,8 +471,15 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         stats: FeatureNormalizer | None = None,
         window: WindowMode = "center_frame",
         window_minutes: float = 10.0,
+        dhi_parameterization: str = "raw",
     ) -> None:
-        super().__init__(manifest, feature_columns, train=train, stats=stats)
+        super().__init__(
+            manifest,
+            feature_columns,
+            train=train,
+            stats=stats,
+            dhi_parameterization=dhi_parameterization,
+        )
         if window not in _WINDOW_MODES:
             raise ValueError(f"window must be one of {_WINDOW_MODES}, got {window!r}")
         if window_minutes <= 0:

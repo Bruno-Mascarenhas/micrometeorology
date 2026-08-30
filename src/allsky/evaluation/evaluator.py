@@ -35,7 +35,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from allsky.clearsky import haurwitz_ghi_from_cos_zenith
+from allsky.clearsky import clearsky_ghi_and_kt
 from allsky.config import ExperimentConfig, geometry_channels_of, image_size_of
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
@@ -56,7 +56,6 @@ from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
 from allsky.preprocessing import PreprocessingPipeline
 from allsky.training.checkpointing import normalizers_from_checkpoint
 from labmim_core.sky import SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES, sky_class_name
-from labmim_core.solar import SOLAR_CONSTANT_WM2, eccentricity_correction
 
 logger = logging.getLogger(__name__)
 
@@ -484,6 +483,14 @@ def _run_inference(
     for name in ("dhi", "kindex"):
         if name in predicted and name in target_normalizers:
             predicted[name] = np.asarray(target_normalizers[name].denormalize(predicted[name]))
+    if "dhi" in predicted and cfg.targets.dhi.parameterization == "clearsky_index":
+        # The head fitted DHI / DHI_clearsky; the report is in W/m2, so each
+        # prediction is multiplied by its own row's clear-sky reference. The
+        # observed side is read from the manifest and is already in W/m2.
+        from allsky.clearsky import clearsky_diffuse
+
+        times = pd.to_datetime(split_df["timestamp_utc"], utc=True)
+        predicted["dhi"] = predicted["dhi"] * clearsky_diffuse(split_df["solar_zenith"], times)
 
     return _build_predictions_frame(split_df, predicted, enabled_targets, kindex_kind=kindex_kind)
 
@@ -534,6 +541,7 @@ def _build_split_dataset(
         stats=feature_normalizer,
         preprocess=PreprocessingPipeline.from_config(cfg),
         geometry_channels=geometry_channels_of(cfg),
+        dhi_parameterization=cfg.targets.dhi.parameterization,
     )
     return dataset, None
 
@@ -800,25 +808,11 @@ def _resolved_clearsky(
 def _clearsky_ghi_and_kt(frame: pd.DataFrame, times: pd.Series) -> tuple[np.ndarray, np.ndarray]:
     """Haurwitz clear-sky GHI (W m-2) and its clearness index, at each row's zenith.
 
-    Returns
-    -------
-    tuple[numpy.ndarray, numpy.ndarray]
-        ``(ghi_clear, kt_clear)``, both shape ``(N,)`` ``float64``: clear-sky
-        global horizontal irradiance in W m-2 and the dimensionless ratio of it
-        to the extraterrestrial horizontal irradiance, ``NaN`` where the sun is
-        down.
+    Thin wrapper over :func:`allsky.clearsky.clearsky_ghi_and_kt`, which owns the
+    physics so the training path can normalize a target by exactly the reference
+    this path scores against.
     """
-    cos_zenith_values = np.cos(np.radians(frame["solar_zenith"].to_numpy(dtype=np.float64)))
-    ghi_clear = haurwitz_ghi_from_cos_zenith(cos_zenith_values)
-    local = times.dt.tz_convert(_LOCAL_TZ)
-    extraterrestrial = (
-        SOLAR_CONSTANT_WM2
-        * eccentricity_correction(local.dt.tz_localize(None))
-        * np.maximum(cos_zenith_values, 0.0)
-    )
-    with np.errstate(divide="ignore", invalid="ignore"):
-        kt_clear = np.where(extraterrestrial > 0.0, ghi_clear / extraterrestrial, np.nan)
-    return ghi_clear, np.asarray(kt_clear, dtype=np.float64)
+    return clearsky_ghi_and_kt(frame["solar_zenith"], times)
 
 
 def _stratified_metrics(
