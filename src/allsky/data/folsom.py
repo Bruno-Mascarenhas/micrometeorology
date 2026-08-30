@@ -45,13 +45,29 @@ import pandas as pd
 from labmim_core.site import SiteConfig
 
 __all__ = [
+    "FOLSOM_MAX_TIMESTAMP_DISAGREEMENT_S",
     "FOLSOM_SITE",
+    "FOLSOM_TIMESTAMP_OFFSET_S",
     "FOLSOM_UTC_OFFSET_HOURS",
+    "folsom_manifest_kwargs",
+    "folsom_sensor_at",
     "read_folsom_frames",
     "read_folsom_sensor",
 ]
 
 logger = logging.getLogger(__name__)
+
+#: Largest disagreement tolerated between a frame's two timestamps, in seconds.
+#: Varaschin & Silva (2025, arXiv:2503.21966, sec. 3.6) drop the pairs beyond it,
+#: retaining 65,202 of 66,908 — about 2.5 % discarded to buy an alignment that is
+#: worth 25 W/m2 of RMSE.
+FOLSOM_MAX_TIMESTAMP_DISAGREEMENT_S = 30.0
+
+#: Shift applied to the irradiance clock, in seconds. The same work optimised it
+#: per dataset by cross-validation and measured -20 s as Folsom's best, worth
+#: 40.24 -> 37.21 W/m2 of test RMSE. It is small next to the file-name defect
+#: above and included because it is measured, not guessed.
+FOLSOM_TIMESTAMP_OFFSET_S = -20.0
 
 #: Fixed offset the adapter puts Folsom's clock on. Pacific Standard Time, with
 #: no daylight saving: see the module docstring for why a named zone is wrong for
@@ -120,72 +136,136 @@ def read_folsom_sensor(
     return frame
 
 
-def read_folsom_frames(frames_dir: str | Path, *, pattern: str = "**/*.jpg") -> pd.DataFrame:
+def read_folsom_frames(
+    frames_dir: str | Path,
+    *,
+    pattern: str = "**/*.jpg",
+    max_disagreement_s: float | None = FOLSOM_MAX_TIMESTAMP_DISAGREEMENT_S,
+) -> pd.DataFrame:
     """The extracted Folsom frames as the frame manifest the builder takes.
+
+    **The frame time is the file's modification time, not its name.** This is the
+    single most consequential choice in this module, and it is measured rather
+    than preferred: Varaschin & Silva (2025, arXiv:2503.21966, sec. 5.2.1) trained
+    and tested the same model under all four combinations and found file-name
+    alignment costs **62.52 W/m2 of RMSE against 37.21** for date-modified — a
+    25 W/m2 gap, larger than the entire spread between the ten architectures they
+    benchmarked.
+
+    Two independent facts say which one is the capture instant. The daily mean
+    disagreement between the two drifts with time, from about zero in early 2014
+    to roughly **700 s** by the end of 2016 (their Fig. 7), which is a clock that
+    was never resynchronised rather than noise. And the file-name seconds pile up
+    on ``:00`` and ``:59`` while the modification seconds spread evenly over all
+    sixty (their Fig. 8) — the name is an assigned label, the mtime is when the
+    file was written.
 
     Parameters
     ----------
     frames_dir:
-        Directory the year archive was extracted into.
+        Directory the year archive was extracted into. It must have been
+        extracted with the modification times preserved, which ``tar`` does by
+        default; ``tar -m`` would discard exactly the timestamp this reads.
     pattern:
         Glob for the image files, relative to *frames_dir*.
+    max_disagreement_s:
+        Drop frames whose two timestamps differ by more than this, in seconds.
+        ``None`` keeps every frame. The default follows the same work, which
+        discards about 2.5 % of pairs on this gate.
 
     Returns
     -------
     pandas.DataFrame
         Columns ``frame_path``, ``timestamp`` (naive, site clock), ``video``
-        (the source year archive) and ``index``, time-ordered.
+        (the source day directory) and ``index``, time-ordered.
 
     Raises
     ------
     FileNotFoundError
         If the directory holds no file matching *pattern*.
     ValueError
-        If a filename does not carry the ``YYYYMMDDHHMMSS`` stamp the archive
-        names its frames with. Guessing a time for a frame would put a sky image
-        against an irradiance reading from another moment, which is the label
-        error this project already paid for once.
+        If a filename carries no ``YYYYMMDDHHMMSS`` stamp — without it the
+        disagreement gate has nothing to compare against — or if every frame
+        fails that gate, which means the archive lost its modification times.
     """
     root = Path(frames_dir)
     paths = sorted(root.glob(pattern))
     if not paths:
         raise FileNotFoundError(f"no Folsom frames under {root} matching {pattern!r}")
-    stamps = [_timestamp_of(path) for path in paths]
+
+    named = pd.DatetimeIndex([_timestamp_of(path) for path in paths]).tz_localize("UTC")
+    modified = pd.to_datetime([path.stat().st_mtime for path in paths], unit="s", utc=True)
+    disagreement = (modified - named).total_seconds()
+
+    keep = np.ones(len(paths), dtype=bool)
+    if max_disagreement_s is not None:
+        keep = np.abs(disagreement.to_numpy()) <= float(max_disagreement_s)
+        if not keep.any():
+            raise ValueError(
+                f"every one of {len(paths)} frames under {root} disagrees with its file name "
+                f"by more than {max_disagreement_s} s (median "
+                f"{np.median(np.abs(disagreement)):.0f} s). Either the archive was extracted "
+                "without its modification times (tar -m discards them) or this is not the "
+                "Folsom layout"
+            )
+        logger.info(
+            "Folsom timestamps: median |date-modified - file-name| = %.1f s; dropped %d of %d "
+            "frames over the %.0f s gate",
+            float(np.median(np.abs(disagreement))),
+            int((~keep).sum()),
+            len(paths),
+            max_disagreement_s,
+        )
+
     frame = pd.DataFrame(
         {
-            "frame_path": [str(p) for p in paths],
-            "timestamp": _to_site_clock(pd.DatetimeIndex(stamps).tz_localize("UTC")),
-            "video": [p.parent.name for p in paths],
+            "frame_path": [str(p) for p, k in zip(paths, keep, strict=True) if k],
+            "timestamp": _to_site_clock(modified[keep]),
+            "video": [p.parent.name for p, k in zip(paths, keep, strict=True) if k],
         }
     ).sort_values("timestamp", ignore_index=True)
     frame["index"] = np.arange(len(frame), dtype=np.int64)
-    logger.info(
-        "read %d Folsom frames from %s (%s .. %s, site clock)",
-        len(frame),
-        root,
-        frame["timestamp"].iloc[0],
-        frame["timestamp"].iloc[-1],
-    )
     return frame
 
 
-def _timestamp_of(path: Path) -> pd.Timestamp:
-    """The UTC instant a Folsom frame filename encodes.
+def folsom_sensor_at(sensor: pd.DataFrame, frames: pd.DataFrame) -> pd.DataFrame:
+    """Folsom's irradiance interpolated onto the exact instants the frames were taken.
 
-    The archive names frames by a 14-digit ``YYYYMMDDHHMMSS`` stamp. Varaschin &
-    Silva (2025, section 5.2.1) measured that Folsom's file-name timestamps carry
-    a larger label error than the files' modification times, and that shifting
-    the irradiance by tens of seconds measurably improves test performance. The
-    name is used here because it is the only stamp that survives extraction, and
-    that choice is recorded rather than assumed away.
+    Folsom's irradiance is stamped on whole minutes while its frames land
+    anywhere in the minute, so pairing a ``:30`` frame with the nearest sample
+    can be half a minute off — enough to matter under fast-moving cloud, where
+    the error is largest. Varaschin & Silva mitigate this by interpolating the
+    irradiance linearly before aligning, and that is what happens here: the
+    returned frame is indexed at the frame times themselves, so the manifest's
+    alignment pairs at distance zero instead of rounding.
+
+    :data:`FOLSOM_TIMESTAMP_OFFSET_S` is applied to the irradiance clock first.
+
+    Parameters
+    ----------
+    sensor:
+        Frame from :func:`read_folsom_sensor`, indexed on the site clock.
+    frames:
+        Frame manifest from :func:`read_folsom_frames`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        *sensor*'s columns, indexed at ``frames["timestamp"]``, linearly
+        interpolated and never extrapolated beyond the measured span.
     """
-    digits = "".join(ch for ch in path.stem if ch.isdigit())
-    if len(digits) < 14:
-        raise ValueError(
-            f"{path.name} carries no YYYYMMDDHHMMSS stamp; a frame whose time is guessed "
-            "would be paired with another moment's irradiance"
-        )
-    return pd.Timestamp(digits[:14], tz=None)
+    shifted = sensor.copy()
+    shifted.index = pd.DatetimeIndex(shifted.index) + pd.Timedelta(
+        seconds=FOLSOM_TIMESTAMP_OFFSET_S
+    )
+    wanted = pd.DatetimeIndex(frames["timestamp"]).unique().sort_values()
+    union = shifted.index.union(wanted)
+    return (
+        shifted.reindex(union)
+        .interpolate(method="time", limit_area="inside")
+        .reindex(wanted)
+        .rename_axis(None)
+    )
 
 
 def _to_site_clock(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
@@ -208,3 +288,19 @@ def folsom_manifest_kwargs() -> dict[str, Any]:
         "feature_set": "bare",
         "kindex_kind": "kstar",
     }
+
+
+def _timestamp_of(path: Path) -> pd.Timestamp:
+    """The instant a Folsom frame FILENAME encodes.
+
+    Read only to cross-check the modification time against
+    :data:`FOLSOM_MAX_TIMESTAMP_DISAGREEMENT_S`; see
+    :func:`read_folsom_frames` for why it is not the frame's time.
+    """
+    digits = "".join(ch for ch in path.stem if ch.isdigit())
+    if len(digits) < 14:
+        raise ValueError(
+            f"{path.name} carries no YYYYMMDDHHMMSS stamp, so its modification time has "
+            "nothing to be checked against"
+        )
+    return pd.Timestamp(digits[:14], tz=None)
