@@ -264,6 +264,7 @@ def run_experiment(
         image_backbone=image_backbone,
         temporal_pooling=temporal_pooling,
     ).to(resolved_device)
+    _transfer_weights_if_asked(model, cfg, trust_checkpoint=trust_checkpoint)
 
     climatology = model if isinstance(model, ClimatologyModel) else None
     is_climatology = climatology is not None
@@ -636,6 +637,24 @@ def _build_datasets(
         geometry_channels=geometry_channels_of(cfg),
     )
     return image_train, image_val, None
+
+
+def _transfer_weights_if_asked(
+    model: nn.Module, cfg: ExperimentConfig, *, trust_checkpoint: bool
+) -> None:
+    """Initialise *model* from ``model.init_from`` when the config names a source.
+
+    Weights only: the optimizer, the schedule, the epoch counter and every
+    normalizer stay this run's own. See :mod:`allsky.modeling.transfer` for why
+    the loading is explicit rather than ``strict=False``.
+    """
+    source = model_param(cfg, "init_from", None)
+    if not source:
+        return
+    from allsky.modeling.transfer import load_transferable_weights
+
+    report = load_transferable_weights(model, str(source), trust_pickle=trust_checkpoint)
+    logger.info("initialised from %s — %s", source, report.describe())
 
 
 def _validate_embedding_coverage(
