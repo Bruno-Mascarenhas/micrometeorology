@@ -81,7 +81,8 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from allsky.atomic import atomic_write
+from labmim_core.atomic import atomic_write
+from labmim_core.site import STATION_SITE
 from micrometeorology.common.physics import (
     KELVIN_AT_ZERO_CELSIUS,
     PASCAL_PER_HECTOPASCAL,
@@ -89,7 +90,6 @@ from micrometeorology.common.physics import (
     saturation_vapor_pressure,
     vapor_pressure,
 )
-from micrometeorology.common.site import STATION_SITE
 from micrometeorology.sensors.wind import wind_direction_from_components
 from micrometeorology.wrf.columns import (
     ALBEDO,
@@ -146,6 +146,7 @@ __all__ = [
     "TIME_COLUMNS",
     "V1_COLUMNS",
     "V1_TO_V2",
+    "V1_UNREPAIRED_COLUMNS",
     "MigrationReport",
     "PointSample",
     "SeriesColumn",
@@ -1118,13 +1119,29 @@ def legacy_spellings(header: Sequence[str]) -> tuple[str, ...]:
     return tuple(old for old, new in V1_TO_V2 if old != new and old in header)
 
 
+#: The v2 columns whose v1 values are wrong until :func:`migrate_to_v2` runs.
+#: These are exactly what :func:`_repair_v1_row` recomputes; naming them is what
+#: lets a reader of a v1 file be told which of its numbers not to trust.
+V1_UNREPAIRED_COLUMNS: frozenset[str] = frozenset(
+    {"albedo", "emissivity", "swup_w_m2", "lwup_air_w_m2", "e_hpa", "rh_pct"}
+)
+
+
 def rename_v1_columns(frame: pd.DataFrame) -> pd.DataFrame:
     """Give a frame read from a v1 file its v2 column names.
 
     Applied by every reader of the operational record, so a consumer names its
-    columns once -- in the v2 spelling -- and works whether the file on disk has
-    been through :func:`migrate_to_v2` or not. A frame already on v2, or one
-    carrying columns from neither schema, comes back untouched.
+    columns once -- in the v2 spelling -- whether the file on disk has been
+    through :func:`migrate_to_v2` or not. A frame already on v2, or one carrying
+    columns from neither schema, comes back untouched.
+
+    Renaming is ALL this does. The six columns :func:`_repair_v1_row` recomputes
+    are still the values the v1 extraction wrote, and those are wrong by a known
+    formula: ``albedo`` and ``emissivity`` carry a dimensionless value with
+    273.15 subtracted, and ``swup_w_m2``, ``lwup_air_w_m2``, ``e_hpa`` and
+    ``rh_pct`` are derived from them. Reading a v1 file therefore serves an
+    albedo near -273 and a reflected shortwave in the -10^5 W/m2, which is why
+    the caller is warned by name rather than told the file was handled.
 
     Parameters
     ----------
@@ -1142,8 +1159,18 @@ def rename_v1_columns(frame: pd.DataFrame) -> pd.DataFrame:
     present = {old: new for old, new in V1_TO_V2 if old != new and old in frame.columns}
     if not present:
         return frame
-    logger.info("v1 column names found, reading them as v2: %s", ", ".join(sorted(present)))
-    return frame.rename(columns=present)
+    renamed = frame.rename(columns=present)
+    unrepaired = sorted(V1_UNREPAIRED_COLUMNS.intersection(renamed.columns))
+    if unrepaired:
+        logger.warning(
+            "reading a v1 operational file: %s carry the values the v1 extraction wrote, "
+            "which are wrong by a known formula. Run `labmim-wrf-series migrate` to repair "
+            "the record before publishing from it.",
+            ", ".join(unrepaired),
+        )
+    else:
+        logger.info("v1 column names found, reading them as v2: %s", ", ".join(sorted(present)))
+    return renamed
 
 
 def read_wrf_series(path: str | Path) -> pd.DataFrame:
