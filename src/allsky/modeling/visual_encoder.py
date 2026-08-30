@@ -521,15 +521,20 @@ class _HubVisualBackbone(nn.Module):
         architecture is how a run reports a fine-tuning depth it never applied.
         """
         name = str(getattr(backbone, "name", "") or "")
-        try:
+        if name:
+            # A named backbone that its family rejects is a real configuration
+            # error — a ResNet asked for token pooling, say — and the family's
+            # own message says exactly which. Catching it here would replace that
+            # with a false claim about the name and then install a ViT, whose
+            # forward_features call dies at the first batch with no trace of the
+            # cause.
             return family_for(name, self.pooling)
-        except BackboneCapabilityError:
-            logger.warning(
-                "image backbone %s does not name itself, so it is treated as a token ViT; "
-                "a real backbone gets its family from its name",
-                type(backbone).__name__,
-            )
-            return VitTokenFamily(self.pooling, name=name or "unnamed backbone")
+        logger.warning(
+            "image backbone %s does not name itself, so it is treated as a token ViT; "
+            "a real backbone gets its family from its name",
+            type(backbone).__name__,
+        )
+        return VitTokenFamily(self.pooling, name="unnamed backbone")
 
     def _warn_if_blocks_are_chunked(self) -> None:
         """Warn when ``blocks`` holds chunks instead of one entry per transformer block.

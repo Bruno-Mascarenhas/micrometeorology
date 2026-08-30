@@ -120,8 +120,9 @@ class AlignmentConfig(BaseModel):
 
     ``strategy`` is the window mode: ``center_frame`` picks the frame nearest
     the window centre at manifest-build time, while ``mean_embedding`` and
-    ``attention_pooling`` pool every frame in the window at dataset level (both
-    implemented for ``input_mode: embedding`` only — see
+    ``attention_pooling`` pool every frame in the window at dataset level.
+    ``mean_embedding`` works in both input modes; ``attention_pooling`` needs a
+    learned pooler that only the embedding source has (see
     :class:`DataSourceConfig`). ``window_minutes`` is the full width of the
     alignment window.
     """
@@ -130,6 +131,12 @@ class AlignmentConfig(BaseModel):
 
     strategy: AlignmentStrategyName = "center_frame"
     window_minutes: float = 10.0
+    #: Cap on frames per window in IMAGE mode, evenly subsampled keeping the
+    #: ends. The embedding path ignores it: an embedding is a 384-float read,
+    #: while a frame is a JPEG decode plus a backbone forward, so a ten-minute
+    #: window at this camera's one-frame-per-minute cadence would be eleven
+    #: forwards per sample.
+    max_frames: int = 5
 
 
 class DataSourceConfig(BaseModel):
@@ -146,7 +153,6 @@ class DataSourceConfig(BaseModel):
     LRU of open shards that thrashes under shuffled access; set it ``False`` to
     keep the lazy LRU path (e.g. when the store does not fit in memory).
 
-    Windowed pooling is implemented for ``embedding`` mode only, so a windowed
     A windowed ``alignment.strategy`` works in both modes — the image dataset
     stacks the frames and the encoder mean-pools them — except
     ``attention_pooling``, whose learned pooler exists only on the embedding

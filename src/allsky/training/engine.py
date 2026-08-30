@@ -602,6 +602,7 @@ def _build_datasets(
             train=True,
             window=window,
             window_minutes=window_minutes,
+            dhi_parameterization=cfg.targets.dhi.parameterization,
         )
         val_ds = MultimodalEmbeddingDataset(
             val_df,
@@ -611,6 +612,7 @@ def _build_datasets(
             stats=train_ds.stats,
             window=window,
             window_minutes=window_minutes,
+            dhi_parameterization=cfg.targets.dhi.parameterization,
         )
         embedding_dim = int(getattr(reader, "dim", 0)) or int(train_ds.embedding_dim)
         return train_ds, val_ds, embedding_dim
@@ -637,6 +639,7 @@ def _build_datasets(
         dhi_parameterization=cfg.targets.dhi.parameterization,
         window=cfg.data.alignment.strategy,
         window_minutes=cfg.data.alignment.window_minutes,
+        window_max_frames=cfg.data.alignment.max_frames,
     )
     image_val = MultimodalImageDataset(
         val_df,
@@ -650,6 +653,7 @@ def _build_datasets(
         dhi_parameterization=cfg.targets.dhi.parameterization,
         window=cfg.data.alignment.strategy,
         window_minutes=cfg.data.alignment.window_minutes,
+        window_max_frames=cfg.data.alignment.max_frames,
     )
     return image_train, image_val, None
 

@@ -525,6 +525,7 @@ def _build_split_dataset(
             stats=feature_normalizer,
             window=window,
             window_minutes=float(cfg.data.alignment.window_minutes),
+            dhi_parameterization=cfg.targets.dhi.parameterization,
         )
         embedding_dim = int(getattr(reader, "dim", 0)) or int(dataset.embedding_dim)
         return dataset, embedding_dim
@@ -544,6 +545,7 @@ def _build_split_dataset(
         dhi_parameterization=cfg.targets.dhi.parameterization,
         window=cfg.data.alignment.strategy,
         window_minutes=cfg.data.alignment.window_minutes,
+        window_max_frames=cfg.data.alignment.max_frames,
     )
     return dataset, None
 
