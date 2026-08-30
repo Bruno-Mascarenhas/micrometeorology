@@ -82,6 +82,7 @@ class MultimodalNet(nn.Module):
         temporal_pooling: Literal["mean", "attention"] = "mean",
         backbone_frozen: bool = False,
         unfreeze_last_n: int = 0,
+        extra_input_channels: int = 0,
         backbone_lr: float | None = None,
     ) -> None:
         super().__init__()
@@ -100,6 +101,7 @@ class MultimodalNet(nn.Module):
             unfreeze_last_n=unfreeze_last_n,
             dropout=dropout,
             temporal_pooling=temporal_pooling,
+            extra_input_channels=extra_input_channels,
         )
         visual_dim = cast("int", self.visual_encoder.out_dim)
         sensor_dim = int(self.sensor_encoder.out_dim)

@@ -34,6 +34,8 @@ import pandas as pd
 from allsky.config import DEFAULT_IMAGE_SIZE, AlignmentStrategyName
 from allsky.data.contracts import NS_PER_MINUTE, resolve
 from allsky.features.normalization import FeatureNormalizer
+from allsky.geometry import solar_geometry_maps
+from allsky.lens import LensCalibration, isotropic_calibration
 
 if TYPE_CHECKING:
     # allsky.preprocessing reaches back into allsky.data.contracts, so importing
@@ -184,7 +186,10 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
     Each item is a dict of torch tensors:
 
     - ``features`` — float32 ``(F,)`` standardized sensor vector;
-    - ``image`` — float32 ``(3, H, W)`` in ``[0, 1]``, resized to *image_size*;
+    - ``image`` — float32 ``(C, H, W)``, resized to *image_size*: three
+      standardized RGB planes, plus the
+      :data:`~allsky.geometry.GEOMETRY_CHANNEL_NAMES` maps when
+      *geometry_channels* is set;
     - ``dhi`` — float32 raw diffuse target (W/m2), NaN when missing;
     - ``kindex`` — float32 raw k-index target, NaN when missing;
     - ``sky_class`` — int64 label, ``-1`` when missing;
@@ -203,13 +208,22 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
     train, stats:
         Train-only standardization: on the training split ``stats`` is fit from
         *manifest*; validation/test must be handed ``train_dataset.stats``.
+    geometry_channels:
+        Append the per-pixel solar geometry maps of
+        :func:`allsky.geometry.solar_geometry_maps` to every frame, built at
+        *image_size* from :func:`allsky.lens.isotropic_calibration` and the row's
+        own solar angles.  Only valid for frames from the isotropic
+        re-extraction: on an anisotropically resized frame the maps would
+        describe optics the image does not have.
 
     Raises
     ------
     ValueError
         If *feature_columns* is empty or names a column *manifest* lacks, if
-        *stats* covers different columns, or if ``train=False`` is passed
-        without the training split's *stats* (the leakage guard).
+        *stats* covers different columns, if ``train=False`` is passed without
+        the training split's *stats* (the leakage guard), or if
+        *geometry_channels* is asked for without finite solar angles or
+        alongside a translating augmentation.
     """
 
     def __init__(
@@ -224,6 +238,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         augment: AugmentationPipeline | None = None,
         preprocess: PreprocessingPipeline | None = None,
         seed: int = 0,
+        geometry_channels: bool = False,
     ) -> None:
         super().__init__(manifest, feature_columns, train=train, stats=stats)
         self.data_root = data_root
@@ -239,6 +254,42 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         # the model runs, or inference sees pixels training never produced.
         self.preprocess = preprocess
         self._seed = int(seed)
+        self._geometry = (
+            self._geometry_source(manifest, augment if train else None)
+            if geometry_channels
+            else None
+        )
+
+    def _geometry_source(
+        self, manifest: pd.DataFrame, augment: AugmentationPipeline | None
+    ) -> tuple[LensCalibration, np.ndarray, np.ndarray]:
+        """Calibration and per-row solar angles (degrees) for the geometry maps.
+
+        Raises
+        ------
+        ValueError
+            If the manifest lacks the solar angles or carries a non-finite one —
+            a NaN would silently become a NaN channel and poison the batch — or
+            if the augmentation translates the frame, which would move the image
+            under maps that do not move with it.
+        """
+        missing = [c for c in ("solar_zenith", "solar_azimuth") if c not in manifest.columns]
+        if missing:
+            raise ValueError(
+                f"geometry channels need the manifest columns {missing}, which it lacks"
+            )
+        if augment is not None and augment.p_translate > 0:
+            raise ValueError(
+                "geometry channels are incompatible with p_translate > 0: the frame would shift "
+                "while the geometry maps, built from the lens, would not follow it"
+            )
+        zenith_deg = manifest["solar_zenith"].to_numpy(dtype=np.float64)
+        azimuth_deg = manifest["solar_azimuth"].to_numpy(dtype=np.float64)
+        if not (np.isfinite(zenith_deg).all() and np.isfinite(azimuth_deg).all()):
+            raise ValueError(
+                "geometry channels need finite solar_zenith / solar_azimuth on every row"
+            )
+        return isotropic_calibration(self.image_size), zenith_deg, azimuth_deg
 
     def _load_image(self, image_path: Path, idx: int = 0) -> np.ndarray:
         """Load a JPEG as a standardized float32 CHW array, resized to ``image_size``.
@@ -273,7 +324,17 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
             preprocess=self.preprocess,
         )
         # `chw` was allocated there, so standardising in place costs no copy.
-        return imagenet_standardize(self._augmented(chw, idx), copy=False)
+        standardized = imagenet_standardize(self._augmented(chw, idx), copy=False)
+        if self._geometry is None:
+            return standardized
+        calibration, zenith_deg, azimuth_deg = self._geometry
+        maps = solar_geometry_maps(
+            calibration,
+            (self.image_size, self.image_size),
+            sun_zenith_rad=float(np.radians(zenith_deg[idx])),
+            sun_azimuth_rad=float(np.radians(azimuth_deg[idx])),
+        )
+        return np.concatenate([standardized, maps], axis=0)
 
     def _augmented(self, chw: np.ndarray, idx: int) -> np.ndarray:
         """Augment one frame with a per-sample seeded generator.
@@ -291,7 +352,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         return augmented
 
     def __getitem__(self, idx: int) -> SampleTensors:
-        """Row *idx*: the shared target tensors plus ``image`` ``(3, H, W)`` float32."""
+        """Row *idx*: the shared target tensors plus ``image`` ``(C, H, W)`` float32."""
         import torch
 
         item = self._target_item(idx)

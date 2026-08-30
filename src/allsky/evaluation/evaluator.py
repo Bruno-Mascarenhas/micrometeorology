@@ -36,7 +36,7 @@ import numpy as np
 import pandas as pd
 
 from allsky.clearsky import haurwitz_ghi_from_cos_zenith
-from allsky.config import ExperimentConfig, image_size_of
+from allsky.config import ExperimentConfig, geometry_channels_of, image_size_of
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
     default_embedding_reader,
@@ -533,6 +533,7 @@ def _build_split_dataset(
         train=False,
         stats=feature_normalizer,
         preprocess=PreprocessingPipeline.from_config(cfg),
+        geometry_channels=geometry_channels_of(cfg),
     )
     return dataset, None
 

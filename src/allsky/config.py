@@ -453,6 +453,17 @@ def image_size_of(cfg: ExperimentConfig) -> int:
     return int(model_param(cfg, "image_size", DEFAULT_IMAGE_SIZE))
 
 
+def geometry_channels_of(cfg: ExperimentConfig) -> bool:
+    """Whether *cfg* appends the per-pixel solar geometry maps to each frame.
+
+    Like :func:`image_size_of`, this is read by the training engine, the
+    evaluator and the registry alike: the dataset must emit exactly the channels
+    the patch projection was widened for, and a checkpoint trained with the maps
+    cannot be reloaded into a model built without them.
+    """
+    return bool(model_param(cfg, "geometry_channels", False))
+
+
 class MaskConfig(BaseModel):
     """Static horizon/obstruction mask. ``threshold=None`` selects an auto value."""
 
