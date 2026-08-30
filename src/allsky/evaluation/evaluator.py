@@ -28,7 +28,6 @@ import itertools
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +35,7 @@ import numpy as np
 import pandas as pd
 
 from allsky.clearsky import clearsky_ghi_and_kt
-from allsky.config import ExperimentConfig, geometry_channels_of, image_size_of
+from allsky.config import SITE_TZ, ExperimentConfig, geometry_channels_of, image_size_of
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
     default_embedding_reader,
@@ -44,6 +43,7 @@ from allsky.data.loading import (
     load_split,
     resolve_against_root,
 )
+from allsky.data.manifest import site_utc_offset_hours
 from allsky.erbs import pseudo_diffuse
 from allsky.evaluation.metrics import (
     REFERENCE_LABELS,
@@ -63,7 +63,7 @@ __all__ = ["EvaluationResult", "evaluate_checkpoint"]
 
 #: Fixed America/Bahia offset (UTC-3, no DST) used to derive local hour/month
 #: from the manifest's tz-aware ``timestamp_utc`` (mirrors the manifest builder).
-_LOCAL_TZ = timezone(timedelta(hours=-3))
+_LOCAL_TZ = SITE_TZ
 
 #: Solar-elevation band edges (degrees); rows outside ``[10, 90]`` fall in no
 #: band and are simply absent from the elevation breakdown.
@@ -258,6 +258,7 @@ def evaluate_checkpoint(
         embedding_reader=embedding_reader,
         image_backbone_builder=image_backbone_builder,
         kindex_kind=manifest_kind,
+        utc_offset_hours=site_utc_offset_hours(meta),
     )
 
     global_metrics = _global_metrics(predictions, enabled_targets)
@@ -424,6 +425,7 @@ def _run_inference(
     embedding_reader: EmbeddingReader | None,
     image_backbone_builder: Any | None,
     kindex_kind: str | None,
+    utc_offset_hours: float,
 ) -> pd.DataFrame:
     """Rebuild the model, run a no-grad pass and assemble the predictions frame."""
     import torch
@@ -438,6 +440,7 @@ def _run_inference(
         feature_normalizer,
         root=root,
         embedding_reader=embedding_reader,
+        utc_offset_hours=utc_offset_hours,
     )
 
     model = restore_model(
@@ -490,7 +493,9 @@ def _run_inference(
         from allsky.clearsky import clearsky_diffuse
 
         times = pd.to_datetime(split_df["timestamp_utc"], utc=True)
-        predicted["dhi"] = predicted["dhi"] * clearsky_diffuse(split_df["solar_zenith"], times)
+        predicted["dhi"] = predicted["dhi"] * clearsky_diffuse(
+            split_df["solar_zenith"], times, utc_offset_hours
+        )
 
     return _build_predictions_frame(split_df, predicted, enabled_targets, kindex_kind=kindex_kind)
 
@@ -503,6 +508,7 @@ def _build_split_dataset(
     *,
     root: Path,
     embedding_reader: EmbeddingReader | None,
+    utc_offset_hours: float,
 ) -> tuple[Any, int | None]:
     """Build the (train=False) dataset for the split, reusing the stored normalizer."""
     from allsky.data.datasets import MultimodalEmbeddingDataset, MultimodalImageDataset
@@ -526,6 +532,7 @@ def _build_split_dataset(
             window=window,
             window_minutes=float(cfg.data.alignment.window_minutes),
             dhi_parameterization=cfg.targets.dhi.parameterization,
+            utc_offset_hours=utc_offset_hours,
         )
         embedding_dim = int(getattr(reader, "dim", 0)) or int(dataset.embedding_dim)
         return dataset, embedding_dim
@@ -543,6 +550,7 @@ def _build_split_dataset(
         preprocess=PreprocessingPipeline.from_config(cfg),
         geometry_channels=geometry_channels_of(cfg),
         dhi_parameterization=cfg.targets.dhi.parameterization,
+        utc_offset_hours=utc_offset_hours,
         window=cfg.data.alignment.strategy,
         window_minutes=cfg.data.alignment.window_minutes,
         window_max_frames=cfg.data.alignment.max_frames,

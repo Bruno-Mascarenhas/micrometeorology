@@ -36,6 +36,7 @@ from allsky.data.contracts import NS_PER_MINUTE, resolve
 from allsky.features.normalization import FeatureNormalizer
 from allsky.geometry import solar_geometry_maps
 from allsky.lens import LensCalibration, isotropic_calibration
+from labmim_core.site import STATION_UTC_OFFSET_HOURS
 
 if TYPE_CHECKING:
     # allsky.preprocessing reaches back into allsky.data.contracts, so importing
@@ -153,6 +154,7 @@ class _BaseMultimodalDataset:
         train: bool = True,
         stats: FeatureNormalizer | None = None,
         dhi_parameterization: str = "raw",
+        utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
     ) -> None:
         self.manifest = manifest.reset_index(drop=True)
         self.feature_columns = list(feature_columns)
@@ -180,7 +182,7 @@ class _BaseMultimodalDataset:
         self.stats = stats
 
         self._features = stats.transform(self.manifest).astype(np.float32)
-        self._dhi_scale = self._dhi_scale_column(dhi_parameterization)
+        self._dhi_scale = self._dhi_scale_column(dhi_parameterization, utc_offset_hours)
         self._dhi = self._raw_target("target_dhi") / self._dhi_scale
         self._kindex = self._raw_target("target_kindex")
         self._cloud_fraction = self._raw_target("cloud_fraction")
@@ -212,7 +214,7 @@ class _BaseMultimodalDataset:
         """
         self.epoch = epoch
 
-    def _dhi_scale_column(self, parameterization: str) -> np.ndarray:
+    def _dhi_scale_column(self, parameterization: str, utc_offset_hours: float) -> np.ndarray:
         """Per-row divisor turning the DHI target into what the head fits.
 
         ``raw`` gives exactly ``1.0``, so the raw path is unchanged bit for bit —
@@ -245,12 +247,7 @@ class _BaseMultimodalDataset:
         from allsky.clearsky import clearsky_diffuse
 
         times = pd.to_datetime(self.manifest["timestamp_utc"], utc=True)
-        # The station's own offset. A manifest from another site would want its
-        # own, which this layer cannot see — it holds the frame, not the sidecar
-        # that records it. The offset only reaches the eccentricity correction's
-        # day-of-year, so the error is a fraction of a percent, but the
-        # assumption is written down rather than left to be discovered.
-        scale = clearsky_diffuse(self.manifest["solar_zenith"], times)
+        scale = clearsky_diffuse(self.manifest["solar_zenith"], times, utc_offset_hours)
         if not np.all(np.isfinite(scale)) or float(np.min(scale)) <= 0.0:
             raise ValueError(
                 "the clear-sky DHI reference is non-positive or non-finite on some rows, so "
@@ -375,6 +372,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         seed: int = 0,
         geometry_channels: Sequence[str] = (),
         dhi_parameterization: str = "raw",
+        utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
         window: WindowMode = "center_frame",
         window_minutes: float = 10.0,
         window_max_frames: int = 5,
@@ -385,6 +383,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
             train=train,
             stats=stats,
             dhi_parameterization=dhi_parameterization,
+            utc_offset_hours=utc_offset_hours,
         )
         self.data_root = data_root
         self.image_size = image_size
@@ -593,6 +592,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         window: WindowMode = "center_frame",
         window_minutes: float = 10.0,
         dhi_parameterization: str = "raw",
+        utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
     ) -> None:
         super().__init__(
             manifest,
@@ -600,6 +600,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
             train=train,
             stats=stats,
             dhi_parameterization=dhi_parameterization,
+            utc_offset_hours=utc_offset_hours,
         )
         if window not in _WINDOW_MODES:
             raise ValueError(f"window must be one of {_WINDOW_MODES}, got {window!r}")

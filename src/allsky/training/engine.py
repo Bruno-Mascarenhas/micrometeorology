@@ -69,6 +69,7 @@ from allsky.data.loading import (
     load_split,
     resolve_against_root,
 )
+from allsky.data.manifest import site_utc_offset_hours
 from allsky.features.normalization import TargetNormalizer
 from allsky.features.policy import active_feature_groups, resolve_feature_set
 from allsky.modeling.baselines import ClimatologyModel
@@ -231,6 +232,7 @@ def run_experiment(
         feature_columns,
         root=root,
         embedding_reader=embedding_reader,
+        utc_offset_hours=site_utc_offset_hours(meta),
     )
     # Fitted from the dataset, not the manifest: the normalizer has to describe
     # the quantity the head actually receives, which the DHI parameterization
@@ -569,6 +571,7 @@ def _build_datasets(
     *,
     root: Path,
     embedding_reader: EmbeddingReader | None,
+    utc_offset_hours: float,
 ) -> tuple[Any, Any, int | None]:
     """Build the train/val datasets for the configured input mode.
 
@@ -603,6 +606,7 @@ def _build_datasets(
             window=window,
             window_minutes=window_minutes,
             dhi_parameterization=cfg.targets.dhi.parameterization,
+            utc_offset_hours=utc_offset_hours,
         )
         val_ds = MultimodalEmbeddingDataset(
             val_df,
@@ -613,6 +617,7 @@ def _build_datasets(
             window=window,
             window_minutes=window_minutes,
             dhi_parameterization=cfg.targets.dhi.parameterization,
+            utc_offset_hours=utc_offset_hours,
         )
         embedding_dim = int(getattr(reader, "dim", 0)) or int(train_ds.embedding_dim)
         return train_ds, val_ds, embedding_dim
@@ -637,6 +642,7 @@ def _build_datasets(
         seed=cfg.seed,
         geometry_channels=geometry_channels_of(cfg),
         dhi_parameterization=cfg.targets.dhi.parameterization,
+        utc_offset_hours=utc_offset_hours,
         window=cfg.data.alignment.strategy,
         window_minutes=cfg.data.alignment.window_minutes,
         window_max_frames=cfg.data.alignment.max_frames,
@@ -651,6 +657,7 @@ def _build_datasets(
         preprocess=preprocess,
         geometry_channels=geometry_channels_of(cfg),
         dhi_parameterization=cfg.targets.dhi.parameterization,
+        utc_offset_hours=utc_offset_hours,
         window=cfg.data.alignment.strategy,
         window_minutes=cfg.data.alignment.window_minutes,
         window_max_frames=cfg.data.alignment.max_frames,

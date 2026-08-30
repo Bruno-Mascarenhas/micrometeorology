@@ -54,6 +54,7 @@ from allsky.erbs import pseudo_diffuse
 from allsky.features import build_feature_frame, resolve_feature_set, validate_features
 from allsky.provenance import code_version, content_sha256
 from labmim_core.atomic import atomic_write, atomic_write_json
+from labmim_core.site import STATION_SITE
 from labmim_core.sky import (
     SKY_CLASS_KT_UPPER_BOUNDS,
     SKY_CLASS_MISSING,
@@ -96,11 +97,32 @@ def _timezone_meta(site: SiteConfig) -> dict[str, Any]:
 
     The station keeps its named zone; any other site is recorded by its offset
     alone, because a fixed instrument offset is what this pipeline consumes and
-    naming a zone it never resolved would be an assertion nobody checked.
+    naming a zone it never resolved would be an assertion nobody checked — and
+    the check is on the whole site, not the offset alone, because another site
+    three hours west of UTC is not Bahia.
     """
-    if site.utc_offset_hours == SITE_UTC_OFFSET_HOURS:
+    if site == STATION_SITE:
         return {"name": SITE_TZ_NAME, "utc_offset_hours": SITE_UTC_OFFSET_HOURS}
     return {"name": None, "utc_offset_hours": float(site.utc_offset_hours)}
+
+
+def site_utc_offset_hours(meta: Mapping[str, Any]) -> float:
+    """The fixed clock offset the manifest in *meta* was built against.
+
+    Every consumer that recomputes solar geometry from a manifest needs it, and
+    the sidecar is the only place that records which site produced the rows. A
+    manifest whose sidecar was lost falls back to this station's offset, loudly:
+    guessing silently is how a Folsom manifest would get Salvador's clock.
+    """
+    timezone_meta = meta.get("timezone")
+    if isinstance(timezone_meta, Mapping) and "utc_offset_hours" in timezone_meta:
+        return float(timezone_meta["utc_offset_hours"])
+    logger.warning(
+        "manifest meta carries no timezone block; assuming this station's %+g h offset. "
+        "A manifest from another site will have its solar geometry computed on the wrong clock",
+        SITE_UTC_OFFSET_HOURS,
+    )
+    return float(SITE_UTC_OFFSET_HOURS)
 
 
 def build_manifest(

@@ -203,143 +203,6 @@ def imagenet_batch(images: Sequence[np.ndarray], size: int) -> Any:
     return torch.stack(tensors)
 
 
-class DinoV2Backbone:
-    """DINOv2 ViT-*/14 backbone (``torch.hub``, pinned revision, ImageNet norm).
-
-    Parameters
-    ----------
-    model:
-        A DINOv2 entrypoint from :data:`AVAILABLE_BACKBONES`; every one has
-        patch size 14, so ``image_size`` stays a multiple of 14 for all of them.
-    pooling:
-        Token pooling: ``"cls"``, ``"mean"`` (both one token wide) or
-        ``"cls+mean"`` (concatenation, twice that). :func:`embedding_dim` is
-        the authority on the resulting width.
-    device:
-        ``"auto"`` (cuda -> mps -> cpu), or an explicit torch device string.
-    dtype:
-        ``"fp16"`` enables fp16 autocast **on CUDA only** (CPU/MPS fp16 autocast
-        is not reliably supported, so it is silently a no-op there); ``"fp32"``
-        forces full precision.  Embeddings are always returned as fp32.
-    image_size:
-        Square input size; must be a multiple of the patch size (14).  Default
-        224 (16x16 patches).
-
-    Notes
-    -----
-    The hub model is loaded lazily on the first :meth:`encode` and cached on the
-    instance — created **once per process**.  Extraction is single-process and
-    batched precisely so no data-loader worker triggers a duplicate download.
-    """
-
-    name: str
-
-    def __init__(
-        self,
-        *,
-        model: str = DINOV2_MODEL,
-        pooling: Pooling = "cls",
-        device: str = "auto",
-        dtype: Literal["fp16", "fp32"] = "fp16",
-        image_size: int = DEFAULT_IMAGE_SIZE,
-    ) -> None:
-        if image_size % 14 != 0:
-            raise ValueError(f"image_size {image_size} must be a multiple of the patch size (14)")
-        self.name = model
-        self.revision = DINOV2_REVISION
-        self.pooling: str = pooling
-        self.dim = embedding_dim(model, pooling)
-        self.dtype = dtype
-        self.image_size = image_size
-        self._device_pref = device
-        self.transform_description = (
-            f"imagenet-norm, resize {image_size}x{image_size} bilinear, pooling={pooling}"
-        )
-        self._model: Any = None
-        self._device: Any = None
-
-    def _ensure_model(self) -> None:
-        """Load the pinned hub model once and move it to the resolved device."""
-        if self._model is not None:
-            return
-        import torch
-
-        from allsky.training import resolve_device
-
-        self._device = torch.device(resolve_device(self._device_pref))
-        model = torch.hub.load(
-            f"{DINOV2_REPO}:{DINOV2_REVISION}",
-            self.name,
-            trust_repo=True,
-        )
-        model.eval()
-        model.to(self._device)
-        self._model = model
-
-    def load_torch_module(self) -> Any:
-        """Load (once) and return the underlying hub ``nn.Module``.
-
-        The extraction path uses :meth:`encode` (``inference_mode``, detached,
-        CPU) — unusable for end-to-end image training.  Image-mode training
-        instead wants the raw model so it can run it *with* gradients and
-        register / freeze its parameters; this returns exactly that module (its
-        ``blocks`` sequence supports the usual last-*n* ViT unfreezing).  Loading
-        happens once per process and is cached on the instance.
-        """
-        self._ensure_model()
-        return self._model
-
-    def transform(self, images: Sequence[np.ndarray]) -> Any:
-        """Resize + ImageNet-normalize frames to a ``(B, 3, H, W)`` CPU tensor.
-
-        Parameters
-        ----------
-        images:
-            Sequence of ``(H, W, 3)`` ``uint8`` RGB frames (channels-last, 0-255).
-
-        Returns
-        -------
-        torch.Tensor
-            Shape ``(B, 3, image_size, image_size)``, float32, channels-first,
-            scaled to ``[0, 1]`` and standardized by :data:`IMAGENET_MEAN` /
-            :data:`IMAGENET_STD` (dimensionless).
-        """
-        return imagenet_batch(images, self.image_size)
-
-    def _pool(self, batch: Any) -> Any:
-        """Run ``forward_features`` and pool tokens per :attr:`pooling`."""
-        import torch
-
-        out = self._model.forward_features(batch)
-        cls = out["x_norm_clstoken"]
-        if self.pooling == "cls":
-            return cls
-        patch_mean = out["x_norm_patchtokens"].mean(dim=1)
-        if self.pooling == "mean":
-            return patch_mean
-        return torch.cat([cls, patch_mean], dim=-1)
-
-    def encode(self, batch: Any) -> Any:
-        """Encode a :meth:`transform` batch to a ``(B, dim)`` fp32 CPU tensor.
-
-        The hub model is loaded on first use.  fp16 autocast applies on CUDA only
-        (see the ``dtype`` parameter); the returned embeddings are float32
-        whatever the compute precision was, and carry no physical unit.
-        """
-        import torch
-
-        self._ensure_model()
-        batch = batch.to(self._device)
-        use_amp = self.dtype == "fp16" and self._device.type == "cuda"
-        with torch.inference_mode():
-            if use_amp:
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    feats = self._pool(batch)
-            else:
-                feats = self._pool(batch)
-        return feats.to(torch.float32).cpu()
-
-
 class _TorchModuleBackbone:
     """Shared machinery for a backbone that IS one torch module.
 
@@ -424,6 +287,73 @@ class _TorchModuleBackbone:
             else:
                 feats = family.pooled(self._model, batch)
         return feats.to(torch.float32).cpu()
+
+
+class DinoV2Backbone(_TorchModuleBackbone):
+    """DINOv2 ViT-*/14 backbone (``torch.hub``, pinned revision, ImageNet norm).
+
+    Everything but the model construction comes from
+    :class:`_TorchModuleBackbone`: the ImageNet batch, the lazy load onto the run
+    device, the autocast policy, and — the one that matters — the pooling, which
+    it takes from :class:`~allsky.modeling.backbone_families.VitTokenFamily`.
+    That is the same object the training path pools through, so extraction and
+    fine-tuning cannot read this model's tokens two different ways.
+
+    Parameters
+    ----------
+    model:
+        A DINOv2 entrypoint from :data:`AVAILABLE_BACKBONES`; every one has
+        patch size 14, so ``image_size`` stays a multiple of 14 for all of them.
+    pooling:
+        Token pooling: ``"cls"``, ``"mean"`` (both one token wide) or
+        ``"cls+mean"`` (concatenation, twice that). :func:`embedding_dim` is
+        the authority on the resulting width.
+    device:
+        ``"auto"`` (cuda -> mps -> cpu), or an explicit torch device string.
+    dtype:
+        ``"fp16"`` enables fp16 autocast **on CUDA only** (CPU/MPS fp16 autocast
+        is not reliably supported, so it is silently a no-op there); ``"fp32"``
+        forces full precision.  Embeddings are always returned as fp32.
+    image_size:
+        Square input size; must be a multiple of the patch size (14).  Default
+        224 (16x16 patches).
+
+    Notes
+    -----
+    The hub model is loaded lazily on the first :meth:`encode` and cached on the
+    instance — created **once per process**.  Extraction is single-process and
+    batched precisely so no data-loader worker triggers a duplicate download.
+    """
+
+    PATCH_SIZE = 14
+
+    def __init__(
+        self,
+        *,
+        model: str = DINOV2_MODEL,
+        pooling: Pooling = "cls",
+        device: str = "auto",
+        dtype: Literal["fp16", "fp32"] = "fp16",
+        image_size: int = DEFAULT_IMAGE_SIZE,
+    ) -> None:
+        if image_size % self.PATCH_SIZE != 0:
+            raise ValueError(
+                f"image_size {image_size} must be a multiple of the patch size ({self.PATCH_SIZE})"
+            )
+        self.name = model
+        self.revision = DINOV2_REVISION
+        self.dim = embedding_dim(model, pooling)
+        super().__init__(pooling=pooling, device=device, dtype=dtype, image_size=image_size)
+
+    def _build_module(self) -> Any:
+        """Fetch the pinned hub revision and build the model."""
+        import torch
+
+        return torch.hub.load(
+            f"{DINOV2_REPO}:{DINOV2_REVISION}",
+            self.name,
+            trust_repo=True,
+        )
 
 
 class TorchvisionBackbone(_TorchModuleBackbone):
