@@ -1,0 +1,44 @@
+# O cruzamento: alvo normalizado E canal de geometria ao mesmo tempo.
+#
+# BRACO DE CONFIRMACAO, NAO DE DESCOBERTA. A secao 5.2.6 de Varaschin & Silva
+# (2025) ja preve o resultado: mascara de sol como canal "improves the
+# performance when the model's target variable is the unnormalized solar
+# irradiance value, but is detrimental otherwise". Ou seja, canal de geometria e
+# alvo normalizado sao SUBSTITUTOS, nao somam — os dois removem a dependencia da
+# geometria solar, um pela entrada e outro pela saida.
+#
+# O que ja medimos aqui e coerente com isso. Com alvo bruto, o canal
+# `cos_sun_angle` derrubou a amplitude do vies por banda de elevacao de 17,47
+# para 2,65 W/m2. Se o alvo normalizado fizer o mesmo sozinho, este braco nao
+# deve melhorar nada e pode piorar.
+#
+# Vale rodar por uma razao so: e o unico jeito de distinguir "sao substitutos"
+# de "sao complementares" nos NOSSOS dados, e a previsao vem de um benchmark em
+# GHI sobre outras tres estacoes.
+#
+# Controles: `kdindex` (mesmo alvo, sem canal) e `iso` (alvo bruto, sem canal).
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: kdsun_s42
+output_dir: output/allsky-mm/experiments/kdsun/kdsun_s42
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso
+  input_mode: image
+targets:
+  dhi:
+    loss: mae
+    parameterization: clearsky_index
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  geometry_channels: [cos_sun_angle]
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  num_workers: 8

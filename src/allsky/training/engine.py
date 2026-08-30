@@ -224,7 +224,6 @@ def run_experiment(
     logger.info("split %s: %d train / %d val rows", split.split_id[:12], len(train_df), len(val_df))
 
     feature_columns = resolve_feature_set(cfg.features.feature_set, cfg.features.extra)
-    target_normalizers = _fit_target_normalizers(train_df)
     train_ds, val_ds, embedding_dim = _build_datasets(
         cfg,
         train_df,
@@ -233,6 +232,10 @@ def run_experiment(
         root=root,
         embedding_reader=embedding_reader,
     )
+    # Fitted from the dataset, not the manifest: the normalizer has to describe
+    # the quantity the head actually receives, which the DHI parameterization
+    # changes.
+    target_normalizers = _fit_target_normalizers(train_ds)
     feature_normalizer = train_ds.stats
     batch_size = int(cfg.train.batch_size)
     train_sampler_generator = torch.Generator()
@@ -544,12 +547,18 @@ def _select_splits(manifest: pd.DataFrame, split: Any) -> tuple[pd.DataFrame, pd
     return train_df, val_df
 
 
-def _fit_target_normalizers(train_df: pd.DataFrame) -> dict[str, TargetNormalizer]:
-    """Fit ``dhi`` / ``kindex`` target normalizers on the train rows only."""
-    from allsky.features.normalization import fit_target_normalizers
+def _fit_target_normalizers(train_ds: Any) -> dict[str, TargetNormalizer]:
+    """Fit the ``dhi`` / ``kindex`` normalizers on what the TRAIN dataset serves.
 
-    raw = fit_target_normalizers(train_df, ["target_dhi", "target_kindex"])
-    return {"dhi": raw["target_dhi"], "kindex": raw["target_kindex"]}
+    Reading the arrays off the dataset rather than the manifest keeps the
+    normalizer and the head describing one quantity: ``targets.dhi.parameterization``
+    decides whether that is W/m2 or a ratio to the clear-sky reference, and a
+    normalizer fitted on the other one is not a smaller error, it is a different
+    unit reported as W/m2.
+    """
+    from allsky.features.normalization import TargetNormalizer
+
+    return {name: TargetNormalizer.fit(values) for name, values in train_ds.served_targets.items()}
 
 
 def _build_datasets(

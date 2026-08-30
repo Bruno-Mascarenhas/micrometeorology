@@ -124,6 +124,19 @@ class _BaseMultimodalDataset:
         self._sample_ids = [str(s) for s in self.manifest["sample_id"]]
         self._columns: SampleTensors | None = None
 
+    @property
+    def served_targets(self) -> dict[str, np.ndarray]:
+        """The regression target arrays this dataset actually serves.
+
+        The target normalizer is fitted from HERE rather than from the manifest
+        column, so it is by construction the same quantity the head sees. Fitting
+        it from ``target_dhi`` while the dataset served ``DHI / DHI_clearsky``
+        denormalized a ratio with W/m2 statistics — the physical MAE came back as
+        274 W/m2 after one epoch against the raw arm's 29, which is how the defect
+        was found.
+        """
+        return {"dhi": self._dhi, "kindex": self._kindex}
+
     def set_epoch(self, epoch: int) -> None:
         """Tell the dataset which pass over the data it is on.
 
