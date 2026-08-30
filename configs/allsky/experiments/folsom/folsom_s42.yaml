@@ -1,0 +1,47 @@
+# Pre-treino no UCSD-Folsom. Este braco e a FONTE da transferencia.
+#
+# Nao e um resultado a ser comparado com nada daqui: e um artefato, o checkpoint
+# que os bracos `transfer/` consomem em model.init_from. Por isso uma semente so
+# — a variancia que interessa medir e a do fine-tune sobre o alvo, e essa tem
+# tres.
+#
+# POR QUE FOLSOM. Nie et al. (2022, arXiv:2211.02108) compararam treinar local,
+# treinar global sobre datasets fundidos, e pre-treinar-e-transferir, e a
+# terceira vence: "with 80% less training data, it can achieve comparable
+# performance as the local baseline". E o nosso regime — 55 dias de treino.
+# Entre os 72 datasets abertos catalogados por Nie et al. (2024,
+# arXiv:2211.14709), o Folsom foi escolhido por ter camera FISHEYE com o sol
+# visivel, como a nossa; os sitios tropicais da ARM, de latitude muito mais
+# proxima, imageiam por TSI, cuja faixa de sombra OCULTA o sol. Ver
+# docs/datasets-de-ceu-abertos.md.
+#
+# O DADO. 230.791 linhas em 351 dias (contra 46.014 em 81 dias aqui), 38,642 N,
+# elevacao solar ate 74,8 graus. O carimbo de tempo de cada frame e a data de
+# MODIFICACAO e nao o nome do arquivo: usar o nome parearia 45,7 % das imagens
+# com a irradiancia do minuto errado. Ver auditoria-2026-08-30-09h, Parte III.
+#
+# CUSTO. Os frames sao 1536x1536 nativos, contra os 512 da nossa reextracao, e
+# sao decodificados a cada epoca. Isto e candidato ao Colab, nao a RTX 2060.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: folsom_s42
+output_dir: output/allsky-mm/experiments/folsom/folsom_s42
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-folsom
+  input_mode: image
+targets:
+  dhi:
+    loss: mae
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+train:
+  backbone_lr: 0.00001
+  epochs: 20
+  num_workers: 8
