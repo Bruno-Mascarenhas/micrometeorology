@@ -22,6 +22,7 @@ run in tests or CI — use :class:`FakeBackbone` there.
 """
 
 import hashlib
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Protocol, get_args, runtime_checkable
@@ -500,6 +501,14 @@ class TorchvisionBackbone(_TorchModuleBackbone):
         return model
 
 
+#: Environment variable holding the DINOv3 weights, so a versioned config names
+#: neither the licensed URL nor an absolute machine path.
+WEIGHTS_ENV_VAR = "ALLSKY_DINOV3_WEIGHTS"
+
+#: Environment variable holding the DINOv3 source tree, same reason.
+REPO_DIR_ENV_VAR = "ALLSKY_DINOV3_REPO"
+
+
 class Dinov3Backbone(_TorchModuleBackbone):
     """A DINOv3 vision transformer, loaded from a local clone and local weights.
 
@@ -523,7 +532,8 @@ class Dinov3Backbone(_TorchModuleBackbone):
     model:
         A DINOv3 backbone entrypoint, e.g. ``"dinov3_vits16plus"``.
     weights:
-        Path to a downloaded ``.pth``, or a URL. ``"none"`` builds the
+        Path to a downloaded ``.pth``, or a URL; falls back to the
+        :data:`WEIGHTS_ENV_VAR` environment variable. ``"none"`` builds the
         architecture untrained.
     repo_dir:
         The DINOv3 source tree. Defaults to the ``torch.hub`` cache location.
@@ -569,15 +579,21 @@ class Dinov3Backbone(_TorchModuleBackbone):
                 f"image_size {image_size} must be a multiple of DINOv3's patch size "
                 f"({self.PATCH_SIZE})"
             )
+        weights = weights or os.environ.get(WEIGHTS_ENV_VAR, "")
         if not weights:
             raise ValueError(
-                f"{model} needs model.backbone_weights: a path to the downloaded .pth or a "
-                "signed URL. The DINOv3 weights are licensed and the public URL answers 403"
+                f"{model} needs its weights: set model.backbone_weights or the "
+                f"{WEIGHTS_ENV_VAR} environment variable to the downloaded .pth or a signed "
+                "URL. They are licensed — the public URL answers 403 — and a signed URL is a "
+                "credential, so the environment variable is how a shipped config stays free "
+                "of both the secret and the machine path"
             )
         self.name = model
         self.dim = self.TOKEN_DIM[model] * (2 if pooling == "cls+mean" else 1)
         self._weights = weights
-        self._repo_dir = Path(repo_dir) if repo_dir is not None else _default_dinov3_repo_dir()
+        self._repo_dir = Path(
+            repo_dir or os.environ.get(REPO_DIR_ENV_VAR) or _default_dinov3_repo_dir()
+        )
         self.revision = f"repo_dir={self._repo_dir}"
         super().__init__(pooling=pooling, device=device, dtype=dtype, image_size=image_size)
 

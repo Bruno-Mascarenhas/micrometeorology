@@ -1,0 +1,46 @@
+# ResNet50: a primeira vez que este projeto compara FAMÍLIA de backbone.
+#
+# Todo braço até aqui usou DINOv2 ViT-S/14. O benchmark de Varaschin & Silva
+# (2025, arXiv:2503.21966), dez arquiteturas sobre Folsom, SIRTA e NREL,
+# conclui que profundidade e conexões residuais é o que separa: ResNet50 e
+# EfficientNet vencem consistentemente, os rasos (Sunset, U-Net) são os piores,
+# e profundo-sem-residual (VGG16, SolarNet) também vai mal. RMSE agregado deles,
+# em GHI e portanto em escala não comparável à nossa: ResNet50 38,05 +/- 0,20 e
+# EfficientNetV2-S 38,53 +/- 0,31 contra U-Net 49,54 +/- 1,35.
+#
+# Capacidade equivalente ao controle: 25M parâmetros contra os 22M do ViT-S/14.
+# A resolução de pré-treino do ResNet50 é 224, exatamente a nossa entrada.
+#
+# `unfreeze_last_n` conta a unidade DESTA família. O ResNet50 expõe 16 blocos
+# residuais (os quatro `layerN` achatados), o ViT-S/14 expõe 12 blocos de
+# transformer. 6 aqui é aproximadamente a mesma fração de rede que 12 lá.
+#
+# `backbone_pooling: mean` não é escolha: uma rede convolucional não emite
+# token, e pedir `cls` levanta erro em vez de devolver outra coisa.#
+# Controle: o braço `iso` — 19,94 +/- 0,35 W/m2 de RMSE de DHI, MAE 13,94,
+# MBE -8,30, sobre as mesmas 7.138 linhas de teste. Difere só no backbone.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: resnet50_s42
+output_dir: output/allsky-mm/experiments/resnet50/resnet50_s42
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso
+  input_mode: image
+targets:
+  dhi:
+    loss: mae
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone: resnet50
+  backbone_pooling: mean
+  backbone_frozen: false
+  unfreeze_last_n: 6
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  num_workers: 8
