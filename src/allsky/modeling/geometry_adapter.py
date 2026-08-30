@@ -23,8 +23,11 @@ convolution is a normal trainable module that no backbone freeze sweep owns.
 """
 
 import logging
+from typing import cast
 
 from torch import Tensor, nn
+
+from allsky.modeling.backbone_families import BackboneCapabilityError
 
 __all__ = [
     "GeometryPatchProjection",
@@ -140,27 +143,47 @@ def attach_extra_input_channels(
     Raises
     ------
     PatchProjectionNotFoundError
-        If no ``patch_embed.proj`` convolution is reachable. Failing here is the
-        point: silently skipping the wrap would leave the extra channels
+        If the backbone's family cannot say where the frame enters. Failing here
+        is the point: silently skipping the wrap would leave the extra channels
         unconsumed and the experiment would measure nothing.
     """
-    for candidate in (backbone, getattr(backbone, "model", None)):
-        patch_embed = getattr(candidate, "patch_embed", None)
-        if patch_embed is None:
-            continue
-        proj = getattr(patch_embed, "proj", None)
-        if isinstance(proj, nn.Conv2d):
-            adapter = GeometryPatchProjection(proj, extra_channels)
-            patch_embed.proj = adapter
-            logger.info(
-                "wrapped the patch projection of %s: %d pretrained + %d extra input channels, "
-                "the extra branch zero-initialised",
-                type(candidate).__name__,
-                adapter.pretrained_channels,
-                extra_channels,
-            )
-            return adapter
-    raise PatchProjectionNotFoundError(
-        f"backbone {type(backbone).__name__} exposes no patch_embed.proj Conv2d to wrap; "
-        "extra input channels cannot reach a backbone that does not tokenise with a convolution"
+    located = _locate_first_convolution(backbone)
+    if located is None:
+        raise PatchProjectionNotFoundError(
+            f"backbone {type(backbone).__name__} exposes no first convolution to wrap; "
+            "extra input channels cannot reach a backbone whose family does not say where "
+            "the frame enters"
+        )
+    owner, attribute = located
+    adapter = GeometryPatchProjection(getattr(owner, attribute), extra_channels)
+    setattr(owner, attribute, adapter)
+    logger.info(
+        "wrapped %s.%s: %d pretrained + %d extra input channels, the extra branch zero-initialised",
+        type(owner).__name__,
+        attribute,
+        adapter.pretrained_channels,
+        extra_channels,
     )
+    return adapter
+
+
+def _locate_first_convolution(backbone: nn.Module) -> tuple[nn.Module, str] | None:
+    """``(owner, attribute)`` of the convolution the frame enters, or ``None``.
+
+    A production backbone carries a family that answers this
+    (:mod:`allsky.modeling.backbone_families`).  Test stubs do not, so a direct
+    ``patch_embed.proj`` is still recognised — that path predates the families
+    and the stubs are written against it.
+    """
+    family = getattr(backbone, "family", None)
+    model = getattr(backbone, "model", None)
+    if family is not None and model is not None:
+        try:
+            return cast("tuple[nn.Module, str]", family.first_convolution(model))
+        except BackboneCapabilityError:
+            return None
+    for candidate in (backbone, model):
+        patch_embed = getattr(candidate, "patch_embed", None)
+        if patch_embed is not None and isinstance(getattr(patch_embed, "proj", None), nn.Conv2d):
+            return patch_embed, "proj"
+    return None

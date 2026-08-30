@@ -30,6 +30,7 @@ from allsky.geometry import (
     solar_geometry_maps,
 )
 from allsky.lens import LensCalibration, isotropic_calibration
+from allsky.modeling.backbone_families import BackboneCapabilityError, family_for
 from allsky.modeling.geometry_adapter import (
     GeometryPatchProjection,
     PatchProjectionNotFoundError,
@@ -178,7 +179,7 @@ class TestGeometryPatchProjection:
         assert float(gradient.abs().sum()) > 0.0
 
     def test_a_backbone_without_a_patch_convolution_fails_loudly(self):
-        with pytest.raises(PatchProjectionNotFoundError, match=r"no patch_embed\.proj"):
+        with pytest.raises(PatchProjectionNotFoundError, match="no first convolution"):
             attach_extra_input_channels(nn.Linear(3, 4), 3)
 
     def test_a_zero_width_adapter_is_refused_rather_than_built_inert(self):
@@ -414,3 +415,42 @@ class TestConfigFlow:
             build_model(cfg, 9, embedding_dim=None, image_backbone=_StubViT())
 
         assert not any("unknown hyper-parameter" in r.getMessage() for r in caplog.records)
+
+
+class TestBackboneFamilies:
+    """The families exist so a new architecture cannot be wired in silently wrong.
+
+    What is asserted here is refusal: a convolutional network asked for a token
+    pooling it does not have, a family nobody wrote, a backbone that cannot say
+    where the frame enters. Each of those, answered with a guess instead of an
+    error, produces a run that trains and reports a number for a question nobody
+    asked — which is the defect this project has already paid for once.
+    """
+
+    def test_a_convolutional_family_refuses_token_pooling(self):
+        with pytest.raises(BackboneCapabilityError, match="produces no tokens"):
+            family_for("resnet50", "cls")
+
+    def test_an_unwritten_family_is_refused_rather_than_guessed(self):
+        with pytest.raises(BackboneCapabilityError, match="no backbone family describes"):
+            family_for("some_net_v9", "mean")
+
+    def test_a_transformer_without_blocks_has_nothing_to_unfreeze(self):
+        family = family_for("dinov2_vits14", "cls")
+
+        with pytest.raises(BackboneCapabilityError, match="no 'blocks' sequence"):
+            family.stages(nn.Linear(3, 4))
+
+    def test_a_transformer_without_a_patch_projection_refuses_extra_channels(self):
+        family = family_for("dinov2_vits14", "cls")
+
+        with pytest.raises(BackboneCapabilityError, match=r"patch_embed\.proj"):
+            family.first_convolution(nn.Linear(3, 4))
+
+    def test_the_vit_family_finds_the_projection_extra_channels_attach_to(self):
+        family = family_for("dinov2_vits14", "cls")
+        stub = _StubViT()
+
+        owner, attribute = family.first_convolution(stub)
+
+        assert getattr(owner, attribute) is stub.patch_embed.proj

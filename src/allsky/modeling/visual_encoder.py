@@ -26,11 +26,17 @@ visual encoder hands to the engine.
 """
 
 import logging
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import torch
 from torch import Tensor, nn
 
+from allsky.modeling.backbone_families import (
+    BackboneCapabilityError,
+    BackboneFamily,
+    VitTokenFamily,
+    family_for,
+)
 from allsky.modeling.geometry_adapter import (
     GeometryPatchProjection,
     attach_extra_input_channels,
@@ -446,7 +452,32 @@ class _HubVisualBackbone(nn.Module):
         # which makes forward_features(...) un-analyzable. Runtime registration as a
         # submodule still happens because the assigned value *is* an nn.Module.
         self.model: Any = loader()
+        self.family = self._family_of(backbone)
         self._warn_if_blocks_are_chunked()
+
+    def _family_of(self, backbone: Any) -> BackboneFamily:
+        """The family that answers what fine-tuning needs of this architecture.
+
+        Resolved from the backbone's own name, which every backbone
+        :func:`allsky.embeddings.backbone.build_backbone` produces carries — a
+        config can therefore never reach here with a family nobody wrote, because
+        the builder rejects the unknown name first.
+
+        A wrapper that does not name itself is a test stub, and the only shape
+        ``load_torch_module`` has ever had is the hub ViT contract, so that is
+        what it falls back to — with a warning, because a silent guess about the
+        architecture is how a run reports a fine-tuning depth it never applied.
+        """
+        name = str(getattr(backbone, "name", "") or "")
+        try:
+            return family_for(name, self.pooling)
+        except BackboneCapabilityError:
+            logger.warning(
+                "image backbone %s does not name itself, so it is treated as a token ViT; "
+                "a real backbone gets its family from its name",
+                type(backbone).__name__,
+            )
+            return VitTokenFamily(self.pooling, name=name or "unnamed backbone")
 
     def _warn_if_blocks_are_chunked(self) -> None:
         """Warn when ``blocks`` holds chunks instead of one entry per transformer block.
@@ -472,20 +503,21 @@ class _HubVisualBackbone(nn.Module):
 
     @property
     def blocks(self) -> Any:
-        """The backbone's transformer ``blocks`` sequence (for unfreezing), if any."""
-        return getattr(self.model, "blocks", None)
+        """The stages ``unfreeze_last_n`` counts, or ``None`` when the family has none.
+
+        ``None`` rather than an exception because :class:`ImageEncoder` already
+        warns for a backbone with nothing to unfreeze, and that warning is the
+        established contract; the capability error is reserved for the requests
+        that would otherwise pass silently, such as extra input channels.
+        """
+        try:
+            return list(self.family.stages(self.model))
+        except BackboneCapabilityError:
+            return None
 
     def forward(self, image: Tensor) -> Tensor:
-        """Encode ``(B, 3, H, W)`` frames to a ``(B, dim)`` embedding with gradients."""
-        out = self.model.forward_features(image)
-        cls = out["x_norm_clstoken"]
-        if self.pooling == "cls":
-            pooled = cls
-        elif self.pooling == "mean":
-            pooled = out["x_norm_patchtokens"].mean(dim=1)
-        else:
-            pooled = torch.cat([cls, out["x_norm_patchtokens"].mean(dim=1)], dim=-1)
-        return cast("Tensor", pooled)
+        """Encode ``(B, C, H, W)`` frames to a ``(B, dim)`` embedding with gradients."""
+        return self.family.pooled(self.model, image)
 
 
 def coerce_image_backbone(backbone: Any, *, pooling: str = "cls") -> nn.Module:
