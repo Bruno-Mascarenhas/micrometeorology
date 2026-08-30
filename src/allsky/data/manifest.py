@@ -26,7 +26,7 @@ content ``manifest_sha256``.
 import json
 import logging
 from collections.abc import Iterable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,6 @@ import pandas as pd
 
 from allsky.clearsky import clear_sky_index
 from allsky.config import (
-    SITE_TZ,
     SITE_TZ_NAME,
     SITE_UTC_OFFSET_HOURS,
     PrepareConfig,
@@ -82,6 +81,18 @@ __all__ = [
 #: ``target_source`` values written by :func:`build_manifest`.
 TARGET_SOURCE_MEASURED = "measured"
 TARGET_SOURCE_ERBS = "erbs_pseudo"
+
+
+def _timezone_meta(site: SiteConfig) -> dict[str, Any]:
+    """Sidecar timezone block for *site*.
+
+    The station keeps its named zone; any other site is recorded by its offset
+    alone, because a fixed instrument offset is what this pipeline consumes and
+    naming a zone it never resolved would be an assertion nobody checked.
+    """
+    if site.utc_offset_hours == SITE_UTC_OFFSET_HOURS:
+        return {"name": SITE_TZ_NAME, "utc_offset_hours": SITE_UTC_OFFSET_HOURS}
+    return {"name": None, "utc_offset_hours": float(site.utc_offset_hours)}
 
 
 def build_manifest(
@@ -242,7 +253,7 @@ def build_manifest(
         site,
         feature_set,
         extra=extra_features,
-        utc_offset_hours=float(SITE_UTC_OFFSET_HOURS),
+        utc_offset_hours=float(site.utc_offset_hours),
     )
     finite = np.isfinite(features.to_numpy(dtype=np.float64)).all(axis=1)
     n_nonfinite = int((~finite).sum())
@@ -257,7 +268,7 @@ def build_manifest(
     if len(frames) == 0:
         raise ValueError("no rows survived the finite-feature filter; check sensor coverage")
 
-    utc_offset = float(SITE_UTC_OFFSET_HOURS)
+    utc_offset = float(site.utc_offset_hours)
     elevation = solar_elevation_deg(frame_times, site, utc_offset)
 
     if night_min_elevation_deg is not None:
@@ -320,7 +331,8 @@ def build_manifest(
     sample_id = [f"allsky-{ts:%Y%m%d-%H%M}" for ts in frame_times]
     _check_sample_id_unique(sample_id)
     day_id = frame_times.strftime("%Y-%m-%d")
-    timestamp_utc = frame_times.tz_localize(SITE_TZ).tz_convert("UTC").as_unit("ns")
+    site_tz = timezone(timedelta(hours=site.utc_offset_hours))
+    timestamp_utc = frame_times.tz_localize(site_tz).tz_convert("UTC").as_unit("ns")
     image_path = [to_relative(path, data_root) for path in frames["frame_path"]]
 
     dtypes = manifest_column_dtypes(feature_columns)
@@ -685,7 +697,7 @@ def _build_meta(
         "code_version": code_version(),
         "created_at": datetime.now(UTC).isoformat(),
         "row_count": row_count,
-        "timezone": {"name": SITE_TZ_NAME, "utc_offset_hours": SITE_UTC_OFFSET_HOURS},
+        "timezone": _timezone_meta(site),
         "site": {"latitude": site.latitude, "longitude": site.longitude},
         "thresholds": thresholds,
         "manifest_sha256": None,
