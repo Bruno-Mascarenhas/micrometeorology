@@ -209,8 +209,9 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         Train-only standardization: on the training split ``stats`` is fit from
         *manifest*; validation/test must be handed ``train_dataset.stats``.
     geometry_channels:
-        Append the per-pixel solar geometry maps of
-        :func:`allsky.geometry.solar_geometry_maps` to every frame, built at
+        Names of the per-pixel solar geometry maps of
+        :func:`allsky.geometry.solar_geometry_maps` to append to every frame,
+        empty for none.  They are built at
         *image_size* from :func:`allsky.lens.isotropic_calibration` and the row's
         own solar angles.  Only valid for frames from the isotropic
         re-extraction: on an anisotropically resized frame the maps would
@@ -238,7 +239,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         augment: AugmentationPipeline | None = None,
         preprocess: PreprocessingPipeline | None = None,
         seed: int = 0,
-        geometry_channels: bool = False,
+        geometry_channels: Sequence[str] = (),
     ) -> None:
         super().__init__(manifest, feature_columns, train=train, stats=stats)
         self.data_root = data_root
@@ -254,9 +255,10 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         # the model runs, or inference sees pixels training never produced.
         self.preprocess = preprocess
         self._seed = int(seed)
+        self._geometry_channels = tuple(geometry_channels)
         self._geometry = (
             self._geometry_source(manifest, augment if train else None)
-            if geometry_channels
+            if self._geometry_channels
             else None
         )
 
@@ -333,6 +335,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
             (self.image_size, self.image_size),
             sun_zenith_rad=float(np.radians(zenith_deg[idx])),
             sun_azimuth_rad=float(np.radians(azimuth_deg[idx])),
+            channels=self._geometry_channels,
         )
         return np.concatenate([standardized, maps], axis=0)
 

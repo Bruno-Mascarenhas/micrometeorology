@@ -24,7 +24,11 @@ from allsky.config import ExperimentConfig, geometry_channels_of
 from allsky.data.datasets import MultimodalImageDataset
 from allsky.data.manifest import build_manifest
 from allsky.features import resolve_feature_set
-from allsky.geometry import GEOMETRY_CHANNEL_NAMES, solar_geometry_maps
+from allsky.geometry import (
+    GEOMETRY_CHANNEL_NAMES,
+    resolve_geometry_channels,
+    solar_geometry_maps,
+)
 from allsky.lens import LensCalibration, isotropic_calibration
 from allsky.modeling.geometry_adapter import (
     GeometryPatchProjection,
@@ -103,6 +107,49 @@ class TestSolarGeometryMaps:
         centre = (round(calibration.centre_row), round(calibration.centre_col))
 
         assert zenith[centre] == pytest.approx(1.0, abs=2e-3)
+
+
+class TestChannelSelection:
+    def test_true_means_every_map_and_false_means_none(self):
+        assert resolve_geometry_channels(True) == GEOMETRY_CHANNEL_NAMES
+        assert resolve_geometry_channels(False) == ()
+        assert resolve_geometry_channels(None) == ()
+
+    def test_a_subset_comes_back_in_the_canonical_order_however_it_was_asked_for(self):
+        """The plane a trained weight belongs to must not depend on the order
+        someone typed the names in, or a checkpoint would reload onto a
+        different channel than it was fitted on."""
+        assert resolve_geometry_channels(["solar_disc", "cos_sun_angle"]) == (
+            "cos_sun_angle",
+            "solar_disc",
+        )
+
+    def test_an_unknown_channel_name_fails_loudly(self):
+        with pytest.raises(ValueError, match="unknown geometry channel"):
+            resolve_geometry_channels(["cos_sun_angle", "cos_moon_angle"])
+
+    def test_an_empty_list_is_refused_rather_than_read_as_disabled(self):
+        with pytest.raises(ValueError, match="empty list"):
+            resolve_geometry_channels([])
+
+    def test_a_repeated_channel_is_refused(self):
+        with pytest.raises(ValueError, match="repeats a channel"):
+            resolve_geometry_channels(["cos_sun_angle", "cos_sun_angle"])
+
+    def test_a_subset_builds_only_the_maps_it_names(self, calibration: LensCalibration):
+        full = solar_geometry_maps(
+            calibration, (FRAME_PX, FRAME_PX), sun_zenith_rad=0.4, sun_azimuth_rad=1.2
+        )
+        one = solar_geometry_maps(
+            calibration,
+            (FRAME_PX, FRAME_PX),
+            sun_zenith_rad=0.4,
+            sun_azimuth_rad=1.2,
+            channels=("cos_sun_angle",),
+        )
+
+        assert one.shape == (1, FRAME_PX, FRAME_PX)
+        assert np.array_equal(one[0], full[GEOMETRY_CHANNEL_NAMES.index("cos_sun_angle")])
 
 
 class TestGeometryPatchProjection:
@@ -246,7 +293,7 @@ class TestImageDatasetChannels:
             data_root=root,
             image_size=FRAME_PX,
             train=True,
-            geometry_channels=True,
+            geometry_channels=GEOMETRY_CHANNEL_NAMES,
         )
 
         image = dataset[0]["image"]
@@ -267,7 +314,7 @@ class TestImageDatasetChannels:
             data_root=root,
             image_size=FRAME_PX,
             train=True,
-            geometry_channels=True,
+            geometry_channels=GEOMETRY_CHANNEL_NAMES,
         )
 
         assert torch.equal(with_geometry[0]["image"][:3], plain[0]["image"])
@@ -286,8 +333,21 @@ class TestImageDatasetChannels:
                 image_size=FRAME_PX,
                 train=True,
                 augment=AugmentationPipeline(p_translate=1.0),
-                geometry_channels=True,
+                geometry_channels=GEOMETRY_CHANNEL_NAMES,
             )
+
+    def test_a_subset_narrows_the_frame_to_rgb_plus_those_planes(self, tmp_path: Path):
+        manifest, root = _manifest(tmp_path)
+        dataset = MultimodalImageDataset(
+            manifest,
+            resolve_feature_set("bare"),
+            data_root=root,
+            image_size=FRAME_PX,
+            train=True,
+            geometry_channels=("cos_sun_angle",),
+        )
+
+        assert dataset[0]["image"].shape == (4, FRAME_PX, FRAME_PX)
 
     def test_a_manifest_without_solar_angles_is_refused(self, tmp_path: Path):
         manifest, root = _manifest(tmp_path)
@@ -299,7 +359,7 @@ class TestImageDatasetChannels:
                 data_root=root,
                 image_size=FRAME_PX,
                 train=True,
-                geometry_channels=True,
+                geometry_channels=GEOMETRY_CHANNEL_NAMES,
             )
 
 
@@ -314,13 +374,29 @@ class TestConfigFlow:
             }
         )
 
-        assert geometry_channels_of(cfg) is True
+        assert geometry_channels_of(cfg) == GEOMETRY_CHANNEL_NAMES
 
         model: Any = build_model(cfg, 9, embedding_dim=None, image_backbone=_StubViT())
         adapter = model.visual_encoder.extra_channel_projection
 
         assert adapter is not None
         assert adapter.in_channels == 3 + len(GEOMETRY_CHANNEL_NAMES)
+
+    def test_a_named_subset_widens_the_projection_by_exactly_that_many_planes(self):
+        cfg = ExperimentConfig.model_validate(
+            {
+                "features": {"set": "bare"},
+                "targets": {"dhi": {"enabled": True}},
+                "model": {"name": "image_only", "geometry_channels": ["cos_sun_angle"]},
+                "data": {"input_mode": "image"},
+            }
+        )
+
+        assert geometry_channels_of(cfg) == ("cos_sun_angle",)
+
+        model: Any = build_model(cfg, 9, embedding_dim=None, image_backbone=_StubViT())
+
+        assert model.visual_encoder.extra_channel_projection.in_channels == 4
 
     def test_the_flag_is_a_recognised_knob_and_does_not_warn_as_a_typo(self, caplog: Any):
         import logging

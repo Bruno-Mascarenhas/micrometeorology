@@ -27,7 +27,6 @@ from torch import nn
 from allsky.config import ExperimentConfig, geometry_channels_of
 from allsky.embeddings.backbone import Pooling
 from allsky.features.policy import resolve_feature_set
-from allsky.geometry import GEOMETRY_CHANNEL_NAMES
 from allsky.modeling.baselines import ClimatologyModel, ImageOnlyModel, SensorOnlyModel
 from allsky.modeling.multimodal import MultimodalNet
 from allsky.modeling.visual_encoder import build_visual_encoder
@@ -179,7 +178,7 @@ def _extra_input_channels(cfg: ExperimentConfig) -> int:
     Reads the same config key the dataset does, so the frame the loader emits and
     the projection the model builds cannot disagree.
     """
-    return len(GEOMETRY_CHANNEL_NAMES) if geometry_channels_of(cfg) else 0
+    return len(geometry_channels_of(cfg))
 
 
 def _build_image_only(
