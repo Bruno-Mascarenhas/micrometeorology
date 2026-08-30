@@ -343,7 +343,7 @@ def run_experiment(
         history = truncate_metrics(run_dir, fields, start_epoch)
         logger.info(
             "resumed from %s at epoch %d (global_step %d, epochs_no_improve %d)",
-            resolve_resume_path,
+            resume_path,
             start_epoch,
             global_step,
             epochs_no_improve,
