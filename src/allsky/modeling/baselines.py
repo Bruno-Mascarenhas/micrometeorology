@@ -24,12 +24,12 @@ from numpy.typing import ArrayLike
 from torch import Tensor, nn
 
 from allsky.config import TargetsConfig
-from allsky.data.contracts import SKY_CLASS_COUNT
 from allsky.features.normalization import TargetNormalizer
 from allsky.modeling.contracts import ModelOutputs
 from allsky.modeling.heads import Heads, Trunk
 from allsky.modeling.sensor_encoder import SensorEncoder
 from allsky.modeling.visual_encoder import split_backbone_param_groups
+from labmim_core.sky import SKY_CLASS_COUNT
 
 __all__ = [
     "ClimatologyModel",

@@ -22,7 +22,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from allsky.data.contracts import SKY_CLASS_COUNT
+from labmim_core.sky import SKY_CLASS_COUNT
 from solrad_correction.evaluation.metrics import compute_regression_metrics
 
 __all__ = [
@@ -188,7 +188,7 @@ def classification_metrics(
     y_true, y_pred:
         True and predicted class integers.
     n_classes:
-        Number of classes, defaulting to :data:`~allsky.data.contracts.SKY_CLASS_COUNT`
+        Number of classes, defaulting to :data:`~allsky.data.sky.SKY_CLASS_COUNT`
         so an absent-column split reports the same confusion shape as a scored one.
 
     Returns

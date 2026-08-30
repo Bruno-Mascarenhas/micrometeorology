@@ -35,7 +35,7 @@ import pandas as pd
 import pytest
 import scipy.constants
 
-from allsky.solar import eccentricity_correction
+from labmim_core.solar import eccentricity_correction
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import variables
 from micrometeorology.wrf.reader import WRFDataset

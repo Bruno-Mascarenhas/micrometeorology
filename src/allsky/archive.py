@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Self
 from urllib.parse import urljoin
 
-from allsky.atomic import atomic_write, atomic_write_json
+from labmim_core.atomic import atomic_write, atomic_write_json
 
 logger = logging.getLogger(__name__)
 

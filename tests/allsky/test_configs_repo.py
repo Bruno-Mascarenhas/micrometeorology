@@ -28,9 +28,9 @@ from allsky.config import (
     load_experiment_config,
     load_prepare_config,
 )
-from allsky.data.contracts import SKY_CLASS_COUNT
 from allsky.features.policy import resolve_feature_set
 from allsky.modeling.registry import MODEL_BUILDERS, build_model
+from labmim_core.sky import SKY_CLASS_COUNT
 
 _CONFIGS = Path(__file__).resolve().parents[2] / "configs" / "allsky"
 _EXPERIMENTS = sorted((_CONFIGS / "experiments").glob("v*.yaml"))

@@ -665,8 +665,8 @@ def _extract_replacing_previous_frames(
         If the video decodes to no usable frame, in which case *frames_dir* is
         left exactly as it was.
     """
-    from allsky.atomic import atomic_write
     from allsky.overlay import MANIFEST_FILENAME, OverlayTimestampError, extract_frames_for
+    from labmim_core.atomic import atomic_write
 
     staging = frames_dir.with_name(f".{frames_dir.name}.incoming")
     shutil.rmtree(staging, ignore_errors=True)
@@ -844,8 +844,8 @@ def _predict_snapshot(
     """
     import pandas as pd
 
-    from allsky.atomic import atomic_write_strict_json
     from allsky.snapshot import predict_snapshot
+    from labmim_core.atomic import atomic_write_strict_json
 
     try:
         prediction = predict_snapshot(

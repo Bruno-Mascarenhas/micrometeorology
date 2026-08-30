@@ -24,7 +24,6 @@ from typing import Annotated, Any
 
 import typer
 
-from allsky.atomic import atomic_write, atomic_write_json
 from allsky.cli.runtime import configure_cli_logging
 from allsky.config import (
     DATASET_MANIFEST_FILENAME,
@@ -36,6 +35,7 @@ from allsky.config import (
     manifest_meta_path,
 )
 from allsky.frame_pixels import decode_rgb
+from labmim_core.atomic import atomic_write, atomic_write_json
 
 logger = logging.getLogger(__name__)
 

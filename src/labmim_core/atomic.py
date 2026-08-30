@@ -1,9 +1,9 @@
 """Atomic file writes: temp file in the same directory + ``os.replace``.
 
-Every artifact the allsky pipeline writes — parquet manifests and their meta
-sidecars, embedding shards + index + meta, training checkpoints, metrics
-CSV/JSON, evaluation reports and Colab bundles — is written through
-:func:`atomic_write`.  The payload is written to a hidden temp file *in the
+Every artifact this project publishes goes through :func:`atomic_write` — the
+all-sky parquet manifests and their meta sidecars, embedding shards, training
+checkpoints, metrics CSV/JSON, evaluation reports and Colab bundles, and on the
+micrometeorology side the site's JSON and the operational record.  The payload is written to a hidden temp file *in the
 destination directory* (``.<name>.tmp-<pid>``) and then ``os.replace``-d onto
 the final path, so a crash mid-write never leaves a half-written artifact in
 place; the temp file is removed if the writer raises.
@@ -11,8 +11,9 @@ place; the temp file is removed if the writer raises.
 Same-directory placement is deliberate: ``os.replace`` is only atomic within a
 single filesystem, so the temp file must never live in a system tempdir.
 
-Pure stdlib: importing this module never pulls torch (callers that need torch —
-e.g. checkpoint saving — import it lazily inside the writer callable).
+Pure stdlib, and it imports nothing from this project: both packages write
+through it, so it has to sit under both. Callers that need torch — checkpoint
+saving — import it lazily inside the writer callable.
 """
 
 import json

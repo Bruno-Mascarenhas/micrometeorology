@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from micrometeorology.common.site import STATION_SITE
+from labmim_core.site import STATION_SITE
 
 
 @dataclass(slots=True)

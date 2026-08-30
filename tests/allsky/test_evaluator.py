@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 import torch
 
-from allsky.data.contracts import SKY_CLASS_COUNT
 from allsky.evaluation.evaluator import evaluate_checkpoint
 from allsky.training.engine import run_experiment
+from labmim_core.sky import SKY_CLASS_COUNT
 from tests.allsky import _synthetic as synthetic
 
 

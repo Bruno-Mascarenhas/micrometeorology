@@ -37,7 +37,6 @@ import pandas as pd
 
 from allsky.clearsky import haurwitz_ghi_from_cos_zenith
 from allsky.config import ExperimentConfig, image_size_of
-from allsky.data.contracts import SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES, sky_class_name
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
     default_embedding_reader,
@@ -55,8 +54,9 @@ from allsky.evaluation.metrics import (
 )
 from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
 from allsky.preprocessing import PreprocessingPipeline
-from allsky.solar import SOLAR_CONSTANT_WM2, eccentricity_correction
 from allsky.training.checkpointing import normalizers_from_checkpoint
+from labmim_core.sky import SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES, sky_class_name
+from labmim_core.solar import SOLAR_CONSTANT_WM2, eccentricity_correction
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ _ELEVATION_EDGES: tuple[float, ...] = (10.0, 20.0, 35.0, 50.0, 90.0)
 
 #: k-index band edges used as a **partial-sun proxy**: the continuous clearness
 #: index ``target_kt`` (not the pre-binned ``sky_class``) split at the outer
-#: bounds of :data:`~allsky.data.contracts.SKY_CLASS_KT_UPPER_BOUNDS`, so the
+#: bounds of :data:`~allsky.data.sky.SKY_CLASS_KT_UPPER_BOUNDS`, so the
 #: middle band is the partial-cloud regime where diffuse is hardest to predict.
 #: The bounds are published on Kt, so the frozen ``target_kindex`` column is not
 #: what they may be applied to: under ``kindex_kind="kstar"`` it holds k*, whose

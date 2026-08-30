@@ -6,7 +6,7 @@ published files cannot disagree about the contract.
 
 Scope is the site payloads and nothing else. The all-sky artifacts a person
 reads by eye — manifests, run metrics, evaluation reports — are written
-``indent=2`` by :mod:`allsky.atomic`, which shares the ``allow_nan`` discipline
+``indent=2`` by :mod:`labmim_core.atomic`, which shares the ``allow_nan`` discipline
 and not the encoding. Neither writer may stand in for the other: the choice is
 a byte contract a consumer already depends on, not a formatting preference.
 
@@ -18,7 +18,7 @@ The writer that stages atomically lives here rather than inside the 1200-line
 climatology module, so exporters with nothing climatological about them do not
 pay its import-time bibliography validation.
 
-Depends only on the standard library and :mod:`allsky.atomic`. Modules with
+Depends only on the standard library and :mod:`labmim_core.atomic`. Modules with
 their own I/O (the streaming GeoJSON writer, the measured dumps-then-write in
 the WRF batch) import :data:`JSON_ENCODING` alone and keep their own writing.
 """
@@ -30,7 +30,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from allsky.atomic import atomic_write
+from labmim_core.atomic import atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ def write_json(output_path: str | Path, payload: Mapping[str, Any]) -> Path:
     """Write one artifact atomically, in the encoding the site pipeline uses.
 
     Serialised to a private sibling and ``os.replace``-d into place by
-    :func:`allsky.atomic.atomic_write`, so a reader fetching the directory
+    :func:`labmim_core.atomic.atomic_write`, so a reader fetching the directory
     mid-run sees the old file or the new one, never a truncated parse error.
 
     Raises

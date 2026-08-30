@@ -10,12 +10,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from allsky import solar
-from allsky.config import SiteConfig
 from allsky.data.datasets import MultimodalEmbeddingDataset, MultimodalImageDataset
 from allsky.data.manifest import build_manifest
 from allsky.features import resolve_feature_set
 from allsky.preprocessing import IMAGENET_MEAN, IMAGENET_STD, imagenet_standardize
+from labmim_core import solar
+from labmim_core.site import SiteConfig
 
 type TorchDataset = Any  # runtime type: torch.utils.data.Dataset[dict[str, Any]]
 

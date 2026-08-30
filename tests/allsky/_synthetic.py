@@ -12,10 +12,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from allsky import solar
-from allsky.config import ExperimentConfig, SiteConfig
+from allsky.config import ExperimentConfig
 from allsky.data.manifest import build_manifest, write_manifest_parquet
 from allsky.data.splits import create_day_splits, save_split_artifact
+from labmim_core import solar
+from labmim_core.site import SiteConfig
 
 _MET = {
     "AirT1_C_Avg": (20.0, 30.0),

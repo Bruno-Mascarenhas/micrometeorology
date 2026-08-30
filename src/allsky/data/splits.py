@@ -23,9 +23,9 @@ from typing import Any, Literal
 
 import numpy as np
 
-from allsky.atomic import atomic_write
 from allsky.data.contracts import DATASET_VERSION
 from allsky.provenance import canonical_config_json
+from labmim_core.atomic import atomic_write
 
 __all__ = [
     "SPLIT_NAMES",

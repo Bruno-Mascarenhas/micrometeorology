@@ -12,14 +12,14 @@ import numpy as np
 import pandas as pd
 from typer.testing import CliRunner
 
-from allsky import solar
 from allsky.cli import app
-from allsky.config import SiteConfig
 from allsky.data.manifest import build_manifest, write_manifest_parquet
 from allsky.data.splits import create_day_splits, save_split_artifact
 from allsky.embeddings.storage import save_shard, shard_path, write_index, write_meta
 from allsky.training.checkpointing import load_checkpoint as _load_checkpoint
 from allsky.training.errors import TrainingError
+from labmim_core import solar
+from labmim_core.site import SiteConfig
 
 runner = CliRunner()
 

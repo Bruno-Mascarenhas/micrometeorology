@@ -3,7 +3,7 @@
 The four sky conditions are Escobedo, Gomes, Oliveira & Soares (2009), Applied
 Energy 86(3):299-309, sec. 3.1, with the Portuguese nomenclature of Teramoto &
 Escobedo (2012), RBEAA 16(9):985-992.  The bounds themselves are **not** declared
-here: they live in :data:`allsky.data.contracts.SKY_CLASS_KT_UPPER_BOUNDS`, which
+here: they live in :data:`allsky.data.sky.SKY_CLASS_KT_UPPER_BOUNDS`, which
 the all-sky manifest also classifies against, so the two pipelines cannot drift
 onto different partitions of the same published quantity.
 
@@ -26,7 +26,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from allsky.data.contracts import (
+from labmim_core.sky import (
     SKY_CLASS_KT_UPPER_BOUNDS,
     SKY_CLASS_NAMES,
     SKY_CLASS_NAMES_PT,

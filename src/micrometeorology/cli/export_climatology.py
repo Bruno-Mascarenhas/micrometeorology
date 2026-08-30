@@ -11,7 +11,7 @@ gitignored there and attached at deploy time.
 The hourly database and the WRF series both enter as naive station-local stamps,
 each carrying its instrument's own clock. This module is the manifest boundary:
 the ``UTC-03`` it stamps into the published artifacts comes from the pinned
-:data:`~micrometeorology.common.site.STATION_UTC_OFFSET_HOURS`, never from the
+:data:`~labmim_core.site.STATION_UTC_OFFSET_HOURS`, never from the
 host's zone.
 
 Examples
@@ -37,12 +37,13 @@ import numpy as np
 import pandas as pd
 import typer
 
-# allsky.solar is pure numpy/pandas (no torch) and ships in the same wheel, so
+from labmim_core.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
+
+# labmim_core.solar is pure numpy/pandas (no torch) and ships in the same wheel, so
 # this CLI reuses NOAA's formulas without pulling a training dependency in.
-from allsky.solar import extraterrestrial_ghi
+from labmim_core.solar import extraterrestrial_ghi
 from micrometeorology.common.git import short_commit
 from micrometeorology.common.logging import setup_logging
-from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.stats import distributions as dist
 from micrometeorology.stats.climatology import seasonal_groups
 from micrometeorology.stats.climatology_export import (
@@ -74,7 +75,7 @@ app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 logger = logging.getLogger(__name__)
 
 #: Re-exported under this module's shorter local names; the numbers themselves
-#: live in :mod:`micrometeorology.common.site`, shared with the sensor archive's
+#: live in :mod:`labmim_core.site`, shared with the sensor archive's
 #: quality checks so the two cannot describe different towers.
 SITE = STATION_SITE
 UTC_OFFSET_HOURS = STATION_UTC_OFFSET_HOURS

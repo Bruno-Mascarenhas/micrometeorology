@@ -23,8 +23,8 @@ from typing import cast
 from torch import Tensor, nn
 
 from allsky.config import TargetsConfig
-from allsky.data.contracts import SKY_CLASS_COUNT
 from allsky.modeling.contracts import ModelOutputs
+from labmim_core.sky import SKY_CLASS_COUNT
 
 __all__ = [
     "DHIHeteroscedasticHead",
@@ -206,7 +206,7 @@ class SkyHead(nn.Module):
         Width of the trunk embedding this head reads.
     n_classes:
         Number of sky classes; defaults to
-        :data:`allsky.data.contracts.SKY_CLASS_COUNT`, the Escobedo binning
+        :data:`allsky.data.sky.SKY_CLASS_COUNT`, the Escobedo binning
         (cloudy / partly_cloudy_diffuse / partly_cloudy_clear / clear).
     """
 

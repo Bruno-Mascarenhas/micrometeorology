@@ -14,8 +14,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from allsky import solar
-from allsky.config import SiteConfig
 from allsky.data.alignment import CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
@@ -31,6 +29,8 @@ from allsky.data.manifest import (
     write_manifest_parquet,
 )
 from allsky.features import resolve_feature_set
+from labmim_core import solar
+from labmim_core.site import SiteConfig
 
 
 @pytest.fixture

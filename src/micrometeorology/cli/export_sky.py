@@ -14,7 +14,7 @@ climatology export, so a reader can put the three pages side by side.
 
 The hourly database is indexed by naive station-local stamps, from the
 datalogger's own clock; the solar geometry behind both documents takes its
-offset from the pinned :data:`~micrometeorology.common.site.STATION_UTC_OFFSET_HOURS`
+offset from the pinned :data:`~labmim_core.site.STATION_UTC_OFFSET_HOURS`
 rather than the host's zone.
 
 Examples
@@ -33,8 +33,8 @@ import numpy as np
 import pandas as pd
 import typer
 
+from labmim_core.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.common.logging import setup_logging
-from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.common.site_json import write_json
 from micrometeorology.stats import ktkd as ktkd_stats
 from micrometeorology.stats.sky_condition import (

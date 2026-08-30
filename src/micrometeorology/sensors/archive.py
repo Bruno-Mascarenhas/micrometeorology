@@ -46,13 +46,12 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from allsky.solar import cos_zenith, eccentricity_correction, solar_elevation_deg
-from micrometeorology.common import instruments
-from micrometeorology.common.paths import ensure_dir
-
 # The same solar geometry the climatology exporter uses, so "deep night" means
 # the same angle in both places.
-from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
+from labmim_core.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
+from labmim_core.solar import cos_zenith, eccentricity_correction, solar_elevation_deg
+from micrometeorology.common import instruments
+from micrometeorology.common.paths import ensure_dir
 from micrometeorology.sensors.ingestion import merge_dat_files
 from micrometeorology.sensors.quality import SAMPLING_INTERVAL
 
@@ -974,7 +973,7 @@ NIGHT_CORRUPTION_CHANNELS = (*NIGHT_CORRUPTION_COLUMNS, "Lw_dw", "Lw_up", "Net_C
 # 1367 is the coefficient the cited method prescribes ("Let Sa = 1367 * E0", Long
 # & Shi 2008 pp. 24-25, transcribed in docs/arqueologia/qc/lit-statistical-methods.md),
 # NOT a physical constant this repo is free to update: it is deliberately distinct
-# from ``allsky.solar.SOLAR_CONSTANT_WM2``, the Kopp & Lean TSI that scales
+# from ``labmim_core.solar.SOLAR_CONSTANT_WM2``, the Kopp & Lean TSI that scales
 # extraterrestrial irradiance and the clearness index. Two quantities, two names.
 BSRN_CEILING_SOLAR_CONSTANT_WM2 = 1367.0
 

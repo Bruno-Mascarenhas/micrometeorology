@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from allsky.config import SiteConfig
 from allsky.features import (
     BARE_FEATURES,
     BAROMETER_FEATURES,
@@ -22,6 +21,7 @@ from allsky.features import (
     source_column,
     validate_features,
 )
+from labmim_core.site import SiteConfig
 
 
 @pytest.fixture
@@ -186,7 +186,7 @@ class TestFeatureEngineering:
     def test_geometry_columns_match_solar_module(
         self, sensor_frame: pd.DataFrame, site: SiteConfig
     ):
-        from allsky import solar
+        from labmim_core import solar
 
         index = pd.DatetimeIndex(sensor_frame.index)
         frame = build_feature_frame(sensor_frame, index, site, "safe")

@@ -24,7 +24,7 @@ from typing import Any, TextIO
 import numpy as np
 from numpy.typing import NDArray
 
-from allsky.atomic import atomic_write
+from labmim_core.atomic import atomic_write
 from micrometeorology.common.site_json import JSON_ENCODING
 from micrometeorology.wrf.safety import assert_reasonable_array_size
 

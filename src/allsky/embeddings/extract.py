@@ -45,7 +45,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from allsky.atomic import atomic_write
 from allsky.data.contracts import resolve
 from allsky.embeddings.backbone import VisualBackbone
 from allsky.embeddings.storage import (
@@ -59,6 +58,7 @@ from allsky.embeddings.storage import (
     write_meta,
 )
 from allsky.frame_pixels import decode_rgb
+from labmim_core.atomic import atomic_write
 
 logger = logging.getLogger(__name__)
 

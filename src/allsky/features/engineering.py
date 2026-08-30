@@ -4,7 +4,7 @@ Turns a time-indexed sensor frame plus a target timestamp index into the
 engineered feature frame named by :mod:`allsky.features.policy`.  Two families
 of transforms live here:
 
-- **Solar geometry** (elevation, zenith, azimuth) from :mod:`allsky.solar`.
+- **Solar geometry** (elevation, zenith, azimuth) from :mod:`labmim_core.solar`.
 - **Cyclic encodings** of periodic quantities — day-of-year, wind direction
   and solar azimuth — as sine/cosine pairs, so the model never sees the
   artificial discontinuity at the wrap point (e.g. wind direction 359 deg and
@@ -24,9 +24,9 @@ from collections.abc import Iterable
 import numpy as np
 import pandas as pd
 
-from allsky.config import SiteConfig
 from allsky.features.policy import FeatureSet, resolve_feature_set, source_column
-from allsky.solar import DatetimeLike, solar_azimuth_deg, solar_elevation_deg
+from labmim_core.site import SiteConfig
+from labmim_core.solar import DatetimeLike, solar_azimuth_deg, solar_elevation_deg
 from micrometeorology.sensors.wind import wind_components
 
 __all__ = ["DAYS_PER_YEAR", "build_feature_frame"]

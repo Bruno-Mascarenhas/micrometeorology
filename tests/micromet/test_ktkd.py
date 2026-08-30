@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from micrometeorology.common.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
+from labmim_core.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
 from micrometeorology.stats import ktkd
 
 
@@ -65,7 +65,7 @@ def test_apparent_solar_time_is_twelve_at_solar_noon():
     index = pd.date_range("2024-03-20 00:00", periods=24 * 4, freq="15min")
 
     ast = ktkd.apparent_solar_time_hours(index, STATION_SITE.longitude, STATION_UTC_OFFSET_HOURS)
-    from allsky.solar import hour_angle_deg
+    from labmim_core.solar import hour_angle_deg
 
     noon = np.argmin(
         np.abs(

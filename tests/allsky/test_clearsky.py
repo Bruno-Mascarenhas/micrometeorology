@@ -4,8 +4,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from allsky import clearsky, solar
-from allsky.config import SiteConfig
+from allsky import clearsky
+from labmim_core import solar
+from labmim_core.site import SiteConfig
 
 
 @pytest.fixture

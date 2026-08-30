@@ -29,9 +29,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from allsky.atomic import atomic_write, atomic_write_json
 from allsky.config import ExperimentConfig
 from allsky.training.checkpointing import BEST_CHECKPOINT, LAST_CHECKPOINT
+from labmim_core.atomic import atomic_write, atomic_write_json
 
 logger = logging.getLogger(__name__)
 

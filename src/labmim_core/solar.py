@@ -29,7 +29,7 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
-from allsky.config import SiteConfig
+from labmim_core.site import SiteConfig
 
 type DatetimeLike = pd.DatetimeIndex | pd.Series | np.ndarray | list | tuple
 

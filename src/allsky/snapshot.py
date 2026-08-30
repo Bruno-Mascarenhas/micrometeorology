@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeIs, runtime_checkable
 import numpy as np
 import pandas as pd
 
-from allsky.atomic import atomic_write, atomic_write_json
 from allsky.config import (
     SITE_TZ,
     SITE_UTC_OFFSET_HOURS,
@@ -31,6 +30,7 @@ from allsky.embeddings.backbone import VisualBackbone
 from allsky.frame_pixels import decode_rgb
 from allsky.provenance import code_version
 from allsky.training.checkpointing import normalizers_from_checkpoint
+from labmim_core.atomic import atomic_write, atomic_write_json
 
 if TYPE_CHECKING:
     from micrometeorology.common.config import SensorRangeLimit
@@ -657,7 +657,7 @@ def predict_snapshot(
         whichever heads the checkpoint has: ``dhi`` (diffuse horizontal
         irradiance, W m-2), ``kindex`` (dimensionless), ``cloud_fraction``
         (in [0, 1]), and ``sky_class`` with its ``sky_probabilities`` over
-        :data:`allsky.data.contracts.SKY_CLASS_NAMES`. ``features`` records the
+        :data:`allsky.data.sky.SKY_CLASS_NAMES`. ``features`` records the
         raw values fed in and which of them were imputed.
 
     Raises
@@ -671,9 +671,9 @@ def predict_snapshot(
     """
     import torch
 
-    from allsky.data.contracts import SKY_CLASS_NAMES
     from allsky.modeling.registry import restore_model
     from allsky.training.checkpointing import load_checkpoint
+    from labmim_core.sky import SKY_CLASS_NAMES
 
     checkpoint = load_checkpoint(
         checkpoint_path, map_location=device, trust_pickle=trust_checkpoint

@@ -18,7 +18,7 @@ portable v2 manifest pinned in :mod:`allsky.data.contracts`:
   sensor gap, far alignment, k-index artifact).
 
 Diffuse/kt/Erbs derivation reuses the physics helpers in :mod:`allsky.erbs`,
-:mod:`allsky.solar` and :mod:`allsky.clearsky`.  :func:`write_manifest_parquet`
+:mod:`labmim_core.solar` and :mod:`allsky.clearsky`.  :func:`write_manifest_parquet`
 writes the parquet and its ``<name>.meta.json`` sidecar atomically and records a
 content ``manifest_sha256``.
 """
@@ -33,7 +33,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from allsky.atomic import atomic_write, atomic_write_json
 from allsky.clearsky import clear_sky_index
 from allsky.config import (
     SITE_TZ,
@@ -47,6 +46,16 @@ from allsky.data.alignment import CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
     GEOMETRY_COLUMNS,
+    QCFlag,
+    manifest_column_dtypes,
+    to_relative,
+)
+from allsky.data.splits import DaySplit
+from allsky.erbs import pseudo_diffuse
+from allsky.features import build_feature_frame, resolve_feature_set, validate_features
+from allsky.provenance import code_version, content_sha256
+from labmim_core.atomic import atomic_write, atomic_write_json
+from labmim_core.sky import (
     SKY_CLASS_KT_UPPER_BOUNDS,
     SKY_CLASS_MISSING,
     SKY_CLASS_NAMES,
@@ -56,15 +65,8 @@ from allsky.data.contracts import (
     SKY_CLOUDY,
     SKY_PARTLY_CLOUDY_CLEAR,
     SKY_PARTLY_CLOUDY_DIFFUSE,
-    QCFlag,
-    manifest_column_dtypes,
-    to_relative,
 )
-from allsky.data.splits import DaySplit
-from allsky.erbs import pseudo_diffuse
-from allsky.features import build_feature_frame, resolve_feature_set, validate_features
-from allsky.provenance import code_version, content_sha256
-from allsky.solar import clearness_index, solar_azimuth_deg, solar_elevation_deg
+from labmim_core.solar import clearness_index, solar_azimuth_deg, solar_elevation_deg
 
 logger = logging.getLogger(__name__)
 

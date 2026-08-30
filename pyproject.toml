@@ -100,7 +100,7 @@ solrad-run = "solrad_correction.cli:main"
 solrad-colab = "solrad_correction.cli_colab:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/micrometeorology", "src/solrad_correction", "src/allsky"]
+packages = ["src/labmim_core", "src/micrometeorology", "src/solrad_correction", "src/allsky"]
 
 # Without this the installed CLI resolves the QC limits, aggregation columns and
 # calibration table to their empty defaults and exports unfiltered, uncalibrated
@@ -198,7 +198,7 @@ convention = "numpy"
 [tool.ruff.lint.per-file-ignores]
 # Seeds the legacy GLOBAL stream on purpose — the one sklearn, torch's DataLoader
 # and every bare `np.random.*` call draw from. `default_rng` has no such reach.
-"src/solrad_correction/utils/seeds.py" = ["NPY002"]
+"src/labmim_core/seeds.py" = ["NPY002"]
 # A test's NAME is its documentation here, so a required docstring would restate
 # it. `assert` is pytest's assertion API. Benchmarks are `__main__` scripts.
 "tests/**" = ["D101", "D103", "S101"]

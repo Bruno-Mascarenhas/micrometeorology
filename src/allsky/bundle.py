@@ -36,7 +36,6 @@ from typing import Any
 import pandas as pd
 import yaml
 
-from allsky.atomic import atomic_write
 from allsky.config import (
     DATASET_MANIFEST_FILENAME,
     DATASET_SPLIT_FILENAME,
@@ -45,6 +44,7 @@ from allsky.config import (
     manifest_meta_path,
 )
 from allsky.provenance import content_sha256
+from labmim_core.atomic import atomic_write
 
 logger = logging.getLogger(__name__)
 

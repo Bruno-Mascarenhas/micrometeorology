@@ -40,9 +40,9 @@ from typing import Any
 
 import numpy as np
 
-from allsky.atomic import atomic_write
 from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
 from allsky.provenance import code_version
+from labmim_core.atomic import atomic_write
 
 #: ``torch.nn.Module`` / ``torch.optim.Optimizer`` at runtime. Kept as aliases so
 #: importing this module stays torch-free (torch is imported lazily in the funcs).

@@ -27,7 +27,7 @@ import pytest
 from typer.testing import CliRunner
 
 from allsky.cli import app
-from allsky.config import SITE_UTC_OFFSET_HOURS, ExperimentConfig, SiteConfig
+from allsky.config import SITE_UTC_OFFSET_HOURS, ExperimentConfig
 from allsky.embeddings import backbone as backbone_module
 from allsky.embeddings.storage import META_FILENAME, read_meta, write_meta
 from allsky.snapshot import (
@@ -38,8 +38,9 @@ from allsky.snapshot import (
     _shipped_sensor_limits,
     predict_snapshot,
 )
-from allsky.solar import solar_elevation_deg
 from allsky.training.checkpointing import load_checkpoint
+from labmim_core.site import SiteConfig
+from labmim_core.solar import solar_elevation_deg
 from tests.allsky import _synthetic as synthetic
 from tests.allsky.test_e2e_experiment import _REPO_V1, _write_embeddings
 

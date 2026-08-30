@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from allsky import solar
+from labmim_core import solar
 from micrometeorology.sensors import archive
 from micrometeorology.sensors.archive import (
     ARCHIVE_END,

@@ -21,6 +21,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from labmim_core.site import SiteConfig
+
 #: Fixed UTC offset of the LabMiM camera and datalogger clocks. Pinned rather
 #: than read from the host TZ: a UTC-configured container would otherwise shift
 #: every capture time by three hours while the instruments keep stamping local
@@ -103,17 +105,6 @@ def manifest_meta_path(manifest_path: Path) -> Path:
 
 
 DATASET_SPLIT_FILENAME = "splits.json"
-
-
-class SiteConfig(BaseModel):
-    """Observation site (LabMiM/UFBA, Salvador-BA by default)."""
-
-    #: LabMiM tower, Instituto de Fisica, UFBA — Ondina, Salvador. These are the
-    #: canonical coordinates for the station: every package reads them from here,
-    #: through :data:`micrometeorology.common.site.STATION_SITE`, so a surveyed
-    #: correction reaches all of them at once.
-    latitude: float = -13.0055
-    longitude: float = -38.5089
 
 
 #: The window modes a dataset can build. This module is the single owner of the
@@ -550,7 +541,7 @@ class PrepareTargetsConfig(BaseModel):
     (:func:`allsky.erbs.pseudo_diffuse`, ``target_source="erbs_pseudo"``).
 
     The sky-condition bins are not configurable: they are the published bounds
-    of :data:`allsky.data.contracts.SKY_CLASS_KT_UPPER_BOUNDS`, always applied
+    of :data:`allsky.data.sky.SKY_CLASS_KT_UPPER_BOUNDS`, always applied
     to Kt. A config carrying the retired ``class_clear``/``class_overcast`` keys
     is rejected rather than silently ignored.
     """

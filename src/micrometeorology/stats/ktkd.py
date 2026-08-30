@@ -15,7 +15,7 @@ functions at all: at one Kt they predict a spread.  They are therefore summarise
 per Kt bin as a median with a p10-p90 envelope, never as a line — a line would
 assert a determinism the model does not have.
 
-The solar geometry is not recomputed here: :mod:`allsky.solar` owns it, and the
+The solar geometry is not recomputed here: :mod:`labmim_core.solar` owns it, and the
 extraterrestrial term behind Kt is the same one the climatology exporter divides
 by.
 
@@ -32,8 +32,8 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from allsky.config import SiteConfig
-from allsky.solar import hour_angle_deg, solar_elevation_deg
+from labmim_core.site import SiteConfig
+from labmim_core.solar import hour_angle_deg, solar_elevation_deg
 from micrometeorology.stats.daylight import elevation_bounds
 
 __all__ = [
@@ -456,7 +456,7 @@ def prepare_clearness(
         Kt on the surviving hours, with the extraterrestrial denominator
         evaluated at the averaging window's midpoint (BSRN).
     """
-    from allsky.solar import extraterrestrial_ghi
+    from labmim_core.solar import extraterrestrial_ghi
 
     index = pd.DatetimeIndex(hourly.index)
     midpoint = index + pd.Timedelta(minutes=30)
@@ -534,7 +534,7 @@ def prepare_ktkd(
     PreparedKtKd
         The surviving pairs, their predictors and the gates applied.
     """
-    from allsky.solar import extraterrestrial_ghi
+    from labmim_core.solar import extraterrestrial_ghi
 
     index = pd.DatetimeIndex(hourly.index)
     midpoint = index + pd.Timedelta(minutes=30)
@@ -672,8 +672,8 @@ def build_ktkd_payload(
 def solar_elevation_for(
     timestamps: pd.DatetimeIndex, latitude: float, longitude: float, utc_offset_hours: float
 ) -> NDArray:
-    """Solar elevation in degrees for the model predictors, from :mod:`allsky.solar`."""
-    from allsky.config import SiteConfig
+    """Solar elevation in degrees for the model predictors, from :mod:`labmim_core.solar`."""
+    from labmim_core.site import SiteConfig
 
     site = SiteConfig(latitude=latitude, longitude=longitude)
     return np.asarray(solar_elevation_deg(timestamps, site, utc_offset_hours), dtype=np.float64)

@@ -4,14 +4,14 @@ Provides the single-parameter Haurwitz clear-sky model for global
 horizontal irradiance (GHI) — a function of the solar zenith angle only,
 with no aerosol/water-vapour inputs — and the derived **clear-sky index**
 ``k* = GHI / GHI_cs``.  Unlike the extraterrestrial clearness index ``kt``
-(see :func:`allsky.solar.clearness_index`), ``k*`` normalizes by a
+(see :func:`labmim_core.solar.clearness_index`), ``k*`` normalizes by a
 ground-level clear-sky reference, so clear skies sit near 1.0, broken cloud
 scatters around/above 1.0 (cloud enhancement) and overcast skies fall well
 below 1.0.
 
 All functions are pure numpy/pandas, vectorized over any datetime sequence
 convertible to a :class:`pandas.DatetimeIndex`, and share the naive
-local-standard-time contract of :mod:`allsky.solar` (tz-aware input is
+local-standard-time contract of :mod:`labmim_core.solar` (tz-aware input is
 rejected there).
 
 References
@@ -28,8 +28,8 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
-from allsky.config import SiteConfig
-from allsky.solar import DatetimeLike, cos_zenith, solar_elevation_deg
+from labmim_core.site import SiteConfig
+from labmim_core.solar import DatetimeLike, cos_zenith, solar_elevation_deg
 
 type ArrayLike = Sequence[float] | np.ndarray | pd.Series
 
@@ -58,7 +58,7 @@ def haurwitz_ghi(
     -------
     ``GHI_cs = 1098 * cos(theta_z) * exp(-0.057 / cos(theta_z))`` when the
     sun is above the horizon (``cos(theta_z) > 0``), else 0.  ``theta_z`` is
-    the solar zenith angle from :func:`allsky.solar.cos_zenith`.
+    the solar zenith angle from :func:`labmim_core.solar.cos_zenith`.
 
     Parameters
     ----------
