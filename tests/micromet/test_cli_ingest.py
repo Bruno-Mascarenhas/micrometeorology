@@ -258,3 +258,19 @@ def test_without_sources_the_manifest_still_refuses_a_missing_entry(tmp_path) ->
     resultado = CliRunner().invoke(app, ["-d", str(tmp_path), "-o", str(tmp_path / "out")])
 
     assert resultado.exit_code != 0
+
+
+def test_a_directory_with_no_matching_file_exits_non_zero_instead_of_reporting_success(
+    tmp_path: Path,
+):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    output_path = tmp_path / "out.csv"
+
+    result = runner.invoke(
+        ingest_sensor_data.app,
+        ["-i", str(empty), "-o", str(output_path), "--log-level", "WARNING"],
+    )
+
+    assert result.exit_code != 0
+    assert not output_path.exists()
