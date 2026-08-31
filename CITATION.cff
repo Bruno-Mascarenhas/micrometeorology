@@ -13,10 +13,8 @@ type: software
 authors:
   - family-names: Mascarenhas
     given-names: Bruno
-    affiliation: Universidade Federal da Bahia
-  - name: Laboratório de Micrometeorologia (LabMiM), Universidade Federal da Bahia
-    city: Salvador
-    country: BR
+    affiliation: >-
+      Laboratório de Micrometeorologia (LabMiM), Universidade Federal da Bahia
 repository-code: https://github.com/Bruno-Mascarenhas/micrometeorology
 license: MIT
 keywords:
