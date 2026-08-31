@@ -1,0 +1,26 @@
+{
+  "title": "LabMiM Micrometeorology and Solar Radiation Intelligence",
+  "description": "<p>Toolkit for solar irradiance and micrometeorology research at the LabMiM station, Universidade Federal da Bahia, Salvador, Brazil (13.0&deg;S).</p><p>It post-processes WRF output into JSON and GeoJSON payloads for web mapping, builds a quality-controlled archive from the station's Campbell dataloggers, estimates diffuse horizontal irradiance from all-sky camera images with multimodal deep learning, and corrects the model's diffuse radiation bias with machine learning.</p><p>Held-out test performance for the image model: DHI RMSE 20.80 W/m&sup2;, R&sup2; 0.939, skill over the clear-sky baseline +0.72.</p>",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "MIT",
+  "language": "eng",
+  "creators": [
+    {
+      "name": "Mascarenhas, Bruno",
+      "affiliation": "Laboratório de Micrometeorologia (LabMiM), Universidade Federal da Bahia"
+    }
+  ],
+  "keywords": [
+    "solar radiation",
+    "solar irradiance",
+    "diffuse horizontal irradiance",
+    "micrometeorology",
+    "all-sky imager",
+    "sky images",
+    "WRF",
+    "deep learning",
+    "remote sensing",
+    "atmospheric science"
+  ]
+}
