@@ -18,6 +18,7 @@ matplotlib.use("Agg")
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.paths import ensure_dir
 from micrometeorology.stats.comparison import (
+    UnreadableDatasetError,
     compare_all_variables,
     pair_dataframes,
     read_dataset,
@@ -48,8 +49,11 @@ def run(
     typer.echo(f"Observations: {obs}")
     typer.echo(f"Model:        {model}")
 
-    df_obs = read_dataset(str(obs), separator=separator)
-    df_model = read_dataset(str(model), separator=separator)
+    try:
+        df_obs = read_dataset(str(obs), separator=separator)
+        df_model = read_dataset(str(model), separator=separator)
+    except UnreadableDatasetError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
     # This command pairs by TIME (unlike labmim-metrics, which falls back to row
     # order), so a file whose timestamps could not be read is unusable here and

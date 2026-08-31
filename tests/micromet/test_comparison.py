@@ -18,6 +18,7 @@ from matplotlib.figure import Figure
 
 from micrometeorology.sensors.export import export_csv
 from micrometeorology.stats.comparison import (
+    UnreadableDatasetError,
     compare_all_variables,
     compare_variables,
     pair_dataframes,
@@ -320,3 +321,11 @@ class TestTheSampleSizeIsPublished:
         assert table.loc["MBE", "T"] == pytest.approx(
             float((finite["T_model"] - finite["T_obs"]).mean())
         )
+
+
+def test_a_parquet_dataset_is_refused_by_name_instead_of_raising_a_decode_error(tmp_path: Path):
+    path = tmp_path / "station_hourly.parquet"
+    pd.DataFrame({"ghi": [1.0, 2.0]}).to_parquet(path)
+
+    with pytest.raises(UnreadableDatasetError, match="not the delimited text"):
+        read_dataset(path)

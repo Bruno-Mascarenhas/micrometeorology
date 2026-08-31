@@ -17,6 +17,10 @@ from micrometeorology.stats.metrics import compute_all, is_circular_column, vali
 logger = logging.getLogger(__name__)
 
 
+class UnreadableDatasetError(ValueError):
+    """Raised when a dataset path is not the delimited text this module reads."""
+
+
 def read_dataset(
     path: str | Path,
     *,
@@ -47,8 +51,20 @@ def read_dataset(
         the metrics never meet an object dtype. The index is a
         :class:`~pandas.DatetimeIndex` when one could be built and a
         ``RangeIndex`` otherwise — a supported state here, not an error.
+
+    Raises
+    ------
+    UnreadableDatasetError
+        If *path* is not delimited text. Parquet and other binary artifacts
+        reach this function often enough to deserve their own message.
     """
-    df = pd.read_csv(path, sep=separator, low_memory=False)
+    try:
+        df = pd.read_csv(path, sep=separator, low_memory=False)
+    except (UnicodeDecodeError, pd.errors.ParserError) as exc:
+        raise UnreadableDatasetError(
+            f"{path} is not the delimited text this command reads; "
+            f"export it to CSV first (a parquet artifact fails exactly here)"
+        ) from exc
 
     if timestamp_columns and all(c in df.columns for c in timestamp_columns):
         df.index = pd.to_datetime(df[timestamp_columns])
