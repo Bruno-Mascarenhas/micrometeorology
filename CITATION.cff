@@ -16,6 +16,9 @@ authors:
     affiliation: >-
       Laboratório de Micrometeorologia (LabMiM), Universidade Federal da Bahia
 repository-code: https://github.com/Bruno-Mascarenhas/micrometeorology
+doi: 10.5281/zenodo.22204854
+version: 1.4.0
+date-released: '2026-08-31'
 license: MIT
 keywords:
   - solar radiation
