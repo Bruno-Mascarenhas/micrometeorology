@@ -72,7 +72,7 @@ sensor:
   # the window it averages. The offset sweep against that 1-minute truth bottoms
   # out at exactly -2.50 (94.00 -> 74.99 W/m2 of label noise on GHI, -20.2%;
   # 21.66 -> 15.35 on diffuse, -29.1%), and the downstream factorial measured
-  # -2.89 +- 0.22 W/m2 of test DHI RMSE. See docs/allsky-join-de-rotulo.md.
+  # -2.89 +- 0.22 W/m2 of test DHI RMSE. See docs/allsky-label-join.md.
   timestamp_offset_minutes: -2.5
 
 targets:

@@ -263,7 +263,7 @@ Pairing yields **46,014 rows over 81 days**, split by day into 55 train / 12 val
 / 12 test. That is a small archive for a visual model, which is why arms are
 compared against persistence and clear-sky baselines rather than in isolation,
 and why the stack carries transfer learning from a larger external source (see
-[datasets-de-ceu-abertos.md](datasets-de-ceu-abertos.md)).
+[open-sky-datasets.md](open-sky-datasets.md)).
 
 ---
 
