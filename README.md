@@ -3,6 +3,7 @@
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
 [![Ruff](https://img.shields.io/badge/linter-ruff-261230.svg)](https://docs.astral.sh/ruff/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22204854.svg)](https://doi.org/10.5281/zenodo.22204854)
 
 An advanced scientific computing suite for atmospheric science research, maintained by the Micrometeorology Laboratory (LabMiM) at UFBA. This repository unifies data processing, geospatial visualization, and machine learning pipelines into three core packages:
 
