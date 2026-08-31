@@ -13,7 +13,7 @@
 # arXiv:2211.14709), o Folsom foi escolhido por ter camera FISHEYE com o sol
 # visivel, como a nossa; os sitios tropicais da ARM, de latitude muito mais
 # proxima, imageiam por TSI, cuja faixa de sombra OCULTA o sol. Ver
-# docs/datasets-de-ceu-abertos.md.
+# docs/open-sky-datasets.md.
 #
 # O DADO. 230.791 linhas em 351 dias (contra 46.014 em 81 dias aqui), 38,642 N,
 # elevacao solar ate 74,8 graus. O carimbo de tempo de cada frame e a data de

@@ -394,7 +394,7 @@ def run(
     qc, night_masked = mask_night_corrupted_days(qc, corrupted, sources)
     # The order of the four stages below is load-bearing and every way of getting
     # it wrong fails silently; test_the_pipeline_calls_its_radiation_stages_in_the
-    # _load_bearing_order pins it and docs/controle-de-qualidade.md explains it.
+    # _load_bearing_order pins it and docs/quality-control.md explains it.
     offsets = nocturnal_offset_statistics(qc, elevation_deg=elevation)
     qc, impossible = mask_impossible_shortwave(qc, sources)
     qc, nocturnal = mask_nocturnal_shortwave(qc, sources, elevation_deg=elevation)

@@ -421,4 +421,4 @@ cross-model `comparison.csv` + `comparison.md` from several eval report dirs.
 - **Single site for the target.** Everything is LabMiM/UFBA (Salvador-BA,
   −13.00/−38.51). Folsom (38.6°N) is a pre-training source only — a different
   climate with the same camera geometry, which is the trade the
-  [dataset survey](datasets-de-ceu-abertos.md) documents.
+  [dataset survey](open-sky-datasets.md) documents.

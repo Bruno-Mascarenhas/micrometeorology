@@ -4,7 +4,7 @@ What runs, in what order, on what evidence. This is the authoritative descriptio
 of the quality control the published record passes through; the research that
 produced the thresholds is in `docs/arqueologia/qc/`, and which file and which
 sensor column feeds each variable over which period is in
-`docs/acervo-da-estacao.md`.
+`docs/station-archive.md`.
 
 The governing idea is one sentence: **a gate that only rejects the impossible does
 not detect the improbable.** For years this archive had range gates alone. A

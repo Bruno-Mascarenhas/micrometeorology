@@ -16,6 +16,43 @@ An advanced scientific computing suite for atmospheric science research, maintai
 
 ---
 
+## Results
+
+![All-sky image to diffuse irradiance](docs/assets/allsky-pipeline.png)
+
+Diffuse horizontal irradiance estimated from a single sky image, at t=0, on a
+held-out test split (12 days, day-level split with a gap — no same-day leakage):
+
+| | DHI RMSE | MAE | R² | skill vs. clear-sky |
+|---|---|---|---|---|
+| published baseline | 35.32 W/m² | — | — | — |
+| **current** | **20.80 W/m²** | 14.5 W/m² | 0.939 | **+0.72** |
+
+A 41 % reduction, and the decomposition is measured rather than assumed —
+unfreezing the whole DINOv2 backbone is worth −10.1 W/m², correcting the
+image↔sensor join is worth −2.9, and changing the loss function is worth nothing
+measurable. Details in [`docs/allsky-label-join.md`](docs/allsky-label-join.md).
+
+Three findings the archive paid for, all reproducible from this repository:
+
+- **The camera's frame timestamps cannot be modelled, only read.** Mapping frame
+  *N* to `start + N × interval` mislabels daylight frames by a median of 13.5 min
+  and puts **96.7 %** of them outside the 5-minute pairing tolerance — and nothing
+  downstream notices, because the manifest stays internally consistent. The
+  timestamp burned into each frame is read by OCR instead
+  ([`docs/allsky-archive.md`](docs/allsky-archive.md)).
+- **A shadow-band correction changed conclusions about published models.** Without
+  it the diffuse fraction saturates at 0.81 under fully overcast sky where physics
+  requires 1; with it, 0.97. The "systematic overestimation" previously attributed
+  to three empirical diffuse-fraction models was in large part the missing
+  geometric factor ([`docs/quality-control.md`](docs/quality-control.md)).
+- **A statistical gate finds what a range gate cannot.** 551 single-sample
+  barometer excursions passed every physical bound — 997 hPa is a perfectly
+  possible pressure — and reached the published hourly means, shifting individual
+  hours by up to 3.70 hPa.
+
+---
+
 ## Repository Architecture
 
 ```

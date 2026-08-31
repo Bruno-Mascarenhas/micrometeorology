@@ -1,5 +1,5 @@
 # CONTROL arm of the alignment factorial: the pre-fix raw-stamp join.
-# Kept so the comparison in docs/allsky-join-de-rotulo.md can be rebuilt. It
+# Kept so the comparison in docs/allsky-label-join.md can be rebuilt. It
 # writes to its OWN dataset_dir; do NOT point it at output/allsky-mm/dataset,
 # which the shipped local_prepare.yaml owns with the centroid join.
 # PrepareConfig — LOCAL dataset preparation for the multimodal (v2) pipeline.
@@ -53,7 +53,7 @@ sensor:
   # the window it averages. The offset sweep against that 1-minute truth bottoms
   # out at exactly -2.50 (94.00 -> 74.99 W/m2 of label noise on GHI, -20.2%;
   # 21.66 -> 15.35 on diffuse, -29.1%), and the downstream factorial measured
-  # -2.89 +- 0.22 W/m2 of test DHI RMSE. See docs/allsky-join-de-rotulo.md.
+  # -2.89 +- 0.22 W/m2 of test DHI RMSE. See docs/allsky-label-join.md.
   timestamp_offset_minutes: 0.0   # raw-stamp join: the CONTROL arm, not the recommended setting
 
 targets:

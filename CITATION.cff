@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it as below.
+title: >-
+  LabMiM Micrometeorology and Solar Radiation Intelligence
+abstract: >-
+  Toolkit for solar irradiance and micrometeorology research at the LabMiM
+  station, Universidade Federal da Bahia, Salvador, Brazil. It post-processes
+  WRF output for web mapping, builds a quality-controlled archive from the
+  station's Campbell dataloggers, estimates diffuse horizontal irradiance from
+  all-sky camera images with multimodal deep learning, and corrects the model's
+  diffuse radiation bias with machine learning.
+type: software
+authors:
+  - family-names: Mascarenhas
+    given-names: Bruno
+    affiliation: Universidade Federal da Bahia
+  - name: Laboratório de Micrometeorologia (LabMiM), Universidade Federal da Bahia
+    city: Salvador
+    country: BR
+repository-code: https://github.com/Bruno-Mascarenhas/micrometeorology
+license: MIT
+keywords:
+  - solar radiation
+  - solar irradiance
+  - micrometeorology
+  - all-sky imager
+  - WRF
+  - deep learning
