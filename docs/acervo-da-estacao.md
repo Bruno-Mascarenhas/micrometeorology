@@ -93,6 +93,7 @@ ausente por falha, mas que nenhum instrumento a media.
 | 2022-04-11 a 2025-03-19 | `Net_Wm2_Avg` | — | `CNR1TK_Avg` | — |
 | 2025-03-19 a 2025-03-28 | `Net_Wm2_Avg` | — | `CNR1TK_Avg` | `MetSENS_Status` |
 | 2025-03-28 em diante | `Net_Wm2_Avg` | — | `CNR1TK_Avg` | `MetSENS1_Status` |
+
 ### As três lacunas que decidem um recorte
 
 Ler a matriz acima de cima para baixo mostra que a estação não mediu tudo o tempo
@@ -129,6 +130,7 @@ passarem desapercebidos:
 | `pressure` | 558,248 | 71.7% | 740 dias | 2023-03-10 06:10 |
 | `qc_flag` | 142,759 | 96.3% | 10 dias | 2026-04-14 05:45 |
 | `ur` | 907,061 | 93.5% | 112 dias | 2024-11-27 05:50 |
+
 A cobertura é medida contra a grade de 5 minutos entre a primeira e a última
 amostra de cada variável, no frame com controle de qualidade aplicado — ou seja,
 já descontando o que o QC removeu. `docs/controle-de-qualidade.md` descreve o que
@@ -246,6 +248,7 @@ por concatenação. Os intervalos abaixo foram lidos de cada arquivo, não das n
 | `dados-labmim/LBM_rain2023_14032024.dat` | 2024-03-14 17:05 | 2024-03-18 09:00 | 1,056 | — | 2024-03 handover |
 | `dados-labmim/LBM_rain_2024.dat` | 2024-03-18 09:05 | 2025-03-12 13:20 | 103,424 | — | 2024 |
 | `LBM_rain_2025.dat` | 2025-03-12 13:25 | 2026-08-15 23:30 | 144,904 | — | 2025 to 2026-08-12 |
+
 ---
 
 ## Como usar isto

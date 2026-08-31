@@ -45,7 +45,7 @@ src/allsky/
 ├── cli/               # frames, prepare, embeddings, train, evaluate command groups
 ├── data/              # manifest, contracts, alignment, splits, datasets, loading, validation
 ├── features/          # engineering, normalization, anti-leakage policy
-├── embeddings/        # DINOv2 backbone, extraction loop, safetensors storage
+├── embeddings/        # visual backbones, extraction loop, safetensors storage
 ├── modeling/          # sensor/visual encoders, fusions, heads, model registry (V0–V7)
 ├── training/          # experiment engine, losses, checkpointing, device resolution
 └── evaluation/        # evaluator, metrics, stratified reports
@@ -198,7 +198,7 @@ allsky evaluate --checkpoint CHECKPOINT.ckpt [--split val|test|train]
 ```
 
 - `prepare-local` runs `extract-frames → build-manifest → splits`; steps are resumable and skip up-to-date outputs unless `--force`. A `--steps build-manifest` run without `extract-frames` cannot re-extract anything, so it aborts (exit 1) on a video whose frames carry no recorded provenance, or one written under a different video/mask/crop/resize config, instead of stamping the manifest with a config that did not produce those JPEGs — include the `extract-frames` step, or pass `--force` to build from the frames as they are. `--dry-run` logs the full plan and writes nothing.
-- `precompute-embeddings` reads the `embeddings` section of the PrepareConfig (backbone / pooling / batch / shard-size / dtype); backbone `"fake"` is the offline dev/test hook, `"dinov2_vits14"` downloads via `torch.hub` on first use. `--resume` (default) skips `sample_id`s already in `index.parquet`, but refuses to resume into an embeddings dir built with a different backbone/pooling/dim/config — rerun with `--no-resume` (or a fresh `--out` dir) to overwrite.
+- `precompute-embeddings` reads the `embeddings` section of the PrepareConfig (backbone / pooling / batch / shard-size / dtype); backbone `"fake"` is the offline dev/test hook; the DINOv2 and DINOv3 ViTs download via `torch.hub` on first use, and `resnet50`/`efficientnet_v2_s` come from torchvision. See the [architecture reference](allsky-architecture.md#backbone-families) for the full list. `--resume` (default) skips `sample_id`s already in `index.parquet`, but refuses to resume into an embeddings dir built with a different backbone/pooling/dim/config — rerun with `--no-resume` (or a fresh `--out` dir) to overwrite.
 - `train` **requires** an experiment config (a YAML declaring `experiment: true`); any other config (or none) is rejected with a pointer to `configs/allsky/experiments/`. `--resume auto` finds `last.ckpt` in the run dir; `--epochs` is the **total** budget (resuming trains only the remainder and never clobbers a better `best.ckpt`).
 - `evaluate` rebuilds the model from the checkpoint, restores the train-split normalizers (no refit — leakage-safe), denormalizes to physical units, verifies `manifest_sha256`/`split_id` (warn, or error under `--strict`), and writes `metrics.json`, `stratified.csv`, `report.md` and (optionally) `predictions.parquet`.
 
@@ -257,9 +257,13 @@ Yes, for everything except embedding extraction, training, and evaluation. Confi
 
 ---
 
-## Known Data Gap
+## Size of the paired archive
 
-The sensor archive currently ends on **2026-04-24**, while the first all-sky video is from **2026-06-25** — there is no temporal overlap yet. `prepare-local` runs fine on this data but matches zero frames to sensor records. Preparation yields real training rows once logger files covering the camera dates are added to `sensor.paths`.
+Pairing yields **46,014 rows over 81 days**, split by day into 55 train / 12 val
+/ 12 test. That is a small archive for a visual model, which is why arms are
+compared against persistence and clear-sky baselines rather than in isolation,
+and why the stack carries transfer learning from a larger external source (see
+[datasets-de-ceu-abertos.md](datasets-de-ceu-abertos.md)).
 
 ---
 

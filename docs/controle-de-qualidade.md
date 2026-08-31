@@ -161,7 +161,13 @@ The same measurement kills the more principled-looking variant: keying the level
 the propeller's own 0.281 m/s stall floor collapses the catch from 33,037 to 816
 and makes an 18-day dead anemometer disappear entirely.
 
----|---|---|---|
+#### A fault code that lands inside the physical range
+
+The same fault writes 2.62 into three channels at once. Two of them a value gate
+rejects on sight; on the third it reads as ordinary weather.
+
+| channel | samples at 2.62 | survivors | what removed them |
+|---|---|---|---|
 | `BP1_mbar_Avg` | 1,566 | 0 | sentinel — 2.62 hPa is impossible |
 | `RH1` | 1,567 | 0 | sentinel |
 | `WS1_ms_GMX` | 1,592 | 26 | persistence — 2.62 m/s is a perfectly ordinary wind |

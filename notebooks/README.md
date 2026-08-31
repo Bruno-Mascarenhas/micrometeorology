@@ -58,8 +58,9 @@ only thing needed to persist models across Colab sessions is an output path on
 Drive — the notebooks are already wired this way:
 
 - **allsky**: point `--out-dir` at a Drive path (or the notebook's `OUTPUT_DIR`
-  cell). `best.ckpt`, `last.ckpt`, `metrics.json`, the run manifest and the
-  TensorBoard events land there directly.
+  cell). `best.ckpt`, `last.ckpt`, `metrics.json`/`metrics.csv` and the
+  TensorBoard events land there directly; run provenance travels inside both
+  checkpoints, not in a separate file.
 - **solrad_correction**: pass `--output-dir /content/drive/MyDrive/labmim/runs/solrad`
   to `solrad-colab`. Checkpoints, `metrics.json`, and `predictions.csv`
   (always timestamped) persist per experiment name.

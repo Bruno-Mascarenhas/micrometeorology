@@ -210,9 +210,9 @@ output/experiments/svm_baseline_salvador/
 ```
 
 Migration note: root-level artifacts from the previous layout are no longer
-written. Use `configs/config.yaml`, `metrics/metrics.json`,
-`predictions/predictions.csv`, `models/model.*`, and
-`preprocessing/preprocessing_pipeline.joblib`.
+written. Every path below is relative to `experiments/<name>/`: use
+`configs/config.yaml`, `metrics/metrics.json`, `predictions/predictions.csv`,
+`models/model.*`, and `preprocessing/preprocessing_pipeline.joblib`.
 
 Crash safety: the fitted preprocessing pipeline is written right after fitting
 and the trained model right after `fit()` returns — before prediction and

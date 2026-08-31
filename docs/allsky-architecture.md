@@ -2,76 +2,66 @@
 
 Reference for the **multimodal DHI-estimation stack** — the only all-sky
 pipeline (see [`allsky.md`](allsky.md) for the CLI/config quickstart and shared
-physics). The stack estimates **diffuse horizontal irradiance (DHI)**, a
-**clear-sky / clearness index**, and a **sky-condition class** from an all-sky
-image (as a precomputed DINOv2 embedding *or* end-to-end) plus non-radiometric
-sensor context.
+physics). It estimates **diffuse horizontal irradiance (DHI)**, a **clear-sky /
+clearness index**, and a **sky-condition class** from an all-sky image — as a
+precomputed embedding *or* end-to-end — plus non-radiometric sensor context.
 
-All timestamps are naive local **America/Bahia** (fixed UTC-3, no DST). This is
-the instrument-clock exception to the laboratory's tz-aware-UTC rule: the
-Campbell datalogger and the camera overlay both stamp local time, and restamping
-that as UTC would invent a precision the acquisition does not have. **The
-manifest layer is the UTC boundary** — it writes tz-aware `timestamp_utc` from
-the site's pinned offset (`allsky.config.SITE_UTC_OFFSET_HOURS`, never the
-host's timezone). `day_id` is the local calendar day; a `sample_id` is
-`allsky-YYYYMMDD-HHMM` (local, matching the frame filename stem).
+All timestamps are naive local **America/Bahia** (fixed UTC-3, no DST): the
+instrument-clock exception to the lab's tz-aware-UTC rule, because the Campbell
+datalogger and the camera overlay both stamp local time. **The manifest layer is
+the UTC boundary** — it writes tz-aware `timestamp_utc` from the site's pinned
+offset, never the host timezone. `day_id` is the local calendar day.
 
 ---
 
 ## Local → bundle → Colab flow
 
 ```
-                          LOCAL WORKSTATION (CPU/GPU)
-  ┌───────────────────────────────────────────────────────────────────────┐
-  │  allsky-*.mp4          LBM_lenta_*.dat (Campbell TOA5)                  │
-  │        │                        │                                       │
-  │        ▼                        ▼                                       │
-  │  extract frames  ─────►  build v2 manifest  ◄─── feature policy (safe)  │
-  │  (+ QC, mask/crop)       (solar geometry, k-index, sky_class, targets)  │
-  │        │                        │                                       │
-  │        │                        ▼                                       │
-  │        │                  day-level splits (splits.json, split_id)      │
-  │        │                        │                                       │
-  │        ▼                        ▼                                       │
-  │   precompute-embeddings ──► embeddings/ (fp16 shards + index + meta)    │
-  │        │                                                                │
-  │        ▼                                                                │
-  │   export-colab-bundle ─────────────► bundle.tar.gz ───────────────┐    │
-  └───────────────────────────────────────────────────────────────────┼────┘
-                                                                        │
-        allsky prepare-local / validate-dataset / train / evaluate     │  (Drive
-        run identically here for a fully-local workflow.               │   or upload)
-                                                                        ▼
-                                    GOOGLE COLAB (GPU)   notebooks/allsky_multimodal_colab.ipynb
-  ┌───────────────────────────────────────────────────────────────────────┐
-  │  uv venv (CPython 3.14)  ─►  unpack bundle  ─►  validate-dataset        │
-  │        └─────────────────────────────────►  train (--resume auto, AMP)  │
-  │                                              └──►  evaluate (test split) │
-  │                                                    └──►  copy → Drive     │
-  └───────────────────────────────────────────────────────────────────────┘
+  LOCAL WORKSTATION                                    GOOGLE COLAB (GPU)
+  ─────────────────                                    ─────────────────
+  allsky-*.mp4   LBM_lenta_*.dat
+        │              │
+        ▼              ▼
+   extract frames → build v2 manifest ← feature policy
+   (+ QC, mask/crop)   (geometry, k-index, targets)
+        │              │
+        │              ▼
+        │        day-level splits (splits.json)
+        ▼              │
+   precompute-embeddings → embeddings/ (fp16 + index + meta)
+        │
+        ▼
+   export-colab-bundle → bundle.tar.gz ──────────────► unpack → validate
+                                                       → train → evaluate
+  prepare-local / validate-dataset / train / evaluate    → copy to Drive
+  run identically here for a fully-local workflow.
 ```
 
-The bundle is the single portable artifact: it carries the manifest + sidecar,
-the split, the embedding shards, and the configs used, all with **relative POSIX
-paths**, so training on Colab is byte-identical to training locally.
+The bundle is the single portable artifact — manifest + sidecar, split, embedding
+shards and configs, all with **relative POSIX paths** — so training on Colab is
+byte-identical to training locally.
 
 ---
 
 ## Module map
 
-Code lives in packages under `src/allsky/`. The shared physics helpers
-(`video.py`, `erbs.py`, `solar.py`, `clearsky.py`, `preprocessing.py`) stay
-import-torch-free.
+Code lives under `src/allsky/`. The shared physics helpers (`video.py`,
+`erbs.py`, `clearsky.py`, `preprocessing.py`, `geometry.py`, `lens.py`) stay
+import-torch-free; site and solar-position primitives live in `labmim_core`.
 
 | Package | Responsibility |
 |---|---|
-| `features/` | Anti-leakage **policy** (`safe`/`extended`/`forbidden`, feature groups), cyclic **engineering** (solar geometry, wind, day-of-year), train-only **normalization** (`FeatureNormalizer`, `TargetNormalizer`). |
-| `data/` | `contracts` (v2 column registry, `QCFlag`, sky classes, relative-path helpers), `manifest` builder + atomic parquet + `.meta.json` sidecar, `validation` (every failure mode), `splits` (day-level artifact with `split_id`), `alignment` strategies, lazy-torch `datasets` (the batch contract). |
-| `embeddings/` | `backbone` (`VisualBackbone` protocol, pinned DINOv2 via `torch.hub`, `FakeBackbone` for tests), `storage` (safetensors shards + parquet index + `embeddings.meta.json`, `SafetensorsEmbeddingReader`), `extract` (resumable, batched, atomic). |
-| `modeling/` | `contracts` (`ModelOutputs`, `group_slices`), `sensor_encoder`, `visual_encoder` (embedding passthrough / image backbone), `fusion` (concat / FiLM / cross-attention), `heads` (trunk + DHI / heteroscedastic / k-index / sky / cloud-fraction), `baselines` (climatology / sensor-only / image-only), `multimodal` assembly, `registry`. |
-| `training/` | `losses` (`MultitaskLoss`, maskable per-head), `engine` (`run_experiment`: AMP, grad accum/clip, scheduler, early stop, TensorBoard + `metrics.csv`/`metrics.json`, full resume), `checkpointing` (atomic, full payload, RNG), `device` (torch-free `resolve_device`). |
-| `evaluation/` | `metrics` (regression + classification), `evaluator` (rebuild from checkpoint, denormalize, stratify), `reports` (`report.md` / `metrics.json` / `stratified.csv` / `predictions.parquet`, `compare_experiments`). |
-| `cli/` | `frames` (`extract-frames`), `prepare` (`validate-dataset`/`prepare-local`/`export-colab-bundle`), `embeddings` (`precompute-embeddings`), `train` (experiment engine), `evaluate`. Every command imports torch lazily so `allsky --help` stays light. |
+| `features/` | Anti-leakage **policy** (`safe`/`minimal`/`bare`/`extended`/`forbidden`), cyclic **engineering**, train-only **normalization**. |
+| `data/` | `contracts` (v2 column registry, `QCFlag`, sky classes), `manifest` builder + atomic parquet + `.meta.json` sidecar, `validation`, `splits` (day-level, `split_id`), `alignment`, `folsom` (UCSD-Folsom adapter), lazy-torch `datasets` (the batch contract). |
+| `embeddings/` | `backbone` (`VisualBackbone` protocol; DINOv2/DINOv3 via `torch.hub`, torchvision ResNet50/EfficientNetV2-S, `FakeBackbone` for tests), `storage` (safetensors shards + parquet index + meta), `extract` (resumable, atomic). |
+| `modeling/` | `contracts`, `sensor_encoder`, `visual_encoder`, `backbone_families` (what fine-tuning needs per family), `geometry_adapter` (extra input channels), `transfer` (initialise from another run's weights), `fusion`, `heads`, `baselines`, `multimodal`, `registry`. |
+| `training/` | `losses`, `engine` (`run_experiment`), `checkpointing`, `device`. |
+| `evaluation/` | `metrics`, `evaluator`, `reports`. |
+| `cli/` | `frames`, `prepare`, `embeddings`, `train`, `evaluate`. Every command imports torch lazily so `allsky --help` stays light. |
+
+Top-level `allsky` modules outside those packages: `archive`/`snapshot`/`drive`
+(camera mirror), `augmentation`, `bundle`, `config`, `frame_pixels`, `overlay`,
+`provenance`.
 
 ---
 
@@ -81,434 +71,354 @@ import-torch-free.
 
 One row per paired sample. Columns (see `data/contracts.py`):
 
-- **Identity/metadata**: `sample_id`, `timestamp_utc` (tz-aware UTC), `day_id`
-  (local `YYYY-MM-DD`), `image_path` (relative POSIX against `data_root`),
+- **Identity**: `sample_id`, `timestamp_utc` (tz-aware UTC), `day_id` (local
+  `YYYY-MM-DD`), `image_path` (relative POSIX against `data_root`),
   `frame_index`, `video`.
 - **Solar geometry** (degrees): `solar_elevation`, `solar_azimuth`,
-  `solar_zenith`. Elevation/zenith double as features; azimuth is fed as the
-  `azimuth_sin`/`azimuth_cos` cyclic pair.
-- **Feature columns** per the active policy set (13 for `safe`, 10 for
-  `minimal`, 9 for `bare`, +4 for `extended`).
-- **Targets/labels**: `target_dhi`, `target_source` (`measured`/`erbs_pseudo`),
-  `target_kindex`, `kindex_kind` (`kstar`/`kt`), `sky_class`
-  (`0/1/2`, `-1` = missing), `cloud_fraction` (nullable, all-NaN today),
-  `qc_flags` (`int64` `QCFlag` bitmask: `LOW_SUN`, `SENSOR_GAP`,
-  `ALIGNMENT_FAR`, `KT_ARTIFACT`, `FRAME_DARK`, `FRAME_SATURATED`).
-  `build_manifest` sets the first four; `FRAME_DARK`/`FRAME_SATURATED` are ORed
-  in afterwards by `prepare-local`'s frame-QC pass
-  (`allsky.preprocessing.visual_qc` → `_apply_frame_qc`), so a `prepare-local`
-  manifest **may** carry all six. Those two bits are present only when the
-  per-video parquet carries a `qc_frame_flags` column: a manifest built from a
-  standalone `extract-frames` run, from a resumed pre-frame-QC extraction, or
-  straight from the `build_manifest` library API leaves them unset.
-- **Provenance (constant per row)**: `dataset_version`, `alignment_id` (mirror
-  the sidecar meta so a manifest is self-describing), and `split` — a **nullable**
-  label, empty at build and filled in place by
-  `attach_split_column(manifest, split)` after the day split exists.
+  `solar_zenith`. Azimuth is fed as the `azimuth_sin`/`azimuth_cos` pair.
+- **Feature columns** per the active policy set (13 `safe`, 10 `minimal`,
+  9 `bare`, +4 `extended`).
+- **Targets**: `target_dhi`, `target_source` (`measured`/`erbs_pseudo`),
+  `target_kindex`, `kindex_kind` (`kstar`/`kt`), `sky_class` (`0/1/2`, `-1` =
+  missing), `cloud_fraction` (nullable, all-NaN today), `qc_flags` (`int64`
+  `QCFlag` bitmask: `LOW_SUN`, `SENSOR_GAP`, `ALIGNMENT_FAR`, `KT_ARTIFACT`,
+  `FRAME_DARK`, `FRAME_SATURATED`). `build_manifest` sets the first four; the
+  two frame bits are ORed in by `prepare-local`'s frame-QC pass, so they are
+  present only when the per-video parquet carries `qc_frame_flags`.
+- **Provenance (constant per row)**: `dataset_version`, `alignment_id`, and
+  `split` — nullable, empty at build, filled by `attach_split_column`.
 
 Night frames below `night_min_elevation_deg` (default 5°) are **dropped** at
-build (not just flagged); `LOW_SUN` marks the surviving band between the night
-threshold and the k-index floor (`min_elevation_deg`, default 10°). The
-`KT_ARTIFACT` ceiling defaults per k-index kind — `1.5` for `kstar` (cloud
-enhancement over the Haurwitz clear-sky reference legitimately exceeds `1.2`) and
-`1.2` for `kt`. `sample_id` is minute-resolution (`allsky-YYYYMMDD-HHMM`), so a
-build with two frames in the same minute raises rather than silently colliding.
+build; `LOW_SUN` marks the surviving band up to the k-index floor
+(`min_elevation_deg`, default 10°). The `KT_ARTIFACT` ceiling defaults per
+k-index kind — `1.5` for `kstar` (cloud enhancement over the Haurwitz reference
+legitimately exceeds `1.2`) and `1.2` for `kt`.
+
+`sample_id` is built from the frame time by `sample_id_format`. This station
+uses minute resolution (`allsky-%Y%m%d-%H%M`), one frame a minute; a source
+whose frames land anywhere inside the minute needs a finer format and a prefix
+of its own (Folsom uses `folsom-%Y%m%d-%H%M%S`). A build that produces two
+identical ids raises rather than colliding silently.
 
 ### Meta sidecar (`manifest.parquet.meta.json`)
 
-`dataset_version`, `alignment_id`, `feature_set`, the ordered `feature_columns`,
-`kindex_kind`, `target_source`, `config_sha256`, `code_version`/git commit,
-`created_at`, `row_count`, the `timezone` and `site`, thresholds (incl.
-`night_min_elevation_deg` and the resolved `max_kindex`), an optional `split_id`
-(recorded by `attach_split_column`), and a content **`manifest_sha256`**
-(order-sensitive, parquet-container-independent) that ties a trained checkpoint to
-the exact data it saw. **Attaching the split column changes the manifest content,
-so it re-hashes `manifest_sha256`** (by design — the split label is part of the
-bytes a checkpoint trains on). Both files are written atomically
-(temp + `os.replace`).
+`dataset_version`, `alignment_id`, `feature_set`, ordered `feature_columns`,
+`kindex_kind`, `target_source`, `sample_id_format`, `config_sha256`,
+`code_version`/git commit, `created_at`, `row_count`, thresholds, an optional
+`split_id`, and a content **`manifest_sha256`** tying a checkpoint to the exact
+data it saw. Attaching the split column re-hashes it, by design.
+
+The `timezone` block records `utc_offset_hours` and, for this station only, the
+zone `name`. Any other site is recorded by offset alone — naming a zone the
+pipeline never resolved would be an assertion nobody checked. Consumers read it
+with `site_utc_offset_hours`; a manifest whose sidecar lost the block falls back
+to this station's offset **loudly**, because guessing silently is how a Folsom
+manifest would get Salvador's clock.
+
+Both files are written atomically (temp + `os.replace`).
 
 ### Split artifact (`splits.json`)
 
-`{split_id (sha256 of the day→split map + params), seed, fractions, assignment
-day_id→split, created_at, dataset_version, per-split day counts}`. Splits are
-**day-level** (never row-level) so
-near-duplicate consecutive frames cannot cross splits. Overwriting an existing
-artifact with different content requires `force=True`, else `SplitExistsError`.
+`{split_id, seed, fractions, day_id→split assignment, created_at,
+dataset_version, per-split day counts}`. Splits are **day-level**, never
+row-level, so near-duplicate consecutive frames cannot cross splits.
+Overwriting with different content requires `force=True`.
 
 ### Embeddings (`embeddings/`)
 
-- `embeddings-{i:05d}.safetensors` — one fp16 tensor per shard.
-- `index.parquet` — `sample_id → (shard, row)`.
-- `embeddings.meta.json` — backbone, revision, pooling, dim, transform,
-  `config_sha256`, `pixel_config_sha256` (the digest of the mask — its file's
-  bytes included — crop, resize and video time fields that decide which pixels
-  were encoded), count, storage `dtype` (`fp16`).
+`embeddings-{i:05d}.safetensors` (one fp16 tensor per shard), `index.parquet`
+(`sample_id → shard, row`), and `embeddings.meta.json` (backbone, revision,
+pooling, dim, transform, `config_sha256`, `pixel_config_sha256`, count, dtype).
 
-`SafetensorsEmbeddingReader` resolves a `sample_id` to its vector lazily.
-Extraction is resumable — the index is the source of truth, so every `sample_id`
-already recorded in `index.parquet` is skipped (a shard and its index rows land
-together atomically, so a crash leaves a consistent, possibly shorter index). It
-**refuses to resume** into a store whose `embeddings.meta.json` records a
-different backbone / revision / pooling / dim / config, rather than silently
-mixing two encoders' vectors — rerun with `--no-resume` (or a fresh out dir) to
-overwrite. One mismatch is still migrated in place: a `config_sha256` written by
-the superseded digest formula, which covered the `embeddings` section alone. That
-equality proves only that the encoder did not move, so the migration now goes
-through **only if the store also records a `pixel_config_sha256` equal to this
-run's** — a store whose pixel provenance is absent, or has moved (a swapped
-horizon mask leaves the legacy digest equal), is refused instead of being
-appended to and then restamped past the difference.
+Extraction is resumable — the index is the source of truth, and a shard lands
+atomically with its index rows. It **refuses to resume** into a store recording
+a different backbone / revision / pooling / dim / config rather than mixing two
+encoders' vectors. One legacy mismatch is migrated in place: a `config_sha256`
+from the superseded digest formula, and only if the store's
+`pixel_config_sha256` also equals this run's — otherwise the pixel provenance
+has moved and the store is refused.
 
 ### Checkpoint payload (`last.ckpt` / `best.ckpt`)
 
-`torch.save` (atomic). Read back under torch's **restricted** unpickler
-(`weights_only=True` plus an explicit allowlist of the payload's own types): a
-checkpoint travels through Colab and shared Drives, so it is not a trusted local
-file, and one carrying an object outside the allowlist is refused rather than
-executed. `allsky train --trust-checkpoint` / `allsky evaluate
---trust-checkpoint` (both default off) opt back into the unrestricted reader for
-a file you produced yourself. Contains:
-`model_state`, `optimizer_state`, `scheduler_state`, `scaler_state`, `epoch`,
-`global_step`, `epochs_no_improve` (the early-stopping patience counter, so a
-resumed run continues from the exact point on the patience curve; optional —
-`None` on pre-field checkpoints, from which the engine reconstructs a lower bound
-`max(0, epoch - best_epoch)`), `best_metric{name,value,epoch}`, full `config`
-dump, `normalizers` (`feature_normalizer` + per-target `target_normalizers` as
-JSON-able dicts), ordered `feature_columns`, `feature_groups`, `dataset_version`,
-`split_id`, `manifest_sha256`, `backbone` info (image mode only), `code_version`
-(package + git commit), and `rng_state` (python / numpy / torch / cuda) for
-deterministic resume. Loading strips a compiled `_orig_mod.` prefix.
+`torch.save`, atomic. Read back under torch's **restricted** unpickler
+(`weights_only=True` plus an allowlist of the payload's own types): a checkpoint
+travels through Colab and shared Drives, so it is not a trusted local file.
+`--trust-checkpoint` (default off, on `train` and `evaluate`) opts back into the
+unrestricted reader for a file you produced yourself.
 
-Resume is deterministic and crash-safe: the train batch order is drawn from a
-dedicated `RandomSampler` generator re-seeded to `seed * 100003 + epoch` each
-epoch (a pure function of `(seed, epoch)`, independent of the resume point,
-`persistent_workers`, or global-RNG draw count), and a per-loader generator
-isolates the worker `base_seed` draw from the global RNG that drives dropout. On
-resume the engine also truncates any `metrics.csv`/`metrics.json` rows past the
-resumed epoch (metrics are flushed before the checkpoint each epoch, so a crash
-in that gap can leave a row the checkpoint never completed) before appending
-again, so re-running the interrupted epoch never duplicates it.
+Contains `model_state`, `optimizer_state`, `scheduler_state`, `scaler_state`,
+`epoch`, `global_step`, `epochs_no_improve`, `best_metric`, the full `config`
+dump, `normalizers`, ordered `feature_columns`, `feature_groups`,
+`dataset_version`, `split_id`, `manifest_sha256`, `backbone` info (image mode),
+`code_version`, and `rng_state` for deterministic resume.
+
+Resume is crash-safe: the train batch order is drawn from a dedicated sampler
+generator re-seeded to `seed * 100003 + epoch` — a pure function of
+`(seed, epoch)`, independent of the resume point — and metrics rows past the
+resumed epoch are truncated before appending, so re-running the interrupted
+epoch never duplicates it.
 
 ### Bundle (`bundle.tar.gz`)
 
-`manifest.parquet` + `.meta.json`, `splits.json`, `embeddings/` (shards + index +
-meta), the configs used, and a generated `BUNDLE_README.md`. All members are
-relative; `validate_bundle` re-checks the manifest content hash against the
-sidecar.
+Manifest + sidecar, `splits.json`, `embeddings/`, the configs used, and a
+generated `BUNDLE_README.md`. All members relative; `validate_bundle` re-checks
+the manifest hash against the sidecar.
 
 ---
 
-## Batch contract (new stack)
+## Batch contract
 
 Keys emitted by the datasets (all `float32` unless noted):
 
 | Key | Shape | Notes |
 |---|---|---|
 | `features` | `(B, F)` | standardized sensor vector (train-only stats) |
-| `embedding` | `(B, D)` | embedding mode (`center_frame`, or `mean_embedding` pooled in the dataset) |
-| `image` | `(B, 3, H, W)` | image mode, `[0, 1]` |
-| `embedding_seq` + `frame_mask` | `(B, T, D)` + `(B, T)` bool | `attention_pooling` window: zero-padded to fixed `T = ceil(window_minutes)+1`, mask True = real frame |
+| `embedding` | `(B, D)` | embedding mode, `center_frame` or pooled `mean_embedding` |
+| `image` | `(B, C, H, W)` | image mode, `[0, 1]`; `C` = 3 + any geometry channels |
+| `embedding_seq` + `frame_mask` | `(B, T, D)` + `(B, T)` bool | windowed embedding mode |
+| `image_seq` + `frame_mask` | `(B, T, C, H, W)` + `(B, T)` bool | windowed image mode, zero-padded to `seq_len` |
 | `dhi`, `kindex` | `(B,)` | **raw physical units**, NaN = missing |
+| `dhi_scale` | `(B,)` | divisor that produced `dhi`; exactly `1.0` under `raw` |
 | `sky_class` | `(B,)` int64 | `-1` = missing |
 | `cloud_fraction` | `(B,)` | NaN = missing |
 
-Losses mask absent targets (`isfinite` / `sky_class >= 0`). The engine normalizes
-targets for the loss; metrics and evaluation are always in physical units.
-Regression **model outputs are in normalized space** — the engine/evaluator
-denormalize with the stored `TargetNormalizer`.
+Losses mask absent targets. The engine normalizes targets for the loss; metrics
+and evaluation are always in physical units, and regression outputs are
+denormalized with the stored `TargetNormalizer`.
+
+**Target parameterization.** `raw` fits DHI in W/m². `clearsky_index` fits
+`DHI / DHI_clearsky`, the same reference `skill_clearsky` is scored against, and
+the engine and evaluator multiply back. The `raw` path keeps a scale of exactly
+`1.0`, so existing arms are unchanged bit for bit.
+
+The target normalizer is fitted from what the dataset **serves**, not from the
+manifest column, so it describes by construction the quantity the head receives.
 
 ---
 
 ## Anti-leakage policy
 
-DHI is derived from the station radiometers (GHI drives `kt`/`k*`; the diffuse
-pyranometer *is* the label), so those channels must never be model inputs.
-`features/policy.py` pins four tiers:
+DHI comes from the station radiometers (GHI drives `kt`/`k*`; the diffuse
+pyranometer *is* the label), so those channels must never be inputs.
+`features/policy.py` pins five tiers:
 
-- **`SAFE_FEATURES`** (default, 13): solar geometry (`solar_elevation`,
-  `solar_zenith`, `azimuth_sin`, `azimuth_cos`, `doy_sin`, `doy_cos`) + standard
-  met (`air_temp_c`, `dew_point_c`, `rel_humidity`, `pressure_mbar`,
-  `wind_speed_ms`, `wind_dir_sin`, `wind_dir_cos`). **No radiometry.**
-- **`MINIMAL_FEATURES`** (10): the safe set minus `THERMOHYGROMETER_FEATURES`
-  (`air_temp_c`, `dew_point_c`, `rel_humidity`), derived from it rather than
-  transcribed. For periods where the Gill MetSENS1 is down — it has been railed
-  at 1000 °C / 1000 °C / 999 %RH since 2025-12-19, `mask_sentinels` turns each
-  rail into NaN, and `build_manifest` drops those rows whole, which over the
-  all-sky camera archive costs 99.98 % of the dataset. Selected by
-  `features.set: minimal`; still **no radiometry**.
-- **`BARE_FEATURES`** (9): the minimal set minus `BAROMETER_FEATURES`
-  (`pressure_mbar`), again derived rather than transcribed. For periods where
-  the MetSENS1 fault has taken the barometer as well — from 2026-08-10 13:05
-  `BP1_mbar_Avg` is a constant 2.62 hPa, outside `SENTINEL_RANGES`, so
-  `mask_sentinels` NaNs it and every later row is dropped whole. What survives
-  is solar geometry plus the **mechanical** anemometer (`WS_ms`, `WindDir`),
-  a separate instrument from the Gill unit whose `WS1_ms_GMX`/`WindDir1_GMX`
-  died with it. Selected by `features.set: bare`; still **no radiometry**.
-- **`EXTENDED_FEATURES`** (ablation only, never silent): `uv_wm2`, `par_wm2`,
-  `longwave_up_wm2`, `longwave_down_wm2`. Selected only by `features.set:
-  extended`.
-- **`FORBIDDEN_FEATURES`** (always fail): `CM3Up_Wm2_Avg` (GHI), `CM3Dn_Wm2_Avg`,
-  `Net_Wm2_Avg`, `PSP_Wm2_Avg`/`CMP21_*`/`PSP_Avg` (diffuse), `kt`, `kstar`,
-  `dhi`, `diffuse`, any `target_*` column, plus any configured target column.
+- **`SAFE_FEATURES`** (default, 13) — solar geometry (`solar_elevation`,
+  `solar_zenith`, `azimuth_sin/cos`, `doy_sin/cos`) plus standard met
+  (`air_temp_c`, `dew_point_c`, `rel_humidity`, `pressure_mbar`,
+  `wind_speed_ms`, `wind_dir_sin/cos`). **No radiometry.**
+- **`MINIMAL_FEATURES`** (10) — safe minus the thermohygrometer. The Gill
+  MetSENS1 has been railed at 1000 °C / 1000 °C / 999 %RH since 2025-12-19;
+  `mask_sentinels` turns each rail into NaN and `build_manifest` drops those rows
+  whole, which over the camera archive costs 99.98 % of the dataset.
+- **`BARE_FEATURES`** (9) — minimal minus the barometer. From 2026-08-10 13:05
+  `BP1_mbar_Avg` is a constant 2.62 hPa, outside `SENTINEL_RANGES`, so every
+  later row is dropped whole. What survives is solar geometry plus the
+  **mechanical** anemometer, a separate instrument from the dead Gill unit.
+- **`EXTENDED_FEATURES`** (ablation only) — `uv_wm2`, `par_wm2`,
+  `longwave_up_wm2`, `longwave_down_wm2`.
+- **`FORBIDDEN_FEATURES`** (always fail) — `CM3Up_Wm2_Avg` (GHI),
+  `CM3Dn_Wm2_Avg`, `Net_Wm2_Avg`, `PSP_Wm2_Avg`/`CMP21_*` (diffuse), `kt`,
+  `kstar`, `dhi`, `diffuse`, any `target_*`, plus any configured target column.
 
-**How it fails loudly:** `validate_features(names, target_columns=...)` raises
-`ForbiddenFeatureError` (a `ValueError` subclass) naming the first offender;
-`validate_manifest` reports forbidden feature columns as errors. There is no
-silent drop — a leakage-prone request stops the run.
-
-`FEATURE_GROUPS` (used for cross-attention tokens): `solar`, `temperature`,
-`humidity`, `pressure`, `wind`, and `radiometry_aux`. `active_feature_groups`
-narrows every group to the features the requested set resolves and drops the
-ones left empty, so `radiometry_aux` appears only under `extended`,
-`temperature`/`humidity` disappear under `minimal`, and `pressure` disappears
-under `bare` as well.
+`validate_features` raises `ForbiddenFeatureError` naming the first offender;
+there is no silent drop. `FEATURE_GROUPS` (cross-attention tokens): `solar`,
+`temperature`, `humidity`, `pressure`, `wind`, `radiometry_aux`.
+`active_feature_groups` drops groups the resolved set leaves empty.
 
 ---
 
-## Alignment strategies
+## Alignment and temporal windows
 
-The accepted names are the `AlignmentStrategyName` literal in `config.py` (a leaf
-module, so it is the single owner of the set); `data/alignment.py` implements the
-build-time pairing and `data/datasets.py` implements the dataset-level windowing.
-A windowed strategy requires `data.input_mode: embedding` — the image dataset has
-no windowing, so the combination is rejected at config load instead of silently
-training a centre-frame model:
+Accepted names are the `AlignmentStrategyName` literal in `config.py`;
+`data/alignment.py` implements build-time pairing and `data/datasets.py` the
+dataset-level windowing.
 
-| Strategy | Stage | Status |
+| Strategy | Stage | Behaviour |
 |---|---|---|
-| `center_frame` | build-time pairing | **Default, fully wired.** Picks the frame nearest the window centre within `tolerance_minutes`; flags `ALIGNMENT_FAR`. |
-| `mean_embedding` | dataset-level window | **Wired end-to-end.** `MultimodalEmbeddingDataset(window="mean_embedding")` averages the *available* embeddings of the co-frames in each row's window (same `day_id`, within `window_minutes/2`; missing co-frames skipped, all-missing falls back to the own frame) and emits a plain `embedding`. |
-| `attention_pooling` | dataset-level window | **Wired end-to-end.** The dataset emits a zero-padded `embedding_seq` + `frame_mask`; `PrecomputedEmbedding` pools it either with a mask-aware mean (`temporal_pooling=mean`, default) or a small **learned** pooler (`temporal_pooling=attention`: one learnable **single query** over one `nn.MultiheadAttention` with `key_padding_mask=~frame_mask`; all-masked rows fall back to zeros). Both the **engine** (build/train) and the **evaluator** (rebuild/score) derive `temporal_pooling` from `data.alignment.strategy` via `temporal_pooling_for_strategy` — so an attention-pooled checkpoint, which carries the extra query/attention weights, is reloaded with the matching pooler instead of failing `load_state_dict`. (Cross-attention *fusion* is between modalities — distinct from this temporal pooler.) |
+| `center_frame` | build-time pairing | Default. Frame nearest the window centre within `tolerance_minutes`; flags `ALIGNMENT_FAR`. |
+| `mean_embedding` | dataset window | Averages the available members of each row's window (same `day_id`, within `window_minutes/2`). In embedding mode it emits a pooled `embedding`; in image mode a padded `image_seq` + `frame_mask` the encoder reduces by masked mean. |
+| `attention_pooling` | dataset window | Padded sequence pooled by a **single-query** `nn.MultiheadAttention` with `key_padding_mask`. Embedding mode only — the learned pooler lives on `PrecomputedEmbedding`, and asking for it in image mode is rejected at config load. |
+
+A window never crosses a day boundary: the night gap between the last frame of
+one day and the first of the next is not a neighbourhood. `window_max_frames`
+caps members, evenly subsampled, always keeping the ends — the image path needs
+that cap because each member costs a decode plus a backbone forward.
+
+Engine and evaluator both derive the pooler from `data.alignment.strategy`, so
+an attention-pooled checkpoint reloads with the matching pooler instead of
+failing `load_state_dict`. This temporal pooler is distinct from cross-attention
+*fusion* (V7), which attends between modalities.
+
+---
+
+## Solar geometry as image channels
+
+Geometry reaches the model as scalars beside the image, or as extra image
+channels — one value per pixel saying where that pixel points relative to the
+sun. A convolutional tokeniser can read the second and cannot read the first: a
+scalar is constant across the frame, so it carries nothing about *which patch*
+holds the circumsolar region that governs the diffuse split.
+
+`allsky.geometry` builds every map through `LensCalibration`, which owns the
+projection, the east-west mirror and the mount rotation. Channels:
+`cos_sun_angle`, `cos_pixel_zenith`, `solar_disc`. The zenith channel is fixed
+for a fixed camera — a spatial prior, carrying no information *between* samples.
+
+**How the channels attach.** Widening the pretrained convolution would put the
+new weights inside the backbone, where the freeze sweep owns them:
+`patch_embed` is not part of `blocks`, so `unfreeze_last_n` never reaches it,
+and channels initialised at zero and frozen at zero are structurally inert — the
+arm returns the control's number and reads as a null finding about the physics
+when it is a finding about the wiring. `GeometryPatchProjection` instead leaves
+the pretrained convolution untouched and sums a **separate** zero-initialised
+one: at initialisation the sum equals the pretrained projection exactly, and the
+new convolution is a normal trainable module no freeze sweep owns.
+
+Measured: one channel (`cos_sun_angle`) drops the elevation-band bias amplitude
+from 17.47 to 2.65 W/m². The adapter weight moves from exactly 0.0 to
+|w| = 445.93 after one epoch, which is how reachability is verified.
+
+---
+
+## Backbone families
+
+A ViT and a convolutional network answer three questions differently, and
+`modeling/backbone_families.py` is where each is answered:
+
+1. **pooling** — how a `(B, C, H, W)` frame becomes `(B, dim)`. A DINOv2 ViT
+   returns CLS and patch tokens; a ResNet has neither and pools its last map.
+2. **stages** — what `unfreeze_last_n` counts. Flattening `Sequential` gives
+   ResNet50 16 blocks, the ViT 12, EfficientNetV2-S 8. Unfreezing "the last 2"
+   of one thinking it is the other reports a depth the run never used.
+3. **the first convolution** — where extra channels attach: `patch_embed.proj`
+   on a ViT, `conv1` on a ResNet, the stem of `features` on an EfficientNet.
+
+A family that cannot answer raises `BackboneCapabilityError` rather than
+guessing. `AVAILABLE_BACKBONES` today: DINOv2 `vits14/vitb14/vitl14/vitg14`,
+DINOv3 `vits16/vits16plus/vitb16/vitl16`, `resnet50`, `efficientnet_v2_s`, and
+`fake` for tests.
+
+---
+
+## Transfer learning
+
+Transfer is not `--resume`: only the **weights** move, and the fresh run brings
+its own optimizer, schedule and normalizers. Nie et al. (2022,
+arXiv:2211.02108) found pre-train-then-transfer superior to local-only and to
+joint training on fused datasets, reaching the local baseline with 80 % less
+target data — which matters here, where the station has 55 training days.
+
+The risk is silent partial loading: `load_state_dict(strict=False)` accepts a
+checkpoint sharing three tensors and drops the rest, and the run then trains a
+nearly-random network while its log says it transferred. So nothing is skipped
+without being counted and named, and a mismatch *inside* the backbone — a
+different architecture, not a different task — is an error.
+
+**Direction is an invariant**: Folsom is always the source, this station always
+the target. A station arm pre-training another station arm would report a
+transfer gain that is really a longer schedule; a Folsom arm initialising from
+anywhere would stop being reproducible from public data alone. Neither failure
+announces itself in a metric, so `tests/allsky/test_configs_repo.py` asserts it.
 
 ---
 
 ## Model ladder (V0–V7)
 
-| # | Config | Model | Input | What it adds | Use when |
-|---|---|---|---|---|---|
-| V0 | `v0_climatology` | `climatology` | — | Constant train-mean per target (+ class freqs). The floor. | Always — the baseline every model must beat. |
-| V1 | `v1_sensor_only` | `sensor_only` | sensor | MLP over geometry + met, no image. | Quantify the sensor-only ceiling. |
-| V2 | `v2_image_only` | `image_only` | embedding | Visual signal alone (frozen DINOv2 embedding). | Quantify the image-only ceiling. |
-| V3 | `v3_concat` | `concat` | embedding + sensor | First multimodal model: concatenated fusion. | Default multimodal baseline. |
-| V4 | `v4_film` | `film` | embedding + sensor | Sensor modulates the visual embedding (FiLM, zero-init = concat at start). | Default experiment; usually ≥ concat. |
-| V5 | `v5_multitask` | `film` | embedding + sensor | **Heteroscedastic DHI** (predicts its own variance) + k-index + sky (+ disabled cloud-fraction head). | Want calibrated DHI uncertainty. |
-| V6 | `v6_film_finetune` | `film` | **image** | End-to-end: unfreezes the last 2 ViT blocks (`backbone_lr 1e-5`). | Have a GPU and want to adapt DINOv2 to sky images. |
-| V7 | `v7_cross_attention` | `cross_attention` | embedding + sensor | Visual query attends to per-group sensor tokens. | Want the image to select relevant sensor context. |
+| # | Config | Model | Input | What it adds |
+|---|---|---|---|---|
+| V0 | `v0_climatology` | `climatology` | — | Constant train-mean per target. The floor every model must beat. |
+| V1 | `v1_sensor_only` | `sensor_only` | sensor | MLP over geometry + met, no image. |
+| V2 | `v2_image_only` | `image_only` | embedding | Visual signal alone. |
+| V3 | `v3_concat` | `concat` | embedding + sensor | First multimodal model. |
+| V4 | `v4_film` | `film` | embedding + sensor | Sensor modulates the visual embedding (zero-init = concat at start). |
+| V5 | `v5_multitask` | `film` | embedding + sensor | Heteroscedastic DHI + k-index + sky heads. |
+| V6 | `v6_film_finetune` | `film` | **image** | End-to-end; unfreezes the last backbone stages. |
+| V7 | `v7_cross_attention` | `cross_attention` | embedding + sensor | Visual query attends to per-group sensor tokens. |
 
-**Embeddings vs. patch tokens vs. finetune.** V0–V5 and V7 train on **precomputed
-embeddings** (cheap, CPU-friendly, but the backbone is frozen). V6 switches
-`data.input_mode: image` to decode JPEGs and **finetune** the backbone — heavier,
-GPU-only, and impossible on the embedding path. There is no separate patch-token
-path today; cross-attention (V7) attends over *sensor* group tokens, not visual
-patch tokens.
+V0–V5 and V7 train on **precomputed embeddings** — cheap, CPU-friendly, backbone
+frozen. V6 sets `data.input_mode: image` to decode JPEGs and fine-tune.
+Cross-attention (V7) attends over *sensor* group tokens, not visual patches.
+
+### Experiment arms
+
+Beyond the ladder, `configs/allsky/experiments/` carries one directory per arm,
+each a seed sweep over a single question: `iso` (isotropic re-extraction, the
+control), `sunmap`/`sunangle` (geometry channels), `kdindex`/`kdsun` (clear-sky
+index target), `janela` (temporal window), `resnet50`/`effnet`/`dinov3s`
+(backbone family), `folsom`/`transfer` (pre-train and transfer), plus the
+earlier `control`/`exposure`/`shuffled`/`finetune`/`anneal`/`loss`/`normlr`/`res`
+sweeps. Every arm pins its seed and every run records the commit hash.
 
 ---
 
 ## How to add a sensor feature
 
-1. **Policy** (`features/policy.py`): add the engineered name → source logger
-   column to `SAFE_FEATURES` (or `EXTENDED_FEATURES` for radiometric auxiliaries).
-   The insertion position is the canonical feature order.
-2. **Engineering** (`features/engineering.py`): compute the column in
-   `build_feature_frame` (read the source column, or derive from geometry/time;
-   use `wind_components` for direction sin/cos). Cyclic quantities become a
-   sin/cos pair.
-3. **Groups** (`FEATURE_GROUPS`): add the name to the right group so
-   cross-attention builds a token for it. `active_feature_groups` intersects with
-   the resolved set, so a superset name is harmless.
+1. **Policy** (`features/policy.py`) — add the engineered name → source column to
+   the right tier. Insertion position is the canonical feature order.
+2. **Engineering** (`features/engineering.py`) — compute it in
+   `build_feature_frame`. Cyclic quantities become a sin/cos pair.
+3. **Groups** (`FEATURE_GROUPS`) — add the name so cross-attention builds a token.
 
-Rebuild the manifest (`prepare-local`) so the new column is baked in; `n_features`
-and the sensor-encoder width follow automatically.
+Rebuild with `prepare-local`; `n_features` and the encoder width follow.
 
 ## How to add a fusion strategy
 
-1. **`modeling/fusion.py`**: implement a `nn.Module` exposing `out_dim` and a
-   uniform `forward(visual, sensor, ...)`; set `needs_features = True` if it needs
-   the raw standardized vector (like cross-attention). Register it in
-   `build_fusion`.
-2. **`modeling/registry.py`**: add a `_multimodal_builder("<name>")` entry to
-   `MODEL_BUILDERS` (or a bespoke builder).
-3. **Config**: add a `configs/allsky/models/<name>.yaml` fragment and an
-   experiment that `extends` it. The arch params ride the permissive
-   `ExperimentModelConfig` (`extra="allow"`).
+1. **`modeling/fusion.py`** — an `nn.Module` exposing `out_dim` and a uniform
+   `forward(visual, sensor, ...)`; set `needs_features = True` if it needs the
+   raw standardized vector. Register it in `build_fusion`.
+2. **`modeling/registry.py`** — add a `_multimodal_builder("<name>")` entry.
+3. **Config** — a `configs/allsky/models/<name>.yaml` fragment plus an
+   experiment that `extends` it.
 
 ---
 
-## Reproduce an experiment (exact commands)
+## Reproduce an experiment
 
 ```bash
 # 0) Prepare the dataset locally (frames → v2 manifest → day splits).
-allsky prepare-local --config configs/allsky/data/local_prepare.yaml
+allsky prepare-local   --config configs/allsky/data/local_prepare.yaml
 allsky validate-dataset --config configs/allsky/data/local_prepare.yaml
 
-# 1) Precompute DINOv2 embeddings (resumable; use backbone "fake" offline).
+# 1) Precompute embeddings (resumable; backbone "fake" works offline).
 allsky precompute-embeddings --config configs/allsky/data/local_prepare.yaml
 
-# 2) Train an experiment (V4 shown). --resume auto continues from last.ckpt.
+# 2) Train. --resume auto continues from last.ckpt after an interruption.
 allsky train --config configs/allsky/experiments/v4_film.yaml \
     --data-root output/allsky-mm/dataset \
-    --out-dir  output/allsky-mm/experiments/v4_film/run \
+    --out-dir   output/allsky-mm/experiments/v4_film/run \
     --device cuda --amp
-allsky train --config configs/allsky/experiments/v4_film.yaml \
-    --data-root output/allsky-mm/dataset \
-    --out-dir  output/allsky-mm/experiments/v4_film/run \
-    --device cuda --amp --resume auto        # after an interruption
 
-# 3) Evaluate on the held-out test split (writes report.md + metrics.json + …).
+# 3) Evaluate on the held-out test split.
 allsky evaluate --checkpoint output/allsky-mm/experiments/v4_film/run/best.ckpt \
     --split test --data-root output/allsky-mm/dataset
 
-# 4) Export a Colab bundle (manifest + splits + embeddings + configs).
+# 4) Export a Colab bundle.
 allsky export-colab-bundle -o bundle.tar.gz \
     --config configs/allsky/data/local_prepare.yaml
 ```
 
-Cross-model comparison table (in Python, from several eval report dirs):
-
-```python
-from allsky.evaluation.reports import compare_experiments
-
-compare_experiments(
-    [
-        "output/allsky-mm/experiments/v3_concat/run/eval-test",
-        "output/allsky-mm/experiments/v4_film/run/eval-test",
-    ],
-    out_dir="output/allsky-mm/compare",
-)  # writes comparison.csv + comparison.md
-```
-
 For CPU or a smoke run, swap `--device cuda --amp` for `--device cpu --no-amp`.
+`allsky.evaluation.reports.compare_experiments([...], out_dir=...)` writes a
+cross-model `comparison.csv` + `comparison.md` from several eval report dirs.
 
 ---
 
 ## Current limitations (honest)
 
-- **No cloud-fraction ground truth.** The `cloud_fraction` head exists (V5) but is
-  disabled everywhere: the manifest column is all-NaN. Enable it only once a label
-  source exists.
-- **Temporal windowing vs. cross-attention fusion are distinct.** `mean_embedding`
-  and `attention_pooling` are now wired end to end — the engine builds the dataset
-  with `window=data.alignment.strategy` and builds/evaluates the model with the
-  matching temporal pooler. The dataset resolves each row's co-frame window and
-  emits a pooled `embedding` or a padded `embedding_seq` + `frame_mask`; the
-  encoder pools with a mask-aware mean or a learned attention pooler. Two honest
-  bounds on that attention pooler: it is a **single-query** MHA (one learnable
-  query attends over the window — a compact summary, not a full temporal
-  transformer), and the co-frame window is built from **embeddings that must
-  already be present for the same `day_id`** — missing co-frame reads are skipped,
-  and a row whose whole window is missing falls back to its own frame (attention:
-  an all-`False` mask yields a zero-pooled embedding with a logged warning). This
-  is a **temporal** pooler over a frame window and is separate from
-  cross-attention *fusion* (V7), which attends between the visual embedding and
-  sensor group tokens. The V0–V7 shipped configs still default to `center_frame`;
-  the windowed modes are opt-in via `data.alignment.strategy` + `window_minutes`.
-- **DINOv2 / image mode (V6) and Colab are not executed here.** The real DINOv2
-  backbone downloads via `torch.hub` on first local use only (never in CI —
-  `FakeBackbone` there). The Colab notebook provisions CPython 3.14 with `uv` but
-  has not been run on a real Colab runtime; the `[allsky]` extra installs a **CPU**
-  torch wheel, so GPU runs need a CUDA torch build installed into the venv.
-- **Single site, and a data gap.** Everything is for LabMiM/UFBA (Salvador-BA,
-  −13.00/−38.51). The sensor archive currently ends **2026-04** while the first
-  all-sky video is **2026-06** — there is no temporal overlap yet, so a real
-  paired dataset needs logger files covering the camera dates.
-```
-
-## Geometria solar como canais da imagem
-
-A geometria solar chega ao modelo de duas formas: como escalar ao lado da
-imagem, ou como canal extra — um valor por pixel, nas coordenadas do quadro,
-dizendo para onde aquele pixel aponta em relação ao sol. Um tokenizador
-convolucional lê a segunda e não lê a primeira: um escalar é constante ao longo
-do quadro, então não carrega informação sobre *qual patch* contém a região
-circunsolar que governa a partição difusa.
-
-Todo mapa é construído através de `allsky.lens.LensCalibration`, que detém a
-projeção, o espelhamento leste-oeste e a rotação da montagem. `allsky.geometry`
-não re-deriva nenhum dos três.
-
-O canal `cos_pixel_zenith` é fixo para uma câmera fixa: ele não carrega
-informação *entre* amostras e age só como prior espacial. Registrar isso importa
-para ler um resultado nulo com honestidade.
-
-## Como canais extras entram num backbone pré-treinado
-
-Um backbone DINOv2 tokeniza com uma única `Conv2d(3, embed_dim, patch, patch)`
-em `patch_embed.proj`. Os canais extras precisam passar por ela, e as duas rotas
-óbvias falham:
-
-- **alargar a convolução** e zerar as fatias novas põe os pesos novos *dentro*
-  do backbone, onde o `ImageEncoder` os congela. `patch_embed` não faz parte de
-  `blocks`, então `unfreeze_last_n` nunca o alcança. Peso inicializado em zero e
-  congelado em zero deixa os canais **estruturalmente inertes**: o braço devolve
-  o resultado do controle, e o experimento é lido como achado nulo sobre os
-  canais quando é achado sobre a fiação;
-- **inicializar aleatório** perturba a tokenização pré-treinada desde o passo 0,
-  e o fine-tune parte de um backbone que já não é o que o pré-treino produziu.
-
-`GeometryPatchProjection` evita as duas: a convolução pré-treinada mantém os
-próprios pesos e o próprio `requires_grad`, uma convolução **separada**
-inicializada em zero lê os canais extras, e as saídas são somadas. Na
-inicialização a soma é exatamente a projeção pré-treinada, e a convolução nova é
-um módulo treinável comum que nenhuma varredura de congelamento possui.
-
-Verificação de que os canais chegam à rede: o peso do adaptador sai de
-exatamente 0,0 e vai a |w| = 445,93 após uma época.
-
-## O que o fine-tuning pede de cada família de backbone
-
-Três perguntas são feitas a um backbone de imagem, e um ViT e uma rede
-convolucional respondem cada uma de forma diferente:
-
-1. **pooling** — como um quadro `(B, C, H, W)` vira um embedding `(B, dim)`. Um
-   ViT DINOv2 devolve token CLS e tokens de patch por `forward_features`; um
-   ResNet não tem nenhum dos dois e faz pooling do último mapa de features.
-2. **estágios** — o que `unfreeze_last_n` conta. Bloco de transformer e estágio
-   residual não são a mesma unidade, e uma rodada que descongelou "os últimos 2"
-   de um pensando ter feito o do outro reporta uma profundidade de fine-tune que
-   nunca usou. Achatar `Sequential` faz o ResNet50 dar 16 blocos, o ViT 12 e a
-   EfficientNetV2-S 8.
-3. **a primeira convolução** — onde os canais extras se conectam.
-   `patch_embed.proj` num ViT, `conv1` num ResNet, o stem de `features` numa
-   EfficientNet.
-
-Uma família que não sabe responder uma delas levanta `BackboneCapabilityError`
-em vez de adivinhar. Um config pedindo canais de geometria a um backbone que os
-descartaria em silêncio, ou `unfreeze_last_n` a um sem estágios para contar, é o
-defeito de entrada inerte: o modelo treina, o número volta, e responde a uma
-pergunta que ninguém fez.
-
-`build_backbone` e `family_for` mantêm duas tabelas para a mesma pergunta
-nome→família, e não podem ser fundidas sem import circular.
-
-## Transfer learning: por que, e qual é o risco
-
-Transferência não é `--resume`. Um resume continua uma rodada: mesmo dataset,
-mesmo estado de otimizador, mesmo contador de época, mesmo schedule.
-Transferência leva só os **pesos** de uma rodada fonte — tipicamente treinada num
-acervo de céu externo e maior — e começa uma rodada nova sobre o dado desta
-estação, com otimizador, schedule e normalizadores próprios.
-
-Nie et al. (2022, arXiv:2211.02108) compararam treinar local, treinar junto sobre
-datasets fundidos, e pré-treinar e transferir, e acharam o terceiro superior —
-alcançando o desempenho do baseline local com **80 % menos dado alvo**. É essa
-última cláusula que importa aqui: esta estação tem 55 dias de treino.
-
-O risco inteiro da ideia é carga parcial silenciosa. `load_state_dict` com
-`strict=False` aceita alegremente um checkpoint que compartilha três tensores com
-o modelo e descarta o resto, e a rodada treina uma rede quase aleatória enquanto
-o log diz que transferiu. Por isso nada é pulado sem ser contado e nomeado, e um
-descasamento *dentro* do backbone — que significa arquitetura fonte diferente,
-não tarefa diferente — é erro, não linha de relatório.
-
-Amarra de direção: Folsom é sempre a fonte, esta estação é sempre o alvo. Um
-braço da estação que pré-treinasse outro braço da estação reportaria ganho de
-transferência que é na verdade schedule mais longo; um braço Folsom que
-inicializasse de qualquer lugar deixaria de ser reprodutível a partir de dado
-público. Nenhuma das duas falhas se anuncia numa métrica.
-
-## Janela temporal: o custo
-
-O cap de quadros por janela existe para o caminho de imagem e não para o de
-embedding. Um embedding é uma leitura de 384 floats; um quadro é um decode mais
-um forward de backbone. Uma janela de dez minutos na cadência de um quadro por
-minuto desta câmera seria onze forwards por amostra.
+- **No cloud-fraction ground truth.** The head exists (V5) but is disabled
+  everywhere: the manifest column is all-NaN. Enable it only once a label source
+  exists.
+- **The station's paired archive is small.** 46,014 rows over 81 days, of which
+  55 are training days. That is what makes transfer learning worth the machinery
+  above, and it is why every metric is reported against persistence and
+  clear-sky baselines rather than in isolation.
+- **The sensor archive constrains the feature tier.** With the Gill MetSENS1
+  railed since 2025-12-19 and the barometer gone since 2026-08-10, the `safe`
+  tier drops almost every row; production arms run `minimal` or `bare`.
+- **Colab is provisioned but lightly exercised.** The notebook installs CPython
+  3.14 with `uv`; the `[allsky]` extra pulls a **CPU** torch wheel, so GPU runs
+  need a CUDA build installed into the venv.
+- **Single site for the target.** Everything is LabMiM/UFBA (Salvador-BA,
+  −13.00/−38.51). Folsom (38.6°N) is a pre-training source only — a different
+  climate with the same camera geometry, which is the trade the
+  [dataset survey](datasets-de-ceu-abertos.md) documents.
