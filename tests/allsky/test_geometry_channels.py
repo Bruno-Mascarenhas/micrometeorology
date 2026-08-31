@@ -23,6 +23,7 @@ from allsky.augmentation import AugmentationPipeline
 from allsky.config import ExperimentConfig, geometry_channels_of
 from allsky.data.datasets import MultimodalImageDataset
 from allsky.data.manifest import build_manifest
+from allsky.embeddings.backbone import AVAILABLE_BACKBONES, POOLINGS
 from allsky.features import resolve_feature_set
 from allsky.geometry import (
     GEOMETRY_CHANNEL_NAMES,
@@ -30,6 +31,11 @@ from allsky.geometry import (
     solar_geometry_maps,
 )
 from allsky.lens import LensCalibration, isotropic_calibration
+from allsky.modeling.backbone_families import (
+    VIT_POOLINGS,
+    BackboneCapabilityError,
+    family_for,
+)
 from allsky.modeling.geometry_adapter import (
     GeometryPatchProjection,
     PatchProjectionNotFoundError,
@@ -83,12 +89,9 @@ class TestSolarGeometryMaps:
         assert disc.max() == pytest.approx(disc[round(row), round(col)], abs=1e-3)
         assert disc.min() < disc.max()
 
-    def test_the_zenith_channel_does_not_depend_on_where_the_sun_is(
+    def test_the_zenith_channel_is_a_fixed_spatial_prior_not_a_per_sample_signal(
         self, calibration: LensCalibration
     ):
-        """It is fixed for a fixed camera, so it is a spatial prior and not a
-        per-sample signal. Stating that here keeps a later reading of a null
-        result honest."""
         index = GEOMETRY_CHANNEL_NAMES.index("cos_pixel_zenith")
         morning = solar_geometry_maps(
             calibration, (FRAME_PX, FRAME_PX), sun_zenith_rad=1.2, sun_azimuth_rad=1.5
@@ -116,9 +119,6 @@ class TestChannelSelection:
         assert resolve_geometry_channels(None) == ()
 
     def test_a_subset_comes_back_in_the_canonical_order_however_it_was_asked_for(self):
-        """The plane a trained weight belongs to must not depend on the order
-        someone typed the names in, or a checkpoint would reload onto a
-        different channel than it was fitted on."""
         assert resolve_geometry_channels(["solar_disc", "cos_sun_angle"]) == (
             "cos_sun_angle",
             "solar_disc",
@@ -178,7 +178,7 @@ class TestGeometryPatchProjection:
         assert float(gradient.abs().sum()) > 0.0
 
     def test_a_backbone_without_a_patch_convolution_fails_loudly(self):
-        with pytest.raises(PatchProjectionNotFoundError, match=r"no patch_embed\.proj"):
+        with pytest.raises(PatchProjectionNotFoundError, match="no first convolution"):
             attach_extra_input_channels(nn.Linear(3, 4), 3)
 
     def test_a_zero_width_adapter_is_refused_rather_than_built_inert(self):
@@ -213,9 +213,6 @@ class _StubViT(nn.Module):
 
 class TestImageEncoderWiring:
     def test_the_extra_branch_trains_even_when_the_backbone_is_frozen(self):
-        """The failure this guards is silent: a zero-initialised projection that
-        the freeze sweep also owns leaves the channels inert, and the arm then
-        reports the control's error as evidence against the physics."""
         encoder = ImageEncoder(_StubViT(), frozen=True, unfreeze_last_n=1, extra_input_channels=3)
         adapter = encoder.extra_channel_projection
 
@@ -414,3 +411,85 @@ class TestConfigFlow:
             build_model(cfg, 9, embedding_dim=None, image_backbone=_StubViT())
 
         assert not any("unknown hyper-parameter" in r.getMessage() for r in caplog.records)
+
+
+class TestBackboneFamilies:
+    def test_a_convolutional_family_refuses_token_pooling(self):
+        with pytest.raises(BackboneCapabilityError, match="produces no tokens"):
+            family_for("resnet50", "cls")
+
+    def test_an_unwritten_family_is_refused_rather_than_guessed(self):
+        with pytest.raises(BackboneCapabilityError, match="no backbone family describes"):
+            family_for("some_net_v9", "mean")
+
+    def test_a_transformer_without_blocks_has_nothing_to_unfreeze(self):
+        family = family_for("dinov2_vits14", "cls")
+
+        with pytest.raises(BackboneCapabilityError, match="no 'blocks' sequence"):
+            family.stages(nn.Linear(3, 4))
+
+    def test_a_transformer_without_a_patch_projection_refuses_extra_channels(self):
+        family = family_for("dinov2_vits14", "cls")
+
+        with pytest.raises(BackboneCapabilityError, match=r"patch_embed\.proj"):
+            family.first_convolution(nn.Linear(3, 4))
+
+    def test_the_vit_family_finds_the_projection_extra_channels_attach_to(self):
+        family = family_for("dinov2_vits14", "cls")
+        stub = _StubViT()
+
+        owner, attribute = family.first_convolution(stub)
+
+        assert getattr(owner, attribute) is stub.patch_embed.proj
+
+
+class TestExtraChannelsAcrossFamilies:
+    """The adapter has to survive every stem geometry, not just a ViT's.
+
+    A DINOv2 patch projection is 14x14 stride 14 with NO padding, so a copy that
+    forgot padding worked there and only broke on the first convolutional
+    backbone: a ResNet stem is 7x7 stride 2 padding 3, and the extra branch
+    produced a 109x109 map against the pretrained 112x112.
+    """
+
+    @pytest.mark.parametrize(
+        ("stem", "frame"),
+        [
+            (nn.Conv2d(3, 8, kernel_size=14, stride=14), 28),
+            (nn.Conv2d(3, 8, kernel_size=7, stride=2, padding=3), 32),
+            (nn.Conv2d(3, 8, kernel_size=3, stride=2, padding=1), 32),
+            (nn.Conv2d(3, 8, kernel_size=3, stride=1, padding=2, dilation=2), 16),
+        ],
+        ids=["vit-patch", "resnet-stem", "efficientnet-stem", "dilated"],
+    )
+    def test_the_extra_branch_matches_the_pretrained_output_grid(self, stem: nn.Conv2d, frame: int):
+        adapter = GeometryPatchProjection(stem, 2)
+        image = torch.randn(2, 5, frame, frame)
+
+        assert adapter(image).shape == stem(image[:, :3]).shape
+
+    def test_a_grouped_stem_is_refused_rather_than_silently_reinterpreted(self):
+        with pytest.raises(ValueError, match="grouped"):
+            GeometryPatchProjection(nn.Conv2d(4, 8, kernel_size=3, groups=2), 2)
+
+
+class TestBackboneTablesAgree:
+    """The builder and the family layer answer the same question from two tables.
+
+    ``build_backbone`` dispatches on dict membership, ``family_for`` on a name
+    prefix. They cannot be merged without a circular import, so what keeps them
+    honest is this: every name the builder advertises must resolve to a family,
+    or a config naming it would build a backbone that nothing knows how to
+    fine-tune.
+    """
+
+    def test_every_advertised_backbone_resolves_to_a_family(self):
+        for name in AVAILABLE_BACKBONES:
+            if name == "fake":
+                continue
+            pooling = "mean" if name.startswith(("resnet", "efficientnet")) else "cls"
+
+            assert family_for(name, pooling) is not None, name
+
+    def test_the_vit_poolings_are_the_extraction_path_s_own(self):
+        assert set(VIT_POOLINGS) == set(POOLINGS)

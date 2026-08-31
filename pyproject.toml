@@ -63,6 +63,10 @@ video = [
 ]
 allsky = [
     "torch>=2.6.0",
+    # Pretrained ResNet / EfficientNet weights, and the DINOv3 hubconf, which
+    # imports torchvision before it reaches its own weights. The floor pairs
+    # with the torch floor above (torch 2.6 shipped alongside torchvision 0.21).
+    "torchvision>=0.21",
     "imageio-ffmpeg>=0.6",
     "tensorboard>=2.14",
     "safetensors>=0.5",

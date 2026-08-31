@@ -166,6 +166,7 @@ class TestReaderVsDataset:
         assert item["embedding"].shape == (4,)
         assert set(item) == {
             "features",
+            "dhi_scale",
             "embedding",
             "dhi",
             "kindex",

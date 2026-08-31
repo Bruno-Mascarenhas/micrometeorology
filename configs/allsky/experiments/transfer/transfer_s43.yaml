@@ -1,0 +1,47 @@
+# Fine-tune na estacao, partindo dos pesos aprendidos no Folsom.
+#
+# Este e o braco que responde se a transferencia vale. O dado, o modelo, a perda
+# e o cronograma sao os do controle `iso`; a UNICA diferenca e model.init_from.
+#
+# A direcao e fixa por construcao: Folsom e sempre FONTE, a estacao e sempre
+# ALVO. Um braco daqui nunca inicializa outro braco daqui, e um braco do Folsom
+# nunca inicializa de lugar nenhum — se o fizesse, o pre-treino deixaria de ser
+# reproduzivel a partir do dado publico.
+#
+# O QUE TRANSFERE. Peso apenas. Otimizador, cronograma e contagem de epoca sao
+# deste run, e os normalizadores sao ajustados NO NOSSO treino — herdar a
+# estatistica do Folsom padronizaria os nossos alvos por uma distribuicao de onde
+# nao foram sorteados. O backbone transfere inteiro ou o carregamento falha alto:
+# ver allsky/modeling/transfer.py, que existe porque um strict=False mudo
+# transferia 9 de 327 tensores e declarava sucesso.
+#
+# PRE-REQUISITO. O checkpoint precisa existir antes; rode o braco `folsom`
+# primeiro. Se o caminho nao existir, o treino falha na construcao do modelo, e
+# nao depois de uma epoca.
+#
+# Controle: o braco `iso` — 19,94 +/- 0,35 W/m2 de RMSE de DHI, MAE 13,94,
+# MBE -8,30, sobre as mesmas 7.138 linhas de teste, sem transferencia nenhuma.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: transfer_s43
+output_dir: output/allsky-mm/experiments/transfer/transfer_s43
+seed: 43
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso
+  input_mode: image
+targets:
+  dhi:
+    loss: mae
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  init_from: output/allsky-mm/experiments/folsom/folsom_s42/run/best.ckpt
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  num_workers: 8

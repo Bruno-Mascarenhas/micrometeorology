@@ -69,6 +69,7 @@ from allsky.data.loading import (
     load_split,
     resolve_against_root,
 )
+from allsky.data.manifest import site_utc_offset_hours
 from allsky.features.normalization import TargetNormalizer
 from allsky.features.policy import active_feature_groups, resolve_feature_set
 from allsky.modeling.baselines import ClimatologyModel
@@ -224,7 +225,6 @@ def run_experiment(
     logger.info("split %s: %d train / %d val rows", split.split_id[:12], len(train_df), len(val_df))
 
     feature_columns = resolve_feature_set(cfg.features.feature_set, cfg.features.extra)
-    target_normalizers = _fit_target_normalizers(train_df)
     train_ds, val_ds, embedding_dim = _build_datasets(
         cfg,
         train_df,
@@ -232,7 +232,12 @@ def run_experiment(
         feature_columns,
         root=root,
         embedding_reader=embedding_reader,
+        utc_offset_hours=site_utc_offset_hours(meta),
     )
+    # Fitted from the dataset, not the manifest: the normalizer has to describe
+    # the quantity the head actually receives, which the DHI parameterization
+    # changes.
+    target_normalizers = _fit_target_normalizers(train_ds)
     feature_normalizer = train_ds.stats
     batch_size = int(cfg.train.batch_size)
     train_sampler_generator = torch.Generator()
@@ -264,6 +269,7 @@ def run_experiment(
         image_backbone=image_backbone,
         temporal_pooling=temporal_pooling,
     ).to(resolved_device)
+    _transfer_weights_if_asked(model, cfg, trust_checkpoint=trust_checkpoint)
 
     climatology = model if isinstance(model, ClimatologyModel) else None
     is_climatology = climatology is not None
@@ -543,12 +549,18 @@ def _select_splits(manifest: pd.DataFrame, split: Any) -> tuple[pd.DataFrame, pd
     return train_df, val_df
 
 
-def _fit_target_normalizers(train_df: pd.DataFrame) -> dict[str, TargetNormalizer]:
-    """Fit ``dhi`` / ``kindex`` target normalizers on the train rows only."""
-    from allsky.features.normalization import fit_target_normalizers
+def _fit_target_normalizers(train_ds: Any) -> dict[str, TargetNormalizer]:
+    """Fit the ``dhi`` / ``kindex`` normalizers on what the TRAIN dataset serves.
 
-    raw = fit_target_normalizers(train_df, ["target_dhi", "target_kindex"])
-    return {"dhi": raw["target_dhi"], "kindex": raw["target_kindex"]}
+    Reading the arrays off the dataset rather than the manifest keeps the
+    normalizer and the head describing one quantity: ``targets.dhi.parameterization``
+    decides whether that is W/m2 or a ratio to the clear-sky reference, and a
+    normalizer fitted on the other one is not a smaller error, it is a different
+    unit reported as W/m2.
+    """
+    from allsky.features.normalization import TargetNormalizer
+
+    return {name: TargetNormalizer.fit(values) for name, values in train_ds.served_targets.items()}
 
 
 def _build_datasets(
@@ -559,6 +571,7 @@ def _build_datasets(
     *,
     root: Path,
     embedding_reader: EmbeddingReader | None,
+    utc_offset_hours: float,
 ) -> tuple[Any, Any, int | None]:
     """Build the train/val datasets for the configured input mode.
 
@@ -592,6 +605,8 @@ def _build_datasets(
             train=True,
             window=window,
             window_minutes=window_minutes,
+            dhi_parameterization=cfg.targets.dhi.parameterization,
+            utc_offset_hours=utc_offset_hours,
         )
         val_ds = MultimodalEmbeddingDataset(
             val_df,
@@ -601,6 +616,8 @@ def _build_datasets(
             stats=train_ds.stats,
             window=window,
             window_minutes=window_minutes,
+            dhi_parameterization=cfg.targets.dhi.parameterization,
+            utc_offset_hours=utc_offset_hours,
         )
         embedding_dim = int(getattr(reader, "dim", 0)) or int(train_ds.embedding_dim)
         return train_ds, val_ds, embedding_dim
@@ -624,6 +641,11 @@ def _build_datasets(
         preprocess=preprocess,
         seed=cfg.seed,
         geometry_channels=geometry_channels_of(cfg),
+        dhi_parameterization=cfg.targets.dhi.parameterization,
+        utc_offset_hours=utc_offset_hours,
+        window=cfg.data.alignment.strategy,
+        window_minutes=cfg.data.alignment.window_minutes,
+        window_max_frames=cfg.data.alignment.max_frames,
     )
     image_val = MultimodalImageDataset(
         val_df,
@@ -634,8 +656,31 @@ def _build_datasets(
         stats=image_train.stats,
         preprocess=preprocess,
         geometry_channels=geometry_channels_of(cfg),
+        dhi_parameterization=cfg.targets.dhi.parameterization,
+        utc_offset_hours=utc_offset_hours,
+        window=cfg.data.alignment.strategy,
+        window_minutes=cfg.data.alignment.window_minutes,
+        window_max_frames=cfg.data.alignment.max_frames,
     )
     return image_train, image_val, None
+
+
+def _transfer_weights_if_asked(
+    model: nn.Module, cfg: ExperimentConfig, *, trust_checkpoint: bool
+) -> None:
+    """Initialise *model* from ``model.init_from`` when the config names a source.
+
+    Weights only: the optimizer, the schedule, the epoch counter and every
+    normalizer stay this run's own. See :mod:`allsky.modeling.transfer` for why
+    the loading is explicit rather than ``strict=False``.
+    """
+    source = model_param(cfg, "init_from", None)
+    if not source:
+        return
+    from allsky.modeling.transfer import load_transferable_weights
+
+    report = load_transferable_weights(model, str(source), trust_pickle=trust_checkpoint)
+    logger.info("initialised from %s — %s", source, report.describe())
 
 
 def _validate_embedding_coverage(
@@ -1034,7 +1079,13 @@ class _MetricAccumulator:
         if "dhi" in outputs:
             self._fold_physical(
                 "dhi_mae",
-                *_mae_terms(outputs["dhi"], batch["dhi"], self._dhi_mean, self._dhi_std),
+                *_mae_terms(
+                    outputs["dhi"],
+                    batch["dhi"],
+                    self._dhi_mean,
+                    self._dhi_std,
+                    batch.get("dhi_scale"),
+                ),
             )
         if "kindex" in outputs:
             self._fold_physical(
@@ -1081,7 +1132,9 @@ class _MetricAccumulator:
         return metrics
 
 
-def _mae_terms(pred: Tensor, target: Tensor, mean: float, std: float) -> tuple[Tensor, Tensor]:
+def _mae_terms(
+    pred: Tensor, target: Tensor, mean: float, std: float, scale: Tensor | None = None
+) -> tuple[Tensor, Tensor]:
     """One batch's physical-unit absolute-error sum and its finite-target row count.
 
     Both are zero-dim tensors on *pred*'s device: the sum of
@@ -1090,6 +1143,14 @@ def _mae_terms(pred: Tensor, target: Tensor, mean: float, std: float) -> tuple[T
     """
     physical = pred.detach().float() * std + mean
     truth = target.detach().float()
+    if scale is not None:
+        # The head may have fitted a ratio to the clear-sky reference; both sides
+        # are multiplied by the row's own reference so the reported error is in
+        # W/m2 whatever was fitted. Under the raw parameterization the scale is
+        # exactly 1.0 and this is a no-op down to the bit.
+        factor = scale.detach().float()
+        physical = physical * factor
+        truth = truth * factor
     mask = torch.isfinite(truth)
     # Masked with ``where`` rather than ``physical[mask]``: boolean-mask indexing
     # lowers to nonzero/masked_select, whose output shape is data-dependent, so it

@@ -36,6 +36,7 @@ from allsky.data.contracts import NS_PER_MINUTE, resolve
 from allsky.features.normalization import FeatureNormalizer
 from allsky.geometry import solar_geometry_maps
 from allsky.lens import LensCalibration, isotropic_calibration
+from labmim_core.site import STATION_UTC_OFFSET_HOURS
 
 if TYPE_CHECKING:
     # allsky.preprocessing reaches back into allsky.data.contracts, so importing
@@ -78,6 +79,61 @@ class EmbeddingReader(Protocol):
         ...
 
 
+def resolve_time_windows(
+    manifest: pd.DataFrame, window_minutes: float, *, max_frames: int | None = None
+) -> list[list[int]]:
+    """Per-row positional window members: same ``day_id``, within the window.
+
+    For each row the members are the positions whose ``day_id`` matches and whose
+    ``timestamp_utc`` is within ``window_minutes / 2`` of the row's own time, in
+    time order.  The row's own position is always included (distance zero), so a
+    window is never empty.
+
+    Parameters
+    ----------
+    manifest:
+        Frame carrying ``day_id`` and ``timestamp_utc``.
+    window_minutes:
+        Full width of the window, in minutes.
+    max_frames:
+        Cap on members per row, evenly subsampled and always keeping the first
+        and last. ``None`` keeps every member.
+
+    Returns
+    -------
+    list of list of int
+        One list of manifest positions per row, in time order.
+    """
+    index = pd.DatetimeIndex(manifest["timestamp_utc"]).tz_convert("UTC").tz_localize(None)
+    times_ns = index.as_unit("ns").to_numpy().astype("int64")
+    day_codes = pd.factorize(manifest["day_id"].astype(str), sort=False)[0]
+    half_ns = round(window_minutes / 2.0 * NS_PER_MINUTE)
+    n_rows = len(manifest)
+    windows: list[list[int]] = [[] for _ in range(n_rows)]
+    order = np.lexsort((np.arange(n_rows), times_ns, day_codes))
+    sorted_days = day_codes[order]
+    sorted_times = times_ns[order]
+    day_starts = np.concatenate(
+        ([0], np.flatnonzero(sorted_days[1:] != sorted_days[:-1]) + 1, [n_rows])
+    )
+    for start, stop in itertools.pairwise(day_starts):
+        idx_sorted = order[start:stop]
+        t_sorted = sorted_times[start:stop]
+        low = np.searchsorted(t_sorted, t_sorted - half_ns, side="left")
+        high = np.searchsorted(t_sorted, t_sorted + half_ns, side="right")
+        for row, window_start, window_stop in zip(idx_sorted, low, high, strict=True):
+            members = idx_sorted[window_start:window_stop].tolist()
+            windows[int(row)] = _subsample_window(members, max_frames)
+    return windows
+
+
+def _subsample_window(members: list[int], max_frames: int | None) -> list[int]:
+    if max_frames is None or len(members) <= max_frames:
+        return members
+    picks = np.linspace(0, len(members) - 1, max_frames).round().astype(int)
+    return [members[i] for i in picks.tolist()]
+
+
 class _BaseMultimodalDataset:
     """Shared feature/target handling for the multimodal datasets."""
 
@@ -88,6 +144,8 @@ class _BaseMultimodalDataset:
         *,
         train: bool = True,
         stats: FeatureNormalizer | None = None,
+        dhi_parameterization: str = "raw",
+        utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
     ) -> None:
         self.manifest = manifest.reset_index(drop=True)
         self.feature_columns = list(feature_columns)
@@ -115,12 +173,18 @@ class _BaseMultimodalDataset:
         self.stats = stats
 
         self._features = stats.transform(self.manifest).astype(np.float32)
-        self._dhi = self._raw_target("target_dhi")
+        self._dhi_scale = self._dhi_scale_column(dhi_parameterization, utc_offset_hours)
+        self._dhi = self._raw_target("target_dhi") / self._dhi_scale
         self._kindex = self._raw_target("target_kindex")
         self._cloud_fraction = self._raw_target("cloud_fraction")
         self._sky_class = self.manifest["sky_class"].to_numpy(dtype=np.int64, copy=True)
         self._sample_ids = [str(s) for s in self.manifest["sample_id"]]
         self._columns: SampleTensors | None = None
+
+    @property
+    def served_targets(self) -> dict[str, np.ndarray]:
+        """The regression target arrays this dataset actually serves."""
+        return {"dhi": self._dhi, "kindex": self._kindex}
 
     def set_epoch(self, epoch: int) -> None:
         """Tell the dataset which pass over the data it is on.
@@ -132,6 +196,25 @@ class _BaseMultimodalDataset:
         silently freeze augmentation on the first epoch.
         """
         self.epoch = epoch
+
+    def _dhi_scale_column(self, parameterization: str, utc_offset_hours: float) -> np.ndarray:
+        ones = np.ones(len(self.manifest), dtype=np.float32)
+        if parameterization != "clearsky_index":
+            return ones
+        missing = [c for c in ("solar_zenith", "timestamp_utc") if c not in self.manifest.columns]
+        if missing:
+            raise ValueError(f"the clear-sky-index DHI target needs the manifest columns {missing}")
+        from allsky.clearsky import clearsky_diffuse
+
+        times = pd.to_datetime(self.manifest["timestamp_utc"], utc=True)
+        scale = clearsky_diffuse(self.manifest["solar_zenith"], times, utc_offset_hours)
+        if not np.all(np.isfinite(scale)) or float(np.min(scale)) <= 0.0:
+            raise ValueError(
+                "the clear-sky DHI reference is non-positive or non-finite on some rows, so "
+                "DHI / DHI_clearsky is undefined there; the night filter is what normally "
+                "keeps it away from zero"
+            )
+        return scale.astype(np.float32)
 
     def _raw_target(self, column: str) -> np.ndarray:
         """Raw physical target column as float32 (NaN preserved as missing).
@@ -162,6 +245,7 @@ class _BaseMultimodalDataset:
             self._columns = {
                 "features": torch.from_numpy(np.ascontiguousarray(self._features)),
                 "dhi": torch.from_numpy(self._dhi),
+                "dhi_scale": torch.from_numpy(self._dhi_scale),
                 "kindex": torch.from_numpy(self._kindex),
                 "sky_class": torch.from_numpy(self._sky_class),
                 "cloud_fraction": torch.from_numpy(self._cloud_fraction),
@@ -186,11 +270,18 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
     Each item is a dict of torch tensors:
 
     - ``features`` — float32 ``(F,)`` standardized sensor vector;
-    - ``image`` — float32 ``(C, H, W)``, resized to *image_size*: three
+    - ``image`` — float32 ``(C, H, W)`` under ``center_frame``, or ``image_seq``
+      ``(T, C, H, W)`` plus ``frame_mask`` ``(T,)`` under a windowed strategy;
+      resized to *image_size*, with three
       standardized RGB planes, plus the
       :data:`~allsky.geometry.GEOMETRY_CHANNEL_NAMES` maps when
       *geometry_channels* is set;
-    - ``dhi`` — float32 raw diffuse target (W/m2), NaN when missing;
+    - ``dhi`` — float32 diffuse target, NaN when missing: W/m2 under the default
+      ``raw`` parameterization, and ``DHI / DHI_clearsky`` (dimensionless) under
+      ``clearsky_index``;
+    - ``dhi_scale`` — float32 W/m2 divisor that produced ``dhi``; exactly ``1.0``
+      under ``raw``. Multiplying ``dhi`` by it always gives W/m2, which is how
+      the engine and the evaluator report one number whatever the head fitted;
     - ``kindex`` — float32 raw k-index target, NaN when missing;
     - ``sky_class`` — int64 label, ``-1`` when missing;
     - ``cloud_fraction`` — float32 in ``[0, 1]``, NaN when missing.
@@ -240,8 +331,20 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         preprocess: PreprocessingPipeline | None = None,
         seed: int = 0,
         geometry_channels: Sequence[str] = (),
+        dhi_parameterization: str = "raw",
+        utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
+        window: WindowMode = "center_frame",
+        window_minutes: float = 10.0,
+        window_max_frames: int = 5,
     ) -> None:
-        super().__init__(manifest, feature_columns, train=train, stats=stats)
+        super().__init__(
+            manifest,
+            feature_columns,
+            train=train,
+            stats=stats,
+            dhi_parameterization=dhi_parameterization,
+            utc_offset_hours=utc_offset_hours,
+        )
         self.data_root = data_root
         self.image_size = image_size
         # Resolved once here rather than per __getitem__: the join rebuilds a
@@ -255,6 +358,20 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         # the model runs, or inference sees pixels training never produced.
         self.preprocess = preprocess
         self._seed = int(seed)
+        if window not in _WINDOW_MODES:
+            raise ValueError(f"window must be one of {_WINDOW_MODES}, got {window!r}")
+        if window_minutes <= 0:
+            raise ValueError(f"window_minutes must be positive, got {window_minutes}")
+        if window_max_frames < 1:
+            raise ValueError(f"window_max_frames must be at least 1, got {window_max_frames}")
+        self.window = window
+        self.window_minutes = float(window_minutes)
+        self.seq_len = int(window_max_frames)
+        self._windows: list[list[int]] = (
+            resolve_time_windows(manifest, self.window_minutes, max_frames=self.seq_len)
+            if window != "center_frame"
+            else []
+        )
         self._geometry_channels = tuple(geometry_channels)
         self._geometry = (
             self._geometry_source(manifest, augment if train else None)
@@ -265,16 +382,6 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
     def _geometry_source(
         self, manifest: pd.DataFrame, augment: AugmentationPipeline | None
     ) -> tuple[LensCalibration, np.ndarray, np.ndarray]:
-        """Calibration and per-row solar angles (degrees) for the geometry maps.
-
-        Raises
-        ------
-        ValueError
-            If the manifest lacks the solar angles or carries a non-finite one —
-            a NaN would silently become a NaN channel and poison the batch — or
-            if the augmentation translates the frame, which would move the image
-            under maps that do not move with it.
-        """
         missing = [c for c in ("solar_zenith", "solar_azimuth") if c not in manifest.columns]
         if missing:
             raise ValueError(
@@ -355,12 +462,30 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         return augmented
 
     def __getitem__(self, idx: int) -> SampleTensors:
-        """Row *idx*: the shared target tensors plus ``image`` ``(C, H, W)`` float32."""
+        """Row *idx*: the shared targets plus its frame, or its window of frames.
+
+        Under ``center_frame`` the item carries ``image`` ``(C, H, W)``. Under any
+        windowed strategy it carries ``image_seq`` ``(T, C, H, W)`` zero-padded to
+        ``seq_len`` and ``frame_mask`` ``(T,)`` bool marking the real frames.
+        """
         import torch
 
         item = self._target_item(idx)
-        item["image"] = torch.from_numpy(self._load_image(self._paths[idx], idx))
+        if self.window == "center_frame":
+            item["image"] = torch.from_numpy(self._load_image(self._paths[idx], idx))
+            return item
+        members = self._windows[idx]
+        frames = np.zeros((self.seq_len, *self._frame_shape()), dtype=np.float32)
+        mask = np.zeros(self.seq_len, dtype=bool)
+        for slot, position in enumerate(members):
+            frames[slot] = self._load_image(self._paths[position], position)
+            mask[slot] = True
+        item["image_seq"] = torch.from_numpy(frames)
+        item["frame_mask"] = torch.from_numpy(mask)
         return item
+
+    def _frame_shape(self) -> tuple[int, int, int]:
+        return (3 + len(self._geometry_channels), self.image_size, self.image_size)
 
 
 class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
@@ -414,8 +539,17 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         stats: FeatureNormalizer | None = None,
         window: WindowMode = "center_frame",
         window_minutes: float = 10.0,
+        dhi_parameterization: str = "raw",
+        utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
     ) -> None:
-        super().__init__(manifest, feature_columns, train=train, stats=stats)
+        super().__init__(
+            manifest,
+            feature_columns,
+            train=train,
+            stats=stats,
+            dhi_parameterization=dhi_parameterization,
+            utc_offset_hours=utc_offset_hours,
+        )
         if window not in _WINDOW_MODES:
             raise ValueError(f"window must be one of {_WINDOW_MODES}, got {window!r}")
         if window_minutes <= 0:
@@ -439,37 +573,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         return self._embedding_dim
 
     def _resolve_windows(self) -> list[list[int]]:
-        """Per-row positional window members (same day_id, within window, ordered).
-
-        For each row the members are the positions whose ``day_id`` matches and
-        whose ``timestamp_utc`` is within ``window_minutes / 2`` of the row's own
-        time, in time order.  The row's own position is always included (distance
-        zero), so a window is never empty.
-
-        All rows are resolved in one lexsort (day, then time, then original
-        position) rather than by rescanning the day column per day: each day's
-        bounds are then a pair of searchsorted calls over its sorted times.
-        """
-        index = pd.DatetimeIndex(self.manifest["timestamp_utc"]).tz_convert("UTC").tz_localize(None)
-        times_ns = index.as_unit("ns").to_numpy().astype("int64")
-        day_codes = pd.factorize(self.manifest["day_id"].astype(str), sort=False)[0]
-        half_ns = round(self.window_minutes / 2.0 * NS_PER_MINUTE)
-        n_rows = len(self.manifest)
-        windows: list[list[int]] = [[] for _ in range(n_rows)]
-        order = np.lexsort((np.arange(n_rows), times_ns, day_codes))
-        sorted_days = day_codes[order]
-        sorted_times = times_ns[order]
-        day_starts = np.concatenate(
-            ([0], np.flatnonzero(sorted_days[1:] != sorted_days[:-1]) + 1, [n_rows])
-        )
-        for start, stop in itertools.pairwise(day_starts):
-            idx_sorted = order[start:stop]
-            t_sorted = sorted_times[start:stop]
-            low = np.searchsorted(t_sorted, t_sorted - half_ns, side="left")
-            high = np.searchsorted(t_sorted, t_sorted + half_ns, side="right")
-            for row, window_start, window_stop in zip(idx_sorted, low, high, strict=True):
-                windows[int(row)] = idx_sorted[window_start:window_stop].tolist()
-        return windows
+        return resolve_time_windows(self.manifest, self.window_minutes)
 
     def _read(self, sample_id: str) -> np.ndarray:
         """Read + validate the ``(D,)`` float32 embedding for *sample_id*."""

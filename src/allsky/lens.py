@@ -162,11 +162,7 @@ class LensCalibration:
     def direction_of(self, shape: tuple[int, ...]) -> np.ndarray:
         """Unit vector toward the sky direction each pixel of *shape* images.
 
-        The inverse of :meth:`pixel_of`, vectorised over a whole frame. It lives
-        here, beside the forward map, because a second implementation of the
-        projection is how the east-west reflection creeps back in: the mirror and
-        the mount rotation are applied once, in one place, and both maps read the
-        same fields.
+        The inverse of :meth:`pixel_of`, vectorised over a whole frame.
 
         Parameters
         ----------

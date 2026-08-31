@@ -67,21 +67,24 @@ class TestAlignmentStrategy:
             PrepareConfig.model_validate({"alignment": {"strategy": "attention"}})
 
 
-class TestWindowedPoolingNeedsEmbeddingMode:
-    """Image mode has no windowing, so asking for it must not be silent.
-
-    ``MultimodalImageDataset`` never windows and ``build_visual_encoder`` ignores
-    ``temporal_pooling`` in image mode, so ``mean_embedding`` + ``input_mode:
-    image`` used to train a plain centre-frame model while the config — and the
-    manifest meta derived from it — reported a windowed experiment.
-    """
-
-    @pytest.mark.parametrize("strategy", ["mean_embedding", "attention_pooling"])
-    def test_windowed_strategy_with_image_mode_is_rejected(self, strategy):
-        with pytest.raises(ValidationError, match="input_mode 'embedding' only"):
+class TestOnlyTheLearnedPoolerNeedsEmbeddingMode:
+    def test_the_learned_pooler_is_rejected_in_image_mode(self):
+        with pytest.raises(ValidationError, match="learned pooler"):
             ExperimentConfig.model_validate(
-                {"data": {"input_mode": "image", "alignment": {"strategy": strategy}}}
+                {
+                    "data": {
+                        "input_mode": "image",
+                        "alignment": {"strategy": "attention_pooling"},
+                    }
+                }
             )
+
+    def test_the_mean_pooled_window_is_accepted_in_image_mode(self):
+        cfg = ExperimentConfig.model_validate(
+            {"data": {"input_mode": "image", "alignment": {"strategy": "mean_embedding"}}}
+        )
+
+        assert cfg.data.alignment.strategy == "mean_embedding"
 
     def test_windowed_strategy_with_embedding_mode_is_accepted(self):
         cfg = ExperimentConfig.model_validate(

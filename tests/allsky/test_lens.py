@@ -77,9 +77,6 @@ class TestKeepMask:
 
 class TestDirectionOf:
     def test_it_inverts_pixel_of_everywhere_inside_the_dome(self, lente: LensCalibration):
-        """A second implementation of the projection is how the east-west
-        reflection creeps back in, so the inverse is required to agree with the
-        forward map rather than merely to look plausible."""
         directions = lente.direction_of((224, 224))
         keep = lente.keep_mask((224, 224))
         rows, cols = np.nonzero(keep)

@@ -1,0 +1,42 @@
+# DINOv3 ViT-S/16+: o sucessor direto do backbone do controle.
+#
+# Mesma família do `iso` — patch embedding convolucional, blocos de transformer,
+# token CLS de 384 — treinado pelo LVD-1689M. 28,7M parâmetros contra 22M do
+# DINOv2 ViT-S/14, e patch 16 em vez de 14, o que a 224 px dá 196 patches contra
+# 256. Menos tokens, cada um cobrindo mais céu.
+#
+# Os pesos são LICENCIADOS: o URL público responde HTTP 403 e o acesso vem por
+# URL assinada após aceitar a licença. Por isso este config NÃO os nomeia — nem
+# a URL, que é credencial, nem um caminho absoluto de máquina. Antes de rodar:
+#
+#   export ALLSKY_DINOV3_WEIGHTS=/caminho/para/dinov3_vits16plus_pretrain_lvd1689m.pth
+#
+# e, se a árvore do DINOv3 não estiver no cache do torch.hub, também
+# ALLSKY_DINOV3_REPO. O download é por `wget`, como o repositório deles exige.#
+# Controle: o braço `iso` — 19,94 +/- 0,35 W/m2 de RMSE de DHI, MAE 13,94,
+# MBE -8,30, sobre as mesmas 7.138 linhas de teste. Difere só no backbone.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: dinov3s_s44
+output_dir: output/allsky-mm/experiments/dinov3s/dinov3s_s44
+seed: 44
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso
+  input_mode: image
+targets:
+  dhi:
+    loss: mae
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone: dinov3_vits16plus
+  backbone_pooling: cls
+  backbone_frozen: false
+  unfreeze_last_n: 12
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  num_workers: 8

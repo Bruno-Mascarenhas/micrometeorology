@@ -1,0 +1,40 @@
+# EfficientNetV2-S: o segundo colocado do benchmark, com uma ressalva de escala.
+#
+# Mesma base de Varaschin & Silva (2025) que motiva o braço resnet50: 38,53 +/-
+# 0,31 de RMSE agregado contra 38,05 +/- 0,20 do ResNet50, ambos bem à frente
+# dos modelos rasos.
+#
+# RESSALVA declarada: os pesos ImageNet do EfficientNetV2-S foram treinados com
+# recorte de **384 px**, verificado no metadado do enum de pesos do torchvision,
+# e este braço o alimenta com 224. É desvio consciente da receita original,
+# escolhido para manter a entrada idêntica à do controle `iso` — trocar
+# resolução e arquitetura ao mesmo tempo não deixaria atribuir a diferença.
+#
+# `unfreeze_last_n` conta blocos de feature: esta família expõe 8.#
+# Controle: o braço `iso` — 19,94 +/- 0,35 W/m2 de RMSE de DHI, MAE 13,94,
+# MBE -8,30, sobre as mesmas 7.138 linhas de teste. Difere só no backbone.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: effnet_s43
+output_dir: output/allsky-mm/experiments/effnet/effnet_s43
+seed: 43
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso
+  input_mode: image
+targets:
+  dhi:
+    loss: mae
+  kindex:
+    enabled: false
+  sky:
+    enabled: false
+model:
+  backbone: efficientnet_v2_s
+  backbone_pooling: mean
+  backbone_frozen: false
+  unfreeze_last_n: 4
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  num_workers: 8

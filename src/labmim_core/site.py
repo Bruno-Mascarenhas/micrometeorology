@@ -25,6 +25,16 @@ class SiteConfig(BaseModel):
     #: different latitudes for one tower.
     latitude: float = -13.0055
     longitude: float = -38.5089
+    #: Fixed offset of the clock the instrument stamps with, in hours from UTC.
+    #: It travels WITH the coordinates because solar geometry needs both, and a
+    #: site read from here beside an offset read from a module global is how a
+    #: second station would get this one's clock — computing California noon on a
+    #: Salvador clock without failing anywhere.
+    #:
+    #: Fixed, not a named zone: this is the offset of an instrument's own clock,
+    #: and a site whose civil time observes DST needs its acquisition convention
+    #: declared rather than inferred.
+    utc_offset_hours: float = -3.0
 
 
 #: The station itself, at those default coordinates.

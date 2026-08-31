@@ -28,15 +28,14 @@ import itertools
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from allsky.clearsky import haurwitz_ghi_from_cos_zenith
-from allsky.config import ExperimentConfig, geometry_channels_of, image_size_of
+from allsky.clearsky import clearsky_ghi_and_kt
+from allsky.config import SITE_TZ, ExperimentConfig, geometry_channels_of, image_size_of
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
     default_embedding_reader,
@@ -44,6 +43,7 @@ from allsky.data.loading import (
     load_split,
     resolve_against_root,
 )
+from allsky.data.manifest import site_utc_offset_hours
 from allsky.erbs import pseudo_diffuse
 from allsky.evaluation.metrics import (
     REFERENCE_LABELS,
@@ -56,7 +56,6 @@ from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
 from allsky.preprocessing import PreprocessingPipeline
 from allsky.training.checkpointing import normalizers_from_checkpoint
 from labmim_core.sky import SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES, sky_class_name
-from labmim_core.solar import SOLAR_CONSTANT_WM2, eccentricity_correction
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +63,7 @@ __all__ = ["EvaluationResult", "evaluate_checkpoint"]
 
 #: Fixed America/Bahia offset (UTC-3, no DST) used to derive local hour/month
 #: from the manifest's tz-aware ``timestamp_utc`` (mirrors the manifest builder).
-_LOCAL_TZ = timezone(timedelta(hours=-3))
+_LOCAL_TZ = SITE_TZ
 
 #: Solar-elevation band edges (degrees); rows outside ``[10, 90]`` fall in no
 #: band and are simply absent from the elevation breakdown.
@@ -259,6 +258,7 @@ def evaluate_checkpoint(
         embedding_reader=embedding_reader,
         image_backbone_builder=image_backbone_builder,
         kindex_kind=manifest_kind,
+        utc_offset_hours=site_utc_offset_hours(meta),
     )
 
     global_metrics = _global_metrics(predictions, enabled_targets)
@@ -425,6 +425,7 @@ def _run_inference(
     embedding_reader: EmbeddingReader | None,
     image_backbone_builder: Any | None,
     kindex_kind: str | None,
+    utc_offset_hours: float,
 ) -> pd.DataFrame:
     """Rebuild the model, run a no-grad pass and assemble the predictions frame."""
     import torch
@@ -439,6 +440,7 @@ def _run_inference(
         feature_normalizer,
         root=root,
         embedding_reader=embedding_reader,
+        utc_offset_hours=utc_offset_hours,
     )
 
     model = restore_model(
@@ -484,6 +486,16 @@ def _run_inference(
     for name in ("dhi", "kindex"):
         if name in predicted and name in target_normalizers:
             predicted[name] = np.asarray(target_normalizers[name].denormalize(predicted[name]))
+    if "dhi" in predicted and cfg.targets.dhi.parameterization == "clearsky_index":
+        # The head fitted DHI / DHI_clearsky; the report is in W/m2, so each
+        # prediction is multiplied by its own row's clear-sky reference. The
+        # observed side is read from the manifest and is already in W/m2.
+        from allsky.clearsky import clearsky_diffuse
+
+        times = pd.to_datetime(split_df["timestamp_utc"], utc=True)
+        predicted["dhi"] = predicted["dhi"] * clearsky_diffuse(
+            split_df["solar_zenith"], times, utc_offset_hours
+        )
 
     return _build_predictions_frame(split_df, predicted, enabled_targets, kindex_kind=kindex_kind)
 
@@ -496,6 +508,7 @@ def _build_split_dataset(
     *,
     root: Path,
     embedding_reader: EmbeddingReader | None,
+    utc_offset_hours: float,
 ) -> tuple[Any, int | None]:
     """Build the (train=False) dataset for the split, reusing the stored normalizer."""
     from allsky.data.datasets import MultimodalEmbeddingDataset, MultimodalImageDataset
@@ -518,6 +531,8 @@ def _build_split_dataset(
             stats=feature_normalizer,
             window=window,
             window_minutes=float(cfg.data.alignment.window_minutes),
+            dhi_parameterization=cfg.targets.dhi.parameterization,
+            utc_offset_hours=utc_offset_hours,
         )
         embedding_dim = int(getattr(reader, "dim", 0)) or int(dataset.embedding_dim)
         return dataset, embedding_dim
@@ -534,6 +549,11 @@ def _build_split_dataset(
         stats=feature_normalizer,
         preprocess=PreprocessingPipeline.from_config(cfg),
         geometry_channels=geometry_channels_of(cfg),
+        dhi_parameterization=cfg.targets.dhi.parameterization,
+        utc_offset_hours=utc_offset_hours,
+        window=cfg.data.alignment.strategy,
+        window_minutes=cfg.data.alignment.window_minutes,
+        window_max_frames=cfg.data.alignment.max_frames,
     )
     return dataset, None
 
@@ -800,25 +820,11 @@ def _resolved_clearsky(
 def _clearsky_ghi_and_kt(frame: pd.DataFrame, times: pd.Series) -> tuple[np.ndarray, np.ndarray]:
     """Haurwitz clear-sky GHI (W m-2) and its clearness index, at each row's zenith.
 
-    Returns
-    -------
-    tuple[numpy.ndarray, numpy.ndarray]
-        ``(ghi_clear, kt_clear)``, both shape ``(N,)`` ``float64``: clear-sky
-        global horizontal irradiance in W m-2 and the dimensionless ratio of it
-        to the extraterrestrial horizontal irradiance, ``NaN`` where the sun is
-        down.
+    Thin wrapper over :func:`allsky.clearsky.clearsky_ghi_and_kt`, which owns the
+    physics so the training path can normalize a target by exactly the reference
+    this path scores against.
     """
-    cos_zenith_values = np.cos(np.radians(frame["solar_zenith"].to_numpy(dtype=np.float64)))
-    ghi_clear = haurwitz_ghi_from_cos_zenith(cos_zenith_values)
-    local = times.dt.tz_convert(_LOCAL_TZ)
-    extraterrestrial = (
-        SOLAR_CONSTANT_WM2
-        * eccentricity_correction(local.dt.tz_localize(None))
-        * np.maximum(cos_zenith_values, 0.0)
-    )
-    with np.errstate(divide="ignore", invalid="ignore"):
-        kt_clear = np.where(extraterrestrial > 0.0, ghi_clear / extraterrestrial, np.nan)
-    return ghi_clear, np.asarray(kt_clear, dtype=np.float64)
+    return clearsky_ghi_and_kt(frame["solar_zenith"], times)
 
 
 def _stratified_metrics(

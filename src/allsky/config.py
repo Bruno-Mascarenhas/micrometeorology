@@ -120,8 +120,9 @@ class AlignmentConfig(BaseModel):
 
     ``strategy`` is the window mode: ``center_frame`` picks the frame nearest
     the window centre at manifest-build time, while ``mean_embedding`` and
-    ``attention_pooling`` pool every frame in the window at dataset level (both
-    implemented for ``input_mode: embedding`` only — see
+    ``attention_pooling`` pool every frame in the window at dataset level.
+    ``mean_embedding`` works in both input modes; ``attention_pooling`` needs a
+    learned pooler that only the embedding source has (see
     :class:`DataSourceConfig`). ``window_minutes`` is the full width of the
     alignment window.
     """
@@ -130,6 +131,12 @@ class AlignmentConfig(BaseModel):
 
     strategy: AlignmentStrategyName = "center_frame"
     window_minutes: float = 10.0
+    #: Cap on frames per window in IMAGE mode, evenly subsampled keeping the
+    #: ends. The embedding path ignores it: an embedding is a 384-float read,
+    #: while a frame is a JPEG decode plus a backbone forward, so a ten-minute
+    #: window at this camera's one-frame-per-minute cadence would be eleven
+    #: forwards per sample.
+    max_frames: int = 5
 
 
 class DataSourceConfig(BaseModel):
@@ -146,9 +153,10 @@ class DataSourceConfig(BaseModel):
     LRU of open shards that thrashes under shuffled access; set it ``False`` to
     keep the lazy LRU path (e.g. when the store does not fit in memory).
 
-    Windowed pooling is implemented for ``embedding`` mode only, so a windowed
-    ``alignment.strategy`` combined with ``input_mode: image`` is rejected rather
-    than silently reduced to a single centre frame.
+    A windowed ``alignment.strategy`` works in both modes — the image dataset
+    stacks the frames and the encoder mean-pools them — except
+    ``attention_pooling``, whose learned pooler exists only on the embedding
+    source and is rejected rather than silently replaced by the mean.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -162,13 +170,24 @@ class DataSourceConfig(BaseModel):
     alignment: AlignmentConfig = Field(default_factory=AlignmentConfig)
 
     @model_validator(mode="after")
-    def _windowed_pooling_needs_embedding_mode(self) -> DataSourceConfig:
-        if self.input_mode == "image" and self.alignment.strategy != "center_frame":
+    def _learned_pooling_needs_embedding_mode(self) -> DataSourceConfig:
+        """Refuse ``attention_pooling`` in image mode, where no pooler learns.
+
+        The mean-pooled window IS available for images: the dataset stacks the
+        frames and :class:`~allsky.modeling.visual_encoder.ImageEncoder` folds
+        them into the batch, runs the backbone once and takes the masked mean.
+        What image mode has no equivalent of is the LEARNED pooler — the
+        single-query attention that ``attention_pooling`` selects lives on
+        :class:`~allsky.modeling.visual_encoder.PrecomputedEmbedding`, and asking
+        for it here would train a model whose pooling is not the one the config
+        names.
+        """
+        if self.input_mode == "image" and self.alignment.strategy == "attention_pooling":
             raise ValueError(
-                f"alignment.strategy {self.alignment.strategy!r} pools every frame in the "
-                "window, which is implemented for input_mode 'embedding' only: the image "
-                "dataset has no windowing and the visual encoder ignores temporal_pooling "
-                "in image mode. Use input_mode: embedding, or strategy: center_frame."
+                "alignment.strategy 'attention_pooling' uses a learned pooler that exists "
+                "only on the precomputed-embedding source; image mode pools its window with "
+                "the mask-aware mean. Use input_mode: embedding, or strategy: "
+                "mean_embedding / center_frame."
             )
         return self
 
@@ -200,6 +219,15 @@ class FeaturesConfig(BaseModel):
     extra: list[str] = Field(default_factory=list)
 
 
+#: How the DHI head's target is expressed. ``raw`` fits W m-2 directly.
+#: ``clearsky_index`` fits ``DHI / DHI_clearsky`` and multiplies the prediction
+#: back by each row's own clear-sky DHI, so the metrics stay in W m-2 while the
+#: network no longer spends capacity on the deterministic solar-geometry
+#: envelope — an envelope that DRIFTS between this dataset's chronological
+#: splits (the DHI-vs-elevation slope moves 20 % from train to test).
+DHIParameterization = Literal["raw", "clearsky_index"]
+
+
 class DHITargetConfig(BaseModel):
     """Diffuse horizontal irradiance target head."""
 
@@ -208,6 +236,7 @@ class DHITargetConfig(BaseModel):
     enabled: bool = True
     loss: Literal["mse", "mae", "huber", "heteroscedastic"] = "huber"
     weight: float = 1.0
+    parameterization: DHIParameterization = "raw"
 
 
 class KIndexTargetConfig(BaseModel):

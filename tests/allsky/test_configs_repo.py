@@ -27,6 +27,7 @@ from torch import Tensor, nn
 from allsky.config import (
     load_experiment_config,
     load_prepare_config,
+    model_param,
 )
 from allsky.features.policy import resolve_feature_set
 from allsky.modeling.registry import MODEL_BUILDERS, build_model
@@ -190,3 +191,46 @@ def test_experiment_builds_and_forwards(experiment: Path) -> None:
         assert outputs["sky_logits"].shape == (_BATCH, SKY_CLASS_COUNT)
     # cloud_fraction stays disabled everywhere (no ground truth yet).
     assert "cloud_fraction" not in outputs
+
+
+class TestTransferDirection:
+    @staticmethod
+    def _arms(family: str) -> list[Path]:
+        return sorted((_CONFIGS / "experiments" / family).glob("*.yaml"))
+
+    def test_the_source_never_initialises_from_anywhere(self):
+        for path in self._arms("folsom"):
+            cfg = load_experiment_config(path)
+
+            assert model_param(cfg, "init_from", None) is None, path.name
+
+    def test_the_source_trains_on_folsom_and_nothing_else(self):
+        for path in self._arms("folsom"):
+            cfg = load_experiment_config(path)
+
+            assert cfg.data.data_root.endswith("dataset-folsom"), path.name
+
+    def test_every_transfer_arm_starts_from_a_folsom_checkpoint(self):
+        arms = self._arms("transfer")
+
+        assert arms, "the transfer family has no configs"
+        for path in arms:
+            cfg = load_experiment_config(path)
+            source = str(model_param(cfg, "init_from", "") or "")
+
+            assert "/folsom/" in source, f"{path.name} initialises from {source!r}"
+            assert source.endswith(".ckpt"), path.name
+
+    def test_every_transfer_arm_fine_tunes_on_this_station(self):
+        for path in self._arms("transfer"):
+            cfg = load_experiment_config(path)
+
+            assert cfg.data.data_root.endswith("dataset-iso"), path.name
+
+    def test_no_station_arm_outside_the_transfer_family_initialises_from_anything(self):
+        for path in sorted((_CONFIGS / "experiments").glob("*/*.yaml")):
+            if path.parent.name in {"transfer", "folsom"}:
+                continue
+            cfg = load_experiment_config(path)
+
+            assert model_param(cfg, "init_from", None) is None, path.name

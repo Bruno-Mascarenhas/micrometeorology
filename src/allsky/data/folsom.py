@@ -1,0 +1,271 @@
+"""Reading the UCSD-Folsom sky-image dataset into this project's manifest.
+
+Format, from the dataset's own files (Zenodo DOI 10.5281/zenodo.2826939,
+CC BY-NC 4.0; Pedro, Larson & Coimbra, *A comprehensive dataset for the
+accelerated development and benchmarking of solar forecasting methods*, Journal
+of Renewable and Sustainable Energy 11(3), 036102, 2019):
+
+- ``Folsom_irradiance.csv`` — ``timeStamp,ghi,dni,dhi``, one row per minute, W/m2,
+  timestamps in **UTC**.
+- ``Folsom_weather.csv`` — ``timeStamp,air_temp,relhum,press,windsp,winddir,
+  max_windsp,precipitation``, same cadence and clock.
+- ``Folsom_sky_images_<year>.tar.bz2`` — daytime frames at 1-minute intervals.
+
+**Time convention.** This project's manifest builder takes naive times on the
+instrument's own clock and stamps UTC from the site's fixed offset. Folsom
+publishes UTC directly, so the adapter shifts to a **fixed UTC-8** and declares
+that as the site offset. Fixed, not ``America/Los_Angeles``: the pipeline's
+convention is an instrument clock, and letting DST in would move solar geometry
+by an hour for half of every year. Since the shift is applied and then undone by
+the same constant, the UTC instant the geometry is computed from is exactly the
+one Folsom published.
+"""
+
+import logging
+from datetime import timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from allsky.video import MANIFEST_COLUMNS
+from labmim_core.site import SiteConfig
+
+__all__ = [
+    "FOLSOM_LOST_TIMESTAMPS_S",
+    "FOLSOM_SITE",
+    "FOLSOM_TIMESTAMP_OFFSET_S",
+    "FOLSOM_UTC_OFFSET_HOURS",
+    "folsom_manifest_kwargs",
+    "folsom_sensor_at",
+    "read_folsom_frames",
+    "read_folsom_sensor",
+]
+
+logger = logging.getLogger(__name__)
+
+#: Disagreement above which the archive is judged to have LOST its modification
+#: times rather than to carry a drifting clock, in seconds.
+#:
+#: This is deliberately not the 30 s per-frame filter of Varaschin & Silva (2025,
+#: sec. 3.6). Measured on the extracted 2014 archive, over its first 6,683
+#: frames, the disagreement is already **median 14 s, p95 34 s**, so a 30 s gate
+#: discards 12 % of the year's opening days — and their own Fig. 7 has the drift
+#: growing to roughly 700 s by the end of 2016, which the same gate would erase
+#: almost entirely, in silence. Their 2.5 % discard rate describes the subset
+#: they worked on, not a whole-archive ingest.
+FOLSOM_LOST_TIMESTAMPS_S = 6 * 3600.0
+
+#: Shift applied to the irradiance clock, in seconds. The same work optimised it
+#: per dataset by cross-validation and measured -20 s as Folsom's best, worth
+#: 40.24 -> 37.21 W/m2 of test RMSE. It is small next to the file-name defect
+#: above and included because it is measured, not guessed.
+FOLSOM_TIMESTAMP_OFFSET_S = -20.0
+
+#: Fixed offset the adapter puts Folsom's clock on. Pacific Standard Time, with
+#: no daylight saving: see the module docstring for why a named zone is wrong for
+#: an acquisition pipeline built on instrument clocks.
+FOLSOM_UTC_OFFSET_HOURS = -8.0
+
+#: The Folsom site. Coordinates as reported by Varaschin & Silva (2025,
+#: arXiv:2503.21966), which benchmarks ten architectures on this dataset.
+FOLSOM_SITE = SiteConfig(
+    latitude=38.642,
+    longitude=-121.148,
+    utc_offset_hours=FOLSOM_UTC_OFFSET_HOURS,
+)
+
+SENSOR_COLUMN_MAP: dict[str, str] = {
+    "windsp": "WS_ms",
+    "winddir": "WindDir",
+    "air_temp": "AirT1_C_Avg",
+    "relhum": "RH1",
+    "press": "BP1_mbar_Avg",
+}
+
+
+def read_folsom_sensor(
+    irradiance_csv: str | Path, weather_csv: str | Path | None = None
+) -> pd.DataFrame:
+    """Folsom's irradiance (and weather) as a sensor frame on the site's clock.
+
+    Parameters
+    ----------
+    irradiance_csv:
+        ``Folsom_irradiance.csv``.
+    weather_csv:
+        ``Folsom_weather.csv``; omitted leaves the met columns absent, which the
+        ``bare`` feature tier tolerates for everything except the anemometer.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Time-indexed on **naive Folsom-fixed local time**, carrying ``ghi``,
+        ``dni``, ``dhi`` in W m-2 plus the mapped met columns. The index name is
+        dropped so it matches what :func:`allsky.data.manifest.build_manifest`
+        expects of a logger frame.
+
+    Raises
+    ------
+    ValueError
+        If the irradiance file lacks the columns the format declares.
+    """
+    irradiance = pd.read_csv(irradiance_csv, parse_dates=["timeStamp"])
+    missing = [c for c in ("timeStamp", "ghi", "dni", "dhi") if c not in irradiance.columns]
+    if missing:
+        raise ValueError(f"{irradiance_csv} is missing the Folsom columns {missing}")
+    frame = irradiance.set_index("timeStamp")
+
+    if weather_csv is not None:
+        weather = pd.read_csv(weather_csv, parse_dates=["timeStamp"]).set_index("timeStamp")
+        keep = {src: dst for src, dst in SENSOR_COLUMN_MAP.items() if src in weather.columns}
+        frame = frame.join(weather[list(keep)].rename(columns=keep), how="left")
+
+    frame.index = _to_site_clock(pd.DatetimeIndex(frame.index))
+    frame.index.name = None
+    return frame
+
+
+def read_folsom_frames(
+    frames_dir: str | Path,
+    *,
+    pattern: str = "**/*.jpg",
+) -> pd.DataFrame:
+    """The extracted Folsom frames as the frame manifest the builder takes.
+
+    **The frame time is the file's modification time, not its name.** This is the
+    single most consequential choice in this module, and it is measured rather
+    than preferred: Varaschin & Silva (2025, arXiv:2503.21966, sec. 5.2.1) trained
+    and tested the same model under all four combinations and found file-name
+    alignment costs **62.52 W/m2 of RMSE against 37.21** for date-modified.
+
+    Parameters
+    ----------
+    frames_dir:
+        Directory the year archive was extracted into. It must have been
+        extracted with the modification times preserved, which ``tar`` does by
+        default; ``tar -m`` would discard exactly the timestamp this reads.
+    pattern:
+        Glob for the image files, relative to *frames_dir*.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns ``frame_path``, ``timestamp`` (naive, site clock), ``video``
+        (the source day directory) and ``index``, time-ordered.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the directory holds no file matching *pattern*.
+    ValueError
+        If a filename carries no ``YYYYMMDDHHMMSS`` stamp — without it the
+        disagreement gate has nothing to compare against — or if every frame
+        fails that gate, which means the archive lost its modification times.
+    """
+    root = Path(frames_dir)
+    paths = sorted(root.glob(pattern))
+    if not paths:
+        raise FileNotFoundError(f"no Folsom frames under {root} matching {pattern!r}")
+
+    named = _named_timestamps(paths)
+    modified = pd.to_datetime([path.stat().st_mtime for path in paths], unit="s", utc=True)
+    disagreement = (modified - named).total_seconds()
+
+    typical = float(np.median(np.abs(disagreement)))
+    if typical > FOLSOM_LOST_TIMESTAMPS_S:
+        raise ValueError(
+            f"the {len(paths)} frames under {root} disagree with their file names by a median "
+            f"of {typical / 3600:.1f} h. A drifting camera clock is seconds to minutes; hours "
+            "means the archive was extracted without its modification times (tar -m discards "
+            "them), which would stamp every frame with the moment of extraction"
+        )
+
+    logger.info(
+        "Folsom timestamps: median |date-modified - file-name| = %.1f s over %d frames",
+        typical,
+        len(paths),
+    )
+
+    frame = pd.DataFrame(
+        {
+            "frame_path": [str(path) for path in paths],
+            "timestamp": _to_site_clock(modified),
+            "video": [path.parent.name for path in paths],
+        },
+        columns=list(MANIFEST_COLUMNS[:3]),
+    ).sort_values("timestamp", ignore_index=True)
+    frame[MANIFEST_COLUMNS[3]] = np.arange(len(frame), dtype=np.int64)
+    return frame
+
+
+def folsom_sensor_at(sensor: pd.DataFrame, frames: pd.DataFrame) -> pd.DataFrame:
+    """Folsom's irradiance interpolated onto the exact instants the frames were taken.
+
+    Folsom's irradiance is stamped on whole minutes while its frames land
+    anywhere in the minute, so pairing a ``:30`` frame with the nearest sample
+    can be half a minute off — enough to matter under fast-moving cloud, where
+    the error is largest. Varaschin & Silva mitigate this by interpolating the
+    irradiance linearly before aligning, and that is what happens here: the
+    returned frame is indexed at the frame times themselves, so the manifest's
+    alignment pairs at distance zero instead of rounding.
+
+    :data:`FOLSOM_TIMESTAMP_OFFSET_S` is applied to the irradiance clock first.
+
+    Parameters
+    ----------
+    sensor:
+        Frame from :func:`read_folsom_sensor`, indexed on the site clock.
+    frames:
+        Frame manifest from :func:`read_folsom_frames`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        *sensor*'s columns, indexed at ``frames["timestamp"]``, linearly
+        interpolated and never extrapolated beyond the measured span.
+    """
+    shifted = sensor.set_axis(
+        pd.DatetimeIndex(sensor.index) + pd.Timedelta(seconds=FOLSOM_TIMESTAMP_OFFSET_S)
+    )
+    wanted = pd.DatetimeIndex(frames["timestamp"]).unique().sort_values()
+    union = shifted.index.union(wanted)
+    return (
+        shifted.reindex(union)
+        .interpolate(method="time", limit_area="inside")
+        .reindex(wanted)
+        .rename_axis(None)
+    )
+
+
+def _named_timestamps(paths: list[Path]) -> pd.DatetimeIndex:
+    digits = [("".join(ch for ch in path.stem if ch.isdigit()))[:14] for path in paths]
+    short = [path.name for path, text in zip(paths, digits, strict=True) if len(text) < 14]
+    if short:
+        raise ValueError(
+            f"{len(short)} Folsom frame(s) carry no YYYYMMDDHHMMSS stamp (e.g. {short[0]}), "
+            "so their modification times have nothing to be checked against"
+        )
+    return pd.DatetimeIndex(pd.to_datetime(digits, format="%Y%m%d%H%M%S")).tz_localize("UTC")
+
+
+def _to_site_clock(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    aware = index if index.tz is not None else index.tz_localize("UTC")
+    site_tz = timezone(timedelta(hours=FOLSOM_UTC_OFFSET_HOURS))
+    return aware.tz_convert(site_tz).tz_localize(None)
+
+
+def folsom_manifest_kwargs() -> dict[str, Any]:
+    """The :func:`allsky.data.manifest.build_manifest` arguments Folsom needs."""
+    return {
+        "site": FOLSOM_SITE,
+        "ghi_column": "ghi",
+        "diffuse_column": "dhi",
+        "feature_set": "bare",
+        "kindex_kind": "kstar",
+        # Seconds because Folsom's frames, stamped by modification time, land
+        # anywhere inside the minute; and its own prefix so a row from here can
+        # never be mistaken for one of the station's in a transfer workflow.
+        "sample_id_format": "folsom-%Y%m%d-%H%M%S",
+    }

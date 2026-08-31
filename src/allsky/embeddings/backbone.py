@@ -22,8 +22,10 @@ run in tests or CI — use :class:`FakeBackbone` there.
 """
 
 import hashlib
+import os
 from collections.abc import Sequence
-from typing import Any, Literal, Protocol, get_args, runtime_checkable
+from pathlib import Path
+from typing import Any, ClassVar, Literal, Protocol, get_args, runtime_checkable
 
 import numpy as np
 
@@ -56,26 +58,33 @@ Pooling = Literal["cls", "mean", "cls+mean"]
 #: Pooling names understood by every DINOv2 entrypoint.
 POOLINGS: tuple[str, ...] = get_args(Pooling)
 
-#: Backbone names the CLI / :func:`build_backbone` understands.
-AVAILABLE_BACKBONES = (*_TOKEN_DIM, "fake")
-
 
 def embedding_dim(model: str, pooling: str) -> int:
     """Output width of *model* under *pooling*.
 
     ``cls+mean`` concatenates the CLS token with the patch-token mean, so it is
-    twice the model's token width; the other poolings are one token wide.
+    twice the model's token width; the other poolings are one token wide. A
+    convolutional backbone has no tokens at all and answers only to ``mean``, the
+    global average its own classifier head consumes.
 
     Raises
     ------
     ValueError
         For an unknown *model* or *pooling*.
     """
-    if model not in _TOKEN_DIM:
-        raise ValueError(f"unknown DINOv2 model {model!r}; expected one of {sorted(_TOKEN_DIM)}")
     if pooling not in POOLINGS:
         raise ValueError(f"unknown pooling {pooling!r}; expected one of {sorted(POOLINGS)}")
-    return _TOKEN_DIM[model] * (2 if pooling == "cls+mean" else 1)
+    if model in TorchvisionBackbone.HEADS:
+        if pooling != "mean":
+            raise ValueError(
+                f"{model} emits no tokens, so pooling {pooling!r} does not exist for it; "
+                "it offers only 'mean'"
+            )
+        return TorchvisionBackbone.HEADS[model][0]
+    token_widths = {**_TOKEN_DIM, **Dinov3Backbone.TOKEN_DIM}
+    if model not in token_widths:
+        raise ValueError(f"unknown backbone {model!r}; expected one of {sorted(token_widths)}")
+    return token_widths[model] * (2 if pooling == "cls+mean" else 1)
 
 
 __all__ = [
@@ -147,8 +156,132 @@ def _resize_uint8(image: np.ndarray, size: int) -> np.ndarray:
     return np.ascontiguousarray(resize_bilinear(arr, size), dtype=np.uint8)
 
 
-class DinoV2Backbone:
+def imagenet_batch(images: Sequence[np.ndarray], size: int) -> Any:
+    """Stack ``uint8`` HWC frames into a standardized ``(B, 3, size, size)`` tensor.
+
+    The one recipe every torch backbone here feeds its model: resize, scale to
+    ``[0, 1]``, standardize by :data:`IMAGENET_MEAN` / :data:`IMAGENET_STD`.
+    Those statistics are not DINOv2's alone — the torchvision ResNet and
+    EfficientNet weight enums declare exactly the same mean and std, verified
+    against ``weights.transforms()`` rather than assumed — so one function serves
+    every family and they cannot drift apart.
+
+    Parameters
+    ----------
+    images:
+        Sequence of ``(H, W, 3)`` ``uint8`` RGB frames (channels-last, 0-255).
+    size:
+        Square side to resize to, in pixels.
+
+    Returns
+    -------
+    torch.Tensor
+        ``(B, 3, size, size)`` float32, channels-first, dimensionless.
+    """
+    import torch
+
+    mean = torch.tensor(IMAGENET_MEAN, dtype=torch.float32).view(3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, dtype=torch.float32).view(3, 1, 1)
+    tensors = []
+    for image in images:
+        arr = _resize_uint8(image, size)
+        chw = torch.from_numpy(arr).permute(2, 0, 1).to(torch.float32) / 255.0
+        tensors.append((chw - mean) / std)
+    return torch.stack(tensors)
+
+
+class _TorchModuleBackbone:
+    """Shared machinery for a backbone that IS one torch module.
+
+    DINOv3 and the torchvision families differ only in how their module is
+    built; everything after that — the ImageNet batch, the lazy load onto the run
+    device, the autocast policy, the pooling — is the same, and the pooling is
+    the same because :mod:`allsky.modeling.backbone_families` already owns it for
+    the training path. Sharing it here is what keeps extraction and fine-tuning
+    from pooling a model two different ways.
+
+    Subclasses implement :meth:`_build_module` and set :attr:`name`,
+    :attr:`revision` and :attr:`dim`.
+    """
+
+    name: str
+    revision: str
+    dim: int
+
+    def __init__(
+        self,
+        *,
+        pooling: str,
+        device: str,
+        dtype: Literal["fp16", "fp32"],
+        image_size: int,
+    ) -> None:
+        self.pooling = pooling
+        self.dtype = dtype
+        self.image_size = image_size
+        self._device_pref = device
+        self._model: Any = None
+        self._device: Any = None
+        self.transform_description = (
+            f"imagenet-norm, resize {image_size}x{image_size} bilinear, pooling={pooling}"
+        )
+
+    def _build_module(self) -> Any:
+        raise NotImplementedError
+
+    @property
+    def _family(self) -> Any:
+        from allsky.modeling.backbone_families import family_for
+
+        return family_for(self.name, self.pooling)
+
+    def _ensure_model(self) -> None:
+        if self._model is not None:
+            return
+        import torch
+
+        from allsky.training import resolve_device
+
+        self._device = torch.device(resolve_device(self._device_pref))
+        model = self._build_module()
+        model.eval()
+        model.to(self._device)
+        self._model = model
+
+    def load_torch_module(self) -> Any:
+        self._ensure_model()
+        return self._model
+
+    def transform(self, images: Sequence[np.ndarray]) -> Any:
+        """Resize + ImageNet-normalize frames to a ``(B, 3, H, W)`` CPU tensor."""
+        return imagenet_batch(images, self.image_size)
+
+    def encode(self, batch: Any) -> Any:
+        """Encode a :meth:`transform` batch to a ``(B, dim)`` fp32 CPU tensor."""
+        import torch
+
+        self._ensure_model()
+        batch = batch.to(self._device)
+        family = self._family
+        use_amp = self.dtype == "fp16" and self._device.type == "cuda"
+        with torch.inference_mode():
+            if use_amp:
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    feats = family.pooled(self._model, batch)
+            else:
+                feats = family.pooled(self._model, batch)
+        return feats.to(torch.float32).cpu()
+
+
+class DinoV2Backbone(_TorchModuleBackbone):
     """DINOv2 ViT-*/14 backbone (``torch.hub``, pinned revision, ImageNet norm).
+
+    Everything but the model construction comes from
+    :class:`_TorchModuleBackbone`: the ImageNet batch, the lazy load onto the run
+    device, the autocast policy, and — the one that matters — the pooling, which
+    it takes from :class:`~allsky.modeling.backbone_families.VitTokenFamily`.
+    That is the same object the training path pools through, so extraction and
+    fine-tuning cannot read this model's tokens two different ways.
 
     Parameters
     ----------
@@ -176,7 +309,7 @@ class DinoV2Backbone:
     batched precisely so no data-loader worker triggers a duplicate download.
     """
 
-    name: str
+    PATCH_SIZE = 14
 
     def __init__(
         self,
@@ -187,110 +320,218 @@ class DinoV2Backbone:
         dtype: Literal["fp16", "fp32"] = "fp16",
         image_size: int = DEFAULT_IMAGE_SIZE,
     ) -> None:
-        if image_size % 14 != 0:
-            raise ValueError(f"image_size {image_size} must be a multiple of the patch size (14)")
+        if image_size % self.PATCH_SIZE != 0:
+            raise ValueError(
+                f"image_size {image_size} must be a multiple of the patch size ({self.PATCH_SIZE})"
+            )
         self.name = model
         self.revision = DINOV2_REVISION
-        self.pooling: str = pooling
         self.dim = embedding_dim(model, pooling)
-        self.dtype = dtype
-        self.image_size = image_size
-        self._device_pref = device
-        self.transform_description = (
-            f"imagenet-norm, resize {image_size}x{image_size} bilinear, pooling={pooling}"
-        )
-        self._model: Any = None
-        self._device: Any = None
+        super().__init__(pooling=pooling, device=device, dtype=dtype, image_size=image_size)
 
-    def _ensure_model(self) -> None:
-        """Load the pinned hub model once and move it to the resolved device."""
-        if self._model is not None:
-            return
+    def _build_module(self) -> Any:
         import torch
 
-        from allsky.training import resolve_device
-
-        self._device = torch.device(resolve_device(self._device_pref))
-        model = torch.hub.load(
+        return torch.hub.load(
             f"{DINOV2_REPO}:{DINOV2_REVISION}",
             self.name,
             trust_repo=True,
         )
-        model.eval()
-        model.to(self._device)
-        self._model = model
 
-    def load_torch_module(self) -> Any:
-        """Load (once) and return the underlying hub ``nn.Module``.
 
-        The extraction path uses :meth:`encode` (``inference_mode``, detached,
-        CPU) — unusable for end-to-end image training.  Image-mode training
-        instead wants the raw model so it can run it *with* gradients and
-        register / freeze its parameters; this returns exactly that module (its
-        ``blocks`` sequence supports the usual last-*n* ViT unfreezing).  Loading
-        happens once per process and is cached on the instance.
-        """
-        self._ensure_model()
-        return self._model
+class TorchvisionBackbone(_TorchModuleBackbone):
+    """A torchvision classification network used as a feature extractor.
 
-    def transform(self, images: Sequence[np.ndarray]) -> Any:
-        """Resize + ImageNet-normalize frames to a ``(B, 3, H, W)`` CPU tensor.
+    The classifier head is replaced by :class:`torch.nn.Identity`, so the
+    module's own forward already ends at the pooled feature vector and every
+    family-specific detail on the way there — a ResNet's flatten, an
+    EfficientNet's dropout — stays exactly where its authors put it.
 
-        Parameters
-        ----------
-        images:
-            Sequence of ``(H, W, 3)`` ``uint8`` RGB frames (channels-last, 0-255).
+    Parameters
+    ----------
+    model:
+        ``"resnet50"`` or ``"efficientnet_v2_s"``.
+    pooling:
+        Must be ``"mean"``: these networks emit no tokens, only the global
+        average their own heads consume.
+    weights:
+        ``None`` uses the default ImageNet weights; ``"none"`` builds the
+        architecture untrained, which is what a transfer-learning run that will
+        load its own weights wants.
 
-        Returns
-        -------
-        torch.Tensor
-            Shape ``(B, 3, image_size, image_size)``, float32, channels-first,
-            scaled to ``[0, 1]`` and standardized by :data:`IMAGENET_MEAN` /
-            :data:`IMAGENET_STD` (dimensionless).
-        """
-        import torch
+    Notes
+    -----
+    ResNet50's pretraining crop is 224, the size this project feeds. The
+    EfficientNetV2-S weights were trained at **384**, so running it at 224 is a
+    deliberate deviation from its original recipe and belongs in the arm's
+    config header.
+    """
 
-        mean = torch.tensor(IMAGENET_MEAN, dtype=torch.float32).view(3, 1, 1)
-        std = torch.tensor(IMAGENET_STD, dtype=torch.float32).view(3, 1, 1)
-        tensors = []
-        for image in images:
-            arr = _resize_uint8(image, self.image_size)
-            chw = torch.from_numpy(arr).permute(2, 0, 1).to(torch.float32) / 255.0
-            tensors.append((chw - mean) / std)
-        return torch.stack(tensors)
+    #: torchvision entrypoint -> pooled feature width, and the head attribute
+    #: that :class:`torch.nn.Identity` replaces.
+    HEADS: ClassVar[dict[str, tuple[int, str]]] = {
+        "resnet50": (2048, "fc"),
+        "efficientnet_v2_s": (1280, "classifier"),
+    }
 
-    def _pool(self, batch: Any) -> Any:
-        """Run ``forward_features`` and pool tokens per :attr:`pooling`."""
-        import torch
+    def __init__(
+        self,
+        *,
+        model: str,
+        pooling: str = "mean",
+        device: str = "auto",
+        dtype: Literal["fp16", "fp32"] = "fp16",
+        image_size: int = DEFAULT_IMAGE_SIZE,
+        weights: str | None = None,
+    ) -> None:
+        if model not in self.HEADS:
+            raise ValueError(
+                f"unknown torchvision backbone {model!r}; expected one of {sorted(self.HEADS)}"
+            )
+        import torchvision
 
-        out = self._model.forward_features(batch)
-        cls = out["x_norm_clstoken"]
-        if self.pooling == "cls":
-            return cls
-        patch_mean = out["x_norm_patchtokens"].mean(dim=1)
-        if self.pooling == "mean":
-            return patch_mean
-        return torch.cat([cls, patch_mean], dim=-1)
+        self.name = model
+        self.revision = f"torchvision {torchvision.__version__}"
+        self.dim, self._head_attribute = self.HEADS[model]
+        self._weights = weights
+        super().__init__(pooling=pooling, device=device, dtype=dtype, image_size=image_size)
 
-    def encode(self, batch: Any) -> Any:
-        """Encode a :meth:`transform` batch to a ``(B, dim)`` fp32 CPU tensor.
+    def _build_module(self) -> Any:
+        import torchvision.models as tvm
+        from torch import nn
 
-        The hub model is loaded on first use.  fp16 autocast applies on CUDA only
-        (see the ``dtype`` parameter); the returned embeddings are float32
-        whatever the compute precision was, and carry no physical unit.
-        """
-        import torch
+        factory = getattr(tvm, self.name)
+        weights = (
+            None
+            if self._weights == "none"
+            else "DEFAULT"
+            if self._weights is None
+            else self._weights
+        )
+        model = factory(weights=weights)
+        setattr(model, self._head_attribute, nn.Identity())
+        return model
 
-        self._ensure_model()
-        batch = batch.to(self._device)
-        use_amp = self.dtype == "fp16" and self._device.type == "cuda"
-        with torch.inference_mode():
-            if use_amp:
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    feats = self._pool(batch)
-            else:
-                feats = self._pool(batch)
-        return feats.to(torch.float32).cpu()
+
+#: Environment variable holding the DINOv3 weights, so a versioned config names
+#: neither the licensed URL nor an absolute machine path.
+WEIGHTS_ENV_VAR = "ALLSKY_DINOV3_WEIGHTS"
+
+#: Environment variable holding the DINOv3 source tree, same reason.
+REPO_DIR_ENV_VAR = "ALLSKY_DINOV3_REPO"
+
+
+class Dinov3Backbone(_TorchModuleBackbone):
+    """A DINOv3 vision transformer, loaded from a local clone and local weights.
+
+    Two things force this to differ from :class:`DinoV2Backbone`, both measured
+    rather than assumed:
+
+    - ``torch.hub.load`` is unusable. DINOv3's ``hubconf`` imports its
+      classifiers, segmentors, depthers and text tower, which drag in
+      ``torchmetrics``, ``omegaconf``, ``ftfy`` and ``submitit`` — a SLURM
+      launcher — none of which a backbone touches. Its
+      ``dinov3/hub/backbones.py`` imports only the standard library and a local
+      ``utils``, so it is imported directly from the repository instead.
+    - the weights are licensed. ``dl.fbaipublicfiles.com/dinov3`` answers HTTP
+      403 without an accepted licence, so *weights* is required and names a file
+      or a signed URL the operator obtained. **A signed URL is a credential: it
+      belongs in an untracked config or an environment variable, never in a
+      committed file.**
+
+    Parameters
+    ----------
+    model:
+        A DINOv3 backbone entrypoint, e.g. ``"dinov3_vits16plus"``.
+    weights:
+        Path to a downloaded ``.pth``, or a URL; falls back to the
+        :data:`WEIGHTS_ENV_VAR` environment variable. ``"none"`` builds the
+        architecture untrained.
+    repo_dir:
+        The DINOv3 source tree. Defaults to the ``torch.hub`` cache location.
+    pooling, device, dtype, image_size:
+        As :class:`DinoV2Backbone`. Patch size is 16, so *image_size* must be a
+        multiple of 16.
+
+    Notes
+    -----
+    Reproducibility gap, stated rather than hidden: this loads whatever revision
+    of the DINOv3 source tree *repo_dir* holds. DINOv2 is pinned to a commit
+    because ``torch.hub`` accepts ``repo:ref``; here the directory IS the pin,
+    and an experiment that must be reproducible should record its provenance.
+    """
+
+    #: DINOv3 entrypoint -> token width.
+    TOKEN_DIM: ClassVar[dict[str, int]] = {
+        "dinov3_vits16": 384,
+        "dinov3_vits16plus": 384,
+        "dinov3_vitb16": 768,
+        "dinov3_vitl16": 1024,
+    }
+
+    PATCH_SIZE = 16
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        weights: str,
+        repo_dir: str | Path | None = None,
+        pooling: str = "cls",
+        device: str = "auto",
+        dtype: Literal["fp16", "fp32"] = "fp16",
+        image_size: int = DEFAULT_IMAGE_SIZE,
+    ) -> None:
+        if model not in self.TOKEN_DIM:
+            raise ValueError(
+                f"unknown DINOv3 backbone {model!r}; expected one of {sorted(self.TOKEN_DIM)}"
+            )
+        if image_size % self.PATCH_SIZE != 0:
+            raise ValueError(
+                f"image_size {image_size} must be a multiple of DINOv3's patch size "
+                f"({self.PATCH_SIZE})"
+            )
+        weights = weights or os.environ.get(WEIGHTS_ENV_VAR, "")
+        if not weights:
+            raise ValueError(
+                f"{model} needs its weights: set model.backbone_weights or the "
+                f"{WEIGHTS_ENV_VAR} environment variable to the downloaded .pth or a signed "
+                "URL. They are licensed — the public URL answers 403 — and a signed URL is a "
+                "credential, so the environment variable is how a shipped config stays free "
+                "of both the secret and the machine path"
+            )
+        self.name = model
+        self.dim = embedding_dim(model, pooling)
+        self._weights = weights
+        self._repo_dir = Path(
+            repo_dir or os.environ.get(REPO_DIR_ENV_VAR) or _default_dinov3_repo_dir()
+        )
+        self.revision = f"repo_dir={self._repo_dir}"
+        super().__init__(pooling=pooling, device=device, dtype=dtype, image_size=image_size)
+
+    def _build_module(self) -> Any:
+        import importlib
+        import sys
+
+        if not (self._repo_dir / "dinov3" / "hub" / "backbones.py").is_file():
+            raise FileNotFoundError(
+                f"no DINOv3 source tree at {self._repo_dir}; clone it with "
+                "`git clone https://github.com/facebookresearch/dinov3` and point "
+                "model.backbone_repo_dir at the result"
+            )
+        if str(self._repo_dir) not in sys.path:
+            sys.path.insert(0, str(self._repo_dir))
+        backbones = importlib.import_module("dinov3.hub.backbones")
+        entrypoint = getattr(backbones, self.name)
+        if self._weights == "none":
+            return entrypoint(pretrained=False)
+        return entrypoint(pretrained=True, weights=self._weights)
+
+
+def _default_dinov3_repo_dir() -> Path:
+    import torch
+
+    return Path(torch.hub.get_dir()) / "facebookresearch_dinov3_main"
 
 
 class FakeBackbone:
@@ -341,6 +582,15 @@ class FakeBackbone:
         return torch.from_numpy(vectors)
 
 
+#: Backbone names the CLI / :func:`build_backbone` understands.
+AVAILABLE_BACKBONES = (
+    *_TOKEN_DIM,
+    *Dinov3Backbone.TOKEN_DIM,
+    *TorchvisionBackbone.HEADS,
+    "fake",
+)
+
+
 def build_backbone(
     name: str,
     *,
@@ -348,6 +598,8 @@ def build_backbone(
     device: str = "auto",
     dtype: Literal["fp16", "fp32"] = "fp16",
     fake_dim: int = 32,
+    weights: str | None = None,
+    repo_dir: str | Path | None = None,
 ) -> VisualBackbone:
     """Construct a backbone by name.
 
@@ -360,6 +612,13 @@ def build_backbone(
         Forwarded to :class:`DinoV2Backbone` (ignored by :class:`FakeBackbone`).
     fake_dim:
         Embedding dimension for :class:`FakeBackbone`.
+    weights:
+        Where a family that does not ship open weights gets them. Required for
+        DINOv3 (licensed; a path or a signed URL). Optional for torchvision,
+        where ``None`` means the default ImageNet weights and ``"none"`` builds
+        the architecture untrained. Ignored by DINOv2 and the fake backbone.
+    repo_dir:
+        DINOv3 source tree; defaults to the ``torch.hub`` cache location.
 
     Returns
     -------
@@ -377,6 +636,19 @@ def build_backbone(
         return FakeBackbone(dim=fake_dim)
     if name in _TOKEN_DIM:
         return DinoV2Backbone(model=name, pooling=pooling, device=device, dtype=dtype)
+    if name in Dinov3Backbone.TOKEN_DIM:
+        return Dinov3Backbone(
+            model=name,
+            weights=weights or "",
+            repo_dir=repo_dir,
+            pooling=pooling,
+            device=device,
+            dtype=dtype,
+        )
+    if name in TorchvisionBackbone.HEADS:
+        return TorchvisionBackbone(
+            model=name, pooling=pooling, device=device, dtype=dtype, weights=weights
+        )
     raise ValueError(
         f"unknown backbone {name!r}; available backbones: {', '.join(AVAILABLE_BACKBONES)}"
     )

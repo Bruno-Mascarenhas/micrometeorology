@@ -26,7 +26,7 @@ content ``manifest_sha256``.
 import json
 import logging
 from collections.abc import Iterable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,6 @@ import pandas as pd
 
 from allsky.clearsky import clear_sky_index
 from allsky.config import (
-    SITE_TZ,
     SITE_TZ_NAME,
     SITE_UTC_OFFSET_HOURS,
     PrepareConfig,
@@ -55,6 +54,7 @@ from allsky.erbs import pseudo_diffuse
 from allsky.features import build_feature_frame, resolve_feature_set, validate_features
 from allsky.provenance import code_version, content_sha256
 from labmim_core.atomic import atomic_write, atomic_write_json
+from labmim_core.site import STATION_SITE
 from labmim_core.sky import (
     SKY_CLASS_KT_UPPER_BOUNDS,
     SKY_CLASS_MISSING,
@@ -70,6 +70,9 @@ from labmim_core.solar import clearness_index, solar_azimuth_deg, solar_elevatio
 
 logger = logging.getLogger(__name__)
 
+#: Minute resolution: this station's camera writes one frame a minute.
+DEFAULT_SAMPLE_ID_FORMAT = "allsky-%Y%m%d-%H%M"
+
 __all__ = [
     "TARGET_SOURCE_ERBS",
     "TARGET_SOURCE_MEASURED",
@@ -82,6 +85,25 @@ __all__ = [
 #: ``target_source`` values written by :func:`build_manifest`.
 TARGET_SOURCE_MEASURED = "measured"
 TARGET_SOURCE_ERBS = "erbs_pseudo"
+
+
+def _timezone_meta(site: SiteConfig) -> dict[str, Any]:
+    if site == STATION_SITE:
+        return {"name": SITE_TZ_NAME, "utc_offset_hours": SITE_UTC_OFFSET_HOURS}
+    return {"name": None, "utc_offset_hours": float(site.utc_offset_hours)}
+
+
+def site_utc_offset_hours(meta: Mapping[str, Any]) -> float:
+    """The fixed clock offset, in hours, the manifest in *meta* was built against."""
+    timezone_meta = meta.get("timezone")
+    if isinstance(timezone_meta, Mapping) and "utc_offset_hours" in timezone_meta:
+        return float(timezone_meta["utc_offset_hours"])
+    logger.warning(
+        "manifest meta carries no timezone block; assuming this station's %+g h offset. "
+        "A manifest from another site will have its solar geometry computed on the wrong clock",
+        SITE_UTC_OFFSET_HOURS,
+    )
+    return float(SITE_UTC_OFFSET_HOURS)
 
 
 def build_manifest(
@@ -101,6 +123,7 @@ def build_manifest(
     far_distance_minutes: float | None = None,
     extra_features: Iterable[str] = (),
     sensor_timestamp_offset_minutes: float = 0.0,
+    sample_id_format: str = DEFAULT_SAMPLE_ID_FORMAT,
     config_sha256: str | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Build the v2 manifest DataFrame and its sidecar meta dict.
@@ -152,6 +175,11 @@ def build_manifest(
         half the strategy's ``max_distance_minutes``.
     extra_features:
         Extra engineered feature names appended to the resolved set.
+    sample_id_format:
+        ``strftime`` pattern building each row's ``sample_id`` from its frame
+        time. The default is this station's minute-resolution identifier; a
+        source with sub-minute frame times needs seconds in it, and one that may
+        be merged with another needs its own prefix.
     sensor_timestamp_offset_minutes:
         Minutes added to every sensor stamp before pairing, in minutes. The
         Campbell logger end-stamps its block averages, so ``-2.5`` moves a
@@ -242,7 +270,7 @@ def build_manifest(
         site,
         feature_set,
         extra=extra_features,
-        utc_offset_hours=float(SITE_UTC_OFFSET_HOURS),
+        utc_offset_hours=float(site.utc_offset_hours),
     )
     finite = np.isfinite(features.to_numpy(dtype=np.float64)).all(axis=1)
     n_nonfinite = int((~finite).sum())
@@ -257,7 +285,7 @@ def build_manifest(
     if len(frames) == 0:
         raise ValueError("no rows survived the finite-feature filter; check sensor coverage")
 
-    utc_offset = float(SITE_UTC_OFFSET_HOURS)
+    utc_offset = float(site.utc_offset_hours)
     elevation = solar_elevation_deg(frame_times, site, utc_offset)
 
     if night_min_elevation_deg is not None:
@@ -317,10 +345,11 @@ def build_manifest(
         far_distance_minutes=far_distance_minutes,
     )
 
-    sample_id = [f"allsky-{ts:%Y%m%d-%H%M}" for ts in frame_times]
-    _check_sample_id_unique(sample_id)
+    sample_id = [format(ts, sample_id_format) for ts in frame_times]
+    _check_sample_id_unique(sample_id, sample_id_format)
     day_id = frame_times.strftime("%Y-%m-%d")
-    timestamp_utc = frame_times.tz_localize(SITE_TZ).tz_convert("UTC").as_unit("ns")
+    site_tz = timezone(timedelta(hours=site.utc_offset_hours))
+    timestamp_utc = frame_times.tz_localize(site_tz).tz_convert("UTC").as_unit("ns")
     image_path = [to_relative(path, data_root) for path in frames["frame_path"]]
 
     dtypes = manifest_column_dtypes(feature_columns)
@@ -555,8 +584,7 @@ def _split_assignment_and_id(
     )
 
 
-def _check_sample_id_unique(sample_ids: list[str]) -> None:
-    """Raise if minute-resolution ``sample_id`` values collide (naming the minute)."""
+def _check_sample_id_unique(sample_ids: list[str], sample_id_format: str) -> None:
     index = pd.Index(sample_ids)
     duplicated = index[index.duplicated(keep=False)]
     if len(duplicated) == 0:
@@ -564,10 +592,9 @@ def _check_sample_id_unique(sample_ids: list[str]) -> None:
     colliding = sorted(set(duplicated))
     shown = ", ".join(colliding[:10]) + (" ..." if len(colliding) > 10 else "")
     raise ValueError(
-        f"duplicate sample_id after minute-resolution binning: {shown}. "
-        "sample_id is 'allsky-YYYYMMDD-HHMM' (minute cadence), so two frames in the "
-        "same minute collide. Space frames >= 1 min apart, or extend sample_id to "
-        "sub-minute resolution before building the manifest."
+        f"duplicate sample_id under {sample_id_format!r}: {shown}. Two frames fell in the "
+        "same bin, so the identifier no longer names one image. Give sample_id_format a "
+        "finer resolution, or space the frames further apart."
     )
 
 
@@ -685,7 +712,7 @@ def _build_meta(
         "code_version": code_version(),
         "created_at": datetime.now(UTC).isoformat(),
         "row_count": row_count,
-        "timezone": {"name": SITE_TZ_NAME, "utc_offset_hours": SITE_UTC_OFFSET_HOURS},
+        "timezone": _timezone_meta(site),
         "site": {"latitude": site.latitude, "longitude": site.longitude},
         "thresholds": thresholds,
         "manifest_sha256": None,

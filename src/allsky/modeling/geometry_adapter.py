@@ -1,30 +1,21 @@
-"""Feeding extra channels to a pretrained ViT without disturbing its RGB weights.
+"""Feeding extra channels to a pretrained backbone without disturbing its RGB weights.
 
-A DINOv2 backbone tokenises with a single ``Conv2d(3, embed_dim, patch, patch)``
-in ``patch_embed.proj``. Extra input channels have to pass through it, and the
-two obvious routes both fail:
-
-- widening that convolution and zero-initialising the new slices puts the new
-  weights inside the backbone, where :class:`allsky.modeling.visual_encoder.ImageEncoder`
-  freezes them — ``patch_embed`` is not part of ``blocks``, so ``unfreeze_last_n``
-  never reaches it. Weights initialised at zero and frozen at zero make the extra
-  channels **structurally inert**: the arm returns the control's result and the
-  experiment reads as a null finding about the channels rather than about the
-  wiring;
-- initialising them randomly instead perturbs the pretrained tokenisation from
-  step 0, so the fine-tune starts from a backbone that is no longer the one the
-  pretraining produced.
-
-:class:`GeometryPatchProjection` avoids both: the pretrained convolution keeps
-its own weights and its own ``requires_grad``, a **separate** zero-initialised
-convolution reads the extra channels, and their outputs are summed. At
-initialisation the sum equals the pretrained projection exactly, and the new
-convolution is a normal trainable module that no backbone freeze sweep owns.
+Widening the pretrained convolution would put the new weights inside the
+backbone, where the freeze sweep owns them — ``patch_embed`` is not part of
+``blocks``, so ``unfreeze_last_n`` never reaches it, and channels initialised at
+zero and frozen at zero are structurally inert.
+:class:`GeometryPatchProjection` instead leaves the pretrained convolution
+untouched and sums a **separate** zero-initialised one reading the extra
+channels: at initialisation the sum equals the pretrained projection exactly,
+and the new convolution is a normal trainable module no freeze sweep owns.
 """
 
 import logging
+from typing import Any, cast
 
 from torch import Tensor, nn
+
+from allsky.modeling.backbone_families import BackboneCapabilityError
 
 __all__ = [
     "GeometryPatchProjection",
@@ -35,8 +26,15 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
+def _pair(value: Any) -> tuple[int, int]:
+    """A Conv2d geometry parameter as the ``(h, w)`` pair torch's stubs expect."""
+    if isinstance(value, int):
+        return (value, value)
+    return (int(value[0]), int(value[1]))
+
+
 class PatchProjectionNotFoundError(TypeError):
-    """Raised when a backbone exposes no ``patch_embed.proj`` convolution to wrap."""
+    """Raised when a backbone exposes no first convolution to wrap."""
 
 
 class GeometryPatchProjection(nn.Module):
@@ -59,8 +57,9 @@ class GeometryPatchProjection(nn.Module):
     Raises
     ------
     ValueError
-        If *extra_channels* is not positive: a zero-channel adapter would be a
-        silent no-op wearing the name of a wired one.
+        If *extra_channels* is not positive (a zero-channel adapter would be a
+        silent no-op wearing the name of a wired one), or if the wrapped
+        convolution is grouped.
     """
 
     def __init__(self, pretrained: nn.Conv2d, extra_channels: int) -> None:
@@ -69,13 +68,26 @@ class GeometryPatchProjection(nn.Module):
             raise ValueError(f"extra_channels must be positive, got {extra_channels}")
         self.pretrained = pretrained
         self.pretrained_channels = int(pretrained.in_channels)
-        kernel = (int(pretrained.kernel_size[0]), int(pretrained.kernel_size[1]))
-        stride = (int(pretrained.stride[0]), int(pretrained.stride[1]))
+        if pretrained.groups != 1:
+            raise ValueError(
+                f"the wrapped convolution is grouped (groups={pretrained.groups}); a grouped "
+                "stem ties each output channel to a subset of the input ones, so what the "
+                "extra planes should feed is a modelling decision, not a default"
+            )
+        # Every geometric parameter is copied, not just kernel and stride: a
+        # ResNet stem is 7x7 stride 2 with padding 3, and an extra branch built
+        # without that padding produces a 109x109 map against the pretrained
+        # 112x112 — measured, and it fails at the sum rather than silently.
         self.extra_proj = nn.Conv2d(
             extra_channels,
             int(pretrained.out_channels),
-            kernel_size=kernel,
-            stride=stride,
+            kernel_size=_pair(pretrained.kernel_size),
+            stride=_pair(pretrained.stride),
+            padding=pretrained.padding
+            if isinstance(pretrained.padding, str)
+            else _pair(pretrained.padding),
+            dilation=_pair(pretrained.dilation),
+            padding_mode=pretrained.padding_mode,
             bias=False,
         )
         nn.init.zeros_(self.extra_proj.weight)
@@ -140,27 +152,53 @@ def attach_extra_input_channels(
     Raises
     ------
     PatchProjectionNotFoundError
-        If no ``patch_embed.proj`` convolution is reachable. Failing here is the
-        point: silently skipping the wrap would leave the extra channels
+        If the backbone's family cannot say where the frame enters. Failing here
+        is the point: silently skipping the wrap would leave the extra channels
         unconsumed and the experiment would measure nothing.
     """
-    for candidate in (backbone, getattr(backbone, "model", None)):
+    owner, attribute = _locate_first_convolution(backbone)
+    adapter = GeometryPatchProjection(getattr(owner, attribute), extra_channels)
+    setattr(owner, attribute, adapter)
+    logger.info(
+        "wrapped %s.%s: %d pretrained + %d extra input channels, the extra branch zero-initialised",
+        type(owner).__name__,
+        attribute,
+        adapter.pretrained_channels,
+        extra_channels,
+    )
+    return adapter
+
+
+def _locate_first_convolution(backbone: nn.Module) -> tuple[nn.Module, str]:
+    """``(owner, attribute)`` of the convolution the frame enters.
+
+    A production backbone carries a family that answers this
+    (:mod:`allsky.modeling.backbone_families`).  Test stubs do not, so a direct
+    ``patch_embed.proj`` is still recognised — that path predates the families
+    and the stubs are written against it.
+
+    Raises
+    ------
+    PatchProjectionNotFoundError
+        If neither route finds one. When a family was consulted and refused, its
+        own message is chained: "efficientnet_v2_s stem attribute '0' is not a
+        convolution" says what to fix, and replacing it with a generic sentence
+        would discard the diagnosis.
+    """
+    family = getattr(backbone, "family", None)
+    model = getattr(backbone, "model", None)
+    if family is not None:
+        try:
+            return cast("tuple[nn.Module, str]", family.first_convolution(model))
+        except BackboneCapabilityError as exc:
+            raise PatchProjectionNotFoundError(
+                f"backbone {type(backbone).__name__} exposes no first convolution to wrap: {exc}"
+            ) from exc
+    for candidate in (backbone, model):
         patch_embed = getattr(candidate, "patch_embed", None)
-        if patch_embed is None:
-            continue
-        proj = getattr(patch_embed, "proj", None)
-        if isinstance(proj, nn.Conv2d):
-            adapter = GeometryPatchProjection(proj, extra_channels)
-            patch_embed.proj = adapter
-            logger.info(
-                "wrapped the patch projection of %s: %d pretrained + %d extra input channels, "
-                "the extra branch zero-initialised",
-                type(candidate).__name__,
-                adapter.pretrained_channels,
-                extra_channels,
-            )
-            return adapter
+        if patch_embed is not None and isinstance(getattr(patch_embed, "proj", None), nn.Conv2d):
+            return patch_embed, "proj"
     raise PatchProjectionNotFoundError(
-        f"backbone {type(backbone).__name__} exposes no patch_embed.proj Conv2d to wrap; "
-        "extra input channels cannot reach a backbone that does not tokenise with a convolution"
+        f"backbone {type(backbone).__name__} exposes no first convolution to wrap; "
+        "extra input channels cannot reach a backbone that does not say where the frame enters"
     )

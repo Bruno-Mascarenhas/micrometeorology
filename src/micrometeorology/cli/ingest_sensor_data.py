@@ -103,8 +103,7 @@ def run(
 
     files = find_files(input_dir, pattern)
     if not files:
-        typer.echo(f"No files matching '{pattern}' found in {input_dir}")
-        return
+        raise typer.BadParameter(f"no files matching '{pattern}' in {input_dir}; nothing to export")
 
     typer.echo(f"Found {len(files)} files")
 

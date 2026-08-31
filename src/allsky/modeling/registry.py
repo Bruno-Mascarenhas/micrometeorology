@@ -60,14 +60,30 @@ ModelBuilder = Callable[
 # Per-builder recognised ``model`` hyper-parameter keys (``name`` excluded). A
 # config key outside the selected model's set triggers a typo warning in
 # :func:`build_model`; it is still kept (``extra="allow"``).
-_COMMON_PARAMS = frozenset({"sensor_hidden", "trunk_hidden", "trunk_layers", "dropout"})
+# Transfer initialisation applies to every model: the weights come from a run on
+# other data, and which architecture consumed them is the model's own business.
+_TRANSFER_PARAMS = frozenset({"init_from"})
+_COMMON_PARAMS = (
+    frozenset({"sensor_hidden", "trunk_hidden", "trunk_layers", "dropout"}) | _TRANSFER_PARAMS
+)
 # Visual knobs the training/evaluation pipeline reads rather than the builder
 # here — legitimate keys that must not warn: ``image_size`` in
 # ``engine._build_datasets`` and the evaluator, ``backbone`` /
 # ``backbone_pooling`` in :func:`default_image_backbone_builder` (which also
 # runs on evaluate).  They are not in ``_COMMON_PARAMS``: ``sensor_only`` and
 # ``climatology`` never build an image backbone, so those must keep warning.
-_PIPELINE_VISUAL_PARAMS = frozenset({"image_size", "backbone", "backbone_pooling"})
+_PIPELINE_VISUAL_PARAMS = frozenset(
+    {
+        "image_size",
+        "backbone",
+        "backbone_pooling",
+        # Where a family that ships no open weights gets them. DINOv3 requires
+        # it: those weights are licensed and the public URL answers 403. A signed
+        # URL is a credential and belongs outside a committed config.
+        "backbone_weights",
+        "backbone_repo_dir",
+    }
+)
 _VISUAL_PARAMS = (
     frozenset(
         {
@@ -84,9 +100,11 @@ _CROSS_ATTENTION_PARAMS = frozenset({"num_heads", "token_dim"})
 #: Model name -> the hyper-parameter keys that model consumes (the registry
 #: builder plus the engine / evaluator paths the model runs under).
 KNOWN_MODEL_PARAMS: dict[str, frozenset[str]] = {
-    "climatology": frozenset(),
+    "climatology": _TRANSFER_PARAMS,
     "sensor_only": _COMMON_PARAMS,
-    "image_only": frozenset({"trunk_hidden", "trunk_layers", "dropout"}) | _VISUAL_PARAMS,
+    "image_only": (
+        frozenset({"trunk_hidden", "trunk_layers", "dropout"}) | _VISUAL_PARAMS | _TRANSFER_PARAMS
+    ),
     "concat": _COMMON_PARAMS | _VISUAL_PARAMS,
     "film": _COMMON_PARAMS | _VISUAL_PARAMS,
     "cross_attention": _COMMON_PARAMS | _VISUAL_PARAMS | _CROSS_ATTENTION_PARAMS,
@@ -335,7 +353,13 @@ def default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Callab
         name = str(params.get("backbone", "dinov2_vits14"))
         pooling = str(params.get("backbone_pooling", "cls"))
         try:
-            backbone = build_backbone(name, pooling=_backbone_pooling(pooling), device=device)
+            backbone = build_backbone(
+                name,
+                pooling=_backbone_pooling(pooling),
+                device=device,
+                weights=params.get("backbone_weights"),
+                repo_dir=params.get("backbone_repo_dir"),
+            )
             return coerce_image_backbone(backbone, pooling=pooling)
         except Exception as exc:
             raise TrainingError(

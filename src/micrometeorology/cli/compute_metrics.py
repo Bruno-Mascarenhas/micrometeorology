@@ -20,7 +20,7 @@ import typer
 from micrometeorology.common.cli_options import parse_csv
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.paths import ensure_dir
-from micrometeorology.stats.comparison import read_dataset
+from micrometeorology.stats.comparison import UnreadableDatasetError, read_dataset
 from micrometeorology.stats.metrics import compute_all, is_circular_column, valid_pairs
 
 
@@ -79,8 +79,11 @@ def run(
     typer.echo(f"Dataset A: {dataset_a}")
     typer.echo(f"Dataset B: {dataset_b}")
 
-    df_a = read_dataset(str(dataset_a), separator=separator)
-    df_b = read_dataset(str(dataset_b), separator=separator)
+    try:
+        df_a = read_dataset(str(dataset_a), separator=separator)
+        df_b = read_dataset(str(dataset_b), separator=separator)
+    except UnreadableDatasetError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
     col_list = parse_csv(columns)
     if columns is not None and not col_list:

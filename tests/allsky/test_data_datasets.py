@@ -131,7 +131,15 @@ class TestImageDatasetContract:
 
         assert len(dataset) == len(manifest)
         item = dataset[0]
-        assert set(item) == {"features", "image", "dhi", "kindex", "sky_class", "cloud_fraction"}
+        assert set(item) == {
+            "features",
+            "dhi_scale",
+            "image",
+            "dhi",
+            "kindex",
+            "sky_class",
+            "cloud_fraction",
+        }
         assert item["features"].shape == (len(features),)
         assert item["features"].dtype == torch.float32
         assert item["image"].shape == (3, 16, 16)
@@ -356,6 +364,7 @@ class TestEmbeddingDatasetContract:
         item = dataset[0]
         assert set(item) == {
             "features",
+            "dhi_scale",
             "embedding",
             "dhi",
             "kindex",
@@ -410,6 +419,7 @@ class TestEmbeddingWindowModes:
         item = dataset[3]
         assert set(item) == {
             "features",
+            "dhi_scale",
             "embedding",
             "dhi",
             "kindex",

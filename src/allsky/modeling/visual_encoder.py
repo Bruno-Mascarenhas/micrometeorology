@@ -26,11 +26,17 @@ visual encoder hands to the engine.
 """
 
 import logging
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import torch
 from torch import Tensor, nn
 
+from allsky.modeling.backbone_families import (
+    BackboneCapabilityError,
+    BackboneFamily,
+    VitTokenFamily,
+    family_for,
+)
 from allsky.modeling.geometry_adapter import (
     GeometryPatchProjection,
     attach_extra_input_channels,
@@ -46,8 +52,38 @@ __all__ = [
     "PrecomputedEmbedding",
     "build_visual_encoder",
     "coerce_image_backbone",
+    "masked_mean_pool",
     "split_backbone_param_groups",
 ]
+
+
+def masked_mean_pool(sequence: Tensor, mask: Tensor | None) -> Tensor:
+    """Mean over ``T`` of a ``(B, T, D)`` window, ignoring masked-out steps.
+
+    Shared by the precomputed-embedding source and the windowed image encoder:
+    a window of frames and a window of embeddings are the same shape once the
+    backbone has run, so they pool the same way and cannot drift apart.
+
+    Parameters
+    ----------
+    sequence:
+        ``(B, T, D)`` float32.
+    mask:
+        ``(B, T)`` bool, True where the step is real; ``None`` pools everything.
+
+    Returns
+    -------
+    Tensor
+        ``(B, D)`` float32.
+    """
+    if mask is None:
+        pooled: Tensor = sequence.mean(dim=1)
+        return pooled
+    weights = mask.unsqueeze(-1).to(sequence.dtype)
+    summed = (sequence * weights).sum(dim=1)
+    count = weights.sum(dim=1).clamp_min(1.0)
+    masked: Tensor = summed / count
+    return masked
 
 
 def _projection(in_dim: int, out_dim: int | None, dropout: float) -> tuple[nn.Module, int]:
@@ -134,14 +170,7 @@ class PrecomputedEmbedding(nn.Module):
     @staticmethod
     def _pool(sequence: Tensor, mask: Tensor | None) -> Tensor:
         """Mean-pool a ``(B, T, D)`` window over ``T`` (masked when *mask* given)."""
-        if mask is None:
-            pooled: Tensor = sequence.mean(dim=1)
-            return pooled
-        weights = mask.unsqueeze(-1).to(sequence.dtype)
-        summed = (sequence * weights).sum(dim=1)
-        count = weights.sum(dim=1).clamp_min(1.0)
-        masked: Tensor = summed / count
-        return masked
+        return masked_mean_pool(sequence, mask)
 
     def _attention_pool(self, sequence: Tensor, mask: Tensor | None) -> Tensor:
         """Learned single-query attention pool of a ``(B, T, D)`` window over ``T``.
@@ -292,11 +321,14 @@ class ImageEncoder(nn.Module):
             for param in block.parameters():
                 param.requires_grad_(True)
         logger.info(
-            "image backbone %s: unfroze the last %d of %d block(s) — %d of %d backbone "
+            "image backbone %s: unfroze the last %d of %d %s(s) — %d of %d backbone "
             "parameters are trainable",
             type(self.backbone).__name__,
             len(unfrozen),
             len(list(blocks)),
+            # The unit differs by family — 12 transformer blocks, 16 residual
+            # blocks, 8 feature blocks — so the log names the one it counted.
+            getattr(getattr(self.backbone, "family", None), "stage_unit", "block"),
             sum(p.numel() for p in self.backbone.parameters() if p.requires_grad),
             sum(p.numel() for p in self.backbone.parameters()),
         )
@@ -315,16 +347,39 @@ class ImageEncoder(nn.Module):
             Batch dict whose ``image`` entry is ``(B, C, H, W)`` float32,
             channels-first: the first three planes are the normalized RGB frame
             and any further ones are the extra maps the patch projection was
-            widened for (all dimensionless).
+            widened for (all dimensionless).  A windowed dataset sends
+            ``image_seq`` ``(B, T, C, H, W)`` and ``frame_mask`` ``(B, T)``
+            instead, and the window is mean-pooled after the backbone.
 
         Returns
         -------
         Tensor
             ``(B, out_dim)`` float32 visual embedding (dimensionless).
         """
-        features = self.backbone(batch["image"])
+        if "image_seq" in batch:
+            features = self._encode_window(batch["image_seq"], batch.get("frame_mask"))
+        else:
+            features = self.backbone(batch["image"])
         out: Tensor = self.projection(features)
         return out
+
+    def _encode_window(self, window: Tensor, mask: Tensor | None) -> Tensor:
+        """Encode a ``(B, T, C, H, W)`` window and mean-pool it to ``(B, dim)``.
+
+        The window is folded into the batch so the backbone runs ONCE over
+        ``B * T`` frames rather than T times over B — the cost is the same
+        arithmetic either way, but one launch keeps the GPU busy where T launches
+        of a B-sized batch would not.
+
+        Padded steps are encoded and then discarded by the mask rather than being
+        skipped: which steps are padding varies per row, so skipping them would
+        make the batch shape data-dependent and synchronise the device on every
+        forward.
+        """
+        batch_size, steps = window.shape[0], window.shape[1]
+        folded = window.reshape(batch_size * steps, *window.shape[2:])
+        encoded = self.backbone(folded).reshape(batch_size, steps, -1)
+        return masked_mean_pool(encoded, mask)
 
     def param_groups(self, backbone_lr: float) -> list[dict[str, Any]]:
         """Optimizer parameter groups putting the backbone on its own learning rate.
@@ -446,7 +501,43 @@ class _HubVisualBackbone(nn.Module):
         # which makes forward_features(...) un-analyzable. Runtime registration as a
         # submodule still happens because the assigned value *is* an nn.Module.
         self.model: Any = loader()
+        # Carried through so the checkpoint records WHICH architecture trained
+        # it. Without them the provenance said `_HubVisualBackbone` with a null
+        # revision — the wrapper's own class name — and a checkpoint could not
+        # say whether it was a DINOv2, a DINOv3, a ResNet or an EfficientNet.
+        self.name = str(getattr(backbone, "name", "") or type(backbone).__name__)
+        self.revision = getattr(backbone, "revision", None)
+        self.family = self._family_of(backbone)
         self._warn_if_blocks_are_chunked()
+
+    def _family_of(self, backbone: Any) -> BackboneFamily:
+        """The family that answers what fine-tuning needs of this architecture.
+
+        Resolved from the backbone's own name, which every backbone
+        :func:`allsky.embeddings.backbone.build_backbone` produces carries — a
+        config can therefore never reach here with a family nobody wrote, because
+        the builder rejects the unknown name first.
+
+        A wrapper that does not name itself is a test stub, and the only shape
+        ``load_torch_module`` has ever had is the hub ViT contract, so that is
+        what it falls back to — with a warning, because a silent guess about the
+        architecture is how a run reports a fine-tuning depth it never applied.
+        """
+        name = str(getattr(backbone, "name", "") or "")
+        if name:
+            # A named backbone that its family rejects is a real configuration
+            # error — a ResNet asked for token pooling, say — and the family's
+            # own message says exactly which. Catching it here would replace that
+            # with a false claim about the name and then install a ViT, whose
+            # forward_features call dies at the first batch with no trace of the
+            # cause.
+            return family_for(name, self.pooling)
+        logger.warning(
+            "image backbone %s does not name itself, so it is treated as a token ViT; "
+            "a real backbone gets its family from its name",
+            type(backbone).__name__,
+        )
+        return VitTokenFamily(self.pooling, name="unnamed backbone")
 
     def _warn_if_blocks_are_chunked(self) -> None:
         """Warn when ``blocks`` holds chunks instead of one entry per transformer block.
@@ -472,20 +563,21 @@ class _HubVisualBackbone(nn.Module):
 
     @property
     def blocks(self) -> Any:
-        """The backbone's transformer ``blocks`` sequence (for unfreezing), if any."""
-        return getattr(self.model, "blocks", None)
+        """The stages ``unfreeze_last_n`` counts, or ``None`` when the family has none.
+
+        ``None`` rather than an exception because :class:`ImageEncoder` already
+        warns for a backbone with nothing to unfreeze, and that warning is the
+        established contract; the capability error is reserved for the requests
+        that would otherwise pass silently, such as extra input channels.
+        """
+        try:
+            return list(self.family.stages(self.model))
+        except BackboneCapabilityError:
+            return None
 
     def forward(self, image: Tensor) -> Tensor:
-        """Encode ``(B, 3, H, W)`` frames to a ``(B, dim)`` embedding with gradients."""
-        out = self.model.forward_features(image)
-        cls = out["x_norm_clstoken"]
-        if self.pooling == "cls":
-            pooled = cls
-        elif self.pooling == "mean":
-            pooled = out["x_norm_patchtokens"].mean(dim=1)
-        else:
-            pooled = torch.cat([cls, out["x_norm_patchtokens"].mean(dim=1)], dim=-1)
-        return cast("Tensor", pooled)
+        """Encode ``(B, C, H, W)`` frames to a ``(B, dim)`` embedding with gradients."""
+        return self.family.pooled(self.model, image)
 
 
 def coerce_image_backbone(backbone: Any, *, pooling: str = "cls") -> nn.Module:
