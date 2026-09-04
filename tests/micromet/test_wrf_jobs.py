@@ -511,6 +511,72 @@ def test_series_bin_and_summary_agree_with_per_step_jsons(tmp_path):
         assert summary["date_times"][i] == payload["metadata"]["date_time"]
 
 
+def test_skip_first_leaves_missing_columns_and_still_indexes_from_zero(tmp_path):
+    """`--skip-first N` drops the first N steps of a cold start, yet the matrix
+    keeps columns 0..n_steps-1: the byte offset the site computes is
+    ``index * 4``, so a matrix narrowed to the surviving steps would slice the
+    wrong cell for every index above the cut. The manifest's own ``index_min``
+    rises to N while ``features.cell_series.index_min`` stays 0, which is the
+    contract documented in docs/micrometeorology.md.
+    """
+    wrf = tmp_path / "wrfout_d02_jobs_skip.nc"
+    _write_full_wrf_file(wrf, seed=37)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], ["temperature"], json_dir, geo_dir, skip_first=2)
+    results = jobs.execute_units(units, workers=1)
+    assert [r for r in results if r.error] == []
+
+    written = sorted(p.name for p in json_dir.glob("D02_TEMP_*.json"))
+    assert written == [f"D02_TEMP_{i:03d}.json" for i in range(2, NT)]
+
+    matrix = _series_matrix(json_dir / "D02_TEMP.series.bin", NT)
+    assert matrix.shape == (NY * NX, NT)
+    assert (matrix[:, :2] == jobs.SERIES_MISSING).all()
+    assert (matrix[:, 2:] != jobs.SERIES_MISSING).all()
+
+    with open(json_dir / "D02_TEMP.summary.json", encoding="utf-8") as fh:
+        assert json.load(fh)["indices"] == list(range(2, NT))
+
+    manifest_path = jobs.write_run_manifest(json_dir, results)
+    assert manifest_path is not None
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    assert manifest["index_min"] == 2
+    assert manifest["features"]["cell_series"]["index_min"] == 0
+
+
+def test_the_arrow_overlay_publishes_one_file_per_step_on_the_stride_four_subgrid(tmp_path):
+    """`wind_vectors` runs inside the serial-vs-parallel byte-identity test, so a
+    change to what it publishes moves both sides together and is invisible there.
+    The stamp is the part that can drift silently: it is formatted by
+    ``jobs._format_datetime`` for the values file and by
+    ``geojson.create_wind_vectors_json`` for this one, and the page pairs the two
+    by that string.
+    """
+    wrf = tmp_path / "wrfout_d02_jobs_arrows.nc"
+    _write_full_wrf_file(wrf, seed=43)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], ["temperature", "wind_vectors"], json_dir, geo_dir)
+    results = jobs.execute_units(units, workers=1)
+    assert [r for r in results if r.error] == []
+
+    written = sorted(p.name for p in json_dir.glob("D02_WIND_VECTORS_*.json"))
+    assert written == [f"D02_WIND_VECTORS_{i:03d}.json" for i in range(NT)]
+
+    for step, name in enumerate(written):
+        payload = json.loads((json_dir / name).read_text(encoding="utf-8"))
+        # Stride 4 over a 4x5 grid keeps rows {0} and columns {0, 4}: cells 0 and 4.
+        assert payload["downsampled_linear_indices"] == [0, 4]
+        assert len(payload["downsampled_angles"]) == len(payload["downsampled_magnitudes"]) == 2
+        values_file = json.loads(
+            (json_dir / f"D02_TEMP_{step:03d}.json").read_text(encoding="utf-8")
+        )
+        assert payload["metadata"]["date_time"] == values_file["metadata"]["date_time"]
+
+
 def test_manifest_v2_timeline_availability_and_features(tmp_path, monkeypatch):
     monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_jobs_manifest.nc"
@@ -1072,6 +1138,97 @@ def test_a_step_with_no_finite_cell_is_not_published_at_all(tmp_path, monkeypatc
     # The one invariant that was broken: the timeline and the panel agree.
     assert manifest["index_min"] == min(summary["indices"])
     assert manifest["index_max"] == max(summary["indices"])
+
+
+def _values_unit(
+    json_dir: Path, domain: str, indices: range, *, n_steps: int, start_local: str | None = None
+) -> jobs.UnitResult:
+    """One domain's values-JSON unit, plus the two byte-offset artifacts."""
+    files = [str(json_dir / f"{domain}_KT_{i:03d}.json") for i in indices]
+    files.append(str(json_dir / f"{domain}_KT.summary.json"))
+    files.append(str(json_dir / f"{domain}_KT.series.bin"))
+    return jobs.UnitResult(
+        label=f"{domain} KT",
+        kind="values_json",
+        files=tuple(files),
+        domain=domain,
+        n_steps=n_steps,
+        start_local=start_local,
+    )
+
+
+def test_domains_that_disagree_on_their_step_count_withhold_the_series_offsets(tmp_path):
+    """`cell_series` hands the site a byte offset computed as index * 4 within a
+    row of n_steps columns. Two domains of different lengths make one n_steps a
+    lie for the other, and the reader would slice a neighbouring cell's value
+    rather than fail. The summary, which carries no offsets, still ships.
+    """
+    json_dir = tmp_path / "json"
+    json_dir.mkdir()
+
+    manifest_path = jobs.write_run_manifest(
+        json_dir,
+        [
+            _values_unit(json_dir, "D01", range(3), n_steps=3),
+            _values_unit(json_dir, "D02", range(3), n_steps=5),
+        ],
+    )
+
+    assert manifest_path is not None
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    assert "cell_series" not in manifest["features"]
+    assert "domain_summary" in manifest["features"]
+
+
+def test_domains_that_disagree_on_the_start_do_not_advertise_one(tmp_path):
+    """`start_local` is the label the page pins to index 0. Advertising one of
+    two would date every frame of the other domain wrongly.
+    """
+    split, shared = tmp_path / "split", tmp_path / "shared"
+    split.mkdir()
+    shared.mkdir()
+
+    disagreeing = jobs.write_run_manifest(
+        split,
+        [
+            _values_unit(split, "D01", range(3), n_steps=3, start_local="03/05/2026 00:00:00"),
+            _values_unit(split, "D02", range(3), n_steps=3, start_local="03/05/2026 06:00:00"),
+        ],
+    )
+    agreeing = jobs.write_run_manifest(
+        shared,
+        [
+            _values_unit(shared, "D01", range(3), n_steps=3, start_local="03/05/2026 00:00:00"),
+            _values_unit(shared, "D02", range(3), n_steps=3, start_local="03/05/2026 00:00:00"),
+        ],
+    )
+
+    assert disagreeing is not None
+    assert agreeing is not None
+    assert "start_local" not in json.loads(Path(disagreeing).read_text(encoding="utf-8"))
+    assert (
+        json.loads(Path(agreeing).read_text(encoding="utf-8"))["start_local"]
+        == "03/05/2026 00:00:00"
+    )
+
+
+def test_a_run_that_did_not_cover_every_variable_publishes_no_byte_offsets(tmp_path):
+    """The two feature templates are wildcards over the whole directory, so a
+    partial run would point the site at the previous run's matrices under this
+    run's version stamp. Every unit here succeeded; only the coverage flag says
+    the run was partial.
+    """
+    json_dir = tmp_path / "json"
+    json_dir.mkdir()
+
+    manifest_path = jobs.write_run_manifest(
+        json_dir,
+        [_values_unit(json_dir, "D01", range(3), n_steps=3)],
+        covers_every_variable=False,
+    )
+
+    assert manifest_path is not None
+    assert "features" not in json.loads(Path(manifest_path).read_text(encoding="utf-8"))
 
 
 def test_availability_is_the_intersection_across_domains(tmp_path):

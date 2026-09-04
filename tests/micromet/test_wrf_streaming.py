@@ -6,6 +6,7 @@ import netCDF4
 import numpy as np
 import pytest
 
+from micrometeorology.wrf import geojson
 from micrometeorology.wrf import variables as vmod
 from micrometeorology.wrf.reader import WRFDataset
 from tests.micromet._reference import (
@@ -118,6 +119,65 @@ def test_stream_wind_at_heights_matches_eager_path_bitwise(tmp_path, block_steps
                 got["downsampled_magnitudes"]
                 == np.round(ref_vec["downsampled_magnitudes"], 2).tolist()
             )
+
+
+def test_the_block_path_rotates_the_wind_onto_true_north(tmp_path):
+    """The fixture above writes COSALPHA=1, SINALPHA=0 and the frozen oracle
+    never rotates at all, so the two agree whatever the block path does with the
+    angle. On a quarter-turn grid the earth-relative components are ``(v, -u)``:
+    a sign error or a mis-sliced block of the rotation field moves them.
+
+    The blocks are shorter than the time axis on purpose — the per-block slice of
+    COSALPHA/SINALPHA is exactly what a whole-file read would get wrong.
+    """
+    path = tmp_path / "wrfout_d03_rotated.nc"
+    _write_wind_wrf_file(path)
+    with netCDF4.Dataset(path, "a") as ds:
+        ds.variables["COSALPHA"][:] = np.zeros((NT, NY, NX), dtype=np.float32)
+        ds.variables["SINALPHA"][:] = np.ones((NT, NY, NX), dtype=np.float32)
+
+    with WRFDataset(path) as ds:
+        u_central, v_central, height_adjusted, _speed = compute_adjusted_heights(ds)
+        turned = vmod.stream_wind_at_heights(ds, (100,), block_steps=3)
+
+    (series,) = turned
+    for step, payload in enumerate(series.wind_vectors):
+        assert payload is not None
+        quarter_turned = compute_wind_vectors_at_height(
+            v_central[step : step + 1],
+            -u_central[step : step + 1],
+            height_adjusted[step : step + 1],
+            100,
+            downsampling=4,
+        )
+        assert (
+            payload["downsampled_angles"]
+            == np.round(quarter_turned["downsampled_angles"], 1).tolist()
+        )
+
+
+def test_the_two_wind_vector_producers_package_one_step_identically():
+    """The angle arithmetic — arctan2(u, v), the +360 wrap, 1 and 2 decimals, the
+    NaN drop — lives in two production functions: the streamed overlay embedded
+    in POT_EOLICO and the standalone WIND_VECTORS file. The page draws arrows
+    from either, so a change to one alone would silently split the two.
+    """
+    generator = np.random.default_rng(19)
+    u = generator.uniform(-20.0, 20.0, (8, 12)).astype(np.float32)
+    v = generator.uniform(-20.0, 20.0, (8, 12)).astype(np.float32)
+    u[0, 4] = np.nan
+
+    standalone = geojson.create_wind_vectors_json(u, v, None, downsampling=4)
+    rows, columns = np.arange(0, 8, 4), np.arange(0, 12, 4)
+    subgrid = np.ix_(rows, columns)
+    streamed = vmod._package_wind_vectors_step(
+        u[subgrid],
+        v[subgrid],
+        (rows[:, np.newaxis] * 12 + columns[np.newaxis, :]).ravel(),
+    )
+
+    for key in ("downsampled_angles", "downsampled_magnitudes", "downsampled_linear_indices"):
+        assert streamed[key] == standalone[key], key
 
 
 def _write_offsubgrid_defects_wrf_file(path: Path, *, seed: int = 41) -> None:
