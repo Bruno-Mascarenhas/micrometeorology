@@ -96,7 +96,8 @@ jobs:
       - name: Smoke-test built wheel
         run: |
           uv pip install --python .venv/bin/python --reinstall --no-deps dist/*.whl
-          .venv/bin/python -c 'from importlib.metadata import version; import allsky, micrometeorology, solrad_correction; assert micrometeorology.__version__ == version("labmim-micrometeorology")'
+          .venv/bin/python -c 'from importlib.metadata import version; import allsky, labmim_core, micrometeorology, solrad_correction; assert micrometeorology.__version__ == version("labmim-micrometeorology")'
+          .venv/bin/python -c 'import pathlib, micrometeorology; assert (pathlib.Path(micrometeorology.__file__).parent / "configs/micromet/default.yaml").is_file()'
 
       - name: Cache MyPy
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

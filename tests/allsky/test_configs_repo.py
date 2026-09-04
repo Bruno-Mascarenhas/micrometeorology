@@ -154,6 +154,29 @@ def test_every_experiment_trains_on_a_dataset_some_prepare_config_builds(
     assert cfg.data.data_root in prepared, cfg.data.data_root
 
 
+def test_the_isotropic_calibration_matches_the_crop_and_pad_that_produced_it() -> None:
+    """``allsky.lens`` derives three constants from this config's crop and pad,
+    and the derivation lives only in a comment. Moving ``crop.left``,
+    ``crop.width`` or ``pad.top`` here leaves ``isotropic_calibration()``
+    returning the old centre, and every geometry channel is then drawn around a
+    point the frames no longer have.
+    """
+    from allsky.lens import _ISOTROPIC_CROP_LEFT, _ISOTROPIC_PAD_TOP, ISOTROPIC_FRAME_PX
+
+    cfg = load_prepare_config(_CONFIGS / "data" / "local_prepare_iso.yaml")
+    sensor_width = 1920
+
+    width, height = cfg.crop.width, cfg.crop.height
+    assert width is not None
+    assert height is not None
+
+    assert width == ISOTROPIC_FRAME_PX
+    assert (sensor_width - width) // 2 + cfg.crop.left == _ISOTROPIC_CROP_LEFT
+    assert cfg.pad.top == _ISOTROPIC_PAD_TOP
+    # The pad squares the frame: the padded height must equal the cropped width.
+    assert height + cfg.pad.top + cfg.pad.bottom == ISOTROPIC_FRAME_PX
+
+
 @pytest.mark.parametrize("fragment", _FRAGMENTS, ids=lambda p: p.name)
 def test_model_fragment_loads_and_names_a_real_model(fragment: Path) -> None:
     """Each ``models/*.yaml`` fragment loads and names a registered model."""

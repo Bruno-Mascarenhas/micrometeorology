@@ -16,7 +16,9 @@ import json
 import re
 import tomllib
 from pathlib import Path
+from typing import Any
 
+import pytest
 import yaml
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +26,15 @@ _PYPROJECT = _ROOT / "pyproject.toml"
 _ENVIRONMENT = _ROOT / "environment.yml"
 _NOTEBOOK = _ROOT / "notebooks" / "allsky_multimodal_colab.ipynb"
 _NOTEBOOKS_README = _ROOT / "notebooks" / "README.md"
+_CITATION = _ROOT / "CITATION.cff"
+_ZENODO = _ROOT / ".zenodo.json"
+_README = _ROOT / "README.md"
+#: Notebooks whose outputs must be stripped. ``legacy/`` predates the rule.
+_NOTEBOOKS = sorted(
+    path
+    for path in (_ROOT / "notebooks").rglob("*.ipynb")
+    if ".ipynb_checkpoints" not in path.parts
+)
 
 
 def _filterwarnings() -> list[str]:
@@ -49,6 +60,87 @@ def _configured_branch() -> str:
 
 def _clone_cell() -> str:
     return next(source for source in _notebook_cell_sources() if '"clone"' in source)
+
+
+def _citation() -> dict[str, Any]:
+    loaded: dict[str, Any] = yaml.safe_load(_CITATION.read_text(encoding="utf-8"))
+    return loaded
+
+
+def _zenodo() -> dict[str, Any]:
+    loaded: dict[str, Any] = json.loads(_ZENODO.read_text(encoding="utf-8"))
+    return loaded
+
+
+def _pyproject() -> dict:
+    with open(_PYPROJECT, "rb") as fh:
+        return tomllib.load(fh)
+
+
+def test_the_release_metadata_agrees_on_one_version() -> None:
+    """CITATION.cff is what a citing paper reads and pyproject is what the wheel
+    reports; a release that moves one and not the other cites code that was
+    never published.
+    """
+    assert _citation()["version"] == _pyproject()["project"]["version"]
+
+
+def test_the_doi_the_citation_gives_is_the_one_the_readme_advertises() -> None:
+    """Two hand-maintained copies of a DOI point readers at two records."""
+    doi = _citation()["doi"]
+
+    assert doi in _README.read_text(encoding="utf-8")
+
+
+def test_every_metadata_file_declares_the_same_licence() -> None:
+    """A licence stated four ways is a licence nobody can rely on."""
+    assert _citation()["license"] == "MIT"
+    assert _zenodo()["license"] == "MIT"
+    assert _pyproject()["project"]["license"]["text"] == "MIT"
+    assert (_ROOT / "LICENSE").read_text(encoding="utf-8").startswith("MIT License")
+
+
+def test_the_citation_and_the_zenodo_record_name_the_same_authors() -> None:
+    """Zenodo mints the DOI from .zenodo.json and the CFF is what tooling cites;
+    an author on one and not the other is dropped from half the record.
+    """
+    cited = {
+        f"{author['family-names']}, {author['given-names']}"
+        for author in _citation()["authors"]
+        if "family-names" in author
+    }
+
+    assert cited == {creator["name"] for creator in _zenodo()["creators"]}
+
+
+@pytest.mark.parametrize("notebook", _NOTEBOOKS, ids=lambda path: path.name)
+def test_a_tracked_notebook_carries_no_cell_output(notebook: Path) -> None:
+    """The house rule asks for stripped outputs before every commit and nothing
+    enforced it: a notebook committed with 40 MB of inline images is permanent
+    in the history. Checked here rather than by a hook so it costs no new
+    dependency and fails in CI like any other test.
+    """
+    cells = json.loads(notebook.read_text(encoding="utf-8"))["cells"]
+
+    carrying = [
+        position
+        for position, cell in enumerate(cells)
+        if cell.get("cell_type") == "code" and (cell.get("outputs") or cell.get("execution_count"))
+    ]
+    assert carrying == [], f"{notebook.name}: cells {carrying} carry output"
+
+
+def test_the_notebook_names_configs_that_exist() -> None:
+    """The clone cell's BRANCH was pinned after a run died on it; the config
+    paths the same notebook passes to the CLI fail the same way, one cell later.
+    """
+    referenced = set()
+    for source in _notebook_cell_sources():
+        referenced.update(re.findall(r'"(configs/[^"]+\.yaml)"', source))
+        referenced.update(re.findall(r"--config\s+(\S*configs/\S+\.yaml)", source))
+
+    assert referenced, "the notebook names no config at all"
+    assert [name for name in sorted(referenced) if not (_ROOT / name).is_file()] == []
 
 
 def test_deprecation_warnings_are_visible() -> None:
