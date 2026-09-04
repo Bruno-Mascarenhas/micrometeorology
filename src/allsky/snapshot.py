@@ -746,6 +746,34 @@ def _clearsky_dhi_reference(timestamp: pd.Timestamp, site: SiteConfig) -> float:
     return float(np.asarray(clearsky_diffuse(zenith_deg, times, site.utc_offset_hours))[0])
 
 
+def _refuse_a_windowed_checkpoint(cfg: ExperimentConfig) -> None:
+    """Refuse to serve a checkpoint fitted on a window from a single frame.
+
+    A snapshot is one capture, so the batch carries one ``image``/``embedding``
+    and never the ``image_seq``/``embedding_seq`` a pooled window is served as.
+    The encoders fall back to their single-frame branch when the sequence key is
+    absent, so a ``mean_embedding`` or ``attention_pooling`` checkpoint scored
+    one frame where it was fitted on up to ``alignment.max_frames`` — no error,
+    no warning, and a plausible number. Silence is the one option ruled out;
+    building the window here needs the frames around the capture, which a live
+    snapshot does not have.
+
+    Raises
+    ------
+    ValueError
+        Naming the strategy the checkpoint was trained under.
+    """
+    strategy = cfg.data.alignment.strategy
+    if strategy == "center_frame":
+        return
+    raise ValueError(
+        f"this checkpoint was trained with alignment.strategy={strategy!r}, which pools "
+        f"up to {cfg.data.alignment.max_frames} frames over "
+        f"{cfg.data.alignment.window_minutes:g} min; a snapshot is a single capture and "
+        "scoring it would silently use the model's single-frame path"
+    )
+
+
 def predict_snapshot(
     image_path: str | Path,
     checkpoint_path: str | Path,
@@ -854,6 +882,7 @@ def predict_snapshot(
         timestamp_offset_minutes=pairing.timestamp_offset_minutes,
     )
     standardized = feature_normalizer.transform(pd.DataFrame([raw_values], columns=feature_columns))
+    _refuse_a_windowed_checkpoint(cfg)
     image_size = image_size_of(cfg)
 
     batch: dict[str, Any] = {"features": torch.from_numpy(standardized).to(device)}

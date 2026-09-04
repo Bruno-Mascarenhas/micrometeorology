@@ -646,3 +646,29 @@ def test_a_checkpoint_recording_no_geometry_warns_instead_of_passing_silently(
         assert _frame_geometry(payload) is None
 
     assert "records no frame geometry" in caplog.text
+
+
+@pytest.mark.parametrize("strategy", ["mean_embedding", "attention_pooling"])
+def test_a_windowed_checkpoint_refuses_to_be_scored_from_one_capture(
+    embedding_checkpoint: Path, sky_image: Path, strategy: str
+) -> None:
+    """The batch carries one `embedding`, never the `embedding_seq` a pooled
+    window is served as, and the encoder falls back to its single-frame branch
+    when the sequence key is absent: three shipped `janela_*` families train
+    image mode with `mean_embedding`, and scoring one of them live produced a
+    plausible number from a model fitted on five frames."""
+    import torch
+
+    payload = load_checkpoint(embedding_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["config"]["data"]["alignment"]["strategy"] = strategy
+    torch.save(payload, embedding_checkpoint)
+
+    with pytest.raises(ValueError, match=strategy):
+        predict_snapshot(
+            sky_image,
+            embedding_checkpoint,
+            timestamp=pd.Timestamp("2026-01-01 12:00:00"),
+            sensor_csv=None,
+            sensor_limits=[],
+            trust_checkpoint=True,
+        )
