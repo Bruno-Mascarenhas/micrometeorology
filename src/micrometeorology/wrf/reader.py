@@ -66,6 +66,53 @@ def detect_grid_level(path: str | Path) -> GridLevel | None:
     return None
 
 
+def _fill_value_of(var: netCDF4.Variable) -> float | None:
+    """The value this variable writes where nothing was ever computed.
+
+    ``_FillValue``/``missing_value`` when the file declares one; otherwise the
+    netCDF library's own default for the dtype, which is what an unwritten
+    record of an operational ``wrfout`` actually holds — WRF sets no explicit
+    ``_FillValue``.  ``None`` for a non-floating dtype, where no default fill is
+    distinguishable from data.
+    """
+    for attribute in ("_FillValue", "missing_value"):
+        if attribute in var.ncattrs():
+            return float(np.asarray(var.getncattr(attribute)).reshape(-1)[0])
+    dtype = np.dtype(var.dtype)
+    if dtype.kind != "f":
+        return None
+    return float(netCDF4.default_fillvals[dtype.str[1:]])
+
+
+def _reject_fill_values(arr: NDArray, var: netCDF4.Variable, name: str, where: str) -> None:
+    """Refuse an array carrying the fill value as if it were a measurement.
+
+    :class:`WRFDataset` disables auto-masking, so an unwritten record comes back
+    as a plain, FINITE ``9.96921e+36`` — ``np.isfinite`` says True and every
+    downstream reduction treats it as data: colour scales in the 1e36, cell
+    values published verbatim in the site JSON, and no error anywhere.  The
+    comparison is exact on purpose: the fill is a bit pattern the netCDF library
+    writes, never a computed quantity.
+
+    Raises
+    ------
+    ValueError
+        Naming the variable and the affected time steps.
+    """
+    fill = _fill_value_of(var)
+    if fill is None or arr.dtype.kind != "f":
+        return
+    offending = arr == fill
+    if not offending.any():
+        return
+    steps = sorted({int(step) for step in np.nonzero(offending)[0]}) if offending.ndim > 1 else [0]
+    raise ValueError(
+        f"WRF variable {name!r} carries the netCDF fill value {fill:g} at {where} "
+        f"(time step(s) {steps}): the model never wrote those records, and read "
+        "unmasked the value is finite and would publish as data"
+    )
+
+
 def assert_one_file_per_domain(paths: Sequence[str | Path]) -> None:
     """Raise ``ValueError`` when two files would publish under the same domain.
 
@@ -257,12 +304,16 @@ class WRFDataset:
             absent field as skippable check :meth:`has_variable` first.
         MemoryError
             When the full read would exceed the array-size ceiling.
+        ValueError
+            When the variable carries the netCDF fill value, i.e. records the
+            model never wrote (see :func:`_reject_fill_values`).
         """
         var = self._ds.variables[name]
         shape = tuple(int(size) for size in var.shape)
         dtype = np.dtype(var.dtype)
         assert_reasonable_array_size(shape, dtype, context=f"eager read of WRF variable {name}")
         arr = np.asarray(var[:])
+        _reject_fill_values(arr, var, name, f"{self.path.name}")
         squeeze_axes = tuple(i for i, size in enumerate(arr.shape) if size == 1 and i != 0)
         if not squeeze_axes:
             return arr
@@ -284,7 +335,8 @@ class WRFDataset:
         Raises
         ------
         ValueError
-            When the block is empty or starts before the first step.
+            When the block is empty, starts before the first step, or carries
+            the netCDF fill value (see :func:`_reject_fill_values`).
         MemoryError
             When the block would exceed the array-size ceiling.
         """
@@ -299,7 +351,9 @@ class WRFDataset:
             np.dtype(var.dtype),
             context=f"block read of WRF variable {name}",
         )
-        return np.asarray(var[t_start:t_stop])
+        block = np.asarray(var[t_start:t_stop])
+        _reject_fill_values(block, var, name, f"{self.path.name}[{t_start}:{t_stop}]")
+        return block
 
     def has_variable(self, name: str) -> bool:
         """Whether ``name`` is present among the file's NetCDF variables."""

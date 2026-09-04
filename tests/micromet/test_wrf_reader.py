@@ -225,3 +225,41 @@ def test_build_date_metadata_flags_skipped_steps(tmp_path):
         entries = wrf.build_date_metadata(skip_first_n=1)
     assert [e["skip"] for e in entries] == [True, False]
     assert [e["index"] for e in entries] == [0, 1]
+
+
+def test_an_unwritten_record_is_refused_instead_of_publishing_9e36(tmp_path):
+    """``set_auto_mask(False)`` hands back the fill value as a plain float, so
+    ``np.isfinite`` says True and every reduction downstream — colour scales,
+    published cell values — treats 9.96921e+36 as a measurement."""
+    path = tmp_path / "wrfout_d02_2026-05-03_00:00:00"
+    with netCDF4.Dataset(path, "w") as ds:
+        ds.createDimension("Time", None)
+        ds.createDimension("south_north", 2)
+        ds.createDimension("west_east", 3)
+        ds.createDimension("DateStrLen", 19)
+        ds.setncattr("DX", 1000.0)
+        ds.setncattr("DY", 1000.0)
+        times = ds.createVariable("Times", "S1", ("Time", "DateStrLen"))
+        hfx = ds.createVariable("HFX", "f4", ("Time", "south_north", "west_east"))
+        for step in range(3):
+            stamp = f"2026-05-03_0{step}:00:00"
+            times[step] = np.array(list(stamp), dtype="S1")
+        # The Time dimension is extended by writing Times but not HFX for the
+        # last step: the shape of a run interrupted partway through a record.
+        hfx[0:2] = 1.0
+
+    with WRFDataset(path) as wrf:
+        assert np.isfinite(np.asarray(wrf.dataset.variables["HFX"][:])).all()
+        with pytest.raises(ValueError, match="fill value"):
+            wrf.get_variable("HFX")
+        with pytest.raises(ValueError, match="fill value"):
+            wrf.get_variable_block("HFX", 0, 3)
+
+
+def test_a_fully_written_variable_still_reads(tmp_path):
+    path = tmp_path / "wrfout_d02_2026-05-04_00:00:00"
+    _write_tiny_wrf_file(path, n_times=2)
+
+    with WRFDataset(path) as wrf:
+        assert wrf.get_variable("T2").shape[0] == 2
+        assert wrf.get_variable_block("T2", 0, 2).shape[0] == 2
