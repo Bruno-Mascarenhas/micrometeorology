@@ -136,6 +136,7 @@ def save_checkpoint(
     split_id: str | None,
     manifest_sha256: str | None,
     sensor_pairing: Mapping[str, float] | None = None,
+    frame_geometry: Mapping[str, Any] | None = None,
     backbone_info: Mapping[str, Any] | None = None,
     code_version_info: Mapping[str, Any] | None = None,
     rng_state: Mapping[str, Any] | None = None,
@@ -172,6 +173,10 @@ def save_checkpoint(
         ``{timestamp_offset_minutes, tolerance_minutes}`` the manifest paired
         with, so live prediction pairs the way the run trained; ``None`` when
         the sidecar recorded neither.
+    frame_geometry:
+        The ``mask``/``crop``/``pad``/``resize`` the dataset's frames were
+        prepared with, so live prediction shapes the frame the same way;
+        ``None`` for a manifest built before the sidecar recorded it.
     backbone_info:
         Image-mode backbone identity (name / revision / pooling / dim / frozen);
         ``None`` in embedding mode.
@@ -205,6 +210,7 @@ def save_checkpoint(
         "split_id": split_id,
         "manifest_sha256": manifest_sha256,
         "sensor_pairing": dict(sensor_pairing) if sensor_pairing is not None else None,
+        "frame_geometry": dict(frame_geometry) if frame_geometry is not None else None,
         "backbone": dict(backbone_info) if backbone_info is not None else None,
         "code_version": dict(code_version_info)
         if code_version_info is not None

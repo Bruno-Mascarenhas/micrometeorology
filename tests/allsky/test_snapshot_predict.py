@@ -27,7 +27,7 @@ import pytest
 from typer.testing import CliRunner
 
 from allsky.cli import app
-from allsky.config import SITE_UTC_OFFSET_HOURS, ExperimentConfig
+from allsky.config import SITE_UTC_OFFSET_HOURS, ExperimentConfig, PrepareConfig
 from allsky.embeddings import backbone as backbone_module
 from allsky.embeddings.storage import META_FILENAME, read_meta, write_meta
 from allsky.snapshot import (
@@ -588,3 +588,61 @@ def test_a_checkpoint_recording_no_pairing_keeps_the_documented_default(
     assert pairing["from_checkpoint"] is False
     assert pairing["tolerance_minutes"] == pytest.approx(15.0)
     assert pairing["gap_minutes"] == pytest.approx(6.0)
+
+
+def test_the_live_frame_is_shaped_by_the_prepare_geometry_the_checkpoint_records(
+    tmp_path: Path,
+) -> None:
+    """`ExperimentConfig` carries only overlay/ROI; the mask, crop and pad that
+    inscribe the fisheye disc concentrically live on `PrepareConfig` and never
+    travelled, so a checkpoint trained on the isotropic dataset was served a
+    1.78x horizontally squeezed full frame with nothing detecting it."""
+    from PIL import Image
+
+    from allsky.preprocessing import model_input_frame
+
+    wide = tmp_path / "wide.jpg"
+    pixels = np.zeros((36, 64, 3), dtype=np.uint8)
+    pixels[:, :32] = 255  # left half white, so a left crop is visible in the mean
+    Image.fromarray(pixels).save(wide, quality=100)
+
+    geometry = PrepareConfig.model_validate(
+        {"crop": {"enabled": True, "top": 0, "left": 32, "height": 36, "width": 32}}
+    )
+
+    squeezed = model_input_frame(wide, size=16)
+    cropped = model_input_frame(wide, size=16, geometry=geometry)
+
+    assert float(squeezed.mean()) > 0.4
+    assert float(cropped.mean()) < 0.05
+
+
+def test_a_checkpoint_whose_mask_is_not_on_this_machine_refuses_to_score(
+    embedding_checkpoint: Path,
+) -> None:
+    """A static mask zeroes pixels, so scoring without it is a different image."""
+    import torch
+
+    from allsky.snapshot import _frame_geometry
+
+    payload = load_checkpoint(embedding_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["frame_geometry"] = {"mask": {"path": "/nowhere/mask.png", "threshold": None}}
+    torch.save(payload, embedding_checkpoint)
+    reloaded = load_checkpoint(embedding_checkpoint, map_location="cpu", trust_pickle=True)
+
+    with pytest.raises(ValueError, match=r"not\s+on this machine"):
+        _frame_geometry(reloaded)
+
+
+def test_a_checkpoint_recording_no_geometry_warns_instead_of_passing_silently(
+    embedding_checkpoint: Path, caplog
+) -> None:
+    from allsky.snapshot import _frame_geometry
+
+    payload = load_checkpoint(embedding_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["frame_geometry"] = None
+
+    with caplog.at_level("WARNING"):
+        assert _frame_geometry(payload) is None
+
+    assert "records no frame geometry" in caplog.text

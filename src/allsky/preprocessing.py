@@ -266,6 +266,13 @@ class PreprocessingPipeline:
         the same transforms or the model sees pixels it was not fitted on, and
         nothing reports the difference. One reader, so a field added to
         :class:`~allsky.config.PreprocessingConfig` reaches all three at once.
+
+        This covers ``PreprocessingConfig`` — the overlay band and the ROI — and
+        nothing else. The mask/crop/pad/resize that shaped the frames on disk
+        live on :class:`~allsky.config.PrepareConfig`, which no
+        ``ExperimentConfig`` carries; they travel as the checkpoint's own
+        ``frame_geometry`` and reach :func:`model_input_frame` through its
+        *geometry* argument.
         """
         return cls(**cfg.preprocessing.model_dump())
 
@@ -341,19 +348,28 @@ def model_input_frame(
     *,
     size: int,
     preprocess: PreprocessingPipeline | None = None,
+    geometry: PrepareConfig | None = None,
 ) -> np.ndarray:
     """Decode one frame into the array a visual backbone is fed, minus the standardisation.
 
-    This is the whole train/serve chain in one place: decode -> preprocess at
-    **native** resolution -> resize -> ``[0, 1]`` CHW. It deliberately stops
+    The chain the dataset's own frames went through, in one place: decode ->
+    prepare geometry (mask/crop/pad/resize, *geometry*) -> preprocess at the
+    resulting resolution -> resize -> ``[0, 1]`` CHW. It deliberately stops
     short of :func:`imagenet_standardize` because the training dataset augments
     between the two and the serving path does not — that one step is the only
     difference the two sides are allowed to have, and keeping the rest here is
     what stops them drifting.
 
-    The preprocessing runs before the resize on purpose: the overlay band is a
-    fixed fraction of the *native* frame, and a bilinear resize would smear its
-    edge into the sky below it.
+    *geometry* is the ``PrepareConfig`` stage that ran once, at extraction time,
+    to write the JPEGs the dataset reads; the dataset itself never sees it.
+    Serving therefore has to re-apply it, and that is exactly what
+    :class:`~allsky.config.ExperimentConfig` could not describe: a checkpoint
+    trained on the isotropic dataset was fed a 1.78x horizontally squeezed
+    full frame, with nothing detecting the mismatch.
+
+    The preprocessing runs before the final resize on purpose: the overlay band
+    is a fixed fraction of the frame, and a bilinear resize would smear its edge
+    into the sky below it.
 
     Parameters
     ----------
@@ -364,6 +380,9 @@ def model_input_frame(
     preprocess:
         Deterministic pipeline from the run's config; ``None`` or a disabled one
         leaves the pixels alone.
+    geometry:
+        The prepare geometry the training frames were written through; ``None``
+        leaves the decoded pixels as they are.
 
     Returns
     -------
@@ -371,7 +390,13 @@ def model_input_frame(
         ``(3, size, size)`` float32 in ``[0, 1]``, C-contiguous and freshly
         allocated — so the caller may standardize it in place.
     """
-    if preprocess is not None and preprocess.enabled:
+    if geometry is not None:
+        arr = process_frame(decode_rgb(source), geometry)
+        if preprocess is not None and preprocess.enabled:
+            arr = preprocess.apply_uint8_hwc(arr)
+        if arr.shape[0] != size or arr.shape[1] != size:
+            arr = resize_bilinear(arr, size)
+    elif preprocess is not None and preprocess.enabled:
         arr = preprocess.apply_uint8_hwc(decode_rgb(source))
         if arr.shape[0] != size or arr.shape[1] != size:
             arr = resize_bilinear(arr, size)

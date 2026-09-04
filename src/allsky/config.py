@@ -693,6 +693,26 @@ class PrepareConfig(BaseModel):
     splits: SplitsConfig = Field(default_factory=SplitsConfig)
 
 
+def frame_geometry_of(cfg: PrepareConfig) -> dict[str, Any]:
+    """The prepare sections that decide which PIXELS a frame holds.
+
+    :data:`FRAME_PIXEL_SECTIONS` dumped from *cfg*, in a shape
+    :meth:`PrepareConfig.model_validate` accepts back, so a checkpoint can carry
+    the geometry its dataset was built with.  ``ExperimentConfig`` — the config a
+    checkpoint stores — has only ``preprocessing`` (overlay/ROI); mask, crop, pad
+    and resize live on ``PrepareConfig`` alone and never travelled, so a live
+    frame was scored as decoded while the model was fitted on a cropped, padded,
+    isotropically resized one, with nothing detecting the difference.
+
+    Returns
+    -------
+    dict
+        ``{"mask", "crop", "pad", "resize"}``, JSON-able.
+    """
+    dumped = cfg.model_dump(mode="json")
+    return {section: dumped[section] for section in FRAME_PIXEL_SECTIONS}
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Recursively merge *override* into *base*, returning a new dict.
 

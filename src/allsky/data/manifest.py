@@ -39,6 +39,7 @@ from allsky.config import (
     SITE_UTC_OFFSET_HOURS,
     PrepareConfig,
     SiteConfig,
+    frame_geometry_of,
     manifest_meta_path,
 )
 from allsky.data.alignment import CenterFrame
@@ -452,7 +453,7 @@ def build_manifest_from_prepare_config(
         window_minutes=cfg.alignment.window_minutes,
         max_distance_minutes=cfg.sensor.tolerance_minutes,
     )
-    return build_manifest(
+    manifest, meta = build_manifest(
         frames_manifest,
         sensor_df,
         site=cfg.site,
@@ -466,6 +467,13 @@ def build_manifest_from_prepare_config(
         sensor_timestamp_offset_minutes=cfg.sensor.timestamp_offset_minutes,
         config_sha256=config_sha256,
     )
+    # The pixels the frames on disk actually hold. Only this builder knows the
+    # PrepareConfig, and a checkpoint stores an ExperimentConfig, which carries
+    # no mask/crop/pad/resize at all: without recording it here, serving a live
+    # frame reproduced the encoder's transforms but not the geometry the dataset
+    # was built with.
+    meta["frame_geometry"] = frame_geometry_of(cfg)
+    return manifest, meta
 
 
 def write_manifest_parquet(

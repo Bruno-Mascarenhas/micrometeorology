@@ -22,6 +22,7 @@ import pandas as pd
 from allsky.config import (
     SITE_TZ,
     ExperimentConfig,
+    PrepareConfig,
     SiteConfig,
     geometry_channels_of,
     image_size_of,
@@ -457,13 +458,49 @@ def _image_as_hwc(image_path: str | Path) -> np.ndarray:
     return decode_rgb(image_path)
 
 
-def _image_as_chw(image_path: str | Path, size: int, cfg: ExperimentConfig) -> np.ndarray:
+def _frame_geometry(checkpoint: dict[str, Any]) -> PrepareConfig | None:
+    """The prepare geometry this checkpoint's frames were written through.
+
+    ``None`` when the run's manifest predates the sidecar recording it, in which
+    case the live frame is scored as decoded — which is what every checkpoint
+    got before, and is wrong for any dataset built with a crop or a pad, so it
+    warns rather than passing silently.
+
+    Raises
+    ------
+    ValueError
+        When the recorded geometry names a static mask this machine cannot read:
+        the mask zeroes pixels, so scoring without it is a different image.
+    """
+    recorded = checkpoint.get("frame_geometry")
+    if not recorded:
+        logger.warning(
+            "this checkpoint records no frame geometry; the live frame is scored as "
+            "decoded, which is not what the model saw if its dataset was built with a "
+            "mask, crop or pad (re-run prepare-local to record it)"
+        )
+        return None
+    geometry = PrepareConfig.model_validate(recorded)
+    if geometry.mask.path is not None and not Path(geometry.mask.path).is_file():
+        raise ValueError(
+            f"the checkpoint's frames were masked with {geometry.mask.path}, which is not "
+            "on this machine; scoring without it would feed the model pixels it never saw"
+        )
+    return geometry
+
+
+def _image_as_chw(
+    image_path: str | Path,
+    size: int,
+    cfg: ExperimentConfig,
+    geometry: PrepareConfig | None = None,
+) -> np.ndarray:
     """Decode one live frame the way :class:`MultimodalImageDataset` decodes a training one.
 
     This is the serving side of the train/serve pair, so the chain has to match
-    the dataset's exactly: decode -> ``[0, 1]`` -> preprocess at native
-    resolution -> resize -> standardize. Augmentation is training-only and has
-    no counterpart here.
+    the dataset's exactly: decode -> prepare geometry -> ``[0, 1]`` -> preprocess
+    -> resize -> standardize. Augmentation is training-only and has no
+    counterpart here.
 
     Parameters
     ----------
@@ -474,6 +511,11 @@ def _image_as_chw(image_path: str | Path, size: int, cfg: ExperimentConfig) -> n
     cfg:
         The checkpoint's own config, which carries the preprocessing settings
         the model was trained under.
+    geometry:
+        The mask/crop/pad/resize the dataset's own frames were written through,
+        from the checkpoint's ``frame_geometry``. ``ExperimentConfig`` cannot
+        express it, so without this the live frame kept its native aspect ratio
+        while the model was fitted on the cropped, padded one.
 
     Returns
     -------
@@ -487,6 +529,7 @@ def _image_as_chw(image_path: str | Path, size: int, cfg: ExperimentConfig) -> n
         image_path,
         size=size,
         preprocess=PreprocessingPipeline.from_config(cfg),
+        geometry=geometry,
     )
     return imagenet_standardize(chw, copy=False)
 
@@ -656,16 +699,17 @@ def _image_input(
     *,
     timestamp: pd.Timestamp,
     site: SiteConfig,
+    geometry: PrepareConfig | None = None,
 ) -> np.ndarray:
     """The ``(3 + G, S, S)`` ``float32`` tensor the image branch of *cfg* was trained on.
 
-    The three standardized RGB planes come from :func:`_image_as_chw`; the ``G``
-    solar-geometry planes are the ones the dataset stacks under
-    ``model.geometry_channels`` (:func:`allsky.geometry.solar_geometry_maps`),
-    built for *timestamp* on the site's own clock and the isotropic lens
-    calibration at *image_size*.
+    The three standardized RGB planes come from :func:`_image_as_chw`, through
+    the run's own *geometry*; the ``G`` solar-geometry planes are the ones the
+    dataset stacks under ``model.geometry_channels``
+    (:func:`allsky.geometry.solar_geometry_maps`), built for *timestamp* on the
+    site's own clock and the isotropic lens calibration at *image_size*.
     """
-    chw = _image_as_chw(image_path, image_size, cfg)
+    chw = _image_as_chw(image_path, image_size, cfg, geometry)
     channels = geometry_channels_of(cfg)
     if not channels:
         return chw
@@ -815,7 +859,14 @@ def predict_snapshot(
     batch: dict[str, Any] = {"features": torch.from_numpy(standardized).to(device)}
     embedding_dim = None
     if cfg.data.input_mode == "image":
-        image = _image_input(image_path, image_size, cfg, timestamp=timestamp, site=resolved_site)
+        image = _image_input(
+            image_path,
+            image_size,
+            cfg,
+            timestamp=timestamp,
+            site=resolved_site,
+            geometry=_frame_geometry(checkpoint),
+        )
         batch["image"] = torch.from_numpy(image).unsqueeze(0).to(device)
     else:
         from allsky.embeddings.storage import META_FILENAME

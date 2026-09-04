@@ -1431,6 +1431,7 @@ def _checkpoint_common(
         "split_id": split_id,
         "manifest_sha256": meta.get("manifest_sha256"),
         "sensor_pairing": _sensor_pairing(meta),
+        "frame_geometry": meta.get("frame_geometry"),
         "backbone_info": backbone_info,
         "code_version_info": code_version(),
     }
