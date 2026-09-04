@@ -73,7 +73,7 @@ not a sea-surface temperature. Pointed at a water cell it is one.
 import logging
 import re
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1189,7 +1189,7 @@ def rename_v1_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return renamed
 
 
-def read_wrf_series(path: str | Path) -> pd.DataFrame:
+def read_wrf_series(path: str | Path, *, consumes: Collection[str] = ()) -> pd.DataFrame:
     """Read ``series_operacional.dat`` defensively.
 
     The file is an append-only log of successive operational runs: **not**
@@ -1206,6 +1206,14 @@ def read_wrf_series(path: str | Path) -> pd.DataFrame:
     ----------
     path:
         The ``series_operacional.dat`` the operational extraction appends to.
+    consumes:
+        Column names the caller will actually publish from. An unmigrated v1
+        file is REFUSED when they include one of
+        :data:`V1_UNREPAIRED_COLUMNS`, whose v1 values are wrong by a known
+        formula — ``rh_pct`` is the humidity histogram and the humidity
+        overlay, ``swup_w_m2`` sits in the -10^5 W/m2. Left empty the file is
+        read as before, warning only: a caller that publishes none of the six
+        is unaffected by the schema.
 
     Returns
     -------
@@ -1214,10 +1222,29 @@ def read_wrf_series(path: str | Path) -> pd.DataFrame:
         :class:`~pandas.DatetimeIndex` of naive station-local hours (UTC-03),
         with the spin-up hour removed. A repeated timestamp keeps the LAST row,
         which is the most recent run's value for that hour.
+
+    Raises
+    ------
+    ValueError
+        When the file is still on v1 and *consumes* names a column
+        :func:`migrate_to_v2` has not repaired.
     """
     frame = pd.read_csv(path)
     frame = frame.drop(columns=[c for c in frame.columns if str(c).startswith("Unnamed")])
+    unmigrated = bool(legacy_spellings(list(frame.columns)))
     frame = rename_v1_columns(frame)
+    if unmigrated:
+        # Present AND consumed: a v1 file that never carried the column cannot
+        # serve a wrong value from it, and a caller that publishes none of the
+        # six is unaffected by the schema.
+        unrepaired = sorted(V1_UNREPAIRED_COLUMNS & set(consumes) & set(frame.columns))
+        if unrepaired:
+            raise ValueError(
+                f"{path} is still a v1 operational file and this run publishes "
+                f"{', '.join(unrepaired)}, which carry the values the v1 extraction "
+                "wrote — wrong by a known formula. Run `labmim-wrf-series migrate` "
+                "on the record first."
+            )
     stamps = pd.to_datetime(frame[["year", "month", "day", "hour"]])
     frame.index = pd.DatetimeIndex(stamps)
     frame = frame.drop(columns=["year", "month", "day", "hour"])

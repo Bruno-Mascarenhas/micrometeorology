@@ -1026,3 +1026,20 @@ def test_a_partial_last_row_left_by_an_interrupted_append_is_cut_and_written_aga
     assert written == 1
     assert len(lines) == 3
     assert lines[2].startswith("2026,8,8,23,25.5")
+
+
+def test_reading_an_unmigrated_v1_file_refuses_the_columns_the_migration_repairs(tmp_path):
+    """`rename_v1_columns` renames and nothing else, so a v1 file serves an albedo
+    near -273 and an `ur` derived from it. It warned and handed the frame back
+    anyway, and `export_climatology`/`generate_station_graphs` publish `rh_pct` —
+    a member of that set — as the humidity histogram and the humidity overlay."""
+    from micrometeorology.wrf.operational_record import RH_PCT, T2_C, read_wrf_series
+
+    path = tmp_path / "serie.dat"
+    _v1_file(path, [_v1_row(), _v1_row()])
+
+    # A caller publishing none of the six is unaffected by the schema.
+    assert T2_C in read_wrf_series(path, consumes=[T2_C]).columns
+
+    with pytest.raises(ValueError, match="still a v1 operational file"):
+        read_wrf_series(path, consumes=[T2_C, RH_PCT])

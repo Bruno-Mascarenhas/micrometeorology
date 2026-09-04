@@ -833,7 +833,7 @@ def run(
     }
 
     if wrf_path is not None:
-        model = read_wrf_series(wrf_path)
+        model = read_wrf_series(wrf_path, consumes=WRF_COLUMN.values())
         typer.echo(f"WRF: {len(model):,} horas, {model.index.min()} .. {model.index.max()}")
         sources.append(
             {

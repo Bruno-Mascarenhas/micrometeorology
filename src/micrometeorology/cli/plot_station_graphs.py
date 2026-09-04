@@ -656,7 +656,9 @@ def _load_wrf(path: Path, hourly: pd.DataFrame) -> pd.DataFrame:
     """Load the model series through the shared defensive reader and clip it."""
     from micrometeorology.wrf.operational_record import read_wrf_series
 
-    frame = read_wrf_series(path)
+    frame = read_wrf_series(
+        path, consumes=[name for chain in DEFAULT_WRF_COLUMNS.values() for name in chain]
+    )
     clipped: pd.DataFrame = frame.loc[hourly.index.min() : hourly.index.max()]
     logger.info("wrf layer: %d hours over the plotted window", len(clipped))
     return clipped

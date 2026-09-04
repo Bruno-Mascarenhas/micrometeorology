@@ -219,7 +219,10 @@ def run(
     if wrf_path is not None:
         from micrometeorology.wrf.operational_record import read_wrf_series
 
-        model_full = read_wrf_series(wrf_path)
+        model_full = read_wrf_series(
+            wrf_path,
+            consumes=[name for chart in MONITORING_CHARTS for s in chart.series for name in s.wrf],
+        )
 
     # `first` still anchors on the station, so the reader keeps the same seven
     # days of record behind them; only the END reaches forward. `--end` is an

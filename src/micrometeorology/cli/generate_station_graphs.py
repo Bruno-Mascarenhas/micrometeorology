@@ -726,7 +726,7 @@ def run(
 
     wrf: pd.DataFrame | None = None
     if wrf_path:
-        wrf = read_wrf_series(wrf_path)
+        wrf = read_wrf_series(wrf_path, consumes=WRF_COLUMNS.values())
         typer.echo(f"  wrf:   {len(wrf)} rows")
 
     if start_date is not None:
