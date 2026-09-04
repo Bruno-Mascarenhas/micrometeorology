@@ -285,3 +285,30 @@ def test_speed_weighting_still_applies_when_the_anemometer_is_present() -> None:
     )
 
     assert hourly["WindDir"].iloc[0] == pytest.approx(5.71, abs=0.1)
+
+
+def test_a_sample_whose_speed_alone_is_missing_still_bears_on_the_direction() -> None:
+    """Between the two extremes the tests already pin — no speed at all, and speed
+    throughout — sits the common case: speed present for part of the hour. Those
+    samples contributed NaN u/v that the resampled mean silently dropped, while
+    ``dir_counts`` counted all twelve directions and called the hour whole, so the
+    published bearing came from half the record the count claimed.
+    """
+    stamps = pd.date_range("2024-06-15 00:00", periods=12, freq="5min")
+    frame = pd.DataFrame(
+        {
+            "WindDir": [0.0] * 6 + [90.0] * 6,
+            "WS_ms": [1.0] * 6 + [float("nan")] * 6,
+        },
+        index=stamps,
+    )
+
+    hourly = aggregate_to_hourly(
+        frame,
+        min_samples=6,
+        sum_columns=[],
+        wind_dir_columns=["WindDir"],
+        wind_speed_column_map={"WindDir": "WS_ms"},
+    )
+
+    assert hourly["WindDir"].iloc[0] == pytest.approx(45.0, abs=0.1)

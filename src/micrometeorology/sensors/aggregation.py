@@ -116,7 +116,14 @@ def aggregate_to_hourly(
             return pd.DataFrame({"u": u, "v": v}, index=df.index).resample(freq).mean()
 
         if speed_col is not None and speed_col in df.columns:
-            uv_means = directional_mean(df[speed_col].to_numpy())
+            speed = df[speed_col].to_numpy(dtype=float)
+            # A sample whose speed alone is missing contributes NaN u/v that the
+            # resampled mean silently drops, while `dir_counts` below -- the only
+            # completeness gate on the published direction -- counts the direction
+            # channel alone and calls the hour whole. Unit weight for exactly
+            # those samples keeps them in the vector mean, the same trade the
+            # sparse-hour fallback below already makes for a whole hour.
+            uv_means = directional_mean(np.where(np.isfinite(speed), speed, 1.0))
             # Where the speed is too sparse to weight with, fall back to the
             # unit-weight directional mean: losing the weight beats losing the hour.
             sparse = (resampler[speed_col].count() < min_samples).reindex(
