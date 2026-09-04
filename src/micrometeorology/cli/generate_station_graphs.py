@@ -791,7 +791,12 @@ def run(
     # build_archive joins the two tables `how="outer"` for the same reason.
     if RAIN_COLUMN in raw_rain.columns:
         hourly_rain = aggregate_to_hourly(raw_rain, min_samples=6, sum_columns=[RAIN_COLUMN])
-        hourly = hourly.join(hourly_rain[[RAIN_COLUMN]], how="outer")
+        # One of the archive's lenta tables carries the gauge column too, where
+        # the generic pass would have averaged it; the rain table's own SUM is
+        # the one the bars mean, so it replaces rather than collides.
+        hourly = hourly.drop(columns=[RAIN_COLUMN], errors="ignore").join(
+            hourly_rain[[RAIN_COLUMN]], how="outer"
+        )
         dropped = len(raw_rain.index.difference(raw.index))
         if dropped:
             typer.echo(f"  rain: {dropped} carimbo(s) fora do índice da lenta, preservados")

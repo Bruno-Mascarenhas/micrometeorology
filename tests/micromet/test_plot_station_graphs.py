@@ -541,7 +541,8 @@ class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
         only its aggregate Net column: a logger that stopped writing Rn dropped
         the four measured streams with it, even fully populated."""
         frame = self._frame()
-        shape = np.clip(np.sin((frame.index.hour.to_numpy() - 6) / 12.0 * np.pi), 0.0, None)
+        hours = pd.DatetimeIndex(frame.index).hour.to_numpy()
+        shape = np.clip(np.sin((hours - 6) / 12.0 * np.pi), 0.0, None)
         frame["CM3Up_Wm2_Avg"] = 900.0 * shape
         frame["CM3Dn_Wm2_Avg"] = 180.0 * shape
         frame["CG3Up_Wm2Cr_Avg"] = np.full(48, 400.0)

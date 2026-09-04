@@ -6,8 +6,12 @@ module deliberately avoids ``pytest.importorskip('torch')`` at import time.
 
 import subprocess
 import sys
+from typing import TYPE_CHECKING, cast
 
 import pytest
+
+if TYPE_CHECKING:
+    from allsky.modeling.fusion import CrossAttentionFusion
 
 from allsky.features import FEATURE_GROUPS, active_feature_groups, resolve_feature_set
 from allsky.modeling.contracts import group_slices
@@ -97,6 +101,7 @@ def test_cross_attention_tokenizes_a_column_added_through_features_extra():
 
     model = build_model(cfg, len(columns), embedding_dim=16)
 
-    tokenized = {columns[index] for indices in model.fusion._group_indices for index in indices}
+    fusion = cast("CrossAttentionFusion", model.fusion)
+    tokenized = {columns[index] for indices in fusion._group_indices for index in indices}
     assert "uv_wm2" in tokenized
     assert tokenized == set(columns)
