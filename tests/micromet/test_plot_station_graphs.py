@@ -726,3 +726,63 @@ class TestTheDateAxisSurvivesALongWindow:
             assert len(ticks) >= 3, len(ticks)
         finally:
             plt.close(fig)
+
+
+class TestLoadGraphConfigRefusals:
+    """Every documented `Raises` branch of the config loader was unexercised, so a
+    malformed override could have started passing silently and framed the graphs
+    against columns nobody declared."""
+
+    @pytest.mark.parametrize(
+        "override",
+        ["temperatura", "temperatura=", "temperature=AirT2"],
+    )
+    def test_a_malformed_or_unknown_override_is_refused(self, override: str) -> None:
+        with pytest.raises(ValueError, match="--col"):
+            load_graph_config(None, [override])
+
+    def test_a_direction_pair_that_is_not_a_pair_is_refused(self, tmp_path: Path) -> None:
+        config = tmp_path / "graphs.yaml"
+        config.write_text("direction_components: [u]\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="\\[u, v\\] pair"):
+            load_graph_config(config, [])
+
+    def test_a_valid_override_reaches_the_returned_chain(self) -> None:
+        columns, _balance, _direction = load_graph_config(None, ["temperatura=AirT2_C_Avg"])
+
+        assert columns["temperatura"] == ("AirT2_C_Avg",)
+
+
+class TestTheEmptyWindowExit:
+    """The sibling producer's own test cites this exit as precedent, and it was
+    itself untested: a cron chain must be able to tell an empty window from a
+    fresh publication, and neither leaves a PNG behind."""
+
+    @staticmethod
+    def _header_only(tmp_path: Path) -> Path:
+        path = tmp_path / "hourly.csv"
+        path.write_text("timestamp,AirT1_C_Avg\n", encoding="utf-8")
+        return path
+
+    @pytest.mark.parametrize(("strict", "expected"), [(False, 0), (True, 1)])
+    def test_an_empty_window_exits_by_the_strict_flag(
+        self, tmp_path: Path, strict: bool, expected: int
+    ) -> None:
+        out = tmp_path / "out"
+
+        result = runner.invoke(
+            app,
+            [
+                "site",
+                "-i",
+                str(self._header_only(tmp_path)),
+                "-o",
+                str(out),
+                *(["--strict"] if strict else []),
+            ],
+        )
+
+        assert result.exit_code == expected, result.output
+        assert "nothing to plot" in result.output
+        assert not list(out.glob("*.png")) if out.exists() else True

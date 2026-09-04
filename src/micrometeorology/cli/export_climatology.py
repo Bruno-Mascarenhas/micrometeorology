@@ -22,9 +22,9 @@ Publish straight into a checkout of the site::
         -w data/series/labmim_series_operacional.dat \\
         -o ../site-labmim/site/Climatologia
 
-Restrict to the observed record (no model subsets)::
+Restrict to the observed record (no model subsets) by leaving ``-w`` out::
 
-    labmim-climatology -i output/archive/station_hourly.parquet -o out/ --no-wrf
+    labmim-climatology -i output/archive/station_hourly.parquet -o out/
 """
 
 import functools
@@ -398,13 +398,29 @@ def _strip_atoms(
         # REPORTS while stalled. 2,794 hourly means sit on it exactly (4.0% of the
         # record) and 51.8% of them bear north against 5.3% for the record as a
         # whole — a parked vane, which a strict `<` would keep.
+        # An hour whose paired speed is missing satisfies NEITHER comparison, so
+        # it left the sample AND the calm atom, and the published coverage — n
+        # plus the atoms — came out short of the hours the record holds. It is
+        # its own atom: the vane read, the cup did not, and calling that calm
+        # would put a bearing measured in wind into the calm mass.
+        unpaired = int(speed.isna().sum())
         removed = int((speed <= CALM_THRESHOLD_MS).sum())
         calm = removed / len(series) if len(series) else float("nan")
         kept = series.loc[speed > CALM_THRESHOLD_MS]
         label = (
             f"Calmarias (até {CALM_THRESHOLD_MS:.3f} m/s, o valor que o anemômetro reporta parado)"
         ).replace(".", ",")
-        return _chronological(kept), [Atom("calm", label, calm, removed)]
+        atoms = [Atom("calm", label, calm, removed)]
+        if unpaired:
+            atoms.append(
+                Atom(
+                    "unpaired_speed",
+                    "Horas sem velocidade pareada (a calmaria nao pode ser decidida)",
+                    unpaired / len(series) if len(series) else float("nan"),
+                    unpaired,
+                )
+            )
+        return _chronological(kept), atoms
 
     if spec_id in ("relative_humidity", "relative_humidity_wxt"):
         removed = int((series >= SATURATION_RH).sum())

@@ -328,3 +328,48 @@ def test_rain_at_a_stamp_the_lenta_table_lacks_still_enters_the_hourly_sum(tmp_p
 
     assert result.exit_code == 0, result.output
     assert seen["hourly"]["PL01_mm_Tot"].sum() == pytest.approx(12.0)
+
+
+def test_the_wrf_overlay_reaches_the_graphs_end_to_end(full_station, tmp_path):
+    """`--wrf` is the whole model half of this command and no test drove it: the
+    overlay could have stopped reaching the figures with every assertion green."""
+    lenta, rain = full_station
+    index = pd.date_range(START_DATE, periods=48, freq="h")
+    wrf_dat = tmp_path / "series_operacional.dat"
+    pd.DataFrame(
+        {
+            "year": index.year,
+            "month": index.month,
+            "day": index.day,
+            "hour": index.hour,
+            "t2_c": np.linspace(20.0, 30.0, len(index)),
+            "swdown_w_m2": np.linspace(0.0, 900.0, len(index)),
+            "swddif_w_m2": np.linspace(0.0, 300.0, len(index)),
+        }
+    ).to_csv(wrf_dat, index=False)
+
+    result = _invoke(lenta, rain, tmp_path / "out", "-w", str(wrf_dat))
+
+    assert result.exit_code == 0, result.output
+    assert "temperatura.png" in _claimed_ok(result.output)
+
+
+def test_the_stamp_is_the_newest_sample_drawn_not_the_wall_clock():
+    """Without `--start-date`, `date_end` is today, so a record that stopped
+    months ago would be published under today's date. The rule was stated in a
+    comment and pinned by nothing."""
+    from micrometeorology.cli.generate_station_graphs import newest_plotted_stamp
+
+    lenta = pd.DataFrame({"x": [1.0]}, index=pd.DatetimeIndex(["2026-07-22 23:55"]))
+    rain = pd.DataFrame({"y": [1.0]}, index=pd.DatetimeIndex(["2026-07-22 12:00"]))
+
+    assert newest_plotted_stamp(lenta, rain) == pd.Timestamp("2026-07-22 23:55").to_pydatetime()
+
+
+def test_the_stamp_reads_the_rain_table_when_it_runs_later():
+    from micrometeorology.cli.generate_station_graphs import newest_plotted_stamp
+
+    lenta = pd.DataFrame({"x": [1.0]}, index=pd.DatetimeIndex(["2026-07-22 12:00"]))
+    rain = pd.DataFrame({"y": [1.0]}, index=pd.DatetimeIndex(["2026-07-22 23:55"]))
+
+    assert newest_plotted_stamp(lenta, rain) == pd.Timestamp("2026-07-22 23:55").to_pydatetime()

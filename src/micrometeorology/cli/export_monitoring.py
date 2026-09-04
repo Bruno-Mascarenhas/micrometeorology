@@ -116,6 +116,17 @@ def _regular(
     """
     if frame.empty:
         return frame, index
+    # Before `reindex`, which raises a raw pandas ValueError on a duplicated
+    # label — "cannot reindex on an axis with duplicate labels" — that reaches
+    # the operator as a traceback with no mention of the file or the cadence.
+    # The axis guard below cannot see it either: it reads the deltas, and a
+    # repeated stamp is a delta of zero among many, not a second cadence.
+    duplicated = index[index.duplicated()]
+    if len(duplicated):
+        raise ValueError(
+            f"{len(duplicated)} duplicated timestamp(s) on the {cadence} layer "
+            f"(first: {duplicated[0]}); the merge upstream must resolve them"
+        )
     grid = pd.date_range(index.min(), index.max(), freq=cadence, name=index.name)
     off_grid = index.difference(grid)
     if not off_grid.empty:
@@ -262,7 +273,15 @@ def run(
     charts: list[dict[str, object]] = []
     for chart in MONITORING_CHARTS:
         station_columns = {series.id: series.station for series in chart.series}
-        decimals = _DECIMALS.get(chart.unit, 2)
+        if chart.unit not in _DECIMALS:
+            # A unit with no entry would silently take two decimals, so a new
+            # chart publishes a precision nobody chose — and for W/m2 that is
+            # three characters per sample across the whole payload.
+            raise typer.BadParameter(
+                f"chart {chart.id!r} declares unit {chart.unit!r}, which has no entry in "
+                "_DECIMALS; add the precision this unit publishes at"
+            )
+        decimals = _DECIMALS[chart.unit]
 
         wrf_columns: dict[str, str] = {}
         missing: list[str] = []

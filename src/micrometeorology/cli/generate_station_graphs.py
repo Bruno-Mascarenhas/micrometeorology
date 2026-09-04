@@ -37,6 +37,7 @@ from matplotlib.axes import Axes
 
 matplotlib.use("Agg")  # headless backend for server
 
+from micrometeorology.cli.plot_station_graphs import GRAPH_SPECS
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.timeparse import parse_naive_timestamp
 from micrometeorology.sensors.aggregation import aggregate_to_hourly
@@ -109,6 +110,14 @@ WRF_COLUMNS = {
     "pressao": PSFC_HPA,
     "velocidade": WIND_SPEED_M_S,
     "direcao": WIND_DIR_DEG,
+}
+
+#: Fixed y-frames, read from the SIBLING producer of these same nine filenames so
+#: the two cannot frame one PNG differently. This module used to carry the
+#: tighter pair — 18..32 degC and 50..100 %RH against 10..40 and 0..105 — and a
+#: sample outside them left the figure with nothing on the axes saying so.
+SHARED_Y_LIMITS: dict[str, tuple[float, float]] = {
+    spec.key: spec.ylim for spec in GRAPH_SPECS if spec.ylim is not None
 }
 
 
@@ -413,7 +422,7 @@ def _plot_temperatura(
         plt.close(fig)
         return None
 
-    ax.set_ylim(18, 32)
+    ax.set_ylim(*SHARED_Y_LIMITS["temperatura"])
     setup_date_axis(ax)
     plt.ylabel(
         "Temperatura do Ar (\u00b0C)",
@@ -464,7 +473,7 @@ def _plot_umidade(
         plt.close(fig)
         return None
 
-    ax.set_ylim(50, 100)
+    ax.set_ylim(*SHARED_Y_LIMITS["umidade"])
     setup_date_axis(ax)
     plt.ylabel(
         "Umidade Relativa do Ar (%)",
@@ -515,7 +524,9 @@ def _plot_pressao(
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["pressao"])
 
-    ax.set_ylim(1000, 1030)
+    # No fixed frame: the sibling producer of pressao.png declares none, and a
+    # 30 hPa window clips a real synoptic passage off the top of the figure with
+    # nothing on the axes saying so.
     setup_date_axis(ax)
     plt.ylabel(
         "Pressao Atmosferica (hPa)",
@@ -565,7 +576,7 @@ def _plot_velocidade(
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["velocidade"])
 
-    ax.set_ylim(0, 10)
+    ax.set_ylim(*SHARED_Y_LIMITS["velocidade"])
     setup_date_axis(ax)
     plt.ylabel(
         "Velocidade do Vento (m/s)",
@@ -653,6 +664,25 @@ def _plot_precipitacao(
     return save_figure(fig, out_dir / "precipitacao.png")
 
 
+def newest_plotted_stamp(raw: pd.DataFrame, raw_rain: pd.DataFrame) -> datetime:
+    """The newest sample actually drawn, across both logger tables.
+
+    Stamped onto every figure instead of the wall clock: without ``--start-date``
+    the window ends at today, so a record that stopped months ago would publish
+    under today's date and read as current.
+
+    Raises
+    ------
+    ValueError
+        When neither frame carries a row, which the caller has already refused.
+    """
+    plotted = [frame.index.max() for frame in (raw, raw_rain) if not frame.empty]
+    if not plotted:
+        raise ValueError("neither the lenta nor the rain frame carries a sample to stamp")
+    newest: datetime = max(plotted).to_pydatetime()
+    return newest
+
+
 @app.command()
 def run(
     lenta: Annotated[
@@ -690,9 +720,16 @@ def run(
 ) -> None:
     """Generate LabMiM station graphs from raw .dat sensor files.
 
-    Reads Campbell Scientific .dat files directly from the datalogger,
-    performs quality control, hourly aggregation, and generates 10 PNG
-    graphs for the LabMiM website with the standard watermark and layout.
+    Reads Campbell Scientific .dat files directly from the datalogger, aggregates
+    them to hourly means and writes 10 PNG graphs for the LabMiM website with the
+    standard watermark and layout.
+
+    **No quality control runs here.** The sentinel table, the physical range
+    gates and every radiation mask belong to ``labmim-archive``, which reads the
+    same files through the explicit manifest and publishes ``station_5min_qc``;
+    this command plots what the logger wrote. A rail such as the BP1 fill value
+    therefore reaches the figure, which is the difference between these PNGs and
+    the ones ``labmim-site-graphs`` draws from the QC'd database.
 
     A graph whose source columns are all absent from the .dat file is
     skipped rather than written blank, and reported as `[skip]`; `--strict`
@@ -806,8 +843,7 @@ def run(
     # `--start-date`, `date_end` is today, so a record that stopped months ago
     # would be published under today's date. plot_station_graphs, the sibling
     # producer of the same images, stamps the data end for the same reason.
-    plotted = [frame.index.max() for frame in (raw, raw_rain) if not frame.empty]
-    graph_dt = max(plotted).to_pydatetime()
+    graph_dt = newest_plotted_stamp(raw, raw_rain)
 
     typer.echo("Generating graphs...")
 

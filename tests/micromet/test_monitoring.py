@@ -23,6 +23,7 @@ from micrometeorology.cli.export_monitoring import (
     PAYLOAD_FORMAT,
     _axis,
     _regular,
+    _round,
 )
 from micrometeorology.cli.export_monitoring import app as monitoring_app
 from micrometeorology.sensors.monitoring import (
@@ -462,3 +463,55 @@ class TestExporter:
 
         assert pd.Timestamp(window["station_end"]) <= pd.Timestamp(window["end"])
         assert pd.Timestamp(window["station_end"]) >= pd.Timestamp(window["start"])
+
+
+class TestTheSerialisedNumbersCarryTheirUnitsPrecision:
+    """The CSV download must never carry a digit its chart does not show, and the
+    zero-decimal path is what keeps a W/m2 sample three characters shorter across
+    the whole payload."""
+
+    def test_a_zero_decimal_unit_is_written_as_an_int_not_a_rounded_float(self) -> None:
+        rounded = _round(pd.Series([-0.3, 489.5, np.nan]), 0)
+
+        assert rounded == [0, 490, None]
+        assert all(isinstance(value, int) for value in rounded if value is not None)
+        assert ".0" not in json.dumps(rounded)
+
+    def test_a_unit_with_decimals_keeps_them(self) -> None:
+        assert _round(pd.Series([12.3456, np.nan]), 1) == [12.3, None]
+
+    def test_a_chart_declaring_a_unit_with_no_declared_precision_is_refused(
+        self, archive: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`.get(unit, 2)` gave a new chart two decimals nobody chose."""
+        import typer
+
+        from micrometeorology.cli import export_monitoring
+
+        charts = list(MONITORING_CHARTS)
+        monkeypatch.setattr(
+            export_monitoring,
+            "MONITORING_CHARTS",
+            [type(charts[0])(**{**charts[0].__dict__, "unit": "furlongs"})],
+        )
+
+        result = runner.invoke(
+            monitoring_app,
+            ["-i", str(archive), "-o", str(tmp_path / "out"), "--log-level", "WARNING"],
+        )
+
+        assert result.exit_code != 0
+        assert "furlongs" in result.output
+        assert isinstance(result.exception, (SystemExit, typer.BadParameter)) or result.exception
+
+
+def test_a_duplicated_stamp_is_named_instead_of_escaping_as_a_pandas_error() -> None:
+    """`reindex` raises "cannot reindex on an axis with duplicate labels", which
+    reaches the operator as a traceback naming neither the file nor the cadence;
+    the axis guard cannot see it either, since a repeat is a zero delta among
+    many rather than a second cadence."""
+    index = pd.DatetimeIndex(["2022-07-01 00:00", "2022-07-01 00:00", "2022-07-01 01:00"])
+    frame = pd.DataFrame({"T": [1.0, 2.0, 3.0]}, index=index)
+
+    with pytest.raises(ValueError, match="duplicated timestamp"):
+        _regular(frame, index, "h")

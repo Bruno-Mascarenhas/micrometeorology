@@ -241,3 +241,30 @@ class TestTheDirectionEraCutIsPublished:
         frame = self._frame_spanning_the_cut()
 
         assert _available_hours("wind_direction", frame) == 4
+
+
+def test_an_hour_whose_speed_is_missing_becomes_its_own_atom():
+    """It satisfied neither comparison, so it left the sample AND the calm atom
+    and the published coverage — n plus the atoms — came out short of the hours
+    the record holds. Calling it calm would put a bearing measured in wind into
+    the calm mass."""
+    direction = _hours([10.0, 20.0, 30.0, 40.0])
+    speed = _hours([0.10, float("nan"), 5.0, 5.0])
+
+    values, atoms = _strip_atoms("wind_direction", direction, speed)
+
+    by_id = {atom.id: atom for atom in atoms}
+    assert by_id["calm"].count == 1
+    assert by_id["unpaired_speed"].count == 1
+    assert len(values[np.isfinite(values)]) + sum(atom.count for atom in atoms) == len(direction)
+
+
+def test_no_unpaired_atom_is_published_when_every_hour_has_its_speed():
+    """Published only when it removes something: an empty atom on every rose
+    would read as a fault the record does not have."""
+    direction = _hours([10.0, 20.0, 30.0, 40.0])
+    speed = _hours([0.10, 0.10, 5.0, 5.0])
+
+    _values, atoms = _strip_atoms("wind_direction", direction, speed)
+
+    assert [atom.id for atom in atoms] == ["calm"]
