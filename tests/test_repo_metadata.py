@@ -17,8 +17,11 @@ import re
 import tomllib
 from pathlib import Path
 
+import yaml
+
 _ROOT = Path(__file__).resolve().parents[1]
 _PYPROJECT = _ROOT / "pyproject.toml"
+_ENVIRONMENT = _ROOT / "environment.yml"
 _NOTEBOOK = _ROOT / "notebooks" / "allsky_multimodal_colab.ipynb"
 _NOTEBOOKS_README = _ROOT / "notebooks" / "README.md"
 
@@ -100,3 +103,17 @@ def test_project_urls_are_declared() -> None:
 
     assert set(urls) >= {"Homepage", "Repository", "Issues"}
     assert all(value.startswith("https://") for value in urls.values())
+
+
+def test_the_conda_bootstrap_pins_the_uv_range_the_project_requires() -> None:
+    """environment.yml pinned uv below 0.12 while pyproject requires 0.12.5 or
+    newer, so the documented first run (conda env create, make install-dev)
+    failed on a clean machine with uv refusing the project."""
+    with open(_PYPROJECT, "rb") as fh:
+        required = tomllib.load(fh)["tool"]["uv"]["required-version"]
+    dependencies = yaml.safe_load(_ENVIRONMENT.read_text(encoding="utf-8"))["dependencies"]
+    uv_spec = next(
+        entry for entry in dependencies if isinstance(entry, str) and entry.startswith("uv")
+    )
+
+    assert uv_spec == f"uv{required}"
