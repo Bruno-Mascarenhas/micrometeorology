@@ -246,6 +246,7 @@ def _multimodal_builder(fusion_name: str) -> ModelBuilder:
             fusion_name=fusion_name,
             input_mode=cfg.data.input_mode,
             feature_set=feature_set,
+            feature_extra=cfg.features.extra,
             embedding_dim=embedding_dim,
             image_backbone=image_backbone,
             sensor_hidden=_sensor_hidden(params),

@@ -76,3 +76,27 @@ def test_group_slices_indices_map_to_named_columns():
         assert [feature_columns[i] for i in indices] == sorted(
             groups[group], key=feature_columns.index
         )
+
+
+def test_cross_attention_tokenizes_a_column_added_through_features_extra():
+    """``active_feature_groups`` was called without ``features.extra`` while
+    ``feature_columns`` was resolved with it, so ``group_slices`` dropped the
+    ablation column: it widened the sensor MLP but never became an attention
+    token, and nothing anywhere reported the mismatch."""
+    from allsky.config import ExperimentConfig
+    from allsky.modeling.registry import build_model
+
+    cfg = ExperimentConfig.model_validate(
+        {
+            "data": {"input_mode": "embedding"},
+            "features": {"feature_set": "safe", "extra": ["uv_wm2"]},
+            "model": {"name": "cross_attention"},
+        }
+    )
+    columns = resolve_feature_set("safe", ["uv_wm2"])
+
+    model = build_model(cfg, len(columns), embedding_dim=16)
+
+    tokenized = {columns[index] for indices in model.fusion._group_indices for index in indices}
+    assert "uv_wm2" in tokenized
+    assert tokenized == set(columns)

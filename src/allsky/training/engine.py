@@ -1413,7 +1413,7 @@ def _checkpoint_common(
         "config": cfg.model_dump(),
         "normalizers": normalizers,
         "feature_columns": feature_columns,
-        "feature_groups": active_feature_groups(cfg.features.feature_set),
+        "feature_groups": active_feature_groups(cfg.features.feature_set, cfg.features.extra),
         "dataset_version": _dataset_version(meta),
         "split_id": split_id,
         "manifest_sha256": meta.get("manifest_sha256"),
