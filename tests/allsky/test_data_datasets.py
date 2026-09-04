@@ -153,10 +153,14 @@ class TestImageDatasetContract:
             ],
             dtype=np.float32,
         )
-        assert float(item["image"].min()) == pytest.approx(float(bounds.min()), abs=1e-5) or (
-            float(bounds.min()) <= float(item["image"].min())
-        )
+        # The second half of an `A or B` here was true for every input: with the
+        # frame in [0, 1] the standardized minimum cannot fall below bounds.min().
+        assert float(item["image"].min()) >= float(bounds.min()) - 1e-5
         assert float(item["image"].max()) <= float(bounds.max()) + 1e-5
+        # And the standardization did happen: a [0, 1] frame straddles zero after
+        # it, which an identity or a missed division would not.
+        assert float(item["image"].min()) < 0.0
+        assert float(item["image"].max()) > 0.0
         assert item["dhi"].dtype == torch.float32
         assert item["kindex"].dtype == torch.float32
         assert item["sky_class"].dtype == torch.long

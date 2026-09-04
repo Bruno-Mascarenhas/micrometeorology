@@ -74,6 +74,23 @@ class TestTransfer:
         assert set(report.reshaped) == {"heads.weight", "heads.bias"}
         assert any(name.startswith("visual_encoder.backbone.") for name in report.loaded)
 
+    def test_a_tensor_the_target_has_no_home_for_is_named_not_swallowed(self, tmp_path: Path):
+        """``report.unexpected`` is what tells the operator the source carried
+        weights this model cannot hold — the symptom of a checkpoint from another
+        architecture that still cleared every guard. Nothing asserted it, so the
+        field could have been empty for every source.
+        """
+        source = _Model()
+        state = source.state_dict()
+        state["aux_head.weight"] = torch.zeros(3, 4)
+        path = tmp_path / "source.ckpt"
+        torch.save({"model_state": state}, path)
+
+        report = load_transferable_weights(_Model(), path, trust_pickle=True)
+
+        assert report.unexpected == ("aux_head.weight",)
+        assert "heads.weight" in report.loaded
+
     def test_a_backbone_of_another_width_is_refused(self, tmp_path: Path):
         checkpoint = _write_checkpoint(tmp_path / "source.ckpt", _Model(width=6))
 

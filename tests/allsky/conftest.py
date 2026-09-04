@@ -11,7 +11,11 @@ and it reproduces the shim's behaviour exactly: on a dev install without the
 
 Keep the tuple in sync -- a module that needs torch but is missing here fails
 collection with an ImportError (or errors at runtime), and one listed by mistake
-silently stops running for anyone without the extra.
+silently stops running for anyone without the extra. One direction of that is
+now enforced: ``test_torch_gate.py`` reads every module in this directory and
+requires each one importing torch at module scope to be listed. The other
+direction stays a judgement call -- the CLI-driving modules import torch only
+through the run they launch, so they are here without saying ``import torch``.
 """
 
 import importlib.util
@@ -24,6 +28,7 @@ import pytest
 
 _TORCH_BACKED = (
     "test_checkpointing.py",
+    "test_clearsky_index_target.py",
     "test_cli_evaluate.py",
     "test_cli_train_dispatch.py",
     "test_configs_repo.py",
@@ -33,9 +38,12 @@ _TORCH_BACKED = (
     "test_engine_findings.py",
     "test_evaluator.py",
     "test_evaluator_findings.py",
+    "test_geometry_channels.py",
     "test_losses.py",
     "test_modeling.py",
     "test_science_findings.py",
+    "test_temporal_window.py",
+    "test_transfer.py",
 )
 
 collect_ignore = [] if importlib.util.find_spec("torch") is not None else list(_TORCH_BACKED)

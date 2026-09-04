@@ -4,8 +4,10 @@ These do not import torch (the subprocess checks assert it stays out), so the
 module deliberately avoids ``pytest.importorskip('torch')`` at import time.
 """
 
+import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -13,6 +15,7 @@ import pytest
 if TYPE_CHECKING:
     from allsky.modeling.fusion import CrossAttentionFusion
 
+import allsky
 from allsky.features import FEATURE_GROUPS, active_feature_groups, resolve_feature_set
 from allsky.modeling.contracts import group_slices
 
@@ -26,8 +29,17 @@ def test_import_allsky_modeling_is_torch_free():
         "from allsky.modeling import group_slices\n"  # torch-free name
         "assert 'torch' not in sys.modules, 'torch was imported eagerly'\n"
     )
+    # pytest puts src/ on the path through `pythonpath` in pyproject, which a
+    # subprocess does not inherit: without this the import resolved to whatever
+    # `allsky` the interpreter finds installed, so the contract was verified
+    # against a different tree than the one under test.
+    source_root = str(Path(allsky.__file__).resolve().parents[1])
     result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": source_root},
     )
     assert result.returncode == 0, result.stderr
 

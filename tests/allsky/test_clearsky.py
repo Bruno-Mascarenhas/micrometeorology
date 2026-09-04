@@ -1,5 +1,7 @@
 """Tests for allsky.clearsky (Haurwitz clear-sky GHI and clear-sky index k*)."""
 
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -33,6 +35,29 @@ class TestHaurwitzGhi:
         ghi = clearsky.haurwitz_ghi(day, site)
         assert 1000.0 < ghi.max() < 1100.0
 
+    @pytest.mark.parametrize("cos_zenith_value", [1.0, 0.5, 0.25])
+    def test_the_model_is_the_published_one_term_fit(self, cos_zenith_value: float):
+        """``GHI_cs = 1098 * cos(z) * exp(-0.057 / cos(z))`` — Haurwitz (1945).
+
+        Written out here so the two coefficients are pinned against arithmetic:
+        every other test in this file feeds the function's own output back in or
+        checks a 100 W/m2 window, and both survive a different one-term fit.
+        """
+        expected = 1098.0 * cos_zenith_value * math.exp(-0.057 / cos_zenith_value)
+
+        modelled = clearsky.haurwitz_ghi_from_cos_zenith(np.array([cos_zenith_value]))
+
+        assert modelled[0] == pytest.approx(expected, rel=1e-12)
+
+    @pytest.mark.parametrize("cos_zenith_value", [0.0, -0.3])
+    def test_the_sun_below_the_horizon_is_exactly_zero_not_extrapolated(
+        self, cos_zenith_value: float
+    ):
+        """Dividing by a cosine at or below zero is the trap the clamp exists for,
+        and zero is a physical irradiance, not a missing one.
+        """
+        assert clearsky.haurwitz_ghi_from_cos_zenith(np.array([cos_zenith_value]))[0] == 0.0
+
     def test_tz_aware_timestamps_rejected(self, site: SiteConfig):
         times = pd.date_range("2025-06-25", periods=3, freq="1h", tz="UTC")
         with pytest.raises(ValueError, match="naive"):
@@ -40,9 +65,11 @@ class TestHaurwitzGhi:
 
 
 class TestClearSkyIndex:
-    def test_unity_on_synthetic_clear_sky(self, site: SiteConfig):
+    def test_k_star_is_the_ratio_to_the_reference_where_it_is_defined(self, site: SiteConfig):
         # Feeding the Haurwitz reference back in must yield k* == 1 wherever the
-        # index is defined (sun high enough).
+        # index is defined (sun high enough). This pins the division and the
+        # elevation mask; the model itself is pinned by the tests above, because
+        # f/f == 1 holds for any positive f in Haurwitz's place.
         day = pd.date_range("2025-06-25 05:00", "2025-06-25 19:00", freq="5min")
         ghi_cs = clearsky.haurwitz_ghi(day, site)
         kstar = clearsky.clear_sky_index(ghi_cs, day, site)
