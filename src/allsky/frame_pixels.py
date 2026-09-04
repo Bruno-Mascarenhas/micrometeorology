@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, BinaryIO
 import numpy as np
 
 if TYPE_CHECKING:
+    # Only ever a type: importing PIL at module scope would pull the decoder into
+    # every consumer of the pixel helpers, including the torch-free ones.
     from PIL.Image import Image as PILImage
 
 __all__ = ["as_rgb_uint8", "decode_rgb", "decode_rgb_resized", "resize_bilinear"]

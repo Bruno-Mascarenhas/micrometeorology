@@ -48,11 +48,6 @@ def sensor_frame() -> pd.DataFrame:
     )
 
 
-# ---------------------------------------------------------------------------
-# policy.py
-# ---------------------------------------------------------------------------
-
-
 class TestFeaturePolicy:
     def test_resolve_safe_is_safe_features_in_order(self):
         assert resolve_feature_set("safe") == list(SAFE_FEATURES)
@@ -169,11 +164,6 @@ class TestFeaturePolicy:
             resolve_feature_set("barometric")
 
 
-# ---------------------------------------------------------------------------
-# engineering.py
-# ---------------------------------------------------------------------------
-
-
 class TestFeatureEngineering:
     def test_deterministic_column_order(self, sensor_frame: pd.DataFrame, site: SiteConfig):
         frame = build_feature_frame(
@@ -247,11 +237,6 @@ class TestFeatureEngineering:
         edge_frame = build_feature_frame(pd.DataFrame(base, index=edge), edge, site, "safe")
         assert abs(edge_frame["doy_sin"].iloc[0] - edge_frame["doy_sin"].iloc[1]) < 0.05
         assert abs(edge_frame["doy_cos"].iloc[0] - edge_frame["doy_cos"].iloc[1]) < 0.05
-
-
-# ---------------------------------------------------------------------------
-# normalization.py
-# ---------------------------------------------------------------------------
 
 
 class TestFeatureNormalizer:

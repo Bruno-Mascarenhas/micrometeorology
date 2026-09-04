@@ -15,8 +15,6 @@ and every run in this project early-stops well before its epoch budget — so
 anything not written to Drive inside the same cell as the training call is lost.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import shutil

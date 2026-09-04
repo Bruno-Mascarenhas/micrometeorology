@@ -130,11 +130,6 @@ class TestTheMergedSensorExport:
         )
 
 
-# ---------------------------------------------------------------------------
-# manifest builders for validate-dataset / splits
-# ---------------------------------------------------------------------------
-
-
 def _sensor_frame(site: SiteConfig, index: pd.DatetimeIndex) -> pd.DataFrame:
     e0h = solar.extraterrestrial_ghi(index, site)
     n = len(index)
@@ -179,11 +174,6 @@ def _write_manifest(dataset_dir: Path, times: list[str], *, create_files: bool) 
     )
     write_manifest_parquet(manifest, meta, dataset_dir / "manifest.parquet")
     return dataset_dir / "manifest.parquet"
-
-
-# ---------------------------------------------------------------------------
-# validate-dataset
-# ---------------------------------------------------------------------------
 
 
 class TestValidateDataset:
@@ -297,11 +287,6 @@ class TestValidateDataset:
         result = runner.invoke(app, ["validate-dataset", "--config", str(config)])
         assert result.exit_code == 1
         assert "manifest not found" in result.output
-
-
-# ---------------------------------------------------------------------------
-# prepare-local
-# ---------------------------------------------------------------------------
 
 
 class TestPrepareLocal:
@@ -633,11 +618,6 @@ class TestSplitsGuard:
             app, ["prepare-local", "--config", str(config2), "--steps", "splits", "--force"]
         )
         assert forced.exit_code == 0, forced.output
-
-
-# ---------------------------------------------------------------------------
-# export-colab-bundle
-# ---------------------------------------------------------------------------
 
 
 class TestExportColabBundle:

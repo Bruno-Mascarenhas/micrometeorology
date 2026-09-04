@@ -170,11 +170,6 @@ Deliberately NOT cited, having been checked and found unsupportable:
 """
 
 
-# ---------------------------------------------------------------------------
-# 1. Physical constants
-# ---------------------------------------------------------------------------
-
-
 def test_solar_constant_matches_kopp_lean():
     """Kopp & Lean (2011) put total solar irradiance at 1360.8 +- 0.5 W/m2."""
     assert pytest.approx(1361.0, abs=1.0) == SOLAR_CONSTANT_WM2
@@ -204,11 +199,6 @@ def test_the_whole_package_declares_the_stefan_boltzmann_constant_once():
     )
 
     assert declarations == ["src/micrometeorology/common/physics.py"]
-
-
-# ---------------------------------------------------------------------------
-# 2. Closed-form limits of the graybody law
-# ---------------------------------------------------------------------------
 
 
 def test_blackbody_surface_emits_sigma_t4_and_reflects_nothing():
@@ -242,11 +232,6 @@ def test_upwelling_longwave_hand_computed_value():
     lwup = compute_upwelling_longwave(np.array([0.95]), np.array([300.0]), np.array([400.0]))
 
     assert lwup[0] == pytest.approx(456.33531, abs=1e-4)
-
-
-# ---------------------------------------------------------------------------
-# 3. Budget identities -- the terms must add up
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -298,11 +283,6 @@ def test_net_radiation_expands_to_the_four_stream_budget(surface_state):
         rtol=1e-9,
         atol=1e-9,
     )
-
-
-# ---------------------------------------------------------------------------
-# 4. Literature value ranges
-# ---------------------------------------------------------------------------
 
 
 def test_net_longwave_can_turn_positive_under_a_warm_overcast():
@@ -373,11 +353,6 @@ def test_sky_emissivity_of_a_blackbody_sky_is_one():
     )
 
 
-# ---------------------------------------------------------------------------
-# 5. Clearness index
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("local_hour", "shortwave_publishes"),
     [(5, False), (6, True), (18, True), (19, False)],
@@ -428,10 +403,6 @@ def test_eccentricity_correction_stays_within_the_annual_swing():
     assert int(np.argmax(e0)) == 0
     assert int(np.argmin(e0)) == 6
 
-
-# ---------------------------------------------------------------------------
-# 6. Validation against WRF's own RRTMG fluxes (skips without the archive)
-# ---------------------------------------------------------------------------
 
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 _LWUPB_FILE = _DATA_DIR / "wrfout_d02_2013-07-01_01_00_00-004_"
@@ -596,12 +567,6 @@ def test_published_radiation_fields_stay_in_physical_range_on_a_real_run():
                 assert values.min() >= low, f"{variable} step {step} min {values.min()}"
                 assert values.max() <= high, f"{variable} step {step} max {values.max()}"
             assert checked > 0, f"{variable} published no usable frame"
-
-
-# ---------------------------------------------------------------------------
-# 6b. The 2026 operational run: no LWUPB anywhere, so the derivation is held
-#     to published bounds and to the surface energy budget instead.
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("domain", _OPERATIONAL_DOMAINS)
@@ -772,11 +737,6 @@ def test_operational_swup_matches_swupb_where_the_radiation_call_aligns(domain):
     np.testing.assert_allclose(
         swup[contemporaneous], f["SWUPB"][contemporaneous], rtol=1e-5, atol=1e-3
     )
-
-
-# ---------------------------------------------------------------------------
-# 7. Wiring: registration, gating, and the missing-input path
-# ---------------------------------------------------------------------------
 
 
 def _write_radiation_wrf_file(path: Path, *, nt: int = 24, start_hour_utc: int = 3) -> None:
