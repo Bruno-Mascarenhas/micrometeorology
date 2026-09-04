@@ -32,10 +32,19 @@ from micrometeorology.common.physics import (
     saturation_vapor_pressure,
     vapor_pressure,
 )
+from micrometeorology.wrf.interpolation import VerticalInterpolator
 from micrometeorology.wrf.reader import WRFDataset
 from micrometeorology.wrf.safety import assert_reasonable_array_size
 
+#: Grams in one kilogram, for the kg/kg -> g/kg conversion of WRF's ``Q2``.
+GRAMS_PER_KILOGRAM = 1000.0
+
 logger = logging.getLogger(__name__)
+
+#: Standard gravity in m/s2 at WRF's own value (``g = 9.81`` in
+#: share/module_model_constants.F): the geopotential divided by it below was
+#: accumulated by the model with that same constant.
+STANDARD_GRAVITY_M_S2 = 9.81
 
 
 def _drop_spinup_step(value: NDArray) -> NDArray:
@@ -46,17 +55,6 @@ def _drop_spinup_step(value: NDArray) -> NDArray:
     if value.shape[0] <= 1:
         return value
     return value[1:, :]
-
-
-def squeeze_array(value: NDArray) -> NDArray:
-    """Drop every singleton axis, turning a one-step ``(1, ny, nx)`` slice into a frame.
-
-    Returns
-    -------
-    NDArray
-        A view of *value* with all length-1 axes removed, in its dtype and unit.
-    """
-    return np.squeeze(value)
 
 
 def materialize_2d(value: NDArray) -> NDArray:
@@ -158,7 +156,7 @@ def extract_temperature(ds: WRFDataset) -> tuple[NDArray, float, float]:
 
 def extract_temperature_step(t2_step: NDArray) -> NDArray:
     """Convert a single time-step of T2 from Kelvin to Celsius."""
-    return squeeze_array(t2_step) - KELVIN_AT_ZERO_CELSIUS
+    return np.squeeze(t2_step) - KELVIN_AT_ZERO_CELSIUS
 
 
 def extract_skin_temperature(ds: WRFDataset) -> tuple[NDArray, float, float]:
@@ -191,7 +189,7 @@ def extract_vapor(ds: WRFDataset) -> tuple[NDArray, float, float]:
     """
     q2 = ds.get_variable("Q2")
     q_min, q_max = percentile_scale_bounds(q2)
-    return q2 * 1000.0, q_min * 1000.0, q_max * 1000.0
+    return q2 * GRAMS_PER_KILOGRAM, q_min * GRAMS_PER_KILOGRAM, q_max * GRAMS_PER_KILOGRAM
 
 
 def compute_relative_humidity(q2: NDArray, t2: NDArray, psfc: NDArray) -> NDArray:
@@ -657,7 +655,7 @@ def extract_wind_power_density_10m(ds: WRFDataset) -> tuple[NDArray, float, floa
 DEFAULT_STREAM_BLOCK_STEPS = 64
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WindHeightSeries:
     """Interpolated wind speed series and per-step wind vectors for one height.
 
@@ -765,8 +763,6 @@ def stream_wind_at_heights(
     ValueError
         When *block_steps* is not positive.
     """
-    from micrometeorology.wrf.interpolation import VerticalInterpolator
-
     if block_steps <= 0:
         raise ValueError("block_steps must be positive")
 
@@ -792,7 +788,7 @@ def stream_wind_at_heights(
         ph = ds.get_variable_block("PH", t0, t1)
         phb = ds.get_variable_block("PHB", t0, t1)
         height = ph + phb
-        height /= 9.81
+        height /= STANDARD_GRAVITY_M_S2
         del ph, phb
         height_agl = height[:, :-1, :, :] + height[:, 1:, :, :]
         height_agl /= 2.0

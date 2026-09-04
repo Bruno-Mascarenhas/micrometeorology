@@ -11,8 +11,10 @@ from micrometeorology.wrf.reader import (
     WRFDataset,
     assert_one_file_per_domain,
     detect_grid_level,
+    normalize_run_date,
     resolve_wrfout_paths,
 )
+from micrometeorology.wrf.series import extract_point_series
 from micrometeorology.wrf.variables import (
     compute_air_density,
     compute_relative_humidity,
@@ -114,6 +116,21 @@ def test_resolve_wrfout_paths_matches_exact_domain_set(tmp_path):
     assert names(None) == [f"wrfout_d{d:02d}_2026-01-01_00:00:00" for d in (1, 2, 3, 4)]
 
 
+def test_point_series_reads_the_cell_nearest_the_target_in_time_order(tmp_path):
+    path = tmp_path / "wrfout_d01_point_series.nc"
+    _write_tiny_wrf_file(path)
+
+    frame = extract_point_series([path], -12.5, -37.0, ["T2"])
+
+    assert list(frame.columns) == ["T2"]
+    assert [str(stamp) for stamp in frame.index] == [
+        "2024-01-01 00:00:00",
+        "2024-01-01 01:00:00",
+    ]
+    # Row 1, column 2 of the 2x3 grid is the nearest cell to (-12.5, -37.0).
+    assert frame["T2"].tolist() == [5.0, 11.0]
+
+
 def test_get_variable_keeps_time_axis_for_single_timestep_file(tmp_path):
     path = tmp_path / "wrfout_d01_single_step.nc"
     _write_tiny_wrf_file(path, n_times=1)
@@ -145,6 +162,14 @@ def test_get_variable_block_reads_unsqueezed_time_slabs(tmp_path):
             wrf.get_variable_block("T2", 1, 1)
 
 
+def test_a_time_block_starting_past_the_last_step_names_the_step_count(tmp_path):
+    path = tmp_path / "wrfout_d01_block_past_the_end.nc"
+    _write_tiny_wrf_file(path)
+
+    with WRFDataset(path) as wrf, pytest.raises(ValueError, match="past the 2 steps"):
+        wrf.get_variable_block("T2", 7, 99)
+
+
 def test_build_date_metadata_uses_pinned_product_timezone(tmp_path, monkeypatch):
     """Local datetimes must come from the pinned product timezone, never the
     host OS setting — a UTC-configured job host must not shift the forecast."""
@@ -164,6 +189,26 @@ def test_build_date_metadata_uses_pinned_product_timezone(tmp_path, monkeypatch)
     with WRFDataset(path) as wrf:
         entries = wrf.build_date_metadata()
     assert entries[0]["datetime_local"].utcoffset() == timedelta(0)
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["20260503", "2026-05-03", "2026/05/03", "2026050300"],
+)
+def test_normalize_run_date_keeps_the_digits_of_every_accepted_spelling(spelling):
+    assert normalize_run_date(spelling) == spelling.replace("-", "").replace("/", "")
+
+
+@pytest.mark.parametrize("typo", ["2026-5-3", "2026050", "may3", "2026-05-0x"])
+def test_normalize_run_date_refuses_anything_short_of_a_full_day(typo):
+    """Slicing a mistyped date would report it as a day WRF produced no files for."""
+    with pytest.raises(ValueError, match="--date must be YYYYMMDD"):
+        normalize_run_date(typo)
+
+
+def test_a_date_with_no_wrfout_warns_which_pattern_found_nothing(tmp_path, caplog):
+    assert resolve_wrfout_paths(tmp_path, "20260503", (2,)) == []
+    assert "wrfout_d02_2026-05-03*" in caplog.text
 
 
 def test_detect_grid_level_reads_the_token_from_any_name_shape():

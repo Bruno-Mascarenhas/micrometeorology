@@ -548,6 +548,58 @@ def test_masked_grid_with_a_non_finite_fill_is_refused(tmp_path, sample_grid):
         write_grid_geojson_stream(tmp_path / "grid.geojson", masked_lon, lat, 1000.0, 2000.0)
 
 
+def test_values_writer_publishes_a_masked_cell_as_null(tmp_path):
+    frame = np.ma.masked_array(
+        np.array([[1.0, 2.0], [3.0, 4.0]]),
+        mask=[[False, True], [False, False]],
+    )
+    out = tmp_path / "masked.json"
+
+    write_values_json_stream(out, frame, 0.0, 5.0, "N/A")
+
+    with open(out, encoding="utf-8") as f:
+        assert json.load(f)["values"] == [1, None, 3, 4]
+
+
+@pytest.mark.parametrize("value", [np.inf, -np.inf], ids=str)
+def test_values_writer_publishes_an_infinite_value_as_null(tmp_path, value):
+    out = tmp_path / "infinite.json"
+
+    write_values_json_stream(out, np.array([[1.0, value]]), 0.0, 5.0, "N/A")
+
+    with open(out, encoding="utf-8") as f:
+        assert json.load(f)["values"] == [1, None]
+
+
+@pytest.mark.parametrize("chunk_size", [0, -1])
+def test_values_writer_refuses_a_non_positive_chunk_size(tmp_path, sample_values_2d, chunk_size):
+    with pytest.raises(ValueError, match="chunk_size must be positive"):
+        write_values_json_stream(
+            tmp_path / "chunked.json",
+            sample_values_2d,
+            0.0,
+            20.0,
+            "N/A",
+            chunk_size=chunk_size,
+        )
+
+
+def test_wind_vectors_refuse_components_of_different_shapes():
+    with pytest.raises(ValueError, match="wind vector shapes differ"):
+        create_wind_vectors_json(np.zeros((2, 3)), np.zeros((3, 2)), None)
+
+
+@pytest.mark.parametrize("writer", GRID_WRITERS, ids=lambda w: w.__name__)
+def test_grid_writers_refuse_a_grid_thinner_than_two_cells(tmp_path, writer):
+    """The corner arithmetic takes each edge cell's outer half-width from its
+    neighbour, which a single-row grid has none of."""
+    lon = np.linspace(-40.0, -38.0, 5)[np.newaxis, :]
+    lat = np.full((1, 5), -13.0)
+
+    with pytest.raises(ValueError, match="at least a 2x2 grid"):
+        writer(tmp_path / "thin.json", lon, lat, 1000.0, 1000.0)
+
+
 def test_grid_geojson_bytes_parse_under_strict_json(tmp_path, sample_grid):
     lon, lat = sample_grid
     out = write_grid_geojson_stream(tmp_path / "D01.geojson", lon, lat, 1000.0, 2000.0)

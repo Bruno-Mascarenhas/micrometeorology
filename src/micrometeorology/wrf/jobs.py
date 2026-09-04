@@ -59,7 +59,10 @@ ISOBARS_VARIABLE = "isobars"
 #: mis-cased ``-v swdown`` cannot reach one of them canonical and the other raw.
 CANONICAL_VARIABLES: dict[str, str] = {
     **{variable.value.casefold(): variable.value for variable in WRFVariable},
-    **{f"poteolico{height}": f"poteolico{height}" for height in POTEOLICO_ALL_HEIGHTS},
+    **{
+        f"{WRFVariable.WIND_POTENTIAL}{height}": f"{WRFVariable.WIND_POTENTIAL}{height}"
+        for height in POTEOLICO_ALL_HEIGHTS
+    },
     WIND_VECTORS_VARIABLE: WIND_VECTORS_VARIABLE,
     ISOBARS_VARIABLE: ISOBARS_VARIABLE,
 }
@@ -127,21 +130,15 @@ def normalize_var_list(var_list: Sequence[str], *, collapse_heights: bool) -> li
     """
     names = [CANONICAL_VARIABLES.get(v.casefold(), v) for v in var_list]
     if collapse_heights:
-        names = ["poteolico" if _is_poteolico_height(v) else v for v in names]
-    elif "poteolico" in names:
+        names = [WRFVariable.WIND_POTENTIAL if _is_poteolico_height(v) else v for v in names]
+    elif WRFVariable.WIND_POTENTIAL in names:
         names = [v for v in names if not _is_poteolico_height(v)]
-    seen: set[str] = set()
-    normalized: list[str] = []
-    for name in names:
-        if name not in seen:
-            normalized.append(name)
-            seen.add(name)
-    return normalized
+    return list(dict.fromkeys(names))
 
 
 def _is_poteolico_height(name: str) -> bool:
     """True for ``poteolico50`` and friends, false for the bare ``poteolico``."""
-    return name.startswith("poteolico") and name != "poteolico"
+    return name.startswith(WRFVariable.WIND_POTENTIAL) and name != WRFVariable.WIND_POTENTIAL
 
 
 def poteolico_output_id(height: int) -> str:
@@ -170,10 +167,10 @@ def parse_poteolico_heights(variable: str) -> tuple[int, ...]:
     ``"poteolico"`` means all of ``(50, 100, 150)``; ``"poteolico<nn>"`` means
     ``(<nn>,)`` for those same heights. Anything else raises ``ValueError``.
     """
-    if variable == "poteolico":
+    if variable == WRFVariable.WIND_POTENTIAL:
         return POTEOLICO_ALL_HEIGHTS
-    if variable.startswith("poteolico"):
-        suffix = variable[len("poteolico") :]
+    if variable.startswith(WRFVariable.WIND_POTENTIAL):
+        suffix = variable[len(WRFVariable.WIND_POTENTIAL) :]
         if suffix.isdigit() and int(suffix) in POTEOLICO_ALL_HEIGHTS:
             return (int(suffix),)
     raise ValueError(
@@ -232,8 +229,6 @@ class UnitResult:
         The unit's pipeline, carried through so the manifest can group results.
     files:
         Paths of every file the unit wrote.
-    seconds:
-        Wall-clock time the unit took, including the NetCDF open.
     warnings:
         Non-fatal messages the CLI surfaces after the run.
     error:
@@ -257,7 +252,6 @@ class UnitResult:
     label: str
     kind: UnitKind
     files: tuple[str, ...] = ()
-    seconds: float = 0.0
     warnings: tuple[str, ...] = ()
     error: str | None = None
     start_local: str | None = None
@@ -281,18 +275,14 @@ def apply_hdf5_locking_policy() -> None:
 def _format_datetime(timestamp: datetime | None) -> str:
     """Format a datetime for the JSON ``date_time`` field the site parses.
 
-    ``None`` yields ``"N/A"``; a timestamp object that cannot be formatted falls
-    back to ``str()`` rather than failing the work unit.
+    ``None`` yields ``"N/A"``; anything else is truncated to the whole hour,
+    stripped of its tzinfo and rendered as ``dd/mm/YYYY HH:MM:SS``.
     """
     if timestamp is None:
         return "N/A"
-    try:
-        formatted: str = timestamp.replace(minute=0, second=0, microsecond=0, tzinfo=None).strftime(
-            "%d/%m/%Y %H:%M:%S"
-        )
-    except Exception:  # noqa: BLE001 - formatting must never fail the work unit
-        return str(timestamp)
-    return formatted
+    return timestamp.replace(minute=0, second=0, microsecond=0, tzinfo=None).strftime(
+        "%d/%m/%Y %H:%M:%S"
+    )
 
 
 def _atomic_values_json(
@@ -410,12 +400,13 @@ class _SiteArtifactAccumulator:
         if self._matrix is None:
             self._matrix = np.full((flat.size, self.n_steps), SERIES_MISSING, dtype="<i4")
         finite = np.isfinite(flat)
-        scaled = np.rint(flat[finite] * SERIES_SCALE)
+        valid = flat[finite]
+        scaled = np.rint(valid * SERIES_SCALE)
         # Refused, not clipped: int32 hundredths cannot represent past
         # +-21,474,836.47, and clipping would publish the ceiling in the series
         # while the per-step JSON and the summary publish the true number.
         if scaled.size and (scaled.min() <= SERIES_MISSING or scaled.max() > _SERIES_INT_MAX):
-            extreme = flat[finite][np.argmax(np.abs(scaled))]
+            extreme = valid[np.argmax(np.abs(scaled))]
             raise ValueError(
                 f"step {index}: {extreme:g} exceeds what the int32 series can carry "
                 f"(+-{_SERIES_INT_MAX / SERIES_SCALE:,.2f}); the field is broken, not extreme"
@@ -424,7 +415,6 @@ class _SiteArtifactAccumulator:
         column[finite] = scaled.astype("<i4")
         self._matrix[:, index] = column
         if finite.any():
-            valid = flat[finite]
             self.indices.append(index)
             self.date_times.append(date_str)
             self.finite_cells.append(int(finite.sum()))
@@ -508,7 +498,7 @@ def _run_values_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[str], li
         # empty even inside the daylight window. Writing them would desync the
         # run's two artifacts — `availability` derives from the files WRITTEN,
         # while the summary records only steps with a finite cell.
-        if not np.isfinite(np.asarray(frame_values, dtype=float)).any():
+        if not np.isfinite(frame_values).any():
             continue
         formatted_local_time = _format_datetime(step_metadata["datetime_local"])
         output_path = (
@@ -684,17 +674,13 @@ def _run_grid_geojson_unit(unit: WorkUnit, dataset: WRFDataset) -> tuple[list[st
     grid_level = dataset.grid_level.value
     output_path = Path(unit.geojson_dir) / f"{grid_level}.geojson"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _staging_path(output_path)
-    geojson.write_grid_geojson_stream(tmp, lon, lat, dataset.dx, dataset.dy)
-    os.replace(tmp, output_path)
+    geojson.write_grid_geojson_stream(output_path, lon, lat, dataset.dx, dataset.dy)
     logger.info("Saved GeoJSON: %s", output_path)
 
     # Compact companion preferred by the site front-end (which falls back to
     # the legacy .geojson above); a fraction of the size on the wire.
     compact = Path(unit.geojson_dir) / f"{grid_level}.grid.json"
-    compact_tmp = _staging_path(compact)
-    geojson.write_grid_compact_json_stream(compact_tmp, lon, lat, dataset.dx, dataset.dy)
-    os.replace(compact_tmp, compact)
+    geojson.write_grid_compact_json_stream(compact, lon, lat, dataset.dx, dataset.dy)
     return [str(output_path), str(compact)], []
 
 
@@ -989,7 +975,6 @@ def process_unit(unit: WorkUnit) -> UnitResult:
     """
     if os.environ.get("LABMIM_TEST_CRASH_UNIT") == unit.variable:
         os._exit(137)
-    t0 = time.perf_counter()
     missing_variables: list[str] = []
     try:
         with WRFDataset(unit.wrf_path) as dataset:
@@ -1020,7 +1005,6 @@ def process_unit(unit: WorkUnit) -> UnitResult:
             label=unit.label,
             kind=unit.kind,
             files=tuple(files),
-            seconds=time.perf_counter() - t0,
             warnings=tuple(warnings),
             start_local=start_local,
             n_steps=n_steps,
@@ -1032,14 +1016,13 @@ def process_unit(unit: WorkUnit) -> UnitResult:
         return UnitResult(
             label=unit.label,
             kind=unit.kind,
-            seconds=time.perf_counter() - t0,
             error=f"{type(exc).__name__}: {exc}",
             domain=_unit_domain(unit),
             missing_variables=_unit_output_ids(unit),
         )
 
 
-# Isobars rank with the heaviest: they are the only unit that reads the 3-D
+# Isobars and wind potential rank first: they are the units that read the 3-D
 # fields, two orders of magnitude more bytes per step than a surface variable.
 _KIND_COST_RANK = {
     "isobars": 0,
@@ -1057,9 +1040,9 @@ def _init_worker_logging(level: int) -> None:
     unattributable across 44 concurrent workers. Records carry the pid and go
     to stderr, leaving stdout to the CLI's progress lines.
 
-    Held at WARNING or above whatever the parent's level: the streaming writers
-    log their ``.tmp-<pid>`` argument rather than the final path, so worker INFO
-    would name files that never exist.
+    Held at WARNING or above whatever the parent's level: a worker writes one
+    file per time step and variable, so its INFO would bury the parent's
+    progress lines under tens of thousands of "saved" records.
     """
     logging.basicConfig(
         level=max(level, logging.WARNING),
@@ -1072,7 +1055,7 @@ def _init_worker_logging(level: int) -> None:
 
 def build_units(
     wrf_paths: Sequence[str | Path],
-    variables: Sequence[str],
+    variable_names: Sequence[str],
     json_dir: str | Path,
     geojson_dir: str | Path,
     skip_first: int = 0,
@@ -1120,7 +1103,7 @@ def build_units(
                 skip_first=skip_first,
                 site_artifacts=site_artifacts,
             )
-            for var_name in variables
+            for var_name in variable_names
         )
     return units
 

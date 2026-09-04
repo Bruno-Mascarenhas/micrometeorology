@@ -37,6 +37,7 @@ method, not of the code:
 import numpy as np
 from numpy.typing import NDArray
 
+from micrometeorology.common.physics import PASCAL_PER_HECTOPASCAL
 from micrometeorology.wrf.reader import WRFDataset
 
 # RIP4 seaprs constants, kept at RIP's own values rather than the repository's
@@ -210,7 +211,7 @@ def sea_level_pressure_hpa(
         * lowest_height
         / (_DRY_AIR_GAS_CONSTANT * (sea_level_temperature + surface_temperature))
     )
-    return np.asarray(reduced_pa / 100.0, dtype=np.float64)
+    return np.asarray(reduced_pa / PASCAL_PER_HECTOPASCAL, dtype=np.float64)
 
 
 def read_sea_level_pressure_hpa(dataset: WRFDataset, step: int) -> NDArray:

@@ -23,9 +23,11 @@ becomes a block; nothing here re-derives it.
 
 Turning a wrfout INTO a block is
 :mod:`micrometeorology.wrf.operational_series`, which is where the netCDF
-dependency lives. This module needs only numpy and pandas, so the CLIs that
-merely read the record -- ``labmim-climatology``, ``labmim-station-graphs`` --
-do not pay for a NetCDF stack they never touch.
+READING lives. The three surface-flux formulas the record shares with it come
+from :mod:`micrometeorology.wrf.variables`, which imports the reader, so
+importing this module does pull netCDF4 in: a CLI that only reads the record
+pays for that stack unless it defers the import, as ``plot_station_graphs``
+does in ``_load_wrf``.
 
 The v1 record and what was wrong with it
 ----------------------------------------
@@ -87,6 +89,7 @@ from micrometeorology.common.physics import (
     KELVIN_AT_ZERO_CELSIUS,
     PASCAL_PER_HECTOPASCAL,
     STEFAN_BOLTZMANN,
+    Elementwise,
     saturation_vapor_pressure,
     vapor_pressure,
 )
@@ -126,17 +129,13 @@ from micrometeorology.wrf.columns import (
     WIND_SPEED_M_S,
 )
 from micrometeorology.wrf.variables import (
+    GRAMS_PER_KILOGRAM,
     compute_upwelling_longwave,
     compute_upwelling_shortwave,
     rotate_components,
 )
 
 logger = logging.getLogger(__name__)
-
-#: What the shared physical conversions accept. They are elementwise, and the
-#: v1 repair in :func:`migrate_to_v2` applies them one cell at a time while the
-#: extraction applies them to a whole window, so both spellings must type.
-type Elementwise = NDArray | float
 
 __all__ = [
     "DEFAULT_HEADER",
@@ -153,6 +152,7 @@ __all__ = [
     "Station",
     "append_block",
     "build_columns",
+    "duplicated",
     "extend_header",
     "format_row",
     "legacy_spellings",
@@ -160,6 +160,7 @@ __all__ = [
     "parse_station",
     "read_header",
     "read_stations",
+    "read_wrf_series",
     "rename_v1_columns",
     "render_rows",
 ]
@@ -168,8 +169,6 @@ __all__ = [
 #: Leading integer fields; ``pd.to_datetime`` reads them by these exact names,
 #: which is why they are the one part of the schema the v2 rename left alone.
 TIME_COLUMNS: tuple[str, ...] = ("year", "month", "day", "hour")
-
-_GRAMS_PER_KILOGRAM = 1000.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,7 +315,7 @@ def _relative_humidity_percent(sample: PointSample) -> NDArray:
 
 
 def _mixing_ratio_g_kg(sample: PointSample) -> NDArray:
-    grams: NDArray = sample.fields["Q2"] * _GRAMS_PER_KILOGRAM
+    grams: NDArray = sample.fields["Q2"] * GRAMS_PER_KILOGRAM
     return grams
 
 
@@ -489,9 +488,9 @@ DEFAULT_HEADER: tuple[str, ...] = TIME_COLUMNS + tuple(
 _CATALOG_BY_NAME = {column.name: column for column in OPERATIONAL_CATALOG}
 
 #: v1 column name -> v2 column name, in the v1 file's own field order. The four
-#: time fields keep their names: ``export_climatology.read_wrf_series`` builds
-#: its index with ``pd.to_datetime(frame[["year", "month", "day", "hour"]])``,
-#: which resolves them by name.
+#: time fields keep their names: :func:`read_wrf_series` builds its index with
+#: ``pd.to_datetime(frame[["year", "month", "day", "hour"]])``, which resolves
+#: them by name.
 V1_TO_V2: tuple[tuple[str, str], ...] = (
     ("year", "year"),
     ("month", "month"),
@@ -739,7 +738,16 @@ def append_block(
     -------
     int
         Rows written; ``0`` when the block was skipped as already present.
+
+    Raises
+    ------
+    ValueError
+        When *frame* has no rows -- rendering it appends a bare newline and
+        reports the same ``0`` a legitimate skip returns -- or when *header* is
+        still on the v1 schema.
     """
+    if frame.empty:
+        raise ValueError(f"{path.name}: refusing to append a block with no rows")
     legacy = legacy_spellings(header)
     if legacy:
         # Extending a v1 header would weld both schemas into one file: the rows
@@ -828,13 +836,22 @@ def duplicated(names: Iterable[str]) -> list[str]:
 
 
 def _v1_number(row: Mapping[str, str], name: str) -> float:
+    """The number one v1 cell carries; an empty cell is no-value.
+
+    Raises
+    ------
+    ValueError
+        When the cell holds text that is not a number. No-valuing it instead
+        would skip the row's repair silently and pass the corrupted string into
+        the v2 file as a cell the migration reports as untouched.
+    """
     raw = row.get(name, "").strip()
     if not raw:
         return float("nan")
     try:
         return float(raw)
     except ValueError:
-        return float("nan")
+        raise ValueError(f"column {name!r} holds {raw!r}, which is not a number") from None
 
 
 def _repair_v1_row(row: dict[str, str], line_number: int, repaired: Counter[str]) -> None:
@@ -889,7 +906,7 @@ def _repair_v1_row(row: dict[str, str], line_number: int, repaired: Counter[str]
         row["Lwup_calc"] = f"{upwelling_longwave_from_air(emissivity, kelvin):.4f}"
         repaired["Lwup_calc"] += 1
 
-    mixing_ratio = _v1_number(row, "q") / _GRAMS_PER_KILOGRAM
+    mixing_ratio = _v1_number(row, "q") / GRAMS_PER_KILOGRAM
     pressure = _v1_number(row, "pressure")
     if np.isfinite(mixing_ratio) and np.isfinite(pressure):
         vapor = vapor_pressure(mixing_ratio, pressure)
@@ -913,7 +930,9 @@ def _blank_v1_cold_start(row: dict[str, str], blanked: Counter[str]) -> None:
         return
     for old, new in V1_TO_V2:
         column = _CATALOG_BY_NAME.get(new)
-        if column is not None and column.cold_start_blank and row.get(old, "").strip():
+        # A cell that already carries no value was not blanked by this
+        # migration: counting it reports the operator a change nothing made.
+        if column is not None and column.cold_start_blank and np.isfinite(_v1_number(row, old)):
             row[old] = "nan"
             blanked[new] += 1
 
@@ -1156,7 +1175,7 @@ def legacy_spellings(header: Sequence[str]) -> tuple[str, ...]:
 #: These are exactly what :func:`_repair_v1_row` recomputes; naming them is what
 #: lets a reader of a v1 file be told which of its numbers not to trust.
 V1_UNREPAIRED_COLUMNS: frozenset[str] = frozenset(
-    {"albedo", "emissivity", "swup_w_m2", "lwup_air_w_m2", "e_hpa", "rh_pct"}
+    {ALBEDO, EMISSIVITY, SWUP_W_M2, LWUP_AIR_W_M2, E_HPA, RH_PCT}
 )
 
 

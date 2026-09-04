@@ -5,8 +5,9 @@ Produces the grid GeoJSON and per-timestep value JSON files for external visuali
 Optimisations applied:
   - GeoJSON coordinates rounded to 10 decimal places (~0.01 mm precision).
   - JSON output uses compact separators (no indent / whitespace).
-  - Custom float encoder avoids Python's excessive float precision
-    (e.g. ``20.450000762939453`` → ``20.45``).
+  - Values are rounded to two decimals with ``np.round`` before ``json.dumps``
+    (see :func:`_write_flat_values_chunks`), so a float32 cell serializes as
+    ``20.45`` and not ``20.450000762939453``.
   - Whole floats in values arrays are serialized as integers (``0.0`` → ``0``);
     the parsed numeric values are unchanged.
   - A compact ``.grid.json`` companion is written next to each ``.geojson``
@@ -113,7 +114,6 @@ def write_values_json_stream(
         _write_flat_values_chunks(f, arr, chunk_size=chunk_size)
         f.write("]}")
 
-    logger.info("Saved streamed JSON: %s", out)
     return out
 
 
@@ -209,11 +209,8 @@ def create_wind_vectors_json(
     if date_time is None:
         date_str = "N/A"
     else:
-        try:
-            dt = date_time.replace(minute=0, second=0, microsecond=0, tzinfo=None)
-            date_str = dt.strftime("%d/%m/%Y %H:%M:%S")
-        except Exception:  # noqa: BLE001 - best-effort formatting; any datetime-like falls back
-            date_str = str(date_time)
+        dt = date_time.replace(minute=0, second=0, microsecond=0, tzinfo=None)
+        date_str = dt.strftime("%d/%m/%Y %H:%M:%S")
 
     return {
         "metadata": {"date_time": date_str},
@@ -530,8 +527,6 @@ def _write_flat_values_chunks(f: TextIO, arr: NDArray, *, chunk_size: int) -> No
         invalid = np.flatnonzero(~np.isfinite(chunk))
         for idx in invalid:
             values[idx] = None
-        if not values:
-            continue
         # json.dumps writes whole floats with a redundant ".0" ("0.0" instead of
         # "0"). Stripping it changes no parsed value (JSON "0" and "0.0" are the
         # same number, and "-0.0" -> "-0" preserves the negative-zero sign) but

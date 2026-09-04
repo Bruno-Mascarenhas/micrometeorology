@@ -14,7 +14,7 @@ import typer
 from typer.testing import CliRunner
 
 from micrometeorology.cli import render_wrf_maps
-from micrometeorology.wrf import batch, jobs, reader, value_source
+from micrometeorology.wrf import animation, batch, jobs, reader, value_source
 from micrometeorology.wrf.batch import FigureTask
 from micrometeorology.wrf.value_source import ValueFrameSource
 from tests.micromet.test_wrf_jobs import NT, _write_full_wrf_file
@@ -327,6 +327,18 @@ def test_duplicate_variable_requests_do_not_render_the_same_png_twice(tmp_path, 
     tasks = _build_tasks(wrf, ["temperature", "temperature"], tmp_path / "figs")
 
     assert len({task.output_path for task in tasks}) == len(tasks) == NT
+
+
+def test_an_empty_image_group_produces_no_video(tmp_path):
+    assert animation._batch_single_webm(("TEMP_D02", [], str(tmp_path), 2)) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_no_images_writes_no_video_and_hands_back_the_path_it_would_have_written(tmp_path):
+    out = tmp_path / "TEMP_D02.webm"
+
+    assert animation.create_webm_from_images([], out) == out
+    assert not out.exists()
 
 
 def test_cli_exits_non_zero_when_every_figure_fails(tmp_path, monkeypatch):

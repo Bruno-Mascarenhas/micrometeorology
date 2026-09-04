@@ -662,6 +662,41 @@ def test_sweep_removes_dead_pid_debris_on_healthy_run(tmp_path):
     assert not debris.exists()
 
 
+def test_debris_of_a_live_process_survives_the_sweep(tmp_path):
+    """A concurrent run writing into the same directory must not lose its
+    staging file to another run's end-of-run sweep."""
+    json_dir = tmp_path / "json"
+    json_dir.mkdir()
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    debris = json_dir / f".D02_TEMP_000.json.tmp-{live.pid}"
+    debris.write_text("still being written")
+
+    try:
+        assert jobs._sweep_stale_temp_files([str(json_dir)]) == 0
+        assert debris.exists()
+    finally:
+        live.kill()
+        live.wait()
+
+
+def test_no_hdf5_locking_policy_leaves_the_environment_alone(monkeypatch):
+    monkeypatch.delenv("HDF5_USE_FILE_LOCKING", raising=False)
+    monkeypatch.delenv(jobs.HDF5_LOCKING_ENV, raising=False)
+
+    jobs.apply_hdf5_locking_policy()
+
+    assert "HDF5_USE_FILE_LOCKING" not in os.environ
+
+
+def test_an_opted_in_hdf5_locking_policy_reaches_the_pool_environment(monkeypatch):
+    monkeypatch.setenv("HDF5_USE_FILE_LOCKING", "FALSE")
+    monkeypatch.setenv(jobs.HDF5_LOCKING_ENV, "BEST_EFFORT")
+
+    jobs.apply_hdf5_locking_policy()
+
+    assert os.environ["HDF5_USE_FILE_LOCKING"] == "BEST_EFFORT"
+
+
 def test_manifest_omits_features_when_any_unit_failed(tmp_path):
     """A failed unit can leave LAST run's consolidated artifacts in place;
     the manifest must not vouch for them (the site falls back to per-step

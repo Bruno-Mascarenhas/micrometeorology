@@ -335,8 +335,9 @@ class WRFDataset:
         Raises
         ------
         ValueError
-            When the block is empty, starts before the first step, or carries
-            the netCDF fill value (see :func:`_reject_fill_values`).
+            When the block is empty, starts before the first step or past the
+            last one, or carries the netCDF fill value (see
+            :func:`_reject_fill_values`).
         MemoryError
             When the block would exceed the array-size ceiling.
         """
@@ -344,6 +345,10 @@ class WRFDataset:
             raise ValueError(f"Invalid time block [{t_start}:{t_stop}] for variable {name}")
         var = self._ds.variables[name]
         n_times = int(var.shape[0])
+        if t_start >= n_times:
+            raise ValueError(
+                f"Time block starts at {t_start}, past the {n_times} steps of variable {name}"
+            )
         t_stop = min(t_stop, n_times)
         shape = (t_stop - t_start, *(int(size) for size in var.shape[1:]))
         assert_reasonable_array_size(

@@ -38,7 +38,7 @@ import scipy.constants
 from labmim_core.solar import eccentricity_correction
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import variables
-from micrometeorology.wrf.reader import WRFDataset
+from micrometeorology.wrf.reader import WRFDataset, product_timezone
 from micrometeorology.wrf.value_source import (
     DAYLIGHT_ONLY_VARIABLES,
     DERIVED_RADIATION_SOURCES,
@@ -375,6 +375,19 @@ def test_sky_emissivity_of_a_blackbody_sky_is_one():
 # ---------------------------------------------------------------------------
 # 5. Clearness index
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("local_hour", "shortwave_publishes"),
+    [(5, False), (6, True), (18, True), (19, False)],
+)
+def test_the_daylight_window_keeps_its_edge_hours_and_drops_the_ones_beside_them(
+    local_hour, shortwave_publishes
+):
+    step = {"datetime_local": datetime(2026, 5, 3, local_hour, tzinfo=product_timezone())}
+
+    assert publishes_step(WRFVariable.SWDOWN, step) is shortwave_publishes
+    assert publishes_step(WRFVariable.TEMPERATURE, step) is True
 
 
 def test_clearness_index_matches_its_definition_at_high_sun():

@@ -1,7 +1,7 @@
-"""GIF and WebM video generation from WRF map image sequences.
+"""WebM video generation from WRF map image sequences.
 
-Supports direct PNG → WebM conversion (no GIF intermediary) for
-production use, and GIF for quick previews.
+PNG frames are encoded straight to WebM with ``moviepy``: no GIF intermediary
+and no ffmpeg CLI dependency.
 """
 
 import logging
@@ -13,6 +13,12 @@ from pathlib import Path
 from micrometeorology.common.paths import ensure_dir
 
 logger = logging.getLogger(__name__)
+
+#: CPUs left to the parent process and the OS when no worker count is given.
+RESERVED_CPUS = 4
+
+#: Worker count assumed when the OS reports none.
+FALLBACK_CPU_COUNT = 4
 
 
 def create_webm_from_images(
@@ -105,7 +111,8 @@ def batch_create_webm(
     fps:
         Frames per second for each video.
     workers:
-        Number of parallel workers.  Defaults to ``min(cpu_count - 4, num_groups)``.
+        Number of parallel workers. ``None`` resolves to
+        ``min(cpu_count - RESERVED_CPUS, num_groups)``.
 
     Returns
     -------
@@ -113,8 +120,11 @@ def batch_create_webm(
         Paths of the videos written, in COMPLETION order. A group whose encode
         failed is logged and left out, so the list may be shorter than the input.
     """
-    n_workers = workers or max(1, (os.cpu_count() or 4) - 4)
-    n_workers = min(n_workers, len(grouped_images)) if grouped_images else 1
+    if workers is None:
+        workers = max(1, (os.cpu_count() or FALLBACK_CPU_COUNT) - RESERVED_CPUS)
+    if workers < 1:
+        raise ValueError(f"workers must be at least 1, got {workers}")
+    n_workers = min(workers, len(grouped_images)) if grouped_images else 1
 
     out_dir = str(Path(output_dir))
     tasks = [(name, paths, out_dir, fps) for name, paths in grouped_images.items()]
