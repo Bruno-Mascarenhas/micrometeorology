@@ -371,6 +371,25 @@ class TestQCFlags:
         manifest, _ = build_manifest(frames, sensor, site=site, data_root=tmp_path)
         assert int(manifest["qc_flags"].iloc[0]) & int(QCFlag.SENSOR_GAP)
 
+    def test_sensor_gap_flag_on_nan_diffuse_label(self, site: SiteConfig, tmp_path: Path):
+        """A partially-NaN diffuse column produced rows with a missing label and
+        ``qc_flags == 0``, which the evaluator's QC stratification counted as
+        clean — the flag's own justification for letting the channel through."""
+        frames = make_frames(tmp_path, ["2025-03-21 12:00", "2025-03-21 12:10"])
+        sensor = make_sensor_frame(site)
+        sensor.loc["2025-03-21 12:00", "PSP_Wm2_Avg"] = np.nan
+        manifest, _ = build_manifest(frames, sensor, site=site, data_root=tmp_path)
+        flags = manifest["qc_flags"].to_numpy(dtype="int64")
+        assert flags[0] & int(QCFlag.SENSOR_GAP)
+        assert not flags[1] & int(QCFlag.SENSOR_GAP)
+
+    def test_the_erbs_pseudo_target_sets_no_gap_of_its_own(self, site: SiteConfig, tmp_path: Path):
+        frames = make_frames(tmp_path, ["2025-03-21 12:00"])
+        manifest, _ = build_manifest(
+            frames, make_sensor_frame(site), site=site, data_root=tmp_path, diffuse_column=None
+        )
+        assert not int(manifest["qc_flags"].iloc[0]) & int(QCFlag.SENSOR_GAP)
+
     def test_alignment_far_flag(self, site: SiteConfig, tmp_path: Path):
         # Frame 3 min from the nearest 10-min sensor record; far threshold
         # defaults to max_distance/2 = 2.5, so 3 > 2.5 -> ALIGNMENT_FAR.

@@ -338,6 +338,7 @@ def build_manifest(
     qc_flags = _qc_flags(
         elevation=elevation,
         ghi=ghi,
+        measured_dhi=target_dhi if diffuse_column is not None else None,
         distance_minutes=distance_minutes,
         kindex=kindex,
         min_elevation_deg=min_elevation_deg,
@@ -614,7 +615,8 @@ def _reject_dead_channel(values: np.ndarray, column: str, remedy: str) -> None:
 
     Only an *identically zero* channel is refused: an all-NaN channel is a
     sensor gap, which ``QCFlag.SENSOR_GAP`` and the missing-label machinery
-    already handle, so it passes through untouched.
+    already handle — for the configured diffuse channel as well as for the
+    global one — so it passes through untouched.
     """
     finite = values[np.isfinite(values)]
     if finite.size == 0 or np.any(finite != 0.0):
@@ -668,17 +670,28 @@ def _qc_flags(
     *,
     elevation: np.ndarray,
     ghi: np.ndarray,
+    measured_dhi: np.ndarray | None,
     distance_minutes: np.ndarray,
     kindex: np.ndarray,
     min_elevation_deg: float,
     max_kindex: float,
     far_distance_minutes: float,
 ) -> np.ndarray:
-    """Assemble the per-row :class:`QCFlag` bitmask as int64."""
+    """Assemble the per-row :class:`QCFlag` bitmask as int64.
+
+    *measured_dhi* is the raw diffuse channel when one is configured, and
+    ``None`` for the Erbs pseudo-target, which is derived from *ghi* and carries
+    no gap of its own.  Its gaps set ``SENSOR_GAP`` alongside the global
+    channel's: a partially-NaN diffuse column otherwise produced rows with a
+    missing label and ``qc_flags == 0``, indistinguishable from a clean row in
+    the evaluator's QC stratification.
+    """
     n = len(elevation)
     flags = np.zeros(n, dtype=np.int64)
     flags[elevation < min_elevation_deg] |= int(QCFlag.LOW_SUN)
     flags[~np.isfinite(ghi)] |= int(QCFlag.SENSOR_GAP)
+    if measured_dhi is not None:
+        flags[~np.isfinite(measured_dhi)] |= int(QCFlag.SENSOR_GAP)
     far = np.isfinite(distance_minutes) & (distance_minutes > far_distance_minutes)
     flags[far] |= int(QCFlag.ALIGNMENT_FAR)
     artifact = np.isfinite(kindex) & (kindex > max_kindex)
