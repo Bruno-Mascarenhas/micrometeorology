@@ -274,3 +274,36 @@ def test_a_directory_with_no_matching_file_exits_non_zero_instead_of_reporting_s
 
     assert result.exit_code != 0
     assert not output_path.exists()
+
+
+def test_a_source_file_matching_neither_table_is_refused_instead_of_dropped(
+    tmp_path: Path,
+) -> None:
+    """A ``--source`` whose name carries neither ``lenta`` nor ``rain`` was silently
+    left out while the summary line counted it as used."""
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    slow = tmp_path / "LBM_slow_2025.dat"
+    for path in (lenta, slow):
+        _write_toa5(path, ["CM3Up_Wm2_Avg"], [("2026-08-15 12:00:00", [500.0])])
+
+    resultado = CliRunner().invoke(
+        app,
+        [
+            "-d",
+            str(tmp_path),
+            "-o",
+            str(tmp_path / "out"),
+            "--source",
+            str(lenta),
+            "--source",
+            str(slow),
+        ],
+    )
+
+    assert resultado.exit_code == 2, resultado.output
+    assert "LBM_slow_2025.dat" in resultado.output
+    assert not (tmp_path / "out" / "station_hourly.parquet").exists()

@@ -182,19 +182,26 @@ def run(
         # manifest is the HISTORY — every entry unique coverage or a documented
         # repair, and it fails hard on a missing one. A rolling window is a
         # different question, asked of the files the datalogger is writing now.
-        lenta = merge_dat_files(
-            [path for path in source_files if "lenta" in path.name.lower()],
-            text_columns=list(STATUS_COLUMNS),
-        )
+        lenta_paths = [path for path in source_files if "lenta" in path.name.lower()]
         rain_paths = [path for path in source_files if "rain" in path.name.lower()]
+        unmatched = [
+            path for path in source_files if path not in lenta_paths and path not in rain_paths
+        ]
+        if unmatched:
+            raise typer.BadParameter(
+                "cada --source precisa ter 'lenta' ou 'rain' no nome para ser atribuido a "
+                f"uma tabela; sem tabela: {', '.join(path.name for path in unmatched)}",
+                param_hint="--source",
+            )
+        lenta = merge_dat_files(lenta_paths, text_columns=list(STATUS_COLUMNS))
         rain = (
             merge_dat_files(rain_paths, text_columns=list(STATUS_COLUMNS))
             if rain_paths
             else pd.DataFrame(index=lenta.index[:0])
         )
         typer.echo(
-            f"Janela a partir de {len(source_files)} arquivo(s) do registrador "
-            f"(sem manifesto, sem verificacao contra a auditoria do acervo)"
+            f"Janela a partir de {len(lenta_paths)} arquivo(s) lenta e {len(rain_paths)} "
+            f"rain do registrador (sem manifesto, sem verificacao contra a auditoria do acervo)"
         )
         reports = []
     else:
