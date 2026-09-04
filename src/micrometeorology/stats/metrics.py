@@ -158,7 +158,7 @@ def r_squared(observed: NDArray, predicted: NDArray, clean: bool = True) -> floa
         return float("nan")
     ss_res = np.sum(np.square(obs - pred))
     ss_tot = np.sum(np.square(obs - np.mean(obs)))
-    if ss_tot == 0:
+    if np.isclose(np.std(obs), 0.0):
         return float("nan")
     return float(1.0 - ss_res / ss_tot)
 
@@ -215,7 +215,7 @@ def d_index(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
     obs_mean = np.mean(obs)
     numerator = np.sum(np.square(obs - pred))
     denominator = np.sum(np.square(np.abs(pred - obs_mean) + np.abs(obs - obs_mean)))
-    if denominator == 0:
+    if np.isclose(np.std(obs), 0.0):
         return float("nan")
     return float(1.0 - numerator / denominator)
 
@@ -245,7 +245,7 @@ def ioa(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
     obs_mean = np.mean(obs)
     numerator = np.sum(np.abs(pred - obs))
     denominator = 2.0 * np.sum(np.abs(obs - obs_mean))
-    if denominator == 0:
+    if np.isclose(np.std(obs), 0.0):
         return float("nan")
     ratio = numerator / denominator
     if ratio <= 1:

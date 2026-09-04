@@ -276,3 +276,14 @@ class TestCircularMetrics:
         linear = compute_all(obs, pred, circular=False)
         for name in ("RMSE", "MAE", "MBE"):
             assert circular[name] == pytest.approx(linear[name]), name
+
+
+@pytest.mark.parametrize("metric", [r_squared, d_index, ioa], ids=lambda f: f.__name__)
+def test_a_constant_observation_yields_nan_not_a_degenerate_number(metric):
+    """``np.mean`` of 15,803 copies of 21.3 differs from 21.3 by an ulp, so the
+    exact ``== 0`` test on the observed spread never fired: R² published
+    -1.98e28, d published 0 and the refined IOA -1 for a railed channel."""
+    obs = np.full(15803, 21.3)
+    pred = obs + 0.5
+
+    assert np.isnan(metric(obs, pred))
