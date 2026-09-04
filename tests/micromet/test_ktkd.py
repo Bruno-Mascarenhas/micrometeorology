@@ -41,6 +41,31 @@ def test_the_two_brl_models_differ_only_in_their_coefficients():
     assert ktkd.lemos_2017(*args)[0] != pytest.approx(ktkd.ridley_brl_2010(*args)[0])
 
 
+#: Predictors chosen so no term of the logistic vanishes: with AST or elevation at
+#: zero a transposed sign on their coefficient would leave the exponent unchanged.
+LEMOS_PROBE = (
+    np.array([0.62]),
+    np.array([9.25]),
+    np.array([37.5]),
+    np.array([0.54]),
+    np.array([0.41]),
+)
+
+
+def test_lemos_matches_the_published_logistic_by_hand():
+    """Kd = 1 / (1 + exp(-4.41 + 7.87 Kt - 0.088 AST - 0.0049 alpha + 1.47 Ktd + 1.10 psi)).
+
+    Lemos et al. (2017), the BRL form refitted to Brazilian stations. Written out
+    term by term here so a transposed sign is a failure, not a silent refit.
+    """
+    kt, ast, elevation, daily_kt, psi = (value[0] for value in LEMOS_PROBE)
+    exponent = -4.41 + 7.87 * kt - 0.088 * ast - 0.0049 * elevation + 1.47 * daily_kt + 1.10 * psi
+
+    expected = 1.0 / (1.0 + np.exp(exponent))
+
+    np.testing.assert_allclose(ktkd.lemos_2017(*LEMOS_PROBE), [expected], rtol=1e-12)
+
+
 def test_every_model_returns_a_fraction_between_zero_and_one():
     kt = np.linspace(0.0, 1.0, 51)
     zeros, noon, elevation = np.zeros_like(kt), np.full_like(kt, 12.0), np.full_like(kt, 45.0)
@@ -126,6 +151,22 @@ def test_regression_scores_are_none_rather_than_nan_when_nothing_pairs():
     assert scores == {"rmse": None, "mbe": None, "mae": None, "n": 0}
 
 
+def test_the_published_scores_are_signed_from_the_model_towards_the_measurement():
+    """MBE is predicted - observed, so a model that runs high publishes a positive
+    bias; the pairwise-finite mask must drop the two half-pairs before averaging,
+    leaving residuals +0.2 and -0.1 over n = 2.
+    """
+    observed = np.array([0.5, 0.6, np.nan, 0.4])
+    predicted = np.array([0.7, 0.5, 0.3, np.nan])
+
+    scores = ktkd.regression_scores(observed, predicted)
+
+    assert scores["n"] == 2
+    assert scores["mbe"] == pytest.approx(0.05)
+    assert scores["mae"] == pytest.approx(0.15)
+    assert scores["rmse"] == pytest.approx(np.sqrt((0.2**2 + 0.1**2) / 2))
+
+
 def test_the_gates_keep_only_daylight_hours_with_a_physical_ratio():
     prepared = ktkd.prepare_ktkd(
         _daylight_frame(), site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
@@ -136,6 +177,68 @@ def test_the_gates_keep_only_daylight_hours_with_a_physical_ratio():
     assert prepared.kd.between(0.0, ktkd.MAX_RATIO).all()
     assert len(prepared.ast) == len(prepared.kt)
     assert len(prepared.psi) == len(prepared.kt)
+
+
+def test_a_dim_hour_and_an_hour_without_diffuse_are_both_dropped():
+    """The ratio window alone admits the dim hour: 40 W/m2 against 20 W/m2 of
+    diffuse gives a Kt and a Kd both inside [0, 1.2], so only the 50 W/m2 floor
+    removes it. The hour with no diffuse reading is removed by its own gate.
+    """
+    hourly = _daylight_frame()
+    index = pd.DatetimeIndex(hourly.index)
+    noon = index[index.hour == 12]
+    dim, without_diffuse = noon[0], noon[1]
+    hourly.loc[dim, ["Sw_dw", "Sw_dif"]] = [40.0, 20.0]
+    hourly.loc[without_diffuse, "Sw_dif"] = np.nan
+
+    prepared = ktkd.prepare_ktkd(
+        hourly, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
+    )
+
+    assert dim not in prepared.kt.index
+    assert without_diffuse not in prepared.kt.index
+    assert noon[2] in prepared.kt.index
+
+
+def test_an_hour_without_diffuse_is_no_neighbour_of_the_persistence_index():
+    """Dropping the pair is not enough: psi averages the hour before and after,
+    so an hour the diffuse channel never covered must leave the neighbourhood
+    too. The oracle is the same frame with the global channel also missing,
+    which every gate excludes for a reason nobody disputes.
+    """
+    hourly = _daylight_frame()
+    index = pd.DatetimeIndex(hourly.index)
+    without_diffuse = index[index.hour == 12][1]
+    neighbours = [without_diffuse - pd.Timedelta(hours=1), without_diffuse + pd.Timedelta(hours=1)]
+
+    blind = hourly.copy()
+    blind.loc[without_diffuse, "Sw_dif"] = np.nan
+    both_blind = hourly.copy()
+    both_blind.loc[without_diffuse, ["Sw_dw", "Sw_dif"]] = np.nan
+
+    prepared = [
+        ktkd.prepare_ktkd(frame, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS)
+        for frame in (blind, both_blind)
+    ]
+    psi = [pd.Series(one.psi, index=pd.DatetimeIndex(one.kt.index)) for one in prepared]
+
+    np.testing.assert_allclose(psi[0][neighbours], psi[1][neighbours], rtol=1e-12)
+
+
+def test_no_surviving_hour_dips_below_the_elevation_floor_at_either_end():
+    """The floor is on the WHOLE hour, not on its midpoint: a terminator hour
+    whose midpoint clears 10 degrees still starts below it, and the model's
+    predictors would then describe a sky the sensor never saw.
+    """
+    prepared = ktkd.prepare_ktkd(
+        _daylight_frame(), site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
+    )
+    kept = pd.DatetimeIndex(prepared.kt.index)
+
+    lowest, _highest = ktkd.elevation_bounds(kept, STATION_SITE, STATION_UTC_OFFSET_HOURS)
+
+    assert (lowest > 10.0).all()
+    assert prepared.elevation.min() > 10.0
 
 
 def test_the_payload_declares_the_published_schema_and_both_model_kinds():
