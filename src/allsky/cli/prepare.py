@@ -73,22 +73,14 @@ def _config_sha256(cfg: PrepareConfig) -> str:
     return config_sha256(cfg)
 
 
-#: :class:`PrepareConfig` sections that reach the manifest.  ``embeddings`` and
-#: ``splits`` are deliberately excluded from :func:`_manifest_inputs_sha256`:
-#: neither influences a single manifest row, so an unrelated edit (lowering
-#: ``embeddings.batch_size`` after an OOM) must not force a full rebuild.
-_MANIFEST_CONFIG_SECTIONS = (
-    "video",
-    "site",
-    "features",
-    "mask",
-    "crop",
-    "resize",
-    "night_filter",
-    "sensor",
-    "targets",
-    "alignment",
-    "output",
+#: :class:`PrepareConfig` sections that reach no manifest row and are left out of
+#: :func:`_manifest_inputs_sha256`: an unrelated edit (lowering
+#: ``embeddings.batch_size`` after an OOM) must not force a full rebuild. Every
+#: other section is hashed by construction, so a new section is covered unless
+#: it is written down here.
+_EXCLUDED_FROM_MANIFEST_HASH = ("embeddings", "splits")
+_MANIFEST_CONFIG_SECTIONS = tuple(
+    name for name in PrepareConfig.model_fields if name not in _EXCLUDED_FROM_MANIFEST_HASH
 )
 
 
@@ -200,11 +192,13 @@ def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]
     the manifest's targets are re-derived from the newest sensor data, which is
     the point.
     """
-    unknown = [name for name in _MANIFEST_CONFIG_SECTIONS if name not in PrepareConfig.model_fields]
+    unknown = [
+        name for name in _EXCLUDED_FROM_MANIFEST_HASH if name not in PrepareConfig.model_fields
+    ]
     if unknown:
         raise RuntimeError(
-            f"PrepareConfig has no field(s) {unknown}; pydantic ignores bogus include keys, so "
-            "the manifest inputs hash would silently stop covering them"
+            f"PrepareConfig has no field(s) {unknown}; an exclusion naming nothing means the "
+            "section it meant to leave out of the manifest inputs hash was renamed"
         )
     from allsky.provenance import canonical_config_json, file_content_sha256
 

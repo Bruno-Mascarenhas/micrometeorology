@@ -22,7 +22,11 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from allsky.cli import app
-from allsky.cli.prepare import _manifest_inputs_sha256
+from allsky.cli.prepare import (
+    _EXCLUDED_FROM_MANIFEST_HASH,
+    _MANIFEST_CONFIG_SECTIONS,
+    _manifest_inputs_sha256,
+)
 from allsky.config import PrepareConfig
 from tests.allsky.conftest import _SAFE_COLUMNS
 from tests.allsky.test_cli_prepare import _write_config
@@ -271,6 +275,22 @@ class TestInputsHashContents:
     @staticmethod
     def _frames(paths: list[str]) -> pd.DataFrame:
         return pd.DataFrame({"frame_path": paths})
+
+    def test_every_config_section_is_hashed_unless_excluded_by_name(self):
+        """``pad`` was in neither list, so a padding change never invalidated the
+        manifest; a section is now hashed by construction unless named as excluded."""
+        assert set(_MANIFEST_CONFIG_SECTIONS) | set(_EXCLUDED_FROM_MANIFEST_HASH) == set(
+            PrepareConfig.model_fields
+        )
+        assert "pad" in _MANIFEST_CONFIG_SECTIONS
+
+    def test_the_pad_section_is_part_of_the_key(self):
+        padded = PrepareConfig.model_validate({"pad": {"enabled": True, "top": 254}})
+        frames = [self._frames(["a.jpg"])]
+
+        assert _manifest_inputs_sha256(padded, frames) != _manifest_inputs_sha256(
+            PrepareConfig(), frames
+        )
 
     def test_frame_set_is_part_of_the_key(self):
         cfg = PrepareConfig()
