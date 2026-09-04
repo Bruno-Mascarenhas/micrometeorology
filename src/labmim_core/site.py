@@ -10,7 +10,7 @@ other, and it imports nothing from this project — the all-sky package reads th
 site from here too, which is what keeps that dependency one-directional.
 """
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = ["STATION_SITE", "STATION_UTC_OFFSET_HOURS", "SiteConfig"]
 
@@ -25,8 +25,8 @@ class SiteConfig(BaseModel):
     #: here, so a surveyed correction reaches all of them at once. Repeating
     #: them anywhere else is how the three packages once ended up with three
     #: different latitudes for one tower.
-    latitude: float = -13.0055
-    longitude: float = -38.5089
+    latitude: float = Field(default=-13.0055, ge=-90.0, le=90.0)
+    longitude: float = Field(default=-38.5089, ge=-180.0, le=180.0)
     #: Fixed offset of the clock the instrument stamps with, in hours from UTC.
     #: It travels WITH the coordinates because solar geometry needs both, and a
     #: site read from here beside an offset read from a module global is how a
@@ -36,7 +36,13 @@ class SiteConfig(BaseModel):
     #: Fixed, not a named zone: this is the offset of an instrument's own clock,
     #: and a site whose civil time observes DST needs its acquisition convention
     #: declared rather than inferred.
-    utc_offset_hours: float = -3.0
+    #:
+    #: The bounds on all three are what makes a swapped or sign-flipped site
+    #: unrepresentable rather than merely wrong: ``cos_zenith`` clips to
+    #: [-1, 1] and ``solar_azimuth_deg`` clips its arccos ratio, so a latitude
+    #: of -130 degrees or a lat/lon transposition produces a finite,
+    #: plausible-looking elevation instead of raising anywhere downstream.
+    utc_offset_hours: float = Field(default=-3.0, ge=-12.0, le=14.0)
 
 
 #: The station itself, at those default coordinates.

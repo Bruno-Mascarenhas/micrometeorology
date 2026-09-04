@@ -120,3 +120,31 @@ def test_geometry_channels_are_refused_in_embedding_mode():
                 "model": {"name": "image_only", "geometry_channels": True},
             }
         )
+
+
+class TestSiteBounds:
+    """A ``site:`` block is one YAML edit away from a sign typo, and every
+    number it carries flows into geometry that clips rather than raises:
+    ``cos_zenith`` clamps to [-1, 1] and ``solar_azimuth_deg`` clamps its
+    arccos ratio, so an impossible latitude produced a finite, confident
+    elevation with nothing failing anywhere in the chain."""
+
+    def test_latitude_beyond_the_pole_is_rejected(self):
+        with pytest.raises(ValidationError, match="latitude"):
+            SiteConfig.model_validate({"latitude": -130.0})
+
+    def test_longitude_beyond_the_antimeridian_is_rejected(self):
+        with pytest.raises(ValidationError, match="longitude"):
+            SiteConfig.model_validate({"longitude": 190.0})
+
+    def test_utc_offset_outside_the_real_range_is_rejected(self):
+        with pytest.raises(ValidationError, match="utc_offset_hours"):
+            SiteConfig.model_validate({"utc_offset_hours": -25.0})
+
+    def test_the_station_defaults_still_validate(self):
+        site = SiteConfig()
+        assert (site.latitude, site.longitude, site.utc_offset_hours) == (
+            -13.0055,
+            -38.5089,
+            -3.0,
+        )
