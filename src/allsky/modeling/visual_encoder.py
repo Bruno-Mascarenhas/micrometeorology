@@ -304,6 +304,25 @@ class ImageEncoder(nn.Module):
         )
         self.projection, self._out_dim = _projection(int(dim), out_dim, dropout)
 
+    def train(self, mode: bool = True) -> ImageEncoder:
+        """Set training mode, keeping every frozen normalisation layer in eval.
+
+        ``requires_grad_(False)`` freezes PARAMETERS. A BatchNorm's running mean
+        and variance are BUFFERS: they keep updating on every forward in train
+        mode, so a "frozen" ConvNet backbone still drifts with the batches it
+        sees and the frozen and fine-tuned arms of an ablation stop being the
+        same encoder. The transformer backbones use LayerNorm, which holds no
+        running statistics, which is why this went unnoticed.
+        """
+        from torch.nn.modules.batchnorm import _BatchNorm
+
+        super().train(mode)
+        for module in self.backbone.modules():
+            frozen = not any(param.requires_grad for param in module.parameters(recurse=False))
+            if isinstance(module, _BatchNorm) and frozen:
+                module.eval()
+        return self
+
     def _unfreeze_last_blocks(self, n: int) -> None:
         """Re-enable gradients on the last *n* transformer blocks, if any."""
         blocks = getattr(self.backbone, "blocks", None)

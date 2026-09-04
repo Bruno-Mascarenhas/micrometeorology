@@ -143,12 +143,28 @@ class ClimatologyModel(nn.Module):
         if sky_class is not None:
             labels = np.asarray(sky_class)
             valid = labels[labels >= 0].astype(np.int64)
+            if not valid.size:
+                raise ValueError(
+                    "climatology target 'sky_class' has no labelled row to count; a uniform "
+                    "prior would be reported as a fitted baseline, exactly what the "
+                    "regression branch above refuses for the same reason"
+                )
+            out_of_range = valid[valid >= self.n_classes]
+            if out_of_range.size:
+                raise ValueError(
+                    f"sky_class carries label(s) {sorted({int(v) for v in out_of_range})} outside "
+                    f"the {self.n_classes} declared classes; silently dropping them fits the "
+                    "prior to a different population than the one it is scored against"
+                )
             counts = np.bincount(valid, minlength=self.n_classes)[: self.n_classes].astype(
                 np.float64
             )
-            total = counts.sum()
-            freq = counts / total if total > 0 else np.full(self.n_classes, 1.0 / self.n_classes)
-            logits = np.log(np.clip(freq, 1e-8, None))
+            # A class absent from the training split gets the smallest positive
+            # float64 rather than a magic epsilon: log(0) is -inf, which poisons
+            # the whole softmax, while any finite floor is a probability nobody
+            # measured. This one is the least such floor representable.
+            freq = counts / counts.sum()
+            logits = np.log(np.clip(freq, np.finfo(np.float64).tiny, None))
             self.sky_logits_const.copy_(torch.tensor(logits, dtype=torch.float32))
 
     def forward(self, batch: dict[str, Tensor]) -> ModelOutputs:

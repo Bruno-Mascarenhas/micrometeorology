@@ -328,8 +328,12 @@ class PreprocessingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     overlay: OverlayPolicy = "keep"
-    band_fraction: float = TIMESTAMP_BAND_FRACTION
-    roi_radius_fraction: float | None = None
+    #: Both are fractions OF THE FRAME, so a value at or above 1 asks for a band
+    #: taller than the image or an ROI larger than it — accepted unbounded, the
+    #: first blanked every row and the second kept every pixel, either way with
+    #: no error and a model trained on pixels nobody chose.
+    band_fraction: float = Field(default=TIMESTAMP_BAND_FRACTION, ge=0.0, lt=1.0)
+    roi_radius_fraction: float | None = Field(default=None, gt=0.0, le=1.0)
 
 
 class AugmentationConfig(BaseModel):
@@ -344,13 +348,13 @@ class AugmentationConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    p_exposure: float = 0.0
-    exposure_log2: float = 0.35
-    p_noise: float = 0.0
-    noise_sigma: float = 0.01
-    p_translate: float = 0.0
-    translate_px: int = 4
-    p_erase: float = 0.0
+    p_exposure: float = Field(default=0.0, ge=0.0, le=1.0)
+    exposure_log2: float = Field(default=0.35, ge=0.0)
+    p_noise: float = Field(default=0.0, ge=0.0, le=1.0)
+    noise_sigma: float = Field(default=0.01, ge=0.0)
+    p_translate: float = Field(default=0.0, ge=0.0, le=1.0)
+    translate_px: int = Field(default=4, ge=0)
+    p_erase: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class ExperimentModelConfig(BaseModel):
@@ -420,8 +424,8 @@ class ExperimentTrainConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     epochs: int = Field(default=20, ge=1)
-    batch_size: int = 32
-    lr: float = 3e-4
+    batch_size: int = Field(default=32, ge=1)
+    lr: float = Field(default=3e-4, gt=0.0)
     backbone_lr: float | None = None
     weight_decay: float = 1e-4
     # AdamW is the only algorithm allsky.training.engine builds. Declared as the
@@ -433,7 +437,7 @@ class ExperimentTrainConfig(BaseModel):
     grad_accum_steps: int = Field(default=1, ge=1)
     grad_clip_norm: float | None = None
     early_stopping: EarlyStoppingConfig = Field(default_factory=EarlyStoppingConfig)
-    num_workers: int = 2
+    num_workers: int = Field(default=2, ge=0)
     device: str = "auto"
     out_subdir: str = "run"
 
@@ -472,6 +476,38 @@ class ExperimentConfig(BaseModel):
                 "model.geometry_channels asks for solar-geometry planes, but "
                 "data.input_mode='embedding' reads precomputed vectors and no pixel; "
                 "the planes would be dropped without a word"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _pixel_sections_need_image_mode(self) -> ExperimentConfig:
+        """Refuse preprocessing/augmentation in embedding mode, where no pixel is read.
+
+        Both sections describe transforms over a decoded frame, and embedding
+        mode reads precomputed vectors: the run would accept the section, never
+        apply it, and report metrics as though it had. Same reasoning as
+        :meth:`_geometry_channels_need_image_mode`, one section further out.
+        """
+        if self.data.input_mode != "embedding":
+            return self
+        asked = []
+        if self.preprocessing.overlay != "keep" or self.preprocessing.roi_radius_fraction:
+            asked.append("preprocessing")
+        if (
+            max(
+                self.augmentation.p_exposure,
+                self.augmentation.p_noise,
+                self.augmentation.p_translate,
+                self.augmentation.p_erase,
+            )
+            > 0.0
+        ):
+            asked.append("augmentation")
+        if asked:
+            raise ValueError(
+                f"{' and '.join(asked)} transform decoded pixels, but "
+                "data.input_mode='embedding' reads precomputed vectors and decodes none; "
+                "the section would be accepted and never applied"
             )
         return self
 

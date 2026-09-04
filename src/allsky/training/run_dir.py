@@ -169,18 +169,25 @@ def truncate_metrics(run_dir: Path, fields: list[str], resumed_epoch: int) -> li
     completed.  Only rows with ``epoch <= resumed_epoch`` (completed epochs) are
     kept; both files are atomically rewritten from them and the truncated history
     is returned for the loop to keep appending to.  ``metrics.json`` is the source
-    of truth (it is always present once a checkpoint exists); if it is somehow
-    absent the files are left untouched rather than risking data loss.
+    of truth (it is always present once a checkpoint exists); when it is absent
+    the history is rebuilt from ``metrics.csv``, which carries the same rows.
+    Returning an empty history there instead left the loop appending only the
+    resumed run's epochs, so the rewritten JSON silently lost every epoch the
+    interrupted run had already recorded.
     """
     metrics_json = run_dir / "metrics.json"
     metrics_csv = run_dir / "metrics.csv"
     if not metrics_json.exists():
-        if metrics_csv.exists():
-            logger.warning(
-                "resume: metrics.json is missing but metrics.csv is present; leaving the "
-                "metrics files untouched (cannot safely truncate without the JSON history)"
-            )
-        return []
+        if not metrics_csv.exists():
+            return []
+        logger.warning(
+            "resume: metrics.json is missing; rebuilding the history from metrics.csv",
+        )
+        loaded = _rows_from_csv(metrics_csv)
+        history = [row for row in loaded if int(row.get("epoch", 0)) <= resumed_epoch]
+        rewrite_csv(metrics_csv, fields, history)
+        atomic_write_json(metrics_json, history)
+        return history
     loaded = json.loads(metrics_json.read_text(encoding="utf-8"))
     history = [row for row in loaded if int(row.get("epoch", 0)) <= resumed_epoch]
     dropped = len(loaded) - len(history)
@@ -189,6 +196,30 @@ def truncate_metrics(run_dir: Path, fields: list[str], resumed_epoch: int) -> li
     rewrite_csv(metrics_csv, fields, history)
     atomic_write_json(metrics_json, history)
     return history
+
+
+def _rows_from_csv(path: Path) -> list[dict[str, Any]]:
+    """Read ``metrics.csv`` back into the row dicts ``metrics.json`` holds.
+
+    Every value arrives as text; the numeric fields are converted back so the
+    rebuilt JSON is the same shape the writer produces, and a field that will
+    not parse is kept as the string it is rather than dropped.
+    """
+    with open(path, encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    parsed: list[dict[str, Any]] = []
+    for row in rows:
+        out: dict[str, Any] = {}
+        for key, value in row.items():
+            if value == "":
+                out[key] = None
+                continue
+            try:
+                out[key] = int(value) if key == "epoch" else float(value)
+            except ValueError:
+                out[key] = value
+        parsed.append(out)
+    return parsed
 
 
 def reset_stale_run_artifacts(run_dir: Path) -> None:

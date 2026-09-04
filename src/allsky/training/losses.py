@@ -9,9 +9,12 @@ weighted sum.
 Target/prediction spaces
 ------------------------
 Model regression outputs live in **normalized** space (the heads predict the
-standardized quantity).  Targets arrive in the batch as **raw physical units**,
-so this module normalizes ``dhi`` and ``kindex`` internally with the supplied
-:class:`TargetNormalizer` before comparing them to the model outputs.
+standardized quantity).  Targets arrive in the batch in the unit the dataset
+serves them in — ``dhi`` in W m-2 under ``targets.dhi.parameterization="raw"``,
+and a dimensionless ratio to the clear-sky reference under
+``"clearsky_index"`` — so this module normalizes ``dhi`` and ``kindex``
+internally with the supplied :class:`TargetNormalizer`, which was fitted on that
+same served quantity, before comparing them to the model outputs.
 ``cloud_fraction`` is the one exception: it is already a bounded fraction in
 ``[0, 1]`` (the head is sigmoid-bounded), so it is compared raw with no
 normalization.
@@ -124,7 +127,9 @@ class MultitaskLoss(nn.Module):
             The model's :class:`allsky.modeling.contracts.ModelOutputs` (only
             the enabled heads' keys are read).
         batch:
-            Batch dict with raw physical targets ``dhi`` ``(B,)`` in W m-2,
+            Batch dict with the served targets: ``dhi`` ``(B,)`` in W m-2 under
+            ``targets.dhi.parameterization="raw"`` and dimensionless under
+            ``"clearsky_index"``,
             ``kindex`` ``(B,)`` (dimensionless ratio) and ``cloud_fraction``
             ``(B,)`` in ``[0, 1]`` — all ``float``, NaN = missing — plus
             ``sky_class`` ``(B,)`` ``int64`` with ``-1`` = missing.

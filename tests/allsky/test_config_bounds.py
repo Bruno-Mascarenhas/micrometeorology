@@ -148,3 +148,55 @@ class TestSiteBounds:
             -38.5089,
             -3.0,
         )
+
+
+class TestPixelSectionBounds:
+    """Every one of these is a fraction or a probability, and unbounded each one
+    accepted a value that changes what the model is fed with no error: a band
+    taller than the frame, an ROI larger than it, a probability above 1."""
+
+    @pytest.mark.parametrize(
+        ("section", "payload"),
+        [
+            ("preprocessing", {"band_fraction": 1.5}),
+            ("preprocessing", {"band_fraction": -0.1}),
+            ("preprocessing", {"roi_radius_fraction": 1.5}),
+            ("preprocessing", {"roi_radius_fraction": 0.0}),
+            ("augmentation", {"p_exposure": 1.5}),
+            ("augmentation", {"p_noise": -0.1}),
+            ("augmentation", {"p_translate": 1.5}),
+            ("augmentation", {"p_erase": 1.5}),
+        ],
+    )
+    def test_a_fraction_outside_its_range_is_rejected(self, section: str, payload: dict):
+        with pytest.raises(ValidationError):
+            ExperimentConfig.model_validate({section: payload})
+
+    @pytest.mark.parametrize("payload", [{"batch_size": 0}, {"num_workers": -1}, {"lr": 0.0}])
+    def test_a_train_knob_outside_its_range_is_rejected(self, payload: dict):
+        with pytest.raises(ValidationError):
+            _config(payload)
+
+
+class TestPixelSectionsNeedImageMode:
+    """Both sections describe transforms over a decoded frame, and embedding mode
+    decodes none: the run accepted the section, never applied it, and reported
+    metrics as though it had."""
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"preprocessing": {"overlay": "fill"}},
+            {"preprocessing": {"roi_radius_fraction": 0.9}},
+            {"augmentation": {"p_noise": 0.3}},
+        ],
+    )
+    def test_a_pixel_section_is_refused_in_embedding_mode(self, payload: dict):
+        with pytest.raises(ValidationError, match="decodes none"):
+            ExperimentConfig.model_validate({"data": {"input_mode": "embedding"}, **payload})
+
+    def test_the_same_section_is_accepted_in_image_mode(self):
+        cfg = ExperimentConfig.model_validate(
+            {"data": {"input_mode": "image"}, "augmentation": {"p_noise": 0.3}}
+        )
+        assert cfg.augmentation.p_noise == pytest.approx(0.3)

@@ -600,3 +600,47 @@ def test_sky_logits_documentation_drops_the_retired_three_class_vocabulary(
     documented: str, retired_name: str
 ):
     assert retired_name not in documented
+
+
+def test_a_frozen_convnet_backbone_keeps_its_running_statistics_still():
+    """`requires_grad_(False)` freezes parameters; a BatchNorm's running mean and
+    variance are buffers that keep moving on every forward in train mode, so a
+    "frozen" ConvNet still drifted with the batches it saw and the frozen and
+    fine-tuned arms of an ablation stopped being the same encoder."""
+    from allsky.modeling.visual_encoder import ImageEncoder
+
+    class _ConvBackbone(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dim = 4
+            self.conv = torch.nn.Conv2d(3, 4, 3, padding=1)
+            self.norm = torch.nn.BatchNorm2d(4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            pooled: torch.Tensor = self.norm(self.conv(x)).mean(dim=(2, 3))
+            return pooled
+
+    backbone = _ConvBackbone()
+    encoder = ImageEncoder(backbone, frozen=True)
+    encoder.train()
+    running_mean = backbone.norm.running_mean
+    assert running_mean is not None
+    before = running_mean.clone()
+
+    for _ in range(3):
+        encoder({"image": torch.randn(8, 3, 8, 8) * 5.0 + 2.0})
+
+    assert backbone.norm.training is False
+    torch.testing.assert_close(running_mean, before)
+
+
+def test_a_climatology_with_no_labelled_sky_row_refuses_to_fit():
+    """A uniform prior reported as a fitted baseline is exactly what the
+    regression branch beside it already refuses."""
+    from allsky.modeling.baselines import ClimatologyModel
+
+    cfg = ExperimentConfig.model_validate({"targets": {"sky": {"enabled": True}}})
+    model = ClimatologyModel(cfg.targets)
+
+    with pytest.raises(ValueError, match="no labelled row"):
+        model.fit_from_targets(sky_class=np.array([-1, -1, -1]))

@@ -90,6 +90,12 @@ _VISUAL_PARAMS = (
             "visual_out_dim",
             "backbone_frozen",
             "unfreeze_last_n",
+            # Kept as a RECOGNISED name although the builder never reads it: the
+            # engine and the evaluator both derive the pooler from
+            # `data.alignment.strategy` and pass it as an override that always
+            # wins, so a config setting it is inert. Dropping it from the known
+            # set would warn on the shipped configs that still carry it; the
+            # docstring of build_model states where the value really comes from.
             "temporal_pooling",
             "geometry_channels",
         }
@@ -287,6 +293,11 @@ def build_model(
 ) -> nn.Module:
     """Build the model named by ``experiment_cfg.model.name``.
 
+    The temporal pooler is NOT read from ``model.temporal_pooling``: both
+    production callers — the engine and the evaluator — derive it from
+    ``data.alignment.strategy`` and pass it here as *temporal_pooling*, which
+    always wins, so the config key is inert wherever a run reaches this.
+
     Parameters
     ----------
     experiment_cfg:
@@ -461,8 +472,25 @@ def _warn_unknown_params(name: str, experiment_cfg: ExperimentConfig) -> None:
     ``ExperimentModelConfig`` keeps unknown keys (``extra="allow"``); this catches
     typos (a mistyped hyper-parameter that would otherwise be silently ignored)
     without failing the run.
+
+    A key that IS recognised but cannot act in this ``data.input_mode`` gets its
+    own message rather than the typo one: under ``input_mode='embedding'`` no
+    backbone is built and no pixel is read, so every image-only knob is accepted
+    and dropped without a word. It is not a typo — the shipped ``image_only``
+    fragment sets ``backbone_frozen`` deliberately and says so — but a run whose
+    log never mentions it reads as though the knob took effect.
     """
     known = KNOWN_MODEL_PARAMS.get(name, frozenset())
+    if experiment_cfg.data.input_mode == "embedding":
+        inert_here = _PIPELINE_VISUAL_PARAMS | {"backbone_frozen", "unfreeze_last_n"}
+        inert = sorted(set(_params(experiment_cfg)) & known & inert_here)
+        if inert:
+            logger.info(
+                "model %r: %s describe the image branch, and data.input_mode='embedding' "
+                "reads precomputed vectors, so they do not act on this run",
+                name,
+                inert,
+            )
     extras = sorted(set(_params(experiment_cfg)) - known)
     if extras:
         logger.warning(
