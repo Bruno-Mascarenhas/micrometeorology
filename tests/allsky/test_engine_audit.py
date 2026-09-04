@@ -287,6 +287,31 @@ def test_a_run_that_trained_nothing_reports_no_best_checkpoint_rather_than_a_mis
     assert summary["checkpoint_best"] is None
 
 
+def test_a_run_that_trained_nothing_reports_no_last_checkpoint_either(tmp_path: Path):
+    """``checkpoint_best`` already carried the existence rule; ``checkpoint_last`` named
+    ``<fresh_dir>/last.ckpt`` for a resume that wrote nothing there."""
+    root, manifest, _ = _make_dataset(tmp_path)
+    reader = _reader(manifest)
+    trained_dir = tmp_path / "trained"
+    run_experiment(
+        _cfg(root, model="climatology", epochs=8, patience=1),
+        data_root=root,
+        output_dir=trained_dir,
+        embedding_reader=reader,
+    )
+
+    summary = run_experiment(
+        _cfg(root, model="climatology", epochs=8, patience=1),
+        data_root=root,
+        output_dir=tmp_path / "fresh",
+        resume=str(trained_dir / "last.ckpt"),
+        embedding_reader=reader,
+    )
+
+    assert summary["epochs_ran"] == 0
+    assert summary["checkpoint_last"] is None
+
+
 def test_a_converged_run_still_reports_the_best_checkpoint_it_wrote(tmp_path: Path):
     root, manifest, _ = _make_dataset(tmp_path)
     reader = _reader(manifest)

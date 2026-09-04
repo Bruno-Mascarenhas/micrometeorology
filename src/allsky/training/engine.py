@@ -197,9 +197,10 @@ def run_experiment(
     dict
         ``{best_metric, epochs_ran, epoch, global_step, final_val_metrics,
         output_dir, checkpoint_last, checkpoint_best, wall_seconds}``.
-        ``checkpoint_best`` is the path only when that file exists on disk and
-        ``None`` otherwise (a resume that trained nothing into a new run
-        directory), so the summary never names an artifact a caller cannot read.
+        ``checkpoint_last`` and ``checkpoint_best`` are paths only when the file
+        exists on disk and ``None`` otherwise (a resume that trained nothing into
+        a new run directory), so the summary never names an artifact a caller
+        cannot read.
 
     Raises
     ------
@@ -527,6 +528,7 @@ def run_experiment(
             )
 
     best_checkpoint = run_dir / BEST_CHECKPOINT
+    last_checkpoint = run_dir / LAST_CHECKPOINT
     return {
         "best_metric": {"name": monitor_key, "value": best_value, "epoch": best_epoch},
         "epochs_ran": epochs_ran,
@@ -534,7 +536,7 @@ def run_experiment(
         "global_step": global_step,
         "final_val_metrics": last_val_metrics,
         "output_dir": str(run_dir),
-        "checkpoint_last": str(run_dir / LAST_CHECKPOINT),
+        "checkpoint_last": str(last_checkpoint) if last_checkpoint.exists() else None,
         "checkpoint_best": str(best_checkpoint) if best_checkpoint.exists() else None,
         "wall_seconds": time.monotonic() - started,
     }
