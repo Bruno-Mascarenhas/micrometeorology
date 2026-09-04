@@ -152,10 +152,25 @@ def test_neither_artifact_carries_a_non_finite_number():
 
 
 def test_a_record_with_no_usable_hour_refuses_to_publish_empty_artifacts():
-    dark = pd.DataFrame(
-        {"Sw_dw": np.zeros(48), "Sw_dif": np.zeros(48)},
+    """The global channel decides: with it absent neither document has a
+    population, so the run refuses rather than publishing empty subsets."""
+    blind = pd.DataFrame(
+        {"Sw_dw": np.full(48, np.nan), "Sw_dif": np.full(48, np.nan)},
         index=pd.date_range("2024-01-01", periods=48, freq="h"),
     )
 
     with pytest.raises(ValueError, match="no hour survived"):
-        build_payloads(dark, version="probe")
+        build_payloads(blind, version="probe")
+
+
+def test_a_dead_diffuse_sensor_still_publishes_the_cumulative():
+    """``prepare_ktkd`` needs the diffuse channel and ``kt_cumulative.json`` does
+    not, but the ``kt.empty`` refusal ran first and took both documents down on
+    every PSP outage."""
+    blind = _hourly(days=366)
+    blind["Sw_dif"] = np.nan
+
+    payloads = build_payloads(blind, version="probe")
+
+    assert set(payloads) == {"kt_cumulative.json"}
+    assert payloads["kt_cumulative.json"]["format"] == "labmim-kt-cumulative-v1"

@@ -99,23 +99,42 @@ def build_payloads(hourly: pd.DataFrame, *, version: str) -> dict[str, Any]:
     Returns
     -------
     dict
-        ``{filename: payload}`` for every artifact this command publishes.
+        ``{filename: payload}`` for every artifact this command can publish from
+        *hourly*: always ``kt_cumulative.json``, and ``ktkd.json`` only when the
+        diffuse channel leaves an hour standing.
+
+    Raises
+    ------
+    ValueError
+        When not one hour survives the clearness gates, which the global channel
+        alone decides — neither document is buildable then.
     """
+    # The clearness record is gated on the global channel alone: conditioning it
+    # on the diffuse sensor's availability would publish a different population.
+    # It is also built FIRST: prepare_ktkd needs the diffuse sensor and
+    # kt_cumulative.json does not, so refusing on its emptiness first took the
+    # clearness document down with every PSP outage.
+    clearness = ktkd_stats.prepare_clearness(
+        hourly, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
+    )
+    if clearness.empty:
+        raise ValueError("no hour survived the gates; refusing to publish empty sky artifacts")
+    cumulative = build_kt_cumulative_payload(
+        _seasonal_samples(clearness), SUBSET_LABELS, version=version, caveats=CUMULATIVE_CAVEATS
+    )
+
     prepared = ktkd_stats.prepare_ktkd(
         hourly, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
     )
     kt, kd = prepared.kt, prepared.kd
     if kt.empty:
-        raise ValueError("no hour survived the gates; refusing to publish empty sky artifacts")
-
-    # The clearness record is gated on the global channel alone: conditioning it
-    # on the diffuse sensor's availability would publish a different population.
-    clearness = ktkd_stats.prepare_clearness(
-        hourly, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
-    )
-    cumulative = build_kt_cumulative_payload(
-        _seasonal_samples(clearness), SUBSET_LABELS, version=version, caveats=CUMULATIVE_CAVEATS
-    )
+        logger.warning(
+            "no hour carried both the global and the diffuse channel: publishing "
+            "%s alone and leaving %s as it is",
+            CUMULATIVE_FILENAME,
+            KTKD_FILENAME,
+        )
+        return {CUMULATIVE_FILENAME: cumulative}
 
     predictors = (prepared.ast, prepared.elevation, prepared.daily_kt, prepared.psi)
     edges = np.asarray(KT_CUMULATIVE_EDGES, dtype=float)
@@ -153,17 +172,19 @@ def run(
     ],
     output_dir: Annotated[Path, typer.Option("-o", "--output", help="The site's Ceu/ directory.")],
 ) -> None:
-    """Publish ``kt_cumulative.json`` and ``ktkd.json`` into *output_dir*."""
+    """Publish ``kt_cumulative.json`` and, when the diffuse channel allows it,
+    ``ktkd.json`` into *output_dir*."""
     setup_logging()
     version = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
     hourly = pd.read_parquet(input_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for filename, payload in build_payloads(hourly, version=version).items():
+    payloads = build_payloads(hourly, version=version)
+    for filename, payload in payloads.items():
         path = write_json(output_dir / filename, payload)
         typer.echo(f"  [ok] {path.name}")
 
-    typer.echo(f"\n>> 2 arquivos em {output_dir} (versão {version})")
+    typer.echo(f"\n>> {len(payloads)} arquivo(s) em {output_dir} (versão {version})")
 
 
 def main() -> None:
