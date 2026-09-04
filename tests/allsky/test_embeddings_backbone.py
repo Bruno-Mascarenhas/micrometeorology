@@ -70,3 +70,10 @@ class TestBackboneSelection:
     def test_image_size_must_be_a_multiple_of_the_patch_size(self):
         with pytest.raises(ValueError, match="patch size"):
             DinoV2Backbone(model="dinov2_vitb14", image_size=225)
+
+
+def test_a_convnet_backbone_refuses_a_token_pooling_before_the_store_is_stamped() -> None:
+    """``build_backbone("resnet50", pooling="cls")`` constructed a backbone whose first
+    encode died, after ``extract_embeddings`` had already written the store's meta."""
+    with pytest.raises(ValueError, match="pooling"):
+        build_backbone("resnet50", pooling="cls")
