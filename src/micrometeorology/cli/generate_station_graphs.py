@@ -30,8 +30,10 @@ from typing import Annotated
 
 import matplotlib
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import typer
+from matplotlib.axes import Axes
 
 matplotlib.use("Agg")  # headless backend for server
 
@@ -140,16 +142,14 @@ def _plot_wrf_overlay(
     ax.plot(wrf.index, wrf[col], linestyle=linestyle, color=color, label=label)
 
 
-def _plot_radiacao_difusa(
-    raw: pd.DataFrame,
-    hourly: pd.DataFrame,
-    out_dir: Path,
-    dt: datetime,
-    wrf: pd.DataFrame | None = None,
-) -> Path | None:
-    """Graph 1 -- Solar Radiation (SW global + diffuse)."""
-    fig, ax = create_figure()
+def _carries_signal(series: pd.Series) -> bool:
+    finite = series.dropna().to_numpy(dtype=float)
+    return finite.size > 0 and not np.isclose(finite, 0.0).all()
 
+
+def _draw_radiacao_difusa(
+    ax: Axes, raw: pd.DataFrame, hourly: pd.DataFrame, wrf: pd.DataFrame | None
+) -> None:
     col_sw = "CM3Up_Wm2_Avg"
     col_diffuse = "CMP21_Wm2_Avg"
     col_diffuse_psp = "PSP_Wm2_Avg"
@@ -158,9 +158,11 @@ def _plot_radiacao_difusa(
     # sharing one "Media 5 min" entry left the reader unable to tell the global
     # pyranometer from the two diffuse ones on the figure they disagree on.
     # Short spellings because eight entries have to fit the fixed-height bar.
+    # A diffuse channel the logger writes as a hard zero (CMP21 in every v22 row,
+    # see configs/micromet/calibrations.yaml) is not the diffuse and is not drawn.
     if col_sw in raw.columns:
         ax.plot(raw.index, raw[col_sw], "o", color="yellow", markersize=6, label="5 min (CM3Up)")
-    if col_diffuse in raw.columns:
+    if col_diffuse in raw.columns and _carries_signal(raw[col_diffuse]):
         ax.plot(
             raw.index,
             raw[col_diffuse],
@@ -169,7 +171,7 @@ def _plot_radiacao_difusa(
             markersize=6,
             label="5 min (CMP21)",
         )
-    if col_diffuse_psp in raw.columns:
+    if col_diffuse_psp in raw.columns and _carries_signal(raw[col_diffuse_psp]):
         ax.plot(
             raw.index,
             raw[col_diffuse_psp],
@@ -180,9 +182,9 @@ def _plot_radiacao_difusa(
         )
     if col_sw in hourly.columns:
         ax.plot(hourly.index, hourly[col_sw], "-vr", label="SW_dw 1h")
-    if col_diffuse in hourly.columns:
-        ax.plot(hourly.index, hourly[col_diffuse], "-db", label="SW_df 1h")
-    if col_diffuse_psp in hourly.columns:
+    if col_diffuse in hourly.columns and _carries_signal(hourly[col_diffuse]):
+        ax.plot(hourly.index, hourly[col_diffuse], "-db", label="SW_df 1h (CMP21)")
+    if col_diffuse_psp in hourly.columns and _carries_signal(hourly[col_diffuse_psp]):
         ax.plot(hourly.index, hourly[col_diffuse_psp], "-dg", label="SW_df 1h (PSP)")
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["radiacao_global"], label="SW_dw-wrf 1h")
@@ -194,6 +196,18 @@ def _plot_radiacao_difusa(
         linestyle="-.",
         color="#e07a1f",
     )
+
+
+def _plot_radiacao_difusa(
+    raw: pd.DataFrame,
+    hourly: pd.DataFrame,
+    out_dir: Path,
+    dt: datetime,
+    wrf: pd.DataFrame | None = None,
+) -> Path | None:
+    """Graph 1 -- Solar Radiation (SW global + diffuse)."""
+    fig, ax = create_figure()
+    _draw_radiacao_difusa(ax, raw, hourly, wrf)
 
     if not ax.get_lines():
         logger.warning("No solar radiation columns found -- skipping radiacao_difusa.png")

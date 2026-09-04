@@ -262,3 +262,30 @@ def test_the_model_overlay_never_backtracks_in_time():
     assert index.is_monotonic_increasing
     assert not index.duplicated().any()
     assert not (index.hour == 21).any()
+
+
+def test_a_diffuse_channel_that_is_a_hard_zero_is_not_drawn_as_the_diffuse():
+    """``CMP21_Wm2_Avg`` is a hard 0.0 in every v22 row (calibrations.yaml), yet
+    the graph drew it as ``SW_df 1h`` beside the PSP that measures the diffuse."""
+    from micrometeorology.cli.generate_station_graphs import _draw_radiacao_difusa
+
+    index = pd.date_range("2026-01-01 10:00", periods=3, freq="h")
+    hourly = pd.DataFrame(
+        {
+            "CM3Up_Wm2_Avg": [500.0, 600.0, 550.0],
+            "CMP21_Wm2_Avg": [0.0, 0.0, 0.0],
+            "PSP_Wm2_Avg": [120.0, 130.0, 125.0],
+        },
+        index=index,
+    )
+    figure, axes = plt.subplots()
+    try:
+        _draw_radiacao_difusa(axes, hourly, hourly, None)
+        labels = axes.get_legend_handles_labels()[1]
+    finally:
+        plt.close(figure)
+
+    assert "SW_df 1h (PSP)" in labels
+    assert "5 min (PSP)" in labels
+    assert not any("CMP21" in label for label in labels)
+    assert "SW_df 1h" not in labels
