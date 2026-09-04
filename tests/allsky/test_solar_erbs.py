@@ -223,3 +223,16 @@ class TestPseudoDiffuse:
     def test_nan_propagates(self):
         dhi = erbs.pseudo_diffuse(np.array([np.nan, 500.0]), np.array([0.5, np.nan]))
         assert np.isnan(dhi).all()
+
+
+def test_the_declared_site_offset_wins_over_the_meridian_inference():
+    """``SiteConfig.utc_offset_hours`` exists so a site's clock travels with its
+    coordinates, yet the geometry fell back to ``round(longitude / 15)`` and
+    never read it: a site at 60 W stamping UTC-3 was computed on UTC-4."""
+    site = SiteConfig(latitude=-13.0, longitude=-60.0, utc_offset_hours=-3.0)
+    times = pd.DatetimeIndex(["2026-01-15 09:00:00"])
+
+    declared = solar.solar_elevation_deg(times, site)
+
+    assert declared[0] == pytest.approx(solar.solar_elevation_deg(times, site, -3.0)[0])
+    assert abs(declared[0] - solar.solar_elevation_deg(times, site, -4.0)[0]) > 5.0
