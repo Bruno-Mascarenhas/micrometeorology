@@ -144,6 +144,14 @@ def test_a_frame_too_narrow_to_hold_the_overlay_is_refused():
         read_frame_timestamp(narrow)
 
 
+def test_a_frame_too_short_to_hold_the_overlay_band_is_refused():
+    """Only the width was checked, so a frame shorter than the band reached the
+    matcher and died on a numpy broadcast error instead of the documented one."""
+    short = fake.render_overlay_frame("20260810120000")[:10]
+    with pytest.raises(OverlayTimestampError, match="overlay rows"):
+        read_frame_timestamp(short)
+
+
 def test_a_frame_without_colour_channels_is_refused():
     grey = np.zeros((60, 480), dtype=np.uint8)
     with pytest.raises(OverlayTimestampError, match="needs an RGB frame"):
@@ -507,6 +515,30 @@ def test_extraction_leaves_only_frames_and_the_manifest_in_the_output_directory(
         "allsky-20260810-1202.jpg",
         MANIFEST_FILENAME,
     ]
+
+
+def test_extraction_sweeps_the_staging_debris_a_killed_run_left_and_nothing_else(tmp_path: Path):
+    """The staging directory is named uniquely per run and removed in a finally,
+    which a SIGKILL never reaches, so a directory extracted repeatedly accumulates
+    a full frame set of debris per kill — and the sweep must still not touch a
+    frame, a manifest, or a plain file that merely shares the prefix."""
+    from allsky.overlay import STAGING_DIR_PREFIX
+
+    out_dir = tmp_path / "frames"
+    out_dir.mkdir()
+    orphan = out_dir / f"{STAGING_DIR_PREFIX}dead"
+    orphan.mkdir()
+    (orphan / "00000000.jpg").write_bytes(b"debris")
+    kept_frame = out_dir / "allsky-20260809-1200.jpg"
+    kept_frame.write_bytes(b"an earlier day")
+    namesake = out_dir / f"{STAGING_DIR_PREFIX}notadir"
+    namesake.write_bytes(b"a file, not a directory")
+
+    extract_frames_with_overlay_timestamps(_video(tmp_path, MINUTE_APART), out_dir)
+
+    assert not orphan.exists()
+    assert kept_frame.read_bytes() == b"an earlier day"
+    assert namesake.read_bytes() == b"a file, not a directory"
 
 
 def test_a_video_the_reader_will_not_vouch_for_leaves_no_frame_behind(tmp_path: Path):

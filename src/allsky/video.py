@@ -34,7 +34,7 @@ JPEG_QUALITY = 92
 MANIFEST_COLUMNS = ("frame_path", "timestamp", "video", "index")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FrameRecord:
     """A single decoded video frame with its wall-clock timestamp.
 

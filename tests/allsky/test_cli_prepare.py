@@ -462,7 +462,8 @@ class TestPrepareLocal:
         result = runner.invoke(app, ["prepare-local", "--config", str(config), "--steps", "splits"])
 
         assert result.exit_code == 1
-        assert "cannot create splits" in result.output
+        assert "does not validate" in result.output
+        assert "leaves no day" in result.output
 
     def test_a_day_whose_video_was_pruned_stays_in_the_dataset(
         self, tmp_path: Path, synthetic_video: Path, synthetic_dat: Path

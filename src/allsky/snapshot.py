@@ -13,6 +13,7 @@ are documented in ``docs/allsky-archive.md``.
 import datetime as dt
 import logging
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeIs, runtime_checkable
 
@@ -51,7 +52,6 @@ SNAPSHOT_STEM_FORMAT = "allsky-%Y%m%d-%H%M%S"
 #: existed says nothing about how it paired, so the fallback keeps the behaviour
 #: those checkpoints were served under rather than inventing a tighter one.
 DEFAULT_SENSOR_TOLERANCE = pd.Timedelta(minutes=15)
-HTTP_DATE_FORMAT = "%a, %d %b %Y %H:%M:%S %Z"
 SENSOR_TIME_COLUMNS = ("timestamp", "TIMESTAMP", "datetime", "time")
 LIVE_FRAME_MAX_AGE = pd.Timedelta(minutes=10)
 STORE_RECIPE_KEYS = ("backbone", "pooling", "revision", "dim", "dtype")
@@ -99,10 +99,12 @@ def _naive_site_time_from_http_date(headers: dict[str, str]) -> pd.Timestamp | N
     if not raw:
         return None
     try:
-        parsed = dt.datetime.strptime(raw, HTTP_DATE_FORMAT).replace(tzinfo=dt.UTC)
+        parsed = parsedate_to_datetime(raw)
     except ValueError:
         logger.warning("unparseable Last-Modified header on the live frame: %r", raw)
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.UTC)
     return pd.Timestamp(parsed.astimezone(SITE_TZ).replace(tzinfo=None))
 
 
@@ -564,7 +566,7 @@ def embedding_recipe_of(store: str | Path) -> dict[str, Any] | None:
 
     try:
         meta = read_meta(store)
-    except FileNotFoundError, OSError, ValueError:
+    except OSError, ValueError:
         return None
     if any(meta.get(key) is None for key in STORE_RECIPE_KEYS):
         return None
@@ -849,7 +851,7 @@ def predict_snapshot(
         whichever heads the checkpoint has: ``dhi`` (diffuse horizontal
         irradiance, W m-2), ``kindex`` (dimensionless), ``cloud_fraction``
         (in [0, 1]), and ``sky_class`` with its ``sky_probabilities`` over
-        :data:`allsky.data.sky.SKY_CLASS_NAMES`. ``features`` records the
+        :data:`labmim_core.sky.SKY_CLASS_NAMES`. ``features`` records the
         raw values fed in and which of them were imputed.
 
     Raises
@@ -929,8 +931,8 @@ def predict_snapshot(
         # contract takes a SEQUENCE of (H, W, 3) uint8 HWC frames and does its
         # own resize, ImageNet normalisation and stacking, and that is the
         # recipe precompute-embeddings fed the training store. Handing it the
-        # Handing it the (3, S, S) float array the image branch uses would embed
-        # an image prepared differently from the vectors the model was fitted on.
+        # (3, S, S) float array the image branch uses would embed an image
+        # prepared differently from the vectors the model was fitted on.
         vector = np.asarray(backbone.encode(backbone.transform([_image_as_hwc(image_path)])))
         # Through the store's storage precision: every vector the model was
         # fitted on went to disk as fp16 and came back rounded, and a live vector

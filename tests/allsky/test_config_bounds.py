@@ -66,6 +66,15 @@ class TestAlignmentStrategy:
         with pytest.raises(ValidationError):
             AlignmentConfig.model_validate({"strategy": "centre_frame"})
 
+    @pytest.mark.parametrize(
+        "payload", [{"window_minutes": -10.0}, {"window_minutes": 0.0}, {"max_frames": 0}]
+    )
+    def test_a_window_that_can_select_no_frame_is_refused_at_load_time(self, payload: dict):
+        """max_frames < 1 was refused only at dataset construction and a negative
+        window_minutes reached resolve_time_windows unchecked."""
+        with pytest.raises(ValidationError):
+            AlignmentConfig.model_validate(payload)
+
     def test_typo_rejected_through_both_config_roots(self):
         with pytest.raises(ValidationError):
             ExperimentConfig.model_validate({"data": {"alignment": {"strategy": "attention"}}})
@@ -103,11 +112,36 @@ class TestOnlyTheLearnedPoolerNeedsEmbeddingMode:
         assert cfg.data.alignment.strategy == "center_frame"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"val_fraction": 1.2},
+        {"val_fraction": -0.2},
+        {"test_fraction": 1.0},
+        {"gap_days": -3},
+        {"val_fraction": 0.6, "test_fraction": 0.5},
+    ],
+)
+def test_a_split_that_cannot_partition_the_days_is_refused_at_load_time(payload: dict):
+    """create_day_splits refuses every one of these, but only at split time: a
+    val_fraction of 1.2 used to cost the whole extraction and the manifest first."""
+    with pytest.raises(ValidationError):
+        PrepareConfig.model_validate({"splits": payload})
+
+
 def test_a_misspelt_site_key_is_rejected_instead_of_keeping_the_station_clock():
     """``SiteConfig`` ignored unknown keys, so ``utc_offset_hour: -8`` in a YAML
     ``site:`` block computed a UTC-8 station on Salvador's clock without failing."""
     with pytest.raises(ValidationError, match="utc_offset_hour"):
         SiteConfig.model_validate({"utc_offset_hour": -8.0})
+
+
+def test_a_config_that_enables_no_head_is_refused_instead_of_dying_in_autograd():
+    """Heads returns an empty pack, MultitaskLoss returns a constant with no
+    grad_fn, and backward() fails naming none of the four switches — after the
+    seed, the manifest, the normalizers, the model and the loaders."""
+    with pytest.raises(ValidationError, match="enables no head"):
+        ExperimentConfig.model_validate({"targets": {"dhi": {"enabled": False}}})
 
 
 def test_geometry_channels_are_refused_in_embedding_mode():

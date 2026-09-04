@@ -71,6 +71,12 @@ class TestRemoveTimestampBand:
         assert out.shape == frame.shape
         np.testing.assert_array_equal(out[:, 0], frame[:, round(TIMESTAMP_BAND_FRACTION * 224)])
 
+    def test_a_zero_band_is_refused_rather_than_painting_one_row(self, frame: np.ndarray):
+        """`max(1, ...)` turned "no band" into one painted row, so an ablation that
+        zeroes the fraction to switch the band off got an altered frame instead."""
+        with pytest.raises(ValueError, match="covers no row"):
+            remove_timestamp_band(frame, policy="fill", band_fraction=0.0)
+
     def test_an_unknown_policy_is_rejected(self, frame: np.ndarray):
         with pytest.raises(ValueError, match="unknown overlay policy"):
             remove_timestamp_band(frame, policy="blur")  # type: ignore[arg-type]

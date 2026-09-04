@@ -130,13 +130,13 @@ class AlignmentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     strategy: AlignmentStrategyName = "center_frame"
-    window_minutes: float = 10.0
+    window_minutes: float = Field(default=10.0, gt=0.0)
     #: Cap on frames per window in IMAGE mode, evenly subsampled keeping the
     #: ends. The embedding path ignores it: an embedding is a 384-float read,
     #: while a frame is a JPEG decode plus a backbone forward, so a ten-minute
     #: window at this camera's one-frame-per-minute cadence would be eleven
     #: forwards per sample.
-    max_frames: int = 5
+    max_frames: int = Field(default=5, ge=1)
 
 
 class DataSourceConfig(BaseModel):
@@ -210,7 +210,7 @@ class FeaturesConfig(BaseModel):
     # Spelled out rather than imported from allsky.features.policy, which owns
     # the tiers: allsky.features.__init__ eagerly imports engineering, which
     # imports this module, so the import that would remove the copy closes a
-    # cycle. tests/allsky/test_config.py pins the two spellings equal.
+    # cycle. Pinned equal by tests/allsky/test_config_experiment.py::test_the_feature_set_literal_lists_exactly_the_tiers_policy_declares.
     feature_set: Literal["bare", "minimal", "safe", "extended"] = Field(default="safe", alias="set")
 
     #: Feature names appended verbatim to the resolved set, for ablations over a
@@ -294,6 +294,23 @@ class TargetsConfig(BaseModel):
     sky: SkyClassTargetConfig = Field(default_factory=SkyClassTargetConfig)
     cloud_fraction: CloudFractionTargetConfig = Field(default_factory=CloudFractionTargetConfig)
 
+    @model_validator(mode="after")
+    def _at_least_one_head_is_enabled(self) -> TargetsConfig:
+        """Refuse a config that trains no head at all.
+
+        With every head off the multitask loss is a constant carrying no
+        ``grad_fn`` and the run dies inside ``backward()`` — after the seed, the
+        manifest, the normalizers, the model and the loaders — with an autograd
+        message that names none of the four switches.
+        """
+        if not any(head.enabled for head in (self.dhi, self.kindex, self.sky, self.cloud_fraction)):
+            raise ValueError(
+                "targets enables no head: set one of targets.dhi.enabled, "
+                "targets.kindex.enabled, targets.sky.enabled or "
+                "targets.cloud_fraction.enabled to true"
+            )
+        return self
+
 
 #: How the burned-in timestamp band is handled; see
 #: :func:`allsky.preprocessing.remove_timestamp_band`.
@@ -332,7 +349,7 @@ class PreprocessingConfig(BaseModel):
     #: taller than the image or an ROI larger than it — accepted unbounded, the
     #: first blanked every row and the second kept every pixel, either way with
     #: no error and a model trained on pixels nobody chose.
-    band_fraction: float = Field(default=TIMESTAMP_BAND_FRACTION, ge=0.0, lt=1.0)
+    band_fraction: float = Field(default=TIMESTAMP_BAND_FRACTION, gt=0.0, lt=1.0)
     roi_radius_fraction: float | None = Field(default=None, gt=0.0, le=1.0)
 
 
@@ -522,7 +539,7 @@ def model_param(cfg: ExperimentConfig, key: str, default: Any) -> Any:
     because the training engine, the evaluator and the live snapshot all need it
     and only one of them should own it.
     """
-    return dict(cfg.model.model_dump()).get(key, default)
+    return getattr(cfg.model, key, default)
 
 
 def image_size_of(cfg: ExperimentConfig) -> int:
@@ -658,7 +675,7 @@ class PrepareTargetsConfig(BaseModel):
     (:func:`allsky.erbs.pseudo_diffuse`, ``target_source="erbs_pseudo"``).
 
     The sky-condition bins are not configurable: they are the published bounds
-    of :data:`allsky.data.sky.SKY_CLASS_KT_UPPER_BOUNDS`, always applied
+    of :data:`labmim_core.sky.SKY_CLASS_KT_UPPER_BOUNDS`, always applied
     to Kt. A config carrying the retired ``class_clear``/``class_overcast`` keys
     is rejected rather than silently ignored.
     """
@@ -714,11 +731,26 @@ class SplitsConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    val_fraction: float = 0.2
-    test_fraction: float = 0.1
+    val_fraction: float = Field(default=0.2, ge=0.0, lt=1.0)
+    test_fraction: float = Field(default=0.1, ge=0.0, lt=1.0)
     seed: int = 42
     strategy: Literal["chronological", "random"] = "chronological"
-    gap_days: int = 1
+    gap_days: int = Field(default=1, ge=0)
+
+    @model_validator(mode="after")
+    def _the_fractions_leave_days_to_train_on(self) -> SplitsConfig:
+        """Refuse a val/test pair that claims every day.
+
+        :func:`allsky.data.splits.create_day_splits` refuses it too, but only at
+        split time — after ``extract-frames`` and ``build-manifest`` have already
+        run over the archive.
+        """
+        if self.val_fraction + self.test_fraction >= 1.0:
+            raise ValueError(
+                f"val_fraction {self.val_fraction} + test_fraction {self.test_fraction} "
+                "leaves no day to train on; together they must stay below 1"
+            )
+        return self
 
 
 class PrepareConfig(BaseModel):

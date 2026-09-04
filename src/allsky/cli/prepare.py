@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from pydantic import ValidationError
 
 from allsky.cli.runtime import configure_cli_logging
 from allsky.config import (
@@ -67,8 +68,21 @@ ConfigOption = Annotated[
 
 
 def _load_prepare(config: Path | None) -> PrepareConfig:
-    """Load a :class:`PrepareConfig` from *config*, or the defaults when None."""
-    return PrepareConfig() if config is None else load_prepare_config(config)
+    """Load a :class:`PrepareConfig` from *config*, or the defaults when None.
+
+    Raises
+    ------
+    typer.Exit
+        Code 1 when the YAML does not validate. The refusal is reported as a
+        named CLI error rather than a pydantic traceback: this is an operator
+        typing a path, and the fields the validator names are the actionable
+        part.
+    """
+    try:
+        return PrepareConfig() if config is None else load_prepare_config(config)
+    except ValidationError as exc:
+        typer.echo(f"error: {config} does not validate:\n{exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 #: :class:`PrepareConfig` sections that reach no manifest row and are left out of

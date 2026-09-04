@@ -15,7 +15,7 @@ frames that are unusable for radiometric reasons:
   ``FRAME_DARK`` (mean luminance below a threshold), ``FRAME_SATURATED``
   (too large a fraction of fully-clipped white pixels) and ``FRAME_UNREADABLE``
   (a frame with no pixels at all, on which nothing can be measured);
-- :func:`process_frame` composes mask -> crop -> resize from a
+- :func:`process_frame` composes mask -> crop -> pad -> resize from a
   :class:`~allsky.config.PrepareConfig`, optionally reusing a mask decoded once
   by :func:`resolve_mask` instead of re-reading the PNG for every frame.
 
@@ -71,7 +71,6 @@ __all__ = [
 IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
 
-# Broadcast-shaped once at import: this runs per sample in the dataloader.
 _IMAGENET_MEAN_CHW = np.asarray(IMAGENET_MEAN, dtype=np.float32).reshape(3, 1, 1)
 _IMAGENET_STD_CHW = np.asarray(IMAGENET_STD, dtype=np.float32).reshape(3, 1, 1)
 _IMAGENET_MEAN_CHW.flags.writeable = False
@@ -127,7 +126,8 @@ def remove_timestamp_band(
     """Deal with the camera's burned-in timestamp at the top of the frame.
 
     The overlay is static furniture: it is not sky, it carries no irradiance
-    information, and at 224 px it covers four of the sixteen patch rows. An
+    information, and at 224 px it covers three of the sixteen patch rows (36 of
+    224 rows, the third of them only in part). An
     occlusion probe on a trained checkpoint measured the band at 1.4-1.6x the
     weight of an equal-area sky band — real, but far from the dominant signal,
     so do not expect removing it to transform the model.
@@ -176,8 +176,6 @@ def remove_timestamp_band(
         out[:, :band, :] = np.asarray(fill_value, dtype=np.float32).reshape(3, 1, 1)
         return out
     if policy == "inpaint":
-        # Mirror the rows immediately below the band back up over it: the sky
-        # gradient continues instead of stopping at a synthetic edge.
         source = chw[:, band : 2 * band, :]
         if source.shape[1] < band:
             source = np.repeat(chw[:, band : band + 1, :], band, axis=1)
@@ -197,9 +195,13 @@ def _band_rows(height: int, band_fraction: float) -> int:
     Raises
     ------
     ValueError
-        If the band would cover the whole frame.
+        If the band would cover no row at all, or the whole frame.
     """
-    band = max(1, round(band_fraction * height))
+    band = round(band_fraction * height)
+    if band < 1:
+        raise ValueError(
+            f"band fraction {band_fraction} covers no row of a frame of height {height}"
+        )
     if band >= height:
         raise ValueError(f"band {band} covers the whole frame of height {height}")
     return band
@@ -260,9 +262,11 @@ class PreprocessingPipeline:
     roi_radius_fraction:
         When set, keep only a centred disc of this fraction of ``min(H, W) / 2``
         and zero the rest — the sky dome, without the frame furniture around it.
-        ``None`` disables it. The lens is not characterised at this site, so the
-        disc is centred on the image; a fitted centre belongs in
-        :class:`allsky.augmentation.SunProjection` once a calibration exists.
+        ``None`` disables it. The disc is centred on the image because the
+        isotropic re-extraction (``configs/allsky/data/local_prepare_iso.yaml``)
+        already makes the dome concentric with the frame; a measured centre lives
+        in :class:`allsky.lens.LensCalibration`, built for that geometry by
+        :func:`allsky.lens.isotropic_calibration`.
     """
 
     overlay: OverlayPolicy = "keep"
@@ -744,11 +748,12 @@ def pad_frame(image: np.ndarray, pad: PadConfig) -> np.ndarray:
 def process_frame(
     image: np.ndarray, cfg: PrepareConfig, *, mask: np.ndarray | None = None
 ) -> np.ndarray:
-    """Compose mask -> crop -> resize from a :class:`~allsky.config.PrepareConfig`.
+    """Compose mask -> crop -> pad -> resize from a :class:`~allsky.config.PrepareConfig`.
 
     Each stage is skipped when its config leaves it unset: the static mask is
     applied only when ``cfg.mask.path`` is supplied (a PNG mask), the crop only
-    when ``cfg.crop.enabled``, and the resize only when ``cfg.resize`` is set.
+    when ``cfg.crop.enabled``, the pad only when ``cfg.pad.enabled``, and the
+    resize only when ``cfg.resize`` is set.
     A decentred/auto circular mask is intentionally **not** applied by default
     (it would silently zero pixels); call :func:`apply_static_mask` with
     ``mask=None`` explicitly to opt into the heuristic estimate.

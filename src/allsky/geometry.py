@@ -128,9 +128,15 @@ def resolve_geometry_channels(requested: bool | Sequence[str] | None) -> tuple[s
     Raises
     ------
     ValueError
-        If a name is unknown, if the same one is asked for twice, or if the
-        sequence is empty.
+        If a bare string is given instead of a list of names, if a name is
+        unknown, if the same one is asked for twice, or if the sequence is
+        empty.
     """
+    if isinstance(requested, str):
+        raise ValueError(  # noqa: TRY004 — a config value of the wrong SHAPE, not the wrong type
+            f"geometry_channels must be a list of names, got the string {requested!r}; "
+            f"write [{requested!r}] to ask for that one channel"
+        )
     if requested is None or requested is False:
         return ()
     if requested is True:

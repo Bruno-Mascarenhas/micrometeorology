@@ -29,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 
 from allsky.config import VideoConfig
 from allsky.data.contracts import QCFlag
@@ -109,7 +110,7 @@ class OverlayTimestampError(ValueError):
     """The burned-in timestamps could not be read well enough to trust."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OverlayReading:
     """One frame's overlay read, and how much of it the pixels actually settled.
 
@@ -157,6 +158,24 @@ def _glyph_bank() -> dict[str, np.ndarray]:
 _BANK = _glyph_bank()
 
 
+def _stacked_bank() -> tuple[np.ndarray, tuple[tuple[str, slice], ...]]:
+    """The whole bank as one ``(E, h, w)`` bool array, with each digit's slice of it.
+
+    Comparing every exemplar at once turns the shift search into a handful of
+    numpy calls per cell instead of one per digit per shift.
+    """
+    stack = np.concatenate(list(_BANK.values()))
+    groups: list[tuple[str, slice]] = []
+    offset = 0
+    for digit, exemplars in _BANK.items():
+        groups.append((digit, slice(offset, offset + len(exemplars))))
+        offset += len(exemplars)
+    return stack, tuple(groups)
+
+
+_BANK_STACK, _BANK_GROUPS = _stacked_bank()
+
+
 def _text_mask(frame: np.ndarray) -> np.ndarray:
     band = np.asarray(frame[OVERLAY_ROW_SLICE, :], dtype=np.int16)
     if band.ndim != 3 or band.shape[2] < 3:
@@ -168,17 +187,22 @@ def _text_mask(frame: np.ndarray) -> np.ndarray:
 def _cell_scores(mask: np.ndarray, left: int) -> list[tuple[str, int]]:
     """Every digit scored against one cell, best first, over the shift search."""
     strip = mask[:, left - DIGIT_CELL_SEARCH_PAD : left + DIGIT_CELL_WIDTH + DIGIT_CELL_SEARCH_PAD]
-    best: dict[str, int] = {}
-    for shift in DIGIT_MATCH_SHIFTS:
-        start = DIGIT_CELL_SEARCH_PAD + shift
-        candidate = strip[:, start : start + DIGIT_CELL_WIDTH]
-        if candidate.shape[1] != DIGIT_CELL_WIDTH:
-            continue
-        for digit, exemplars in _BANK.items():
-            score = int((exemplars == candidate).sum(axis=(1, 2)).max())
-            if score > best.get(digit, -1):
-                best[digit] = score
-    return sorted(best.items(), key=lambda item: -item[1])
+    if strip.shape[1] < DIGIT_CELL_WIDTH:
+        return []
+    windows = sliding_window_view(strip, DIGIT_CELL_WIDTH, axis=1)
+    starts = [
+        DIGIT_CELL_SEARCH_PAD + shift
+        for shift in DIGIT_MATCH_SHIFTS
+        if DIGIT_CELL_SEARCH_PAD + shift < windows.shape[1]
+    ]
+    if not starts:
+        return []
+    candidates = windows[:, starts, :].transpose(1, 0, 2)
+    matches = (_BANK_STACK[:, None] == candidates[None]).sum(axis=(2, 3)).max(axis=1)
+    return sorted(
+        ((digit, int(matches[group].max())) for digit, group in _BANK_GROUPS),
+        key=lambda item: -item[1],
+    )
 
 
 def _cell_alternatives(scores: list[tuple[str, int]]) -> tuple[str, ...]:
@@ -216,7 +240,8 @@ def read_frame_timestamp(frame: np.ndarray) -> OverlayReading:
     Raises
     ------
     OverlayTimestampError
-        If the frame is not RGB, or is too narrow to contain the digit band.
+        If the frame is not RGB, or is too narrow or too short to contain the
+        digit band.
     """
     return _read_frame(frame)[0]
 
@@ -227,6 +252,12 @@ def _read_frame(frame: np.ndarray) -> tuple[OverlayReading, tuple[tuple[str, ...
         raise OverlayTimestampError(
             f"frame is only {mask.shape[1]} px wide; the timestamp overlay needs more than "
             f"{DIGIT_CELL_LEFT_EDGES[-1] + DIGIT_CELL_WIDTH}"
+        )
+    band_height = OVERLAY_ROW_SLICE.stop - OVERLAY_ROW_SLICE.start
+    if mask.shape[0] != band_height:
+        raise OverlayTimestampError(
+            f"frame carries only {mask.shape[0]} of the {band_height} overlay rows; the "
+            f"timestamp band lives in rows {OVERLAY_ROW_SLICE.start}..{OVERLAY_ROW_SLICE.stop}"
         )
     if not _cells_carry_ink(mask):
         return OverlayReading(index=-1, timestamp=None, text=""), ()
@@ -504,18 +535,17 @@ def _check_monotonic(readings: list[OverlayReading], name: str) -> None:
     outside the usual band is reported rather than refused — refusing it would
     reject sound data over a cadence the camera never promised.
     """
-    stamped = [item for item in readings if item.timestamp is not None]
+    stamped: list[tuple[int, dt.datetime]] = [
+        (item.index, item.timestamp) for item in readings if item.timestamp is not None
+    ]
     unusual = 0
-    for earlier, later in itertools.pairwise(stamped):
-        first, second = earlier.timestamp, later.timestamp
-        if first is None or second is None:
-            continue
+    for (first_index, first), (second_index, second) in itertools.pairwise(stamped):
         if second <= first:
             raise OverlayTimestampError(
-                f"{name}: overlay timestamps go backwards at frame {later.index} "
+                f"{name}: overlay timestamps go backwards at frame {second_index} "
                 f"({first} -> {second})"
             )
-        gap = (second - first) / (later.index - earlier.index)
+        gap = (second - first) / (second_index - first_index)
         if not MIN_CAPTURE_INTERVAL <= gap <= MAX_CAPTURE_INTERVAL:
             unusual += 1
     if unusual:

@@ -9,10 +9,14 @@ ground-level clear-sky reference, so clear skies sit near 1.0, broken cloud
 scatters around/above 1.0 (cloud enhancement) and overcast skies fall well
 below 1.0.
 
-All functions are pure numpy/pandas, vectorized over any datetime sequence
-convertible to a :class:`pandas.DatetimeIndex`, and share the naive
-local-standard-time contract of :mod:`labmim_core.solar` (tz-aware input is
-rejected there).
+All functions are pure numpy/pandas and vectorized, and they take two different
+clocks. :func:`haurwitz_ghi` and :func:`clear_sky_index` read the instrument's
+own clock over any datetime sequence convertible to a
+:class:`pandas.DatetimeIndex`, sharing the naive local-standard-time contract of
+:mod:`labmim_core.solar` (tz-aware input is rejected there).
+:func:`clearsky_ghi_and_kt` and :func:`clearsky_diffuse` instead take the
+manifest's timezone-aware ``timestamp_utc`` and convert it to the site's clock
+themselves, so naive input is what fails there.
 
 References
 ----------
@@ -44,6 +48,8 @@ __all__ = [
     "HAURWITZ_A_WM2",
     "HAURWITZ_B",
     "clear_sky_index",
+    "clearsky_diffuse",
+    "clearsky_ghi_and_kt",
     "haurwitz_ghi",
     "haurwitz_ghi_from_cos_zenith",
 ]
@@ -202,8 +208,9 @@ def clearsky_ghi_and_kt(
     -------
     tuple of numpy.ndarray
         ``(ghi_clear, kt_clear)``, both ``(N,)`` float64: clear-sky global
-        horizontal irradiance in W m-2 and its dimensionless ratio to the
-        extraterrestrial horizontal irradiance, ``NaN`` where the sun is down.
+        horizontal irradiance in W m-2, exactly zero where the sun is down, and
+        its dimensionless ratio to the extraterrestrial horizontal irradiance,
+        which is ``NaN`` there instead.
     """
     cos_zenith_values = np.cos(np.radians(np.asarray(solar_zenith_deg, dtype=np.float64)))
     ghi_clear = haurwitz_ghi_from_cos_zenith(cos_zenith_values)

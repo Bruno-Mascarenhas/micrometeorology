@@ -292,7 +292,9 @@ class ArchiveClient:
     ) -> None:
         self.base_url = base_url if base_url.endswith("/") else f"{base_url}/"
         self.timeout = timeout
-        self.retries = max(1, retries)
+        if retries < 1:
+            raise ValueError(f"retries must be >= 1, got {retries}")
+        self.retries = retries
         self.backoff = backoff
         self.delay = delay
         self._opener = _https_only_opener(context, allow_plaintext=allow_plaintext)
@@ -318,20 +320,20 @@ class ArchiveClient:
             try:
                 response = self._opener.open(url, timeout=self.timeout)
             except urllib.error.HTTPError as exc:
-                if exc.code == http.client.NOT_MODIFIED:
-                    return consume(exc)
-                last = exc
-                if exc.code < 500 and exc.code != http.client.TOO_MANY_REQUESTS:
-                    break
+                try:
+                    if exc.code == http.client.NOT_MODIFIED:
+                        return consume(exc)
+                    last = exc
+                    if exc.code < 500 and exc.code != http.client.TOO_MANY_REQUESTS:
+                        break
+                finally:
+                    exc.close()
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 last = exc
             else:
                 try:
                     return consume(response)
                 except _TransportError as exc:
-                    # The wrapped read error when there is one, so the log line and
-                    # the final message name the transport fault rather than the
-                    # marker; the truncation check raises the marker on its own.
                     cause = exc.__cause__
                     last = cause if isinstance(cause, Exception) else exc
                 finally:
@@ -347,7 +349,7 @@ class ArchiveClient:
                     pause,
                 )
                 time.sleep(pause)
-        raise ArchiveError(f"GET {url} failed after {self.retries} attempt(s): {last}")
+        raise ArchiveError(f"GET {url} failed after {attempt} attempt(s): {last}")
 
     def fetch_text(self, path: str) -> str:
         """Fetch *path* and decode it with the response's own charset.
@@ -447,10 +449,7 @@ class ArchiveClient:
                         digest.update(chunk)
                         written += len(chunk)
                 if declared is not None and written != declared:
-                    # ``HTTPResponse.read(amt)`` returns b"" on a body that ends
-                    # early instead of raising IncompleteRead, so a connection
-                    # dropped mid-video reaches here as a silent short read. It is
-                    # a broken transport like any other and gets the same retry.
+                    # pinned by tests/allsky/test_archive.py::test_a_body_that_ends_early_without_raising_is_retried_rather_than_failing_the_download
                     raise _TransportError(
                         f"{entry.filename} truncated: got {written} bytes, "
                         f"server announced {declared}"
@@ -563,7 +562,10 @@ class Ledger:
         if not ledger_path.is_file():
             return cls(ledger_path)
         with open(ledger_path, encoding="utf-8") as handle:
-            payload = json.load(handle)
+            try:
+                payload = json.load(handle)
+            except json.JSONDecodeError as exc:
+                raise ArchiveError(f"{ledger_path} is not readable JSON: {exc}") from exc
         if not isinstance(payload, dict) or "entries" not in payload:
             raise ArchiveError(f"{ledger_path} is not an all-sky archive ledger")
         if payload.get("version") != LEDGER_VERSION:
@@ -740,7 +742,7 @@ class Ledger:
             "filename": result.entry.filename,
             "path": path.as_posix(),
             "size": result.size,
-            "sha256": result.sha256,
+            "sha256": result.sha256 or (self.video(result.entry.key) or {}).get("sha256", ""),
             "last_modified": result.last_modified,
             "url": result.entry.url,
             "downloaded_at": _utc_now(),
@@ -804,7 +806,8 @@ def _resolved(path: Path, root: str | Path | None) -> Path:
 @contextmanager
 def ledger_lock(path: str | Path) -> Generator[None]:
     """Hold an exclusive advisory lock so a cron run and a manual run cannot interleave."""
-    lock_path = Path(f"{path}.lock")
+    ledger = Path(path)
+    lock_path = ledger.with_name(f"{ledger.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w", encoding="utf-8") as handle:
         try:

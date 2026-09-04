@@ -515,7 +515,7 @@ def _video_config(timestamps: TimestampSource, config: Path | None) -> VideoConf
     """
     if timestamps is TimestampSource.overlay:
         if config is not None:
-            pass
+            logger.warning("--config is ignored with --timestamps overlay")
         return VideoConfig()
     cfg = PrepareConfig() if config is None else load_prepare_config(config)
     return cfg.video

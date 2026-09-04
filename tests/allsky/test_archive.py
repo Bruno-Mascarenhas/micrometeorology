@@ -380,11 +380,35 @@ def test_a_client_side_refusal_is_final_and_costs_one_request(
     assert len([line for line in mirror.requests if entry.filename in line]) == 1
 
 
+def test_a_client_side_refusal_reports_the_single_attempt_it_made(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    """A 403 breaks the loop on the first request, and the message still read
+    'failed after 3 attempt(s)': the log claimed a day had been retried twice more
+    than it was."""
+    client = ArchiveClient(
+        mirror.base_url, allow_plaintext=True, retries=3, delay=0.0, backoff=0.0, timeout=10.0
+    )
+    entry = client.list_videos()[0]
+    mirror.fail_with[mirror.video_url_path(entry.filename)] = [403, 403, 403]
+
+    with pytest.raises(ArchiveError, match="failed after 1 attempt"):
+        client.download(entry, tmp_path / "videos")
+
+
 def test_the_client_refuses_a_file_url_because_its_opener_carries_no_file_handler(
     client: ArchiveClient,
 ):
     with pytest.raises(ArchiveError, match="unknown url type: file"):
         client.fetch_text("file:///etc/passwd")
+
+
+def test_a_client_built_with_no_retries_is_refused_instead_of_given_one(
+    mirror: fake.ArchiveMirror,
+):
+    """`max(1, retries)` promoted an invalid setting into a different, silent one."""
+    with pytest.raises(ValueError, match="retries must be >= 1"):
+        ArchiveClient(mirror.base_url, allow_plaintext=True, retries=0)
 
 
 def test_plaintext_http_is_refused_unless_the_caller_opts_in(mirror: fake.ArchiveMirror):
@@ -440,11 +464,42 @@ def test_loading_a_json_file_that_is_not_a_ledger_is_refused(tmp_path: Path):
         Ledger.load(path)
 
 
+def test_loading_a_ledger_truncated_mid_write_is_refused_as_an_archive_error(tmp_path: Path):
+    """A ledger cut short by a killed cron run raised json.JSONDecodeError, which
+    the documented contract of Ledger.load does not mention and no caller catches."""
+    path = tmp_path / "ledger.json"
+    path.write_text('{"version": 1, "entries": {"20260810": {}}', encoding="utf-8")
+    with pytest.raises(ArchiveError, match="not readable JSON"):
+        Ledger.load(path)
+
+
 def test_loading_a_ledger_written_by_another_version_is_refused(tmp_path: Path):
     path = tmp_path / "ledger.json"
     path.write_text(json.dumps({"version": 99, "entries": {}}), encoding="utf-8")
     with pytest.raises(ArchiveError, match="ledger version 99"):
         Ledger.load(path)
+
+
+def test_a_304_leaves_the_digest_the_ledger_already_recorded(tmp_path: Path):
+    """DownloadResult documents an empty sha256 on a 304 because nothing was read;
+    recording it verbatim erased the digest the real download had put on file, and
+    extraction_faulted then compared a fault against a video digest of ''."""
+    ledger = Ledger(tmp_path / "ledger.json")
+    downloaded = fake.record_downloaded_day(ledger, tmp_path, DAY_NEW)
+
+    unchanged = archive.DownloadResult(
+        entry=downloaded.entry,
+        path=downloaded.path,
+        size=downloaded.size,
+        sha256="",
+        last_modified=fake.LAST_MODIFIED,
+        downloaded=False,
+    )
+    ledger.record_video(unchanged, root=tmp_path)
+
+    stored = ledger.video(DAY_NEW)
+    assert stored is not None
+    assert stored["sha256"] == downloaded.sha256
 
 
 def test_has_video_is_false_once_the_recorded_file_is_deleted(tmp_path: Path):

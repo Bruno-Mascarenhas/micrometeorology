@@ -132,6 +132,13 @@ class TestChannelSelection:
         with pytest.raises(ValueError, match="empty list"):
             resolve_geometry_channels([])
 
+    def test_a_bare_string_is_refused_instead_of_being_read_letter_by_letter(self):
+        """`geometry_channels: solar_disc` in a YAML arrives as a str, which is a
+        Sequence[str]: it used to be read one character at a time and the refusal
+        named ten channels nobody wrote."""
+        with pytest.raises(ValueError, match="must be a list of names"):
+            resolve_geometry_channels("solar_disc")
+
     def test_a_repeated_channel_is_refused(self):
         with pytest.raises(ValueError, match="repeats a channel"):
             resolve_geometry_channels(["cos_sun_angle", "cos_sun_angle"])

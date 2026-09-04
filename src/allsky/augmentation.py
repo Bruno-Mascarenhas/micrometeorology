@@ -66,11 +66,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from allsky.lens import LensCalibration
-
 __all__ = [
     "AugmentationPipeline",
-    "LensCalibration",
     "exposure_jitter",
     "polar_unwrap",
     "random_erasing",
@@ -81,6 +78,7 @@ __all__ = [
 #: sRGB display gamma. Exposure is a linear-space operation, so a gain applied
 #: to gamma-encoded pixels would not be a gain at all.
 SRGB_GAMMA = 2.2
+ERASE_PLACEMENT_ATTEMPTS = 10
 
 
 def exposure_jitter(
@@ -135,12 +133,24 @@ def sensor_noise(
 
     Parameters
     ----------
+    chw:
+        ``(3, H, W)`` float32 in ``[0, 1]``, gamma-encoded.
+    rng:
+        Seeded generator; the caller owns reproducibility.
+    sigma:
+        Standard deviation of the noise, in the same ``[0, 1]`` intensity units
+        as *chw*.
     valid:
         ``(H, W)`` bool keep-mask of the pixels the camera actually imaged.
         Where it is False the pixel is ABSENCE, not a dark reading — the ROI mask
         zeroes it and the isotropic pad fills it — and noising it turns "nothing
         was measured here" into a faint signal the model can learn from. ``None``
         noises every pixel, which is right for a frame with no absent region.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(3, H, W)`` float32, clipped back into ``[0, 1]``.
     """
     noisy = chw + rng.normal(0.0, sigma, size=chw.shape).astype(np.float32)
     np.clip(noisy, 0.0, 1.0, out=noisy)
@@ -163,20 +173,31 @@ def random_erasing(
 
     Parameters
     ----------
+    chw:
+        ``(3, H, W)`` float32 in ``[0, 1]``.
+    rng:
+        Seeded generator; the caller owns reproducibility.
+    area_range:
+        Bounds of the rectangle's area as a fraction of the frame, drawn
+        uniformly.
+    aspect_range:
+        Bounds of its height-to-width ratio, drawn uniformly.
     keep_solar_disc:
-        ``(row, col)`` of the sun. When given, a patch overlapping the solar
-        disc is redrawn: occluding the sun itself is not a nuisance, it changes
-        the physics the model is being asked about.
+        ``(row, col)`` of the sun in image coordinates. When given, a patch
+        overlapping the solar disc is redrawn: occluding the sun itself is not a
+        nuisance, it changes the physics the model is being asked about.
+    disc_radius:
+        Radius in pixels of the protected disc.
     valid:
         ``(H, W)`` bool keep-mask of the pixels the camera actually imaged; the
         fill averages only those.
-    disc_radius:
-        Radius in pixels of the protected disc.
 
     Returns
     -------
     numpy.ndarray
-        A copy with one rectangle erased.
+        ``(3, H, W)`` float32 copy with one rectangle erased — or an untouched
+        copy, when every placement drawn fell outside the frame or on the
+        protected disc.
     """
     _, height, width = chw.shape
     out = chw.copy()
@@ -191,7 +212,7 @@ def random_erasing(
             (chw * valid[None, :, :]).sum(axis=(1, 2)) / imaged if imaged else chw.mean(axis=(1, 2))
         )
     fill = np.asarray(channel_mean, dtype=np.float32).reshape(3, 1, 1)
-    for _ in range(10):
+    for _ in range(ERASE_PLACEMENT_ATTEMPTS):
         area = rng.uniform(*area_range) * height * width
         aspect = rng.uniform(*aspect_range)
         h = round(float(np.sqrt(area * aspect)))
@@ -202,9 +223,7 @@ def random_erasing(
         left = int(rng.integers(0, width - w))
         if keep_solar_disc is not None:
             sr, sc = keep_solar_disc
-            # Rectangle-vs-square overlap. Testing whether the sun's CENTRE
-            # falls inside the rectangle is not enough: a corner can clip the
-            # protected square while the centre stays outside it.
+            # pinned by tests/allsky/test_augmentation.py::TestRandomErasing::test_the_solar_disc_is_never_erased
             if not (
                 top > sr + disc_radius
                 or top + h - 1 < sr - disc_radius
@@ -228,6 +247,21 @@ def translate(chw: np.ndarray, rng: np.random.Generator, *, max_shift: int = 4) 
     pastes the horizon from one side of the dome onto the other, which is the
     same class of physically impossible content that rules flips out in the
     first place.
+
+    Parameters
+    ----------
+    chw:
+        ``(3, H, W)`` float32 in ``[0, 1]``.
+    rng:
+        Seeded generator; the caller owns reproducibility.
+    max_shift:
+        Largest shift in pixels; the row and column shifts are drawn
+        independently and uniformly from ``[-max_shift, max_shift]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(3, H, W)`` float32; the input array itself when both draws are zero.
     """
     dr = int(rng.integers(-max_shift, max_shift + 1))
     dc = int(rng.integers(-max_shift, max_shift + 1))
@@ -268,14 +302,19 @@ def polar_unwrap(
     chw:
         ``(3, H, W)`` float32 in ``[0, 1]``.
     sun_row, sun_col:
-        The sun's pixel position, from :meth:`LensCalibration.pixel_of`.
+        The sun's pixel position in image (row, column) coordinates, from
+        :meth:`~allsky.lens.LensCalibration.pixel_of`.
     out_shape:
         ``(angles, radii)``; defaults to the input's own ``(H, W)``.
 
     Returns
     -------
     numpy.ndarray
-        ``(3, angles, radii)`` float32.
+        ``(3, angles, radii)`` float32. Row 0 is ``theta = 0``, which points
+        along +row (down the image) and grows toward +column; that is the
+        image's own convention, not the clockwise-from-north azimuth
+        :meth:`~allsky.lens.LensCalibration.pixel_of` takes. Columns run from
+        the sun outward.
 
     Notes
     -----

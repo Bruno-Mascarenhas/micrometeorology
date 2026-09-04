@@ -65,7 +65,7 @@ def _safe_arcname(name: str) -> str:
     a path that escapes its top-level directory on extraction.
     """
     posix = PurePosixPath(name)
-    if posix.is_absolute() or name.startswith("/") or ".." in posix.parts:
+    if posix.is_absolute() or ".." in posix.parts:
         raise ValueError(f"unsafe bundle member name {name!r} (absolute or contains '..')")
     return name
 
@@ -147,11 +147,11 @@ def export_colab_bundle(
             (root / f"{DATASET_MANIFEST_FILENAME}{MANIFEST_META_SUFFIX}").as_posix()
         ): meta_file,
     }
-    if split_file is not None and split_file.exists():
+    if split_file.exists():
         file_members[_safe_arcname((root / DATASET_SPLIT_FILENAME).as_posix())] = split_file
 
     embedded_files = 0
-    if include_embeddings and emb_dir is not None and emb_dir.is_dir():
+    if include_embeddings and emb_dir.is_dir():
         for path in sorted(p for p in emb_dir.rglob("*") if p.is_file()):
             rel = path.relative_to(emb_dir).as_posix()
             arc = _safe_arcname((root / _EMBEDDINGS_DIRNAME / rel).as_posix())
@@ -175,15 +175,13 @@ def export_colab_bundle(
         )
 
     meta = json.loads(meta_file.read_text(encoding="utf-8"))
-    all_names = sorted(
-        [*file_members, *text_members, _safe_arcname((root / BUNDLE_README_NAME).as_posix())]
-    )
+    readme_name = _safe_arcname((root / BUNDLE_README_NAME).as_posix())
+    members = sorted([*file_members, *text_members, readme_name])
     readme = _render_readme(
-        bundle_name=bundle_name, members=all_names, meta=meta, frames_included=frame_files > 0
+        bundle_name=bundle_name, members=members, meta=meta, frames_included=frame_files > 0
     )
-    text_members[_safe_arcname((root / BUNDLE_README_NAME).as_posix())] = readme
+    text_members[readme_name] = readme
 
-    members = sorted([*file_members, *text_members])
     _write_tar_atomic(out_path, file_members=file_members, text_members=text_members, order=members)
 
     out = Path(out_path)
@@ -266,7 +264,7 @@ def _resolve_sources(
     meta_path: str | Path | None,
     split_path: str | Path | None,
     embeddings_dir: str | Path | None,
-) -> tuple[Path, Path, Path | None, Path | None]:
+) -> tuple[Path, Path, Path, Path]:
     """Resolve manifest/meta/split/embeddings sources from explicit args or *cfg*."""
     dataset_dir = Path(prepare_cfg.output.dataset_dir) if prepare_cfg is not None else None
 
@@ -280,14 +278,14 @@ def _resolve_sources(
     meta_file = Path(meta_path) if meta_path is not None else manifest_meta_path(manifest_file)
 
     if split_path is not None:
-        split_file: Path | None = Path(split_path)
+        split_file = Path(split_path)
     elif dataset_dir is not None:
         split_file = dataset_dir / DATASET_SPLIT_FILENAME
     else:
         split_file = manifest_file.with_name(DATASET_SPLIT_FILENAME)
 
     if embeddings_dir is not None:
-        emb_dir: Path | None = Path(embeddings_dir)
+        emb_dir = Path(embeddings_dir)
     elif dataset_dir is not None:
         emb_dir = dataset_dir / _EMBEDDINGS_DIRNAME
     else:

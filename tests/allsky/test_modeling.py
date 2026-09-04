@@ -11,9 +11,18 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from pydantic import ValidationError
 from torch import nn
 
-from allsky.config import ExperimentConfig, TargetsConfig, load_experiment_config
+from allsky.config import (
+    CloudFractionTargetConfig,
+    DHITargetConfig,
+    ExperimentConfig,
+    KIndexTargetConfig,
+    SkyClassTargetConfig,
+    TargetsConfig,
+    load_experiment_config,
+)
 from allsky.features import active_feature_groups, resolve_feature_set
 from allsky.features.normalization import TargetNormalizer
 from allsky.modeling import heads as heads_module
@@ -521,10 +530,31 @@ def test_heads_heteroscedastic_log_var_clamped():
 
 
 def test_heads_empty_when_nothing_enabled():
-    cfg = _cfg("concat", targets={"dhi": {"enabled": False}})
-    heads = Heads(64, cfg.targets)
+    """``Heads`` builds an empty pack rather than raising, which is what makes the
+    config-level refusal the only thing standing between a run and an optimizer
+    with no parameters. The config is built past its validator on purpose here:
+    ``TargetsConfig`` now refuses this combination at load, and the two halves
+    are pinned separately.
+    """
+    targets = TargetsConfig.model_construct(
+        dhi=DHITargetConfig(enabled=False),
+        kindex=KIndexTargetConfig(enabled=False),
+        sky=SkyClassTargetConfig(enabled=False),
+        cloud_fraction=CloudFractionTargetConfig(enabled=False),
+    )
+
+    heads = Heads(64, targets)
+
     assert len(heads.heads) == 0
     assert heads(torch.randn(BATCH, 64)) == {}
+
+
+def test_a_config_enabling_no_head_at_all_is_refused_at_load():
+    """Nothing downstream refuses it: the loss sums an empty list and the failure
+    arrives from autograd, after the dataset, the model and the optimizer are up.
+    """
+    with pytest.raises(ValidationError, match="enables no head"):
+        _cfg("concat", targets={"dhi": {"enabled": False}})
 
 
 def test_image_encoder_param_groups_separate_backbone_lr():
