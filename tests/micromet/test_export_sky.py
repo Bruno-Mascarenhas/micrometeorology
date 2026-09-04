@@ -110,8 +110,12 @@ def test_the_cumulative_selects_exactly_what_the_climatology_histogram_selects()
         frame, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
     )
 
-    assert len(cumulative) == len(histogram)
-    np.testing.assert_allclose(np.sort(cumulative.to_numpy()), np.sort(histogram))
+    # The histogram sample carries a NaN wherever the daylight gate breaks the
+    # hour chain, so `n_effective` is not computed across a splice; the
+    # populations themselves are what must agree.
+    measured = histogram[np.isfinite(histogram)]
+    assert len(cumulative) == len(measured)
+    np.testing.assert_allclose(np.sort(cumulative.to_numpy()), np.sort(measured))
 
 
 def test_the_daylight_gate_brackets_the_whole_hour_not_only_its_midpoint():

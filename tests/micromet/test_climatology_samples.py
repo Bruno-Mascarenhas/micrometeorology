@@ -31,10 +31,15 @@ def _frame(columns: dict[str, list[float]]) -> pd.DataFrame:
     return pd.DataFrame(columns, index=index)
 
 
+def _hours(values: list[float]) -> pd.Series:
+    """A sample on consecutive hours, the shape every published sample has."""
+    return pd.Series(values, index=pd.date_range("2024-03-01", periods=len(values), freq="h"))
+
+
 class TestTheCalmCutIsTheStallValueNotAThreshold:
     def test_a_sample_exactly_on_the_threshold_is_a_calm(self):
         """`<=`, not `<`: 0,281 m/s is what the stalled cup REPORTS."""
-        speed = pd.Series([0.10, CALM_THRESHOLD_MS, CALM_THRESHOLD_MS + 0.001, 3.0])
+        speed = _hours([0.10, CALM_THRESHOLD_MS, CALM_THRESHOLD_MS + 0.001, 3.0])
 
         values, atoms = _strip_atoms("wind_speed", speed, speed)
 
@@ -42,8 +47,8 @@ class TestTheCalmCutIsTheStallValueNotAThreshold:
         assert sorted(values) == pytest.approx([CALM_THRESHOLD_MS + 0.001, 3.0])
 
     def test_direction_is_cut_by_the_paired_speed_not_by_itself(self):
-        direction = pd.Series([10.0, 20.0, 30.0, 40.0])
-        speed = pd.Series([0.10, 0.10, 5.0, 5.0])
+        direction = _hours([10.0, 20.0, 30.0, 40.0])
+        speed = _hours([0.10, 0.10, 5.0, 5.0])
 
         values, atoms = _strip_atoms("wind_direction", direction, speed)
 
@@ -125,7 +130,7 @@ class TestBothSourcesAreConditionedIdentically:
 
 class TestAVariableWithNoPointMassGetsNoAtom:
     def test_temperature_passes_through_untouched(self):
-        series = pd.Series([21.0, 22.0, 23.0])
+        series = _hours([21.0, 22.0, 23.0])
 
         values, atoms = _strip_atoms("air_temperature", series, None)
 
@@ -162,7 +167,33 @@ class TestCoverageMeansSensorAvailability:
 
         for spec_id in ("wind_speed", "relative_humidity"):
             sample, atoms = _observed_sample(spec_id, frame)
-            assert _available_hours(spec_id, frame) == len(sample) + sum(a.count for a in atoms)
+            # The break markers are not hours: every published count is over the
+            # finite entries, which is what `histogram` and `fit_distribution` see.
+            measured = int(np.isfinite(sample).sum())
+            assert _available_hours(spec_id, frame) == measured + sum(a.count for a in atoms)
+
+    def test_the_daylight_gate_marks_where_it_breaks_the_hour_chain(self):
+        """``effective_sample_size`` correlates consecutive ENTRIES, and the
+        daylight gate splices one day's last daylight hour onto the next day's
+        first with nothing marking the jump — so the lag-1 autocorrelation was
+        taken between temporally unrelated neighbours and ``n_effective`` came
+        out roughly twice too high."""
+        from micrometeorology.stats.distributions import effective_sample_size
+
+        index = pd.date_range("2024-03-01", periods=72, freq="h")
+        shape = np.clip(np.sin((index.hour.to_numpy() - 6) / 12.0 * np.pi), 0.0, None)
+        frame = pd.DataFrame({OBSERVED_COLUMN["shortwave_down"]: 900.0 * shape}, index=index)
+
+        sample, _atoms = _observed_sample("shortwave_down", frame)
+
+        # Three days of daylight hours: two breaks, one per night crossed.
+        assert int((~np.isfinite(sample)).sum()) == 2
+        marked_n_eff, marked_r1 = effective_sample_size(sample)
+        spliced_n_eff, spliced_r1 = effective_sample_size(sample[np.isfinite(sample)])
+        # The splice pairs an evening hour with the next morning's, which drags
+        # r1 down and n_effective up: the published number was the optimistic one.
+        assert marked_r1 > spliced_r1
+        assert marked_n_eff < spliced_n_eff
 
     def test_a_missing_sensor_still_reports_zero(self):
         assert _available_hours("precipitation", _frame({"unrelated": [1.0, 2.0]})) == 0
@@ -203,7 +234,7 @@ class TestTheDirectionEraCutIsPublished:
         assert [atom.id for atom in atoms] == ["arithmetic_mean_era", "calm"]
         assert atoms[0].count == 2
         assert atoms[0].fraction == pytest.approx(0.5)
-        assert sorted(sample) == [10.0, 40.0]
+        assert sorted(sample[np.isfinite(sample)]) == [10.0, 40.0]
 
     def test_the_excluded_hours_come_back_in_the_coverage_panel(self):
         """The logger did write them; what is wrong is how it averaged them."""

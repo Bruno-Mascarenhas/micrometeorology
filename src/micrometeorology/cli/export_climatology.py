@@ -341,6 +341,47 @@ def _clearness(frame: pd.DataFrame, column: str, source: GeometrySource) -> pd.S
     return pd.Series(np.where(daylight, kt, np.nan), index=frame.index).dropna()
 
 
+def _chronological(series: pd.Series) -> np.ndarray:
+    """The sample as a float array, with a NaN marking every break in the chain.
+
+    :func:`~micrometeorology.stats.distributions.effective_sample_size`
+    correlates consecutive ENTRIES, so an array whose neighbours are not
+    neighbours in time yields a meaningless ``n_eff``: the daylight gate strips
+    the night hours, and the surviving array then jumps from one day's last
+    daylight hour to the next day's first with nothing marking the jump — 10.6%
+    of the shortwave sample's pairs on this archive. A NaN separator is what its
+    own pair mask already knows how to skip, and every other consumer (the fit,
+    the histogram, ``n``) drops non-finite entries, so no published statistic
+    but ``n_effective`` moves.
+
+    Parameters
+    ----------
+    series:
+        The gated sample, indexed by naive station-local hours.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(N + breaks,)`` float64, chronological, NaN at each discontinuity.
+
+    Raises
+    ------
+    TypeError
+        When *series* carries no ``DatetimeIndex``, which is the only way to
+        know where the chain breaks.
+    """
+    if not isinstance(series.index, pd.DatetimeIndex):
+        raise TypeError(
+            "a climatology sample needs its hourly DatetimeIndex to place the "
+            f"breaks in the chain; got {type(series.index).__name__}"
+        )
+    if series.empty:
+        return series.to_numpy(dtype=float)
+    stamps = series.index.to_numpy()
+    breaks = np.flatnonzero(np.diff(stamps) != np.timedelta64(1, "h"))
+    return np.insert(series.to_numpy(dtype=float), breaks + 1, np.nan)
+
+
 def _strip_atoms(
     spec_id: str, series: pd.Series, speed: pd.Series | None
 ) -> tuple[np.ndarray, list[Atom]]:
@@ -363,19 +404,21 @@ def _strip_atoms(
         label = (
             f"Calmarias (até {CALM_THRESHOLD_MS:.3f} m/s, o valor que o anemômetro reporta parado)"
         ).replace(".", ",")
-        return kept.to_numpy(), [Atom("calm", label, calm, removed)]
+        return _chronological(kept), [Atom("calm", label, calm, removed)]
 
     if spec_id in ("relative_humidity", "relative_humidity_wxt"):
         removed = int((series >= SATURATION_RH).sum())
         clipped = removed / len(series) if len(series) else float("nan")
         kept = series.loc[series < SATURATION_RH]
-        return kept.to_numpy(), [Atom("saturation", "Saturação (UR ≥ 99,5%)", clipped, removed)]
+        return _chronological(kept), [
+            Atom("saturation", "Saturação (UR ≥ 99,5%)", clipped, removed)
+        ]
 
     if spec_id == "precipitation":
         wet = series.loc[series >= RAIN_BUCKET_MM]
         removed = len(series) - len(wet)
         dry = removed / len(series) if len(series) else float("nan")
-        return wet.to_numpy(), [Atom("dry", "Horas sem chuva", dry, removed)]
+        return _chronological(wet), [Atom("dry", "Horas sem chuva", dry, removed)]
 
     if spec_id == "shortwave_down":
         # A pyranometer's zero offset makes a few daytime hours slightly negative.
@@ -384,7 +427,7 @@ def _strip_atoms(
         positive = series.loc[series > 0.0]
         removed = len(series) - len(positive)
         share = removed / len(series) if len(series) else float("nan")
-        return positive.to_numpy(), [
+        return _chronological(positive), [
             Atom(
                 "nonpositive",
                 "Horas com fluxo não positivo (deslocamento de zero do sensor)",
@@ -393,7 +436,7 @@ def _strip_atoms(
             )
         ]
 
-    return series.to_numpy(), []
+    return _chronological(series), []
 
 
 def _paired_speed(
@@ -416,7 +459,7 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
     """Select, gate and de-atomise one variable from the observed hourly frame."""
     if spec_id == "clearness_index":
         values = _clearness(frame, OBSERVED_COLUMN[spec_id], "observed")
-        return values.to_numpy(), []
+        return _chronological(values), []
 
     column = OBSERVED_COLUMN[spec_id]
     if column not in frame.columns:
@@ -512,7 +555,7 @@ def _par_sample(series: pd.Series, frame: pd.DataFrame) -> tuple[np.ndarray, lis
     global_flux = frame[OBSERVED_COLUMN["shortwave_down"]].reindex(series.index)
     zeros, impossible = _par_atom_masks(series, global_flux)
     kept = series.loc[~(zeros | impossible)]
-    return kept.to_numpy(), [
+    return _chronological(kept), [
         Atom("daytime_zero", "Zeros diurnos do registrador", float(zeros.mean()), int(zeros.sum())),
         Atom(
             "par_over_global",
@@ -530,7 +573,7 @@ def _wrf_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Ato
     if spec_id not in WRF_COLUMN:
         return np.array([]), []
     if spec_id == "clearness_index":
-        return _clearness(frame, WRF_COLUMN[spec_id], "wrf").to_numpy(), []
+        return _chronological(_clearness(frame, WRF_COLUMN[spec_id], "wrf")), []
     column = WRF_COLUMN[spec_id]
     if column not in frame.columns:
         return np.array([]), []
@@ -865,7 +908,11 @@ def run(
         )
         _check_caveats_quote_the_published_scalar(spec, payload)
         path = write_json(output_dir / f"{spec.id}.json", payload)
-        counts = " ".join(f"{key}={len(value):,}" for key, value in samples.items() if len(value))
+        counts = " ".join(
+            f"{key}={int(np.isfinite(value).sum()):,}"
+            for key, value in samples.items()
+            if len(value)
+        )
         typer.echo(f"  [ok] {path.name:28s} {counts}")
 
     typer.echo(f"\n>> {len(CLIMATOLOGY_VARIABLES) + 1} arquivos em {output_dir}")
