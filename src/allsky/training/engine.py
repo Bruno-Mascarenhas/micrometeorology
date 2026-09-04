@@ -294,6 +294,12 @@ def run_experiment(
     loss_fn = MultitaskLoss(cfg.targets, target_normalizers).to(resolved_device)
 
     fields = csv_fields(cfg)
+    monitored = {field.removeprefix("val_") for field in fields if field.startswith("val_")}
+    if monitor_key not in monitored:
+        raise TrainingError(
+            f"early-stopping monitor {cfg.train.early_stopping.monitor!r} resolves to "
+            f"{monitor_key!r}, absent from the val metrics this run logs {sorted(monitored)}"
+        )
     start_epoch = 0
     global_step = 0
     best_value: float | None = None

@@ -25,6 +25,7 @@ from allsky.data.splits import create_day_splits, save_split_artifact
 from allsky.evaluation.evaluator import evaluate_checkpoint
 from allsky.training.checkpointing import capture_rng_state, load_checkpoint
 from allsky.training.engine import _restore, run_experiment
+from allsky.training.errors import TrainingError
 from labmim_core import solar
 from labmim_core.site import SiteConfig
 
@@ -469,6 +470,26 @@ class TestEarlyStopping:
         )
 
         assert summary["final_val_metrics"]["dhi_mae"] < 500.0
+
+    def test_a_misspelt_monitor_is_refused_before_the_first_epoch_trains(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The monitor was only checked against the first epoch's val metrics, so a
+        typo cost a whole epoch of GPU before it surfaced."""
+        root, manifest, _ = _make_dataset(tmp_path)
+
+        def _never_trains(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("an epoch trained before the monitor was checked")
+
+        monkeypatch.setattr("allsky.training.engine._train_epoch", _never_trains)
+
+        with pytest.raises(TrainingError, match="val_dhi_mea"):
+            run_experiment(
+                _cfg(root, epochs=2, monitor="val_dhi_mea"),
+                data_root=root,
+                output_dir=tmp_path / "run",
+                embedding_reader=_reader(manifest),
+            )
 
     def test_climatology_plateau_triggers_early_stop(self, tmp_path: Path):
         root, manifest, _ = _make_dataset(tmp_path)
