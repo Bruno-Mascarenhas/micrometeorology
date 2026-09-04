@@ -1160,7 +1160,7 @@ def mask_impossible_shortwave(
         # the four components, so a component the sun cannot produce is inside it.
         # Only the daytime verdicts: the floor fires on the nocturnal offset, over
         # a component whose true value is zero, and the night net is longwave.
-        if column == "Sw_dw":
+        if column in NET_RADIATION_COMPONENTS:
             _blank("Net_CNR1", daytime_fault)
 
     # A shaded sensor measures a subset of what the unshaded one sees, so this is

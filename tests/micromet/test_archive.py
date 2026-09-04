@@ -1140,6 +1140,19 @@ def test_a_daytime_ceiling_violation_still_reaches_the_net() -> None:
     assert removed == {"Sw_dw": 1, "Net_CNR1": 1}
 
 
+def test_a_daytime_ceiling_violation_in_the_reflected_flux_reaches_the_net_too() -> None:
+    """``Sw_up`` is inside ``Net_CNR1`` exactly as ``Sw_dw`` is, yet only the global
+    carried its verdict to the net, against the docstring and
+    ``docs/station-archive.md``."""
+    stamps = pd.DatetimeIndex(["2026-07-05 09:00"])
+    frame = pd.DataFrame({"Sw_dw": [500.0], "Sw_up": [1400.0], "Net_CNR1": [-750.0]}, index=stamps)
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert np.isnan(masked["Net_CNR1"].iloc[0])
+    assert removed == {"Sw_up": 1, "Net_CNR1": 1}
+
+
 def test_the_diffuse_may_exceed_the_global_inside_the_instruments_error() -> None:
     """Since the shade-ring correction the two channels carry the combined error
     of two instruments plus the isotropic ring model; a bare ``>`` rejected 3,018
