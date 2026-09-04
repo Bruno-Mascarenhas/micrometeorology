@@ -838,6 +838,41 @@ def test_a_failed_unit_declares_the_output_ids_it_never_wrote(tmp_path, kind, va
     assert result.missing_variables == output_ids
 
 
+@pytest.mark.parametrize(
+    ("kind", "variable", "output_ids"),
+    [
+        ("poteolico", "poteolico50", ("POT_EOLICO_50M",)),
+        ("wind_vectors", "wind_vectors", ("WIND_VECTORS",)),
+        ("isobars", "isobars", ("ISOBARS",)),
+    ],
+)
+def test_a_unit_that_publishes_no_step_declares_its_ids_like_a_failed_one(
+    tmp_path, kind, variable, output_ids
+):
+    """Only the values pipeline reported its own missing variables, so a unit
+    that ended without error and without publishing a single step -- skip_first
+    at or past the step count -- said nothing. `run_clean` then stayed True and
+    vouched for the PREVIOUS run's fixed-name .series.bin/.summary.json under a
+    new manifest version, and `availability` omitted the id, which the page
+    reads as "full range"."""
+    wrf_path = tmp_path / "wrfout_d02_2026-05-03_00:00:00"
+    _write_full_wrf_file(wrf_path)
+    unit = jobs.WorkUnit(
+        kind=kind,
+        wrf_path=str(wrf_path),
+        variable=variable,
+        json_dir=str(tmp_path),
+        geojson_dir=str(tmp_path),
+        skip_first=NT,
+    )
+
+    result = jobs.process_unit(unit)
+
+    assert result.error is None
+    assert result.files == ()
+    assert result.missing_variables == output_ids
+
+
 def test_every_unit_lost_to_a_broken_pool_declares_its_own_output_ids(monkeypatch, tmp_path):
     """One entry per lost unit, each carrying that unit's own ids.
 

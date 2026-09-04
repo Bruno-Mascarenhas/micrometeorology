@@ -1005,6 +1005,16 @@ def process_unit(unit: WorkUnit) -> UnitResult:
                 files, warnings = _run_grid_geojson_unit(unit, dataset)
             else:
                 raise ValueError(f"Unknown work unit kind: {unit.kind}")
+            # Only the values pipeline reports its own missing variables. A
+            # poteolico/wind_vectors/isobars unit that ends without error and
+            # without publishing a single step -- `--skip-first` at or past the
+            # step count, an all-night window -- said nothing, so `run_clean`
+            # stayed True and vouched for the PREVIOUS run's fixed-name
+            # `.series.bin`/`.summary.json` under a new manifest version. Their
+            # output ids are known from the unit alone, which is what the
+            # failure path below already uses.
+            if not files and not missing_variables:
+                missing_variables = list(_unit_output_ids(unit))
             start_local, n_steps = _run_time_metadata(dataset)
         return UnitResult(
             label=unit.label,
