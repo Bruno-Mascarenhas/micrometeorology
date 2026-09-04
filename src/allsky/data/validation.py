@@ -39,6 +39,7 @@ from allsky.data.contracts import (
     DEGRADABLE_TARGET_COLUMNS,
     META_COLUMNS,
     TARGET_COLUMNS,
+    QCFlag,
     resolve,
 )
 from allsky.features.policy import FORBIDDEN_FEATURES
@@ -148,6 +149,7 @@ def validate_manifest(
     _check_forbidden_columns(manifest, feature_columns, report)
     _check_elevation(manifest, min_elevation_deg, report, strict=strict)
     _check_targets(manifest, max_kindex, report)
+    _check_qc_flags(manifest, report)
     _check_constant_provenance(manifest, meta, report)
     if check_files:
         _check_image_files(manifest, data_root, report)
@@ -291,6 +293,32 @@ def _check_targets(manifest: pd.DataFrame, max_kindex: float, report: Validation
             report.add_error(f"sky_class values outside {sorted(allowed)} present: {offenders}")
 
 
+def _check_qc_flags(manifest: pd.DataFrame, report: ValidationReport) -> None:
+    """``qc_flags`` must be a bitmask this build can read.
+
+    The column is an int64 bitmask over :class:`~allsky.data.contracts.QCFlag`,
+    and nothing else validated it: a negative value (an unsigned mask written
+    through a signed column) or a bit no member declares reaches the evaluator's
+    QC stratification, which only asks whether the mask is zero, and lands the
+    row in whichever stratum the arithmetic happens to give it.
+    """
+    if "qc_flags" not in manifest.columns:
+        return
+    flags = manifest["qc_flags"].dropna()
+    if flags.empty:
+        return
+    values = flags.to_numpy(dtype=np.int64)
+    declared = 0
+    for member in QCFlag:
+        declared |= int(member)
+    offending = (values < 0) | ((values & ~declared) != 0)
+    if bool(offending.any()):
+        report.add_error(
+            f"{int(offending.sum())} row(s) carry a qc_flags value outside the declared "
+            f"QCFlag bits (0..{declared}): {sorted({int(v) for v in values[offending]})[:5]}"
+        )
+
+
 def _check_image_files(
     manifest: pd.DataFrame, data_root: str | Path, report: ValidationReport
 ) -> None:
@@ -341,6 +369,15 @@ def _check_split_column(
         return
     filled = manifest["split"].notna()
     if not bool(filled.any()):
+        # A manifest handed a non-empty artifact is meant to carry the labels;
+        # entirely unfilled means attach_split_column never ran (or ran against
+        # another artifact), and every consumer then silently trains on rows
+        # whose split nothing assigned.
+        if _day_to_splits(split_artifact):
+            report.add_warning(
+                "a split artifact was supplied but the manifest's split column is entirely "
+                "unfilled; run the splits step, or attach_split_column, before training"
+            )
         return
     day_map = {day: min(s) for day, s in _day_to_splits(split_artifact).items()}
     sub = manifest.loc[filled]
@@ -355,8 +392,14 @@ def _check_split_column(
 def _check_constant_provenance(
     manifest: pd.DataFrame, meta: dict[str, Any], report: ValidationReport
 ) -> None:
-    """``dataset_version`` / ``alignment_id`` columns must be constant + match meta."""
-    for column in ("dataset_version", "alignment_id"):
+    """Row-constant provenance columns must be constant AND match the meta.
+
+    ``kindex_kind`` and ``target_source`` are here for the same reason the other
+    two are: the evaluator reads both from the meta while every metric it
+    computes comes from the column, so a manifest whose column and sidecar
+    disagree is scored under one parameterization and reported under another.
+    """
+    for column in ("dataset_version", "alignment_id", "kindex_kind", "target_source"):
         if column not in manifest.columns:
             continue
         values = manifest[column].dropna().unique().tolist()

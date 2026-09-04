@@ -543,3 +543,55 @@ class TestEmbeddingWindowModes:
                 train=True,
                 window="bogus",  # type: ignore[arg-type]
             )
+
+
+def test_a_window_whose_co_frames_are_absent_still_serves_the_row(tmp_path: Path):
+    """A reader that knows only part of the window degrades silently: the mean
+    covers what is there, and with no neighbour at all the row still serves its
+    own embedding rather than an empty stack."""
+    manifest = _build_minutely(tmp_path, periods=5)
+    only = {str(manifest["sample_id"].iloc[2]): np.full(8, 3.0, dtype=np.float32)}
+
+    def partial_reader(sample_id: str) -> np.ndarray:
+        if sample_id not in only:
+            raise KeyError(sample_id)
+        return only[sample_id]
+
+    windowed = MultimodalEmbeddingDataset(
+        manifest,
+        resolve_feature_set("safe"),
+        embedding_reader=partial_reader,
+        train=True,
+        window="mean_embedding",
+        window_minutes=10.0,
+    )
+
+    # Row 2 is the only one the reader knows, so every row's window pools it alone.
+    np.testing.assert_allclose(windowed[2]["embedding"].numpy(), np.full(8, 3.0))
+    np.testing.assert_allclose(windowed[0]["embedding"].numpy(), np.full(8, 3.0))
+
+
+def test_a_row_whose_whole_window_is_unreadable_falls_back_to_its_own(tmp_path: Path):
+    """The all-missing fallback is the documented degradation, and nothing
+    exercised it: without it the row would pool an empty stack."""
+    manifest = _build_minutely(tmp_path, periods=3)
+    reader = FakeEmbeddingReader(dim=8)
+    own = str(manifest["sample_id"].iloc[1])
+
+    def only_the_row_itself(sample_id: str) -> np.ndarray:
+        # The window read goes through _read_optional, which swallows KeyError;
+        # the fallback then reads the row's own id through _read directly.
+        raise KeyError(sample_id)
+
+    windowed = MultimodalEmbeddingDataset(
+        manifest,
+        resolve_feature_set("safe"),
+        embedding_reader=lambda sample_id: (
+            reader(sample_id) if sample_id == own else only_the_row_itself(sample_id)
+        ),
+        train=True,
+        window="mean_embedding",
+        window_minutes=10.0,
+    )
+
+    np.testing.assert_array_equal(windowed[1]["embedding"].numpy(), reader(own))

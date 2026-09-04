@@ -95,16 +95,24 @@ def _timezone_meta(site: SiteConfig) -> dict[str, Any]:
 
 
 def site_utc_offset_hours(meta: Mapping[str, Any]) -> float:
-    """The fixed clock offset, in hours, the manifest in *meta* was built against."""
+    """The fixed clock offset, in hours, the manifest in *meta* was built against.
+
+    Raises
+    ------
+    ValueError
+        When *meta* carries no ``timezone`` block. Every v2 sidecar
+        :func:`_build_meta` writes has one, so reaching this means a hand-edited
+        or foreign sidecar — and the alternative, assuming this station's
+        offset, computes another site's solar geometry on Salvador's clock
+        without failing anywhere.
+    """
     timezone_meta = meta.get("timezone")
     if isinstance(timezone_meta, Mapping) and "utc_offset_hours" in timezone_meta:
         return float(timezone_meta["utc_offset_hours"])
-    logger.warning(
-        "manifest meta carries no timezone block; assuming this station's %+g h offset. "
-        "A manifest from another site will have its solar geometry computed on the wrong clock",
-        SITE_UTC_OFFSET_HOURS,
+    raise ValueError(
+        "manifest meta carries no 'timezone' block, so the clock its solar geometry was "
+        "built against is unknown; every manifest this build writes records one"
     )
-    return float(SITE_UTC_OFFSET_HOURS)
 
 
 def build_manifest(
@@ -426,10 +434,13 @@ def build_manifest_from_prepare_config(
     """Build a manifest from a :class:`~allsky.config.PrepareConfig`.
 
     Every build parameter is read from *cfg*: the feature set from
-    ``cfg.features.feature_set`` (the ``features.set`` YAML key), the GHI column
-    from ``cfg.sensor.ghi_column``, plus the site, alignment window, diffuse
-    column, k-index kind, sky-class thresholds and the night drop threshold
+    ``cfg.features.feature_set`` (the ``features.set`` YAML key) **and the
+    ``features.extra`` names beside it**, the GHI column from
+    ``cfg.sensor.ghi_column``, plus the site, alignment window, diffuse column,
+    k-index kind, sky-class thresholds and the night drop threshold
     (``cfg.night_filter.min_solar_elevation_deg`` -> ``night_min_elevation_deg``).
+    ``extra`` was the one section the docstring promised and the call dropped, so
+    a column an ablation declared never reached the manifest it was declared in.
 
     Parameters
     ----------
@@ -465,6 +476,7 @@ def build_manifest_from_prepare_config(
         alignment=alignment,
         night_min_elevation_deg=cfg.night_filter.min_solar_elevation_deg,
         sensor_timestamp_offset_minutes=cfg.sensor.timestamp_offset_minutes,
+        extra_features=cfg.features.extra,
         config_sha256=config_sha256,
     )
     # The pixels the frames on disk actually hold. Only this builder knows the

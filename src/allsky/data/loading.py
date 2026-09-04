@@ -127,8 +127,36 @@ def default_embedding_reader(cfg: ExperimentConfig, root: Path) -> EmbeddingRead
 
     if cfg.data.embeddings_dir is None:
         raise ValueError("input_mode='embedding' requires cfg.data.embeddings_dir")
+    store = resolve_against_root(cfg.data.embeddings_dir, root)
+    # Nothing here can refuse a store encoded by another backbone — the run's own
+    # config names no encoder, only a directory — so the identity the store
+    # records is at least written into the run's log, which is the only place a
+    # reader of the results can later see which vectors the model was fitted on.
+    _log_store_identity(store)
     reader: EmbeddingReader = SafetensorsEmbeddingReader(
-        resolve_against_root(cfg.data.embeddings_dir, root),
+        store,
         preload=cfg.data.embeddings_preload,
     )
     return reader
+
+
+def _log_store_identity(store: Path) -> None:
+    """Log the encoding recipe *store* records, or that it records none."""
+    from allsky.embeddings.storage import META_FILENAME
+
+    meta_path = store / META_FILENAME
+    if not meta_path.is_file():
+        logger.warning(
+            "embedding store %s has no %s: its encoder is unrecorded", store, META_FILENAME
+        )
+        return
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("embedding store meta %s is unreadable (%s)", meta_path, exc)
+        return
+    recorded = {
+        key: meta.get(key)
+        for key in ("backbone", "revision", "pooling", "dim", "dtype", "pixel_config_sha256")
+    }
+    logger.info("embedding store %s encoded by %s", store, recorded)

@@ -419,7 +419,9 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         the six rows under the band). Augmentation runs on the ``[0, 1]`` frame
         because every transform in :mod:`allsky.augmentation` is defined there,
         and standardisation stays last so the backbone always receives its
-        pretraining distribution. ``idx`` seeds the augmentation together with the seed and the epoch.
+        pretraining distribution. ``idx`` seeds the augmentation together with the seed and the epoch, and it is
+        the SERVED row's index even when the frame read is a co-frame of that
+        row's window.
 
         PIL decode -> RGB (``convert`` channel-replicates grayscale) -> bilinear
         resize. ``image_path`` is already resolved against ``data_root``. On the
@@ -485,7 +487,11 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         frames = np.zeros((self.seq_len, *self._frame_shape()), dtype=np.float32)
         mask = np.zeros(self.seq_len, dtype=bool)
         for slot, position in enumerate(members):
-            frames[slot] = self._load_image(self._paths[position], position)
+            # Seeded on the SERVED row, never on the co-frame's own position: a
+            # per-frame draw gives each frame of one window an independent
+            # exposure and noise realisation, which is scintillation the sky did
+            # not produce — and the window exists precisely to average the sky.
+            frames[slot] = self._load_image(self._paths[position], idx)
             mask[slot] = True
         item["image_seq"] = torch.from_numpy(frames)
         item["frame_mask"] = torch.from_numpy(mask)
@@ -583,7 +589,13 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         return resolve_time_windows(self.manifest, self.window_minutes)
 
     def _read(self, sample_id: str) -> np.ndarray:
-        """Read + validate the ``(D,)`` float32 embedding for *sample_id*."""
+        """Read + validate the ``(D,)`` float32 embedding for *sample_id*.
+
+        The array may be a read-only view into the preloaded store, so every
+        caller copies before ``torch.from_numpy``: that wraps the buffer without
+        copying, and a tensor backed by read-only memory is undefined behaviour
+        the moment anything writes through it.
+        """
         embedding = np.asarray(self.embedding_reader(sample_id), dtype=np.float32)
         if embedding.ndim != 1:
             raise ValueError(
@@ -626,7 +638,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         item = self._target_item(idx)
         if self.window == "center_frame":
             embedding = self._read(self._sample_ids[idx])
-            item["embedding"] = torch.from_numpy(np.ascontiguousarray(embedding))
+            item["embedding"] = torch.from_numpy(np.array(embedding, copy=True))
             return item
 
         vectors = self._window_embeddings(idx)
@@ -635,7 +647,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
 
         if self.window == "mean_embedding":
             pooled = np.mean(np.stack(vectors, axis=0), axis=0).astype(np.float32)
-            item["embedding"] = torch.from_numpy(np.ascontiguousarray(pooled))
+            item["embedding"] = torch.from_numpy(np.array(pooled, copy=True))
             return item
 
         take = vectors[: self.seq_len]

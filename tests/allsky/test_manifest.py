@@ -27,6 +27,7 @@ from allsky.data.manifest import (
     _split_assignment_and_id,
     attach_split_column,
     build_manifest,
+    site_utc_offset_hours,
     write_manifest_parquet,
 )
 from allsky.features import resolve_feature_set
@@ -558,3 +559,81 @@ def test_a_split_dict_with_the_wrong_key_is_refused_before_the_manifest_is_rewri
 def test_an_empty_split_assignment_is_refused() -> None:
     with pytest.raises(ValueError, match="no day assignment"):
         _split_assignment_and_id({"assignment": {}, "split_id": "abc"})
+
+
+class TestTheSidecarRecordsTheClockItWasBuiltOn:
+    """Solar geometry is computed on a fixed offset, never on the host time zone,
+    so the offset a manifest was built against has to travel with it — a
+    container running in UTC would otherwise move every angle by three hours
+    without failing anywhere."""
+
+    def test_the_station_gets_its_named_zone(self, site: SiteConfig, tmp_path: Path):
+        frames = make_frames(tmp_path, ["2025-03-21 12:00"])
+        _manifest, meta = build_manifest(
+            frames, make_sensor_frame(site), site=site, data_root=tmp_path
+        )
+
+        assert meta["timezone"] == {"name": "America/Bahia", "utc_offset_hours": -3.0}
+        assert site_utc_offset_hours(meta) == pytest.approx(-3.0)
+
+    def test_another_site_records_its_offset_with_no_zone_name(self, tmp_path: Path):
+        elsewhere = SiteConfig(latitude=38.6, longitude=-121.1, utc_offset_hours=-8.0)
+        frames = make_frames(tmp_path, ["2025-03-21 12:00"])
+        _manifest, meta = build_manifest(
+            frames,
+            make_sensor_frame(elsewhere),
+            site=elsewhere,
+            data_root=tmp_path,
+        )
+
+        assert meta["timezone"] == {"name": None, "utc_offset_hours": -8.0}
+        assert site_utc_offset_hours(meta) == pytest.approx(-8.0)
+
+    def test_a_sidecar_with_no_timezone_block_is_refused(self):
+        """Falling back to this station's offset computed another site's geometry
+        on Salvador's clock without failing anywhere."""
+        with pytest.raises(ValueError, match="timezone"):
+            site_utc_offset_hours({"dataset_version": "2"})
+
+
+def test_features_extra_reaches_the_manifest_the_config_declared_it_in(
+    site: SiteConfig, tmp_path: Path
+):
+    """`build_manifest_from_prepare_config`'s docstring promises every build
+    parameter comes from the config; `features.extra` was the one it dropped."""
+    from allsky.config import PrepareConfig
+    from allsky.data.manifest import build_manifest_from_prepare_config
+
+    frames = make_frames(tmp_path, ["2025-03-21 12:00"])
+    cfg = PrepareConfig.model_validate(
+        {
+            "features": {"set": "safe", "extra": ["uv_wm2"]},
+            "output": {"dataset_dir": str(tmp_path)},
+        }
+    )
+
+    sensor = make_sensor_frame(site)
+    sensor["CUV5_Wm2_Avg"] = 12.0  # the source column uv_wm2 is engineered from
+
+    manifest, meta = build_manifest_from_prepare_config(frames, sensor, cfg, data_root=tmp_path)
+
+    assert "uv_wm2" in meta["feature_columns"]
+    assert "uv_wm2" in manifest.columns
+
+
+def test_an_extra_feature_whose_logger_column_is_absent_fails_the_build(
+    site: SiteConfig, tmp_path: Path
+):
+    """Silently ignoring `features.extra` hid this: an ablation naming a column
+    the logger does not carry now fails at build time instead of producing a
+    manifest that quietly lacks it."""
+    from allsky.config import PrepareConfig
+    from allsky.data.manifest import build_manifest_from_prepare_config
+
+    frames = make_frames(tmp_path, ["2025-03-21 12:00"])
+    cfg = PrepareConfig.model_validate(
+        {"features": {"set": "safe", "extra": ["uv_wm2"]}, "output": {"dataset_dir": str(tmp_path)}}
+    )
+
+    with pytest.raises(KeyError, match="CUV5_Wm2_Avg"):
+        build_manifest_from_prepare_config(frames, make_sensor_frame(site), cfg, data_root=tmp_path)

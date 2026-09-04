@@ -90,3 +90,28 @@ class TestLoadManifestVerifiesTheSidecarAgainstTheParquet:
 
         with pytest.raises(ValueError, match="manifest_sha256"):
             load_manifest(path)
+
+
+class TestLoadManifestProvenance:
+    def test_a_manifest_that_is_not_there_is_named(self, tmp_path: Path):
+        from allsky.data.loading import load_manifest
+
+        with pytest.raises(FileNotFoundError, match="manifest parquet not found"):
+            load_manifest(tmp_path / "absent.parquet")
+
+    def test_a_manifest_with_no_sidecar_degrades_to_an_empty_meta(self, tmp_path: Path, caplog):
+        """The provenance fields the sidecar carries — the hash check, split_id,
+        dataset_version — are then unavailable, which has to be said out loud."""
+        import pandas as pd
+
+        from allsky.data.loading import load_manifest
+
+        path = tmp_path / "manifest.parquet"
+        pd.DataFrame({"sample_id": ["a"]}).to_parquet(path, index=False)
+
+        with caplog.at_level("WARNING"):
+            manifest, meta = load_manifest(path)
+
+        assert len(manifest) == 1
+        assert meta == {}
+        assert "sidecar" in caplog.text

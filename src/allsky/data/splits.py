@@ -142,10 +142,17 @@ class DaySplit:
             If *payload* is missing a required key.
         ValueError
             If the stored ``split_id`` disagrees with the one recomputed from
-            the assignment (a corrupt artifact), if the strategy name is one
-            this build does not implement, or if the assignment leaks a day
-            across splits.
+            the assignment (a corrupt artifact), if the artifact was written for
+            another ``dataset_version``, if the strategy name is one this build
+            does not implement, or if the assignment leaks a day across splits.
         """
+        stored_version = payload.get("dataset_version")
+        if stored_version is not None and str(stored_version) != DATASET_VERSION:
+            raise ValueError(
+                f"split artifact was written for dataset_version {stored_version!r}, but this "
+                f"build produces {DATASET_VERSION!r}; the day set it assigns may not be the "
+                "one the manifest now holds"
+            )
         assignment = {str(k): str(v) for k, v in payload["assignment"].items()}
         split = cls(
             assignment=assignment,
