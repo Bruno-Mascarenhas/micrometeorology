@@ -29,7 +29,7 @@ from typing import Any
 import pandas as pd
 
 from allsky.evaluation.evaluator import EvaluationResult
-from labmim_core.atomic import atomic_write, atomic_write_json
+from labmim_core.atomic import atomic_write, atomic_write_strict_json
 
 __all__ = ["compare_experiments", "write_evaluation_report"]
 
@@ -49,6 +49,24 @@ _MARKDOWN_CLASSIFICATION_METRICS: tuple[str, ...] = (
 #: directory an evaluation is often pointed at, and one would silently replace
 #: the other.
 EVALUATION_METRICS_FILENAME = "eval_metrics.json"
+
+
+def _json_safe(payload: Any) -> Any:
+    """Recursively replace every non-finite float with ``None``.
+
+    A metric that could not be computed is a missing measurement, and it has to
+    reach the writer already encoded as null: a bare ``NaN`` token fails a strict
+    ``json.loads`` on the WHOLE document, so one unmeasurable skill score would
+    make the entire report unreadable to any consumer that does not opt into
+    Python's non-standard extension.
+    """
+    if isinstance(payload, Mapping):
+        return {key: _json_safe(value) for key, value in payload.items()}
+    if isinstance(payload, (list, tuple)):
+        return [_json_safe(item) for item in payload]
+    if isinstance(payload, float) and not math.isfinite(payload):
+        return None
+    return payload
 
 
 def write_evaluation_report(
@@ -90,7 +108,9 @@ def write_evaluation_report(
     # single-split summary of a different schema, and the resume that rebuilds
     # its history from that file would read the wrong shape.
     written["metrics"] = str(
-        atomic_write_json(report_root / EVALUATION_METRICS_FILENAME, metrics_payload)
+        atomic_write_strict_json(
+            report_root / EVALUATION_METRICS_FILENAME, _json_safe(metrics_payload)
+        )
     )
     written["stratified"] = str(_atomic_csv(report_root / "stratified.csv", result.stratified))
 

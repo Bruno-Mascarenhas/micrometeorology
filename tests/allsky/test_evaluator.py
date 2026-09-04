@@ -129,6 +129,39 @@ class TestProvenanceChecks:
                 ckpt, split="val", data_root=root, embedding_reader=reader, strict=True
             )
 
+    def test_split_id_mismatch_warns(self, tmp_path: Path, caplog):
+        """Scoring a checkpoint against a split it was not trained on is the one
+        way a metric can look right and mean nothing, and neither half of the
+        guard — the warning nor `--strict` — had a test."""
+        import logging
+
+        root, reader, ckpt = _train(tmp_path)
+        _rewrite_split_id(ckpt, "not-the-split-it-trained-on")
+
+        with caplog.at_level(logging.WARNING, logger="allsky.evaluation.evaluator"):
+            result = evaluate_checkpoint(ckpt, split="val", data_root=root, embedding_reader=reader)
+
+        assert result.meta["split_id_ok"] is False
+        assert any("split" in record.message for record in caplog.records)
+
+    def test_split_id_mismatch_strict_raises(self, tmp_path: Path):
+        root, reader, ckpt = _train(tmp_path)
+        _rewrite_split_id(ckpt, "not-the-split-it-trained-on")
+
+        with pytest.raises(ValueError, match="split"):
+            evaluate_checkpoint(
+                ckpt, split="val", data_root=root, embedding_reader=reader, strict=True
+            )
+
+    def test_a_checkpoint_recording_no_split_id_is_reported_as_unchecked(self, tmp_path: Path):
+        """Not the same as a match: nothing was compared."""
+        root, reader, ckpt = _train(tmp_path)
+        _rewrite_split_id(ckpt, None)
+
+        result = evaluate_checkpoint(ckpt, split="val", data_root=root, embedding_reader=reader)
+
+        assert result.meta["split_id_ok"] is False
+
     def test_empty_split_raises(self, tmp_path: Path):
         # make_dataset uses test_fraction=0.0 -> no test days.
         root, reader, ckpt = _train(tmp_path)
@@ -140,4 +173,11 @@ def _corrupt_manifest_hash(ckpt: Path) -> None:
     """Rewrite the checkpoint's stored manifest hash to force a mismatch."""
     payload = torch.load(ckpt, weights_only=False)
     payload["manifest_sha256"] = "deadbeef" * 8
+    torch.save(payload, ckpt)
+
+
+def _rewrite_split_id(ckpt: Path, value: str | None) -> None:
+    """Set the checkpoint's stored split id, to force a mismatch or an absence."""
+    payload = torch.load(ckpt, weights_only=False)
+    payload["split_id"] = value
     torch.save(payload, ckpt)

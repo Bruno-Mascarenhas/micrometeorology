@@ -15,6 +15,7 @@ import pytest
 
 from micrometeorology.cli.export_climatology import (
     CALM_THRESHOLD_MS,
+    ERA_SPLIT,
     INVALID_DIRECTION,
     OBSERVED_COLUMN,
     SATURATION_RH,
@@ -268,3 +269,50 @@ def test_no_unpaired_atom_is_published_when_every_hour_has_its_speed():
     _values, atoms = _strip_atoms("wind_direction", direction, speed)
 
     assert [atom.id for atom in atoms] == ["calm"]
+
+
+class TestTheEraSplitPartitionsThePublishedPopulations:
+    """`ERA_SPLIT` decides which hours reach which published variable, and the
+    boundary itself — the hour ON the split — was pinned nowhere: an off-by-one
+    moves a day of PAR from one era's density to the other's."""
+
+    @staticmethod
+    def _daytime_around_the_split(column: str) -> pd.DataFrame:
+        # Local noon on the three days around the split, so the daylight gate
+        # keeps every row and only the era rule decides.
+        stamps = pd.DatetimeIndex(
+            [ERA_SPLIT - pd.Timedelta(days=1), ERA_SPLIT, ERA_SPLIT + pd.Timedelta(days=1)]
+        ) + pd.Timedelta(hours=12)
+        return pd.DataFrame(
+            {column: [100.0, 200.0, 300.0], OBSERVED_COLUMN["shortwave_down"]: [800.0] * 3},
+            index=stamps,
+        )
+
+    def test_par_early_keeps_only_what_precedes_the_split(self):
+        frame = self._daytime_around_the_split(OBSERVED_COLUMN["par_early"])
+
+        sample, _atoms = _observed_sample("par_early", frame)
+
+        assert sorted(sample[np.isfinite(sample)]) == [100.0]
+
+    @pytest.mark.parametrize("spec_id", ["par_late", "shortwave_up"])
+    def test_the_later_era_keeps_the_split_hour_and_what_follows(self, spec_id: str):
+        frame = self._daytime_around_the_split(OBSERVED_COLUMN[spec_id])
+
+        sample, _atoms = _observed_sample(spec_id, frame)
+
+        assert sorted(sample[np.isfinite(sample)]) == [200.0, 300.0]
+
+
+def test_a_non_positive_shortwave_hour_is_an_atom_not_a_sample():
+    """A pyranometer's zero offset makes a few daytime hours slightly negative.
+    They fall outside the induced density's support, so they leave as a mass —
+    clipping them to zero would invent a spike the instrument never measured."""
+    stamps = pd.DatetimeIndex(["2024-03-01 12:00", "2024-03-01 13:00", "2024-03-01 14:00"])
+    frame = pd.DataFrame({OBSERVED_COLUMN["shortwave_down"]: [-1.5, 0.0, 300.0]}, index=stamps)
+
+    sample, atoms = _observed_sample("shortwave_down", frame)
+
+    assert sorted(sample[np.isfinite(sample)]) == [300.0]
+    assert [atom.id for atom in atoms] == ["nonpositive"]
+    assert atoms[0].count == 2

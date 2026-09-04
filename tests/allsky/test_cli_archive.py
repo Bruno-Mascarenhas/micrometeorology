@@ -32,6 +32,7 @@ from allsky.cli import app
 from allsky.cli.archive import (
     FRAMES_SUBDIR,
     REMOTE_FRAMES,
+    REMOTE_SNAPSHOTS,
     REMOTE_VIDEOS,
     STATE_SUBDIR,
     VIDEOS_SUBDIR,
@@ -1123,3 +1124,145 @@ def test_the_same_modelled_cadence_is_the_same_clock():
     second = _clock_record(VideoConfig(timestamps="modelled", minutes_per_frame=1.0))
 
     assert first == second
+
+
+class TestTheCaptureClockFallbackChain:
+    """Three sources in order — the burned-in overlay, the server's
+    Last-Modified, then the host clock — and only the first was ever exercised.
+    The last is the exact regression the docs warn about: a container in UTC
+    names the snapshot three hours off and nothing fails."""
+
+    @staticmethod
+    def _capture(tmp_path: Path, payload: bytes, headers: dict[str, str]):
+        from allsky.snapshot import capture_snapshot
+
+        return capture_snapshot(_StubLiveCamera(payload, headers), tmp_path)
+
+    def _sidecar(self, snapshot) -> dict:
+        loaded: dict = json.loads(snapshot.metadata_path.read_text(encoding="utf-8"))
+        return loaded
+
+    def test_a_fresh_overlay_wins(self, tmp_path: Path):
+        now = dt.datetime.now(tz=SITE_TZ).replace(microsecond=0, tzinfo=None)
+        snapshot = self._capture(tmp_path, _overlay_jpeg(now), {})
+
+        assert self._sidecar(snapshot)["captured_at_source"] == "overlay"
+
+    def test_a_stale_overlay_falls_to_a_fresh_last_modified(self, tmp_path: Path):
+        stale = dt.datetime.now(tz=SITE_TZ).replace(microsecond=0, tzinfo=None) - dt.timedelta(
+            days=3
+        )
+        fresh = dt.datetime.now(tz=dt.UTC).replace(microsecond=0)
+        headers = {"last-modified": fresh.strftime("%a, %d %b %Y %H:%M:%S GMT")}
+
+        snapshot = self._capture(tmp_path, _overlay_jpeg(stale), headers)
+
+        assert self._sidecar(snapshot)["captured_at_source"] == "server-last-modified"
+
+    def test_a_stale_overlay_and_an_unparseable_header_fall_to_the_host_clock(
+        self, tmp_path: Path, caplog
+    ):
+        stale = dt.datetime.now(tz=SITE_TZ).replace(microsecond=0, tzinfo=None) - dt.timedelta(
+            days=3
+        )
+
+        with caplog.at_level("WARNING"):
+            snapshot = self._capture(tmp_path, _overlay_jpeg(stale), {"last-modified": "nonsense"})
+
+        assert self._sidecar(snapshot)["captured_at_source"] == "local-clock"
+        assert "local clock" in caplog.text
+
+    def test_an_empty_payload_is_refused(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="empty live frame"):
+            self._capture(tmp_path, b"", {})
+
+
+def test_uploading_both_mirrors_the_frames_and_records_the_destination(
+    mirror: fake.ArchiveMirror, tmp_path: Path, rclone_log: Path
+):
+    """`--upload both` is the cron recipe's own invocation and no test drove it:
+    the frames branch could have stopped mirroring, or stopped recording what it
+    mirrored, with every assertion in this file still green."""
+    data = tmp_path / "data"
+
+    result = _sync(data, mirror, "--extract", "--upload", "both", "--drive-remote", "labmim")
+
+    assert result.exit_code == 0, result.output
+    invocations = fake.rclone_invocations(rclone_log)
+    frames = [line for line in invocations if line.startswith("sync")]
+    assert frames, invocations
+    for line in frames:
+        assert "--include *.jpg" in line
+        assert f"{REMOTE_FRAMES}/" in line
+    ledger = _reload(data)
+    assert ledger.uploaded(DAY_NEW, TARGET.path(REMOTE_FRAMES, DAY_NEW))
+    assert ledger.frames(DAY_NEW) is not None
+
+
+@pytest.mark.usefixtures("rclone_log")
+def test_a_second_upload_both_run_leaves_the_frames_alone(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    first = _sync(data, mirror, "--extract", "--upload", "both", "--drive-remote", "labmim")
+    assert first.exit_code == 0, first.output
+
+    second = _sync(data, mirror, "--extract", "--upload", "both", "--drive-remote", "labmim")
+
+    assert "nothing to do" in second.output
+
+
+def test_a_snapshot_publishes_its_frame_and_sidecar_to_drive(
+    mirror: fake.ArchiveMirror, tmp_path: Path, rclone_log: Path
+):
+    """The whole Drive publish path of `snapshot` — the branch the hourly cron
+    runs — was never executed: it could have stopped uploading, or uploaded to
+    the wrong day folder, with every snapshot test still green."""
+    out_dir = tmp_path / "snapshots"
+
+    result = runner.invoke(
+        app,
+        [
+            "snapshot",
+            "--out",
+            str(out_dir),
+            "--base-url",
+            mirror.base_url,
+            "--insecure",
+            "--drive-remote",
+            "labmim",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    copied = [line for line in fake.rclone_invocations(rclone_log) if line.startswith("copyto")]
+    # The JPEG and its provenance sidecar; no checkpoint, so no prediction.
+    assert len(copied) == 2
+    day = f"{next(out_dir.glob('*.jpg')).stem.split('-')[1]}"
+    assert all(f"{REMOTE_SNAPSHOTS}/{day}/" in line for line in copied), copied
+
+
+def test_a_snapshot_whose_upload_fails_exits_one(
+    mirror: fake.ArchiveMirror, tmp_path: Path, rclone_log: Path
+):
+    """The frame is on disk either way; what must not happen is exit 0 while the
+    site never received it."""
+    fake.write_fake_rclone(rclone_log.parent / "bin", rclone_log, fail_on="copyto")
+    out_dir = tmp_path / "snapshots"
+
+    result = runner.invoke(
+        app,
+        [
+            "snapshot",
+            "--out",
+            str(out_dir),
+            "--base-url",
+            mirror.base_url,
+            "--insecure",
+            "--drive-remote",
+            "labmim",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert list(out_dir.glob("*.jpg")), "the capture itself must survive the failed upload"

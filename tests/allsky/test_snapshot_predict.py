@@ -672,3 +672,47 @@ def test_a_windowed_checkpoint_refuses_to_be_scored_from_one_capture(
             sensor_limits=[],
             trust_checkpoint=True,
         )
+
+
+class TestEmbeddingRecipeOf:
+    """It is the only record of how a store's vectors were encoded once the store
+    itself has moved, and every branch that returns None — the store gone, the
+    sidecar incomplete — was unexercised, so a checkpoint could have started
+    predicting from half a recipe."""
+
+    def test_a_store_that_is_not_there_records_no_recipe(self, tmp_path: Path):
+        from allsky.snapshot import embedding_recipe_of
+
+        assert embedding_recipe_of(tmp_path / "absent") is None
+
+    @pytest.mark.parametrize("dropped", ["backbone", "pooling", "revision", "dim", "dtype"])
+    def test_a_sidecar_missing_any_key_records_no_recipe(self, tmp_path: Path, dropped: str):
+        """Half a recipe is worse than none: it would build a backbone the
+        vectors were not encoded by and still produce the accepted width."""
+        from allsky.embeddings.storage import write_meta
+        from allsky.snapshot import embedding_recipe_of
+
+        complete = {
+            "backbone": "fake",
+            "pooling": "cls",
+            "revision": "r1",
+            "dim": 8,
+            "dtype": "fp16",
+        }
+        write_meta(tmp_path, {k: v for k, v in complete.items() if k != dropped})
+
+        assert embedding_recipe_of(tmp_path) is None
+
+    def test_a_complete_sidecar_records_the_five_keys(self, tmp_path: Path):
+        from allsky.embeddings.storage import write_meta
+        from allsky.snapshot import STORE_RECIPE_KEYS, embedding_recipe_of
+
+        write_meta(
+            tmp_path,
+            {"backbone": "fake", "pooling": "cls", "revision": "r1", "dim": 8, "dtype": "fp16"},
+        )
+
+        recipe = embedding_recipe_of(tmp_path)
+
+        assert recipe is not None
+        assert set(STORE_RECIPE_KEYS) <= set(recipe)
