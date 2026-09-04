@@ -192,9 +192,7 @@ def test_the_live_frame_is_prepared_the_way_the_training_frames_are(
     served = _image_as_chw(sky_image, size, cfg)
 
     expected = imagenet_standardize(
-        model_input_frame(
-            sky_image, size=size, preprocess=PreprocessingPipeline.from_config(cfg)
-        )
+        model_input_frame(sky_image, size=size, preprocess=PreprocessingPipeline.from_config(cfg))
     )
     np.testing.assert_allclose(served, expected, rtol=1e-6, atol=1e-6)
     assert served.shape == (3, size, size)

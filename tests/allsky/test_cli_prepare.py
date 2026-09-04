@@ -61,6 +61,74 @@ def _write_config(
     return path
 
 
+class TestTheMergedSensorExport:
+    """``sensor.paths`` is a list because the logger's tables change over time.
+
+    Every other test in the suite passes a one-element list of one constant
+    file, so the per-column merge and the sentinel mask both ran on input that
+    could not tell a working implementation from a broken one.
+    """
+
+    @staticmethod
+    def _config(paths: tuple[Path, Path]) -> PrepareConfig:
+        return PrepareConfig.model_validate({"sensor": {"paths": [str(path) for path in paths]}})
+
+    def test_the_later_file_supplies_the_column_the_earlier_one_lacks(
+        self, two_dat_files: tuple[Path, Path]
+    ):
+        merged = _load_sensor_df(self._config(two_dat_files))
+
+        shared = pd.Timestamp("2026-01-01 06:02:00")
+        assert "PSP_Wm2_Avg" in merged.columns
+        assert merged.loc[shared, "PSP_Wm2_Avg"] == pytest.approx(30.0)
+
+    def test_the_earlier_file_wins_a_column_both_files_carry(
+        self, two_dat_files: tuple[Path, Path]
+    ):
+        """Chronological order decides a conflict, so a re-exported later file
+        cannot rewrite a value the archive already published.
+        """
+        merged = _load_sensor_df(self._config(two_dat_files))
+
+        shared = pd.Timestamp("2026-01-01 06:02:00")
+        assert merged.loc[shared, "RH1"] == pytest.approx(70.2)
+        assert merged.loc[shared, "CM3Up_Wm2_Avg"] == pytest.approx(122.0)
+
+    def test_a_missing_sample_and_a_railed_channel_both_arrive_as_gaps(
+        self, two_dat_files: tuple[Path, Path]
+    ):
+        """The bare ``NAN`` token and the railed sentinel reach the manifest
+        builder the same way — as absences — or the normaliser fits its mean and
+        std over an instrument fault.
+        """
+        merged = _load_sensor_df(self._config(two_dat_files))
+
+        assert pd.isna(merged.loc[pd.Timestamp("2026-01-01 06:01:00"), "RH1"])
+        # 1000 degC is finite, so the reader's own -900 floor passes it through
+        # and only mask_sentinels stands between it and the normaliser.
+        assert pd.isna(merged.loc[pd.Timestamp("2026-01-01 06:02:00"), "AirT1_C_Avg"])
+
+    def test_a_rail_below_the_readers_floor_is_a_gap_the_later_file_may_fill(
+        self, two_dat_files: tuple[Path, Path]
+    ):
+        """-7999 never reaches the merge as a value: the reader has already made
+        it a gap, so the per-column rule takes the later file's reading there
+        rather than keeping the earlier file's rail.
+        """
+        merged = _load_sensor_df(self._config(two_dat_files))
+
+        assert merged.loc[pd.Timestamp("2026-01-01 06:03:00"), "AirT1_C_Avg"] == pytest.approx(25.3)
+
+    def test_the_merged_index_is_the_union_in_chronological_order(
+        self, two_dat_files: tuple[Path, Path]
+    ):
+        merged = _load_sensor_df(self._config(two_dat_files))
+
+        assert list(merged.index) == list(
+            pd.date_range("2026-01-01 06:00", "2026-01-01 06:03", freq="1min")
+        )
+
+
 # ---------------------------------------------------------------------------
 # manifest builders for validate-dataset / splits
 # ---------------------------------------------------------------------------

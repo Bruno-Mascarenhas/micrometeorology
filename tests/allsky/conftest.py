@@ -73,6 +73,94 @@ def synthetic_video(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return path
 
 
+def _write_toa5(path: Path, columns: list[str], rows: list[tuple[str, dict[str, str]]]) -> Path:
+    """Write a Campbell TOA5 file: the four header lines, then *rows*.
+
+    Each row is ``(timestamp, {column: literal})``; a column the row omits is
+    written as the bare ``NAN`` token the logger emits for a missing sample.
+    """
+    header = ["TIMESTAMP", *columns]
+    lines = [
+        '"TOA5","LBM","CR5000","0","std","prog","sig","table"',
+        ",".join(f'"{name}"' for name in header),
+        ",".join('"unit"' for _ in header),
+        ",".join('"Avg"' for _ in header),
+    ]
+    for stamp, values in rows:
+        lines.append(",".join([f'"{stamp}"', *(values.get(name, "NAN") for name in columns)]))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture(scope="module")
+def two_dat_files(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    """Two .dat files whose windows OVERLAP and whose column sets differ.
+
+    The shared fixtures write one file, one day and constant values, so
+    ``sensor.paths`` was never a list of more than one and the per-column merge
+    ran in no test that drives the CLI. Here the later file adds a column the
+    earlier one never carried and disagrees with it on a shared timestamp: the
+    documented resolution keeps the earlier value where both have one and takes
+    the later file's column where only it does. The earlier file also carries a
+    bare ``NAN`` and both kinds of rail — one below the reader's own floor and
+    one finite, which only the archive's sentinel table catches — none of which
+    the constant fixture ever produced.
+    """
+    directory = tmp_path_factory.mktemp("two_sensors")
+    early_columns = ["AirT1_C_Avg", "RH1", "CM3Up_Wm2_Avg"]
+    late_columns = [*early_columns, "PSP_Wm2_Avg"]
+
+    early = _write_toa5(
+        directory / "early.dat",
+        early_columns,
+        [
+            (
+                "2026-01-01 06:00:00",
+                {"AirT1_C_Avg": "25.0", "RH1": "70.0", "CM3Up_Wm2_Avg": "120.0"},
+            ),
+            # A missing sample, written as the logger writes it.
+            ("2026-01-01 06:01:00", {"AirT1_C_Avg": "25.1", "CM3Up_Wm2_Avg": "121.0"}),
+            # The 1000 degC rail: finite, so read_campbell_dat's own -900 floor
+            # lets it through and only the archive's sentinel table catches it.
+            (
+                "2026-01-01 06:02:00",
+                {"AirT1_C_Avg": "1000", "RH1": "70.2", "CM3Up_Wm2_Avg": "122.0"},
+            ),
+            # -7999 sits below the reader's own floor, so it arrives as a gap
+            # and the later file's reading fills it.
+            (
+                "2026-01-01 06:03:00",
+                {"AirT1_C_Avg": "-7999", "RH1": "70.9", "CM3Up_Wm2_Avg": "124.0"},
+            ),
+        ],
+    )
+    late = _write_toa5(
+        directory / "late.dat",
+        late_columns,
+        [
+            (
+                "2026-01-01 06:02:00",
+                {
+                    "AirT1_C_Avg": "99.9",
+                    "RH1": "11.1",
+                    "CM3Up_Wm2_Avg": "999.0",
+                    "PSP_Wm2_Avg": "30.0",
+                },
+            ),
+            (
+                "2026-01-01 06:03:00",
+                {
+                    "AirT1_C_Avg": "25.3",
+                    "RH1": "70.3",
+                    "CM3Up_Wm2_Avg": "123.0",
+                    "PSP_Wm2_Avg": "31.0",
+                },
+            ),
+        ],
+    )
+    return early, late
+
+
 @pytest.fixture(scope="module")
 def synthetic_dat(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A minimal Campbell TOA5 .dat covering 2026-01-01 06:00-06:10."""
