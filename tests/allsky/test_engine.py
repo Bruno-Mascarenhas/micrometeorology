@@ -352,6 +352,37 @@ class TestResumeProvenance:
         assert (run_dir / "metrics.json").read_text(encoding="utf-8") == history_before
         assert list(pd.read_csv(run_dir / "metrics.csv")["epoch"]) == [1, 2]
 
+    def test_resume_into_another_dhi_parameterization_is_refused(self, tmp_path: Path):
+        """The head has the same shape under ``raw`` and ``clearsky_index``, and
+        run_experiment refits the target normalizer on the dataset before the
+        checkpoint is read, so a resume used to carry on in the other unit with
+        ``best.ckpt`` compared across the two."""
+        root, manifest, _ = _make_dataset(tmp_path, n_days=3)
+        run_dir = tmp_path / "run"
+        run_experiment(
+            _cfg(root, epochs=1),
+            data_root=root,
+            output_dir=run_dir,
+            embedding_reader=_reader(manifest),
+        )
+        rescaled = _cfg(
+            root,
+            epochs=2,
+            targets={
+                "dhi": {"enabled": True, "loss": "huber", "parameterization": "clearsky_index"},
+                "sky": {"enabled": True},
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="parameterization"):
+            run_experiment(
+                rescaled,
+                data_root=root,
+                output_dir=run_dir,
+                resume="auto",
+                embedding_reader=_reader(manifest),
+            )
+
     def test_pre_provenance_checkpoint_still_resumes(self, tmp_path: Path):
         # save_checkpoint allows split_id / manifest_sha256 to be None, so a
         # checkpoint carrying no provenance at all must still resume.

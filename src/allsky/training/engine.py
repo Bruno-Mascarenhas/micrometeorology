@@ -1186,7 +1186,10 @@ def _check_resume_provenance(
     attention pooler's ``(1, 1, D)`` query is sequence-length independent and
     centre-frame shares the mean pooler, so ``load_state_dict`` would accept the
     old weights and the run would continue on differently-pooled inputs, with
-    ``best.ckpt`` selected across two regimes.
+    ``best.ckpt`` selected across two regimes.  ``targets.dhi.parameterization``
+    is checked for the same reason on the target side: it decides whether the
+    head receives W/m2 or a ratio to the clear-sky reference, and the head has
+    the same shape either way.
     """
     stored_cfg = checkpoint.get("config") or {}
     stored_data = stored_cfg.get("data") or {}
@@ -1203,6 +1206,11 @@ def _check_resume_provenance(
             "alignment.window_minutes",
             stored_alignment.get("window_minutes"),
             cfg.data.alignment.window_minutes,
+        ),
+        (
+            "targets.dhi.parameterization",
+            ((stored_cfg.get("targets") or {}).get("dhi") or {}).get("parameterization"),
+            cfg.targets.dhi.parameterization,
         ),
     ):
         if stored is None:
