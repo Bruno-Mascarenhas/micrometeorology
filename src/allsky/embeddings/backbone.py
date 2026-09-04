@@ -388,12 +388,12 @@ class TorchvisionBackbone(_TorchModuleBackbone):
             raise ValueError(
                 f"unknown torchvision backbone {model!r}; expected one of {sorted(self.HEADS)}"
             )
+        self.dim = embedding_dim(model, pooling)
+        self._head_attribute = self.HEADS[model][1]
         import torchvision
 
         self.name = model
         self.revision = f"torchvision {torchvision.__version__}"
-        self.dim = embedding_dim(model, pooling)
-        self._head_attribute = self.HEADS[model][1]
         self._weights = weights
         super().__init__(pooling=pooling, device=device, dtype=dtype, image_size=image_size)
 
