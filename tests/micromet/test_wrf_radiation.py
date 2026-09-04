@@ -476,6 +476,39 @@ def _read_operational(domain: str) -> dict:
     return fields
 
 
+#: A thousand cells of the 2013 d02 archive run, at four steps, carrying the four
+#: fields the reconstruction needs and the LWUPB that RRTMG itself wrote. Frozen
+#: from ``wrfout_d02_2013-07-01_01_00_00-004_`` (99x99 grid, seed 2026) because
+#: that file is 8 GB of gitignored bulk data: without this sample the only test
+#: that ever compares the derivation against a ground-truth flux is skipped in
+#: CI and in every clean checkout, which is where it was for its whole life.
+_LWUPB_SAMPLE = Path(__file__).parent / "fixtures" / "rrtmg_lwupb_d02_2013-07-01.npz"
+
+
+def test_derived_lwup_reproduces_the_frozen_sample_of_wrfs_own_lwupb():
+    """The reconstruction against the flux RRTMG actually wrote, in CI.
+
+    Tolerances are the measurement, not a margin: over the four steps the mean
+    absolute error is 0.39, 1.28, 0.50 and 0.45 W/m2 on a ~420 W/m2 signal, and
+    the 99th percentile stays under 11. The residual is structural — the scheme
+    uses the LSM's canopy-adjusted radiative temperature where this uses grid-mean
+    TSK — so a tolerance loose enough to hide a formula change would be describing
+    nothing.
+    """
+    sample = np.load(_LWUPB_SAMPLE)
+
+    derived = compute_upwelling_longwave(
+        sample["EMISS"].astype(np.float64),
+        sample["TSK"].astype(np.float64),
+        sample["GLW"].astype(np.float64),
+    )
+
+    error = np.abs(derived - sample["LWUPB"].astype(np.float64))
+    for row, step in enumerate(sample["steps"]):
+        assert error[row].mean() < 1.5, f"step {step}: MAE {error[row].mean():.3f} W/m2"
+        assert np.percentile(error[row], 99) < 12.0, f"step {step}"
+
+
 @pytest.mark.skipif(not _LWUPB_FILE.exists(), reason="archive wrfout with LWUPB absent")
 def test_derived_lwup_reproduces_wrfs_own_lwupb():
     """The reconstruction is checked against the flux RRTMG actually wrote.
@@ -484,9 +517,10 @@ def test_derived_lwup_reproduces_wrfs_own_lwupb():
     atmosphere. It exists in the 2013 archive runs and NOT in the 2026
     operational runs, which is the whole reason this variable is derived.
 
-    Tolerance: the radiation scheme uses the LSM's canopy-adjusted radiative
-    temperature while we use grid-mean TSK, so a ~1-2 W/m2 land bias is
-    structural, not a bug. 5 W/m2 on a ~420 W/m2 signal is ~1%.
+    The whole grid, where the archive is on this machine; the frozen sample above
+    carries the same comparison everywhere else. Tolerance: the radiation scheme
+    uses the LSM's canopy-adjusted radiative temperature while we use grid-mean
+    TSK, so a ~0.4-1.3 W/m2 mean error is structural, not a bug.
     """
     with netCDF4.Dataset(_LWUPB_FILE) as ds:
         for step in (1, 12, 30, 48):
@@ -497,8 +531,8 @@ def test_derived_lwup_reproduces_wrfs_own_lwupb():
 
             error = np.abs(compute_upwelling_longwave(emiss, tsk, glw) - truth)
 
-            assert error.mean() < 5.0, f"step {step}: MAE {error.mean():.3f} W/m2"
-            assert np.percentile(error, 99) < 25.0
+            assert error.mean() < 1.5, f"step {step}: MAE {error.mean():.3f} W/m2"
+            assert np.percentile(error, 99) < 12.0
 
 
 @pytest.mark.skipif(not _SWUPB_FILE.exists(), reason="operational wrfout absent")
