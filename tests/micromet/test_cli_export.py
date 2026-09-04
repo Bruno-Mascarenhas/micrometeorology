@@ -351,3 +351,26 @@ def test_cli_strict_aborts_on_a_missing_requested_domain_before_writing(tmp_path
     )
     assert strict.exit_code == 1
     assert not strict_dir.exists()
+
+
+def test_a_variables_option_naming_nothing_is_a_usage_error(tmp_path):
+    """``-v ,`` used to select zero variables and still publish a manifest with a
+    new version stamp, which the site reads as a complete new run."""
+    result = runner.invoke(
+        app, ["-o", str(tmp_path / "json"), "-g", str(tmp_path / "geo"), "-v", ","]
+    )
+
+    assert result.exit_code == 2
+    assert "names no variable" in result.output
+    assert list(tmp_path.rglob("manifest.json")) == []
+
+
+def test_zero_workers_is_a_usage_error_rather_than_the_default(tmp_path):
+    """``--workers 0`` fell through ``workers or default_workers()`` to the default."""
+    result = runner.invoke(
+        app,
+        ["-o", str(tmp_path / "json"), "-g", str(tmp_path / "geo"), "-v", "temperature", "-w", "0"],
+    )
+
+    assert result.exit_code == 2
+    assert "--workers must be >= 1" in result.output

@@ -122,19 +122,20 @@ def run(
     setup_logging(log_level)
 
     var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
+    if variables is not None and not var_list:
+        raise typer.BadParameter(f"--variables names no variable (got {variables!r})")
     var_list = jobs.normalize_var_list(var_list, collapse_heights=True)
     # Output file ids are not input variables: `-v TSK` would reach the raw-NetCDF
     # passthrough and publish unconverted KELVIN into TSK_D0X_nnn.png, the exact
     # filenames skin_temperature publishes in °C.
     reject_output_id_variables(var_list)
+    resolved_workers = default_workers() if workers is None else workers
+    if resolved_workers < 1:
+        raise typer.BadParameter("--workers must be >= 1")
     paths = resolve_selection(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")
         return
-
-    resolved_workers = workers or default_workers()
-    if resolved_workers < 1:
-        raise typer.BadParameter("--workers must be >= 1")
 
     typer.echo(f"Files: {[p.name for p in paths]}")
     typer.echo(f"Variables: {var_list}")

@@ -101,9 +101,6 @@ def run(
     geojson_dir = base_out / "GeoJSON"
     video_dir = base_out / "videos"
 
-    resolved_workers = workers or default_workers()
-    if resolved_workers < 1:
-        raise typer.BadParameter("--workers must be >= 1")
     # Phase 3 encodes the PNGs Phase 1 rendered, so --no-figures leaves it
     # nothing to do: its `also_video and png_paths` gate would be unconditionally
     # false and the run would exit 0 having produced none of the requested
@@ -112,10 +109,15 @@ def run(
         raise typer.BadParameter("--also-video encodes the rendered figures; drop --no-figures")
 
     var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
+    if variables is not None and not var_list:
+        raise typer.BadParameter(f"--variables names no variable (got {variables!r})")
     # An output file id (-v TSK) reaches the raw-NetCDF passthrough in BOTH
     # phases and publishes unconverted Kelvin into the PNGs and JSONs that
     # skin_temperature owns, so it is refused before a frame is rendered.
     reject_output_id_variables(var_list)
+    resolved_workers = default_workers() if workers is None else workers
+    if resolved_workers < 1:
+        raise typer.BadParameter("--workers must be >= 1")
     paths = resolve_selection(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")
