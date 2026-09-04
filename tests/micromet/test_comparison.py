@@ -16,8 +16,10 @@ import pandas as pd
 import pytest
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
+from typer.testing import CliRunner
 
 import micrometeorology
+from micrometeorology.cli import compare_wrf_observations
 from micrometeorology.sensors.export import export_csv
 from micrometeorology.stats.comparison import (
     UnreadableDatasetError,
@@ -336,3 +338,26 @@ def test_a_parquet_dataset_is_refused_by_name_instead_of_raising_a_decode_error(
 
     with pytest.raises(UnreadableDatasetError, match="not the delimited text"):
         read_dataset(path)
+
+
+def test_the_cli_refuses_a_pairing_in_which_no_model_row_fell_inside_the_tolerance(
+    tmp_path: Path,
+) -> None:
+    """``pair_dataframes`` merges LEFT, so the paired frame is never empty while
+    there are observations: the old ``paired.empty`` gate let two disjoint years
+    write a metrics table of NaN with exit code 0."""
+    values = [20.0, 21.0, 22.0]
+    obs = tmp_path / "obs.csv"
+    model = tmp_path / "model.csv"
+    for path, year in ((obs, 2020), (model, 2021)):
+        index = pd.date_range(f"{year}-01-01", periods=3, freq="1h", name="TIMESTAMP")
+        pd.DataFrame({"T2": values}, index=index).to_csv(path)
+
+    result = CliRunner().invoke(
+        compare_wrf_observations.app,
+        ["--obs", str(obs), "--model", str(model), "-o", str(tmp_path / "out"), "--no-plots"],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "no timestamp pair falls within" in result.output
+    assert not (tmp_path / "out" / "metrics_summary.csv").exists()

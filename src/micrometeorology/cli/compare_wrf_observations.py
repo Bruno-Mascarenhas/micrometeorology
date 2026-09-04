@@ -81,7 +81,12 @@ def run(
         )
 
     paired = pair_dataframes(df_obs, df_model, tolerance=tolerance)
-    if paired.empty:
+    # ``pair_dataframes`` merges LEFT, so the frame keeps one row per observation
+    # whether or not a model row fell inside --tolerance. ``len(paired)`` is
+    # therefore not the sample size: each variable's denominator is the ``n`` row.
+    model_cols = [c for c in paired.columns if c.endswith("_model")]
+    steps_with_model = int(paired[model_cols].notna().any(axis=1).sum()) if model_cols else 0
+    if steps_with_model == 0:
         raise typer.BadParameter(
             f"the files share {len(shared)} column(s) ({', '.join(shared)}) but no timestamp "
             f"pair falls within {tolerance}. Observations span "
@@ -90,11 +95,6 @@ def run(
             param_hint="--tolerance",
         )
 
-    # ``pair_dataframes`` merges LEFT, so the frame keeps one row per observation
-    # whether or not a model row fell inside --tolerance. ``len(paired)`` is
-    # therefore not the sample size: each variable's denominator is the ``n`` row.
-    model_cols = [c for c in paired.columns if c.endswith("_model")]
-    steps_with_model = int(paired[model_cols].notna().any(axis=1).sum()) if model_cols else 0
     typer.echo(
         f"Paired {len(paired)} time steps, {steps_with_model} with a model value within {tolerance} "
         "(per-variable sample sizes are the 'n' row of the table)"
