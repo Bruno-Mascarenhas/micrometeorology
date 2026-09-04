@@ -381,3 +381,21 @@ def test_a_step_with_no_contour_publishes_an_empty_overlay(tmp_path):
     assert flat["metadata"]["unit"] == "hPa"
     drawn = json.loads((tmp_path / "json" / "D03_ISOBARS_000.json").read_text(encoding="utf-8"))
     assert drawn["isobars"]
+
+
+def test_a_humid_column_reduces_lower_than_the_same_column_dry():
+    """`vapor_mixing_ratio` reaches the reduction only through the virtual
+    temperature, and every existing test passed it zeros — so the 0.608
+    coefficient and the whole moisture path were exercised by nothing but the
+    absence of moisture. Moist air is lighter, so a warmer virtual column needs
+    less pressure below it: the reduced value must come out lower."""
+    pressure, height, temperature, dry = _standard_atmosphere_column(1200.0)
+    humid = np.full_like(dry, 0.018)  # 18 g/kg, a moist tropical column
+
+    reduced_dry = sea_level_pressure_hpa(pressure, height, temperature, dry)[0, 0]
+    reduced_humid = sea_level_pressure_hpa(pressure, height, temperature, humid)[0, 0]
+
+    assert reduced_humid < reduced_dry
+    # 0.608 * 0.018 = 1.09% on the virtual temperature, which over 1200 m of
+    # hypsometric extrapolation is about 1.5 hPa.
+    assert reduced_dry - reduced_humid == pytest.approx(1.5, abs=0.5)

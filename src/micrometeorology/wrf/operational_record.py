@@ -901,6 +901,12 @@ def _repair_v1_row(row: dict[str, str], line_number: int, repaired: Counter[str]
             repaired["ur"] += 1
 
 
+#: Inverse of :data:`_V1_NAME_OF`, for the one place that has to bridge the two
+#: namespaces: the repair tally counts by the v1 name and the cold-start tally by
+#: the v2 one.
+_V1_OLD_OF: dict[str, str] = {new: old for old, new in V1_TO_V2}
+
+
 def _blank_v1_cold_start(row: dict[str, str], blanked: Counter[str]) -> None:
     """No-value the physics columns of a step preceding the first radiation call."""
     if _v1_number(row, "Lwdw_glw") != 0.0:
@@ -982,8 +988,19 @@ def migrate_to_v2(path: Path) -> MigrationReport:
             )
 
         row = dict(zip(V1_COLUMNS, named, strict=True))
-        _repair_v1_row(row, number, repaired)
-        _blank_v1_cold_start(row, blanked)
+        # The cold-start blanking runs SECOND and overwrites cells the repair
+        # just wrote, so counting the repair before it reported work the file
+        # does not carry: the two tallies are taken over disjoint cells.
+        repaired_here: Counter[str] = Counter()
+        _repair_v1_row(row, number, repaired_here)
+        blanked_here: Counter[str] = Counter()
+        _blank_v1_cold_start(row, blanked_here)
+        # `_repair_v1_row` counts by the OLD name and `_blank_v1_cold_start` by
+        # the new one, so the two namespaces are bridged before subtracting.
+        for new_name in blanked_here:
+            repaired_here.pop(_V1_OLD_OF[new_name], None)
+        repaired.update(repaired_here)
+        blanked.update(blanked_here)
         out.append(",".join([*(row[old] for old in V1_COLUMNS), "nan"]) + "\n")
 
     path.with_suffix(f"{path.suffix}.bak").write_bytes(path.read_bytes())
@@ -1227,7 +1244,8 @@ def read_wrf_series(path: str | Path, *, consumes: Collection[str] = ()) -> pd.D
     ------
     ValueError
         When the file is still on v1 and *consumes* names a column
-        :func:`migrate_to_v2` has not repaired.
+        :func:`migrate_to_v2` has not repaired, or when a row carries no readable
+        ``year``/``month``/``day``/``hour``.
     """
     frame = pd.read_csv(path)
     frame = frame.drop(columns=[c for c in frame.columns if str(c).startswith("Unnamed")])
@@ -1245,7 +1263,16 @@ def read_wrf_series(path: str | Path, *, consumes: Collection[str] = ()) -> pd.D
                 "wrote — wrong by a known formula. Run `labmim-wrf-series migrate` "
                 "on the record first."
             )
-    stamps = pd.to_datetime(frame[["year", "month", "day", "hour"]])
+    stamps = pd.to_datetime(frame[["year", "month", "day", "hour"]], errors="coerce")
+    unstamped = int(stamps.isna().sum())
+    if unstamped:
+        # NaT reaches the index, survives sort_index, and only surfaces two
+        # commands later inside export_monitoring's cadence guard, as a pandas
+        # error naming neither the file nor the row.
+        raise ValueError(
+            f"{path}: {unstamped} row(s) carry no readable year/month/day/hour and "
+            "cannot be placed on the timeline"
+        )
     frame.index = pd.DatetimeIndex(stamps)
     frame = frame.drop(columns=["year", "month", "day", "hour"])
     frame = frame.loc[~frame.index.duplicated(keep="last")].sort_index()

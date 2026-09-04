@@ -527,15 +527,31 @@ def extract_upwelling_longwave(ds: WRFDataset) -> tuple[NDArray, float, float]:
 
 
 def extract_upwelling_shortwave(ds: WRFDataset) -> tuple[NDArray, float, float]:
-    """Extract derived upwelling (reflected) shortwave radiation (W/m2)."""
-    values = compute_upwelling_shortwave(ds.get_variable("ALBEDO"), ds.get_variable("SWDOWN"))
+    """Extract derived upwelling (reflected) shortwave radiation (W/m2).
+
+    Blanked on the cold-start step like every other derived flux here: the step
+    precedes WRF's first radiation call, so ``SWDOWN`` is identically zero and
+    the reflected flux computes to a physical zero the page draws as measurement.
+    Inside the daylight window that is a reading no sky produces.
+    """
+    glw = ds.get_variable("GLW")
+    values = blank_uninitialised_radiation(
+        compute_upwelling_shortwave(ds.get_variable("ALBEDO"), ds.get_variable("SWDOWN")), glw
+    )
     low, high = percentile_scale_bounds(values)
     return values, low, high
 
 
 def extract_net_shortwave(ds: WRFDataset) -> tuple[NDArray, float, float]:
-    """Extract derived net shortwave radiation (W/m2)."""
-    values = compute_net_shortwave(ds.get_variable("ALBEDO"), ds.get_variable("SWDOWN"))
+    """Extract derived net shortwave radiation (W/m2).
+
+    Blanked on the cold-start step for the same reason as the upwelling flux
+    beside it.
+    """
+    glw = ds.get_variable("GLW")
+    values = blank_uninitialised_radiation(
+        compute_net_shortwave(ds.get_variable("ALBEDO"), ds.get_variable("SWDOWN")), glw
+    )
     low, high = percentile_scale_bounds(values)
     return values, low, high
 

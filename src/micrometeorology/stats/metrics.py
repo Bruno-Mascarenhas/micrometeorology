@@ -304,7 +304,10 @@ CIRCULAR_METRICS = frozenset({"RMSE", "MAE", "MBE"})
 # (``WindDir_SD``, ``Wd_StdDev``, ``WindDir_SD1_WVT``) are excluded first: a
 # standard deviation of direction is an ordinary scalar spread, so suppressing
 # its R² and r would throw away valid numbers.
-_CIRCULAR_EXACT = frozenset({"wd", "winddir", "wind_dir", "wind_direction", "direction"})
+#: ``wdir`` is the wrf-python / NCL spelling, which is what the WRF comparison
+#: CLIs ingest: without it a model bearing was scored on the line, where 10 deg
+#: against 350 deg reads as a 340 deg error instead of 20.
+_CIRCULAR_EXACT = frozenset({"wd", "wdir", "winddir", "wind_dir", "wind_direction", "direction"})
 # Every prefix keeps its separator ("dir_", not "dir") so that a direct-beam
 # radiation column such as ``Direct_Wm2`` is not mistaken for a bearing.
 _CIRCULAR_PREFIXES = ("wd_", "winddir", "wind_dir", "wind_direction", "direction_", "dir_")

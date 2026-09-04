@@ -1043,3 +1043,31 @@ def test_reading_an_unmigrated_v1_file_refuses_the_columns_the_migration_repairs
 
     with pytest.raises(ValueError, match="still a v1 operational file"):
         read_wrf_series(path, consumes=[T2_C, RH_PCT])
+
+
+def test_a_row_with_no_readable_stamp_is_named_here_not_two_commands_later(tmp_path):
+    """NaT reaches the index, survives `sort_index`, and only surfaces inside
+    export_monitoring's cadence guard as a pandas error naming neither the file
+    nor the row."""
+    from micrometeorology.wrf.operational_record import read_wrf_series
+
+    path = tmp_path / "serie.dat"
+    header = ",".join(DEFAULT_HEADER)
+    good = ["2026", "8", "8", "9"] + ["1.0"] * (len(DEFAULT_HEADER) - 4)
+    broken = ["2026", "13", "40", "99"] + ["1.0"] * (len(DEFAULT_HEADER) - 4)
+    path.write_text("\n".join([header, ",".join(good), ",".join(broken)]) + "\n")
+
+    with pytest.raises(ValueError, match="no readable year/month/day/hour"):
+        read_wrf_series(path)
+
+
+def test_the_repaired_tally_excludes_the_cells_the_cold_start_blanks(tmp_path):
+    """The blanking runs second and overwrites cells the repair just wrote, so
+    counting the repair before it reported work the file does not carry."""
+    path = tmp_path / "serie.dat"
+    _v1_file(path, [_v1_row(cold_start=True)])
+
+    report = migrate_to_v2(path)
+
+    overlap = set(report.repaired) & set(report.blanked)
+    assert overlap == set(), f"a cell counted as both repaired and blanked: {sorted(overlap)}"
