@@ -18,6 +18,7 @@ scope), so the whole module is skipped when torch is unavailable — offline and
 CPU-only otherwise; no dataset, embeddings or network are touched.
 """
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -152,6 +153,44 @@ def test_every_experiment_trains_on_a_dataset_some_prepare_config_builds(
         assert cfg.data.data_root not in prepared
         return
     assert cfg.data.data_root in prepared, cfg.data.data_root
+
+
+#: Arms known to resolve to the same run and left in place deliberately, as
+#: ``family/stem`` pairs. control_sNN and loss_mae_sNN differ only in ``name`` and
+#: ``output_dir`` after ``extends`` resolves — same seed, same data_root, same
+#: model, same loss, same schedule — so running both produces two bit-identical
+#: runs and "control against loss_mae" compares a run with itself. Which arm is
+#: the control, and where seeds 45-47 belong, is an experiment-design decision.
+_KNOWN_IDENTICAL_ARMS = {
+    ("control/control_s42", "loss/loss_mae_s42"),
+    ("control/control_s43", "loss/loss_mae_s43"),
+    ("control/control_s44", "loss/loss_mae_s44"),
+}
+
+
+def test_no_two_experiments_resolve_to_the_same_run() -> None:
+    """Two arms that resolve identically are one measurement served twice, and
+    comparing them measures nothing. New duplicates fail here; the pair already
+    shipped is listed above so removing it removes the exception too.
+    """
+    resolved: dict[str, list[str]] = {}
+    for path in _ALL_EXPERIMENTS:
+        dumped = load_experiment_config(path).model_dump(mode="json")
+        dumped.pop("name", None)
+        dumped.pop("output_dir", None)
+        key = json.dumps(dumped, sort_keys=True)
+        resolved.setdefault(key, []).append(f"{path.parent.name}/{path.stem}")
+
+    duplicates = {tuple(sorted(arms)) for arms in resolved.values() if len(arms) > 1 for _ in (0,)}
+    unexpected = {
+        pair
+        for group in duplicates
+        for pair in (
+            (group[i], group[j]) for i in range(len(group)) for j in range(i + 1, len(group))
+        )
+        if pair not in _KNOWN_IDENTICAL_ARMS
+    }
+    assert unexpected == set(), sorted(unexpected)
 
 
 def test_the_isotropic_calibration_matches_the_crop_and_pad_that_produced_it() -> None:
