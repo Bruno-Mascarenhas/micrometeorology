@@ -156,8 +156,8 @@ class DaySplit:
             strategy=_split_strategy(payload["strategy"]),
             gap_days=int(payload["gap_days"]),
         )
-        stored = payload.get("split_id")
-        if stored is not None and stored != split.split_id:
+        stored = payload["split_id"]
+        if stored != split.split_id:
             raise ValueError(
                 f"split artifact is corrupt: stored split_id {stored!r} does not match "
                 f"the recomputed {split.split_id!r}"
