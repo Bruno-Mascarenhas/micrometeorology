@@ -50,7 +50,7 @@ class VideoConfig(BaseModel):
     filename_date_format: str = "allsky-%Y%m%d"
     timestamps: Literal["overlay", "modelled"] = "overlay"
     start_time: str = "06:00"
-    minutes_per_frame: float = 1.0
+    minutes_per_frame: float = Field(default=1.0, gt=0)
 
 
 #: The :class:`VideoConfig` fields that decide *which capture* a given frame is,
