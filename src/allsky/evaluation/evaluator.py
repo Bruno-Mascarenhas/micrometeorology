@@ -28,6 +28,7 @@ import itertools
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,7 @@ import numpy as np
 import pandas as pd
 
 from allsky.clearsky import clearsky_ghi_and_kt
-from allsky.config import SITE_TZ, ExperimentConfig, geometry_channels_of, image_size_of
+from allsky.config import ExperimentConfig, geometry_channels_of, image_size_of
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
     default_embedding_reader,
@@ -60,10 +61,6 @@ from labmim_core.sky import SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES, sky_clas
 logger = logging.getLogger(__name__)
 
 __all__ = ["EvaluationResult", "evaluate_checkpoint"]
-
-#: Fixed America/Bahia offset (UTC-3, no DST) used to derive local hour/month
-#: from the manifest's tz-aware ``timestamp_utc`` (mirrors the manifest builder).
-_LOCAL_TZ = SITE_TZ
 
 #: Solar-elevation band edges (degrees); rows outside ``[10, 90]`` fall in no
 #: band and are simply absent from the elevation breakdown.
@@ -497,7 +494,13 @@ def _run_inference(
             split_df["solar_zenith"], times, utc_offset_hours
         )
 
-    return _build_predictions_frame(split_df, predicted, enabled_targets, kindex_kind=kindex_kind)
+    return _build_predictions_frame(
+        split_df,
+        predicted,
+        enabled_targets,
+        kindex_kind=kindex_kind,
+        utc_offset_hours=utc_offset_hours,
+    )
 
 
 def _build_split_dataset(
@@ -573,12 +576,15 @@ def _build_predictions_frame(
     enabled_targets: Sequence[str],
     *,
     kindex_kind: str | None,
+    utc_offset_hours: float,
 ) -> pd.DataFrame:
     """Assemble the per-sample predictions frame (identity + strata + obs/pred).
 
     *kindex_kind* is the k-index the manifest's ``target_kindex`` column holds
     (:func:`_manifest_kindex_kind`); it selects the clear-sky reference of the
     k-index head and is ``None`` for a manifest that does not record it.
+    *utc_offset_hours* is the clock the manifest was built on: the hour and
+    month strata and the clear-sky references are all derived on it.
     """
     frame = pd.DataFrame(
         {
@@ -587,7 +593,7 @@ def _build_predictions_frame(
             "timestamp_utc": split_df["timestamp_utc"].astype(str).to_numpy(),
         }
     )
-    _add_strata(frame, split_df)
+    _add_strata(frame, split_df, utc_offset_hours=utc_offset_hours)
 
     for name in enabled_targets:
         if name == "sky":
@@ -602,12 +608,18 @@ def _build_predictions_frame(
             )
             frame[f"obs_{name}"] = observed
             frame[f"pred_{name}"] = np.asarray(predicted[name], dtype=np.float64)
-    _attach_reference_columns(frame, enabled_targets, kindex_kind=kindex_kind)
+    _attach_reference_columns(
+        frame, enabled_targets, kindex_kind=kindex_kind, utc_offset_hours=utc_offset_hours
+    )
     return frame
 
 
 def _attach_reference_columns(
-    frame: pd.DataFrame, enabled_targets: Sequence[str], *, kindex_kind: str | None
+    frame: pd.DataFrame,
+    enabled_targets: Sequence[str],
+    *,
+    kindex_kind: str | None,
+    utc_offset_hours: float,
 ) -> None:
     """Attach the per-sample baseline references, built over the whole split.
 
@@ -622,14 +634,24 @@ def _attach_reference_columns(
     before.
     """
     times = pd.to_datetime(frame["timestamp_utc"], utc=True)
-    clearsky_pair = _clearsky_ghi_and_kt(frame, times) if "solar_zenith" in frame.columns else None
+    clearsky_pair = (
+        _clearsky_ghi_and_kt(frame, times, utc_offset_hours)
+        if "solar_zenith" in frame.columns
+        else None
+    )
     for name in enabled_targets:
         if name == "sky":
             continue
         frame[f"persistence_{name}"] = _previous_observation_same_day(
             frame, f"obs_{name}", times=times
         )
-        clearsky = _clearsky_reference(frame, name, kindex_kind=kindex_kind, clearsky=clearsky_pair)
+        clearsky = _clearsky_reference(
+            frame,
+            name,
+            kindex_kind=kindex_kind,
+            clearsky=clearsky_pair,
+            utc_offset_hours=utc_offset_hours,
+        )
         if clearsky is not None:
             frame[f"clearsky_{name}"] = clearsky
         elif name == "kindex" and kindex_kind is None:
@@ -661,7 +683,7 @@ def _previous_observation_same_day(
     return shifted.sort_index().to_numpy(dtype=np.float64)
 
 
-def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame) -> None:
+def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame, *, utc_offset_hours: float) -> None:
     """Attach the stratification columns to *frame* from *split_df*.
 
     ``solar_zenith`` and ``kindex_band`` are attached only when the manifest
@@ -672,7 +694,8 @@ def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame) -> None:
     that is simply absent from ``stratified.csv`` reads like a stratum with no
     rows in it rather than one that was never computed.
     """
-    local = pd.to_datetime(split_df["timestamp_utc"], utc=True).dt.tz_convert(_LOCAL_TZ)
+    site_clock = timezone(timedelta(hours=utc_offset_hours))
+    local = pd.to_datetime(split_df["timestamp_utc"], utc=True).dt.tz_convert(site_clock)
     frame["hour"] = local.dt.hour.to_numpy(dtype=np.int64)
     if "solar_zenith" in split_df.columns:
         frame["solar_zenith"] = split_df["solar_zenith"].to_numpy(dtype=np.float64)
@@ -781,6 +804,7 @@ def _clearsky_reference(
     *,
     kindex_kind: str | None,
     clearsky: tuple[np.ndarray, np.ndarray] | None = None,
+    utc_offset_hours: float,
 ) -> np.ndarray | None:
     """What a cloudless sky would have produced for this target.
 
@@ -801,30 +825,36 @@ def _clearsky_reference(
             return np.ones(len(frame), dtype=np.float64)
         if kindex_kind != "kt" or "solar_zenith" not in frame.columns:
             return None
-        return _resolved_clearsky(frame, clearsky)[1]
+        return _resolved_clearsky(frame, clearsky, utc_offset_hours)[1]
     if name != "dhi" or "solar_zenith" not in frame.columns:
         return None
-    ghi_clear, kt_clear = _resolved_clearsky(frame, clearsky)
+    ghi_clear, kt_clear = _resolved_clearsky(frame, clearsky, utc_offset_hours)
     return np.asarray(pseudo_diffuse(ghi_clear, kt_clear), dtype=np.float64)
 
 
 def _resolved_clearsky(
-    frame: pd.DataFrame, clearsky: tuple[np.ndarray, np.ndarray] | None
+    frame: pd.DataFrame,
+    clearsky: tuple[np.ndarray, np.ndarray] | None,
+    utc_offset_hours: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """The caller's prebuilt clear-sky pair, or one built from *frame* now."""
     if clearsky is not None:
         return clearsky
-    return _clearsky_ghi_and_kt(frame, pd.to_datetime(frame["timestamp_utc"], utc=True))
+    return _clearsky_ghi_and_kt(
+        frame, pd.to_datetime(frame["timestamp_utc"], utc=True), utc_offset_hours
+    )
 
 
-def _clearsky_ghi_and_kt(frame: pd.DataFrame, times: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+def _clearsky_ghi_and_kt(
+    frame: pd.DataFrame, times: pd.Series, utc_offset_hours: float
+) -> tuple[np.ndarray, np.ndarray]:
     """Haurwitz clear-sky GHI (W m-2) and its clearness index, at each row's zenith.
 
     Thin wrapper over :func:`allsky.clearsky.clearsky_ghi_and_kt`, which owns the
     physics so the training path can normalize a target by exactly the reference
     this path scores against.
     """
-    return clearsky_ghi_and_kt(frame["solar_zenith"], times)
+    return clearsky_ghi_and_kt(frame["solar_zenith"], times, utc_offset_hours)
 
 
 def _stratified_metrics(
