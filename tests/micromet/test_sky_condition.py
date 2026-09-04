@@ -100,22 +100,19 @@ def test_a_sample_with_nothing_labelable_publishes_no_fraction_rather_than_zero(
 
 
 def test_the_class_shares_are_counted_from_the_sample_not_read_off_the_curve():
-    """The 0.02 grid does not carry the partition's bounds — 0.35 falls between
-    0.34 and 0.36 — so a share read off the curve would be the wrong one. It is
-    counted from the sample instead, and this pins that: a subset placed exactly
-    astride a bound must report the count, not the nearest edge's cumulative.
+    """The 0.02 grid does not carry the partition's bounds — 0.55 falls between
+    0.54 and 0.56 — so the published caveat promises the shares come from the
+    sample, not from interpolating the curve. Two samples inside that one cell,
+    one on each side of the bound, separate the two mechanisms: reading off the
+    edge below gives 0 and 2, the edge above gives 2 and 0, counting gives 1
+    and 1.
     """
-    edges = set(KT_CUMULATIVE_EDGES)
-    assert not any(abs(edge - 0.35) < 1e-9 for edge in edges), (
-        "if the grid ever carries the bounds this test is describing the wrong mechanism"
-    )
+    sample = np.array([0.545, 0.555])
 
-    # Four hours either side of the clear/partly bound at 0.55.
-    sample = np.array([0.50, 0.52, 0.60, 0.62])
-    subset = cumulative_subset(sample, label="probe")
+    subset = cumulative_subset(sample, label="astride")
 
-    shares = {entry["id"]: entry for entry in subset["sky_conditions"]["conditions"]}
-    assert sum(entry["count"] for entry in shares.values()) == 4
+    shares = {entry["id"]: entry["count"] for entry in subset["sky_conditions"]["conditions"]}
+    assert [shares[key] for key in ("ii", "iii")] == [1, 1]
 
 
 def test_the_cumulative_edges_are_the_climatology_specs_own_edges():
