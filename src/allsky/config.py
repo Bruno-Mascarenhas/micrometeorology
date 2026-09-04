@@ -73,7 +73,7 @@ VIDEO_TIME_FIELDS = (
 #: gate and the embedding store's both hash this, and two copies of the tuple
 #: would let one start covering a section the other does not — resuming an
 #: embedding store onto frames it was never extracted from.
-FRAME_PIXEL_SECTIONS = ("mask", "crop", "resize")
+FRAME_PIXEL_SECTIONS = ("mask", "crop", "pad", "resize")
 
 #: Filenames a prepared dataset is published under. The bundle writer and the
 #: prepare CLI both name these; separate copies let a rename land in one and not

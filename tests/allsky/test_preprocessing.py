@@ -12,6 +12,7 @@ import pytest
 from allsky.config import CropConfig, PadConfig, PrepareConfig
 from allsky.data.contracts import QCFlag
 from allsky.preprocessing import (
+    _needs_preprocessing,
     apply_static_mask,
     center_crop,
     estimate_circular_mask,
@@ -299,3 +300,12 @@ class TestPadFrame:
 
         assert padded[0, 0, 0] == 13
         assert padded[1, 3, 2] == 13
+
+
+def test_a_pad_only_config_rewrites_the_frame():
+    """``prepare-local`` asks this gate before rewriting a JPEG; a config whose only
+    pixel stage is ``pad`` extracted unpadded frames without a word."""
+    cfg = PrepareConfig.model_validate({"pad": {"enabled": True, "top": 4}})
+
+    assert _needs_preprocessing(cfg) is True
+    assert process_frame(_rgb(8, 8), cfg).shape == (12, 8, 3)

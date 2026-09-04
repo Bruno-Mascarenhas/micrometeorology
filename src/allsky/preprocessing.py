@@ -647,7 +647,9 @@ def visual_qc(
 
 def _needs_preprocessing(cfg: PrepareConfig) -> bool:
     """True when :func:`process_frame` would change the pixels of a frame."""
-    return cfg.mask.path is not None or cfg.crop.enabled or cfg.resize is not None
+    return (
+        cfg.mask.path is not None or cfg.crop.enabled or cfg.pad.enabled or cfg.resize is not None
+    )
 
 
 def resolve_mask(cfg: PrepareConfig) -> np.ndarray | None:

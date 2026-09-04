@@ -429,7 +429,7 @@ class TestMaskBytesAreInTheFrameProvenanceHash:
     def test_a_maskless_config_hashes_as_before_the_mask_bytes_were_folded_in(self):
         assert _frames_inputs_sha256(PrepareConfig()) == config_subset_sha256(
             PrepareConfig(),
-            sections=("mask", "crop", "resize"),
+            sections=("mask", "crop", "pad", "resize"),
             nested_fields={"video": VIDEO_TIME_FIELDS},
             subject="the frame provenance hash",
         )
@@ -453,3 +453,12 @@ def test_rewriting_the_mask_png_in_place_re_extracts_instead_of_resuming(
     ]
     assert shipped
     assert all(not frame[:32].any() for frame in shipped)
+
+
+def test_a_changed_pad_section_moves_the_frame_provenance_hash():
+    """``pad`` rewrites the pixels as much as ``crop`` does, yet it was missing from
+    ``FRAME_PIXEL_SECTIONS``: the isotropic re-extraction hashed identically to the
+    unpadded one, so frames and embeddings resumed across the change."""
+    padded = PrepareConfig.model_validate({"pad": {"enabled": True, "top": 254, "bottom": 377}})
+
+    assert _frames_inputs_sha256(padded) != _frames_inputs_sha256(PrepareConfig())
