@@ -12,6 +12,7 @@ to the ref ``notebooks/README.md`` tells users to open the notebook from.
 Confirm against the live remote with ``git ls-remote --heads <REPO_URL>``.
 """
 
+import importlib.util
 import json
 import re
 import tomllib
@@ -128,6 +129,34 @@ def test_a_tracked_notebook_carries_no_cell_output(notebook: Path) -> None:
         if cell.get("cell_type") == "code" and (cell.get("outputs") or cell.get("execution_count"))
     ]
     assert carrying == [], f"{notebook.name}: cells {carrying} carry output"
+
+
+#: Distributions this repo ships. A notebook importing from one of them names a
+#: module that has to exist; anything else is a third-party dependency.
+_OWN_PACKAGES = ("allsky", "labmim_core", "micrometeorology", "solrad_correction")
+
+
+@pytest.mark.parametrize("notebook", _NOTEBOOKS, ids=lambda path: path.name)
+def test_a_tracked_notebook_imports_only_modules_this_repo_has(notebook: Path) -> None:
+    """A notebook importing a module that was renamed away dies at its first
+    substantive cell, and nothing else in the suite reads notebook source. One
+    tracked notebook imported ``solrad_correction.utils.plots``, which has never
+    existed.
+    """
+    cells = json.loads(notebook.read_text(encoding="utf-8"))["cells"]
+    sources = ["".join(cell["source"]) for cell in cells if cell.get("cell_type") == "code"]
+
+    named = set()
+    for source in sources:
+        for statement in re.findall(r"^\s*from\s+([\w.]+)\s+import", source, re.MULTILINE):
+            if statement.split(".")[0] in _OWN_PACKAGES:
+                named.add(statement)
+        for statement in re.findall(r"^\s*import\s+([\w.]+)", source, re.MULTILINE):
+            if statement.split(".")[0] in _OWN_PACKAGES:
+                named.add(statement)
+
+    missing = [module for module in sorted(named) if importlib.util.find_spec(module) is None]
+    assert missing == [], f"{notebook.name}: {missing}"
 
 
 def test_the_notebook_names_configs_that_exist() -> None:
