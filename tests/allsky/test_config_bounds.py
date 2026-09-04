@@ -12,6 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from allsky.config import AlignmentConfig, ExperimentConfig, PrepareConfig
+from labmim_core.site import SiteConfig
 
 
 def _config(train: dict) -> ExperimentConfig:
@@ -95,3 +96,10 @@ class TestOnlyTheLearnedPoolerNeedsEmbeddingMode:
     def test_center_frame_with_image_mode_stays_the_default(self):
         cfg = ExperimentConfig.model_validate({"data": {"input_mode": "image"}})
         assert cfg.data.alignment.strategy == "center_frame"
+
+
+def test_a_misspelt_site_key_is_rejected_instead_of_keeping_the_station_clock():
+    """``SiteConfig`` ignored unknown keys, so ``utc_offset_hour: -8`` in a YAML
+    ``site:`` block computed a UTC-8 station on Salvador's clock without failing."""
+    with pytest.raises(ValidationError, match="utc_offset_hour"):
+        SiteConfig.model_validate({"utc_offset_hour": -8.0})

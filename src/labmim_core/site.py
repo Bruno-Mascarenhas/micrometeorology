@@ -10,13 +10,15 @@ other, and it imports nothing from this project — the all-sky package reads th
 site from here too, which is what keeps that dependency one-directional.
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 __all__ = ["STATION_SITE", "STATION_UTC_OFFSET_HOURS", "SiteConfig"]
 
 
 class SiteConfig(BaseModel):
     """Observation site (LabMiM/UFBA, Salvador-BA by default)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     #: LabMiM tower, Instituto de Física, UFBA — Ondina, Salvador. These are the
     #: canonical coordinates for the station: every package reads them from

@@ -4,10 +4,10 @@ Two roots sit at the top of the tree. :class:`ExperimentConfig` describes a
 multimodal training run — portable manifest, embeddings, model zoo, experiment
 engine. :class:`PrepareConfig` describes dataset preparation and drives
 ``prepare-local``, ``validate-dataset``, ``precompute-embeddings`` and
-``export-colab-bundle``. Both reuse the permissive :class:`VideoConfig` and
-:class:`SiteConfig` sections verbatim; every other section is strict
-(``extra="forbid"``), so a typo in a YAML key fails loudly instead of being
-ignored.
+``export-colab-bundle``. Both reuse the :class:`VideoConfig` and
+:class:`SiteConfig` sections verbatim; ``VideoConfig`` is the one permissive
+section left, every other one is strict (``extra="forbid"``), so a typo in a
+YAML key fails loudly instead of being ignored.
 
 YAML files compose through an ``extends:`` list that
 :func:`load_experiment_config` and :func:`load_prepare_config` resolve
@@ -651,9 +651,9 @@ class SplitsConfig(BaseModel):
 class PrepareConfig(BaseModel):
     """Root config for dataset preparation, embeddings and export.
 
-    ``video`` and ``site`` reuse the permissive legacy sections
-    (:class:`VideoConfig` / :class:`SiteConfig`); every prepare-specific section
-    is strict so typos fail loudly. ``features`` selects the sensor feature
+    ``video`` and ``site`` reuse the shared sections (:class:`VideoConfig`, still
+    permissive, and the strict :class:`SiteConfig`); every prepare-specific
+    section is strict so typos fail loudly. ``features`` selects the sensor feature
     policy baked into the manifest at build time — its YAML key is ``set``,
     aliasing the ``feature_set`` attribute.
     """
