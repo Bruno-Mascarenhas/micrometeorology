@@ -65,7 +65,7 @@ class LiveFrameSource(Protocol):
 
 @dataclass(frozen=True)
 class Snapshot:
-    """One captured live frame, its provenance sidecar and any prediction over it.
+    """One captured live frame and its provenance sidecar.
 
     Attributes
     ----------
@@ -77,21 +77,11 @@ class Snapshot:
         headers and the code version.
     captured_at:
         Naive local capture time.
-    size:
-        Size of the fetched JPEG payload in bytes.
-    server_last_modified:
-        Raw ``Last-Modified`` header as the server sent it, or None.
-    prediction:
-        Payload from :func:`predict_snapshot`, or None when the capture was not
-        scored.
     """
 
     image_path: Path
     metadata_path: Path
     captured_at: pd.Timestamp
-    size: int
-    server_last_modified: str | None
-    prediction: dict[str, Any] | None = None
 
 
 def _site_now() -> pd.Timestamp:
@@ -203,8 +193,6 @@ def capture_snapshot(
         image_path=image_path,
         metadata_path=metadata_path,
         captured_at=captured,
-        size=len(payload),
-        server_last_modified=headers.get("last-modified"),
     )
 
 
