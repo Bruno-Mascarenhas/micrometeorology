@@ -730,8 +730,12 @@ def snapshot(
         ),
     ] = None,
     tolerance_minutes: Annotated[
-        float, typer.Option(min=0, help="Max age of the sensor row used, in minutes.")
-    ] = 15.0,
+        float | None,
+        typer.Option(
+            min=0,
+            help="Max age of the sensor row used, in minutes; default: the checkpoint's own.",
+        ),
+    ] = None,
     device: Annotated[str, typer.Option(help="Torch device for inference.")] = "cpu",
     trust_checkpoint: Annotated[
         bool,
@@ -828,7 +832,7 @@ def _predict_snapshot(
     checkpoint: Path,
     *,
     sensor_csv: Path | None,
-    tolerance_minutes: float,
+    tolerance_minutes: float | None,
     device: str,
     trust_checkpoint: bool,
     embeddings_dir: Path | None,
@@ -837,7 +841,10 @@ def _predict_snapshot(
 
     Any feature the sensor export could not supply within *tolerance_minutes* is
     imputed at its training mean, and those names are echoed as a warning so a
-    prediction is never read as fully informed when it is not.  The payload is
+    prediction is never read as fully informed when it is not.  Left None the
+    checkpoint's own pairing window applies, which is the one its manifest was
+    built with; a free-standing default here paired live rows three times wider
+    than training accepted.  The payload is
     written through the strict JSON writer, so a non-finite prediction fails the
     command instead of landing on disk as a bare ``NaN`` token that every strict
     reader of the file rejects wholesale.
@@ -853,7 +860,9 @@ def _predict_snapshot(
             checkpoint,
             timestamp=captured.captured_at,
             sensor_csv=sensor_csv,
-            tolerance=pd.Timedelta(minutes=tolerance_minutes),
+            tolerance=(
+                None if tolerance_minutes is None else pd.Timedelta(minutes=tolerance_minutes)
+            ),
             device=device,
             trust_checkpoint=trust_checkpoint,
             embeddings_dir=embeddings_dir,

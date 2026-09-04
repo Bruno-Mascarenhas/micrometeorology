@@ -401,6 +401,7 @@ def build_manifest(
             "max_kindex": max_kindex,
             "far_distance_minutes": far_distance_minutes,
             "sensor_timestamp_offset_minutes": sensor_timestamp_offset_minutes,
+            "max_distance_minutes": strategy.max_distance_minutes,
         },
     )
     logger.info(

@@ -45,6 +45,10 @@ __all__ = [
 ]
 
 SNAPSHOT_STEM_FORMAT = "allsky-%Y%m%d-%H%M%S"
+#: Pairing window used when the checkpoint records none of its own. Wider than
+#: any training default on purpose: a checkpoint written before ``sensor_pairing``
+#: existed says nothing about how it paired, so the fallback keeps the behaviour
+#: those checkpoints were served under rather than inventing a tighter one.
 DEFAULT_SENSOR_TOLERANCE = pd.Timedelta(minutes=15)
 HTTP_DATE_FORMAT = "%a, %d %b %Y %H:%M:%S %Z"
 SENSOR_TIME_COLUMNS = ("timestamp", "TIMESTAMP", "datetime", "time")
@@ -278,8 +282,15 @@ def _sensor_row_near(
     timestamp: pd.Timestamp,
     tolerance: pd.Timedelta,
     sensor_limits: list[SensorRangeLimit],
-) -> pd.DataFrame:
+    timestamp_offset_minutes: float = 0.0,
+) -> tuple[pd.DataFrame, float | None]:
     """Row of *sensor_csv* nearest *timestamp*, relabelled to it, or an empty frame.
+
+    *timestamp_offset_minutes* is the shift the manifest builder applied to the
+    station index before pairing — ``-2.5`` in production, because the CR5000
+    end-stamps its five-minute averages. Applied here with the same sign, so a
+    live prediction pairs against the same instant training did; without it every
+    live row was matched on the logger's raw closing edge.
 
     The export is read on the same two contracts the training path holds it to.
     Its clock is the logger's, i.e. naive site-local, so an export that does
@@ -302,26 +313,28 @@ def _sensor_row_near(
     frame[time_column] = pd.to_datetime(frame[time_column], errors="coerce")
     frame = frame.dropna(subset=[time_column]).set_index(time_column).sort_index()
     if frame.empty:
-        return frame
+        return frame, None
     index = frame.index
     if isinstance(index, pd.DatetimeIndex) and index.tz is not None:
         frame.index = index.tz_convert(SITE_TZ).tz_localize(None)
-    position = int(frame.index.get_indexer(pd.DatetimeIndex([timestamp]), method="nearest")[0])
+    paired_index = pd.DatetimeIndex(frame.index) + pd.Timedelta(minutes=timestamp_offset_minutes)
+    position = int(paired_index.get_indexer(pd.DatetimeIndex([timestamp]), method="nearest")[0])
     if position < 0:
-        return frame.iloc[0:0]
-    gap = abs(pd.Timestamp(frame.index[position]) - timestamp)
+        return frame.iloc[0:0], None
+    gap = abs(pd.Timestamp(paired_index[position]) - timestamp)
+    gap_minutes = gap.total_seconds() / 60.0
     if gap > tolerance:
         logger.warning(
             "nearest sensor row is %s from the frame (tolerance %s) — imputing instead",
             gap,
             tolerance,
         )
-        return frame.iloc[0:0]
+        return frame.iloc[0:0], gap_minutes
     # Screened after the row is chosen, not before: every gate is row-wise, so
     # the outcome is identical, and the nearest-row lookup reads the index only.
     row = _screened_for_plausibility(frame.iloc[[position]], sensor_limits)
     row.index = pd.DatetimeIndex([timestamp])
-    return row
+    return row, gap_minutes
 
 
 def _with_absent_sources_as_nan(sensor: pd.DataFrame, feature_set: str) -> pd.DataFrame:
@@ -350,6 +363,57 @@ def _with_absent_sources_as_nan(sensor: pd.DataFrame, feature_set: str) -> pd.Da
     return filled
 
 
+@dataclass(frozen=True, slots=True)
+class _SensorPairing:
+    """How a live capture is paired with a station row.
+
+    Attributes
+    ----------
+    tolerance:
+        Largest gap still accepted between the frame and the paired row.
+    timestamp_offset_minutes:
+        Shift applied to the station index before the nearest-row lookup, the
+        same one the manifest builder applied.
+    from_checkpoint:
+        Whether both came from the run's own provenance rather than the
+        module defaults.
+    """
+
+    tolerance: pd.Timedelta
+    timestamp_offset_minutes: float
+    from_checkpoint: bool
+
+
+def _pairing_of(checkpoint: dict[str, Any], override: pd.Timedelta | None) -> _SensorPairing:
+    """Resolve the pairing rule for one prediction.
+
+    ``ExperimentConfig`` carries no ``sensor`` section, so before
+    ``sensor_pairing`` was written into the checkpoint a live prediction had no
+    way to know either number: it used a free-standing 15-minute tolerance
+    against training's 5, and applied none of the offset that moves the
+    CR5000's end-stamp onto the centre of the interval it averages. An explicit
+    *override* still wins — it is the operator's own instruction.
+    """
+    recorded = checkpoint.get("sensor_pairing") or {}
+    raw_tolerance = recorded.get("tolerance_minutes")
+    tolerance_minutes = (
+        float(raw_tolerance)
+        if raw_tolerance is not None and np.isfinite(float(raw_tolerance))
+        else None
+    )
+    offset = float(recorded.get("timestamp_offset_minutes") or 0.0)
+    if override is not None:
+        return _SensorPairing(override, offset, from_checkpoint=False)
+    if tolerance_minutes is None:
+        logger.warning(
+            "this checkpoint records no sensor pairing; pairing within %s and applying "
+            "no timestamp offset, which is not necessarily how it trained",
+            DEFAULT_SENSOR_TOLERANCE,
+        )
+        return _SensorPairing(DEFAULT_SENSOR_TOLERANCE, offset, from_checkpoint=False)
+    return _SensorPairing(pd.Timedelta(minutes=tolerance_minutes), offset, from_checkpoint=True)
+
+
 def _feature_vector(
     timestamp: pd.Timestamp,
     *,
@@ -360,13 +424,14 @@ def _feature_vector(
     tolerance: pd.Timedelta,
     training_means: np.ndarray,
     sensor_limits: list[SensorRangeLimit],
-) -> tuple[np.ndarray, list[str]]:
+    timestamp_offset_minutes: float = 0.0,
+) -> tuple[np.ndarray, list[str], float | None]:
     from allsky.features.engineering import build_feature_frame
 
-    sensor = (
-        _sensor_row_near(sensor_csv, timestamp, tolerance, sensor_limits)
+    sensor, gap_minutes = (
+        _sensor_row_near(sensor_csv, timestamp, tolerance, sensor_limits, timestamp_offset_minutes)
         if sensor_csv is not None
-        else pd.DataFrame(index=pd.DatetimeIndex([]))
+        else (pd.DataFrame(index=pd.DatetimeIndex([])), None)
     )
     engineered = build_feature_frame(
         _with_absent_sources_as_nan(sensor, feature_set),
@@ -384,7 +449,7 @@ def _feature_vector(
     values = engineered.loc[:, feature_columns].to_numpy(dtype=np.float32)[0]
     finite = np.isfinite(values)
     imputed = [name for name, ok in zip(feature_columns, finite, strict=True) if not ok]
-    return np.where(finite, values, training_means).astype(np.float32), imputed
+    return np.where(finite, values, training_means).astype(np.float32), imputed, gap_minutes
 
 
 def _image_as_hwc(image_path: str | Path) -> np.ndarray:
@@ -643,7 +708,7 @@ def predict_snapshot(
     *,
     timestamp: pd.Timestamp,
     sensor_csv: str | Path | None = None,
-    tolerance: pd.Timedelta = DEFAULT_SENSOR_TOLERANCE,
+    tolerance: pd.Timedelta | None = None,
     site: SiteConfig | None = None,
     device: str = "cpu",
     trust_checkpoint: bool = False,
@@ -673,7 +738,10 @@ def predict_snapshot(
         sensor-derived column is imputed.
     tolerance:
         Largest gap between *timestamp* and the nearest sensor row still
-        accepted; beyond it the row is discarded and the columns imputed.
+        accepted; beyond it the row is discarded and the columns imputed. Left
+        None the checkpoint's own ``sensor_pairing`` decides, which is the
+        window the run trained under; a checkpoint carrying none falls back to
+        :data:`DEFAULT_SENSOR_TOLERANCE` with a warning.
     site:
         Observation site for the solar geometry; defaults to
         :class:`~allsky.config.SiteConfig`. The geometry is built at the site's
@@ -729,15 +797,17 @@ def predict_snapshot(
     feature_normalizer, target_normalizers = normalizers_from_checkpoint(checkpoint)
     resolved_site = site or SiteConfig()
 
-    raw_values, imputed = _feature_vector(
+    pairing = _pairing_of(checkpoint, tolerance)
+    raw_values, imputed, pairing_gap_minutes = _feature_vector(
         timestamp,
         feature_columns=feature_columns,
         feature_set=cfg.features.feature_set,
         site=resolved_site,
         sensor_csv=sensor_csv,
-        tolerance=tolerance,
+        tolerance=pairing.tolerance,
         training_means=feature_normalizer.mean,
         sensor_limits=sensor_limits if sensor_limits is not None else _shipped_sensor_limits(),
+        timestamp_offset_minutes=pairing.timestamp_offset_minutes,
     )
     standardized = feature_normalizer.transform(pd.DataFrame([raw_values], columns=feature_columns))
     image_size = image_size_of(cfg)
@@ -808,6 +878,15 @@ def predict_snapshot(
             "values": [float(value) for value in raw_values],
             "imputed": imputed,
             "sensor_csv": str(sensor_csv) if sensor_csv is not None else None,
+            # The realized distance, not just accept/reject: a row paired at
+            # 14 minutes and one paired at 30 seconds were indistinguishable in
+            # the payload, and only a log line said which had happened.
+            "sensor_pairing": {
+                "tolerance_minutes": pairing.tolerance.total_seconds() / 60.0,
+                "timestamp_offset_minutes": pairing.timestamp_offset_minutes,
+                "from_checkpoint": pairing.from_checkpoint,
+                "gap_minutes": pairing_gap_minutes,
+            },
         },
         "model": {
             "checkpoint": str(checkpoint_path),

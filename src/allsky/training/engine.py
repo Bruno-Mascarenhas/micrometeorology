@@ -1430,8 +1430,33 @@ def _checkpoint_common(
         "dataset_version": _dataset_version(meta),
         "split_id": split_id,
         "manifest_sha256": meta.get("manifest_sha256"),
+        "sensor_pairing": _sensor_pairing(meta),
         "backbone_info": backbone_info,
         "code_version_info": code_version(),
+    }
+
+
+def _sensor_pairing(meta: Mapping[str, Any]) -> dict[str, float] | None:
+    """How this run's manifest paired a frame with a station row, for serving.
+
+    The pairing lives entirely in ``PrepareConfig``, which a checkpoint never
+    sees: ``ExperimentConfig`` has no ``sensor`` section at all.  So a live
+    prediction had a free-standing 15-minute tolerance against training's 5, and
+    applied none of the ``timestamp_offset_minutes`` that shifts the CR5000's
+    end-stamp onto the centre of the interval it averages.  Both numbers are in
+    the manifest sidecar; copying them in at save time is what lets
+    :func:`allsky.snapshot.predict_snapshot` pair the way the run trained.
+    ``None`` when the sidecar records neither, which leaves prediction on its
+    documented defaults rather than on a guess.
+    """
+    thresholds = meta.get("thresholds") or {}
+    offset = thresholds.get("sensor_timestamp_offset_minutes")
+    tolerance = thresholds.get("max_distance_minutes")
+    if offset is None and tolerance is None:
+        return None
+    return {
+        "timestamp_offset_minutes": float(offset or 0.0),
+        "tolerance_minutes": float(tolerance) if tolerance is not None else float("nan"),
     }
 
 

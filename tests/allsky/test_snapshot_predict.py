@@ -187,7 +187,7 @@ def test_a_railed_logger_channel_is_imputed_instead_of_fed_as_a_measurement(
         encoding="utf-8",
     )
 
-    values, imputed = _feature_vector(
+    values, imputed, _gap = _feature_vector(
         pd.Timestamp("2026-08-14 12:00:00"),
         feature_columns=[feature],
         feature_set=feature_set,
@@ -221,7 +221,7 @@ def test_an_implausible_exported_value_is_refused_instead_of_served_as_a_measure
         f"timestamp,{column}\n2026-08-14 12:00:00,{exported_value}\n", encoding="utf-8"
     )
 
-    values, imputed = _feature_vector(
+    values, imputed, _gap = _feature_vector(
         pd.Timestamp("2026-08-14 12:00:00"),
         feature_columns=[feature],
         feature_set="safe",
@@ -240,7 +240,7 @@ def test_a_plausible_exported_value_is_served_as_measured(tmp_path: Path) -> Non
     sensor_csv = tmp_path / "station-hourly.csv"
     sensor_csv.write_text("timestamp,AirT1_C_Avg\n2026-08-14 12:00:00,27.4\n", encoding="utf-8")
 
-    values, imputed = _feature_vector(
+    values, imputed, _gap = _feature_vector(
         pd.Timestamp("2026-08-14 12:00:00"),
         feature_columns=["air_temp_c"],
         feature_set="safe",
@@ -276,7 +276,7 @@ def test_an_offset_carrying_sensor_export_is_matched_on_site_local_wall_clock(
         encoding="utf-8",
     )
 
-    row = _sensor_row_near(
+    row, _gap = _sensor_row_near(
         sensor_csv,
         pd.Timestamp("2026-08-14 12:00:00"),
         DEFAULT_SENSOR_TOLERANCE,
@@ -293,7 +293,7 @@ def test_solar_geometry_is_built_on_the_declared_site_offset_the_manifest_trains
     site = SiteConfig(latitude=38.6, longitude=-121.1, utc_offset_hours=-8.0)
     timestamp = pd.Timestamp("2026-01-15 09:00:00")
 
-    values, _ = _feature_vector(
+    values, _imputed, _gap = _feature_vector(
         timestamp,
         feature_columns=["solar_elevation"],
         feature_set="minimal",
@@ -522,3 +522,69 @@ def test_the_image_input_carries_the_geometry_planes_the_model_was_widened_for(
 
     assert tensor.shape == (4, 32, 32)
     assert tensor.dtype == np.float32
+
+
+def test_the_live_pairing_uses_the_window_and_offset_the_checkpoint_trained_with(
+    embedding_checkpoint: Path, sky_image: Path, tmp_path: Path
+) -> None:
+    """`ExperimentConfig` carries no `sensor` section, so a live prediction had no
+    way to know either number: a free-standing 15-minute window against training's
+    5, and none of the `timestamp_offset_minutes` that moves the CR5000's
+    end-stamp onto the centre of the interval it averages. Both are in the
+    manifest sidecar, and the checkpoint now carries them."""
+    import torch
+
+    payload = load_checkpoint(embedding_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["sensor_pairing"] = {"timestamp_offset_minutes": -2.5, "tolerance_minutes": 5.0}
+    torch.save(payload, embedding_checkpoint)
+
+    sensor_csv = tmp_path / "station-hourly.csv"
+    # Stamped 12:06; shifted by -2.5 min it pairs at 12:03:30, 3.5 minutes from
+    # the frame — inside training's 5-minute window, and outside it unshifted.
+    sensor_csv.write_text(
+        "timestamp,AirT1_C_Avg,DP1_C_Avg,RH1,BP1_mbar_Avg,WS_ms,WindDir\n"
+        "2026-01-01 12:06:00,27.4,19.0,70.0,1010.0,3.1,90.0\n",
+        encoding="utf-8",
+    )
+
+    prediction = predict_snapshot(
+        sky_image,
+        embedding_checkpoint,
+        timestamp=pd.Timestamp("2026-01-01 12:00:00"),
+        sensor_csv=sensor_csv,
+        sensor_limits=_shipped_sensor_limits(),
+        trust_checkpoint=True,
+    )
+
+    pairing = prediction["features"]["sensor_pairing"]
+    assert pairing["from_checkpoint"] is True
+    assert pairing["tolerance_minutes"] == pytest.approx(5.0)
+    assert pairing["timestamp_offset_minutes"] == pytest.approx(-2.5)
+    assert pairing["gap_minutes"] == pytest.approx(3.5)
+    assert "air_temp_c" not in prediction["features"]["imputed"]
+
+
+def test_a_checkpoint_recording_no_pairing_keeps_the_documented_default(
+    embedding_checkpoint: Path, sky_image: Path, tmp_path: Path
+) -> None:
+    import torch
+
+    payload = load_checkpoint(embedding_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["sensor_pairing"] = None
+    torch.save(payload, embedding_checkpoint)
+    sensor_csv = tmp_path / "station-hourly.csv"
+    sensor_csv.write_text("timestamp,AirT1_C_Avg\n2026-01-01 12:06:00,27.4\n", encoding="utf-8")
+
+    prediction = predict_snapshot(
+        sky_image,
+        embedding_checkpoint,
+        timestamp=pd.Timestamp("2026-01-01 12:00:00"),
+        sensor_csv=sensor_csv,
+        sensor_limits=_shipped_sensor_limits(),
+        trust_checkpoint=True,
+    )
+
+    pairing = prediction["features"]["sensor_pairing"]
+    assert pairing["from_checkpoint"] is False
+    assert pairing["tolerance_minutes"] == pytest.approx(15.0)
+    assert pairing["gap_minutes"] == pytest.approx(6.0)
