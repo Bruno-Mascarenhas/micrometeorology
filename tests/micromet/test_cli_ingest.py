@@ -271,11 +271,20 @@ def test_the_window_mode_fails_strict_on_a_window_that_merged_to_nothing(tmp_pat
     assert "merged to no row at all" in resultado.output
 
 
-def test_a_dead_balance_component_fails_strict_instead_of_blanking_the_chart(tmp_path) -> None:
+@pytest.mark.parametrize("logger_net", ["NAN", 100.0])
+def test_a_dead_balance_component_fails_strict_instead_of_blanking_the_chart(
+    tmp_path, logger_net
+) -> None:
     """``close_net_radiation`` drops every sample whose component is missing, and
     ``net_dropped`` was only ever printed. Chained onto export_monitoring, which
     OMITS an all-null series by design, one dead component made the balance chart
-    disappear from the published page with zero error anywhere in the pipeline."""
+    disappear from the published page with zero error anywhere in the pipeline.
+
+    Both spellings of the same window: the CR5000 computes ITS net from these
+    four channels, so the realistic case has the logger's own net empty too and
+    ``net_dropped`` counts nothing — keying the block on it would have missed
+    exactly the case it exists for.
+    """
     from typer.testing import CliRunner
 
     from micrometeorology.cli.build_archive import app
@@ -297,7 +306,7 @@ def test_a_dead_balance_component_fails_strict_instead_of_blanking_the_chart(tmp
             "Net_Wm2_Avg",
         ],
         [
-            (f"2026-08-15 12:{minute:02d}:00", [500.0, "NAN", 400.0, 450.0, 100.0])
+            (f"2026-08-15 12:{minute:02d}:00", [500.0, "NAN", 400.0, 450.0, logger_net])
             for minute in range(0, 60, 5)
         ],
     )
@@ -309,6 +318,7 @@ def test_a_dead_balance_component_fails_strict_instead_of_blanking_the_chart(tmp
 
     assert resultado.exit_code == 1, resultado.output
     assert "saldo recomposto ficou inteiramente ausente" in resultado.output
+    assert "Sw_dw" in resultado.output
 
 
 def test_without_sources_the_manifest_still_refuses_a_missing_entry(tmp_path) -> None:

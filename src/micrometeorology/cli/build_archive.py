@@ -47,6 +47,7 @@ from micrometeorology.sensors.aggregation import aggregate_to_hourly
 from micrometeorology.sensors.archive import (
     DIFFUSE_RATIO_LIMIT,
     LENTA_MANIFEST,
+    NET_RADIATION_COMPONENTS,
     NIGHT_CORRUPTION_CHANNELS,
     NIGHT_CORRUPTION_FLUX_WM2,
     NOCTURNAL_SHORTWAVE_CHANNELS,
@@ -393,10 +394,20 @@ def run(
         # chart then disappears from the published page with no error anywhere.
         # The gate is emptiness, not a share: the historical build legitimately
         # drops the pre-net-channel era, and no fraction of it is a magic number.
-        if net_dropped and "Net_CNR1" in qc.columns and not qc["Net_CNR1"].notna().any():
+        # It cannot key on net_dropped: the logger computes ITS net from the same
+        # four channels, so a dead component empties that column too and the
+        # recomposition has nothing to drop (dropped counts only the 125
+        # historical rows where a net existed without its components).
+        components_present = [
+            column
+            for column in NET_RADIATION_COMPONENTS
+            if column in qc.columns and qc[column].notna().any()
+        ]
+        if components_present and "Net_CNR1" in qc.columns and not qc["Net_CNR1"].notna().any():
             blocking.append(
-                f"saldo recomposto ficou inteiramente ausente ({net_dropped:,} amostra(s) "
-                "descartadas): um componente do balanco esta morto nesta janela"
+                "saldo recomposto ficou inteiramente ausente enquanto "
+                f"{', '.join(components_present)} carrega(m) dado: um componente do balanco "
+                "esta morto nesta janela"
             )
 
         # Reported, never fatal: the sensitivity is a laboratory decision, and
