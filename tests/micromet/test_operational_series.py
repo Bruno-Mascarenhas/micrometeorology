@@ -1010,3 +1010,19 @@ def test_cli_reports_an_unreadable_wrfout_by_name(tmp_path):
 
     assert result.exit_code != 0
     assert "could not be read as NetCDF" in result.output
+
+
+def test_a_partial_last_row_left_by_an_interrupted_append_is_cut_and_written_again(tmp_path):
+    """A row cut mid-write still parsed as a stamp on its first four fields, so
+    its hour counted as already present and the cron line skipped it forever."""
+    target = tmp_path / "novo.dat"
+    complete = "2026,8,8,22" + ",0.0" * (len(DEFAULT_HEADER) - 4)
+    target.write_text(",".join(DEFAULT_HEADER) + "\n" + complete + "\n2026,8,8,23,25.5")
+    frame = pd.DataFrame({DEFAULT_HEADER[4]: [25.5]}, index=pd.DatetimeIndex(["2026-08-08 23:00"]))
+
+    written = append_block(target, frame, DEFAULT_HEADER)
+
+    lines = target.read_text().splitlines()
+    assert written == 1
+    assert len(lines) == 3
+    assert lines[2].startswith("2026,8,8,23,25.5")

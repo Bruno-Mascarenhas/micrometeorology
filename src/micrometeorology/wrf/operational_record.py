@@ -678,6 +678,24 @@ def _ends_with_newline(path: Path, size: int) -> bool:
         return handle.read(1) == b"\n"
 
 
+def _repair_tail(path: Path) -> None:
+    """Finish a complete last row lacking its newline; cut a partial one so its
+    hour is appended again in full."""
+    size = path.stat().st_size
+    if not size or _ends_with_newline(path, size):
+        return
+    data = path.read_bytes()
+    cut = data.rfind(b"\n") + 1
+    width = data.split(b"\n", 1)[0].count(b",") + 1
+    if cut and data[cut:].count(b",") + 1 < width:
+        with path.open("r+b") as handle:
+            handle.truncate(cut)
+        logger.warning("%s: dropped a partial last row left by an interrupted append", path.name)
+        return
+    with path.open("ab") as handle:
+        handle.write(b"\n")
+
+
 def _existing_stamps(path: Path) -> set[tuple[int, int, int, int]]:
     """The (year, month, day, hour) of every row already in the file."""
     stamps: set[tuple[int, int, int, int]] = set()
@@ -736,24 +754,22 @@ def append_block(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(",".join(header) + "\n", encoding="utf-8")
         logger.info("%s: created with %d columns", path.name, len(header))
-    elif not force:
-        stamps = _existing_stamps(path)
-        block = {(t.year, t.month, t.day, t.hour) for t in frame.index}
-        if block and block <= stamps:
-            logger.warning(
-                "%s: all %d hours of this block are already in the file; "
-                "skipping (use --force to append anyway)",
-                path.name,
-                len(block),
-            )
-            return 0
+    else:
+        _repair_tail(path)
+        if not force:
+            stamps = _existing_stamps(path)
+            block = {(t.year, t.month, t.day, t.hour) for t in frame.index}
+            if block and block <= stamps:
+                logger.warning(
+                    "%s: all %d hours of this block are already in the file; "
+                    "skipping (use --force to append anyway)",
+                    path.name,
+                    len(block),
+                )
+                return 0
 
     rows = render_rows(frame, header)
-    # Only the last byte matters, and the record grows by 24 rows a day forever.
-    size = path.stat().st_size
     with path.open("a", encoding="utf-8") as handle:
-        if size and not _ends_with_newline(path, size):
-            handle.write("\n")
         handle.write("\n".join(rows) + "\n")
     logger.info("%s: appended %d rows", path.name, len(rows))
     return len(rows)
