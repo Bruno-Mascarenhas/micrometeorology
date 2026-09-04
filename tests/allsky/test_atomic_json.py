@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from typing import Any, NoReturn
 
+import numpy as np
 import pytest
 
 from labmim_core.atomic import atomic_write_json, atomic_write_strict_json
@@ -62,3 +63,27 @@ def test_strict_writer_removes_its_temp_file_when_it_refuses(tmp_path: Path) -> 
         atomic_write_strict_json(tmp_path / "prediction.json", {"kt": float("inf")})
 
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "value", [np.float32("nan"), np.float32("inf"), np.float64("-inf")], ids=str
+)
+def test_strict_writer_refuses_a_non_finite_numpy_scalar(tmp_path: Path, value: Any) -> None:
+    """``numpy.float32`` is not a ``float`` subclass, so it reached ``default=str``
+    and was published as the string ``"nan"`` instead of being refused."""
+    with pytest.raises(ValueError, match="not JSON compliant"):
+        atomic_write_strict_json(tmp_path / "prediction.json", {"ghi_w_m2": value})
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_strict_writer_unwraps_numpy_scalars_to_json_numbers(tmp_path: Path) -> None:
+    payload = {"n": np.int64(5), "kt": np.float32(0.5), "ok": np.bool_(True)}
+
+    path = atomic_write_strict_json(tmp_path / "prediction.json", payload)
+
+    assert _parse_as_a_browser_would(path.read_text(encoding="utf-8")) == {
+        "n": 5,
+        "kt": 0.5,
+        "ok": True,
+    }

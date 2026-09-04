@@ -66,7 +66,6 @@ requirements-audit.txt
 !.vscode/extensions.json
 !.vscode/launch.json
 .idea/
-.claude/
 *.swp
 *.swo
 *~
@@ -80,9 +79,19 @@ requirements-audit.txt
 /tb_logs/
 *.nc
 *.nc4
+*.h5
 *.hdf
 *.hdf5
-/data/**/*.dat
+# Datalogger exports, wherever they land: `/data/**/*.dat` covered the archive
+# copy alone, and a TOA5 file pulled into the working tree to inspect it is the
+# one that gets committed by accident. No .dat in this repo is source.
+*.dat
+# Acquisition CSVs. Narrower than `*.csv`, which would swallow the small
+# fixtures the test suite ships: these are the shapes the pipelines write.
+*_hourly.csv
+*_5min.csv
+station-*.csv
+series_operacional*.csv
 # All-sky camera videos (also under /data, but stray copies land elsewhere too,
 # e.g. Colab /content) — one-day timelapses are large binaries.
 *.mp4
@@ -94,6 +103,7 @@ requirements-audit.txt
 *.pt
 *.pth
 *.ckpt
+*.npy
 *.joblib
 *.pkl
 # Precomputed visual-embedding shards (allsky multimodal pipeline). These live

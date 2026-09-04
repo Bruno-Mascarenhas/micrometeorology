@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -141,6 +142,32 @@ def test_unknown_backbone_errors(tmp_path: Path):
     assert "fake" in result.output
 
 
+def test_the_manifest_override_re_roots_the_frames_it_resolves(tmp_path: Path):
+    """The data root follows --manifest, not output.dataset_dir: a manifest read from
+    another directory has its relative image_path values resolved against THAT
+    directory, and nothing in the output says the root moved."""
+    pytest.importorskip("torch")
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    _build_dataset(elsewhere, n=2)
+    config = _write_config(tmp_path, dataset_dir)
+
+    result = runner.invoke(
+        app,
+        [
+            "precompute-embeddings",
+            "--config",
+            str(config),
+            "--manifest",
+            str(elsewhere / "manifest.parquet"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _summary(result.output)["encoded"] == 2
+
+
 def test_missing_manifest_errors(tmp_path: Path):
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir(parents=True, exist_ok=True)  # no manifest.parquet
@@ -151,14 +178,25 @@ def test_missing_manifest_errors(tmp_path: Path):
     assert "manifest not found" in result.output
 
 
+#: One case per field the digest claims to cover: the four pixel sections, the
+#: four video time fields and the encoder's own knobs. A field the formula
+#: silently stopped folding in resumes a store onto vectors of the old pixels
+#: (or of the old encoder), with every sample_id already in the index.
 @pytest.mark.parametrize(
     "patch",
     [
         {"mask": {"path": "masks/horizon.png"}},
+        {"mask": {"threshold": 200}},
         {"crop": {"enabled": True, "top": 40}},
+        {"pad": {"enabled": True, "top": 40}},
         {"resize": 224},
         {"video": {"timestamps": "modelled"}},
         {"video": {"filename_date_format": "allsky_%Y%m%d"}},
+        {"video": {"start_time": "07:00"}},
+        {"video": {"minutes_per_frame": 2.0}},
+        {"embeddings": {"backbone": "dinov2_vitb14"}},
+        {"embeddings": {"pooling": "mean"}},
+        {"embeddings": {"dtype": "fp32"}},
     ],
 )
 def test_a_config_edit_that_changes_the_encoded_pixels_changes_the_resume_hash(patch: dict):
@@ -270,6 +308,7 @@ def test_importing_the_embeddings_command_module_does_not_pull_pandas():
         capture_output=True,
         text=True,
         check=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")},
     )
 
     assert probe.stdout.strip() == "[]"
@@ -287,3 +326,18 @@ def test_a_store_stamped_with_an_unrelated_digest_still_refuses_to_resume(tmp_pa
 
     assert result.exit_code == 1
     assert "cannot resume" in result.output
+
+
+def test_an_unknown_device_is_a_usage_error_like_in_train_and_evaluate(tmp_path: Path):
+    """``--device gpu`` was accepted as free text here and only failed inside torch,
+    after the backbone was built and the manifest read; train and evaluate refuse it
+    at the command line."""
+    dataset_dir = tmp_path / "dataset"
+    _build_dataset(dataset_dir, n=4)
+    config = _write_config(tmp_path, dataset_dir)
+
+    result = runner.invoke(
+        app, ["precompute-embeddings", "--config", str(config), "--device", "gpu", "--dry-run"]
+    )
+
+    assert result.exit_code == 2

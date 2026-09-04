@@ -18,7 +18,10 @@ scope), so the whole module is skipped when torch is unavailable — offline and
 CPU-only otherwise; no dataset, embeddings or network are touched.
 """
 
+import json
+import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -35,7 +38,15 @@ from labmim_core.sky import SKY_CLASS_COUNT
 
 _CONFIGS = Path(__file__).resolve().parents[2] / "configs" / "allsky"
 _EXPERIMENTS = sorted((_CONFIGS / "experiments").glob("v*.yaml"))
+#: Every experiment the repo ships, the nineteen subfamily trees included.
+_ALL_EXPERIMENTS = sorted(
+    path for path in (_CONFIGS / "experiments").rglob("*.yaml") if not path.name.startswith("_")
+)
+#: The prepare configs the experiments train on, keyed by the dataset they build.
+_PREPARE_CONFIGS = sorted((_CONFIGS / "data").glob("local_prepare*.yaml"))
 _FRAGMENTS = sorted((_CONFIGS / "models").glob("*.yaml"))
+#: The per-family arms, whose filenames carry the seed they must be configured with.
+_FAMILY_ARMS = sorted((_CONFIGS / "experiments").glob("*/*.yaml"))
 
 #: Embedding width used for the embedding-mode forward probes.
 _EMBED_DIM = 32
@@ -45,17 +56,24 @@ _BATCH = 4
 class _StubBackbone(nn.Module):
     """Tiny image backbone (``.dim`` attribute) for image-mode forward probes.
 
-    Pools any ``(B, 3, H, W)`` input to ``(B, 3)`` and projects to ``dim`` — no
-    downloads, no ``blocks`` (so ``unfreeze_last_n`` is a harmless no-op).
+    Pools any ``(B, C, H, W)`` input to ``(B, C)`` and projects to ``dim`` — no
+    downloads, no ``blocks`` (so ``unfreeze_last_n`` is a harmless no-op). It
+    carries a ``patch_embed.proj`` because the geometry-channel arms wrap the
+    first convolution to admit their extra channels, and a backbone without one
+    is refused rather than silently left unwrapped.
     """
 
     def __init__(self, dim: int = 16) -> None:
         super().__init__()
         self.dim = dim
+        self.model: Any = nn.Module()
+        self.model.patch_embed = nn.Module()
+        self.model.patch_embed.proj = nn.Conv2d(3, 3, kernel_size=1)
         self.proj = nn.Linear(3, dim)
 
     def forward(self, image: Tensor) -> Tensor:
-        out: Tensor = self.proj(image.mean(dim=(2, 3)))
+        patched = self.model.patch_embed.proj(image)
+        out: Tensor = self.proj(patched.mean(dim=(2, 3)))
         return out
 
 
@@ -104,6 +122,101 @@ def test_the_experiments_train_on_the_set_the_prepare_config_builds() -> None:
         assert trained.features.feature_set == prepared.features.feature_set, experiment.name
 
 
+@pytest.mark.parametrize("experiment", _ALL_EXPERIMENTS, ids=lambda p: p.name)
+def test_every_shipped_experiment_loads_and_names_a_real_model(experiment: Path) -> None:
+    """What must hold for every arm, v0..v7 and the subfamily trees alike. The
+    invariants the v* family carries on top of this (its output_dir naming, its
+    embedding input mode) stay on their own test.
+    """
+    cfg = load_experiment_config(experiment)
+
+    assert cfg.experiment is True
+    assert cfg.model.name in MODEL_BUILDERS, cfg.model.name
+    assert cfg.features.feature_set == "bare"
+
+
+@pytest.mark.parametrize("experiment", _ALL_EXPERIMENTS, ids=lambda p: p.name)
+def test_every_experiment_trains_on_a_dataset_some_prepare_config_builds(
+    experiment: Path,
+) -> None:
+    """An arm pointed at a data_root no prepare config produces trains on
+    whatever happens to be in that directory — the previous experiment's
+    dataset, or nothing.
+    """
+    cfg = load_experiment_config(experiment)
+    prepared = {load_prepare_config(path).output.dataset_dir for path in _PREPARE_CONFIGS}
+
+    if experiment.parent.name == "folsom":
+        # Known and open: the UCSD-Folsom adapter ships in allsky.data.folsom but
+        # no configs/allsky/data/*.yaml builds `dataset-folsom`, so this arm's
+        # data_root has no producer in the repo. Asserted the other way round so
+        # that writing that config removes the exception rather than hiding it.
+        assert cfg.data.data_root not in prepared
+        return
+    assert cfg.data.data_root in prepared, cfg.data.data_root
+
+
+#: Arms known to resolve to the same run and left in place deliberately, as
+#: ``family/stem`` pairs. control_sNN and loss_mae_sNN differ only in ``name`` and
+#: ``output_dir`` after ``extends`` resolves — same seed, same data_root, same
+#: model, same loss, same schedule — so running both produces two bit-identical
+#: runs and "control against loss_mae" compares a run with itself. Which arm is
+#: the control, and where seeds 45-47 belong, is an experiment-design decision.
+_KNOWN_IDENTICAL_ARMS = {
+    ("control/control_s42", "loss/loss_mae_s42"),
+    ("control/control_s43", "loss/loss_mae_s43"),
+    ("control/control_s44", "loss/loss_mae_s44"),
+}
+
+
+def test_no_two_experiments_resolve_to_the_same_run() -> None:
+    """Two arms that resolve identically are one measurement served twice, and
+    comparing them measures nothing. New duplicates fail here; the pair already
+    shipped is listed above so removing it removes the exception too.
+    """
+    resolved: dict[str, list[str]] = {}
+    for path in _ALL_EXPERIMENTS:
+        dumped = load_experiment_config(path).model_dump(mode="json")
+        dumped.pop("name", None)
+        dumped.pop("output_dir", None)
+        key = json.dumps(dumped, sort_keys=True)
+        resolved.setdefault(key, []).append(f"{path.parent.name}/{path.stem}")
+
+    duplicates = {tuple(sorted(arms)) for arms in resolved.values() if len(arms) > 1}
+    unexpected = {
+        pair
+        for group in duplicates
+        for pair in (
+            (group[i], group[j]) for i in range(len(group)) for j in range(i + 1, len(group))
+        )
+        if pair not in _KNOWN_IDENTICAL_ARMS
+    }
+    assert unexpected == set(), sorted(unexpected)
+
+
+def test_the_isotropic_calibration_matches_the_crop_and_pad_that_produced_it() -> None:
+    """``allsky.lens`` derives three constants from this config's crop and pad,
+    and the derivation lives only in a comment. Moving ``crop.left``,
+    ``crop.width`` or ``pad.top`` here leaves ``isotropic_calibration()``
+    returning the old centre, and every geometry channel is then drawn around a
+    point the frames no longer have.
+    """
+    from allsky.lens import _ISOTROPIC_CROP_LEFT, _ISOTROPIC_PAD_TOP, ISOTROPIC_FRAME_PX
+
+    cfg = load_prepare_config(_CONFIGS / "data" / "local_prepare_iso.yaml")
+    sensor_width = 1920
+
+    width, height = cfg.crop.width, cfg.crop.height
+    assert width is not None
+    assert height is not None
+
+    assert width == ISOTROPIC_FRAME_PX
+    assert (sensor_width - width) // 2 + cfg.crop.left == _ISOTROPIC_CROP_LEFT
+    assert cfg.pad.top == _ISOTROPIC_PAD_TOP
+    # The pad squares the frame: the padded height must equal the cropped width.
+    assert height + cfg.pad.top + cfg.pad.bottom == ISOTROPIC_FRAME_PX
+
+
 @pytest.mark.parametrize("fragment", _FRAGMENTS, ids=lambda p: p.name)
 def test_model_fragment_loads_and_names_a_real_model(fragment: Path) -> None:
     """Each ``models/*.yaml`` fragment loads and names a registered model."""
@@ -127,7 +240,30 @@ def test_experiment_loads_and_names_a_real_model(experiment: Path) -> None:
     assert cfg.data.input_mode == expected_mode
 
 
-@pytest.mark.parametrize("experiment", _EXPERIMENTS, ids=lambda p: p.name)
+@pytest.mark.parametrize("arm", _FAMILY_ARMS, ids=lambda p: p.name)
+def test_a_family_arm_carries_the_seed_its_filename_advertises(arm: Path) -> None:
+    """Each arm is a copy of its sibling with one field changed, so a copy that kept
+    the source's ``seed`` publishes two runs of one seed as two repetitions and
+    collapses the between-seed spread into rounding noise.
+    """
+    advertised = re.search(r"_s(\d+)$", arm.stem)
+
+    assert advertised is not None, arm.name
+    assert load_experiment_config(arm).seed == int(advertised.group(1))
+
+
+def test_no_two_experiments_write_into_one_run_directory() -> None:
+    """Two seeds sharing an output_dir overwrite each other's checkpoints and
+    metrics, and the second run reads as the first having diverged.
+    """
+    outputs = [load_experiment_config(path).output_dir for path in _ALL_EXPERIMENTS]
+
+    assert len(set(outputs)) == len(outputs), sorted(
+        name for name in outputs if outputs.count(name) > 1
+    )
+
+
+@pytest.mark.parametrize("experiment", _ALL_EXPERIMENTS, ids=lambda p: p.name)
 def test_data_paths_resolve_without_doubling_data_root(experiment: Path) -> None:
     """manifest/split/embeddings are BARE names: resolving contains data_root once.
 
@@ -155,7 +291,7 @@ def test_data_paths_resolve_without_doubling_data_root(experiment: Path) -> None
         assert resolved.count(data_root) == 1, resolved
 
 
-@pytest.mark.parametrize("experiment", _EXPERIMENTS, ids=lambda p: p.name)
+@pytest.mark.parametrize("experiment", _ALL_EXPERIMENTS, ids=lambda p: p.name)
 def test_experiment_builds_and_forwards(experiment: Path) -> None:
     """Each experiment builds and forwards a dummy batch, emitting its enabled heads."""
     cfg = load_experiment_config(experiment)
@@ -166,9 +302,14 @@ def test_experiment_builds_and_forwards(experiment: Path) -> None:
 
     if cfg.data.input_mode == "image":
         model = build_model(cfg, n_features, image_backbone=_StubBackbone())
+        # The geometry arms widen the frame: the model wraps the first
+        # convolution to admit the maps it is configured for, so the probe batch
+        # has to be as wide as the wrapped convolution now expects.
+        channels = getattr(getattr(model, "visual_encoder", None), "extra_channel_projection", None)
+        n_channels = 3 if channels is None else channels.in_channels
         batch = {
             "features": torch.randn(_BATCH, n_features),
-            "image": torch.randn(_BATCH, 3, 8, 8),
+            "image": torch.randn(_BATCH, n_channels, 8, 8),
         }
     else:
         model = build_model(cfg, n_features, embedding_dim=_EMBED_DIM)
@@ -196,7 +337,9 @@ def test_experiment_builds_and_forwards(experiment: Path) -> None:
 class TestTransferDirection:
     @staticmethod
     def _arms(family: str) -> list[Path]:
-        return sorted((_CONFIGS / "experiments" / family).glob("*.yaml"))
+        paths = sorted((_CONFIGS / "experiments" / family).glob("*.yaml"))
+        assert paths, f"the {family} family has no configs"
+        return paths
 
     def test_the_source_never_initialises_from_anywhere(self):
         for path in self._arms("folsom"):
@@ -228,7 +371,10 @@ class TestTransferDirection:
             assert cfg.data.data_root.endswith("dataset-iso"), path.name
 
     def test_no_station_arm_outside_the_transfer_family_initialises_from_anything(self):
-        for path in sorted((_CONFIGS / "experiments").glob("*/*.yaml")):
+        arms = sorted((_CONFIGS / "experiments").glob("*/*.yaml"))
+
+        assert arms, "the experiment tree has no family arms"
+        for path in arms:
             if path.parent.name in {"transfer", "folsom"}:
                 continue
             cfg = load_experiment_config(path)

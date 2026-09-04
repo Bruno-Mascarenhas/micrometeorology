@@ -1,17 +1,16 @@
 """Decoding and resizing an all-sky frame, in one place.
 
-Four modules turn a file (or a JPEG payload) into an ``(H, W, 3)`` ``uint8`` RGB
-array and bilinear-resize one: :mod:`allsky.video` at extraction time,
-:mod:`allsky.preprocessing` when a frame is reprocessed,
-:mod:`allsky.embeddings.backbone` before encoding, and :mod:`allsky.snapshot`
-when a live frame is scored.
+Every path that turns a file (or a JPEG payload) into an ``(H, W, 3)`` ``uint8``
+RGB array, or bilinear-resizes one, goes through here: extraction and overlay
+staging, reprocessing, the prepare CLI, embedding extraction, the backbone's own
+transform, and the live snapshot.
 
 The frames have to come out **byte-identical** across those paths: a JPEG
 written at extraction and the same frame resized later must agree, or the stored
 embeddings stop describing the images the manifest points at.
 
-This module imports nothing from ``allsky`` — only numpy and PIL — so all four
-depend on it without depending on each other.
+This module imports nothing from ``allsky`` — only numpy and PIL — so every one
+of them depends on it without depending on each other.
 """
 
 from pathlib import Path
@@ -20,6 +19,8 @@ from typing import TYPE_CHECKING, BinaryIO
 import numpy as np
 
 if TYPE_CHECKING:
+    # Only ever a type: importing PIL at module scope would pull the decoder into
+    # every consumer of the pixel helpers, including the torch-free ones.
     from PIL.Image import Image as PILImage
 
 __all__ = ["as_rgb_uint8", "decode_rgb", "decode_rgb_resized", "resize_bilinear"]

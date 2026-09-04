@@ -3,7 +3,7 @@
 The sensor side is built as a plain time-indexed DataFrame carrying the raw
 logger columns the feature policy and targets consume (met channels + GHI +
 optional diffuse) — the same "build the contract, don't parse a file" approach
-as tests/allsky/test_dataset.py.
+as tests/allsky/test_data_datasets.py.
 """
 
 import json
@@ -24,8 +24,10 @@ from allsky.data.contracts import (
 from allsky.data.manifest import (
     TARGET_SOURCE_ERBS,
     TARGET_SOURCE_MEASURED,
+    _split_assignment_and_id,
     attach_split_column,
     build_manifest,
+    site_utc_offset_hours,
     write_manifest_parquet,
 )
 from allsky.features import resolve_feature_set
@@ -370,6 +372,25 @@ class TestQCFlags:
         manifest, _ = build_manifest(frames, sensor, site=site, data_root=tmp_path)
         assert int(manifest["qc_flags"].iloc[0]) & int(QCFlag.SENSOR_GAP)
 
+    def test_sensor_gap_flag_on_nan_diffuse_label(self, site: SiteConfig, tmp_path: Path):
+        """A partially-NaN diffuse column produced rows with a missing label and
+        ``qc_flags == 0``, which the evaluator's QC stratification counted as
+        clean — the flag's own justification for letting the channel through."""
+        frames = make_frames(tmp_path, ["2025-03-21 12:00", "2025-03-21 12:10"])
+        sensor = make_sensor_frame(site)
+        sensor.loc["2025-03-21 12:00", "PSP_Wm2_Avg"] = np.nan
+        manifest, _ = build_manifest(frames, sensor, site=site, data_root=tmp_path)
+        flags = manifest["qc_flags"].to_numpy(dtype="int64")
+        assert flags[0] & int(QCFlag.SENSOR_GAP)
+        assert not flags[1] & int(QCFlag.SENSOR_GAP)
+
+    def test_the_erbs_pseudo_target_sets_no_gap_of_its_own(self, site: SiteConfig, tmp_path: Path):
+        frames = make_frames(tmp_path, ["2025-03-21 12:00"])
+        manifest, _ = build_manifest(
+            frames, make_sensor_frame(site), site=site, data_root=tmp_path, diffuse_column=None
+        )
+        assert not int(manifest["qc_flags"].iloc[0]) & int(QCFlag.SENSOR_GAP)
+
     def test_alignment_far_flag(self, site: SiteConfig, tmp_path: Path):
         # Frame 3 min from the nearest 10-min sensor record; far threshold
         # defaults to max_distance/2 = 2.5, so 3 > 2.5 -> ALIGNMENT_FAR.
@@ -525,3 +546,94 @@ class TestProvenanceColumns:
         # Artifact assigns a different day: this day stays unlabeled (pd.NA).
         attach_split_column(path, {"assignment": {"2099-01-01": "train"}, "split_id": "x"})
         assert pd.read_parquet(path)["split"].isna().all()
+
+
+def test_a_split_dict_with_the_wrong_key_is_refused_before_the_manifest_is_rewritten() -> None:
+    """``.get("assignment", {})`` turned a misspelt key into an empty map: every split
+    label went null, the sidecar's split_id was overwritten with None and the parquet
+    was re-hashed, all reported as a success."""
+    with pytest.raises(KeyError, match="assignment"):
+        _split_assignment_and_id({"assignments": {"2025-01-01": "train"}, "split_id": "abc"})
+
+
+def test_an_empty_split_assignment_is_refused() -> None:
+    with pytest.raises(ValueError, match="no day assignment"):
+        _split_assignment_and_id({"assignment": {}, "split_id": "abc"})
+
+
+class TestTheSidecarRecordsTheClockItWasBuiltOn:
+    """Solar geometry is computed on a fixed offset, never on the host time zone,
+    so the offset a manifest was built against has to travel with it — a
+    container running in UTC would otherwise move every angle by three hours
+    without failing anywhere."""
+
+    def test_the_station_gets_its_named_zone(self, site: SiteConfig, tmp_path: Path):
+        frames = make_frames(tmp_path, ["2025-03-21 12:00"])
+        _manifest, meta = build_manifest(
+            frames, make_sensor_frame(site), site=site, data_root=tmp_path
+        )
+
+        assert meta["timezone"] == {"name": "America/Bahia", "utc_offset_hours": -3.0}
+        assert site_utc_offset_hours(meta) == pytest.approx(-3.0)
+
+    def test_another_site_records_its_offset_with_no_zone_name(self, tmp_path: Path):
+        elsewhere = SiteConfig(latitude=38.6, longitude=-121.1, utc_offset_hours=-8.0)
+        frames = make_frames(tmp_path, ["2025-03-21 12:00"])
+        _manifest, meta = build_manifest(
+            frames,
+            make_sensor_frame(elsewhere),
+            site=elsewhere,
+            data_root=tmp_path,
+        )
+
+        assert meta["timezone"] == {"name": None, "utc_offset_hours": -8.0}
+        assert site_utc_offset_hours(meta) == pytest.approx(-8.0)
+
+    def test_a_sidecar_with_no_timezone_block_is_refused(self):
+        """Falling back to this station's offset computed another site's geometry
+        on Salvador's clock without failing anywhere."""
+        with pytest.raises(ValueError, match="timezone"):
+            site_utc_offset_hours({"dataset_version": "2"})
+
+
+def test_features_extra_reaches_the_manifest_the_config_declared_it_in(
+    site: SiteConfig, tmp_path: Path
+):
+    """`build_manifest_from_prepare_config`'s docstring promises every build
+    parameter comes from the config; `features.extra` was the one it dropped."""
+    from allsky.config import PrepareConfig
+    from allsky.data.manifest import build_manifest_from_prepare_config
+
+    frames = make_frames(tmp_path, ["2025-03-21 12:00"])
+    cfg = PrepareConfig.model_validate(
+        {
+            "features": {"set": "safe", "extra": ["uv_wm2"]},
+            "output": {"dataset_dir": str(tmp_path)},
+        }
+    )
+
+    sensor = make_sensor_frame(site)
+    sensor["CUV5_Wm2_Avg"] = 12.0  # the source column uv_wm2 is engineered from
+
+    manifest, meta = build_manifest_from_prepare_config(frames, sensor, cfg, data_root=tmp_path)
+
+    assert "uv_wm2" in meta["feature_columns"]
+    assert "uv_wm2" in manifest.columns
+
+
+def test_an_extra_feature_whose_logger_column_is_absent_fails_the_build(
+    site: SiteConfig, tmp_path: Path
+):
+    """Silently ignoring `features.extra` hid this: an ablation naming a column
+    the logger does not carry now fails at build time instead of producing a
+    manifest that quietly lacks it."""
+    from allsky.config import PrepareConfig
+    from allsky.data.manifest import build_manifest_from_prepare_config
+
+    frames = make_frames(tmp_path, ["2025-03-21 12:00"])
+    cfg = PrepareConfig.model_validate(
+        {"features": {"set": "safe", "extra": ["uv_wm2"]}, "output": {"dataset_dir": str(tmp_path)}}
+    )
+
+    with pytest.raises(KeyError, match="CUV5_Wm2_Avg"):
+        build_manifest_from_prepare_config(frames, make_sensor_frame(site), cfg, data_root=tmp_path)

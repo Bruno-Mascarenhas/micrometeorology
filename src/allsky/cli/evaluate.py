@@ -1,7 +1,7 @@
 """Evaluation CLI: the ``allsky evaluate`` command.
 
 Runs a trained checkpoint over a split and writes a report directory
-(``metrics.json`` / ``stratified.csv`` / ``report.md`` and, unless
+(``eval_metrics.json`` / ``stratified.csv`` / ``report.md`` and, unless
 ``--no-predictions``, ``predictions.parquet``).  :mod:`allsky.evaluation` pulls
 torch, so it is imported inside the command body to keep importing
 :mod:`allsky.cli` torch-free.
@@ -17,6 +17,8 @@ from allsky.cli.runtime import configure_cli_logging
 from allsky.cli.train import (
     DeviceChoice,  # typer resolves this annotation at runtime
 )
+from allsky.config import load_experiment_config
+from allsky.training.errors import TrainingError
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +109,9 @@ def evaluate_cmd(
             trust_checkpoint=trust_checkpoint,
         )
         written = write_evaluation_report(result, out_dir, predictions=predictions)
-    except Exception as exc:
+    # The domain failures evaluation raises, named rather than `except Exception`,
+    # which would swallow a typo in this module as a scoring failure.
+    except (TrainingError, FileNotFoundError, OSError, ValueError, KeyError, RuntimeError) as exc:
         logger.error("evaluation failed: %s", exc)
         raise typer.Exit(code=1) from exc
 
@@ -122,8 +126,6 @@ def _resolve_data_root(data_root: Path | None, config: Path | None) -> Path | No
     if data_root is not None:
         return data_root
     if config is not None:
-        from allsky.config import load_experiment_config
-
         return Path(load_experiment_config(config).data.data_root)
     return None
 

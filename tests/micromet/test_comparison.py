@@ -6,6 +6,7 @@ an unnamed leading column, and losing them makes every downstream alignment
 positional.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,7 +16,10 @@ import pandas as pd
 import pytest
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
+from typer.testing import CliRunner
 
+import micrometeorology
+from micrometeorology.cli import compare_wrf_observations
 from micrometeorology.sensors.export import export_csv
 from micrometeorology.stats.comparison import (
     UnreadableDatasetError,
@@ -191,8 +195,13 @@ def test_reading_and_scoring_a_dataset_does_not_import_matplotlib() -> None:
         "import sys, micrometeorology.stats.comparison, micrometeorology.cli.compute_metrics; "
         "print(any(m == 'matplotlib' or m.startswith('matplotlib.') for m in sys.modules))"
     )
+    source_root = Path(micrometeorology.__file__).resolve().parents[1]
     result = subprocess.run(
-        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "PYTHONPATH": str(source_root)},
     )
 
     assert result.stdout.strip() == "False", result.stdout
@@ -329,3 +338,67 @@ def test_a_parquet_dataset_is_refused_by_name_instead_of_raising_a_decode_error(
 
     with pytest.raises(UnreadableDatasetError, match="not the delimited text"):
         read_dataset(path)
+
+
+def test_the_cli_refuses_a_pairing_in_which_no_model_row_fell_inside_the_tolerance(
+    tmp_path: Path,
+) -> None:
+    """``pair_dataframes`` merges LEFT, so the paired frame is never empty while
+    there are observations, even when no model row falls inside the tolerance."""
+    values = [20.0, 21.0, 22.0]
+    obs = tmp_path / "obs.csv"
+    model = tmp_path / "model.csv"
+    for path, year in ((obs, 2020), (model, 2021)):
+        index = pd.date_range(f"{year}-01-01", periods=3, freq="1h", name="TIMESTAMP")
+        pd.DataFrame({"T2": values}, index=index).to_csv(path)
+
+    result = CliRunner().invoke(
+        compare_wrf_observations.app,
+        ["--obs", str(obs), "--model", str(model), "-o", str(tmp_path / "out"), "--no-plots"],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "no timestamp pair falls within" in result.output
+    assert not (tmp_path / "out" / "metrics_summary.csv").exists()
+
+
+class TestTheComparisonCliEndToEnd:
+    """The CLI itself had no test, which is how the dead `paired.empty` guard
+    survived: `pair_dataframes` merges LEFT, so the frame is never empty and the
+    refusal it was meant to raise could not fire."""
+
+    @staticmethod
+    def _hourly(path: Path, column: str, start: str, values: list[float]) -> Path:
+        index = pd.date_range(start, periods=len(values), freq="h")
+        pd.DataFrame({column: values}, index=index).to_csv(path, index_label="timestamp")
+        return path
+
+    def test_a_pair_disjoint_in_time_exits_non_zero_and_writes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        obs = self._hourly(tmp_path / "obs.csv", "T", "2024-01-01", [20.0, 21.0, 22.0])
+        model = self._hourly(tmp_path / "model.csv", "T", "2025-01-01", [20.0, 21.0, 22.0])
+        out = tmp_path / "out"
+
+        result = CliRunner().invoke(
+            compare_wrf_observations.app,
+            ["--obs", str(obs), "--model", str(model), "-o", str(out), "--no-plots"],
+        )
+
+        assert result.exit_code != 0, result.output
+        assert not list(out.glob("*.csv")) if out.exists() else True
+
+    def test_a_valid_pair_writes_a_table_with_rows(self, tmp_path: Path) -> None:
+        obs = self._hourly(tmp_path / "obs.csv", "T", "2024-01-01", [20.0, 21.0, 22.0, 23.0])
+        model = self._hourly(tmp_path / "model.csv", "T", "2024-01-01", [20.5, 21.5, 22.5, 23.5])
+        out = tmp_path / "out"
+
+        result = CliRunner().invoke(
+            compare_wrf_observations.app,
+            ["--obs", str(obs), "--model", str(model), "-o", str(out), "--no-plots"],
+        )
+
+        assert result.exit_code == 0, result.output
+        written = list(out.glob("*.csv"))
+        assert written, result.output
+        assert not pd.read_csv(written[0], index_col=0).empty

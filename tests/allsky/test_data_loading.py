@@ -48,3 +48,70 @@ class TestResolveAgainstRoot:
         assert resolve_against_root("a/b.parquet", tmp_path) == tmp_path / "a" / "b.parquet"
         absolute = tmp_path / "elsewhere.parquet"
         assert resolve_against_root(absolute, tmp_path / "root") == absolute
+
+
+class TestLoadManifestVerifiesTheSidecarAgainstTheParquet:
+    """`write_manifest_parquet` performs two independent atomic writes with no
+    transaction linking them, and both hash guards downstream — the evaluator's
+    and the resume provenance check — compare a checkpoint's stored string
+    against the SIDECAR's stored string, never against the parquet's bytes. A
+    parquet left over from a half-completed rewrite passed both."""
+
+    @staticmethod
+    def _written(tmp_path: Path):
+        import pandas as pd
+
+        from allsky.data.manifest import write_manifest_parquet
+
+        manifest = pd.DataFrame({"sample_id": ["a", "b"], "target_dhi": [1.0, 2.0]})
+        path = tmp_path / "manifest.parquet"
+        meta = write_manifest_parquet(manifest, {"dataset_version": "v2"}, path)
+        return manifest, path, meta
+
+    def test_a_matching_pair_loads(self, tmp_path: Path):
+        from allsky.data.loading import load_manifest
+
+        manifest, path, meta = self._written(tmp_path)
+
+        loaded, loaded_meta = load_manifest(path)
+
+        assert len(loaded) == len(manifest)
+        assert loaded_meta["manifest_sha256"] == meta["manifest_sha256"]
+
+    def test_a_parquet_that_does_not_match_its_sidecar_is_refused(self, tmp_path: Path):
+        """The sidecar stays as written; only the parquet is replaced, which is
+        what a crash between the two atomic writes leaves behind."""
+        import pandas as pd
+
+        from allsky.data.loading import load_manifest
+
+        _manifest, path, _meta = self._written(tmp_path)
+        pd.DataFrame({"sample_id": ["a"], "target_dhi": [9.0]}).to_parquet(path, index=False)
+
+        with pytest.raises(ValueError, match="manifest_sha256"):
+            load_manifest(path)
+
+
+class TestLoadManifestProvenance:
+    def test_a_manifest_that_is_not_there_is_named(self, tmp_path: Path):
+        from allsky.data.loading import load_manifest
+
+        with pytest.raises(FileNotFoundError, match="manifest parquet not found"):
+            load_manifest(tmp_path / "absent.parquet")
+
+    def test_a_manifest_with_no_sidecar_degrades_to_an_empty_meta(self, tmp_path: Path, caplog):
+        """The provenance fields the sidecar carries — the hash check, split_id,
+        dataset_version — are then unavailable, which has to be said out loud."""
+        import pandas as pd
+
+        from allsky.data.loading import load_manifest
+
+        path = tmp_path / "manifest.parquet"
+        pd.DataFrame({"sample_id": ["a"]}).to_parquet(path, index=False)
+
+        with caplog.at_level("WARNING"):
+            manifest, meta = load_manifest(path)
+
+        assert len(manifest) == 1
+        assert meta == {}
+        assert "sidecar" in caplog.text

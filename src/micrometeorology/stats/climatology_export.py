@@ -44,13 +44,13 @@ import logging
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import NDArray
 
 from micrometeorology.common.instruments import RAIN_TIP_DEPTH_MM
-from micrometeorology.common.site_json import finite, rounded, rounded_list, write_json
+from micrometeorology.common.site_json import rounded, rounded_list, write_json
 from micrometeorology.stats import distributions as dist
 
 logger = logging.getLogger(__name__)
@@ -95,7 +95,7 @@ ROSE_SECTORS = 16
 _DISPLAY_TAIL = 0.001
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Atom:
     """A point mass reported beside a continuous fit instead of inside it.
 
@@ -125,7 +125,7 @@ class Atom:
     count: int = 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class VariableSpec:
     """One published variable: how it is binned, fitted and captioned.
 
@@ -160,7 +160,7 @@ class VariableSpec:
     id: str
     label: str
     unit: str
-    chart: str
+    chart: Literal["histogram", "rose"]
     family: str | None
     family_label: str
     edges: tuple[float, ...]
@@ -172,7 +172,7 @@ class VariableSpec:
     fit_options: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Reference:
     """One bibliographic record, published so the page can link to the source.
 
@@ -700,7 +700,6 @@ CLIMATOLOGY_VARIABLES: tuple[VariableSpec, ...] = (
 )
 
 
-_finite = finite
 _rounded = rounded
 
 
@@ -804,6 +803,32 @@ def _shape_moments(values: NDArray) -> tuple[float, float]:
     return float(skewness), float(kurtosis)
 
 
+def _atom_payloads(atoms: Sequence[Atom]) -> list[dict[str, Any]]:
+    """The point masses as the page reads them, serialised once for both charts.
+
+    Parameters
+    ----------
+    atoms:
+        Point masses removed from one subset, in publication order.
+
+    Returns
+    -------
+    list of dict
+        One record per atom with ``id``, ``label``, ``fraction`` (rounded to the
+        published precision, dimensionless) and ``count`` (samples). The rose and
+        the histogram both read it here, so a field added to one reaches both.
+    """
+    return [
+        {
+            "id": atom.id,
+            "label": atom.label,
+            "fraction": _rounded(atom.fraction, _FRACTION_DECIMALS),
+            "count": atom.count,
+        }
+        for atom in atoms
+    ]
+
+
 def _histogram_subset(
     spec: VariableSpec,
     sample: NDArray,
@@ -825,15 +850,7 @@ def _histogram_subset(
         "below": binned.below,
         "above": binned.above,
         "stats": _describe(values),
-        "atoms": [
-            {
-                "id": atom.id,
-                "label": atom.label,
-                "fraction": _rounded(atom.fraction, _FRACTION_DECIMALS),
-                "count": atom.count,
-            }
-            for atom in atoms
-        ],
+        "atoms": _atom_payloads(atoms),
         "fit": None,
         "quality": None,
         "curve": None,
@@ -913,15 +930,7 @@ def _rose_subset(
             "resultant_length": _rounded(circular["resultant_length"], 4),
             "circular_variance": _rounded(circular["circular_variance"], 4),
         },
-        "atoms": [
-            {
-                "id": atom.id,
-                "label": atom.label,
-                "fraction": _rounded(atom.fraction, _FRACTION_DECIMALS),
-                "count": atom.count,
-            }
-            for atom in atoms
-        ],
+        "atoms": _atom_payloads(atoms),
         "fit": None,
         "quality": None,
         "curve": None,
@@ -1082,13 +1091,12 @@ def build_variable_payload(
         ],
         "subsets": subsets,
     }
-    if spec.chart == "histogram":
-        payload["display_range"] = _display_range(spec, subsets)
     if spec.chart == "rose":
         payload["sectors"] = [
             round(index * 360.0 / ROSE_SECTORS, 4) for index in range(ROSE_SECTORS)
         ]
     else:
+        payload["display_range"] = _display_range(spec, subsets)
         payload["edges"] = list(spec.edges)
     return payload
 

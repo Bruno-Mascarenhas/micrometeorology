@@ -15,7 +15,7 @@ frames that are unusable for radiometric reasons:
   ``FRAME_DARK`` (mean luminance below a threshold), ``FRAME_SATURATED``
   (too large a fraction of fully-clipped white pixels) and ``FRAME_UNREADABLE``
   (a frame with no pixels at all, on which nothing can be measured);
-- :func:`process_frame` composes mask -> crop -> resize from a
+- :func:`process_frame` composes mask -> crop -> pad -> resize from a
   :class:`~allsky.config.PrepareConfig`, optionally reusing a mask decoded once
   by :func:`resolve_mask` instead of re-reading the PNG for every frame.
 
@@ -71,7 +71,6 @@ __all__ = [
 IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
 
-# Broadcast-shaped once at import: this runs per sample in the dataloader.
 _IMAGENET_MEAN_CHW = np.asarray(IMAGENET_MEAN, dtype=np.float32).reshape(3, 1, 1)
 _IMAGENET_STD_CHW = np.asarray(IMAGENET_STD, dtype=np.float32).reshape(3, 1, 1)
 _IMAGENET_MEAN_CHW.flags.writeable = False
@@ -127,7 +126,8 @@ def remove_timestamp_band(
     """Deal with the camera's burned-in timestamp at the top of the frame.
 
     The overlay is static furniture: it is not sky, it carries no irradiance
-    information, and at 224 px it covers four of the sixteen patch rows. An
+    information, and at 224 px it covers three of the sixteen patch rows (36 of
+    224 rows, the third of them only in part). An
     occlusion probe on a trained checkpoint measured the band at 1.4-1.6x the
     weight of an equal-area sky band — real, but far from the dominant signal,
     so do not expect removing it to transform the model.
@@ -176,8 +176,6 @@ def remove_timestamp_band(
         out[:, :band, :] = np.asarray(fill_value, dtype=np.float32).reshape(3, 1, 1)
         return out
     if policy == "inpaint":
-        # Mirror the rows immediately below the band back up over it: the sky
-        # gradient continues instead of stopping at a synthetic edge.
         source = chw[:, band : 2 * band, :]
         if source.shape[1] < band:
             source = np.repeat(chw[:, band : band + 1, :], band, axis=1)
@@ -197,15 +195,30 @@ def _band_rows(height: int, band_fraction: float) -> int:
     Raises
     ------
     ValueError
-        If the band would cover the whole frame.
+        If the band would cover no row at all, or the whole frame.
     """
-    band = max(1, round(band_fraction * height))
+    band = round(band_fraction * height)
+    if band < 1:
+        raise ValueError(
+            f"band fraction {band_fraction} covers no row of a frame of height {height}"
+        )
     if band >= height:
         raise ValueError(f"band {band} covers the whole frame of height {height}")
     return band
 
 
 @lru_cache(maxsize=8)
+def roi_keep_mask(height: int, width: int, radius_fraction: float) -> np.ndarray:
+    """Read-only ``(H, W)`` BOOL keep-mask for the ROI disc.
+
+    The same disc :func:`_roi_keep` multiplies by, as the mask the augmentation
+    needs to tell an absent pixel from a dark one.
+    """
+    keep = _roi_keep(height, width, radius_fraction) > 0.0
+    keep.flags.writeable = False
+    return keep
+
+
 def _roi_keep(height: int, width: int, radius_fraction: float) -> np.ndarray:
     """Read-only ``(H, W)`` float32 keep-mask, built once per geometry.
 
@@ -249,9 +262,11 @@ class PreprocessingPipeline:
     roi_radius_fraction:
         When set, keep only a centred disc of this fraction of ``min(H, W) / 2``
         and zero the rest — the sky dome, without the frame furniture around it.
-        ``None`` disables it. The lens is not characterised at this site, so the
-        disc is centred on the image; a fitted centre belongs in
-        :class:`allsky.augmentation.SunProjection` once a calibration exists.
+        ``None`` disables it. The disc is centred on the image because the
+        isotropic re-extraction (``configs/allsky/data/local_prepare_iso.yaml``)
+        already makes the dome concentric with the frame; a measured centre lives
+        in :class:`allsky.lens.LensCalibration`, built for that geometry by
+        :func:`allsky.lens.isotropic_calibration`.
     """
 
     overlay: OverlayPolicy = "keep"
@@ -266,6 +281,13 @@ class PreprocessingPipeline:
         the same transforms or the model sees pixels it was not fitted on, and
         nothing reports the difference. One reader, so a field added to
         :class:`~allsky.config.PreprocessingConfig` reaches all three at once.
+
+        This covers ``PreprocessingConfig`` — the overlay band and the ROI — and
+        nothing else. The mask/crop/pad/resize that shaped the frames on disk
+        live on :class:`~allsky.config.PrepareConfig`, which no
+        ``ExperimentConfig`` carries; they travel as the checkpoint's own
+        ``frame_geometry`` and reach :func:`model_input_frame` through its
+        *geometry* argument.
         """
         return cls(**cfg.preprocessing.model_dump())
 
@@ -275,7 +297,14 @@ class PreprocessingPipeline:
         return self.overlay != "keep" or self.roi_radius_fraction is not None
 
     def __call__(self, chw: np.ndarray) -> np.ndarray:
-        """Apply the pipeline to one ``(3, H, W)`` float32 frame in ``[0, 1]``."""
+        """Apply the pipeline to one ``(3, H, W)`` float32 frame in ``[0, 1]``.
+
+        No production path calls this: every frame that reaches a model goes
+        through :meth:`apply_uint8_hwc`, which runs before the ``[0, 1]`` scaling
+        and is the cheaper of the two. This route exists as the equality oracle
+        the tests hold that one against — same pixels, different arithmetic — so
+        deleting it would remove the only independent check on it.
+        """
         out = remove_timestamp_band(chw, policy=self.overlay, band_fraction=self.band_fraction)
         if self.roi_radius_fraction is not None:
             out = out * _roi_keep(out.shape[1], out.shape[2], self.roi_radius_fraction)
@@ -341,19 +370,28 @@ def model_input_frame(
     *,
     size: int,
     preprocess: PreprocessingPipeline | None = None,
+    geometry: PrepareConfig | None = None,
 ) -> np.ndarray:
     """Decode one frame into the array a visual backbone is fed, minus the standardisation.
 
-    This is the whole train/serve chain in one place: decode -> preprocess at
-    **native** resolution -> resize -> ``[0, 1]`` CHW. It deliberately stops
+    The chain the dataset's own frames went through, in one place: decode ->
+    prepare geometry (mask/crop/pad/resize, *geometry*) -> preprocess at the
+    resulting resolution -> resize -> ``[0, 1]`` CHW. It deliberately stops
     short of :func:`imagenet_standardize` because the training dataset augments
     between the two and the serving path does not — that one step is the only
     difference the two sides are allowed to have, and keeping the rest here is
     what stops them drifting.
 
-    The preprocessing runs before the resize on purpose: the overlay band is a
-    fixed fraction of the *native* frame, and a bilinear resize would smear its
-    edge into the sky below it.
+    *geometry* is the ``PrepareConfig`` stage that ran once, at extraction time,
+    to write the JPEGs the dataset reads; the dataset itself never sees it.
+    Serving therefore has to re-apply it, and that is exactly what
+    :class:`~allsky.config.ExperimentConfig` cannot describe: without it a
+    checkpoint trained on the isotropic dataset scores a 1.78x horizontally
+    squeezed full frame.
+
+    The preprocessing runs before the final resize on purpose: the overlay band
+    is a fixed fraction of the frame, and a bilinear resize would smear its edge
+    into the sky below it.
 
     Parameters
     ----------
@@ -364,6 +402,9 @@ def model_input_frame(
     preprocess:
         Deterministic pipeline from the run's config; ``None`` or a disabled one
         leaves the pixels alone.
+    geometry:
+        The prepare geometry the training frames were written through; ``None``
+        leaves the decoded pixels as they are.
 
     Returns
     -------
@@ -371,12 +412,20 @@ def model_input_frame(
         ``(3, size, size)`` float32 in ``[0, 1]``, C-contiguous and freshly
         allocated — so the caller may standardize it in place.
     """
-    if preprocess is not None and preprocess.enabled:
-        arr = preprocess.apply_uint8_hwc(decode_rgb(source))
+    processing = preprocess is not None and preprocess.enabled
+    if geometry is None and not processing:
+        # PIL decodes and resizes in one pass here, which is why this case is
+        # not folded into the branch below: routing it through decode_rgb would
+        # pay the two full-frame numpy<->PIL copies for nothing.
+        arr = decode_rgb_resized(source, size)
+    else:
+        arr = decode_rgb(source)
+        if geometry is not None:
+            arr = process_frame(arr, geometry)
+        if preprocess is not None and preprocess.enabled:
+            arr = preprocess.apply_uint8_hwc(arr)
         if arr.shape[0] != size or arr.shape[1] != size:
             arr = resize_bilinear(arr, size)
-    else:
-        arr = decode_rgb_resized(source, size)
     chw = np.ascontiguousarray(np.asarray(arr, dtype=np.uint8).transpose(2, 0, 1))
     scaled = chw.astype(np.float32)
     scaled /= 255.0
@@ -647,7 +696,9 @@ def visual_qc(
 
 def _needs_preprocessing(cfg: PrepareConfig) -> bool:
     """True when :func:`process_frame` would change the pixels of a frame."""
-    return cfg.mask.path is not None or cfg.crop.enabled or cfg.resize is not None
+    return (
+        cfg.mask.path is not None or cfg.crop.enabled or cfg.pad.enabled or cfg.resize is not None
+    )
 
 
 def resolve_mask(cfg: PrepareConfig) -> np.ndarray | None:
@@ -699,11 +750,12 @@ def pad_frame(image: np.ndarray, pad: PadConfig) -> np.ndarray:
 def process_frame(
     image: np.ndarray, cfg: PrepareConfig, *, mask: np.ndarray | None = None
 ) -> np.ndarray:
-    """Compose mask -> crop -> resize from a :class:`~allsky.config.PrepareConfig`.
+    """Compose mask -> crop -> pad -> resize from a :class:`~allsky.config.PrepareConfig`.
 
     Each stage is skipped when its config leaves it unset: the static mask is
     applied only when ``cfg.mask.path`` is supplied (a PNG mask), the crop only
-    when ``cfg.crop.enabled``, and the resize only when ``cfg.resize`` is set.
+    when ``cfg.crop.enabled``, the pad only when ``cfg.pad.enabled``, and the
+    resize only when ``cfg.resize`` is set.
     A decentred/auto circular mask is intentionally **not** applied by default
     (it would silently zero pixels); call :func:`apply_static_mask` with
     ``mask=None`` explicitly to opt into the heuristic estimate.

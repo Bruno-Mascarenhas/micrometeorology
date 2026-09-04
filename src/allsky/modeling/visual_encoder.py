@@ -167,11 +167,6 @@ class PrecomputedEmbedding(nn.Module):
         """Width of the visual embedding this source produces."""
         return self._out_dim
 
-    @staticmethod
-    def _pool(sequence: Tensor, mask: Tensor | None) -> Tensor:
-        """Mean-pool a ``(B, T, D)`` window over ``T`` (masked when *mask* given)."""
-        return masked_mean_pool(sequence, mask)
-
     def _attention_pool(self, sequence: Tensor, mask: Tensor | None) -> Tensor:
         """Learned single-query attention pool of a ``(B, T, D)`` window over ``T``.
 
@@ -184,17 +179,19 @@ class PrecomputedEmbedding(nn.Module):
         query = self.query.expand(batch_size, -1, -1)
         key_padding_mask: Tensor | None = None
         all_pad: Tensor | None = None
+        has_all_pad = False
         if mask is not None:
             key_padding_mask = ~mask
             all_pad = key_padding_mask.all(dim=1)
-            if bool(all_pad.any()):
+            has_all_pad = bool(all_pad.any())
+            if has_all_pad:
                 key_padding_mask = key_padding_mask.clone()
                 key_padding_mask[all_pad, 0] = False
         attended, _ = self.temporal_attn(
             query, sequence, sequence, key_padding_mask=key_padding_mask, need_weights=False
         )
         pooled: Tensor = attended.squeeze(1)
-        if all_pad is not None and bool(all_pad.any()):
+        if all_pad is not None and has_all_pad:
             logger.warning(
                 "attention temporal pooling: %d row(s) had an all-False frame_mask "
                 "(no valid window frame); their pooled embedding falls back to zeros",
@@ -231,7 +228,7 @@ class PrecomputedEmbedding(nn.Module):
             if self.temporal_pooling == "attention":
                 embedding = self._attention_pool(batch["embedding_seq"], batch.get("frame_mask"))
             else:
-                embedding = self._pool(batch["embedding_seq"], batch.get("frame_mask"))
+                embedding = masked_mean_pool(batch["embedding_seq"], batch.get("frame_mask"))
         else:
             raise KeyError(
                 "batch has neither 'embedding' nor 'embedding_seq' for the "
@@ -303,6 +300,25 @@ class ImageEncoder(nn.Module):
             else None
         )
         self.projection, self._out_dim = _projection(int(dim), out_dim, dropout)
+
+    def train(self, mode: bool = True) -> ImageEncoder:
+        """Set training mode, keeping every frozen normalisation layer in eval.
+
+        ``requires_grad_(False)`` freezes PARAMETERS. A BatchNorm's running mean
+        and variance are BUFFERS: they keep updating on every forward in train
+        mode, so a "frozen" ConvNet backbone still drifts with the batches it
+        sees and the frozen and fine-tuned arms of an ablation stop being the
+        same encoder. The transformer backbones use LayerNorm, which holds no
+        running statistics.
+        """
+        from torch.nn.modules.batchnorm import _BatchNorm
+
+        super().train(mode)
+        for module in self.backbone.modules():
+            frozen = not any(param.requires_grad for param in module.parameters(recurse=False))
+            if isinstance(module, _BatchNorm) and frozen:
+                module.eval()
+        return self
 
     def _unfreeze_last_blocks(self, n: int) -> None:
         """Re-enable gradients on the last *n* transformer blocks, if any."""

@@ -6,7 +6,7 @@ import random
 import numpy as np
 
 
-def set_global_seed(seed: int = 42) -> None:
+def set_global_seed(seed: int) -> None:
     """Set seeds for numpy, random, and torch (if available) for reproducibility.
 
     Seeds the three global streams a run actually draws from — Python's

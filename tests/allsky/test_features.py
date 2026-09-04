@@ -48,11 +48,6 @@ def sensor_frame() -> pd.DataFrame:
     )
 
 
-# ---------------------------------------------------------------------------
-# policy.py
-# ---------------------------------------------------------------------------
-
-
 class TestFeaturePolicy:
     def test_resolve_safe_is_safe_features_in_order(self):
         assert resolve_feature_set("safe") == list(SAFE_FEATURES)
@@ -146,14 +141,27 @@ class TestFeaturePolicy:
         assert "humidity" not in groups
         assert "radiometry_aux" not in groups
 
+    def test_groups_cover_an_ablation_column_added_through_extra(self):
+        """``features.extra`` reached the sensor encoder's input width but no
+        cross-attention token, so the attention arm never saw the column the
+        ablation exists to vary."""
+        groups = active_feature_groups("safe", ["uv_wm2"])
+        covered = [f for members in groups.values() for f in members]
+        assert covered == resolve_feature_set("safe", ["uv_wm2"])
+        assert "uv_wm2" in covered
+
+    def test_an_extra_a_declared_group_already_lists_joins_that_group(self):
+        groups = active_feature_groups("safe", ["uv_wm2"])
+        assert groups["radiometry_aux"] == ["uv_wm2"]
+        assert "extra" not in groups
+
+    def test_an_extra_no_group_declares_lands_in_its_own_group(self):
+        groups = active_feature_groups("safe", ["battery_v"])
+        assert groups["extra"] == ["battery_v"]
+
     def test_an_unknown_set_names_every_tier_it_accepts(self):
         with pytest.raises(ValueError, match="'bare', 'minimal', 'safe' or 'extended'"):
             resolve_feature_set("barometric")
-
-
-# ---------------------------------------------------------------------------
-# engineering.py
-# ---------------------------------------------------------------------------
 
 
 class TestFeatureEngineering:
@@ -231,11 +239,6 @@ class TestFeatureEngineering:
         assert abs(edge_frame["doy_cos"].iloc[0] - edge_frame["doy_cos"].iloc[1]) < 0.05
 
 
-# ---------------------------------------------------------------------------
-# normalization.py
-# ---------------------------------------------------------------------------
-
-
 class TestFeatureNormalizer:
     def test_fit_transform_zero_mean_unit_std(self, sensor_frame: pd.DataFrame, site: SiteConfig):
         frame = build_feature_frame(
@@ -260,6 +263,12 @@ class TestFeatureNormalizer:
         # Constant column -> std clamped to 1, output all zeros (no divide blow-up).
         np.testing.assert_allclose(out[:, 0], 0.0)
         assert np.isfinite(out).all()
+
+    def test_comparing_two_normalizers_answers_one_bool_and_not_an_array(self):
+        frame = pd.DataFrame({"a": [1.0, 2.0], "b": [10.0, 20.0]})
+        norm = FeatureNormalizer.fit(frame)
+
+        assert isinstance(norm == FeatureNormalizer.fit(frame), bool)
 
     def test_json_roundtrip(self, sensor_frame: pd.DataFrame, site: SiteConfig):
         import json

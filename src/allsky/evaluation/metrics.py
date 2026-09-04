@@ -188,7 +188,7 @@ def classification_metrics(
     y_true, y_pred:
         True and predicted class integers.
     n_classes:
-        Number of classes, defaulting to :data:`~allsky.data.sky.SKY_CLASS_COUNT`
+        Number of classes, defaulting to :data:`~labmim_core.sky.SKY_CLASS_COUNT`
         so an absent-column split reports the same confusion shape as a scored one.
 
     Returns

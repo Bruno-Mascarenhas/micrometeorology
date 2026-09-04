@@ -30,12 +30,16 @@ from typing import Annotated
 
 import matplotlib
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import typer
+from matplotlib.axes import Axes
 
-matplotlib.use("Agg")  # headless backend for server
+matplotlib.use("Agg")
 
+from micrometeorology.cli.plot_station_graphs import GRAPH_SPECS
 from micrometeorology.common.logging import setup_logging
+from micrometeorology.common.paths import ensure_dir
 from micrometeorology.common.timeparse import parse_naive_timestamp
 from micrometeorology.sensors.aggregation import aggregate_to_hourly
 from micrometeorology.sensors.ingestion import read_campbell_dat
@@ -109,6 +113,12 @@ WRF_COLUMNS = {
     "direcao": WIND_DIR_DEG,
 }
 
+#: Fixed y-frames, read from the SIBLING producer of these same nine filenames so
+#: the two cannot frame one PNG differently.
+SHARED_Y_LIMITS: dict[str, tuple[float, float]] = {
+    spec.key: spec.ylim for spec in GRAPH_SPECS if spec.ylim is not None
+}
+
 
 def _plot_wrf_overlay(
     ax,
@@ -140,16 +150,14 @@ def _plot_wrf_overlay(
     ax.plot(wrf.index, wrf[col], linestyle=linestyle, color=color, label=label)
 
 
-def _plot_radiacao_difusa(
-    raw: pd.DataFrame,
-    hourly: pd.DataFrame,
-    out_dir: Path,
-    dt: datetime,
-    wrf: pd.DataFrame | None = None,
-) -> Path | None:
-    """Graph 1 -- Solar Radiation (SW global + diffuse)."""
-    fig, ax = create_figure()
+def _carries_signal(series: pd.Series) -> bool:
+    finite = series.dropna().to_numpy(dtype=float)
+    return finite.size > 0 and not np.isclose(finite, 0.0).all()
 
+
+def _draw_radiacao_difusa(
+    ax: Axes, raw: pd.DataFrame, hourly: pd.DataFrame, wrf: pd.DataFrame | None
+) -> None:
     col_sw = "CM3Up_Wm2_Avg"
     col_diffuse = "CMP21_Wm2_Avg"
     col_diffuse_psp = "PSP_Wm2_Avg"
@@ -158,9 +166,11 @@ def _plot_radiacao_difusa(
     # sharing one "Media 5 min" entry left the reader unable to tell the global
     # pyranometer from the two diffuse ones on the figure they disagree on.
     # Short spellings because eight entries have to fit the fixed-height bar.
+    # A diffuse channel the logger writes as a hard zero (CMP21 in every v22 row,
+    # see configs/micromet/calibrations.yaml) is not the diffuse and is not drawn.
     if col_sw in raw.columns:
         ax.plot(raw.index, raw[col_sw], "o", color="yellow", markersize=6, label="5 min (CM3Up)")
-    if col_diffuse in raw.columns:
+    if col_diffuse in raw.columns and _carries_signal(raw[col_diffuse]):
         ax.plot(
             raw.index,
             raw[col_diffuse],
@@ -169,7 +179,7 @@ def _plot_radiacao_difusa(
             markersize=6,
             label="5 min (CMP21)",
         )
-    if col_diffuse_psp in raw.columns:
+    if col_diffuse_psp in raw.columns and _carries_signal(raw[col_diffuse_psp]):
         ax.plot(
             raw.index,
             raw[col_diffuse_psp],
@@ -180,9 +190,9 @@ def _plot_radiacao_difusa(
         )
     if col_sw in hourly.columns:
         ax.plot(hourly.index, hourly[col_sw], "-vr", label="SW_dw 1h")
-    if col_diffuse in hourly.columns:
-        ax.plot(hourly.index, hourly[col_diffuse], "-db", label="SW_df 1h")
-    if col_diffuse_psp in hourly.columns:
+    if col_diffuse in hourly.columns and _carries_signal(hourly[col_diffuse]):
+        ax.plot(hourly.index, hourly[col_diffuse], "-db", label="SW_df 1h (CMP21)")
+    if col_diffuse_psp in hourly.columns and _carries_signal(hourly[col_diffuse_psp]):
         ax.plot(hourly.index, hourly[col_diffuse_psp], "-dg", label="SW_df 1h (PSP)")
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["radiacao_global"], label="SW_dw-wrf 1h")
@@ -194,6 +204,18 @@ def _plot_radiacao_difusa(
         linestyle="-.",
         color="#e07a1f",
     )
+
+
+def _plot_radiacao_difusa(
+    raw: pd.DataFrame,
+    hourly: pd.DataFrame,
+    out_dir: Path,
+    dt: datetime,
+    wrf: pd.DataFrame | None = None,
+) -> Path | None:
+    """Graph 1 -- Solar Radiation (SW global + diffuse)."""
+    fig, ax = create_figure()
+    _draw_radiacao_difusa(ax, raw, hourly, wrf)
 
     if not ax.get_lines():
         logger.warning("No solar radiation columns found -- skipping radiacao_difusa.png")
@@ -399,7 +421,7 @@ def _plot_temperatura(
         plt.close(fig)
         return None
 
-    ax.set_ylim(18, 32)
+    ax.set_ylim(*SHARED_Y_LIMITS["temperatura"])
     setup_date_axis(ax)
     plt.ylabel(
         "Temperatura do Ar (\u00b0C)",
@@ -450,7 +472,7 @@ def _plot_umidade(
         plt.close(fig)
         return None
 
-    ax.set_ylim(50, 100)
+    ax.set_ylim(*SHARED_Y_LIMITS["umidade"])
     setup_date_axis(ax)
     plt.ylabel(
         "Umidade Relativa do Ar (%)",
@@ -501,7 +523,7 @@ def _plot_pressao(
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["pressao"])
 
-    ax.set_ylim(1000, 1030)
+    # No fixed frame: a 30 hPa window clips a real synoptic passage off the top.
     setup_date_axis(ax)
     plt.ylabel(
         "Pressao Atmosferica (hPa)",
@@ -551,7 +573,7 @@ def _plot_velocidade(
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["velocidade"])
 
-    ax.set_ylim(0, 10)
+    ax.set_ylim(*SHARED_Y_LIMITS["velocidade"])
     setup_date_axis(ax)
     plt.ylabel(
         "Velocidade do Vento (m/s)",
@@ -639,6 +661,25 @@ def _plot_precipitacao(
     return save_figure(fig, out_dir / "precipitacao.png")
 
 
+def newest_plotted_stamp(raw: pd.DataFrame, raw_rain: pd.DataFrame) -> datetime:
+    """The newest sample actually drawn, across both logger tables.
+
+    Stamped onto every figure instead of the wall clock: without ``--start-date``
+    the window ends at today, so a record that stopped months ago would publish
+    under today's date and read as current.
+
+    Raises
+    ------
+    ValueError
+        When neither frame carries a row, which the caller has already refused.
+    """
+    plotted = [frame.index.max() for frame in (raw, raw_rain) if not frame.empty]
+    if not plotted:
+        raise ValueError("neither the lenta nor the rain frame carries a sample to stamp")
+    newest: datetime = max(plotted).to_pydatetime()
+    return newest
+
+
 @app.command()
 def run(
     lenta: Annotated[
@@ -676,9 +717,16 @@ def run(
 ) -> None:
     """Generate LabMiM station graphs from raw .dat sensor files.
 
-    Reads Campbell Scientific .dat files directly from the datalogger,
-    performs quality control, hourly aggregation, and generates 10 PNG
-    graphs for the LabMiM website with the standard watermark and layout.
+    Reads Campbell Scientific .dat files directly from the datalogger, aggregates
+    them to hourly means and writes 10 PNG graphs for the LabMiM website with the
+    standard watermark and layout.
+
+    **No quality control runs here.** The sentinel table, the physical range
+    gates and every radiation mask belong to ``labmim-archive``, which reads the
+    same files through the explicit manifest and publishes ``station_5min_qc``;
+    this command plots what the logger wrote. A rail such as the BP1 fill value
+    therefore reaches the figure, which is the difference between these PNGs and
+    the ones ``labmim-site-graphs`` draws from the QC'd database.
 
     A graph whose source columns are all absent from the .dat file is
     skipped rather than written blank, and reported as `[skip]`; `--strict`
@@ -689,8 +737,7 @@ def run(
     and wind graphs.
     """
     setup_logging(log_level)
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
+    out = ensure_dir(output_dir)
     # Campbell .dat timestamps carry no UTC offset, so `read_campbell_dat`
     # builds a naive station-local index. Both date bounds below must stay
     # naive to match it -- an aware Timestamp raises TypeError on comparison.
@@ -712,12 +759,8 @@ def run(
 
     wrf: pd.DataFrame | None = None
     if wrf_path:
-        wrf = read_wrf_series(wrf_path)
+        wrf = read_wrf_series(wrf_path, consumes=WRF_COLUMNS.values())
         typer.echo(f"  wrf:   {len(wrf)} rows")
-
-    # Rain rides along in the lenta frame so one aggregation pass covers both.
-    if RAIN_COLUMN in df_rain.columns:
-        df_lenta[RAIN_COLUMN] = df_rain[RAIN_COLUMN].reindex(df_lenta.index)
 
     if start_date is not None:
         # Naive for the same reason as `now` above: this bound is compared
@@ -732,7 +775,7 @@ def run(
             ) from exc
         date_end = date_start + pd.Timedelta(days=days)
     else:
-        date_end = pd.Timestamp(now)
+        date_end = now
         date_start = date_end - pd.Timedelta(days=days)
 
     mask_lenta = (df_lenta.index >= date_start) & (df_lenta.index <= date_end)
@@ -762,27 +805,39 @@ def run(
 
     wind_dir_cols = ["WD_WXT_Avg", "WindDir1_GMX", "WindDir"]
     wind_speed_map = {"WD_WXT_Avg": "WS_WXT_Avg", "WindDir1_GMX": "WS1_ms_GMX", "WindDir": "WS_ms"}
-    sum_cols = [RAIN_COLUMN]
 
     wind_dir_cols = [c for c in wind_dir_cols if c in raw.columns]
-    sum_cols = [c for c in sum_cols if c in raw.columns]
     wind_speed_map = {k: v for k, v in wind_speed_map.items() if k in raw.columns}
 
     hourly = aggregate_to_hourly(
         raw,
         min_samples=6,
-        sum_columns=sum_cols,
         wind_dir_columns=wind_dir_cols,
         wind_speed_column_map=wind_speed_map,
     )
+    # Rain is a SEPARATE logger table on its own stamps, so it is aggregated from
+    # its own frame and joined on the hourly grid: reindexing it onto lenta's
+    # stamps drops every rain sample at a stamp lenta lacks — measured over
+    # 2026-05-27 + 7 d, 126.24 mm against 67.31 mm on one axes.
+    # build_archive joins the two tables `how="outer"` for the same reason.
+    if RAIN_COLUMN in raw_rain.columns:
+        hourly_rain = aggregate_to_hourly(raw_rain, min_samples=6, sum_columns=[RAIN_COLUMN])
+        # One of the archive's lenta tables carries the gauge column too, where
+        # the generic pass would have averaged it; the rain table's own SUM is
+        # the one the bars mean, so it replaces rather than collides.
+        hourly = hourly.drop(columns=[RAIN_COLUMN], errors="ignore").join(
+            hourly_rain[[RAIN_COLUMN]], how="outer"
+        )
+        dropped = len(raw_rain.index.difference(raw.index))
+        if dropped:
+            typer.echo(f"  rain: {dropped} carimbo(s) fora do índice da lenta, preservados")
     typer.echo(f"  -> {len(hourly)} hourly rows")
 
     # Stamp the newest sample actually drawn, not the wall clock: without
     # `--start-date`, `date_end` is today, so a record that stopped months ago
     # would be published under today's date. plot_station_graphs, the sibling
     # producer of the same images, stamps the data end for the same reason.
-    plotted = [frame.index.max() for frame in (raw, raw_rain) if not frame.empty]
-    graph_dt = max(plotted).to_pydatetime()
+    graph_dt = newest_plotted_stamp(raw, raw_rain)
 
     typer.echo("Generating graphs...")
 

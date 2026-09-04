@@ -21,7 +21,6 @@ __all__ = [
     "LWDNB_W_M2",
     "LWUP_AIR_W_M2",
     "LWUP_W_M2",
-    "OPERATIONAL_COLUMN_NAMES",
     "PBLH_M",
     "PRECIP_MM",
     "PSFC_HPA",
@@ -77,39 +76,3 @@ USTAR_M_S = "ustar_m_s"
 PBLH_M = "pblh_m"
 SST_C = "sst_c"
 PRECIP_MM = "precip_mm"
-
-#: Every column the operational record can carry, in write order.
-OPERATIONAL_COLUMN_NAMES: tuple[str, ...] = (
-    T2_C,
-    RH_PCT,
-    PSFC_HPA,
-    E_HPA,
-    ES_PA,
-    Q2_G_KG,
-    WIND_SPEED_M_S,
-    WIND_DIR_DEG,
-    U10_M_S,
-    V10_M_S,
-    SWDOWN_W_M2,
-    SWDNB_W_M2,
-    SWDOWN_FARMS_W_M2,
-    SWUPB_W_M2,
-    SWUP_W_M2,
-    SWDDIF_W_M2,
-    SWDDIF_FARMS_W_M2,
-    SWDDIR_W_M2,
-    SWDDIR_FARMS_W_M2,
-    GLW_W_M2,
-    LWDNB_W_M2,
-    LWUP_W_M2,
-    LWUP_AIR_W_M2,
-    ALBEDO,
-    EMISSIVITY,
-    HFX_W_M2,
-    LH_W_M2,
-    GRDFLX_W_M2,
-    USTAR_M_S,
-    PBLH_M,
-    SST_C,
-    PRECIP_MM,
-)

@@ -27,13 +27,16 @@ import pytest
 from typer.testing import CliRunner
 
 from allsky.cli import app
-from allsky.config import SITE_UTC_OFFSET_HOURS, ExperimentConfig
+from allsky.config import SITE_UTC_OFFSET_HOURS, ExperimentConfig, PrepareConfig
 from allsky.embeddings import backbone as backbone_module
+from allsky.embeddings.backbone import build_backbone
 from allsky.embeddings.storage import META_FILENAME, read_meta, write_meta
 from allsky.snapshot import (
     DEFAULT_SENSOR_TOLERANCE,
+    _clearsky_dhi_reference,
     _feature_vector,
     _image_as_hwc,
+    _image_input,
     _sensor_row_near,
     _shipped_sensor_limits,
     predict_snapshot,
@@ -42,7 +45,6 @@ from allsky.training.checkpointing import load_checkpoint
 from labmim_core.site import SiteConfig
 from labmim_core.solar import solar_elevation_deg
 from tests.allsky import _synthetic as synthetic
-from tests.allsky.test_e2e_experiment import _REPO_V1, _write_embeddings
 
 runner = CliRunner()
 
@@ -71,15 +73,28 @@ train:
 
 @pytest.fixture
 def embedding_checkpoint(tmp_path: Path) -> Path:
-    """Train one epoch of an embedding-mode model on the fake backbone's width."""
+    """The probe checkpoint with no config override — the common case."""
+    return _train_probe(tmp_path)
+
+
+def _train_probe(tmp_path: Path, extra_yaml: str = "") -> Path:
+    """Train one epoch of the embedding-mode probe, with *extra_yaml* appended to its config."""
     root, manifest, _ = synthetic.make_dataset(tmp_path)
-    _write_embeddings(root, manifest, dim=32)
+    synthetic.make_embeddings_store(
+        root,
+        manifest,
+        dim=32,
+        # The live FakeBackbone describes its own transform; recording anything
+        # else makes the snapshot refuse the store it was trained on.
+        transform=str(getattr(build_backbone("fake", fake_dim=32), "transform_description", "")),
+    )
     store = root / "emb"
     write_meta(store, {**read_meta(store), "revision": "fake-v1", "dtype": "fp32"})
     run_dir = tmp_path / "run"
     config = tmp_path / "probe.yaml"
     config.write_text(
-        _EMBEDDING_EXPERIMENT.format(repo_v1=_REPO_V1, out=run_dir, root=root),
+        _EMBEDDING_EXPERIMENT.format(repo_v1=synthetic.REPO_V1, out=run_dir, root=root)
+        + extra_yaml,
         encoding="utf-8",
     )
     result = runner.invoke(
@@ -128,24 +143,51 @@ def test_the_backbone_is_fed_the_layout_its_transform_documents(sky_image: Path)
     assert frame.shape == (64, 64, 3)
 
 
-def test_the_live_frame_is_standardized_the_way_the_training_frames_are(sky_image: Path) -> None:
-    """Serving must standardize exactly as the dataset does: feeding the backbone
-    raw ``[0, 1]`` is a silent train/serve skew that yields plausible wrong
-    numbers rather than an error."""
-    from PIL import Image
-
+#: A default config leaves the preprocessing pipeline an identity (overlay='keep',
+#: no ROI) and a size equal to the fixture's own side leaves the resize one too.
+#: Each case turns one on.
+@pytest.mark.parametrize(
+    ("overrides", "size"),
+    [
+        ({}, 64),
+        ({"preprocessing": {"overlay": "fill", "band_fraction": 0.12}}, 64),
+        ({"preprocessing": {"roi_radius_fraction": 0.9}}, 64),
+        ({}, 32),
+        (
+            {
+                "preprocessing": {
+                    "overlay": "fill",
+                    "band_fraction": 0.12,
+                    "roi_radius_fraction": 0.9,
+                }
+            },
+            40,
+        ),
+    ],
+)
+def test_the_live_frame_is_prepared_the_way_the_training_frames_are(
+    sky_image: Path, overrides: dict, size: int
+) -> None:
+    """Serving must prepare the frame exactly as the dataset does: feeding the
+    backbone raw ``[0, 1]``, or an unmasked frame, or one at another resolution
+    is a silent train/serve skew that yields plausible wrong numbers rather than
+    an error. Compared against ``model_input_frame`` with the same pipeline —
+    the function the dataset itself calls — rather than against a chain the test
+    rebuilds by hand.
+    """
     from allsky.config import ExperimentConfig
-    from allsky.preprocessing import imagenet_standardize
+    from allsky.preprocessing import PreprocessingPipeline, imagenet_standardize, model_input_frame
     from allsky.snapshot import _image_as_chw
 
-    served = _image_as_chw(sky_image, 64, ExperimentConfig())
+    cfg = ExperimentConfig.model_validate(overrides)
 
-    with Image.open(sky_image) as handle:
-        pixels = np.asarray(handle.convert("RGB"), dtype=np.uint8)
-    unit = pixels.astype(np.float32) / 255.0
-    expected = imagenet_standardize(np.ascontiguousarray(unit.transpose(2, 0, 1)))
+    served = _image_as_chw(sky_image, size, cfg)
 
+    expected = imagenet_standardize(
+        model_input_frame(sky_image, size=size, preprocess=PreprocessingPipeline.from_config(cfg))
+    )
     np.testing.assert_allclose(served, expected, rtol=1e-6, atol=1e-6)
+    assert served.shape == (3, size, size)
     assert served.min() < 0.0, "standardized pixels straddle zero; raw [0, 1] never would"
 
 
@@ -165,7 +207,7 @@ def test_a_railed_logger_channel_is_imputed_instead_of_fed_as_a_measurement(
         encoding="utf-8",
     )
 
-    values, imputed = _feature_vector(
+    values, imputed, _gap = _feature_vector(
         pd.Timestamp("2026-08-14 12:00:00"),
         feature_columns=[feature],
         feature_set=feature_set,
@@ -199,7 +241,7 @@ def test_an_implausible_exported_value_is_refused_instead_of_served_as_a_measure
         f"timestamp,{column}\n2026-08-14 12:00:00,{exported_value}\n", encoding="utf-8"
     )
 
-    values, imputed = _feature_vector(
+    values, imputed, _gap = _feature_vector(
         pd.Timestamp("2026-08-14 12:00:00"),
         feature_columns=[feature],
         feature_set="safe",
@@ -218,7 +260,7 @@ def test_a_plausible_exported_value_is_served_as_measured(tmp_path: Path) -> Non
     sensor_csv = tmp_path / "station-hourly.csv"
     sensor_csv.write_text("timestamp,AirT1_C_Avg\n2026-08-14 12:00:00,27.4\n", encoding="utf-8")
 
-    values, imputed = _feature_vector(
+    values, imputed, _gap = _feature_vector(
         pd.Timestamp("2026-08-14 12:00:00"),
         feature_columns=["air_temp_c"],
         feature_set="safe",
@@ -254,7 +296,7 @@ def test_an_offset_carrying_sensor_export_is_matched_on_site_local_wall_clock(
         encoding="utf-8",
     )
 
-    row = _sensor_row_near(
+    row, _gap = _sensor_row_near(
         sensor_csv,
         pd.Timestamp("2026-08-14 12:00:00"),
         DEFAULT_SENSOR_TOLERANCE,
@@ -264,11 +306,14 @@ def test_an_offset_carrying_sensor_export_is_matched_on_site_local_wall_clock(
     assert float(row["AirT1_C_Avg"].iloc[0]) == pytest.approx(29.0)
 
 
-def test_solar_geometry_is_built_on_the_pinned_site_offset_the_manifest_trains_with() -> None:
-    site = SiteConfig(latitude=-13.0, longitude=-60.0)
+def test_solar_geometry_is_built_on_the_declared_site_offset_the_manifest_trains_with() -> None:
+    """A checkpoint trained on another station and served with that station's
+    ``site`` computed its geometry on the module's pinned Salvador offset: five
+    hours of hour angle for a UTC-8 site."""
+    site = SiteConfig(latitude=38.6, longitude=-121.1, utc_offset_hours=-8.0)
     timestamp = pd.Timestamp("2026-01-15 09:00:00")
 
-    values, _ = _feature_vector(
+    values, _imputed, _gap = _feature_vector(
         timestamp,
         feature_columns=["solar_elevation"],
         feature_set="minimal",
@@ -279,10 +324,26 @@ def test_solar_geometry_is_built_on_the_pinned_site_offset_the_manifest_trains_w
         training_means=np.zeros(1, dtype=np.float32),
     )
 
-    trained_on = solar_elevation_deg(
+    trained_on = solar_elevation_deg(pd.DatetimeIndex([timestamp]), site, -8.0)
+    salvador_clock = solar_elevation_deg(
         pd.DatetimeIndex([timestamp]), site, float(SITE_UTC_OFFSET_HOURS)
     )
     assert float(values[0]) == pytest.approx(float(trained_on[0]), abs=1e-3)
+    assert abs(float(values[0]) - float(salvador_clock[0])) > 10.0
+
+
+@pytest.fixture
+def recorded_backbone_build(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """The name and keyword arguments the live backbone was actually built with."""
+    seen: dict[str, Any] = {}
+    real_build_backbone = backbone_module.build_backbone
+
+    def recording_build_backbone(name: str, **kwargs: Any) -> Any:
+        seen.update({"name": name, **kwargs})
+        return real_build_backbone(name, **kwargs)
+
+    monkeypatch.setattr(backbone_module, "build_backbone", recording_build_backbone)
+    return seen
 
 
 def _forget_the_recorded_recipe(checkpoint_path: Path) -> None:
@@ -302,18 +363,11 @@ def _embedding_store_of(checkpoint_path: Path) -> Path:
 
 
 def test_the_live_frame_is_embedded_with_the_pooling_its_training_store_recorded(
-    embedding_checkpoint: Path, sky_image: Path, monkeypatch: pytest.MonkeyPatch
+    embedding_checkpoint: Path, sky_image: Path, recorded_backbone_build: dict[str, Any]
 ) -> None:
     store = _embedding_store_of(embedding_checkpoint)
     write_meta(store, {**read_meta(store), "pooling": "mean"})
-    seen: dict[str, Any] = {}
-    real_build_backbone = backbone_module.build_backbone
 
-    def recording_build_backbone(name: str, **kwargs: Any) -> Any:
-        seen.update({"name": name, **kwargs})
-        return real_build_backbone(name, **kwargs)
-
-    monkeypatch.setattr(backbone_module, "build_backbone", recording_build_backbone)
     predict_snapshot(
         sky_image,
         embedding_checkpoint,
@@ -321,7 +375,7 @@ def test_the_live_frame_is_embedded_with_the_pooling_its_training_store_recorded
         trust_checkpoint=True,
     )
 
-    assert seen["pooling"] == "mean"
+    assert recorded_backbone_build["pooling"] == "mean"
 
 
 def test_a_checkpoint_recording_no_recipe_refuses_to_guess_when_its_store_is_unreachable(
@@ -340,19 +394,12 @@ def test_a_checkpoint_recording_no_recipe_refuses_to_guess_when_its_store_is_unr
 
 
 def test_a_checkpoint_carrying_its_own_recipe_predicts_with_the_store_gone(
-    embedding_checkpoint: Path, sky_image: Path, monkeypatch: pytest.MonkeyPatch
+    embedding_checkpoint: Path, sky_image: Path, recorded_backbone_build: dict[str, Any]
 ) -> None:
     store = _embedding_store_of(embedding_checkpoint)
     recorded = read_meta(store)
     shutil.rmtree(store)
-    seen: dict[str, Any] = {}
-    real_build_backbone = backbone_module.build_backbone
 
-    def recording_build_backbone(name: str, **kwargs: Any) -> Any:
-        seen.update({"name": name, **kwargs})
-        return real_build_backbone(name, **kwargs)
-
-    monkeypatch.setattr(backbone_module, "build_backbone", recording_build_backbone)
     prediction = predict_snapshot(
         sky_image,
         embedding_checkpoint,
@@ -361,7 +408,11 @@ def test_a_checkpoint_carrying_its_own_recipe_predicts_with_the_store_gone(
     )
 
     assert prediction["predictions"]
-    assert (seen["name"], seen["pooling"], seen["dtype"]) == (
+    assert (
+        recorded_backbone_build["name"],
+        recorded_backbone_build["pooling"],
+        recorded_backbone_build["dtype"],
+    ) == (
         recorded["backbone"],
         recorded["pooling"],
         recorded["dtype"],
@@ -369,18 +420,11 @@ def test_a_checkpoint_carrying_its_own_recipe_predicts_with_the_store_gone(
 
 
 def test_the_live_frame_is_embedded_at_the_precision_its_training_store_recorded(
-    embedding_checkpoint: Path, sky_image: Path, monkeypatch: pytest.MonkeyPatch
+    embedding_checkpoint: Path, sky_image: Path, recorded_backbone_build: dict[str, Any]
 ) -> None:
     store = _embedding_store_of(embedding_checkpoint)
     write_meta(store, {**read_meta(store), "dtype": "fp32"})
-    seen: dict[str, Any] = {}
-    real_build_backbone = backbone_module.build_backbone
 
-    def recording_build_backbone(name: str, **kwargs: Any) -> Any:
-        seen.update({"name": name, **kwargs})
-        return real_build_backbone(name, **kwargs)
-
-    monkeypatch.setattr(backbone_module, "build_backbone", recording_build_backbone)
     predict_snapshot(
         sky_image,
         embedding_checkpoint,
@@ -388,7 +432,7 @@ def test_the_live_frame_is_embedded_at_the_precision_its_training_store_recorded
         trust_checkpoint=True,
     )
 
-    assert seen.get("dtype") == "fp32"
+    assert recorded_backbone_build.get("dtype") == "fp32"
 
 
 def test_a_store_encoded_under_a_superseded_backbone_revision_refuses_to_predict(
@@ -441,3 +485,250 @@ def test_a_moved_checkpoint_predicts_against_the_store_it_is_pointed_at(
     )
 
     assert np.isfinite(prediction["predictions"]["dhi"])
+
+
+def test_a_clearsky_index_checkpoint_is_served_in_watts_per_square_metre(
+    tmp_path: Path, sky_image: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The head fitted DHI / DHI_clearsky and the evaluator multiplies the
+    prediction back by the row's clear-sky reference; the live snapshot
+    denormalized and stopped, serving the dimensionless index under a field
+    the docstring promises in W m-2."""
+    import allsky.clearsky
+
+    checkpoint = _train_probe(
+        tmp_path,
+        "targets:\n  dhi:\n    enabled: true\n    parameterization: clearsky_index\n",
+    )
+    timestamp = pd.Timestamp("2025-03-20 12:00:00")
+    served = predict_snapshot(
+        sky_image, checkpoint, timestamp=timestamp, sensor_limits=[], trust_checkpoint=True
+    )["predictions"]["dhi"]
+
+    monkeypatch.setattr(allsky.clearsky, "clearsky_diffuse", lambda *_args, **_kw: np.ones(1))
+    index = predict_snapshot(
+        sky_image, checkpoint, timestamp=timestamp, sensor_limits=[], trust_checkpoint=True
+    )["predictions"]["dhi"]
+    monkeypatch.undo()
+
+    reference = _clearsky_dhi_reference(timestamp, SiteConfig())
+    assert reference > 10.0
+    assert served == pytest.approx(index * reference, rel=1e-6)
+
+
+def test_the_image_input_carries_the_geometry_planes_the_model_was_widened_for(
+    sky_image: Path,
+) -> None:
+    """``restore_model`` widens the patch projection for ``geometry_channels``, but
+    the live image branch stacked three RGB planes only, so a ``sunangle`` or
+    ``sunmap`` checkpoint raised on its first forward pass."""
+    cfg = ExperimentConfig.model_validate(
+        {
+            "data": {"input_mode": "image"},
+            "model": {
+                "name": "image_only",
+                "backbone": "fake",
+                "geometry_channels": ["cos_sun_angle"],
+            },
+        }
+    )
+
+    tensor = _image_input(
+        sky_image, 32, cfg, timestamp=pd.Timestamp("2025-03-20 12:00:00"), site=SiteConfig()
+    )
+
+    assert tensor.shape == (4, 32, 32)
+    assert tensor.dtype == np.float32
+
+
+def test_the_live_pairing_uses_the_window_and_offset_the_checkpoint_trained_with(
+    embedding_checkpoint: Path, sky_image: Path, tmp_path: Path
+) -> None:
+    """`ExperimentConfig` carries no `sensor` section, so a live prediction reads
+    the window and the `timestamp_offset_minutes` — the one that moves the
+    CR5000's end-stamp onto the centre of the interval it averages — from the
+    checkpoint's manifest sidecar."""
+    import torch
+
+    payload = load_checkpoint(embedding_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["sensor_pairing"] = {"timestamp_offset_minutes": -2.5, "tolerance_minutes": 5.0}
+    torch.save(payload, embedding_checkpoint)
+
+    sensor_csv = tmp_path / "station-hourly.csv"
+    # Stamped 12:06; shifted by -2.5 min it pairs at 12:03:30, 3.5 minutes from
+    # the frame — inside training's 5-minute window, and outside it unshifted.
+    sensor_csv.write_text(
+        "timestamp,AirT1_C_Avg,DP1_C_Avg,RH1,BP1_mbar_Avg,WS_ms,WindDir\n"
+        "2026-01-01 12:06:00,27.4,19.0,70.0,1010.0,3.1,90.0\n",
+        encoding="utf-8",
+    )
+
+    prediction = predict_snapshot(
+        sky_image,
+        embedding_checkpoint,
+        timestamp=pd.Timestamp("2026-01-01 12:00:00"),
+        sensor_csv=sensor_csv,
+        sensor_limits=_shipped_sensor_limits(),
+        trust_checkpoint=True,
+    )
+
+    pairing = prediction["features"]["sensor_pairing"]
+    assert pairing["from_checkpoint"] is True
+    assert pairing["tolerance_minutes"] == pytest.approx(5.0)
+    assert pairing["timestamp_offset_minutes"] == pytest.approx(-2.5)
+    assert pairing["gap_minutes"] == pytest.approx(3.5)
+    assert "air_temp_c" not in prediction["features"]["imputed"]
+
+
+def test_a_checkpoint_recording_no_pairing_keeps_the_documented_default(
+    embedding_checkpoint: Path, sky_image: Path, tmp_path: Path
+) -> None:
+    import torch
+
+    payload = load_checkpoint(embedding_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["sensor_pairing"] = None
+    torch.save(payload, embedding_checkpoint)
+    sensor_csv = tmp_path / "station-hourly.csv"
+    sensor_csv.write_text("timestamp,AirT1_C_Avg\n2026-01-01 12:06:00,27.4\n", encoding="utf-8")
+
+    prediction = predict_snapshot(
+        sky_image,
+        embedding_checkpoint,
+        timestamp=pd.Timestamp("2026-01-01 12:00:00"),
+        sensor_csv=sensor_csv,
+        sensor_limits=_shipped_sensor_limits(),
+        trust_checkpoint=True,
+    )
+
+    pairing = prediction["features"]["sensor_pairing"]
+    assert pairing["from_checkpoint"] is False
+    assert pairing["tolerance_minutes"] == pytest.approx(15.0)
+    assert pairing["gap_minutes"] == pytest.approx(6.0)
+
+
+def test_the_live_frame_is_shaped_by_the_prepare_geometry_the_checkpoint_records(
+    tmp_path: Path,
+) -> None:
+    """`ExperimentConfig` carries only overlay/ROI; the mask, crop and pad that
+    inscribe the fisheye disc concentrically live on `PrepareConfig` and never
+    travelled, so a checkpoint trained on the isotropic dataset was served a
+    1.78x horizontally squeezed full frame with nothing detecting it."""
+    from PIL import Image
+
+    from allsky.preprocessing import model_input_frame
+
+    wide = tmp_path / "wide.jpg"
+    pixels = np.zeros((36, 64, 3), dtype=np.uint8)
+    pixels[:, :32] = 255  # left half white, so a left crop is visible in the mean
+    Image.fromarray(pixels).save(wide, quality=100)
+
+    geometry = PrepareConfig.model_validate(
+        {"crop": {"enabled": True, "top": 0, "left": 32, "height": 36, "width": 32}}
+    )
+
+    squeezed = model_input_frame(wide, size=16)
+    cropped = model_input_frame(wide, size=16, geometry=geometry)
+
+    assert float(squeezed.mean()) > 0.4
+    assert float(cropped.mean()) < 0.05
+
+
+def test_a_checkpoint_whose_mask_is_not_on_this_machine_refuses_to_score(
+    embedding_checkpoint: Path,
+) -> None:
+    """A static mask zeroes pixels, so scoring without it is a different image."""
+    import torch
+
+    from allsky.snapshot import _frame_geometry
+
+    payload = load_checkpoint(embedding_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["frame_geometry"] = {"mask": {"path": "/nowhere/mask.png", "threshold": None}}
+    torch.save(payload, embedding_checkpoint)
+    reloaded = load_checkpoint(embedding_checkpoint, map_location="cpu", trust_pickle=True)
+
+    with pytest.raises(ValueError, match=r"not\s+on this machine"):
+        _frame_geometry(reloaded)
+
+
+def test_a_checkpoint_recording_no_geometry_warns_instead_of_passing_silently(
+    embedding_checkpoint: Path, caplog
+) -> None:
+    from allsky.snapshot import _frame_geometry
+
+    payload = load_checkpoint(embedding_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["frame_geometry"] = None
+
+    with caplog.at_level("WARNING"):
+        assert _frame_geometry(payload) is None
+
+    assert "records no frame geometry" in caplog.text
+
+
+@pytest.mark.parametrize("strategy", ["mean_embedding", "attention_pooling"])
+def test_a_windowed_checkpoint_refuses_to_be_scored_from_one_capture(
+    embedding_checkpoint: Path, sky_image: Path, strategy: str
+) -> None:
+    """The batch carries one `embedding`, never the `embedding_seq` a pooled
+    window is served as, and the encoder falls back to its single-frame branch
+    when the sequence key is absent: three shipped `janela_*` families train
+    image mode with `mean_embedding`, and scoring one of them live produced a
+    plausible number from a model fitted on five frames."""
+    import torch
+
+    payload = load_checkpoint(embedding_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["config"]["data"]["alignment"]["strategy"] = strategy
+    torch.save(payload, embedding_checkpoint)
+
+    with pytest.raises(ValueError, match=strategy):
+        predict_snapshot(
+            sky_image,
+            embedding_checkpoint,
+            timestamp=pd.Timestamp("2026-01-01 12:00:00"),
+            sensor_csv=None,
+            sensor_limits=[],
+            trust_checkpoint=True,
+        )
+
+
+class TestEmbeddingRecipeOf:
+    """It is the only record of how a store's vectors were encoded once the store
+    itself has moved, and every branch that returns None — the store gone, the
+    sidecar incomplete — was unexercised, so a checkpoint could have started
+    predicting from half a recipe."""
+
+    def test_a_store_that_is_not_there_records_no_recipe(self, tmp_path: Path):
+        from allsky.snapshot import embedding_recipe_of
+
+        assert embedding_recipe_of(tmp_path / "absent") is None
+
+    @pytest.mark.parametrize("dropped", ["backbone", "pooling", "revision", "dim", "dtype"])
+    def test_a_sidecar_missing_any_key_records_no_recipe(self, tmp_path: Path, dropped: str):
+        """Half a recipe is worse than none: it would build a backbone the
+        vectors were not encoded by and still produce the accepted width."""
+        from allsky.embeddings.storage import write_meta
+        from allsky.snapshot import embedding_recipe_of
+
+        complete = {
+            "backbone": "fake",
+            "pooling": "cls",
+            "revision": "r1",
+            "dim": 8,
+            "dtype": "fp16",
+        }
+        write_meta(tmp_path, {k: v for k, v in complete.items() if k != dropped})
+
+        assert embedding_recipe_of(tmp_path) is None
+
+    def test_a_complete_sidecar_records_the_five_keys(self, tmp_path: Path):
+        from allsky.embeddings.storage import write_meta
+        from allsky.snapshot import STORE_RECIPE_KEYS, embedding_recipe_of
+
+        write_meta(
+            tmp_path,
+            {"backbone": "fake", "pooling": "cls", "revision": "r1", "dim": 8, "dtype": "fp16"},
+        )
+
+        recipe = embedding_recipe_of(tmp_path)
+
+        assert recipe is not None
+        assert set(STORE_RECIPE_KEYS) <= set(recipe)

@@ -1,6 +1,7 @@
 """Archive-mirroring CLI commands: ``sync-archive`` and ``snapshot``."""
 
 import datetime as dt
+import hashlib
 import http.client
 import logging
 import shutil
@@ -22,6 +23,7 @@ from allsky.archive import (
     ledger_lock,
 )
 from allsky.cli.runtime import configure_cli_logging
+from allsky.config import VIDEO_TIME_FIELDS, PrepareConfig, VideoConfig, load_prepare_config
 from allsky.drive import DriveTarget, RcloneError, RcloneUploader
 
 logger = logging.getLogger(__name__)
@@ -172,7 +174,7 @@ def _plan_day(
     extract: bool,
     step: int,
     resize: int | None,
-    timestamps: TimestampSource,
+    timestamps: str,
     upload: UploadChoice,
 ) -> DayPlan:
     """Decide what *entry* still needs by asking the ledger what it already holds.
@@ -195,9 +197,7 @@ def _plan_day(
     re-reading it nightly costs the whole decode to reach the same refusal.
     """
     frames_done = ledger.frames_match(entry.key, step=step, resize=resize, timestamps=timestamps)
-    faulted = ledger.extraction_faulted(
-        entry.key, step=step, resize=resize, timestamps=timestamps.value
-    )
+    faulted = ledger.extraction_faulted(entry.key, step=step, resize=resize, timestamps=timestamps)
     wants_extract = extract and not frames_done and faulted is None
     wants_video_upload = upload.wants_videos and not ledger.uploaded(
         entry.key, _video_destination(target, entry)
@@ -244,10 +244,9 @@ def _warn_about_ambiguously_clocked_days(
     ambiguous = [
         entry.key
         for entry in selected
-        if (record := ledger.frames(entry.key)) is not None
-        and record.get("timestamps") == TimestampSource.config.value
-        and record.get("step") == step
-        and record.get("resize") == resize
+        if ledger.frames_match(
+            entry.key, step=step, resize=resize, timestamps=TimestampSource.config.value
+        )
     ]
     if not ambiguous:
         return
@@ -405,6 +404,7 @@ def sync_archive(
     selected = _select(published, since=since_date, until=until_date)
     video_config = _video_config(timestamps, config)
     clock = _clock(video_config)
+    clock_record = _clock_record(video_config)
     failures = 0
     with ledger_lock(state_dir / LEDGER_FILENAME):
         ledger = Ledger.load(state_dir / LEDGER_FILENAME)
@@ -419,7 +419,7 @@ def sync_archive(
                     extract=extract,
                     step=step,
                     resize=resize,
-                    timestamps=clock,
+                    timestamps=clock_record,
                     upload=upload,
                 )
                 for entry in selected
@@ -481,7 +481,7 @@ def sync_archive(
                     reason=str(exc),
                     step=step,
                     resize=resize,
-                    timestamps=clock.value,
+                    timestamps=clock_record,
                 )
                 logger.warning("%s cannot be timestamped, skipping: %s", plan.entry.filename, exc)
             except (
@@ -503,7 +503,7 @@ def sync_archive(
         raise typer.Exit(code=1)
 
 
-def _video_config(timestamps: TimestampSource, config: Path | None) -> Any:
+def _video_config(timestamps: TimestampSource, config: Path | None) -> VideoConfig:
     """Resolve the video section that drives frame timestamps into a ``VideoConfig``.
 
     ``--timestamps overlay`` is the built-in default section, so ``--config``
@@ -513,8 +513,6 @@ def _video_config(timestamps: TimestampSource, config: Path | None) -> Any:
     cadence earns — is :func:`allsky.overlay.extract_frames_for`'s to state, so
     this returns a section rather than a verdict.
     """
-    from allsky.config import PrepareConfig, VideoConfig, load_prepare_config
-
     if timestamps is TimestampSource.overlay:
         if config is not None:
             logger.warning("--config is ignored with --timestamps overlay")
@@ -523,7 +521,7 @@ def _video_config(timestamps: TimestampSource, config: Path | None) -> Any:
     return cfg.video
 
 
-def _clock(video_config: Any) -> TimestampSource:
+def _clock(video_config: VideoConfig) -> TimestampSource:
     """The timestamp source *video_config* selects, in the ledger's vocabulary.
 
     The ledger and the resume gate speak the flag's names, the config speaks
@@ -536,6 +534,27 @@ def _clock(video_config: Any) -> TimestampSource:
     )
 
 
+def _clock_record(video_config: VideoConfig) -> str:
+    """What the ledger files as the clock a day's frames were extracted under.
+
+    ``overlay`` reads the burned-in stamp and has nothing else to record. The
+    modelled clock places frame N at ``start_time + N x minutes_per_frame``, so
+    two configs that both say ``modelled`` describe DIFFERENT frames whenever
+    either field differs — and filing both as the bare string ``"config"`` made
+    the resume gate answer "already extracted" for a day whose frames carry the
+    other cadence.
+    """
+    from allsky.provenance import canonical_config_json
+
+    clock = _clock(video_config)
+    if clock is TimestampSource.overlay:
+        return clock.value
+    dumped = video_config.model_dump(mode="json")
+    cadence = {field: dumped[field] for field in VIDEO_TIME_FIELDS if field != "timestamps"}
+    digest = hashlib.sha256(canonical_config_json(cadence).encode("utf-8")).hexdigest()
+    return f"{clock.value}:{digest[:12]}"
+
+
 def _process_day(
     plan: DayPlan,
     *,
@@ -544,7 +563,7 @@ def _process_day(
     root: Path,
     videos_dir: Path,
     frames_root: Path,
-    video_config: Any,
+    video_config: VideoConfig,
     step: int,
     resize: int | None,
     uploader: RcloneUploader | None,
@@ -582,7 +601,7 @@ def _process_day(
             count=len(manifest),
             step=step,
             resize=resize,
-            timestamps=_clock(video_config).value,
+            timestamps=_clock_record(video_config),
         )
         ledger.save()
 
@@ -604,7 +623,13 @@ def _process_day(
     if plan.upload_frames:
         recorded = ledger.frames(entry.key) or {}
         source = ledger.frames_dir(entry.key, root=root) or frames_dir
-        destination = uploader.upload_dir(source, REMOTE_FRAMES, entry.key, pattern=FRAME_PATTERN)
+        # Mirrored, not copied: _discard_previous_frames removes the earlier
+        # extraction's JPEGs locally, and a plain copy would leave them on Drive
+        # beside the new ones — the two-clocks state that function exists to
+        # prevent, with the ledger recording a single clean upload over it.
+        destination = uploader.upload_dir(
+            source, REMOTE_FRAMES, entry.key, pattern=FRAME_PATTERN, mirror=True
+        )
         ledger.record_upload(
             entry.key, destination, kind="frames", count=recorded.get("count"), step=step
         )
@@ -637,7 +662,7 @@ def _discard_previous_frames(frames_dir: Path) -> None:
 
 
 def _extract_replacing_previous_frames(
-    video_path: Path, frames_dir: Path, video_config: Any, *, step: int, resize: int | None
+    video_path: Path, frames_dir: Path, video_config: VideoConfig, *, step: int, resize: int | None
 ) -> Any:
     """Extract *video_path* into a staging sibling, then swap it over *frames_dir*.
 
@@ -730,8 +755,12 @@ def snapshot(
         ),
     ] = None,
     tolerance_minutes: Annotated[
-        float, typer.Option(min=0, help="Max age of the sensor row used, in minutes.")
-    ] = 15.0,
+        float | None,
+        typer.Option(
+            min=0,
+            help="Max age of the sensor row used, in minutes; default: the checkpoint's own.",
+        ),
+    ] = None,
     device: Annotated[str, typer.Option(help="Torch device for inference.")] = "cpu",
     trust_checkpoint: Annotated[
         bool,
@@ -828,7 +857,7 @@ def _predict_snapshot(
     checkpoint: Path,
     *,
     sensor_csv: Path | None,
-    tolerance_minutes: float,
+    tolerance_minutes: float | None,
     device: str,
     trust_checkpoint: bool,
     embeddings_dir: Path | None,
@@ -837,7 +866,9 @@ def _predict_snapshot(
 
     Any feature the sensor export could not supply within *tolerance_minutes* is
     imputed at its training mean, and those names are echoed as a warning so a
-    prediction is never read as fully informed when it is not.  The payload is
+    prediction is never read as fully informed when it is not.  Left None the
+    checkpoint's own pairing window applies, which is the one its manifest was
+    built with.  The payload is
     written through the strict JSON writer, so a non-finite prediction fails the
     command instead of landing on disk as a bare ``NaN`` token that every strict
     reader of the file rejects wholesale.
@@ -853,7 +884,9 @@ def _predict_snapshot(
             checkpoint,
             timestamp=captured.captured_at,
             sensor_csv=sensor_csv,
-            tolerance=pd.Timedelta(minutes=tolerance_minutes),
+            tolerance=(
+                None if tolerance_minutes is None else pd.Timedelta(minutes=tolerance_minutes)
+            ),
             device=device,
             trust_checkpoint=trust_checkpoint,
             embeddings_dir=embeddings_dir,
@@ -881,8 +914,8 @@ def _predict_snapshot(
     return path
 
 
-def _existing(*paths: Any) -> tuple[Path, ...]:
-    return tuple(Path(path) for path in paths if path is not None and Path(path).is_file())
+def _existing(*paths: Path | None) -> tuple[Path, ...]:
+    return tuple(path for path in paths if path is not None and path.is_file())
 
 
 def register(app: typer.Typer) -> None:

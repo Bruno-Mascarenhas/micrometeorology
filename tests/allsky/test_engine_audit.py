@@ -30,14 +30,9 @@ def test_a_diverged_epoch_is_never_the_first_best(mode: str):
     assert _improved(math.nan, None, mode, 0.0) is False
 
 
-@pytest.mark.parametrize(
-    ("mode", "current"),
-    [("min", 0.87), ("max", 0.87)],
-)
-def test_a_finite_epoch_improves_on_a_best_poisoned_by_an_earlier_divergence(
-    mode: str, current: float
-):
-    assert _improved(current, math.nan, mode, 0.0) is True
+@pytest.mark.parametrize("mode", ["min", "max"])
+def test_a_finite_epoch_improves_on_a_best_poisoned_by_an_earlier_divergence(mode: str):
+    assert _improved(0.87, math.nan, mode, 0.0) is True
 
 
 def test_resume_warns_that_an_edited_learning_rate_loses_to_the_checkpoint(
@@ -67,6 +62,19 @@ def test_resume_warns_that_an_edited_learning_rate_loses_to_the_checkpoint(
 def test_an_optimizer_the_engine_cannot_build_is_refused_before_a_run_starts():
     with pytest.raises(ValidationError, match="optimizer"):
         ExperimentConfig.model_validate({"train": {"optimizer": "sgd", "device": "cpu"}})
+
+
+def test_fp16_amp_off_cuda_is_refused_instead_of_running_without_a_grad_scaler():
+    with pytest.raises(TrainingError, match="requires a CUDA device"):
+        _build_amp(True, "fp16", "cpu")
+
+
+def test_bf16_amp_needs_no_grad_scaler():
+    assert _build_amp(True, "bf16", "cpu") == ("cpu", torch.bfloat16, None)
+
+
+def test_amp_turned_off_asks_for_no_autocast_and_no_scaler():
+    assert _build_amp(False, "bf16", "cpu") == (None, None, None)
 
 
 def test_bf16_amp_autocasts_on_the_run_device_and_not_on_the_cpu():
@@ -217,6 +225,16 @@ def test_resuming_from_a_checkpoint_whose_weights_diverged_is_refused(tmp_path: 
     assert "best.ckpt" in str(excinfo.value)
 
 
+def test_a_diverged_checkpoint_is_refused_as_the_error_the_train_cli_reports(tmp_path: Path):
+    """``allsky train`` catches TrainingError to print the message instead of a traceback,
+    and a run that diverged is the one time the operator most needs to read it."""
+    path = tmp_path / "last.ckpt"
+    torch.save({"model_state": {"trunk.weight": torch.tensor([math.nan])}}, path)
+
+    with pytest.raises(TrainingError, match="non-finite weights"):
+        load_checkpoint(path)
+
+
 def test_a_checkpoint_with_finite_weights_still_resumes(tmp_path: Path):
     root, manifest, _ = _make_dataset(tmp_path)
     reader = _reader(manifest)
@@ -234,6 +252,25 @@ def test_a_checkpoint_with_finite_weights_still_resumes(tmp_path: Path):
     )
 
     assert summary["epoch"] == 2
+
+
+def test_a_cosine_horizon_the_operator_pinned_survives_a_changed_epoch_budget(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """``T_max`` in train.scheduler.params is the operator's contract; the resume
+    reconciliation re-points only a horizon the engine itself chose."""
+    from allsky.training.engine import _reconcile_cosine_horizon
+
+    cfg = _cfg(tmp_path, epochs=6, scheduler="cosine")
+    cfg.train.scheduler.params = {"T_max": 3}
+    optimizer = torch.optim.AdamW(torch.nn.Linear(2, 1).parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=3)
+
+    with caplog.at_level(logging.WARNING, logger="allsky.training.engine"):
+        _reconcile_cosine_horizon(scheduler, optimizer, cfg)
+
+    assert scheduler.T_max == 3
+    assert not caplog.records
 
 
 def _diverging_cfg(root: Path, *, epochs: int = 2) -> ExperimentConfig:
@@ -285,6 +322,75 @@ def test_a_run_that_trained_nothing_reports_no_best_checkpoint_rather_than_a_mis
 
     assert summary["epochs_ran"] == 0
     assert summary["checkpoint_best"] is None
+
+
+def test_a_checkpoint_without_the_patience_counter_reconstructs_it_from_the_best_epoch(
+    tmp_path: Path,
+):
+    """``epochs_no_improve`` postdates the checkpoint format, so a payload written before
+    it resumes on the lower bound ``epoch - best_epoch``, which decides whether the
+    resumed run trains at all."""
+    root, manifest, _ = _make_dataset(tmp_path)
+    reader = _reader(manifest)
+    run_dir = tmp_path / "run"
+    run_experiment(
+        _cfg(root, epochs=3), data_root=root, output_dir=run_dir, embedding_reader=reader
+    )
+
+    checkpoint = load_checkpoint(run_dir / "last.ckpt")
+    checkpoint["epochs_no_improve"] = None
+    checkpoint["best_metric"] = {**checkpoint["best_metric"], "epoch": 1}
+    torch.save(checkpoint, run_dir / "last.ckpt")
+
+    summary = run_experiment(
+        _cfg(root, epochs=5, patience=2),
+        data_root=root,
+        output_dir=run_dir,
+        resume="auto",
+        embedding_reader=reader,
+    )
+
+    assert summary["epochs_ran"] == 0
+
+
+def test_a_run_that_trained_nothing_reports_no_last_checkpoint_either(tmp_path: Path):
+    """``checkpoint_best`` already carried the existence rule; ``checkpoint_last`` named
+    ``<fresh_dir>/last.ckpt`` for a resume that wrote nothing there."""
+    root, manifest, _ = _make_dataset(tmp_path)
+    reader = _reader(manifest)
+    trained_dir = tmp_path / "trained"
+    run_experiment(
+        _cfg(root, model="climatology", epochs=8, patience=1),
+        data_root=root,
+        output_dir=trained_dir,
+        embedding_reader=reader,
+    )
+
+    summary = run_experiment(
+        _cfg(root, model="climatology", epochs=8, patience=1),
+        data_root=root,
+        output_dir=tmp_path / "fresh",
+        resume=str(trained_dir / "last.ckpt"),
+        embedding_reader=reader,
+    )
+
+    assert summary["epochs_ran"] == 0
+    assert summary["checkpoint_last"] is None
+
+
+def test_a_metrics_row_with_no_epoch_is_refused_instead_of_kept_as_epoch_zero(tmp_path: Path):
+    """Only a corrupted metrics.json can carry a row without the field, and reading it
+    as epoch 0 keeps it through the truncation and rewrites it as real history."""
+    from allsky.training.run_dir import truncate_metrics
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "metrics.json").write_text(
+        '[{"epoch": 1, "loss": 0.5}, {"loss": 0.4}]', encoding="utf-8"
+    )
+
+    with pytest.raises(TrainingError, match=r"metrics\.json"):
+        truncate_metrics(run_dir, ["epoch", "loss"], 1)
 
 
 def test_a_converged_run_still_reports_the_best_checkpoint_it_wrote(tmp_path: Path):

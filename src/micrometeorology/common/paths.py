@@ -14,7 +14,7 @@ def ensure_dir(path: str | Path) -> Path:
     return directory
 
 
-def find_files(directory: str | Path, pattern: str = "*.dat") -> list[Path]:
+def find_files(directory: str | Path, pattern: str) -> list[Path]:
     """Glob for files matching *pattern* inside *directory*, sorted by name.
 
     The glob is not recursive unless *pattern* says so with ``**``, and the sort

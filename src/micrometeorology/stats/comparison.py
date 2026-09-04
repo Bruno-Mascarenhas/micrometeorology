@@ -68,15 +68,15 @@ def read_dataset(
 
     if timestamp_columns and all(c in df.columns for c in timestamp_columns):
         df.index = pd.to_datetime(df[timestamp_columns])
-        df = df.drop(columns=timestamp_columns, errors="ignore")
+        df = df.drop(columns=timestamp_columns)
     elif "TIMESTAMP" in df.columns:
         df.index = pd.to_datetime(df["TIMESTAMP"])
-        df = df.drop(columns=["TIMESTAMP"], errors="ignore")
+        df = df.drop(columns=["TIMESTAMP"])
     elif parse_dates:
         date_parts = [c for c in ("year", "month", "day", "hour") if c in df.columns]
         if len(date_parts) >= 3:
             df.index = pd.to_datetime(df[date_parts])
-            df = df.drop(columns=date_parts, errors="ignore")
+            df = df.drop(columns=date_parts)
         elif len(df.columns) > 0:
             # The leading index column ``sensors.export.export_csv`` writes, plus
             # the named one ``DataFrame.to_csv`` writes for a ``timestamp`` index.
@@ -198,14 +198,11 @@ def compare_variables(
     model = paired_df[model_col].to_numpy()
     circular = is_circular_column(variable)
     if circular:
-        # Name-based detection changes the published numbers, so it says so.
         logger.info(
             "%s: circular quantity — residuals wrapped to [-180, 180); "
             "R2/r/d/IOA/NRMSE suppressed (an arithmetic mean of bearings is meaningless)",
             variable,
         )
-    # ``n`` leads the record on purpose: it is the denominator of every number
-    # after it, and it is not the row count of *paired_df*.
     return {"n": float(valid_pairs(obs, model)), **compute_all(obs, model, circular=circular)}
 
 

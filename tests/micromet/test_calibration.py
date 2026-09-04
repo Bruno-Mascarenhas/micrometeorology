@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from pydantic import ValidationError
 
 from micrometeorology.sensors import calibration
 from micrometeorology.sensors.calibration import (
@@ -32,8 +33,16 @@ def sample_data() -> pd.DataFrame:
     )
 
 
+CALIBRATIONS_YAML = (
+    Path(__file__).resolve().parents[2] / "configs" / "micromet" / "calibrations.yaml"
+)
+
+
 class TestApplyCalibrations:
     def test_multiplicative_factor(self, sample_data):
+        """A date-only end_date is inclusive of the WHOLE boundary day: every
+        sub-daily sample of 2018-12-31 is calibrated, and 2019-01-01 00:00
+        onward is untouched."""
         cals = [
             CalibrationRecord(
                 column="CM3Up_Wm2_Avg",
@@ -46,9 +55,6 @@ class TestApplyCalibrations:
         original = sample_data["CM3Up_Wm2_Avg"].copy()
         apply_calibrations(sample_data, cals)
 
-        # A date-only end_date is inclusive of the WHOLE boundary day: every
-        # sub-daily sample of 2018-12-31 is calibrated, and 2019-01-01 00:00
-        # onward is untouched.
         mask_before = sample_data.index <= pd.Timestamp("2018-12-31 23:59:59")
         mask_after = sample_data.index >= pd.Timestamp("2019-01-01")
 
@@ -86,9 +92,9 @@ class TestBoundaryDayCalibration:
             ],
         )
         end_day = five_min_data.loc["2018-12-31", "CM3Up_Wm2_Avg"]
-        assert len(end_day) == 288  # all 5-min samples of the day
-        assert (end_day == 50.0).all()
-        assert (five_min_data.loc["2019-01-01", "CM3Up_Wm2_Avg"] == 100.0).all()
+        assert len(end_day) == 288, "every 5-minute sample of the boundary day"
+        np.testing.assert_allclose(end_day, 50.0)
+        np.testing.assert_allclose(five_min_data.loc["2019-01-01", "CM3Up_Wm2_Avg"], 100.0)
 
     def test_null_factor_nans_whole_end_day(self, five_min_data):
         apply_calibrations(
@@ -119,9 +125,9 @@ class TestBoundaryDayCalibration:
                 )
             ],
         )
-        assert five_min_data.loc["2018-12-31 12:00", "CM3Up_Wm2_Avg"] == 50.0
-        assert five_min_data.loc["2018-12-31 12:05", "CM3Up_Wm2_Avg"] == 100.0
-        assert (five_min_data.loc["2018-12-31 00:00":"2018-12-31 12:00"] == 50.0).all().all()
+        assert five_min_data.loc["2018-12-31 12:00", "CM3Up_Wm2_Avg"] == pytest.approx(50.0)
+        assert five_min_data.loc["2018-12-31 12:05", "CM3Up_Wm2_Avg"] == pytest.approx(100.0)
+        np.testing.assert_allclose(five_min_data.loc["2018-12-31 00:00":"2018-12-31 12:00"], 50.0)
 
     def test_unify_has_no_boundary_day_hole(self, five_min_data):
         five_min_data["B"] = 20.0
@@ -144,7 +150,7 @@ class TestBoundaryDayCalibration:
         )
         assert five_min_data.loc["2018-12-31", "U"].notna().all()
         assert (five_min_data.loc["2018-12-31", "U"] == 100.0).all()
-        assert (five_min_data.loc["2019-01-01", "U"] == 20.0).all()
+        np.testing.assert_allclose(five_min_data.loc["2019-01-01", "U"], 20.0)
 
 
 class TestOverlapGuard:
@@ -189,7 +195,6 @@ class TestOverlapGuard:
         ]
         original = sample_data["CM3Up_Wm2_Avg"].copy()
         apply_calibrations(sample_data, cals)
-        # Whole boundary day gets the FIRST factor; next day starts the second.
         end_day = sample_data.loc["2018-12-31", "CM3Up_Wm2_Avg"]
         np.testing.assert_allclose(end_day, original.loc["2018-12-31"] * 0.5)
         next_day = sample_data.loc["2019-01-01", "CM3Up_Wm2_Avg"]
@@ -215,14 +220,13 @@ class TestOverlapGuard:
 
 
 class TestARecordThatClosesBeforeTheDataBegins:
-    """An open-ended record inherits the DATASET's first timestamp.
+    """An open-ended record inherits the DATASET's first timestamp when APPLIED.
 
-    A record that closes before the data starts therefore resolves to
-    ``[dataset-start, its own end]`` with the two inverted: it covers nothing,
-    so it must not count as an interval for the overlap guard.
-
-    This is the ordinary case for a recent logger table — the shipped CMP21
-    record ends 2019-10-12 and ``data/LBM_lenta_2025.dat`` begins 2025-05-14.
+    A record that closes before the data starts therefore masks nothing, which
+    is the ordinary case for a recent logger table — the shipped CMP21 record
+    ends 2019-10-12 and ``data/LBM_lenta_2025.dat`` begins 2025-05-14. The
+    overlap guard reads the DECLARED range instead, so how much data happens to
+    be loaded cannot decide whether ``calibrations.yaml`` is validated.
     """
 
     @staticmethod
@@ -231,15 +235,15 @@ class TestARecordThatClosesBeforeTheDataBegins:
         return pd.DataFrame({"CMP21_Wm2_Avg": np.full(48, 100.0)}, index=index)
 
     def test_the_empty_record_does_not_raise_a_spurious_overlap(self) -> None:
+        """The first record closes six years before this frame starts, so it is
+        empty here and only the second one applies."""
         calibrations: list[CalibrationRecord] = [
-            # Closes six years before this frame starts: empty here.
             CalibrationRecord(
                 column="CMP21_Wm2_Avg",
                 end_date="2019-10-12",
                 factor=None,
                 description="not installed yet",
             ),
-            # The one that actually applies.
             CalibrationRecord(
                 column="CMP21_Wm2_Avg",
                 start_date="2019-10-13",
@@ -255,8 +259,11 @@ class TestARecordThatClosesBeforeTheDataBegins:
 
     def test_a_genuine_overlap_is_still_refused(self) -> None:
         """The guard must not be weakened: two records that really do cover the
-        same day are still a configuration error."""
-        # Both resolve to real intervals inside the 48-hour frame, sharing 2025-05-14.
+        same day are still a configuration error.
+
+        Both records resolve to real intervals inside the 48-hour frame, sharing
+        2025-05-14.
+        """
         calibrations: list[CalibrationRecord] = [
             CalibrationRecord(
                 column="CMP21_Wm2_Avg",
@@ -276,19 +283,41 @@ class TestARecordThatClosesBeforeTheDataBegins:
         with pytest.raises(ValueError, match="Overlapping"):
             apply_calibrations(self._frame().copy(), calibrations)
 
+    def test_a_declared_overlap_is_refused_against_a_frame_narrower_than_it(self) -> None:
+        """The guard resolved open ends against the frame, so on the rolling
+        ``--source`` window the earlier record inverted, was dropped as empty,
+        and the later record's factor applied uncontested — the exact
+        record-order dependence the ValueError exists to prevent."""
+        one_row = pd.DataFrame(
+            {"CMP21_Wm2_Avg": [100.0]}, index=pd.DatetimeIndex(["2026-06-01 12:00"])
+        )
+        calibrations: list[CalibrationRecord] = [
+            CalibrationRecord(
+                column="CMP21_Wm2_Avg", end_date="2020-12-31", factor=1.0, description="a"
+            ),
+            CalibrationRecord(
+                column="CMP21_Wm2_Avg", start_date="2020-01-01", factor=2.0, description="b"
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="Overlapping"):
+            apply_calibrations(one_row.copy(), calibrations)
+
     def test_the_shipped_calibrations_load_against_a_recent_file(self) -> None:
-        """The shipped config must apply end to end against a 2025 frame."""
-        from micrometeorology.common.config import get_settings
+        """The shipped config must apply end to end against a 2025 frame.
+
+        Resolved from this file, not from ``configs_dir``: reading through the
+        settings meant an ambient ``LABMIM_CONFIGS_DIR`` pointing anywhere else
+        made the test SKIP, which is the exact misconfiguration it exists to
+        catch. And the assertion is on the factor the record declares, not on a
+        row count the calibration cannot change.
+        """
         from micrometeorology.sensors.calibration import load_calibrations
 
-        settings = get_settings()
-        path = settings.configs_dir / "calibrations.yaml"
-        if not path.is_file():  # pragma: no cover - only in a stripped checkout
-            pytest.skip("shipped calibrations not present")
+        result = apply_calibrations(self._frame().copy(), load_calibrations(CALIBRATIONS_YAML))
 
-        result = apply_calibrations(self._frame().copy(), load_calibrations(path))
-
-        assert len(result) == 48
+        # 9.38 / 9.52, the CMP21 sensitivity revision the shipped record names.
+        assert result["CMP21_Wm2_Avg"].iloc[0] == pytest.approx(100.0 * 9.38 / 9.52, abs=1e-4)
 
 
 class TestACalibrationSurvivesAColumnRename:
@@ -552,3 +581,18 @@ class TestSolarGeometryParquet:
         fatores = calibration.load_shade_ring_factors(origem)
 
         assert fatores.tolist() == [1.1802, 1.1803]
+
+
+def test_a_record_without_a_factor_is_refused_instead_of_blanking_the_window() -> None:
+    """``factor`` defaulted to ``None``, and ``None`` is the value that declares a
+    window invalid and blanks it: an appended record that merely forgot the key
+    erased its whole window with exit code 0."""
+    with pytest.raises(ValidationError, match="factor"):
+        CalibrationRecord.model_validate(
+            {
+                "column": "CM3Up_Wm2_Avg",
+                "start_date": "2018-06-01",
+                "end_date": "2018-12-31",
+                "description": "sem factor",
+            }
+        )

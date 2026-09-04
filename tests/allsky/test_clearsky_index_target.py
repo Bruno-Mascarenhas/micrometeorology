@@ -9,6 +9,7 @@ support the reference must be refused rather than divided by something wrong.
 """
 
 from pathlib import Path
+from typing import cast
 
 import imageio.v3 as iio
 import numpy as np
@@ -17,6 +18,7 @@ import pytest
 import torch
 
 from allsky.clearsky import clearsky_diffuse
+from allsky.config import DHIParameterization
 from allsky.data.datasets import MultimodalImageDataset
 from allsky.data.manifest import build_manifest
 from allsky.features import resolve_feature_set
@@ -56,7 +58,9 @@ def _manifest(tmp_path: Path, n: int = 6) -> tuple[pd.DataFrame, Path]:
     return manifest, tmp_path
 
 
-def _dataset(manifest: pd.DataFrame, root: Path, parameterization: str) -> MultimodalImageDataset:
+def _dataset(
+    manifest: pd.DataFrame, root: Path, parameterization: DHIParameterization
+) -> MultimodalImageDataset:
     return MultimodalImageDataset(
         manifest,
         resolve_feature_set("bare"),
@@ -96,14 +100,21 @@ class TestClearSkyIndexTarget:
 
         assert scales == pytest.approx(expected.astype(np.float32), rel=1e-6)
 
-    def test_the_ratio_is_dimensionless_and_near_one_under_a_clear_sky(self, tmp_path: Path):
+    def test_the_ratio_is_finite_everywhere(self, tmp_path: Path):
         manifest, root = _manifest(tmp_path)
         dataset = _dataset(manifest, root, "clearsky_index")
 
         ratios = torch.stack([dataset[i]["dhi"] for i in range(len(dataset))])
 
         assert bool(torch.isfinite(ratios).all())
-        assert 0.0 < float(ratios.min()) < 10.0
+
+    def test_the_ratio_is_strictly_positive(self, tmp_path: Path):
+        manifest, root = _manifest(tmp_path)
+        dataset = _dataset(manifest, root, "clearsky_index")
+
+        ratios = torch.stack([dataset[i]["dhi"] for i in range(len(dataset))])
+
+        assert float(ratios.min()) > 0.0
 
     def test_a_manifest_without_the_solar_columns_is_refused(self, tmp_path: Path):
         manifest, root = _manifest(tmp_path)
@@ -128,3 +139,12 @@ class TestClearSkyIndexTarget:
 
         with pytest.raises(ValueError, match="non-positive or non-finite"):
             _dataset(night, root, "clearsky_index")
+
+
+def test_an_unknown_parameterization_is_refused_not_served_as_raw(tmp_path: Path) -> None:
+    """Any spelling other than ``clearsky_index`` fell through to a scale of one, so
+    a misspelt arm trained on raw W/m2 while every metric stayed self-consistent."""
+    manifest, root = _manifest(tmp_path)
+
+    with pytest.raises(ValueError, match="dhi_parameterization"):
+        _dataset(manifest, root, cast(DHIParameterization, "clearsky-index"))

@@ -1,4 +1,4 @@
-"""Torch-gated engine tests for review findings F6, F7 and F10.
+"""Torch-gated engine tests for the paths a production run takes by default.
 
 All offline and CPU-only. Reuses the shared synthetic builders in
 ``tests/allsky/_synthetic.py`` (extended with tiny JPEG writing and a real
@@ -68,7 +68,7 @@ def _image_cfg(root: Path, *, model: str = "film", epochs: int = 1) -> Experimen
 
 
 class TestImageBackboneProduction:
-    """Finding F6: image mode must build a backbone in production (no build_model injection)."""
+    """Image mode builds the backbone its config names, with no model injected by hand."""
 
     def test_image_mode_runs_via_run_experiment_hook(self, tmp_path: Path):
         # The documented run_experiment hook (not a hand-built model) supplies the
@@ -146,7 +146,7 @@ class TestImageBackboneProduction:
 
 
 class TestEmbeddingPreload:
-    """Finding F7: the engine's default embedding reader preloads all shards."""
+    """The engine's default embedding reader preloads all shards."""
 
     def test_embedding_run_preloads_by_default(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -184,7 +184,7 @@ class TestEmbeddingPreload:
 
 
 class TestFreshRunStaleMetrics:
-    """Finding F10: a fresh run into a reused dir must not append to stale metrics."""
+    """A fresh run into a reused directory must not append to stale metrics."""
 
     def test_stale_metrics_rotated_on_fresh_start(self, tmp_path: Path):
         root, manifest, _ = synthetic.make_dataset(tmp_path, n_days=3, per_day=6)

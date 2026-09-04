@@ -185,19 +185,22 @@ The Campbell Scientific datalogger allows sensors to be added or removed at any 
 Calibrations are **immutable historical facts**. Each record specifies:
 
 ```yaml
-# configs/micromet/calibrations.yaml
+# configs/micromet/calibrations.yaml — the two shipped CMP21 records
 calibrations:
-  - column: CM3Up
-    start_date: "2018-11-01"
-    end_date: "2019-06-30"
-    factor: 1.0526
-    description: "Post-maintenance calibration Nov/2018"
+  # Column names carry the logger's exact suffixes, as merge_dat_files()
+  # produces them: `CMP21` without `_Wm2_Avg` matches nothing, and
+  # unify_sensor_columns() then builds no unified column at all.
+  - column: CMP21_Wm2_Avg
+    start_date: null              # null = from the start of the data
+    end_date: "2019-10-12"
+    factor: null                  # null = invalid data for this period → NaN
+    description: "CMP21 not installed before 2019-10-12; data is invalid"
 
-  - column: CM3Up
-    start_date: "2019-07-01"
-    end_date: null      # null = until end of data
-    factor: null         # null = invalid data for this period → NaN
-    description: "Sensor malfunction"
+  - column: CMP21_Wm2_Avg
+    start_date: "2019-10-13"
+    end_date: null                # null = until end of data
+    factor: 0.9852941176          # 9.38 / 9.52
+    description: "CMP21 sensitivity correction: 9.38 / 9.52"
 ```
 
 ```python
@@ -570,17 +573,21 @@ tables. Three clock defects are repaired into a scratch directory; nothing under
 labmim-archive -d data -o output/archive --strict
 ```
 
-`--strict` exits non-zero when the merge does not reproduce the audited counts
-(lenta 987,969 rows, rain 988,249, span 2016-09-29 13:40 to 2026-04-24 13:00,
-zero duplicates, monotonic). Treat it as the archive's regression test.
+`--strict` exits non-zero when the merge loses rows, duplicates a timestamp or
+comes out non-monotonic. The floors it checks against are named constants in
+`micrometeorology.sensors.archive` — `EXPECTED_LENTA_ROWS`, `EXPECTED_RAIN_ROWS`,
+`ARCHIVE_START`, `ARCHIVE_END` — rather than numbers transcribed here, because
+the archive grows with every export and a figure written into prose goes stale
+the following week. Treat it as the archive's regression test.
 
-Three artifacts plus a report:
+Three artifacts plus a report. The shapes below are one run's, on the archive as
+of 2026-09-03; `archive_report.json` carries the current ones:
 
 | file | what it is |
 |------|------------|
-| `station_5min_raw.parquet` | 988,289 x 93 — values as the logger wrote them, sentinels included |
-| `station_5min_qc.parquet` | 988,289 x 111 — after sentinel masking, physical gates, calibrations and era unification |
-| `station_hourly.parquet` | 83,857 x 111 — hourly means, sum for the tipping bucket, speed-weighted vector mean for direction, and the fraction of each hour's samples whose logger status read `OK` |
+| `station_5min_raw.parquet` | 1,022,917 x 93 — values as the logger wrote them, sentinels included |
+| `station_5min_qc.parquet` | 1,022,917 x 111 — after sentinel masking, physical gates, calibrations and era unification |
+| `station_hourly.parquet` | 86,866 x 93 — hourly means, sum for the tipping bucket, speed-weighted vector mean for direction, and the fraction of each hour's samples whose logger status read `OK` |
 | `archive_report.json` | the verification, plus samples masked per column |
 
 The run prints how many physical limits actually **fired**. That number matters:
@@ -649,9 +656,10 @@ distance of 0.55).
 `REFERENCES` carries sixteen records — authors, title, venue, resolvable link —
 and labels and caveats cite them with `[[key]]` markers instead of prose. The
 manifest publishes the registry once and the site turns each marker into a link
-with the full record in its tooltip. A `doi.org` link only where the identifier
-was verified; otherwise a Crossref title search, which cannot point at the wrong
-paper. Two guards run at import: a marker with no record, and a record
+with the full record in its tooltip. Every record links through `doi.org`, each
+identifier resolved and checked to land on the cited work; a search URL is
+refused by test, because a search that silently returns nothing still answers
+200. Two guards run at import: a marker with no record, and a record
 containing a marker of its own — the second because a global rename of the prose
 citations produced exactly that during development.
 
@@ -853,9 +861,9 @@ repair the record's maximum is 99.80% and no hour exceeds saturation.
 
 Shortening the header alone was never an option: pandas refuses a row wider than
 its header, so the 47-field rows and a 35-name header cannot coexist. That is
-why this is a file migration and not a header edit. Both readers of the record
-(`export_climatology.read_wrf_series`, `generate_station_graphs.read_wrf_series`)
-call `rename_v1_columns`, so a file still on v1 is read under the v2 names and no
+why this is a file migration and not a header edit. Every reader of the record
+goes through `wrf.operational_record.read_wrf_series`, which calls
+`rename_v1_columns`, so a file still on v1 is read under the v2 names and no
 consumer needs to know which schema is on disk.
 
 ### Monitoring window artifacts (`labmim-monitoring`)
@@ -1200,7 +1208,19 @@ labmim-site-graphs site \
 
 ### What is the sentinel value (-900)?
 
-The Campbell Scientific datalogger uses -900 (or similar) to indicate missing or invalid data. The ingestion module automatically converts all values ≤ sentinel to NaN.
+It is a default that matches **nothing** in this archive, and leaving it on only
+creates the impression that missing data has been handled. `read_campbell_dat`
+turns values ≤ `sensor_sentinel_value` into NaN, but this station's loggers rail
+at 1000 °C, 999 %RH, −46.8, −273.1, −7999, −6673 and a windowed 0 — all of them
+above −900, all of them finite, and every one of them a plausible-looking number
+to a filter that only checks `np.isfinite`.
+
+The rails that are actually caught are per column and per era, in
+`SENTINEL_RANGES` / `mask_sentinels`
+(`micrometeorology.sensors.archive`), which `labmim-archive` and
+`allsky prepare-local` both apply after reading. Setting
+`sensor_sentinel_value: null` turns off a guard that only looks like one; it
+changes nothing about what reaches the archive.
 
 ### Why does configuration have 4 layers?
 

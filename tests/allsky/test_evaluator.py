@@ -89,6 +89,38 @@ class TestStratified:
         assert len(overall_dhi) == 1
         assert overall_dhi["value"].iloc[0] == pytest.approx(result.global_metrics["dhi"]["rmse"])
 
+    def test_the_sky_and_kindex_strata_carry_more_than_one_bucket(self, tmp_path: Path):
+        """A stratified table with one bucket per kind is the unstratified table
+        under another name, and the report reads as though the model had been
+        scored across the sky. The fixture spans several clearness levels, so
+        the classes and the k-index bands both have to.
+        """
+        root, reader, ckpt = _train(tmp_path)
+        result = evaluate_checkpoint(ckpt, split="val", data_root=root, embedding_reader=reader)
+
+        table = result.stratified
+        for kind in ("sky_class", "kindex_band"):
+            buckets = table[table["stratum_kind"] == kind]["stratum"].unique()
+            assert len(buckets) > 1, (kind, buckets)
+
+    def test_every_stratum_counts_the_samples_it_scored(self, tmp_path: Path):
+        """``n`` is what tells the reader an RMSE of 3 W/m2 came from two frames
+        rather than from two hundred, so an empty or unset count would make the
+        whole table unreadable.
+        """
+        root, reader, ckpt = _train(tmp_path)
+        result = evaluate_checkpoint(ckpt, split="val", data_root=root, embedding_reader=reader)
+
+        table = result.stratified
+        assert (table["n"] > 0).all()
+        overall = table[(table["stratum_kind"] == "overall") & (table["target"] == "dhi")]
+        by_class = table[
+            (table["stratum_kind"] == "sky_class")
+            & (table["target"] == "dhi")
+            & (table["metric"] == "rmse")
+        ]
+        assert by_class["n"].sum() == overall["n"].iloc[0]
+
 
 class TestDenormalization:
     def test_predictions_in_physical_units_not_normalized_space(self, tmp_path: Path):
@@ -129,6 +161,39 @@ class TestProvenanceChecks:
                 ckpt, split="val", data_root=root, embedding_reader=reader, strict=True
             )
 
+    def test_split_id_mismatch_warns(self, tmp_path: Path, caplog):
+        """Scoring a checkpoint against a split it was not trained on is the one
+        way a metric can look right and mean nothing, and neither half of the
+        guard — the warning nor `--strict` — had a test."""
+        import logging
+
+        root, reader, ckpt = _train(tmp_path)
+        _rewrite_split_id(ckpt, "not-the-split-it-trained-on")
+
+        with caplog.at_level(logging.WARNING, logger="allsky.evaluation.evaluator"):
+            result = evaluate_checkpoint(ckpt, split="val", data_root=root, embedding_reader=reader)
+
+        assert result.meta["split_id_ok"] is False
+        assert any("split" in record.message for record in caplog.records)
+
+    def test_split_id_mismatch_strict_raises(self, tmp_path: Path):
+        root, reader, ckpt = _train(tmp_path)
+        _rewrite_split_id(ckpt, "not-the-split-it-trained-on")
+
+        with pytest.raises(ValueError, match="split"):
+            evaluate_checkpoint(
+                ckpt, split="val", data_root=root, embedding_reader=reader, strict=True
+            )
+
+    def test_a_checkpoint_recording_no_split_id_is_reported_as_unchecked(self, tmp_path: Path):
+        """Not the same as a match: nothing was compared."""
+        root, reader, ckpt = _train(tmp_path)
+        _rewrite_split_id(ckpt, None)
+
+        result = evaluate_checkpoint(ckpt, split="val", data_root=root, embedding_reader=reader)
+
+        assert result.meta["split_id_ok"] is False
+
     def test_empty_split_raises(self, tmp_path: Path):
         # make_dataset uses test_fraction=0.0 -> no test days.
         root, reader, ckpt = _train(tmp_path)
@@ -140,4 +205,11 @@ def _corrupt_manifest_hash(ckpt: Path) -> None:
     """Rewrite the checkpoint's stored manifest hash to force a mismatch."""
     payload = torch.load(ckpt, weights_only=False)
     payload["manifest_sha256"] = "deadbeef" * 8
+    torch.save(payload, ckpt)
+
+
+def _rewrite_split_id(ckpt: Path, value: str | None) -> None:
+    """Set the checkpoint's stored split id, to force a mismatch or an absence."""
+    payload = torch.load(ckpt, weights_only=False)
+    payload["split_id"] = value
     torch.save(payload, ckpt)

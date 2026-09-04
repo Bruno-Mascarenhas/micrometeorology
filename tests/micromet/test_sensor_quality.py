@@ -32,6 +32,40 @@ def test_a_value_that_leaves_and_returns_is_masked_but_its_neighbours_are_not():
     assert frame["BP1_mbar_Avg"].isna().tolist() == [False, False, True, False, False]
 
 
+@pytest.mark.parametrize(
+    ("values", "expected_removed"),
+    [
+        # Two interior samples: exactly max_len, so the excursion is masked.
+        ([1013.0, 1013.0, 996.0, 996.0, 1013.0, 1013.0], 2),
+        # Three: one past max_len, so the series is judged to have moved.
+        ([1013.0, 1013.0, 996.0, 996.0, 996.0, 1013.0, 1013.0], 0),
+    ],
+)
+def test_max_len_is_decided_on_its_own_boundary(values: list[float], expected_removed: int):
+    """`max_len` is what separates a dropout from a real move of the series, and
+    neither side of it was pinned: an off-by-one would either cut convective
+    events or leave dropouts in the published record."""
+    frame = _frame("BP1_mbar_Avg", values)
+
+    _frame_out, removed = mask_step_excursions(
+        frame, [SensorStepLimit(column="BP1_mbar_Avg", threshold=1.0, return_tol=1.0, max_len=2)]
+    )
+
+    assert removed == expected_removed
+
+
+def test_missing_samples_inside_an_excursion_do_not_make_it_adjacent():
+    """Adjacency is what the whole test rests on: two readings separated by NaNs
+    never stood next to each other, whatever their stamps say."""
+    frame = _frame("BP1_mbar_Avg", [1013.0, float("nan"), float("nan"), 996.0, 1013.0, 1013.0])
+
+    _frame_out, removed = mask_step_excursions(
+        frame, [SensorStepLimit(column="BP1_mbar_Avg", threshold=1.0, return_tol=1.0, max_len=2)]
+    )
+
+    assert removed == 0
+
+
 def test_a_step_that_stays_down_is_left_alone():
     """A cold pool does not recover in five minutes; a sensor dropout does.
 
@@ -63,6 +97,24 @@ def test_a_value_that_comes_back_to_the_wrong_level_is_not_an_excursion():
 def test_a_gap_in_the_record_is_not_a_step():
     """Two readings either side of missing hours never stood next to each other."""
     frame = _frame("BP1_mbar_Avg", [1013.0, 996.0, 1013.0], freq="1h")
+
+    _frame_out, removed = mask_step_excursions(
+        frame, [SensorStepLimit(column="BP1_mbar_Avg", threshold=1.0, return_tol=1.0, max_len=2)]
+    )
+
+    assert removed == 0
+
+
+def test_an_index_that_steps_backwards_is_not_adjacency():
+    """Two samples out of order never stood next to each other in time.
+
+    Differencing across a backwards jump measures an arbitrary interval, so the
+    excursion these five values would form on an ordered index must not be found
+    on a shuffled one.
+    """
+    frame = _frame("BP1_mbar_Avg", [1013.0, 1013.0, 996.0, 1013.0, 1013.0])
+    stamps = list(frame.index)
+    frame.index = pd.DatetimeIndex([stamps[0], stamps[3], stamps[2], stamps[1], stamps[4]])
 
     _frame_out, removed = mask_step_excursions(
         frame, [SensorStepLimit(column="BP1_mbar_Avg", threshold=1.0, return_tol=1.0, max_len=2)]
@@ -103,7 +155,7 @@ def test_a_gap_breaks_a_run_rather_than_bridging_it():
     assert removed == 0
 
 
-def test_an_anemometer_frozen_above_calm_is_masked_despite_the_exemption():
+def test_an_anemometer_frozen_at_a_nonzero_speed_is_masked():
     """The 18-day rail this test exists for sat at 0.281 m/s, not at zero."""
     frame = _frame("WS_ms_S_WVT", [0.281] * 8)
 
@@ -203,4 +255,6 @@ def test_a_double_dip_does_not_consume_the_reading_between_the_two():
     )
 
     assert removed == 2
-    assert frame["BP1_mbar_Avg"].iloc[3] == 1013.30, "the reading between the dips is ambient"
+    assert frame["BP1_mbar_Avg"].iloc[3] == pytest.approx(1013.30), (
+        "the reading between the dips is ambient"
+    )

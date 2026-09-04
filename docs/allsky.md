@@ -21,7 +21,7 @@ The pipeline has four stages, each with its own CLI command:
 
 The models learn diffuse irradiance and, per the experiment's `targets` block, optionally a clear-sky index (k\*) and a weak sky-condition class. Diffuse targets are a measured pyranometer column by default (`PSP_Wm2_Avg`), or an Erbs-decomposition **pseudo-target** derived from GHI when no measured column is configured. Every manifest row carries a `target_source` column (`"measured"` or `"erbs_pseudo"`) so pseudo rows can be identified and replaced later.
 
-All timestamps in the pipeline are **naive local standard time** (the Campbell datalogger clock — no timezone conversion). The UTC offset for solar geometry is inferred from the site longitude as `round(longitude / 15)`; for Salvador-BA (longitude −38.51) this yields UTC−3, correct year-round since Brazil abolished DST in 2019.
+All timestamps in the pipeline are **naive local standard time** (the Campbell datalogger clock — no timezone conversion). The UTC offset for solar geometry is `SiteConfig.utc_offset_hours`, pinned per site (−3 for the station, −8 for the UCSD-Folsom arm) and published in the manifest meta's `timezone` block; it is never read from the host clock nor inferred from the longitude.
 
 ---
 
@@ -37,10 +37,13 @@ src/allsky/
 ├── drive.py           # rclone uploads to Google Drive
 ├── snapshot.py        # Live-frame capture + single-image prediction
 ├── preprocessing.py   # Static mask / crop / resize + per-frame visual QC
-├── solar.py           # NOAA/Spencer solar position, extraterrestrial GHI, clearness index kt
 ├── clearsky.py        # Haurwitz clear-sky GHI + clear-sky index k*
 ├── erbs.py            # Erbs (1982) diffuse-fraction decomposition -> pseudo diffuse targets
-├── atomic.py          # Atomic file / JSON writes         provenance.py # code + content hashes
+├── geometry.py        # Solar geometry drawn into the frame's own pixels
+├── lens.py            # Fisheye optics of the camera: sky direction <-> pixel
+├── frame_pixels.py    # Frame decode + bilinear resize, one implementation
+├── augmentation.py    # Transforms for fixed all-sky camera frames
+├── provenance.py      # Git commit, code version and content hashes
 ├── bundle.py          # Colab bundle export
 ├── cli/               # frames, prepare, embeddings, train, evaluate command groups
 ├── data/              # manifest, contracts, alignment, splits, datasets, loading, validation
@@ -52,6 +55,11 @@ src/allsky/
 ```
 
 Configs live under `configs/allsky/`; tests are under `tests/allsky/`.
+
+Solar geometry, the station's coordinates, the sky-condition partition, the
+seeding helper and the atomic writer are not here: they live in `labmim_core`
+(`solar.py`, `site.py`, `sky.py`, `seeds.py`, `atomic.py`), the package all
+three others import and which imports none of them.
 
 ---
 
@@ -105,13 +113,28 @@ Swap `--device cuda --amp` for `--device cpu --no-amp` for a CPU smoke run (the 
 allsky extract-frames data/all-sky/allsky-20260625.mp4 -o output/allsky/frames --step 60
 ```
 
-It writes JPEGs named `allsky-YYYYMMDD-HHMM.jpg` (quality 92) plus a `manifest.parquet` with columns `frame_path`, `timestamp`, `video`, `index`, using the `video` section of the PrepareConfig (`--config`, or built-in defaults) for the frame→time mapping. Use `--resize 224` to downscale at extraction time. The manifest is overwritten on every call — use one directory per video or per extraction run.
+It writes JPEGs named `allsky-YYYYMMDD-HHMM.jpg` (quality 92) plus a `manifest.parquet` with columns `frame_path`, `timestamp`, `video`, `index`, using the `video` section of the PrepareConfig (`--config`, or built-in defaults) for the frame→time mapping. By default that mapping is the timestamp the camera burns into each frame; see [Video → Time Mapping](#video--time-mapping). Use `--resize 224` to downscale at extraction time. The manifest is overwritten on every call — use one directory per video or per extraction run.
 
 ---
 
 ## Video → Time Mapping
 
-Videos are **one-day timelapse files** named by date (`data/all-sky/allsky-YYYYMMDD.mp4`) where **one frame covers one minute** of real time by default. Frame 0 is captured at `video.start_time` local time (default `06:00`), and frame *i* maps to:
+Videos are **one-day timelapse files** named by date. `allsky sync-archive`
+writes them to `data/all-sky/videos/allsky-YYYYMMDD.mp4`, which is what the shipped
+`configs/allsky/data/local_prepare*.yaml` point at; the `VideoConfig.pattern` default
+(`data/all-sky/allsky-*.mp4`) is for videos placed there by hand.
+
+Two mappings exist, and `video.timestamps` selects between them.
+
+**`overlay` (the default).** The capture time is read from the stamp the camera
+burns into every frame, so it survives a dropped frame, a paused capture and a
+timelapse that does not start at 06:00. It is the only mapping the archive
+pipeline uses; see [allsky-archive.md](allsky-archive.md) for how a contested or
+unreadable stamp is settled.
+
+**`modelled`.** Kept for footage from another camera, which carries no overlay.
+Frame 0 is taken to be captured at `video.start_time` local time (default
+`06:00`), and frame *i* maps to:
 
 ```
 timestamp(i) = date + start_time + i * minutes_per_frame
@@ -119,7 +142,8 @@ timestamp(i) = date + start_time + i * minutes_per_frame
 
 Both `start_time` and `minutes_per_frame` are configurable — adjust them to the camera schedule. Videos are always decoded as a stream (`imageio.v3.imiter`); a full one-day 1080p file is never loaded into memory at once.
 
-Limitations to keep in mind:
+Both limitations below are limitations of `modelled` alone; the overlay reads each
+frame's own stamp and neither applies to it:
 
 - The mapping assumes the camera never skips frames — a dropped frame in the timelapse shifts every subsequent timestamp.
 - Extracted JPEG filenames carry minute resolution, so with `minutes_per_frame < 1` two frames can map to the same name and overwrite each other.

@@ -5,6 +5,7 @@ on torch; no DINOv2 / network is ever exercised.
 """
 
 from pathlib import Path
+from typing import Any
 
 import imageio.v3 as iio
 import numpy as np
@@ -270,8 +271,12 @@ class TestIncrementalIndex:
         assert set(index["sample_id"].astype(str)) == set(manifest["sample_id"].astype(str))
         assert sorted(out.glob("index.part-*.parquet")) == []
 
-    def test_reader_serves_all_ids_after_resume(self, tmp_path: Path):
-        """The consolidated store round-trips through the reader (values intact)."""
+    def test_the_reader_serves_every_id_when_a_shard_is_smaller_than_the_batch(
+        self, tmp_path: Path
+    ):
+        """Six samples in batches of three over shards of two, so a batch spans two
+        shards and a shard spans two batches, and every value still round-trips.
+        """
         manifest = _make_dataset(tmp_path, n=6)
         out = tmp_path / "emb"
         extract_embeddings(
@@ -471,6 +476,27 @@ class TestValidation:
                 out,
                 data_root=tmp_path,
             )
+
+    def test_a_backbone_whose_vectors_are_wider_than_it_declares_is_refused(self, tmp_path: Path):
+        """``embeddings.meta.json`` is the only source of the reader's width, which sizes
+        the visual encoder, so shards wider than the declared dim never reach disk."""
+
+        class _WiderThanDeclared(FakeBackbone):
+            def encode(self, batch: Any) -> np.ndarray:
+                return np.zeros((len(batch), self.dim + 1), dtype=np.float32)
+
+        out = tmp_path / "emb"
+
+        with pytest.raises(ValueError, match="produced dim 9, expected 8"):
+            extract_embeddings(
+                _make_dataset(tmp_path, n=2),
+                _WiderThanDeclared(dim=8),
+                out,
+                data_root=tmp_path,
+                batch_size=2,
+            )
+
+        assert not shard_path(out, 0).exists()
 
     def test_bad_batch_size_raises(self, tmp_path: Path):
         with pytest.raises(ValueError, match="batch_size"):

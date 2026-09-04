@@ -1,4 +1,4 @@
-"""Manifest v2 contracts: column registry, QC flags, sky classes, paths.
+"""Manifest v2 contracts: column registry, QC flags, portable paths.
 
 This module pins the on-disk schema of the multimodal dataset manifest — the
 byte contract every other ``allsky.data`` module (and the training/embedding
@@ -10,7 +10,8 @@ Three things are fixed here:
 
 - :data:`DATASET_VERSION` and the ordered manifest column -> dtype registry
   (:func:`manifest_column_dtypes`).
-- The :class:`QCFlag` bitmask and the sky-condition class constants/names.
+- The :class:`QCFlag` bitmask.  The sky-condition class constants and names
+  live in :mod:`labmim_core.sky`.
 - Portable-path helpers (:func:`to_relative` / :func:`resolve`): manifests store
   image paths as **relative POSIX** strings against a ``data_root``; absolute
   paths are rejected with a clear error so a manifest never bakes in a machine's
@@ -24,8 +25,10 @@ from pathlib import Path, PurePosixPath
 
 __all__ = [
     "DATASET_VERSION",
+    "DEGRADABLE_TARGET_COLUMNS",
     "FEATURE_DTYPE",
     "GEOMETRY_COLUMNS",
+    "LABELABLE_MIN_ELEVATION_DEG",
     "META_COLUMNS",
     "NS_PER_MINUTE",
     "PROVENANCE_COLUMNS",
@@ -95,6 +98,15 @@ DEGRADABLE_TARGET_COLUMNS: tuple[str, ...] = (
 #: a window could silently stop meaning minutes.
 NS_PER_MINUTE = 60_000_000_000
 
+#: Solar elevation floor, degrees, below which the k-index carries too little
+#: signal to label a frame on. One name because three stages read it and each
+#: has to read the SAME one: the manifest builder sets ``LOW_SUN`` under it,
+#: ``NightFilterConfig`` defaults to it, and ``validate_manifest(strict=True)``
+#: reports the rows that survived the build's own floor but sit under this. Three
+#: independent literals would let a config change the build and leave the
+#: validator checking a band the build no longer produces.
+LABELABLE_MIN_ELEVATION_DEG = 10.0
+
 #: Name of the (nullable) split-label column: empty at build, filled in place by
 #: :func:`allsky.data.manifest.attach_split_column` from a day-level split.
 SPLIT_COLUMN = "split"
@@ -124,7 +136,10 @@ class QCFlag(IntFlag):
     NONE = 0
     #: Solar elevation below the k-index elevation floor (target k-index noisy).
     LOW_SUN = 1
-    #: No sensor record paired within tolerance, or the GHI channel was missing.
+    #: The GHI channel — or the configured diffuse channel — was missing on the
+    #: paired sensor record. A frame that matched no record within tolerance is
+    #: dropped by :func:`allsky.data.manifest.build_manifest`, so it never
+    #: reaches a row this flag could mark.
     SENSOR_GAP = 2
     #: Paired sensor record further than the "far" alignment threshold.
     ALIGNMENT_FAR = 4
@@ -248,6 +263,6 @@ def resolve(relative: str | Path, data_root: str | Path) -> Path:
         paths so they stay portable across machines.
     """
     text = str(relative)
-    if PurePosixPath(text).is_absolute() or Path(text).is_absolute() or text.startswith("/"):
+    if PurePosixPath(text).is_absolute() or Path(text).is_absolute():
         raise ValueError(f"manifest path must be a relative POSIX path, got absolute {relative!r}")
     return Path(data_root) / text

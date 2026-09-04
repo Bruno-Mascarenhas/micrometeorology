@@ -10,10 +10,11 @@ All functions are pure numpy/pandas, vectorized over any datetime
 sequence convertible to a :class:`pandas.DatetimeIndex`.
 
 Timestamps are **naive local standard time** (the Campbell datalogger
-clock — no timezone conversion in v0).  The UTC offset is inferred from
-the site longitude as ``round(longitude / 15)`` unless passed explicitly;
-for Salvador-BA (longitude -38.51) this yields UTC-3, which is correct
-year-round since Brazil abolished DST in 2019.
+clock — no timezone conversion in v0).  The UTC offset is the site's own
+``utc_offset_hours`` unless passed explicitly; only :func:`hour_angle_deg`,
+which takes a bare longitude, still infers ``round(longitude / 15)`` when
+given none. For Salvador-BA (longitude -38.51) both give UTC-3, which is
+correct year-round since Brazil abolished DST in 2019.
 
 References
 ----------
@@ -48,6 +49,14 @@ __all__ = [
 
 #: Total solar irradiance at 1 AU (Kopp & Lean 2011), W m-2.
 SOLAR_CONSTANT_WM2 = 1361.0
+
+#: Longitude spanned by one hour of Earth rotation, degrees; the standard
+#: meridian of a clock offset in the NOAA solar equations sheet.
+_DEGREES_PER_HOUR = 15.0
+
+#: Minutes of solar time per degree of longitude, the inverse of the above; the
+#: ``4*longitude`` and ``tst/4`` factors of the NOAA solar equations sheet.
+_MINUTES_PER_DEGREE = 4.0
 
 
 def _as_datetime_index(timestamps: DatetimeLike) -> pd.DatetimeIndex:
@@ -203,17 +212,18 @@ def hour_angle_deg(
         before noon.  It is not wrapped to ``[-180, 180)``.
     """
     times = _as_datetime_index(timestamps)
-    # Explicit offset when given, else the standard meridian for this longitude.
-    offset = utc_offset_hours if utc_offset_hours is not None else round(longitude / 15.0)
+    offset = (
+        utc_offset_hours if utc_offset_hours is not None else round(longitude / _DEGREES_PER_HOUR)
+    )
     eqtime = equation_of_time(times)
-    time_offset = eqtime + 4.0 * longitude - 60.0 * offset
+    time_offset = eqtime + _MINUTES_PER_DEGREE * longitude - 60.0 * offset
     tst = (
         times.hour.to_numpy(dtype=np.float64) * 60.0
         + times.minute.to_numpy(dtype=np.float64)
         + times.second.to_numpy(dtype=np.float64) / 60.0
         + time_offset
     )
-    return tst / 4.0 - 180.0
+    return tst / _MINUTES_PER_DEGREE - 180.0
 
 
 def cos_zenith(
@@ -234,8 +244,7 @@ def cos_zenith(
     site:
         Observation site (latitude/longitude in degrees).
     utc_offset_hours:
-        UTC offset of the local clock; inferred from ``site.longitude``
-        when None.
+        UTC offset of the local clock; the site's own ``utc_offset_hours`` when None.
 
     Returns
     -------
@@ -246,7 +255,8 @@ def cos_zenith(
     times = _as_datetime_index(timestamps)
     lat = np.deg2rad(site.latitude)
     decl = solar_declination_rad(times)
-    ha = np.deg2rad(hour_angle_deg(times, site.longitude, utc_offset_hours))
+    offset = site.utc_offset_hours if utc_offset_hours is None else utc_offset_hours
+    ha = np.deg2rad(hour_angle_deg(times, site.longitude, offset))
     cosz = np.sin(lat) * np.sin(decl) + np.cos(lat) * np.cos(decl) * np.cos(ha)
     clipped: np.ndarray = np.clip(cosz, -1.0, 1.0)
     return clipped
@@ -270,8 +280,7 @@ def solar_elevation_deg(
     site:
         Observation site (latitude/longitude in degrees).
     utc_offset_hours:
-        UTC offset of the local clock; inferred from ``site.longitude``
-        when None.
+        UTC offset of the local clock; the site's own ``utc_offset_hours`` when None.
 
     Returns
     -------
@@ -317,8 +326,7 @@ def solar_azimuth_deg(
     site:
         Observation site (latitude/longitude in degrees).
     utc_offset_hours:
-        UTC offset of the local clock; inferred from ``site.longitude`` when
-        None (see :func:`hour_angle_deg`).
+        UTC offset of the local clock; the site's own ``utc_offset_hours`` when None (see :func:`hour_angle_deg`).
 
     Returns
     -------
@@ -337,9 +345,10 @@ def solar_azimuth_deg(
     times = _as_datetime_index(timestamps)
     lat = np.deg2rad(site.latitude)
     decl = solar_declination_rad(times)
-    cosz = cos_zenith(times, site, utc_offset_hours)
+    offset = site.utc_offset_hours if utc_offset_hours is None else utc_offset_hours
+    cosz = cos_zenith(times, site, offset)
     sinz = np.sin(np.arccos(cosz))
-    ha = hour_angle_deg(times, site.longitude, utc_offset_hours)
+    ha = hour_angle_deg(times, site.longitude, offset)
     ha_wrapped_deg = (ha + 180.0) % 360.0 - 180.0
 
     denominator = np.cos(lat) * sinz
@@ -376,8 +385,7 @@ def extraterrestrial_ghi(
     site:
         Observation site (latitude/longitude in degrees).
     utc_offset_hours:
-        UTC offset of the local clock; inferred from ``site.longitude``
-        when None.
+        UTC offset of the local clock; the site's own ``utc_offset_hours`` when None.
 
     Returns
     -------
@@ -419,8 +427,7 @@ def clearness_index(
     site:
         Observation site (latitude/longitude in degrees).
     utc_offset_hours:
-        UTC offset of the local clock; inferred from ``site.longitude``
-        when None.
+        UTC offset of the local clock; the site's own ``utc_offset_hours`` when None.
 
     Returns
     -------

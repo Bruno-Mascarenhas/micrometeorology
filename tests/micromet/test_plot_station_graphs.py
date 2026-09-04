@@ -5,6 +5,7 @@ backend (set on import of the CLI module), and the Typer app driven through
 :class:`~typer.testing.CliRunner`.
 """
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import matplotlib
@@ -14,9 +15,10 @@ import pytest
 from matplotlib import dates as mdates
 from matplotlib import pyplot as plt
 from matplotlib.colors import to_hex
+from matplotlib.lines import Line2D
 from typer.testing import CliRunner
 
-from micrometeorology.cli import generate_station_graphs
+from micrometeorology.cli import generate_station_graphs, plot_station_graphs
 from micrometeorology.cli.plot_station_graphs import (
     DEFAULT_BALANCE_COMPONENTS,
     DEFAULT_COLUMNS,
@@ -26,6 +28,7 @@ from micrometeorology.cli.plot_station_graphs import (
     _plot_balance,
     app,
     load_graph_config,
+    load_hourly_csv,
     render_site_graphs,
     resolve_column,
 )
@@ -42,8 +45,9 @@ runner = CliRunner()
 CONTRACT_PNGS = tuple(spec.filename for spec in GRAPH_SPECS)
 
 
-def test_balance_uses_okabe_ito_colors_and_negates_upward_channels():
-    """The four streams stay distinguishable and retain their physical signs."""
+@pytest.fixture
+def balance_chart() -> Iterator[tuple[dict[str, Line2D], dict[str, pd.Series]]]:
+    """The balance axes as ``_plot_balance`` draws them, keyed by legend label."""
     index = pd.date_range("2026-06-01", periods=2, freq="1h")
     net = pd.Series([1.0, 2.0], index=index)
     components = {
@@ -51,38 +55,52 @@ def test_balance_uses_okabe_ito_colors_and_negates_upward_channels():
         for offset, channel in enumerate(BALANCE_COMPONENT_COLORS, start=1)
     }
     fig, ax = create_figure()
-
     try:
         _plot_balance(ax, net, components)
-        lines = {line.get_label(): line for line in ax.get_lines()}
-
-        assert set(lines) == {"Rn", "SW_dw", "SW_up", "LW_dw", "LW_up"}
-        assert to_hex(lines["Rn"].get_color()) == "#000000"
-
-        palette = {to_hex(color) for color in matplotlib.color_sequences["okabe_ito"]}
-        component_colors = {
-            to_hex(lines[label].get_color()) for label in ("SW_dw", "SW_up", "LW_dw", "LW_up")
-        }
-        assert len(component_colors) == 4
-        assert component_colors <= palette
-        assert "#000000" not in component_colors
-        assert {channel: to_hex(color) for channel, color in BALANCE_COMPONENT_COLORS.items()} == {
-            "sw_down": "#e69f00",
-            "sw_up": "#56b4e9",
-            "lw_down": "#009e73",
-            "lw_up": "#cc79a7",
-        }
-        for label, channel in {
-            "SW_dw": "sw_down",
-            "SW_up": "sw_up",
-            "LW_dw": "lw_down",
-            "LW_up": "lw_up",
-        }.items():
-            assert to_hex(lines[label].get_color()) == to_hex(BALANCE_COMPONENT_COLORS[channel])
-        np.testing.assert_array_equal(lines["SW_up"].get_ydata(), -components["sw_up"])
-        np.testing.assert_array_equal(lines["LW_up"].get_ydata(), -components["lw_up"])
+        yield {str(line.get_label()): line for line in ax.get_lines()}, components
     finally:
         plt.close(fig)
+
+
+def test_the_balance_draws_the_net_in_black_beside_its_four_components(balance_chart):
+    lines, _components = balance_chart
+
+    assert set(lines) == {"Rn", "SW_dw", "SW_up", "LW_dw", "LW_up"}
+    assert to_hex(lines["Rn"].get_color()) == "#000000"
+
+
+def test_the_four_components_stay_distinguishable_on_the_shared_palette(balance_chart):
+    """Four Okabe-Ito hues, none of them the net's black."""
+    lines, _components = balance_chart
+    palette = {to_hex(color) for color in matplotlib.color_sequences["okabe_ito"]}
+
+    component_colors = {
+        to_hex(lines[label].get_color()) for label in ("SW_dw", "SW_up", "LW_dw", "LW_up")
+    }
+    assert len(component_colors) == 4
+    assert component_colors <= palette
+    assert "#000000" not in component_colors
+    assert {channel: to_hex(color) for channel, color in BALANCE_COMPONENT_COLORS.items()} == {
+        "sw_down": "#e69f00",
+        "sw_up": "#56b4e9",
+        "lw_down": "#009e73",
+        "lw_up": "#cc79a7",
+    }
+    for label, channel in {
+        "SW_dw": "sw_down",
+        "SW_up": "sw_up",
+        "LW_dw": "lw_down",
+        "LW_up": "lw_up",
+    }.items():
+        assert to_hex(lines[label].get_color()) == to_hex(BALANCE_COMPONENT_COLORS[channel])
+
+
+def test_the_upward_channels_are_drawn_negative(balance_chart):
+    """Upwelling leaves the surface, so it is drawn below the axis."""
+    lines, components = balance_chart
+
+    np.testing.assert_array_equal(lines["SW_up"].get_ydata(), -components["sw_up"])
+    np.testing.assert_array_equal(lines["LW_up"].get_ydata(), -components["lw_up"])
 
 
 def test_legacy_balance_uses_shared_palette_and_negates_upward_channels(monkeypatch, tmp_path):
@@ -189,6 +207,37 @@ class TestSiteCommand:
         assert result.exit_code == 0, result.output
         assert len(list(out.glob("*.png"))) == len(CONTRACT_PNGS)
 
+
+class TestTheLoadedWindow:
+    """Nine filenames come out whatever the window, so the clip is pinned here."""
+
+    def test_the_window_reaches_exactly_last_days_back_from_the_newest_row(self, tmp_path):
+        csv = _write_hourly_csv(tmp_path / "long.csv", days=10)
+
+        clipped = load_hourly_csv(csv, 3)
+
+        newest = clipped.index.max()
+        assert newest == pd.Timestamp("2026-06-10 23:00:00")
+        assert clipped.index.min() == newest - pd.Timedelta(days=3)
+        assert len(clipped) == 3 * 24 + 1
+
+    @pytest.mark.parametrize("last_days", [0, -1])
+    def test_a_window_of_zero_days_or_less_keeps_the_whole_file(self, tmp_path, last_days):
+        """The flag's documented 'keep everything' escape hatch."""
+        csv = _write_hourly_csv(tmp_path / "long.csv", days=10)
+
+        assert len(load_hourly_csv(csv, last_days)) == 10 * 24
+
+    def test_a_parquet_archive_loads_to_the_same_frame_as_the_csv(self, tmp_path):
+        """`labmim-archive` writes parquet and only it carries the unified names,
+        so the branch that reads it must not be the untested one.
+        """
+        csv = _write_hourly_csv(tmp_path / "long.csv", days=4)
+        parquet = tmp_path / "station_hourly.parquet"
+        pd.read_csv(csv, index_col=0, parse_dates=True).to_parquet(parquet)
+
+        pd.testing.assert_frame_equal(load_hourly_csv(parquet, 2), load_hourly_csv(csv, 2))
+
     def test_missing_column_warns_and_skips_but_exits_zero(self, tmp_path):
         df = pd.read_csv(_write_hourly_csv(tmp_path / "src.csv"), index_col=0, parse_dates=True)
         df = df.drop(columns=[_logger_name("temperatura")])
@@ -204,7 +253,7 @@ class TestSiteCommand:
         produced = sorted(p.name for p in out.glob("*.png"))
         assert "temperatura.png" not in produced
         assert len(produced) == len(CONTRACT_PNGS) - 1
-        assert "temperatura" in result.output  # the skip is reported
+        assert "temperatura" in result.output, "the skip must be reported"
 
     def test_strict_makes_a_missing_column_fail(self, tmp_path):
         df = pd.read_csv(_write_hourly_csv(tmp_path / "src.csv"), index_col=0, parse_dates=True)
@@ -221,14 +270,14 @@ class TestSiteCommand:
         assert result.exit_code != 0
 
     def test_col_override_retargets_a_renamed_logger_column(self, tmp_path):
-        # A logger that renames its temperature column must be reachable by
-        # --col alone, with no code change.
+        """A logger that renames its temperature column must be reachable by
+        ``--col`` alone, with no code change: without the override the default
+        column is missing and the graph is skipped."""
         renamed = {key: _logger_name(key) for key in DEFAULT_COLUMNS}
         renamed["temperatura"] = "AirT2_C_Avg"
         csv = _write_hourly_csv(tmp_path / "renamed.csv", columns=renamed)
 
         out = tmp_path / "g"
-        # Without the override the default column is missing -> skipped.
         base = runner.invoke(
             app, ["site", "-i", str(csv), "-o", str(out), "--log-level", "WARNING"]
         )
@@ -338,8 +387,22 @@ class TestThreeLayers:
     layers, so this is pinned here as well as in ``test_monitoring.py``.
     """
 
-    def test_raw_and_wrf_layers_reach_every_graph_that_has_them(self, hourly_csv, tmp_path):
-        out = tmp_path / "three"
+    def test_raw_and_wrf_layers_reach_every_graph_that_has_them(
+        self, hourly_csv, tmp_path, monkeypatch
+    ):
+        """Counting the nine filenames proves nothing: the command writes the same
+        nine with no --raw and no --wrf at all. The layers are read off the axes
+        of each figure as it is saved.
+        """
+        drawn: dict[str, list[str]] = {}
+        original = plot_station_graphs.save_figure
+
+        def _record(fig, path):
+            drawn[Path(path).name] = list(fig.axes[0].get_legend_handles_labels()[1])
+            return original(fig, path)
+
+        monkeypatch.setattr(plot_station_graphs, "save_figure", _record)
+
         result = runner.invoke(
             app,
             [
@@ -347,7 +410,7 @@ class TestThreeLayers:
                 "-i",
                 str(hourly_csv),
                 "-o",
-                str(out),
+                str(tmp_path / "three"),
                 "--raw",
                 str(_write_raw_parquet(tmp_path / "raw.parquet", hourly_csv)),
                 "--wrf",
@@ -356,8 +419,49 @@ class TestThreeLayers:
                 "WARNING",
             ],
         )
+
         assert result.exit_code == 0, result.output
-        assert sorted(p.name for p in out.glob("*.png")) == sorted(CONTRACT_PNGS)
+        assert sorted(drawn) == sorted(CONTRACT_PNGS)
+        for filename, labels in drawn.items():
+            assert "bruto 5 min" in labels, filename
+        # The synthetic .dat carries T and Swdw only, so exactly the two graphs
+        # whose WRF candidate resolves may announce a model layer.
+        with_model = {name for name, labels in drawn.items() if any("WRF 1h" in x for x in labels)}
+        assert with_model == {"temperatura.png", "balanco.png"}
+
+    def test_the_raw_direction_layer_is_wrapped_onto_the_compass(self, tmp_path, monkeypatch):
+        """The raw record is degrees from a vane and can carry 360 or a negative
+        residue; the scatter axis is [0, 360), so the layer is taken modulo 360
+        before it is drawn. Unwrapped, the points leave the axis silently.
+        """
+        drawn: dict[str, np.ndarray] = {}
+        original = plot_station_graphs.save_figure
+
+        def _record(fig, path):
+            (raw_line,) = [
+                line for line in fig.axes[0].get_lines() if line.get_label() == "bruto 5 min"
+            ]
+            drawn[Path(path).name] = np.asarray(raw_line.get_ydata())
+            return original(fig, path)
+
+        monkeypatch.setattr(plot_station_graphs, "save_figure", _record)
+
+        index = pd.date_range("2026-06-01", periods=48, freq="h")
+        hourly = pd.DataFrame({_logger_name("direcao"): np.linspace(0.0, 359.0, 48)}, index=index)
+        raw = pd.DataFrame({_logger_name("direcao"): np.linspace(-45.0, 405.0, 48)}, index=index)
+
+        render_site_graphs(
+            hourly,
+            tmp_path / "compass",
+            DEFAULT_COLUMNS,
+            DEFAULT_BALANCE_COMPONENTS,
+            DEFAULT_DIRECTION_COMPONENTS,
+            raw=raw,
+        )
+
+        points = drawn["direcao.png"]
+        assert points.min() >= 0.0
+        assert points.max() < 360.0
 
     def test_a_wrf_column_the_extraction_lacks_is_skipped_not_fatal(self, hourly_csv, tmp_path):
         """`series_operacional.dat` has no PAR and no rain; that is normal."""
@@ -367,6 +471,47 @@ class TestThreeLayers:
         series, resolved = _wrf_series(wrf, "radiacao_par", DEFAULT_WRF_COLUMNS)
         assert series is None
         assert resolved is None
+
+    def test_the_balance_overlay_borrows_the_shortwave_hue_and_other_charts_do_not(
+        self, tmp_path, monkeypatch
+    ):
+        """``render_site_graphs`` is what decides the overlay hue, per chart kind.
+
+        On the balance chart the model line mirrors incoming shortwave and takes
+        that channel's hue; every other chart keeps the model's own colour, which
+        is what keeps the two readable side by side on the page.
+        """
+        overlay: dict[str, str] = {}
+        original = plot_station_graphs.save_figure
+
+        def _record(fig, path):
+            for line in fig.axes[0].get_lines():
+                if str(line.get_label()).startswith("WRF 1h"):
+                    overlay[Path(path).name] = to_hex(line.get_color())
+            return original(fig, path)
+
+        monkeypatch.setattr(plot_station_graphs, "save_figure", _record)
+
+        index = pd.date_range("2026-06-01", periods=24, freq="h")
+        shape = np.clip(np.sin((index.hour.to_numpy() - 6) / 12.0 * np.pi), 0.0, None)
+        station = pd.DataFrame(
+            {"Net_Wm2_Avg": 500.0 * shape, "BP1_mbar_Avg": np.full(24, 1013.0)}, index=index
+        )
+        model = pd.DataFrame(
+            {"swdown_w_m2": 800.0 * shape, "psfc_hpa": np.full(24, 1012.0)}, index=index
+        )
+
+        render_site_graphs(
+            station,
+            tmp_path / "hues",
+            DEFAULT_COLUMNS,
+            DEFAULT_BALANCE_COMPONENTS,
+            DEFAULT_DIRECTION_COMPONENTS,
+            wrf=model,
+        )
+
+        assert overlay["balanco.png"] == to_hex(BALANCE_COMPONENT_COLORS["sw_down"])
+        assert overlay["pressao.png"] == to_hex(plot_station_graphs._WRF_COLOR)
 
     def test_the_model_overlay_borrows_the_hue_of_the_series_it_mirrors(self):
         """On the balance chart hue means the physical family, so the WRF
@@ -507,14 +652,15 @@ class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
             DEFAULT_DIRECTION_COMPONENTS,
         )
 
-        # Only precipitation had data, so only it can be published; the eight
-        # empty ones drew no layer at all and must not overwrite a good image.
-        assert [p.name for p in written] == ["precipitacao.png"]
-        assert set(empty) >= {"temperatura", "umidade", "pressao", "velocidade", "direcao"}
-        # `missing` is reserved for a column the frame does not CARRY, which is a
-        # configuration error; every column here is present and simply has no
-        # value, which is the station being down. Only the first fails --strict.
-        assert missing == []
+        assert [p.name for p in written] == ["precipitacao.png"], (
+            "only the column with data can be published; the empty ones drew no "
+            "layer at all and must not overwrite a good image"
+        )
+        assert set(empty) == {spec.key for spec in GRAPH_SPECS} - {"precipitacao"}
+        assert missing == [], (
+            "`missing` is reserved for a column the frame does not CARRY: every "
+            "column here is present and simply has no value"
+        )
 
     def test_a_model_layer_still_publishes_without_the_station(self, tmp_path: Path) -> None:
         """The chart keeps whatever layer does have data — it just stops
@@ -533,6 +679,31 @@ class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
 
         assert "pressao.png" in [p.name for p in written]
         assert "pressao" in empty
+
+    def test_the_balance_draws_its_four_components_when_only_net_is_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """`balanco` is the one multi-series chart, and the emptiness gate read
+        only its aggregate Net column: a logger that stopped writing Rn dropped
+        the four measured streams with it, even fully populated."""
+        frame = self._frame()
+        hours = pd.DatetimeIndex(frame.index).hour.to_numpy()
+        shape = np.clip(np.sin((hours - 6) / 12.0 * np.pi), 0.0, None)
+        frame["CM3Up_Wm2_Avg"] = 900.0 * shape
+        frame["CM3Dn_Wm2_Avg"] = 180.0 * shape
+        frame["CG3Up_Wm2Cr_Avg"] = np.full(48, 400.0)
+        frame["CG3Dn_Wm2Cr_Avg"] = np.full(48, 450.0)
+
+        written, _missing, empty = render_site_graphs(
+            frame,
+            tmp_path,
+            DEFAULT_COLUMNS,
+            DEFAULT_BALANCE_COMPONENTS,
+            DEFAULT_DIRECTION_COMPONENTS,
+        )
+
+        assert "balanco.png" in [path.name for path in written]
+        assert "balanco" not in empty
 
     def test_strict_fails_on_a_missing_column_but_not_on_an_empty_one(self, tmp_path: Path) -> None:
         """The distinction is a broken configuration against a broken instrument.
@@ -563,7 +734,6 @@ class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
         assert empty_run.exit_code == 0, empty_run.output
         assert "without the station layer" in empty_run.output
 
-        # Drop a column outright: that IS a configuration error.
         frame.drop(columns=[_logger_name("precipitacao")]).to_csv(csv)
         missing_run = runner.invoke(
             app,
@@ -580,7 +750,7 @@ class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
         )
         assert missing_run.exit_code == 1, missing_run.output
 
-    def test_both_producers_plot_the_same_physical_longwave(self) -> None:
+    def test_both_producers_plot_the_same_physical_longwave(self, monkeypatch, tmp_path) -> None:
         """The two producers of ``balanco.png`` must read the same quantity.
 
         ``CG3*_Wm2_Avg`` is the pyrgeometer's raw thermopile signal, missing the
@@ -593,13 +763,33 @@ class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
         identical either way: a chart that still sums to Rn is no evidence that
         the two individual values are right, and here both are off by ~447 W/m2.
         """
-        from micrometeorology.cli import generate_station_graphs as sibling
+        index = pd.date_range("2026-06-01", periods=2, freq="1h")
+        frame = pd.DataFrame(
+            {
+                "CM3Up_Wm2_Avg": [700.0, 750.0],
+                "CM3Dn_Wm2_Avg": [90.0, 95.0],
+                "CG3Up_Wm2_Avg": [-42.0, -40.0],
+                "CG3Up_Wm2Cr_Avg": [406.0, 410.0],
+                "CG3Dn_Wm2_Avg": [-30.0, -28.0],
+                "CG3Dn_Wm2Cr_Avg": [450.0, 455.0],
+            },
+            index=index,
+        )
+        monkeypatch.setattr(generate_station_graphs, "save_figure", lambda *_args, **_kwargs: None)
 
-        source = Path(sibling.__file__).read_text(encoding="utf-8")
+        generate_station_graphs._plot_balanco(frame, frame, tmp_path, pd.Timestamp(2026, 6, 1, 1))
+        fig = plt.gcf()
+
+        try:
+            lines = {line.get_label(): line for line in fig.axes[0].get_lines()}
+            np.testing.assert_array_equal(lines["LW_dw"].get_ydata(), frame["CG3Up_Wm2Cr_Avg"])
+            np.testing.assert_array_equal(lines["LW_up"].get_ydata(), -frame["CG3Dn_Wm2Cr_Avg"])
+        finally:
+            plt.close(fig)
+
         for channel in ("lw_down", "lw_up"):
             column = DEFAULT_BALANCE_COMPONENTS[channel][-1]
             assert column.endswith("Cr_Avg"), f"{channel} must be the corrected flux, got {column}"
-            assert f'"{column}"' in source, f"{column} disagrees with the sibling producer"
 
 
 class TestTheUnifiedChannelWinsWhenTheFrameHasIt:
@@ -701,3 +891,63 @@ class TestTheDateAxisSurvivesALongWindow:
             assert len(ticks) >= 3, len(ticks)
         finally:
             plt.close(fig)
+
+
+class TestLoadGraphConfigRefusals:
+    """Every documented `Raises` branch of the config loader was unexercised, so a
+    malformed override could have started passing silently and framed the graphs
+    against columns nobody declared."""
+
+    @pytest.mark.parametrize(
+        "override",
+        ["temperatura", "temperatura=", "temperature=AirT2"],
+    )
+    def test_a_malformed_or_unknown_override_is_refused(self, override: str) -> None:
+        with pytest.raises(ValueError, match="--col"):
+            load_graph_config(None, [override])
+
+    def test_a_direction_pair_that_is_not_a_pair_is_refused(self, tmp_path: Path) -> None:
+        config = tmp_path / "graphs.yaml"
+        config.write_text("direction_components: [u]\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="\\[u, v\\] pair"):
+            load_graph_config(config, [])
+
+    def test_a_valid_override_reaches_the_returned_chain(self) -> None:
+        columns, _balance, _direction = load_graph_config(None, ["temperatura=AirT2_C_Avg"])
+
+        assert columns["temperatura"] == ("AirT2_C_Avg",)
+
+
+class TestTheEmptyWindowExit:
+    """The sibling producer's own test cites this exit as precedent, and it was
+    itself untested: a cron chain must be able to tell an empty window from a
+    fresh publication, and neither leaves a PNG behind."""
+
+    @staticmethod
+    def _header_only(tmp_path: Path) -> Path:
+        path = tmp_path / "hourly.csv"
+        path.write_text("timestamp,AirT1_C_Avg\n", encoding="utf-8")
+        return path
+
+    @pytest.mark.parametrize(("strict", "expected"), [(False, 0), (True, 1)])
+    def test_an_empty_window_exits_by_the_strict_flag(
+        self, tmp_path: Path, strict: bool, expected: int
+    ) -> None:
+        out = tmp_path / "out"
+
+        result = runner.invoke(
+            app,
+            [
+                "site",
+                "-i",
+                str(self._header_only(tmp_path)),
+                "-o",
+                str(out),
+                *(["--strict"] if strict else []),
+            ],
+        )
+
+        assert result.exit_code == expected, result.output
+        assert "nothing to plot" in result.output
+        assert not list(out.glob("*.png")) if out.exists() else True

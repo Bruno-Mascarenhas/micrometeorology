@@ -111,10 +111,11 @@ def read_folsom_sensor(
     ValueError
         If the irradiance file lacks the columns the format declares.
     """
-    irradiance = pd.read_csv(irradiance_csv, parse_dates=["timeStamp"])
+    irradiance = pd.read_csv(irradiance_csv)
     missing = [c for c in ("timeStamp", "ghi", "dni", "dhi") if c not in irradiance.columns]
     if missing:
         raise ValueError(f"{irradiance_csv} is missing the Folsom columns {missing}")
+    irradiance["timeStamp"] = pd.to_datetime(irradiance["timeStamp"])
     frame = irradiance.set_index("timeStamp")
 
     if weather_csv is not None:
@@ -161,8 +162,11 @@ def read_folsom_frames(
         If the directory holds no file matching *pattern*.
     ValueError
         If a filename carries no ``YYYYMMDDHHMMSS`` stamp — without it the
-        disagreement gate has nothing to compare against — or if every frame
-        fails that gate, which means the archive lost its modification times.
+        disagreement gate has nothing to compare against — or if the MEDIAN of
+        ``|date-modified - file-name|`` over the directory exceeds
+        :data:`FOLSOM_LOST_TIMESTAMPS_S`, which means the archive lost its
+        modification times. The gate is a whole-directory verdict: no individual
+        frame is ever dropped, so a drifting clock keeps every frame.
     """
     root = Path(frames_dir)
     paths = sorted(root.glob(pattern))
@@ -193,11 +197,10 @@ def read_folsom_frames(
             "frame_path": [str(path) for path in paths],
             "timestamp": _to_site_clock(modified),
             "video": [path.parent.name for path in paths],
-        },
-        columns=list(MANIFEST_COLUMNS[:3]),
+        }
     ).sort_values("timestamp", ignore_index=True)
-    frame[MANIFEST_COLUMNS[3]] = np.arange(len(frame), dtype=np.int64)
-    return frame
+    frame["index"] = np.arange(len(frame), dtype=np.int64)
+    return frame.loc[:, list(MANIFEST_COLUMNS)]
 
 
 def folsom_sensor_at(sensor: pd.DataFrame, frames: pd.DataFrame) -> pd.DataFrame:

@@ -23,9 +23,11 @@ becomes a block; nothing here re-derives it.
 
 Turning a wrfout INTO a block is
 :mod:`micrometeorology.wrf.operational_series`, which is where the netCDF
-dependency lives. This module needs only numpy and pandas, so the CLIs that
-merely read the record -- ``labmim-climatology``, ``labmim-station-graphs`` --
-do not pay for a NetCDF stack they never touch.
+READING lives. The three surface-flux formulas the record shares with it come
+from :mod:`micrometeorology.wrf.variables`, which imports the reader, so
+importing this module does pull netCDF4 in: a CLI that only reads the record
+pays for that stack unless it defers the import, as ``plot_station_graphs``
+does in ``_load_wrf``.
 
 The v1 record and what was wrong with it
 ----------------------------------------
@@ -73,7 +75,7 @@ not a sea-surface temperature. Pointed at a water cell it is one.
 import logging
 import re
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -87,6 +89,7 @@ from micrometeorology.common.physics import (
     KELVIN_AT_ZERO_CELSIUS,
     PASCAL_PER_HECTOPASCAL,
     STEFAN_BOLTZMANN,
+    Elementwise,
     saturation_vapor_pressure,
     vapor_pressure,
 )
@@ -126,17 +129,13 @@ from micrometeorology.wrf.columns import (
     WIND_SPEED_M_S,
 )
 from micrometeorology.wrf.variables import (
+    GRAMS_PER_KILOGRAM,
     compute_upwelling_longwave,
     compute_upwelling_shortwave,
     rotate_components,
 )
 
 logger = logging.getLogger(__name__)
-
-#: What the shared physical conversions accept. They are elementwise, and the
-#: v1 repair in :func:`migrate_to_v2` applies them one cell at a time while the
-#: extraction applies them to a whole window, so both spellings must type.
-type Elementwise = NDArray | float
 
 __all__ = [
     "DEFAULT_HEADER",
@@ -153,6 +152,7 @@ __all__ = [
     "Station",
     "append_block",
     "build_columns",
+    "duplicated",
     "extend_header",
     "format_row",
     "legacy_spellings",
@@ -160,6 +160,7 @@ __all__ = [
     "parse_station",
     "read_header",
     "read_stations",
+    "read_wrf_series",
     "rename_v1_columns",
     "render_rows",
 ]
@@ -168,8 +169,6 @@ __all__ = [
 #: Leading integer fields; ``pd.to_datetime`` reads them by these exact names,
 #: which is why they are the one part of the schema the v2 rename left alone.
 TIME_COLUMNS: tuple[str, ...] = ("year", "month", "day", "hour")
-
-_GRAMS_PER_KILOGRAM = 1000.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,7 +315,7 @@ def _relative_humidity_percent(sample: PointSample) -> NDArray:
 
 
 def _mixing_ratio_g_kg(sample: PointSample) -> NDArray:
-    grams: NDArray = sample.fields["Q2"] * _GRAMS_PER_KILOGRAM
+    grams: NDArray = sample.fields["Q2"] * GRAMS_PER_KILOGRAM
     return grams
 
 
@@ -489,9 +488,9 @@ DEFAULT_HEADER: tuple[str, ...] = TIME_COLUMNS + tuple(
 _CATALOG_BY_NAME = {column.name: column for column in OPERATIONAL_CATALOG}
 
 #: v1 column name -> v2 column name, in the v1 file's own field order. The four
-#: time fields keep their names: ``export_climatology.read_wrf_series`` builds
-#: its index with ``pd.to_datetime(frame[["year", "month", "day", "hour"]])``,
-#: which resolves them by name.
+#: time fields keep their names: :func:`read_wrf_series` builds its index with
+#: ``pd.to_datetime(frame[["year", "month", "day", "hour"]])``, which resolves
+#: them by name.
 V1_TO_V2: tuple[tuple[str, str], ...] = (
     ("year", "year"),
     ("month", "month"),
@@ -678,6 +677,24 @@ def _ends_with_newline(path: Path, size: int) -> bool:
         return handle.read(1) == b"\n"
 
 
+def _repair_tail(path: Path) -> None:
+    """Finish a complete last row lacking its newline; cut a partial one so its
+    hour is appended again in full."""
+    size = path.stat().st_size
+    if not size or _ends_with_newline(path, size):
+        return
+    data = path.read_bytes()
+    cut = data.rfind(b"\n") + 1
+    width = data.split(b"\n", 1)[0].count(b",") + 1
+    if cut and data[cut:].count(b",") + 1 < width:
+        with path.open("r+b") as handle:
+            handle.truncate(cut)
+        logger.warning("%s: dropped a partial last row left by an interrupted append", path.name)
+        return
+    with path.open("ab") as handle:
+        handle.write(b"\n")
+
+
 def _existing_stamps(path: Path) -> set[tuple[int, int, int, int]]:
     """The (year, month, day, hour) of every row already in the file."""
     stamps: set[tuple[int, int, int, int]] = set()
@@ -721,7 +738,16 @@ def append_block(
     -------
     int
         Rows written; ``0`` when the block was skipped as already present.
+
+    Raises
+    ------
+    ValueError
+        When *frame* has no rows -- rendering it appends a bare newline and
+        reports the same ``0`` a legitimate skip returns -- or when *header* is
+        still on the v1 schema.
     """
+    if frame.empty:
+        raise ValueError(f"{path.name}: refusing to append a block with no rows")
     legacy = legacy_spellings(header)
     if legacy:
         # Extending a v1 header would weld both schemas into one file: the rows
@@ -736,24 +762,22 @@ def append_block(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(",".join(header) + "\n", encoding="utf-8")
         logger.info("%s: created with %d columns", path.name, len(header))
-    elif not force:
-        stamps = _existing_stamps(path)
-        block = {(t.year, t.month, t.day, t.hour) for t in frame.index}
-        if block and block <= stamps:
-            logger.warning(
-                "%s: all %d hours of this block are already in the file; "
-                "skipping (use --force to append anyway)",
-                path.name,
-                len(block),
-            )
-            return 0
+    else:
+        _repair_tail(path)
+        if not force:
+            stamps = _existing_stamps(path)
+            block = {(t.year, t.month, t.day, t.hour) for t in frame.index}
+            if block and block <= stamps:
+                logger.warning(
+                    "%s: all %d hours of this block are already in the file; "
+                    "skipping (use --force to append anyway)",
+                    path.name,
+                    len(block),
+                )
+                return 0
 
     rows = render_rows(frame, header)
-    # Only the last byte matters, and the record grows by 24 rows a day forever.
-    size = path.stat().st_size
     with path.open("a", encoding="utf-8") as handle:
-        if size and not _ends_with_newline(path, size):
-            handle.write("\n")
         handle.write("\n".join(rows) + "\n")
     logger.info("%s: appended %d rows", path.name, len(rows))
     return len(rows)
@@ -812,13 +836,20 @@ def duplicated(names: Iterable[str]) -> list[str]:
 
 
 def _v1_number(row: Mapping[str, str], name: str) -> float:
+    """The number one v1 cell carries; an empty cell is no-value.
+
+    Raises
+    ------
+    ValueError
+        When the cell holds text that is not a number.
+    """
     raw = row.get(name, "").strip()
     if not raw:
         return float("nan")
     try:
         return float(raw)
     except ValueError:
-        return float("nan")
+        raise ValueError(f"column {name!r} holds {raw!r}, which is not a number") from None
 
 
 def _repair_v1_row(row: dict[str, str], line_number: int, repaired: Counter[str]) -> None:
@@ -873,7 +904,7 @@ def _repair_v1_row(row: dict[str, str], line_number: int, repaired: Counter[str]
         row["Lwup_calc"] = f"{upwelling_longwave_from_air(emissivity, kelvin):.4f}"
         repaired["Lwup_calc"] += 1
 
-    mixing_ratio = _v1_number(row, "q") / _GRAMS_PER_KILOGRAM
+    mixing_ratio = _v1_number(row, "q") / GRAMS_PER_KILOGRAM
     pressure = _v1_number(row, "pressure")
     if np.isfinite(mixing_ratio) and np.isfinite(pressure):
         vapor = vapor_pressure(mixing_ratio, pressure)
@@ -885,13 +916,21 @@ def _repair_v1_row(row: dict[str, str], line_number: int, repaired: Counter[str]
             repaired["ur"] += 1
 
 
+#: Inverse of :data:`_V1_NAME_OF`, for the one place that has to bridge the two
+#: namespaces: the repair tally counts by the v1 name and the cold-start tally by
+#: the v2 one.
+_V1_OLD_OF: dict[str, str] = {new: old for old, new in V1_TO_V2}
+
+
 def _blank_v1_cold_start(row: dict[str, str], blanked: Counter[str]) -> None:
     """No-value the physics columns of a step preceding the first radiation call."""
     if _v1_number(row, "Lwdw_glw") != 0.0:
         return
     for old, new in V1_TO_V2:
         column = _CATALOG_BY_NAME.get(new)
-        if column is not None and column.cold_start_blank and row.get(old, "").strip():
+        # A cell that already carries no value was not blanked by this
+        # migration: counting it reports the operator a change nothing made.
+        if column is not None and column.cold_start_blank and np.isfinite(_v1_number(row, old)):
             row[old] = "nan"
             blanked[new] += 1
 
@@ -966,8 +1005,18 @@ def migrate_to_v2(path: Path) -> MigrationReport:
             )
 
         row = dict(zip(V1_COLUMNS, named, strict=True))
-        _repair_v1_row(row, number, repaired)
-        _blank_v1_cold_start(row, blanked)
+        # The two tallies are taken over disjoint cells: the cold-start blanking
+        # runs second and overwrites cells the repair wrote.
+        repaired_here: Counter[str] = Counter()
+        _repair_v1_row(row, number, repaired_here)
+        blanked_here: Counter[str] = Counter()
+        _blank_v1_cold_start(row, blanked_here)
+        # `_repair_v1_row` counts by the OLD name and `_blank_v1_cold_start` by
+        # the new one, so the two namespaces are bridged before subtracting.
+        for new_name in blanked_here:
+            repaired_here.pop(_V1_OLD_OF[new_name], None)
+        repaired.update(repaired_here)
+        blanked.update(blanked_here)
         out.append(",".join([*(row[old] for old in V1_COLUMNS), "nan"]) + "\n")
 
     path.with_suffix(f"{path.suffix}.bak").write_bytes(path.read_bytes())
@@ -1123,7 +1172,7 @@ def legacy_spellings(header: Sequence[str]) -> tuple[str, ...]:
 #: These are exactly what :func:`_repair_v1_row` recomputes; naming them is what
 #: lets a reader of a v1 file be told which of its numbers not to trust.
 V1_UNREPAIRED_COLUMNS: frozenset[str] = frozenset(
-    {"albedo", "emissivity", "swup_w_m2", "lwup_air_w_m2", "e_hpa", "rh_pct"}
+    {ALBEDO, EMISSIVITY, SWUP_W_M2, LWUP_AIR_W_M2, E_HPA, RH_PCT}
 )
 
 
@@ -1173,7 +1222,7 @@ def rename_v1_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return renamed
 
 
-def read_wrf_series(path: str | Path) -> pd.DataFrame:
+def read_wrf_series(path: str | Path, *, consumes: Collection[str] = ()) -> pd.DataFrame:
     """Read ``series_operacional.dat`` defensively.
 
     The file is an append-only log of successive operational runs: **not**
@@ -1190,6 +1239,14 @@ def read_wrf_series(path: str | Path) -> pd.DataFrame:
     ----------
     path:
         The ``series_operacional.dat`` the operational extraction appends to.
+    consumes:
+        Column names the caller will actually publish from. An unmigrated v1
+        file is REFUSED when they include one of
+        :data:`V1_UNREPAIRED_COLUMNS`, whose v1 values are wrong by a known
+        formula — ``rh_pct`` is the humidity histogram and the humidity
+        overlay, ``swup_w_m2`` sits in the -10^5 W/m2. Left empty the file is
+        read as before, warning only: a caller that publishes none of the six
+        is unaffected by the schema.
 
     Returns
     -------
@@ -1198,11 +1255,45 @@ def read_wrf_series(path: str | Path) -> pd.DataFrame:
         :class:`~pandas.DatetimeIndex` of naive station-local hours (UTC-03),
         with the spin-up hour removed. A repeated timestamp keeps the LAST row,
         which is the most recent run's value for that hour.
+
+    Raises
+    ------
+    ValueError
+        When the file is still on v1 and *consumes* names a column
+        :func:`migrate_to_v2` has not repaired, or when a row carries no readable
+        ``year``/``month``/``day``/``hour``.
     """
     frame = pd.read_csv(path)
     frame = frame.drop(columns=[c for c in frame.columns if str(c).startswith("Unnamed")])
+    unmigrated = bool(legacy_spellings(list(frame.columns)))
     frame = rename_v1_columns(frame)
-    stamps = pd.to_datetime(frame[["year", "month", "day", "hour"]])
+    if unmigrated:
+        # Present AND consumed: a v1 file that never carried the column cannot
+        # serve a wrong value from it, and a caller that publishes none of the
+        # six is unaffected by the schema.
+        unrepaired = sorted(V1_UNREPAIRED_COLUMNS & set(consumes) & set(frame.columns))
+        if not unrepaired:
+            logger.warning(
+                "%s is still a v1 operational file; this run declared it publishes "
+                "none of %s, so it is read as-is. Run `labmim-wrf-series migrate` "
+                "on the record.",
+                path,
+                ", ".join(sorted(V1_UNREPAIRED_COLUMNS)),
+            )
+        if unrepaired:
+            raise ValueError(
+                f"{path} is still a v1 operational file and this run publishes "
+                f"{', '.join(unrepaired)}, which carry the values the v1 extraction "
+                "wrote — wrong by a known formula. Run `labmim-wrf-series migrate` "
+                "on the record first."
+            )
+    stamps = pd.to_datetime(frame[["year", "month", "day", "hour"]], errors="coerce")
+    unstamped = int(stamps.isna().sum())
+    if unstamped:
+        raise ValueError(
+            f"{path}: {unstamped} row(s) carry no readable year/month/day/hour and "
+            "cannot be placed on the timeline"
+        )
     frame.index = pd.DatetimeIndex(stamps)
     frame = frame.drop(columns=["year", "month", "day", "hour"])
     frame = frame.loc[~frame.index.duplicated(keep="last")].sort_index()

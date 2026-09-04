@@ -29,7 +29,6 @@ complete)::
         --end 2022-07-08
 """
 
-import logging
 import time
 from pathlib import Path
 from typing import Annotated
@@ -40,12 +39,11 @@ import typer
 
 from micrometeorology.common.git import short_commit
 from micrometeorology.common.logging import setup_logging
-from micrometeorology.common.site_json import write_json
+from micrometeorology.common.site_json import rounded_list, write_json
+from micrometeorology.common.timeparse import parse_naive_timestamp
 from micrometeorology.sensors.monitoring import MONITORING_CHARTS, resolve_wrf_column
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
-
-logger = logging.getLogger(__name__)
 
 PAYLOAD_FORMAT = "labmim-monitoring-v1"
 PAYLOAD_FILENAME = "monitoring.json"
@@ -96,10 +94,7 @@ def _round(values: pd.Series, decimals: int) -> list[float | int | None]:
             None if not np.isfinite(value) else round(float(value))
             for value in values.to_numpy(dtype=float)
         ]
-    return [
-        None if not np.isfinite(value) else round(float(value), decimals)
-        for value in values.to_numpy(dtype=float)
-    ]
+    return rounded_list(values.to_numpy(dtype=float).tolist(), decimals)
 
 
 def _regular(
@@ -116,6 +111,12 @@ def _regular(
     """
     if frame.empty:
         return frame, index
+    duplicated = index[index.duplicated()]
+    if len(duplicated):
+        raise ValueError(
+            f"{len(duplicated)} duplicated timestamp(s) on the {cadence} layer "
+            f"(first: {duplicated[0]}); the merge upstream must resolve them"
+        )
     grid = pd.date_range(index.min(), index.max(), freq=cadence, name=index.name)
     off_grid = index.difference(grid)
     if not off_grid.empty:
@@ -190,7 +191,7 @@ def run(
         Path | None, typer.Option("-w", "--wrf", help="series_operacional.dat for the model layer.")
     ] = None,
     days: Annotated[
-        int, typer.Option("--days", help="Length of the rolling window.")
+        int, typer.Option("--days", min=1, help="Length of the rolling window.")
     ] = DEFAULT_DAYS,
     end: Annotated[
         str | None,
@@ -219,15 +220,21 @@ def run(
     if wrf_path is not None:
         from micrometeorology.wrf.operational_record import read_wrf_series
 
-        model_full = read_wrf_series(wrf_path)
+        model_full = read_wrf_series(
+            wrf_path,
+            consumes=[name for chart in MONITORING_CHARTS for s in chart.series for name in s.wrf],
+        )
 
     # `first` still anchors on the station, so the reader keeps the same seven
     # days of record behind them; only the END reaches forward. `--end` is an
     # explicit instruction and overrides both.
     station_last = pd.Timestamp(raw.index.max())
-    if end:
-        first = pd.Timestamp(end) - pd.Timedelta(days=days)
-        last = pd.Timestamp(end)
+    if end is not None:
+        try:
+            last = parse_naive_timestamp(end, "%Y-%m-%d")
+        except ValueError as exc:
+            raise typer.BadParameter(f"--end must be a YYYY-MM-DD date (got {end!r})") from exc
+        first = last - pd.Timedelta(days=days)
     else:
         first = station_last - pd.Timedelta(days=days)
         last = station_last
@@ -259,13 +266,22 @@ def run(
     charts: list[dict[str, object]] = []
     for chart in MONITORING_CHARTS:
         station_columns = {series.id: series.station for series in chart.series}
-        decimals = _DECIMALS.get(chart.unit, 2)
+        if chart.unit not in _DECIMALS:
+            raise typer.BadParameter(
+                f"chart {chart.id!r} declares unit {chart.unit!r}, which has no entry in "
+                "_DECIMALS; add the precision this unit publishes at"
+            )
+        decimals = _DECIMALS[chart.unit]
 
         wrf_columns: dict[str, str] = {}
         missing: list[str] = []
         for series in chart.series:
             column = resolve_wrf_column(series, model.columns) if not model.empty else None
-            if column:
+            # A column PRESENT in the header but empty over this window is the
+            # designed signal that the extraction stopped writing the variable
+            # (export_operational_series empties one column rather than shifting
+            # every column after it).
+            if column and model[column].notna().any():
                 wrf_columns[series.id] = column
             # Only when a model was actually loaded: `wrf_pending` claims to the
             # reader that "the extraction does not write this variable yet", so a

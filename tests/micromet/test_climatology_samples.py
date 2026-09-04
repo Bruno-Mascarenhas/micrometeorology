@@ -15,6 +15,7 @@ import pytest
 
 from micrometeorology.cli.export_climatology import (
     CALM_THRESHOLD_MS,
+    ERA_SPLIT,
     INVALID_DIRECTION,
     OBSERVED_COLUMN,
     SATURATION_RH,
@@ -31,10 +32,15 @@ def _frame(columns: dict[str, list[float]]) -> pd.DataFrame:
     return pd.DataFrame(columns, index=index)
 
 
+def _hours(values: list[float]) -> pd.Series:
+    """A sample on consecutive hours, the shape every published sample has."""
+    return pd.Series(values, index=pd.date_range("2024-03-01", periods=len(values), freq="h"))
+
+
 class TestTheCalmCutIsTheStallValueNotAThreshold:
     def test_a_sample_exactly_on_the_threshold_is_a_calm(self):
         """`<=`, not `<`: 0,281 m/s is what the stalled cup REPORTS."""
-        speed = pd.Series([0.10, CALM_THRESHOLD_MS, CALM_THRESHOLD_MS + 0.001, 3.0])
+        speed = _hours([0.10, CALM_THRESHOLD_MS, CALM_THRESHOLD_MS + 0.001, 3.0])
 
         values, atoms = _strip_atoms("wind_speed", speed, speed)
 
@@ -42,8 +48,8 @@ class TestTheCalmCutIsTheStallValueNotAThreshold:
         assert sorted(values) == pytest.approx([CALM_THRESHOLD_MS + 0.001, 3.0])
 
     def test_direction_is_cut_by_the_paired_speed_not_by_itself(self):
-        direction = pd.Series([10.0, 20.0, 30.0, 40.0])
-        speed = pd.Series([0.10, 0.10, 5.0, 5.0])
+        direction = _hours([10.0, 20.0, 30.0, 40.0])
+        speed = _hours([0.10, 0.10, 5.0, 5.0])
 
         values, atoms = _strip_atoms("wind_direction", direction, speed)
 
@@ -104,7 +110,8 @@ class TestBothSourcesAreConditionedIdentically:
         assert atoms[0].count == 1
         assert len(values) == 3
 
-    def test_both_sources_publish_the_same_value_based_atoms(self):
+    @pytest.mark.parametrize("spec_id", ["relative_humidity", "wind_speed", "wind_direction"])
+    def test_both_sources_publish_the_same_value_based_atoms(self, spec_id):
         """Parity is over the masses a VALUE creates, not over instrument history.
 
         ``arithmetic_mean_era`` is deliberately one-sided: it removes the window
@@ -115,17 +122,17 @@ class TestBothSourcesAreConditionedIdentically:
         observed, model = self._paired([70.0, 80.0, 90.0, 99.9], [0.1, 2.0, 3.0, 4.0])
         instrument_only = {"arithmetic_mean_era"}
 
-        for spec_id in ("relative_humidity", "wind_speed", "wind_direction"):
-            _obs, obs_atoms = _observed_sample(spec_id, observed)
-            _wrf, wrf_atoms = _wrf_sample(spec_id, model)
-            assert [a.id for a in obs_atoms if a.id not in instrument_only] == [
-                a.id for a in wrf_atoms if a.id not in instrument_only
-            ], spec_id
+        _obs, obs_atoms = _observed_sample(spec_id, observed)
+        _wrf, wrf_atoms = _wrf_sample(spec_id, model)
+
+        assert [a.id for a in obs_atoms if a.id not in instrument_only] == [
+            a.id for a in wrf_atoms if a.id not in instrument_only
+        ]
 
 
 class TestAVariableWithNoPointMassGetsNoAtom:
     def test_temperature_passes_through_untouched(self):
-        series = pd.Series([21.0, 22.0, 23.0])
+        series = _hours([21.0, 22.0, 23.0])
 
         values, atoms = _strip_atoms("air_temperature", series, None)
 
@@ -151,7 +158,8 @@ class TestCoverageMeansSensorAvailability:
         assert atoms[0].count == 3
         assert _available_hours("precipitation", frame) == 5
 
-    def test_the_published_identity_is_n_plus_the_atoms(self):
+    @pytest.mark.parametrize("spec_id", ["wind_speed", "relative_humidity"])
+    def test_the_published_identity_is_n_plus_the_atoms(self, spec_id):
         """coverage == n + sum(atom counts), checkable from the bytes alone."""
         frame = _frame(
             {
@@ -160,16 +168,42 @@ class TestCoverageMeansSensorAvailability:
             }
         )
 
-        for spec_id in ("wind_speed", "relative_humidity"):
-            sample, atoms = _observed_sample(spec_id, frame)
-            assert _available_hours(spec_id, frame) == len(sample) + sum(a.count for a in atoms)
+        sample, atoms = _observed_sample(spec_id, frame)
+        # The break markers are not hours: every published count is over the
+        # finite entries, which is what `histogram` and `fit_distribution` see.
+        measured = int(np.isfinite(sample).sum())
+
+        assert _available_hours(spec_id, frame) == measured + sum(a.count for a in atoms)
+
+    def test_the_daylight_gate_marks_where_it_breaks_the_hour_chain(self):
+        """``effective_sample_size`` correlates consecutive ENTRIES, and the
+        daylight gate splices one day's last daylight hour onto the next day's
+        first with nothing marking the jump — so the lag-1 autocorrelation was
+        taken between temporally unrelated neighbours and ``n_effective`` came
+        out roughly twice too high."""
+        from micrometeorology.stats.distributions import effective_sample_size
+
+        index = pd.date_range("2024-03-01", periods=72, freq="h")
+        shape = np.clip(np.sin((index.hour.to_numpy() - 6) / 12.0 * np.pi), 0.0, None)
+        frame = pd.DataFrame({OBSERVED_COLUMN["shortwave_down"]: 900.0 * shape}, index=index)
+
+        sample, _atoms = _observed_sample("shortwave_down", frame)
+
+        # Three days of daylight hours: two breaks, one per night crossed.
+        assert int((~np.isfinite(sample)).sum()) == 2
+        marked_n_eff, marked_r1 = effective_sample_size(sample)
+        spliced_n_eff, spliced_r1 = effective_sample_size(sample[np.isfinite(sample)])
+        # The splice pairs an evening hour with the next morning's, which drags
+        # r1 down and n_effective up.
+        assert marked_r1 > spliced_r1
+        assert marked_n_eff < spliced_n_eff
 
     def test_a_missing_sensor_still_reports_zero(self):
         assert _available_hours("precipitation", _frame({"unrelated": [1.0, 2.0]})) == 0
 
 
 class TestTheDirectionEraCutIsPublished:
-    """46,5% of the record leaves, and it used to leave in silence.
+    """46,5% of the record leaves.
 
     Every number on the rose is then a share of what is left, which is why its
     calm fraction (7,4%) disagreed with the wind-speed panel's (5,2%) for the
@@ -203,10 +237,84 @@ class TestTheDirectionEraCutIsPublished:
         assert [atom.id for atom in atoms] == ["arithmetic_mean_era", "calm"]
         assert atoms[0].count == 2
         assert atoms[0].fraction == pytest.approx(0.5)
-        assert sorted(sample) == [10.0, 40.0]
+        assert sorted(sample[np.isfinite(sample)]) == [10.0, 40.0]
 
     def test_the_excluded_hours_come_back_in_the_coverage_panel(self):
         """The logger did write them; what is wrong is how it averaged them."""
         frame = self._frame_spanning_the_cut()
 
         assert _available_hours("wind_direction", frame) == 4
+
+
+def test_an_hour_whose_speed_is_missing_becomes_its_own_atom():
+    """It satisfied neither comparison, so it left the sample AND the calm atom
+    and the published coverage — n plus the atoms — came out short of the hours
+    the record holds. Calling it calm would put a bearing measured in wind into
+    the calm mass."""
+    direction = _hours([10.0, 20.0, 30.0, 40.0])
+    speed = _hours([0.10, float("nan"), 5.0, 5.0])
+
+    values, atoms = _strip_atoms("wind_direction", direction, speed)
+
+    by_id = {atom.id: atom for atom in atoms}
+    assert by_id["calm"].count == 1
+    assert by_id["unpaired_speed"].count == 1
+    assert len(values[np.isfinite(values)]) + sum(atom.count for atom in atoms) == len(direction)
+
+
+def test_no_unpaired_atom_is_published_when_every_hour_has_its_speed():
+    """Published only when it removes something: an empty atom on every rose
+    would read as a fault the record does not have."""
+    direction = _hours([10.0, 20.0, 30.0, 40.0])
+    speed = _hours([0.10, 0.10, 5.0, 5.0])
+
+    _values, atoms = _strip_atoms("wind_direction", direction, speed)
+
+    assert [atom.id for atom in atoms] == ["calm"]
+
+
+class TestTheEraSplitPartitionsThePublishedPopulations:
+    """`ERA_SPLIT` decides which hours reach which published variable: an
+    off-by-one on the boundary hour — the hour ON the split — moves a day of
+    PAR from one era's density to the other's."""
+
+    @staticmethod
+    def _daytime_around_the_split(column: str) -> pd.DataFrame:
+        # Local noon on the three days around the split, so the daylight gate
+        # keeps every row and only the era rule decides.
+        stamps = pd.DatetimeIndex(
+            [ERA_SPLIT - pd.Timedelta(days=1), ERA_SPLIT, ERA_SPLIT + pd.Timedelta(days=1)]
+        ) + pd.Timedelta(hours=12)
+        return pd.DataFrame(
+            {column: [100.0, 200.0, 300.0], OBSERVED_COLUMN["shortwave_down"]: [800.0] * 3},
+            index=stamps,
+        )
+
+    def test_par_early_keeps_only_what_precedes_the_split(self):
+        frame = self._daytime_around_the_split(OBSERVED_COLUMN["par_early"])
+
+        sample, _atoms = _observed_sample("par_early", frame)
+
+        assert sorted(sample[np.isfinite(sample)]) == [100.0]
+
+    @pytest.mark.parametrize("spec_id", ["par_late", "shortwave_up"])
+    def test_the_later_era_keeps_the_split_hour_and_what_follows(self, spec_id: str):
+        frame = self._daytime_around_the_split(OBSERVED_COLUMN[spec_id])
+
+        sample, _atoms = _observed_sample(spec_id, frame)
+
+        assert sorted(sample[np.isfinite(sample)]) == [200.0, 300.0]
+
+
+def test_a_non_positive_shortwave_hour_is_an_atom_not_a_sample():
+    """A pyranometer's zero offset makes a few daytime hours slightly negative.
+    They fall outside the induced density's support, so they leave as a mass —
+    clipping them to zero would invent a spike the instrument never measured."""
+    stamps = pd.DatetimeIndex(["2024-03-01 12:00", "2024-03-01 13:00", "2024-03-01 14:00"])
+    frame = pd.DataFrame({OBSERVED_COLUMN["shortwave_down"]: [-1.5, 0.0, 300.0]}, index=stamps)
+
+    sample, atoms = _observed_sample("shortwave_down", frame)
+
+    assert sorted(sample[np.isfinite(sample)]) == [300.0]
+    assert [atom.id for atom in atoms] == ["nonpositive"]
+    assert atoms[0].count == 2

@@ -228,15 +228,21 @@ def resolve_feature_set(name: FeatureSet | str, extra: Iterable[str] = ()) -> li
     return resolved
 
 
-def active_feature_groups(name: FeatureSet | str) -> dict[str, list[str]]:
+def active_feature_groups(
+    name: FeatureSet | str, extra: Iterable[str] = ()
+) -> dict[str, list[str]]:
     """Sensor-token groups active for a feature set.
 
     Each group is narrowed to the features the set actually resolves and a group
     left empty is dropped, so the union of the returned groups is exactly
-    :func:`resolve_feature_set` for that set — ``radiometry_aux`` disappears
-    below the extended set, ``temperature``/``humidity`` disappear under
-    ``"minimal"``, which carries no thermohygrometer, and ``pressure`` also
-    disappears under ``"bare"``, which carries no barometer.
+    :func:`resolve_feature_set` for the same ``(name, extra)`` pair —
+    ``radiometry_aux`` disappears below the extended set,
+    ``temperature``/``humidity`` disappear under ``"minimal"``, which carries no
+    thermohygrometer, and ``pressure`` also disappears under ``"bare"``, which
+    carries no barometer.
+
+    *extra* names that a declared group already lists join that group; the rest,
+    which belong to no group, are gathered into a synthetic ``"extra"`` group.
 
     Returns
     -------
@@ -244,12 +250,18 @@ def active_feature_groups(name: FeatureSet | str) -> dict[str, list[str]]:
         Group name -> its member feature names, copied from
         :data:`FEATURE_GROUPS` so the caller cannot mutate the policy.
     """
-    resolved = set(resolve_feature_set(name))
+    resolved = resolve_feature_set(name, extra)
+    members_of = set(resolved)
     groups = {
-        group: [member for member in members if member in resolved]
+        group: [member for member in members if member in members_of]
         for group, members in FEATURE_GROUPS.items()
     }
-    return {group: members for group, members in groups.items() if members}
+    declared = {member for members in FEATURE_GROUPS.values() for member in members}
+    ungrouped = [feature for feature in resolved if feature not in declared]
+    active = {group: members for group, members in groups.items() if members}
+    if ungrouped:
+        active["extra"] = ungrouped
+    return active
 
 
 def validate_features(names: Iterable[str], *, target_columns: Iterable[str] = ()) -> None:

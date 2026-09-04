@@ -28,7 +28,11 @@ from micrometeorology.common.paths import find_files
 from micrometeorology.sensors.aggregation import aggregate_to_hourly
 from micrometeorology.sensors.calibration import apply_calibrations, load_calibrations
 from micrometeorology.sensors.export import export_csv
-from micrometeorology.sensors.ingestion import apply_physical_limits, merge_dat_files
+from micrometeorology.sensors.ingestion import (
+    apply_physical_limits,
+    merge_dat_files,
+    read_campbell_dat,
+)
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -48,6 +52,27 @@ def _opens_windows_off_the_hour(freq: str) -> bool:
     if not isinstance(offset, Tick):
         return False
     return pd.Timedelta(offset) % DATETIME_COLUMN_RESOLUTION != pd.Timedelta(0)
+
+
+def _in_chronological_order(files: list[Path]) -> list[Path]:
+    """Sort *files* by the first timestamp each one carries.
+
+    A file whose first stamp cannot be read keeps its lexicographic position
+    relative to the rest rather than being dropped: the merge still has to see
+    it, and the reader will report whatever is wrong with it.
+    """
+    import pandas as pd
+
+    def first_stamp(path: Path) -> tuple[int, pd.Timestamp | str]:
+        try:
+            frame = read_campbell_dat(path)
+        except OSError, ValueError, KeyError, IndexError:
+            return (1, path.name)
+        if frame.empty:
+            return (1, path.name)
+        return (0, pd.Timestamp(pd.DatetimeIndex(frame.index).min()))
+
+    return sorted(files, key=first_stamp)
 
 
 @app.command()
@@ -107,6 +132,13 @@ def run(
 
     typer.echo(f"Found {len(files)} files")
 
+    # merge_dat_files resolves an overlapping stamp as "the first file in
+    # CHRONOLOGICAL order wins", and find_files sorts lexicographically, which
+    # for the station's own names is a different order — `LBM_lenta.dat` sorts
+    # before `LBM_lenta_2019.dat` while covering 2019 itself. Ordering by each
+    # file's first stamp makes the documented rule true of what is passed.
+    files = _in_chronological_order(files)
+
     # Passed explicitly so `sensor_sentinel_value: null` really switches the
     # guard off, rather than falling back to the reader's hard-coded default.
     df = merge_dat_files(files, sentinel_value=settings.sensor_sentinel_value)
@@ -129,8 +161,6 @@ def run(
         ),
         sum_columns=settings.sensor_sum_columns,
         wind_dir_columns=settings.sensor_wind_dir_columns,
-        # Weights each direction by its own speed: under unit weight instead,
-        # about one hourly bearing in six lands more than 5 deg off.
         wind_speed_column_map=settings.sensor_wind_speed_column_map,
         freq=freq,
     )

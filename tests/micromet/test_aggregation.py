@@ -66,22 +66,15 @@ class TestAggregateToHourly:
         result = aggregate_to_hourly(data, min_samples=6)
         assert np.isnan(result["Temp"].iloc[0])
 
-    def test_wind_direction_vector_mean(self, sample_5min_data):
-        result = aggregate_to_hourly(
-            sample_5min_data,
-            wind_dir_columns=["WD_WXT"],
-        )
-        assert "WD_WXT" in result.columns
-        for val in result["WD_WXT"].dropna():
-            assert 0 <= val < 360
+    def test_the_vector_mean_is_taken_per_hour_not_once_over_the_frame(self):
+        """Two opposite hours: over the whole frame their resultant would cancel."""
+        idx = pd.date_range("2024-01-01 00:00", periods=24, freq="5min")
+        frame = pd.DataFrame({"WD_WXT": [45.0] * 12 + [225.0] * 12}, index=idx)
 
-        # The vector mean is taken per hour, not once over the whole frame.
-        dir1 = result["WD_WXT"].iloc[0]
-        dir2 = result["WD_WXT"].iloc[1]
-        assert abs(dir1 - dir2) > 1.0, f"Hours 1 and 2 identical: {dir1} == {dir2}"
+        result = aggregate_to_hourly(frame, min_samples=6, wind_dir_columns=["WD_WXT"])
 
-        arithmetic = sample_5min_data["WD_WXT"][:12].mean()
-        assert dir1 != pytest.approx(arithmetic, abs=1.0)
+        assert result["WD_WXT"].iloc[0] == pytest.approx(45.0, abs=0.01)
+        assert result["WD_WXT"].iloc[1] == pytest.approx(225.0, abs=0.01)
 
     def test_wind_direction_wraps_around_north(self):
         """350° and 10° in the same hour average to 0°, not to the arithmetic 180°."""
@@ -107,10 +100,12 @@ class TestAggregateToHourly:
             wind_speed_column_map={"WD_WXT": "WS_WXT"},
         )
         unit = aggregate_to_hourly(df, min_samples=6, wind_dir_columns=["WD_WXT"])
-        # The 10 m/s easterly dominates the 1 m/s southerly
-        assert weighted["WD_WXT"].iloc[0] == pytest.approx(95.71, abs=0.5)
-        # Unit speeds give the plain bisector of 090 and 180
-        assert unit["WD_WXT"].iloc[0] == pytest.approx(135.0, abs=0.5)
+        assert weighted["WD_WXT"].iloc[0] == pytest.approx(95.71, abs=0.5), (
+            "the 10 m/s easterly dominates the 1 m/s southerly"
+        )
+        assert unit["WD_WXT"].iloc[0] == pytest.approx(135.0, abs=0.5), (
+            "unit speeds give the plain bisector of 090 and 180"
+        )
 
     def test_unit_speed_fallback_when_mapped_speed_column_is_absent(self):
         idx = pd.date_range("2024-01-01 00:00", periods=12, freq="5min")
@@ -285,3 +280,70 @@ def test_speed_weighting_still_applies_when_the_anemometer_is_present() -> None:
     )
 
     assert hourly["WindDir"].iloc[0] == pytest.approx(5.71, abs=0.1)
+
+
+def test_a_sample_whose_speed_alone_is_missing_still_bears_on_the_direction() -> None:
+    """Between the two extremes the tests already pin — no speed at all, and speed
+    throughout — sits the common case: speed present for part of the hour. Those
+    samples contribute NaN u/v that the resampled mean drops, while
+    ``dir_counts`` counts all twelve directions and calls the hour whole — so the
+    published bearing would come from half the record the count claims.
+    """
+    stamps = pd.date_range("2024-06-15 00:00", periods=12, freq="5min")
+    frame = pd.DataFrame(
+        {
+            "WindDir": [0.0] * 6 + [90.0] * 6,
+            "WS_ms": [1.0] * 6 + [float("nan")] * 6,
+        },
+        index=stamps,
+    )
+
+    hourly = aggregate_to_hourly(
+        frame,
+        min_samples=6,
+        sum_columns=[],
+        wind_dir_columns=["WindDir"],
+        wind_speed_column_map={"WindDir": "WS_ms"},
+    )
+
+    assert hourly["WindDir"].iloc[0] == pytest.approx(45.0, abs=0.1)
+
+
+@pytest.mark.parametrize(
+    ("valid_count", "expected_is_nan"),
+    [(6, False), (5, True)],
+)
+@pytest.mark.parametrize("kind", ["mean", "sum"])
+def test_the_completeness_floor_decides_the_hour_on_its_exact_boundary(
+    valid_count: int, expected_is_nan: bool, kind: str
+) -> None:
+    """`min_samples` is what makes an hour representable at all, and the sum path
+    publishes the hourly rainfall the site prints. Neither side of the boundary
+    was pinned, so an off-by-one would have published a partial hour as a whole
+    one or withheld a complete one."""
+    stamps = pd.date_range("2024-06-15 00:00", periods=12, freq="5min")
+    values = [1.0] * valid_count + [np.nan] * (12 - valid_count)
+    column = "precip" if kind == "sum" else "Temp"
+    frame = pd.DataFrame({column: values}, index=stamps)
+
+    hourly = aggregate_to_hourly(
+        frame, min_samples=6, sum_columns=[column] if kind == "sum" else []
+    )
+
+    assert bool(np.isnan(hourly[column].iloc[0])) is expected_is_nan
+
+
+def test_an_hour_of_exact_zeros_is_a_measured_zero_not_a_gap() -> None:
+    """`sum(min_count=1)` is what tells a dry hour the gauge measured from an hour
+    it never sampled: without it both come back as 0.0 and the record loses the
+    difference."""
+    stamps = pd.date_range("2024-06-15 00:00", periods=12, freq="5min")
+    measured = pd.DataFrame({"precip": [0.0] * 12}, index=stamps)
+    absent = pd.DataFrame({"precip": [np.nan] * 12}, index=stamps)
+
+    assert aggregate_to_hourly(measured, min_samples=6, sum_columns=["precip"])["precip"].iloc[
+        0
+    ] == pytest.approx(0.0)
+    assert np.isnan(
+        aggregate_to_hourly(absent, min_samples=6, sum_columns=["precip"])["precip"].iloc[0]
+    )

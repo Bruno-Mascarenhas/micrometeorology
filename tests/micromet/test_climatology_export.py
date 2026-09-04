@@ -9,7 +9,9 @@ import re
 
 import numpy as np
 import pytest
+from scipy import stats
 
+from micrometeorology.stats import climatology_export
 from micrometeorology.stats.climatology_export import (
     CLIMATOLOGY_VARIABLES,
     MANIFEST_FORMAT,
@@ -90,6 +92,29 @@ class TestVariablePayload:
         # be drawn flat against the axis under bars that integrate to 1.
         assert curve == pytest.approx(1.0, abs=0.02)
 
+    def test_a_percent_variable_is_fitted_on_its_familys_own_support(self):
+        """Relative humidity is binned in %, but Beta only lives on [0, 1], so
+        the spec carries a fit_scale of 100. Four places multiply or divide by
+        it, and a dropped one publishes a curve a hundred times too tall or a
+        quantile gap a hundred times too small — both of which still look like
+        numbers. Pinned against a Beta fitted independently on sample / 100.
+        """
+        spec = next(s for s in CLIMATOLOGY_VARIABLES if s.id == "relative_humidity")
+        generator = np.random.default_rng(11)
+        fraction = generator.beta(6.0, 2.0, 20_000)
+        samples = {"observed_all": fraction * 100.0}
+
+        payload = build_variable_payload(spec, samples, version="v1")
+        subset = payload["subsets"]["observed_all"]
+
+        expected = stats.beta.fit(fraction, floc=0.0, fscale=1.0)
+        assert subset["fit"]["params"]["alpha"] == pytest.approx(expected[0], rel=1e-3)
+        assert subset["fit"]["params"]["beta"] == pytest.approx(expected[1], rel=1e-3)
+
+        widths = np.diff(payload["edges"])
+        assert float(np.sum(np.array(subset["curve"]) * widths)) == pytest.approx(1.0, abs=0.01)
+        assert subset["quality"]["quantile_gap"] > 0.01
+
     def test_atoms_are_reported_verbatim(self, wind_spec, wind_samples):
         atoms = {"observed_all": [Atom("calm", "Calmarias", 0.037, 740)]}
         payload = build_variable_payload(wind_spec, wind_samples, version="v1", atoms=atoms)
@@ -106,11 +131,24 @@ class TestVariablePayload:
         assert empty["fit"] is None
         assert empty["curve"] is None
 
-    def test_display_range_is_shared_by_every_subset(self, wind_spec, wind_samples):
-        """A per-subset axis would silently rescale under the reader between clicks."""
-        payload = build_variable_payload(wind_spec, wind_samples, version="v1")
+    def test_display_range_is_shared_by_every_subset(self, wind_spec):
+        """A per-subset axis would silently rescale under the reader between clicks.
+
+        The two subsets are given disjoint supports, so a window computed from
+        ``observed_all`` alone would leave the other one off the axis.
+        """
+        slow = np.full(500, 1.5)
+        fast = np.full(500, 8.5)
+
+        payload = build_variable_payload(
+            wind_spec, {"observed_all": slow, "observed_jja": fast}, version="v1"
+        )
+
         first, last = payload["display_range"]
-        assert 0 <= first < last <= len(payload["edges"]) - 2
+        edges = payload["edges"]
+        assert 0 <= first < last <= len(edges) - 2
+        assert edges[first] <= 1.5
+        assert edges[last + 1] >= 8.5
 
     def test_display_range_ignores_a_lone_far_outlier(self, wind_spec):
         """One gust must not stretch the axis over a range blank for everything else."""
@@ -238,14 +276,16 @@ class TestReferenceLinks:
             assert ">" not in doi, f"{ref.key}: percent-encode > in the URL"
             assert " " not in doi, ref.key
 
-    def test_reference_keys_and_markers_agree(self) -> None:
-        """A marker with no record renders as raw ``[[key]]`` to the reader."""
-        marker = re.compile(r"\[\[([a-z0-9]+)\]\]")
-        cited = set()
-        for spec in CLIMATOLOGY_VARIABLES:
-            for text in (*spec.caveats, spec.family_label):
-                cited.update(marker.findall(text))
-        assert cited <= set(REFERENCES), sorted(cited - set(REFERENCES))
+    def test_a_marker_with_no_record_stops_the_build(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A marker with no record renders as raw ``[[key]]`` to the reader.
+
+        ``_assert_references`` runs at import, so with the shipped records in
+        place the condition can only be reached by taking them away.
+        """
+        monkeypatch.setattr(climatology_export, "REFERENCES", {})
+
+        with pytest.raises(ValueError, match="undeclared reference marker"):
+            climatology_export._assert_references()
 
 
 class TestSubsetTotalsAgree:

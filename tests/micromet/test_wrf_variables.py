@@ -1,8 +1,9 @@
-"""Regression tests for WRF variable extraction fixes.
+"""Regression tests for WRF variable extraction.
 
-Covers the Phase 6 behavior bug fixes:
-- rain step 0 publishes zeros instead of the cumulative total (Fix 2);
-- min/max helpers must not crash on single-timestep inputs (Fix 3).
+Covers:
+- rain step 0 is entirely no-value, never zero and never the cumulative total:
+  zero would state that it rained nowhere, which the model never says;
+- min/max helpers must not crash on single-timestep inputs.
 """
 
 import numpy as np

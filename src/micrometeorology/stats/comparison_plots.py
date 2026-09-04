@@ -56,13 +56,13 @@ def plot_comparison(
     series_ax.tick_params(axis="x", rotation=45)
 
     scatter_ax = axes[1]
-    obs_vals = paired_df[obs_col].dropna()
-    mod_vals = paired_df[model_col].reindex(obs_vals.index).dropna()
-    common = obs_vals.index.intersection(mod_vals.index)
-    scatter_ax.scatter(obs_vals[common], mod_vals[common], alpha=0.5, s=10)
+    pairs = paired_df[[obs_col, model_col]].dropna()
+    observed = pairs[obs_col]
+    modelled = pairs[model_col]
+    scatter_ax.scatter(observed, modelled, alpha=0.5, s=10)
     lims = [
-        min(obs_vals[common].min(), mod_vals[common].min()),
-        max(obs_vals[common].max(), mod_vals[common].max()),
+        min(observed.min(), modelled.min()),
+        max(observed.max(), modelled.max()),
     ]
     scatter_ax.plot(lims, lims, "k--", alpha=0.5)
     scatter_ax.set_xlabel("Observed")

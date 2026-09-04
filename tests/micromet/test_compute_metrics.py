@@ -88,3 +88,95 @@ def test_a_datetime_indexed_pair_is_not_warned_about(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     assert "aligned by position" not in result.output
+
+
+def test_nearest_join_needs_a_time_index_in_both_files(tmp_path: Path) -> None:
+    """The positional fallback of ``--join nearest`` could never run: a
+    ``Timedelta`` tolerance on an integer key raised a ``MergeError`` traceback."""
+    for name in ("a.csv", "b.csv"):
+        (tmp_path / name).write_text("T2\n20.0\n21.0\n22.0\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        compute_metrics.app,
+        ["-a", str(tmp_path / "a.csv"), "-b", str(tmp_path / "b.csv"), "--join", "nearest"],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "needs a time index in both files" in result.output
+
+
+def test_nearest_join_with_no_pair_inside_the_tolerance_is_an_error_not_a_table_of_nan(
+    tmp_path: Path,
+) -> None:
+    """``merge_asof`` is a LEFT join, so ``aligned.empty`` never fired for two
+    disjoint years and the command printed every metric as NaN with exit 0."""
+    dataset_a = _hourly_csv(tmp_path / "a.csv", 0.0)
+    index = pd.date_range("2021-01-01", periods=6, freq="1h", name="TIMESTAMP")
+    dataset_b = tmp_path / "b.csv"
+    pd.DataFrame({"T2": [1.0] * 6, "RH": [1.0] * 6}, index=index).to_csv(dataset_b)
+
+    result = CliRunner().invoke(
+        compute_metrics.app, ["-a", str(dataset_a), "-b", str(dataset_b), "--join", "nearest"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "No overlapping data after alignment" in result.output
+
+
+def test_nearest_join_pairs_rows_offset_by_less_than_the_tolerance(tmp_path: Path) -> None:
+    """The successful half of `--join nearest` — and `--tolerance` itself."""
+    index_a = pd.date_range("2024-01-01 00:00", periods=6, freq="1h", name="TIMESTAMP")
+    index_b = index_a + pd.Timedelta(minutes=10)
+    dataset_a = tmp_path / "a.csv"
+    dataset_b = tmp_path / "b.csv"
+    pd.DataFrame({"T2": [20.0] * 6}, index=index_a).to_csv(dataset_a)
+    pd.DataFrame({"T2": [21.0] * 6}, index=index_b).to_csv(dataset_b)
+    output = tmp_path / "out" / "metrics.csv"
+
+    result = CliRunner().invoke(
+        compute_metrics.app,
+        [
+            "-a",
+            str(dataset_a),
+            "-b",
+            str(dataset_b),
+            "--join",
+            "nearest",
+            "--tolerance",
+            "30min",
+            "-o",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    table = pd.read_csv(output, index_col=0)
+    assert list(table.loc["n"]) == [6]
+
+
+def test_a_tolerance_tighter_than_the_offset_pairs_nothing(tmp_path: Path) -> None:
+    """The same two files, refused: the tolerance is what decides, so it has to be
+    read from the flag rather than from a default nobody passes."""
+    index_a = pd.date_range("2024-01-01 00:00", periods=6, freq="1h", name="TIMESTAMP")
+    index_b = index_a + pd.Timedelta(minutes=10)
+    dataset_a = tmp_path / "a.csv"
+    dataset_b = tmp_path / "b.csv"
+    pd.DataFrame({"T2": [20.0] * 6}, index=index_a).to_csv(dataset_a)
+    pd.DataFrame({"T2": [21.0] * 6}, index=index_b).to_csv(dataset_b)
+
+    result = CliRunner().invoke(
+        compute_metrics.app,
+        [
+            "-a",
+            str(dataset_a),
+            "-b",
+            str(dataset_b),
+            "--join",
+            "nearest",
+            "--tolerance",
+            "5min",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "No overlapping data after alignment" in result.output

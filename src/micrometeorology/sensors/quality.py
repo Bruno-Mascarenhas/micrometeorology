@@ -27,6 +27,10 @@ are LOCAL: the WMO minimum-variability forms flag 3.6% of one temperature channe
 and 10.1% of one humidity channel at this site, because a damped maritime tropical
 climate genuinely holds still longer than the continental stations those criteria
 were written for.
+
+Timestamps are naive station-local throughout, as they arrive from the
+datalogger's own clock (see :mod:`micrometeorology.sensors.ingestion`); the index
+spacing measured against :data:`SAMPLING_INTERVAL` is local wall-clock spacing.
 """
 
 import numpy as np

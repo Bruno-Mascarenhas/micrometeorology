@@ -11,10 +11,16 @@ Three commands are attached to the shared app by :func:`register`:
 - ``export-colab-bundle`` — pack a prepared dataset into a Colab-ready
   ``tar.gz`` via :func:`allsky.bundle.export_colab_bundle`.
 
+Every timestamp handled here — the frame stamps read back off the overlay and
+the CR5000 index — is **naive local time** on the site clock; the UTC boundary
+is the manifest layer (:mod:`allsky.data.manifest`), which localises with
+:data:`allsky.config.SITE_UTC_OFFSET_HOURS`.
+
 Heavy dependencies (pandas, imageio, torch-free sibling modules) are imported
 lazily inside each command so ``allsky --help`` stays light and torch-free.
 """
 
+import datetime as dt
 import hashlib
 import json
 import logging
@@ -23,6 +29,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from pydantic import ValidationError
 
 from allsky.cli.runtime import configure_cli_logging
 from allsky.config import (
@@ -34,7 +41,6 @@ from allsky.config import (
     load_prepare_config,
     manifest_meta_path,
 )
-from allsky.frame_pixels import decode_rgb
 from labmim_core.atomic import atomic_write, atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -62,33 +68,31 @@ ConfigOption = Annotated[
 
 
 def _load_prepare(config: Path | None) -> PrepareConfig:
-    """Load a :class:`PrepareConfig` from *config*, or the defaults when None."""
-    return PrepareConfig() if config is None else load_prepare_config(config)
+    """Load a :class:`PrepareConfig` from *config*, or the defaults when None.
+
+    Raises
+    ------
+    typer.Exit
+        Code 1 when the YAML does not validate. The refusal is reported as a
+        named CLI error rather than a pydantic traceback: this is an operator
+        typing a path, and the fields the validator names are the actionable
+        part.
+    """
+    try:
+        return PrepareConfig() if config is None else load_prepare_config(config)
+    except ValidationError as exc:
+        typer.echo(f"error: {config} does not validate:\n{exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
-def _config_sha256(cfg: PrepareConfig) -> str:
-    """Content hash of the whole resolved config, recorded as manifest provenance."""
-    from allsky.provenance import config_sha256
-
-    return config_sha256(cfg)
-
-
-#: :class:`PrepareConfig` sections that reach the manifest.  ``embeddings`` and
-#: ``splits`` are deliberately excluded from :func:`_manifest_inputs_sha256`:
-#: neither influences a single manifest row, so an unrelated edit (lowering
-#: ``embeddings.batch_size`` after an OOM) must not force a full rebuild.
-_MANIFEST_CONFIG_SECTIONS = (
-    "video",
-    "site",
-    "features",
-    "mask",
-    "crop",
-    "resize",
-    "night_filter",
-    "sensor",
-    "targets",
-    "alignment",
-    "output",
+#: :class:`PrepareConfig` sections that reach no manifest row and are left out of
+#: :func:`_manifest_inputs_sha256`: an unrelated edit (lowering
+#: ``embeddings.batch_size`` after an OOM) must not force a full rebuild. Every
+#: other section is hashed by construction, so a new section is covered unless
+#: it is written down here.
+_EXCLUDED_FROM_MANIFEST_HASH = ("embeddings", "splits")
+_MANIFEST_CONFIG_SECTIONS = tuple(
+    name for name in PrepareConfig.model_fields if name not in _EXCLUDED_FROM_MANIFEST_HASH
 )
 
 
@@ -181,9 +185,10 @@ def _require_frames_key(video_dir: Path, stem: str, *, frames_key: str, force: b
 def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]) -> str:
     """Content hash of everything the manifest is actually built from.
 
-    ``_config_sha256`` covers none of it, so the resume check keys on this hash
-    instead: a newly extracted video day has to invalidate the manifest, and an
-    edit to an irrelevant section must not.  Three inputs are folded in:
+    :func:`allsky.provenance.config_sha256` covers none of it, so the resume
+    check keys on this hash instead: a newly extracted video day has to
+    invalidate the manifest, and an edit to an irrelevant section must not.
+    Three inputs are folded in:
 
     - the extracted frame set — the ``frame_path`` values of the per-video
       manifests that ``pd.concat`` feeds to the builder;
@@ -195,23 +200,35 @@ def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]
     - only the config sections that reach the manifest
       (:data:`_MANIFEST_CONFIG_SECTIONS`).
 
+    The per-frame ``qc_frame_flags`` are part of the key: re-extracting a video
+    to populate them leaves every ``frame_path`` in place, and the rebuild the
+    missing-flags warning asks for would otherwise resume on the flagless manifest.
+
     Note that the live, appended sensor archive changes content on essentially
     every logger write, so a rebuild on every run is the expected steady state —
     the manifest's targets are re-derived from the newest sensor data, which is
     the point.
     """
-    unknown = [name for name in _MANIFEST_CONFIG_SECTIONS if name not in PrepareConfig.model_fields]
+    unknown = [
+        name for name in _EXCLUDED_FROM_MANIFEST_HASH if name not in PrepareConfig.model_fields
+    ]
     if unknown:
         raise RuntimeError(
-            f"PrepareConfig has no field(s) {unknown}; pydantic ignores bogus include keys, so "
-            "the manifest inputs hash would silently stop covering them"
+            f"PrepareConfig has no field(s) {unknown}; an exclusion naming nothing means the "
+            "section it meant to leave out of the manifest inputs hash was renamed"
         )
     from allsky.provenance import canonical_config_json, file_content_sha256
 
     digest = hashlib.sha256()
     for frame in per_video:
-        for frame_path in sorted(str(value) for value in frame["frame_path"]):
-            digest.update(frame_path.encode("utf-8"))
+        flags = (
+            [str(int(value)) for value in frame["qc_frame_flags"]]
+            if "qc_frame_flags" in frame.columns
+            else ["absent"] * len(frame)
+        )
+        paths = [str(value) for value in frame["frame_path"]]
+        for frame_path, flag in sorted(zip(paths, flags, strict=True)):
+            digest.update(f"{frame_path}\0{flag}".encode())
             digest.update(b"\0")
     for sensor_path in cfg.sensor.paths:
         digest.update(file_content_sha256(Path(sensor_path)).encode("utf-8"))
@@ -332,14 +349,18 @@ def prepare_local(
     Raises
     ------
     typer.Exit
-        Code 1 on an unknown ``--steps`` name, on a sensor record that cannot be
-        paired with any video day, when ``build-manifest`` runs with no extracted
-        frames, or when the split artifact already exists for a different day set.
+        Code 1 on an unknown ``--steps`` name, on a file the video pattern
+        matched whose name carries no parseable date, on a sensor record that
+        cannot be paired with any video day, when ``build-manifest`` runs with no
+        extracted frames, or when the split artifact already exists for a
+        different day set.
     """
     configure_cli_logging()
     cfg = _load_prepare(config)
 
     import glob
+
+    from allsky.provenance import config_sha256
 
     step_set = _parse_steps(steps)
     dataset_dir = Path(cfg.output.dataset_dir)
@@ -348,7 +369,7 @@ def prepare_local(
     meta_path = manifest_meta_path(manifest_path)
     split_path = dataset_dir / DATASET_SPLIT_FILENAME
     videos = sorted(glob.glob(cfg.video.pattern))
-    config_sha = _config_sha256(cfg)
+    config_sha = config_sha256(cfg)
 
     if dry_run:
         _log_plan(
@@ -523,7 +544,7 @@ def _run_extract_step(
         stem = Path(video).stem
         video_dir = frames_root / stem
         video_manifest = video_dir / DATASET_MANIFEST_FILENAME
-        existing = _read_frame_manifest(video_manifest)
+        existing = None if (run_extract and force) else _read_frame_manifest(video_manifest)
         qc_complete = existing is not None and "qc_frame_flags" in existing.columns
 
         if not run_extract:
@@ -544,17 +565,24 @@ def _run_extract_step(
             per_video.append(existing)
             continue
 
-        if qc_complete and not force:
+        if existing is not None and qc_complete and not force:
             recorded = _read_frames_key(video_dir)
-            if recorded == frames_key:
+            missing = _missing_frames(video_dir, existing)
+            if recorded == frames_key and missing == 0:
                 typer.echo(f"resume: skipping extraction for {stem} (frames already present)")
                 per_video.append(existing)
                 continue
-            typer.echo(
-                f"resume: the frames for {stem} were extracted under "
-                + ("no recorded" if recorded is None else "a different")
-                + " video/mask/crop/resize config, re-extracting"
-            )
+            if recorded == frames_key:
+                typer.echo(
+                    f"resume: {missing} of {len(existing)} frames for {stem} are gone from "
+                    f"{video_dir}, re-extracting"
+                )
+            else:
+                typer.echo(
+                    f"resume: the frames for {stem} were extracted under "
+                    + ("no recorded" if recorded is None else "a different")
+                    + " video/mask/crop/resize config, re-extracting"
+                )
         elif video_manifest.exists() and not force:
             typer.echo(
                 f"resume: frame manifest for {stem} is unreadable or predates visual QC, "
@@ -575,7 +603,72 @@ def _run_extract_step(
             f"WARNING: {len(unusable)} video(s) could not be timestamped and contribute no "
             f"rows: {', '.join(unusable)}"
         )
+    per_video += _already_extracted_days(
+        frames_root,
+        extracted={Path(video).stem for video in videos},
+        frames_key=frames_key,
+        force=force,
+    )
     return per_video
+
+
+def _missing_frames(video_dir: Path, frame_manifest: PandasDataFrame) -> int:
+    """How many JPEGs *frame_manifest* lists are no longer in *video_dir*.
+
+    The resume gate reads the per-video parquet and the provenance sidecar, and
+    both survive a cleanup that removed the frames themselves; the manifest would
+    then be rebuilt with ``image_path`` values naming files that are gone, and
+    only ``validate-dataset`` would ever say so.  One directory listing settles
+    it, the same strong check :meth:`allsky.archive.Ledger.has_video` makes
+    before answering that a video is on disk.
+    """
+    on_disk = {path.name for path in video_dir.glob("*.jpg")}
+    return sum(1 for path in frame_manifest["frame_path"] if Path(str(path)).name not in on_disk)
+
+
+def _already_extracted_days(
+    frames_root: Path, *, extracted: set[str], frames_key: str, force: bool
+) -> list[PandasDataFrame]:
+    """Frame manifests on disk for days the video glob no longer matches.
+
+    ``sync-archive --prune-uploaded`` deletes a day's mp4 once Drive has it, and
+    the production configs point ``video.pattern`` at the very directory it
+    prunes from — the cron recipe in ``docs/allsky-archive.md`` runs both.  The
+    day's frames stay on disk even though its video does not.
+
+    A directory is only adopted when its manifest is complete (it carries
+    ``qc_frame_flags``) and its recorded config matches this run's, the same gate
+    a resumed extraction passes; there is no mp4 left to re-extract from, so a
+    mismatch stops the run rather than quietly mixing two configs.
+
+    Returns
+    -------
+    list[pandas.DataFrame]
+        One frame manifest per adopted day, in stem order.
+    """
+    if not frames_root.is_dir():
+        return []
+    adopted: list[PandasDataFrame] = []
+    kept: list[str] = []
+    for video_dir in sorted(frames_root.iterdir()):
+        stem = video_dir.name
+        if not video_dir.is_dir() or stem in extracted or stem.startswith("."):
+            continue
+        # Staging leftovers of an interrupted swap, not days.
+        if video_dir.suffix in (".incoming", ".superseded"):
+            continue
+        existing = _read_frame_manifest(video_dir / DATASET_MANIFEST_FILENAME)
+        if existing is None or "qc_frame_flags" not in existing.columns:
+            continue
+        _require_frames_key(video_dir, stem, frames_key=frames_key, force=force)
+        adopted.append(existing)
+        kept.append(stem)
+    if kept:
+        typer.echo(
+            f"resume: keeping {len(kept)} already-extracted day(s) whose video the glob no "
+            f"longer matches: {', '.join(kept)}"
+        )
+    return adopted
 
 
 def _read_frame_manifest(video_manifest: Path) -> PandasDataFrame | None:
@@ -603,36 +696,52 @@ def _write_frame_manifest(video_manifest: Path, frame_manifest: PandasDataFrame)
     atomic_write(video_manifest, lambda tmp: frame_manifest.to_parquet(tmp, index=False))
 
 
-def _video_day(path: str, cfg: PrepareConfig) -> Any:
-    from allsky.video import video_date
-
-    return video_date(path, cfg.video)
-
-
 def _check_sensor_coverage(cfg: PrepareConfig, videos: list[str]) -> None:
     """Fail before extraction when the logger cannot pair with the videos on hand.
 
     Extraction and visual QC run for minutes per video and every frame is then
     discarded by the pairing step, so a coverage gap has to surface here rather
     than as an empty manifest an hour later.
+
+    Raises
+    ------
+    typer.Exit
+        Code 1 when the sensor export cannot be read, holds no record, does not
+        overlap the video days at all, or when a file the video pattern matched
+        carries no parseable date in its name.
     """
-    import datetime as dt
 
     import pandas as pd
 
-    sensor_df = _load_sensor_df(cfg)
+    from allsky.video import video_date
+
+    try:
+        sensor_df = _load_sensor_df(cfg)
+    except (OSError, ValueError) as exc:
+        typer.echo(f"ERROR: cannot read the sensor export named in sensor.paths: {exc}")
+        raise typer.Exit(code=1) from exc
     if sensor_df.empty:
         typer.echo(f"ERROR: no sensor records read from {cfg.sensor.paths}")
         raise typer.Exit(code=1)
 
     index = pd.DatetimeIndex(sensor_df.index)
     sensor_start, sensor_end = index.min(), index.max()
-    days = sorted({_video_day(video, cfg) for video in videos})
-    covered = [
-        day
-        for day in days
-        if sensor_start.date() <= day + dt.timedelta(days=1) and day <= sensor_end.date()
-    ]
+    dated: set[dt.date] = set()
+    undated: list[str] = []
+    for video in videos:
+        try:
+            dated.add(video_date(video, cfg.video))
+        except ValueError:
+            undated.append(Path(video).name)
+    if undated:
+        typer.echo(
+            f"ERROR: {len(undated)} file(s) matched video.pattern {cfg.video.pattern!r} but "
+            f"their names do not fit video.filename_date_format "
+            f"{cfg.video.filename_date_format!r}: {', '.join(undated)}"
+        )
+        raise typer.Exit(code=1)
+    days = sorted(dated)
+    covered = [day for day in days if sensor_start.date() <= day <= sensor_end.date()]
 
     typer.echo(
         f"sensor coverage: {sensor_start:%Y-%m-%d %H:%M} .. {sensor_end:%Y-%m-%d %H:%M} "
@@ -671,6 +780,7 @@ def _extract_and_qc(video: str, video_dir: Path, cfg: PrepareConfig) -> PandasDa
     import numpy as np
     import pandas as pd
 
+    from allsky.frame_pixels import decode_rgb
     from allsky.overlay import extract_frames_for
     from allsky.preprocessing import _needs_preprocessing, process_frame, resolve_mask, visual_qc
     from allsky.video import JPEG_QUALITY
@@ -705,35 +815,59 @@ def _extract_replacing_frames(video: str, video_dir: Path, cfg: PrepareConfig) -
     """Extract *video* into a staging directory, then swap it in for *video_dir*.
 
     Frames are named after their own timestamp, so a re-extraction under a
-    changed clock writes a different file set: on the 2026-06-25 archive video an
-    overlay run wrote 1366 JPEGs and the modelled re-run added 1434 beside them,
-    leaving 68 orphans that the frame manifest does not list and nothing removes.
-    Consumers that read the directory rather than the manifest — the archive
-    uploader does — then see two clocks at once.
+    changed clock writes a different file set, and consumers that read the
+    directory rather than the manifest — the archive uploader does — then see two
+    clocks at once.
 
     The replacement is produced whole before anything is removed and the previous
     directory is moved aside rather than deleted, so a failure at any point
-    leaves the earlier extraction intact.
+    leaves the earlier extraction intact — including a failure of the swap
+    itself, which puts the previous directory back before propagating.  A video that decodes to no frame at
+    all is refused before the swap: an empty manifest still carries the
+    ``qc_frame_flags`` column, so writing it would satisfy the resume gate
+    forever and the day would leave the dataset in silence.
 
     Returns
     -------
     pandas.DataFrame
         The frame manifest of :func:`_extract_and_qc`, with ``frame_path``
         rewritten from the staging directory onto the final *video_dir*.
+
+    Raises
+    ------
+    allsky.overlay.OverlayTimestampError
+        When the video decodes to no frame; *video_dir* is left as it was and
+        the caller reports the day as unusable.
     """
+    from allsky.overlay import OverlayTimestampError
+
     staging = video_dir.with_name(f"{video_dir.name}.incoming")
     superseded = video_dir.with_name(f"{video_dir.name}.superseded")
     shutil.rmtree(staging, ignore_errors=True)
     try:
         frame_manifest = _extract_and_qc(video, staging, cfg)
+        if len(frame_manifest) == 0:
+            raise OverlayTimestampError(
+                f"{Path(video).name} decoded to no frame — keeping the frames already in "
+                f"{video_dir}"
+            )
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
     shutil.rmtree(superseded, ignore_errors=True)
-    if video_dir.exists():
+    moved_aside = video_dir.exists()
+    if moved_aside:
         video_dir.rename(superseded)
-    staging.rename(video_dir)
-    shutil.rmtree(superseded, ignore_errors=True)
+    try:
+        staging.rename(video_dir)
+    except OSError:
+        # Between the two renames the day has NO directory at all. Failing here
+        # without putting the previous extraction back would strand it under
+        # `.superseded`, which nothing else reads, so the day would silently
+        # leave the dataset — the outcome the whole swap exists to prevent.
+        if moved_aside:
+            superseded.rename(video_dir)
+        raise
     replaced = frame_manifest.copy()
     replaced["frame_path"] = [
         str(video_dir / Path(str(frame_path)).name) for frame_path in frame_manifest["frame_path"]
@@ -876,25 +1010,52 @@ def _run_splits_step(
         raise typer.Exit(1) from exc
     typer.echo(f"splits: {split.split_id[:12]} -> {split_path}")
 
+    if not force and _split_is_already_attached(manifest_path, manifest_df, split.split_id):
+        typer.echo(f"splits: 'split' column in {manifest_path} already carries this split_id")
+        return
     attach_split_column(manifest_path, split)
     typer.echo(f"splits: attached 'split' column to {manifest_path} (manifest_sha256 changed)")
 
 
+def _split_is_already_attached(
+    manifest_path: Path, manifest_df: PandasDataFrame, split_id: str
+) -> bool:
+    """Whether *manifest_df* already carries *split_id* on every row.
+
+    :func:`allsky.data.splits.save_split_artifact` writes nothing when the
+    split_id is unchanged, so that a re-run never rewrites the artifact a
+    checkpoint was trained against.
+    """
+    meta_path = manifest_meta_path(manifest_path)
+    if not meta_path.exists() or "split" not in manifest_df.columns:
+        return False
+    recorded = json.loads(meta_path.read_text(encoding="utf-8")).get("split_id")
+    return recorded == split_id and bool(manifest_df["split"].notna().all())
+
+
 def _load_sensor_df(cfg: PrepareConfig) -> PandasDataFrame:
-    """Read all configured TOA5 files into one deduplicated time-indexed frame.
+    """Read all configured TOA5 files into one merged time-indexed frame.
 
     Raw logger columns are kept as-is (the manifest builder selects and validates
     the policy columns it needs); ``cfg.sensor.column_map`` optionally renames
     logger columns to the policy source names before building.
+
+    Raises
+    ------
+    OSError, ValueError
+        From the reader when a configured path is unreadable or is not a TOA5
+        table; the callers turn both into a named CLI error.
     """
-    import pandas as pd
-
     from micrometeorology.sensors.archive import mask_sentinels
-    from micrometeorology.sensors.ingestion import read_campbell_dat
+    from micrometeorology.sensors.ingestion import merge_dat_files
 
-    frames = [read_campbell_dat(path) for path in cfg.sensor.paths]
-    sensor_df = pd.concat(frames).sort_index()
-    sensor_df = sensor_df.loc[~sensor_df.index.duplicated(keep="first")]
+    # Through the archive's own merge, not concat + sort + drop_duplicates: that
+    # sequence sorts BEFORE deduplicating, so `keep="first"` keeps whichever row
+    # the sort happened to leave first rather than the first file's, and it drops
+    # the whole row — losing a column a later file adds at a stamp an earlier one
+    # also carries. merge_dat_files resolves the overlap per COLUMN, first
+    # non-null in chronological file order, which is the rule the archive states.
+    sensor_df = merge_dat_files(cfg.sensor.paths)
     # read_campbell_dat's own -900 default catches nothing in the LabMiM
     # archive: the real sentinels are 1000 degC, 999 %RH, -273.1 degC and a
     # windowed 0, all of them finite. The manifest builder filters on
@@ -918,6 +1079,8 @@ def _apply_frame_qc(manifest: PandasDataFrame, frames_manifest: PandasDataFrame)
     """
     import pandas as pd
 
+    from allsky.data.manifest import DEFAULT_SAMPLE_ID_FORMAT
+
     if "qc_frame_flags" not in frames_manifest.columns:
         typer.echo(
             "WARNING: frame manifest has no qc_frame_flags; FRAME_DARK/FRAME_SATURATED will "
@@ -933,7 +1096,7 @@ def _apply_frame_qc(manifest: PandasDataFrame, frames_manifest: PandasDataFrame)
             "bits will be unset (re-run the extract-frames step for them)"
         )
     timestamps = pd.to_datetime(frames_manifest["timestamp"])
-    sample_ids = [f"allsky-{ts:%Y%m%d-%H%M}" for ts in timestamps]
+    sample_ids = [format(ts, DEFAULT_SAMPLE_ID_FORMAT) for ts in timestamps]
     qc_by_sample = dict(zip(sample_ids, frame_flags.fillna(0).astype("int64"), strict=False))
     extra = manifest["sample_id"].map(qc_by_sample).fillna(0).astype("int64")
     out = manifest.copy()

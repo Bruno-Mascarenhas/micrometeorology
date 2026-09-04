@@ -4,11 +4,18 @@ These do not import torch (the subprocess checks assert it stays out), so the
 module deliberately avoids ``pytest.importorskip('torch')`` at import time.
 """
 
+import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
+if TYPE_CHECKING:
+    from allsky.modeling.fusion import CrossAttentionFusion
+
+import allsky
 from allsky.features import FEATURE_GROUPS, active_feature_groups, resolve_feature_set
 from allsky.modeling.contracts import group_slices
 
@@ -22,8 +29,15 @@ def test_import_allsky_modeling_is_torch_free():
         "from allsky.modeling import group_slices\n"  # torch-free name
         "assert 'torch' not in sys.modules, 'torch was imported eagerly'\n"
     )
+    # pytest puts src/ on the path through `pythonpath` in pyproject, which a
+    # subprocess does not inherit.
+    source_root = str(Path(allsky.__file__).resolve().parents[1])
     result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": source_root},
     )
     assert result.returncode == 0, result.stderr
 
@@ -76,3 +90,28 @@ def test_group_slices_indices_map_to_named_columns():
         assert [feature_columns[i] for i in indices] == sorted(
             groups[group], key=feature_columns.index
         )
+
+
+def test_cross_attention_tokenizes_a_column_added_through_features_extra():
+    """``active_feature_groups`` was called without ``features.extra`` while
+    ``feature_columns`` was resolved with it, so ``group_slices`` dropped the
+    ablation column: it widened the sensor MLP but never became an attention
+    token, and nothing anywhere reported the mismatch."""
+    from allsky.config import ExperimentConfig
+    from allsky.modeling.registry import build_model
+
+    cfg = ExperimentConfig.model_validate(
+        {
+            "data": {"input_mode": "embedding"},
+            "features": {"feature_set": "safe", "extra": ["uv_wm2"]},
+            "model": {"name": "cross_attention"},
+        }
+    )
+    columns = resolve_feature_set("safe", ["uv_wm2"])
+
+    model = build_model(cfg, len(columns), embedding_dim=16)
+
+    fusion = cast("CrossAttentionFusion", model.fusion)
+    tokenized = {columns[index] for indices in fusion._group_indices for index in indices}
+    assert "uv_wm2" in tokenized
+    assert tokenized == set(columns)

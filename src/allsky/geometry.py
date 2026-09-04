@@ -29,7 +29,11 @@ GEOMETRY_CHANNEL_NAMES: tuple[str, ...] = (
 #: the 14 px patch the backbone tokenises with. The channel therefore marks the
 #: sun at the scale the tokeniser can represent — one patch is ~11 degrees — and
 #: 5 degrees is that choice, not a property of the sun.
-SOLAR_DISC_SIGMA_RAD: float = np.radians(5.0)
+#: Plain Python float, not the numpy.float64 `np.radians` returns: that dtype
+#: promotes the float32 Gaussian it multiplies, and with it the whole per-sample
+#: channel stack, to float64 — which is most of the cost of building the planes
+#: and none of the precision the model reads.
+SOLAR_DISC_SIGMA_RAD: float = float(np.radians(5.0))
 
 
 @lru_cache(maxsize=8)
@@ -124,9 +128,15 @@ def resolve_geometry_channels(requested: bool | Sequence[str] | None) -> tuple[s
     Raises
     ------
     ValueError
-        If a name is unknown, if the same one is asked for twice, or if the
-        sequence is empty.
+        If a bare string is given instead of a list of names, if a name is
+        unknown, if the same one is asked for twice, or if the sequence is
+        empty.
     """
+    if isinstance(requested, str):
+        raise ValueError(  # noqa: TRY004 — a config value of the wrong SHAPE, not the wrong type
+            f"geometry_channels must be a list of names, got the string {requested!r}; "
+            f"write [{requested!r}] to ask for that one channel"
+        )
     if requested is None or requested is False:
         return ()
     if requested is True:

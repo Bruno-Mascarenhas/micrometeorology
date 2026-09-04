@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from micrometeorology.sensors.aggregation import aggregate_to_hourly
 from micrometeorology.sensors.wind import (
     wind_components,
     wind_direction_from_components,
@@ -11,29 +12,29 @@ from micrometeorology.sensors.wind import (
 
 
 class TestWindComponents:
-    def test_north_wind(self):
-        """Wind FROM the north (0°) should give u=0, v<0."""
-        u, v = wind_components(1.0, 0.0)
-        assert abs(u) < 1e-10
-        assert v == pytest.approx(-1.0)
+    @pytest.mark.parametrize(
+        ("direction_deg", "expected_u", "expected_v"),
+        [(0.0, 0.0, -1.0), (90.0, -1.0, 0.0), (180.0, 0.0, 1.0), (270.0, 1.0, 0.0)],
+        ids=["northerly", "easterly", "southerly", "westerly"],
+    )
+    def test_a_unit_wind_from_each_cardinal_point(self, direction_deg, expected_u, expected_v):
+        """Meteorological convention: the components point where the wind blows TO."""
+        u, v = wind_components(1.0, direction_deg)
 
-    def test_east_wind(self):
-        """Wind FROM the east (90°) should give u<0, v≈0."""
-        u, v = wind_components(1.0, 90.0)
-        assert u == pytest.approx(-1.0)
-        assert abs(v) < 1e-10
+        assert u == pytest.approx(expected_u, abs=1e-10)
+        assert v == pytest.approx(expected_v, abs=1e-10)
 
-    def test_south_wind(self):
-        """Wind FROM the south (180°) should give u≈0, v>0."""
-        u, v = wind_components(1.0, 180.0)
-        assert abs(u) < 1e-10
-        assert v == pytest.approx(1.0)
+    @pytest.mark.parametrize(("speed", "direction_deg"), [(np.nan, 90.0), (1.0, np.nan)])
+    def test_a_missing_input_propagates_to_both_components(self, speed, direction_deg):
+        """A missing speed or bearing leaves no component defined."""
+        u, v = wind_components(speed, direction_deg)
+
+        assert np.isnan(u)
+        assert np.isnan(v)
 
 
 class TestVectorMeanDirection:
     def test_elementwise_direction(self):
-        from micrometeorology.sensors.wind import wind_direction_from_components
-
         speeds = np.array([1.0, 1.0, 1.0])
         dirs = np.array([0.0, 90.0, 180.0])
         u, v = wind_components(speeds, dirs)
@@ -57,15 +58,13 @@ class TestZeroResultantIsMissing:
     def test_zero_resultant_is_nan(self):
         assert np.isnan(float(np.asarray(wind_direction_from_components(0.0, 0.0))))
 
-    def test_signed_zero_resultant_is_nan(self):
+    @pytest.mark.parametrize(("u", "v"), [(-0.0, 0.0), (0.0, -0.0), (-0.0, -0.0)])
+    def test_signed_zero_resultant_is_nan(self, u, v):
         """Pins the signed-zero artifact: (-0.0, 0.0) used to answer 90, not 270."""
-        for u, v in [(-0.0, 0.0), (0.0, -0.0), (-0.0, -0.0)]:
-            assert np.isnan(float(np.asarray(wind_direction_from_components(u, v))))
+        assert np.isnan(float(np.asarray(wind_direction_from_components(u, v))))
 
     def test_calm_hour_aggregates_to_missing_direction(self):
         """A stalled anemometer (12 x 0.0 m/s) used to publish WindDir = 270."""
-        from micrometeorology.sensors.aggregation import aggregate_to_hourly
-
         idx = pd.date_range("2024-01-01 00:00", periods=12, freq="5min")
         calm = pd.DataFrame({"WindDir": [123.0] * 12, "WS_ms": [0.0] * 12}, index=idx)
         hourly = aggregate_to_hourly(
@@ -75,7 +74,7 @@ class TestZeroResultantIsMissing:
             wind_speed_column_map={"WindDir": "WS_ms"},
         )
         assert np.isnan(hourly["WindDir"].iloc[0])
-        assert hourly["WS_ms"].iloc[0] == 0.0
+        assert hourly["WS_ms"].iloc[0] == pytest.approx(0.0, abs=1e-12)
 
     def test_near_cancelling_unit_weighted_hour_still_reports_a_bearing(self):
         """Pins the deliberate scope limit of the guard.
@@ -86,8 +85,6 @@ class TestZeroResultantIsMissing:
         ``aggregate_to_hourly``), not an epsilon on the resultant, because an
         epsilon cannot tell calm from strongly variable wind that cancelled.
         """
-        from micrometeorology.sensors.aggregation import aggregate_to_hourly
-
         idx = pd.date_range("2024-01-01 00:00", periods=12, freq="5min")
         anti = pd.DataFrame({"WindDir": [0.0, 180.0] * 6}, index=idx)
         hourly = aggregate_to_hourly(anti, min_samples=6, wind_dir_columns=["WindDir"])

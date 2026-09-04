@@ -73,10 +73,12 @@ def read_campbell_dat(
         file are silently ignored (handles dynamic headers).
     sentinel_value:
         Values ≤ this threshold are replaced with ``NaN``. Pass ``None`` to
-        disable the rule entirely: the -900 default catches nothing in the
-        LabMiM archive, whose sentinels are ``1000``, ``999``, ``-46.8``,
-        ``-273.1``, ``-7999``, ``-6673`` and a windowed ``0``, so leaving it on
-        only creates the impression that missing data has been handled.
+        disable the rule entirely. The -900 default reaches exactly three of the
+        LabMiM archive's rails — ``-7999``, ``-6673`` and ``-1000`` — and leaves
+        every other one standing (``1000``, ``999``, ``7999``, ``-273.1``,
+        ``-100``, ``-46.8`` and a windowed ``0``), so it is a partial gate and
+        never a substitute for
+        :func:`~micrometeorology.sensors.archive.mask_sentinels`.
     text_columns:
         Columns to leave as text instead of coercing to numeric. The datalogger's
         per-row quality flag (``MetSENS1_Status``, values ``"OK"`` /
@@ -101,6 +103,16 @@ def read_campbell_dat(
         nor the cause. The archive holds one such table -- a headerless CSV
         whose TOA5 metadata line is missing -- which the manifest path stages
         and repairs.
+
+    Notes
+    -----
+    The logger writes a bare ``NAN`` token for a missing sample, which is why it
+    is declared to ``na_values``: without that, such a column arrives as text and
+    becomes indistinguishable from the quality flag *text_columns* preserves. The
+    coercion that follows selects both the ``object`` and the ``str`` dtype,
+    because pandas 3 reads text as ``str`` and matches ``object`` only through a
+    shim it schedules for removal; the sentinel rule is then restricted to the
+    numeric columns, a preserved text flag being unorderable against a float.
     """
     if skip_rows is None:
         skip_rows = [0, 2, 3]
@@ -114,9 +126,6 @@ def read_campbell_dat(
         skiprows=skip_rows,
         low_memory=False,
         parse_dates=False,
-        # The logger writes a bare NAN token for a missing sample. Declaring it
-        # keeps such a column numeric on read instead of arriving as text and
-        # becoming indistinguishable from the text quality flag below.
         na_values=["NAN"],
         keep_default_na=True,
     )
@@ -136,9 +145,6 @@ def read_campbell_dat(
         if existing:
             df = df.drop(columns=existing)
 
-    # Catches tokens ``na_values`` above does not cover. Both dtype names are
-    # needed: pandas 3 reads text as ``str`` dtype, and ``include=["object"]``
-    # matches it only through a shim scheduled for removal.
     preserved = [c for c in (text_columns or ()) if c in df.columns]
     text_to_coerce = [
         c for c in df.select_dtypes(include=["object", "str"]).columns if c not in preserved
@@ -146,8 +152,6 @@ def read_campbell_dat(
     if text_to_coerce:
         df[text_to_coerce] = df[text_to_coerce].apply(pd.to_numeric, errors="coerce")
 
-    # Restricted to the numeric columns so a preserved text flag is not compared
-    # against a float, which raises in pandas 3.
     if sentinel_value is not None:
         numeric = df.select_dtypes(include="number").columns
         df[numeric] = df[numeric].mask(df[numeric] <= sentinel_value)
@@ -196,17 +200,11 @@ def merge_dat_files(
 
     dfs = [read_campbell_dat(p, **kwargs) for p in paths]
 
-    # Fast concatenation, avoiding O(N^2) iterative merges. Files are stacked in
-    # chronological order, so within any duplicated-timestamp group the earlier
-    # file's row precedes the later file's row.
     merged = pd.concat(dfs)
 
     if not merged.empty:
         duplicated = merged.index.duplicated(keep=False)
         if duplicated.any():
-            # Collapse only the duplicated timestamps per column (first non-null
-            # wins). Restricting groupby to the overlap keeps the common
-            # no-overlap path cheap instead of grouping the whole frame.
             unique_part = merged.loc[~duplicated]
             collapsed = merged.loc[duplicated].groupby(level=0, sort=False).first()
             merged = pd.concat([unique_part, collapsed])

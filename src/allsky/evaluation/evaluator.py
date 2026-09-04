@@ -26,8 +26,9 @@ never pulls torch.
 
 import itertools
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,7 @@ import numpy as np
 import pandas as pd
 
 from allsky.clearsky import clearsky_ghi_and_kt
-from allsky.config import SITE_TZ, ExperimentConfig, geometry_channels_of, image_size_of
+from allsky.config import ExperimentConfig, geometry_channels_of, image_size_of
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.loading import (
     default_embedding_reader,
@@ -61,17 +62,13 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["EvaluationResult", "evaluate_checkpoint"]
 
-#: Fixed America/Bahia offset (UTC-3, no DST) used to derive local hour/month
-#: from the manifest's tz-aware ``timestamp_utc`` (mirrors the manifest builder).
-_LOCAL_TZ = SITE_TZ
-
 #: Solar-elevation band edges (degrees); rows outside ``[10, 90]`` fall in no
 #: band and are simply absent from the elevation breakdown.
 _ELEVATION_EDGES: tuple[float, ...] = (10.0, 20.0, 35.0, 50.0, 90.0)
 
 #: k-index band edges used as a **partial-sun proxy**: the continuous clearness
 #: index ``target_kt`` (not the pre-binned ``sky_class``) split at the outer
-#: bounds of :data:`~allsky.data.sky.SKY_CLASS_KT_UPPER_BOUNDS`, so the
+#: bounds of :data:`~labmim_core.sky.SKY_CLASS_KT_UPPER_BOUNDS`, so the
 #: middle band is the partial-cloud regime where diffuse is hardest to predict.
 #: The bounds are published on Kt, so the frozen ``target_kindex`` column is not
 #: what they may be applied to: under ``kindex_kind="kstar"`` it holds k*, whose
@@ -156,11 +153,10 @@ def evaluate_checkpoint(
     batch_size: int | None = None,
     num_workers: int | None = None,
     device: str | None = None,
-    report_dir: str | Path | None = None,
     strict: bool = False,
     trust_checkpoint: bool = False,
     embedding_reader: EmbeddingReader | None = None,
-    image_backbone_builder: Any | None = None,
+    image_backbone_builder: Callable[[], Any] | None = None,
 ) -> EvaluationResult:
     """Evaluate *checkpoint_path* on *split* and return an :class:`EvaluationResult`.
 
@@ -182,11 +178,8 @@ def evaluate_checkpoint(
         must overlap the forward pass) and to ``0`` in embedding mode, whose
         preloaded resident array would only be copied into each worker.
     device:
-        ``"auto"`` | ``"cpu"`` | ``"cuda"`` | ``"mps"`` (defaults to the config's
-        train device); a clear error is raised for unavailable CUDA.
-    report_dir:
-        Accepted for signature symmetry with the CLI; report writing lives in
-        :func:`allsky.evaluation.reports.write_evaluation_report`.
+        ``"auto"`` | ``"cpu"`` | ``"cuda"`` | ``"mps"`` (default ``"cpu"``); a clear
+        error is raised for unavailable CUDA.
     strict:
         When ``True`` a manifest-hash or split-id mismatch raises instead of only
         logging a warning.
@@ -217,8 +210,6 @@ def evaluate_checkpoint(
         manifest; and, under ``strict``, on a manifest-hash, split-id or
         k-index-kind mismatch between the checkpoint and the data on disk.
     """
-    del report_dir
-
     from allsky.training.checkpointing import load_checkpoint
     from allsky.training.engine import resolve_run_device
 
@@ -259,6 +250,7 @@ def evaluate_checkpoint(
         image_backbone_builder=image_backbone_builder,
         kindex_kind=manifest_kind,
         utc_offset_hours=site_utc_offset_hours(meta),
+        frame_geometry=meta.get("frame_geometry"),
     )
 
     global_metrics = _global_metrics(predictions, enabled_targets)
@@ -283,6 +275,12 @@ def evaluate_checkpoint(
         "kindex_kind": manifest_kind,
         "kindex_kind_ok": kindex_kind_ok,
         "dataset_version": str(meta.get("dataset_version", checkpoint.get("dataset_version"))),
+        # Which CR5000 join the dataset was built with. It decides whether a
+        # frame was paired against the logger's raw end-stamp or against the
+        # centre of the interval it averages.
+        "sensor_timestamp_offset_minutes": (meta.get("thresholds") or {}).get(
+            "sensor_timestamp_offset_minutes"
+        ),
     }
     logger.info(
         "evaluated %s on '%s': %d rows, targets=%s (hash_ok=%s, split_ok=%s)",
@@ -426,6 +424,7 @@ def _run_inference(
     image_backbone_builder: Any | None,
     kindex_kind: str | None,
     utc_offset_hours: float,
+    frame_geometry: Mapping[str, Any] | None = None,
 ) -> pd.DataFrame:
     """Rebuild the model, run a no-grad pass and assemble the predictions frame."""
     import torch
@@ -441,6 +440,7 @@ def _run_inference(
         root=root,
         embedding_reader=embedding_reader,
         utc_offset_hours=utc_offset_hours,
+        frame_geometry=frame_geometry,
     )
 
     model = restore_model(
@@ -497,7 +497,13 @@ def _run_inference(
             split_df["solar_zenith"], times, utc_offset_hours
         )
 
-    return _build_predictions_frame(split_df, predicted, enabled_targets, kindex_kind=kindex_kind)
+    return _build_predictions_frame(
+        split_df,
+        predicted,
+        enabled_targets,
+        kindex_kind=kindex_kind,
+        utc_offset_hours=utc_offset_hours,
+    )
 
 
 def _build_split_dataset(
@@ -509,6 +515,7 @@ def _build_split_dataset(
     root: Path,
     embedding_reader: EmbeddingReader | None,
     utc_offset_hours: float,
+    frame_geometry: Mapping[str, Any] | None = None,
 ) -> tuple[Any, int | None]:
     """Build the (train=False) dataset for the split, reusing the stored normalizer."""
     from allsky.data.datasets import MultimodalEmbeddingDataset, MultimodalImageDataset
@@ -549,6 +556,7 @@ def _build_split_dataset(
         stats=feature_normalizer,
         preprocess=PreprocessingPipeline.from_config(cfg),
         geometry_channels=geometry_channels_of(cfg),
+        frame_geometry=frame_geometry,
         dhi_parameterization=cfg.targets.dhi.parameterization,
         utc_offset_hours=utc_offset_hours,
         window=cfg.data.alignment.strategy,
@@ -573,13 +581,17 @@ def _build_predictions_frame(
     enabled_targets: Sequence[str],
     *,
     kindex_kind: str | None,
+    utc_offset_hours: float,
 ) -> pd.DataFrame:
     """Assemble the per-sample predictions frame (identity + strata + obs/pred).
 
     *kindex_kind* is the k-index the manifest's ``target_kindex`` column holds
     (:func:`_manifest_kindex_kind`); it selects the clear-sky reference of the
     k-index head and is ``None`` for a manifest that does not record it.
+    *utc_offset_hours* is the clock the manifest was built on: the hour and
+    month strata and the clear-sky references are all derived on it.
     """
+    times = pd.to_datetime(split_df["timestamp_utc"], utc=True)
     frame = pd.DataFrame(
         {
             "sample_id": split_df["sample_id"].astype(str).to_numpy(),
@@ -587,7 +599,7 @@ def _build_predictions_frame(
             "timestamp_utc": split_df["timestamp_utc"].astype(str).to_numpy(),
         }
     )
-    _add_strata(frame, split_df)
+    _add_strata(frame, split_df, utc_offset_hours=utc_offset_hours)
 
     for name in enabled_targets:
         if name == "sky":
@@ -602,14 +614,28 @@ def _build_predictions_frame(
             )
             frame[f"obs_{name}"] = observed
             frame[f"pred_{name}"] = np.asarray(predicted[name], dtype=np.float64)
-    _attach_reference_columns(frame, enabled_targets, kindex_kind=kindex_kind)
+    _attach_reference_columns(
+        frame,
+        enabled_targets,
+        times=times,
+        kindex_kind=kindex_kind,
+        utc_offset_hours=utc_offset_hours,
+    )
     return frame
 
 
 def _attach_reference_columns(
-    frame: pd.DataFrame, enabled_targets: Sequence[str], *, kindex_kind: str | None
+    frame: pd.DataFrame,
+    enabled_targets: Sequence[str],
+    *,
+    times: pd.Series,
+    kindex_kind: str | None,
+    utc_offset_hours: float,
 ) -> None:
     """Attach the per-sample baseline references, built over the whole split.
+
+    *times* is the split's ``timestamp_utc`` parsed once by the caller: the frame's
+    own copy is the stringified one this path would otherwise reparse.
 
     A stratified metric slices these columns instead of rebuilding a baseline
     from the stratum's own rows: persistence rebuilt inside a stratum pairs rows
@@ -621,15 +647,24 @@ def _attach_reference_columns(
     evaluation otherwise still succeeds with one baseline fewer than it scored
     before.
     """
-    times = pd.to_datetime(frame["timestamp_utc"], utc=True)
-    clearsky_pair = _clearsky_ghi_and_kt(frame, times) if "solar_zenith" in frame.columns else None
+    clearsky_pair = (
+        _clearsky_ghi_and_kt(frame, times, utc_offset_hours)
+        if "solar_zenith" in frame.columns
+        else None
+    )
     for name in enabled_targets:
         if name == "sky":
             continue
         frame[f"persistence_{name}"] = _previous_observation_same_day(
             frame, f"obs_{name}", times=times
         )
-        clearsky = _clearsky_reference(frame, name, kindex_kind=kindex_kind, clearsky=clearsky_pair)
+        clearsky = _clearsky_reference(
+            frame,
+            name,
+            kindex_kind=kindex_kind,
+            clearsky=clearsky_pair,
+            utc_offset_hours=utc_offset_hours,
+        )
         if clearsky is not None:
             frame[f"clearsky_{name}"] = clearsky
         elif name == "kindex" and kindex_kind is None:
@@ -661,7 +696,7 @@ def _previous_observation_same_day(
     return shifted.sort_index().to_numpy(dtype=np.float64)
 
 
-def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame) -> None:
+def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame, *, utc_offset_hours: float) -> None:
     """Attach the stratification columns to *frame* from *split_df*.
 
     ``solar_zenith`` and ``kindex_band`` are attached only when the manifest
@@ -672,7 +707,8 @@ def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame) -> None:
     that is simply absent from ``stratified.csv`` reads like a stratum with no
     rows in it rather than one that was never computed.
     """
-    local = pd.to_datetime(split_df["timestamp_utc"], utc=True).dt.tz_convert(_LOCAL_TZ)
+    site_clock = timezone(timedelta(hours=utc_offset_hours))
+    local = pd.to_datetime(split_df["timestamp_utc"], utc=True).dt.tz_convert(site_clock)
     frame["hour"] = local.dt.hour.to_numpy(dtype=np.int64)
     if "solar_zenith" in split_df.columns:
         frame["solar_zenith"] = split_df["solar_zenith"].to_numpy(dtype=np.float64)
@@ -727,16 +763,12 @@ def _global_metrics(
 def _target_metrics(frame: pd.DataFrame, name: str) -> dict[str, Any]:
     """Metrics for one target over *frame* (regression or classification)."""
     if name == "sky":
-        if "obs_sky" not in frame.columns:
-            return classification_metrics(np.empty(0), np.empty(0))
         return classification_metrics(
             frame["obs_sky"].to_numpy(),
             frame["pred_sky"].to_numpy(),
             n_classes=len(SKY_CLASS_NAMES),
         )
     obs_col, pred_col = f"obs_{name}", f"pred_{name}"
-    if obs_col not in frame.columns:
-        return regression_metrics(np.empty(0), np.empty(0))
     observed = frame[obs_col].to_numpy(dtype=np.float64)
     metrics = regression_metrics(observed, frame[pred_col].to_numpy())
     metrics.update(_skill_against_references(frame, name, observed))
@@ -781,6 +813,7 @@ def _clearsky_reference(
     *,
     kindex_kind: str | None,
     clearsky: tuple[np.ndarray, np.ndarray] | None = None,
+    utc_offset_hours: float,
 ) -> np.ndarray | None:
     """What a cloudless sky would have produced for this target.
 
@@ -801,30 +834,36 @@ def _clearsky_reference(
             return np.ones(len(frame), dtype=np.float64)
         if kindex_kind != "kt" or "solar_zenith" not in frame.columns:
             return None
-        return _resolved_clearsky(frame, clearsky)[1]
+        return _resolved_clearsky(frame, clearsky, utc_offset_hours)[1]
     if name != "dhi" or "solar_zenith" not in frame.columns:
         return None
-    ghi_clear, kt_clear = _resolved_clearsky(frame, clearsky)
+    ghi_clear, kt_clear = _resolved_clearsky(frame, clearsky, utc_offset_hours)
     return np.asarray(pseudo_diffuse(ghi_clear, kt_clear), dtype=np.float64)
 
 
 def _resolved_clearsky(
-    frame: pd.DataFrame, clearsky: tuple[np.ndarray, np.ndarray] | None
+    frame: pd.DataFrame,
+    clearsky: tuple[np.ndarray, np.ndarray] | None,
+    utc_offset_hours: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """The caller's prebuilt clear-sky pair, or one built from *frame* now."""
     if clearsky is not None:
         return clearsky
-    return _clearsky_ghi_and_kt(frame, pd.to_datetime(frame["timestamp_utc"], utc=True))
+    return _clearsky_ghi_and_kt(
+        frame, pd.to_datetime(frame["timestamp_utc"], utc=True), utc_offset_hours
+    )
 
 
-def _clearsky_ghi_and_kt(frame: pd.DataFrame, times: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+def _clearsky_ghi_and_kt(
+    frame: pd.DataFrame, times: pd.Series, utc_offset_hours: float
+) -> tuple[np.ndarray, np.ndarray]:
     """Haurwitz clear-sky GHI (W m-2) and its clearness index, at each row's zenith.
 
     Thin wrapper over :func:`allsky.clearsky.clearsky_ghi_and_kt`, which owns the
     physics so the training path can normalize a target by exactly the reference
     this path scores against.
     """
-    return clearsky_ghi_and_kt(frame["solar_zenith"], times)
+    return clearsky_ghi_and_kt(frame["solar_zenith"], times, utc_offset_hours)
 
 
 def _stratified_metrics(
@@ -889,11 +928,19 @@ def _metric_rows(
     return rows
 
 
+#: Fewest pairs a stratified row may report a metric over. Two, because every
+#: dispersion `regression_metrics` computes divides by a variance one pair does
+#: not have.
+_MIN_PAIRS_FOR_A_METRIC = 2
+
+
 def _row_count(metric: str, metrics: Mapping[str, Any]) -> int | None:
     """Pairs *metric* was computed over: a reference's own count, else the model's.
 
-    ``None`` when that count is zero, which marks the metric as absent rather
-    than measured.
+    ``None`` below :data:`_MIN_PAIRS_FOR_A_METRIC`, which marks the metric as
+    absent rather than measured. The floor is TWO, not one: ``regression_metrics``
+    needs a second pair for every dispersion it reports — R2, d and IOA all
+    divide by a variance a single pair cannot have.
     """
     counted = metrics.get("n", 0)
     for label in REFERENCE_LABELS:
@@ -901,4 +948,4 @@ def _row_count(metric: str, metrics: Mapping[str, Any]) -> int | None:
             counted = metrics.get(f"{_REFERENCE_COUNT_PREFIX}{label}", 0)
             break
     paired = int(counted)
-    return paired if paired > 0 else None
+    return paired if paired >= _MIN_PAIRS_FOR_A_METRIC else None

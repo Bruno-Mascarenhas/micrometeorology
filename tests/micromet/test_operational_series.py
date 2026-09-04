@@ -17,6 +17,8 @@ from micrometeorology.wrf.operational_record import (
     DEFAULT_STATION,
     OPERATIONAL_CATALOG,
     V1_COLUMNS,
+    V1_EMISSIVITY_TOLERANCE,
+    V1_SURFACE_EMISSIVITY,
     V1_TO_V2,
     Station,
     append_block,
@@ -657,6 +659,41 @@ def _v1_file(path: Path, rows: list[str]) -> None:
     path.write_text(V1_HEADER + "," * 12 + "\n" + "\n".join(rows) + "\n")
 
 
+def test_the_migrate_command_rewrites_the_record_and_leaves_a_backup(tmp_path):
+    """A migracao so tinha cobertura por baixo da CLI: migrate_to_v2 era chamado
+    direto, entao o eco do cabecalho e a copia .bak nunca rodaram pelo comando."""
+    path = tmp_path / "serie.dat"
+    _v1_file(path, [_v1_row()])
+
+    result = CliRunner().invoke(app, ["migrate", "-i", str(path)])
+
+    assert result.exit_code == 0, result.output
+    assert "v1 -> v2" in result.output
+    assert read_header(path) == DEFAULT_HEADER
+    assert (tmp_path / "serie.dat.bak").exists()
+
+
+def test_the_glob_selection_refuses_a_wrf_dir_without_a_date(tmp_path):
+    """--wrf-dir/--date e a forma que a linha operacional diaria usa, e so o ramo
+    -d/--dataset do resolvedor tinha teste."""
+    result = CliRunner().invoke(
+        app, ["run", "--wrf-dir", str(tmp_path), "-o", str(tmp_path / "series")]
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "--wrf-dir together with --date" in result.output
+
+
+def test_a_day_with_no_wrfout_is_refused_by_name(tmp_path):
+    result = CliRunner().invoke(
+        app,
+        ["run", "--wrf-dir", str(tmp_path), "--date", "20990101", "-o", str(tmp_path / "series")],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "no wrfout for 20990101" in result.output
+
+
 def test_the_v1_header_reads_as_thirty_five_columns(tmp_path):
     path = tmp_path / "serie.dat"
     _v1_file(path, [_v1_row()])
@@ -685,6 +722,58 @@ def test_migration_repairs_the_two_fluxes_the_broken_constants_propagated_into(t
     assert frame["swup_w_m2"].iloc[0] == pytest.approx(_V1_ALBEDO * _V1_SHORTWAVE, abs=1e-3)
     expected = _V1_EMISSIVITY * STEFAN_BOLTZMANN * (_V1_TEMPERATURE_C + _KELVIN) ** 4
     assert frame["lwup_air_w_m2"].iloc[0] == pytest.approx(expected, abs=1e-3)
+
+
+def _v1_row_without_surface_constants() -> str:
+    """The pre-2022-10-07 layout: the extraction wrote no ALBD and no EMISS.
+
+    The 2,424 rows the real record carries from that era are the only ones the
+    fallback emissivity and the albedo-free ``Swup_calc`` repair were written
+    for.
+    """
+    row = _v1_row().split(",")
+    for name in ("ALBD", "EMISS"):
+        row[V1_COLUMNS.index(name)] = "nan"
+    # Written by the v1 code with the fallback emissivity, in CELSIUS.
+    row[V1_COLUMNS.index("Lwup_calc")] = (
+        f"{(V1_SURFACE_EMISSIVITY - _KELVIN) * STEFAN_BOLTZMANN * _V1_TEMPERATURE_C**4:.4f}"
+    )
+    return ",".join(row)
+
+
+def test_migration_repairs_the_2022_rows_that_carry_no_albedo_and_no_emissivity(tmp_path):
+    """``Swup_calc`` is restored without the albedo it never had, and the
+    emission is rebuilt from the fallback emissivity — with both surface columns
+    left as the missing values they are, not filled in from the fallback.
+    """
+    path = tmp_path / "serie.dat"
+    _v1_file(path, [_v1_row_without_surface_constants()])
+
+    migrate_to_v2(path)
+
+    frame = pd.read_csv(path)
+    assert frame["swup_w_m2"].iloc[0] == pytest.approx(_V1_ALBEDO * _V1_SHORTWAVE, abs=1e-3)
+    expected = V1_SURFACE_EMISSIVITY * STEFAN_BOLTZMANN * (_V1_TEMPERATURE_C + _KELVIN) ** 4
+    assert frame["lwup_air_w_m2"].iloc[0] == pytest.approx(expected, abs=1e-3)
+    assert np.isnan(frame["albedo"].iloc[0])
+    assert np.isnan(frame["emissivity"].iloc[0])
+
+
+def test_migration_refuses_a_2022_row_whose_emission_misses_the_fallback_emissivity(tmp_path):
+    """The fallback is a claim about the surface, not a licence: a row whose own
+    emission implies an emissivity outside the tolerance is refused rather than
+    rewritten from a constant that does not describe it.
+    """
+    path = tmp_path / "serie.dat"
+    row = _v1_row_without_surface_constants().split(",")
+    off_by = V1_SURFACE_EMISSIVITY - 2.0 * V1_EMISSIVITY_TOLERANCE
+    row[V1_COLUMNS.index("Lwup_calc")] = (
+        f"{(off_by - _KELVIN) * STEFAN_BOLTZMANN * _V1_TEMPERATURE_C**4:.4f}"
+    )
+    _v1_file(path, [",".join(row)])
+
+    with pytest.raises(ValueError, match="implies an emissivity"):
+        migrate_to_v2(path)
 
 
 def test_migration_repairs_the_vapour_pressure_and_the_humidity_that_followed_it(tmp_path):
@@ -738,7 +827,7 @@ def test_migration_leaves_the_file_uniformly_as_wide_as_its_header(tmp_path):
 def test_migration_passes_untouched_cells_through_verbatim(tmp_path):
     path = tmp_path / "serie.dat"
     _v1_file(path, [_v1_row()])
-    original = dict(zip(V1_COLUMNS, path.read_text().splitlines()[1].split(","), strict=False))
+    original = dict(zip(V1_COLUMNS, path.read_text().splitlines()[1].split(","), strict=True))
 
     migrate_to_v2(path)
 
@@ -1010,3 +1099,64 @@ def test_cli_reports_an_unreadable_wrfout_by_name(tmp_path):
 
     assert result.exit_code != 0
     assert "could not be read as NetCDF" in result.output
+
+
+def test_a_partial_last_row_left_by_an_interrupted_append_is_cut_and_written_again(tmp_path):
+    """A row cut mid-write still parsed as a stamp on its first four fields, so
+    its hour counted as already present and the cron line skipped it forever."""
+    target = tmp_path / "novo.dat"
+    complete = "2026,8,8,22" + ",0.0" * (len(DEFAULT_HEADER) - 4)
+    target.write_text(",".join(DEFAULT_HEADER) + "\n" + complete + "\n2026,8,8,23,25.5")
+    frame = pd.DataFrame({DEFAULT_HEADER[4]: [25.5]}, index=pd.DatetimeIndex(["2026-08-08 23:00"]))
+
+    written = append_block(target, frame, DEFAULT_HEADER)
+
+    lines = target.read_text().splitlines()
+    assert written == 1
+    assert len(lines) == 3
+    assert lines[2].startswith("2026,8,8,23,25.5")
+
+
+def test_reading_an_unmigrated_v1_file_refuses_the_columns_the_migration_repairs(tmp_path):
+    """`rename_v1_columns` renames and nothing else, so a v1 file serves an albedo
+    near -273 and an `ur` derived from it, and `export_climatology`/
+    `generate_station_graphs` publish `rh_pct` — a member of that set — as the
+    humidity histogram and the humidity overlay."""
+    from micrometeorology.wrf.operational_record import RH_PCT, T2_C, read_wrf_series
+
+    path = tmp_path / "serie.dat"
+    _v1_file(path, [_v1_row(), _v1_row()])
+
+    # A caller publishing none of the six is unaffected by the schema.
+    assert T2_C in read_wrf_series(path, consumes=[T2_C]).columns
+
+    with pytest.raises(ValueError, match="still a v1 operational file"):
+        read_wrf_series(path, consumes=[T2_C, RH_PCT])
+
+
+def test_a_row_with_no_readable_stamp_is_named_here_not_two_commands_later(tmp_path):
+    """NaT reaches the index, survives `sort_index`, and only surfaces inside
+    export_monitoring's cadence guard as a pandas error naming neither the file
+    nor the row."""
+    from micrometeorology.wrf.operational_record import read_wrf_series
+
+    path = tmp_path / "serie.dat"
+    header = ",".join(DEFAULT_HEADER)
+    good = ["2026", "8", "8", "9"] + ["1.0"] * (len(DEFAULT_HEADER) - 4)
+    broken = ["2026", "13", "40", "99"] + ["1.0"] * (len(DEFAULT_HEADER) - 4)
+    path.write_text("\n".join([header, ",".join(good), ",".join(broken)]) + "\n")
+
+    with pytest.raises(ValueError, match="no readable year/month/day/hour"):
+        read_wrf_series(path)
+
+
+def test_the_repaired_tally_excludes_the_cells_the_cold_start_blanks(tmp_path):
+    """The blanking runs second and overwrites cells the repair just wrote, so
+    counting the repair before it reported work the file does not carry."""
+    path = tmp_path / "serie.dat"
+    _v1_file(path, [_v1_row(cold_start=True)])
+
+    report = migrate_to_v2(path)
+
+    overlap = set(report.repaired) & set(report.blanked)
+    assert overlap == set(), f"a cell counted as both repaired and blanked: {sorted(overlap)}"

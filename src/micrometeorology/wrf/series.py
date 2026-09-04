@@ -37,10 +37,21 @@ def find_nearest_indices(
     Returns
     -------
     tuple[int, int]
-        ``(row, col)`` of the cell minimizing Euclidean distance in degree
-        space, not great-circle distance.
+        ``(row, col)`` of the cell minimizing distance on the equirectangular
+        approximation — the longitude difference scaled by ``cos(lat)`` — not
+        great-circle distance.
+
+    Notes
+    -----
+    The scaling is what makes the choice and the REPORTED distance agree:
+    ``extract_operational_block`` prints a cos(lat)-weighted distance for the
+    cell this function picked on raw degrees, so at this site's latitude the two
+    could disagree about which cell is nearest by up to 2.6% of a cell.
     """
-    dist = np.hypot(lat_grid - target_lat, lon_grid - target_lon)
+    dist = np.hypot(
+        lat_grid - target_lat,
+        (lon_grid - target_lon) * np.cos(np.radians(target_lat)),
+    )
     idx = np.unravel_index(np.argmin(dist), dist.shape)
     return int(idx[0]), int(idx[1])
 
@@ -133,4 +144,15 @@ def extract_point_series(
     df = pd.concat(all_records)
     df.index.name = "time"
     df = df[df.index.notna()]
-    return df.sort_index()
+    df = df.sort_index()
+    # Two files of one run overlap by design (each wrfout repeats the previous
+    # one's last steps), so the concatenation carries duplicated labels. The LAST
+    # file's value wins, matching read_wrf_series's own rule for the same overlap.
+    duplicated = int(df.index.duplicated().sum())
+    if duplicated:
+        logger.info(
+            "point series: %d duplicated stamp(s) across the files; keeping the last",
+            duplicated,
+        )
+        df = df.loc[~df.index.duplicated(keep="last")]
+    return df

@@ -5,10 +5,25 @@ typo ran the whole pipeline at a verbosity nobody asked for and said nothing.
 """
 
 import logging
+from collections.abc import Iterator
 
 import pytest
 
 from micrometeorology.common.logging import setup_logging
+
+
+@pytest.fixture(autouse=True)
+def restored_root_logger() -> Iterator[None]:
+    """``setup_logging`` reconfigures the PROCESS root logger, not a local one.
+
+    Without this the last case parametrized below leaves every later test
+    running at the level it happened to ask for.
+    """
+    root = logging.getLogger()
+    level, handlers = root.level, root.handlers[:]
+    yield
+    root.handlers[:] = handlers
+    root.setLevel(level)
 
 
 @pytest.mark.parametrize("level", ["DEBUG", "info", "Warning", "ERROR", "critical"])

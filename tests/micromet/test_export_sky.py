@@ -14,7 +14,7 @@ import pandas as pd
 import pytest
 
 from labmim_core.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
-from micrometeorology.cli.export_sky import SUBSET_LABELS, build_payloads
+from micrometeorology.cli.export_sky import SUBSET_LABELS, _seasonal_samples, build_payloads
 from micrometeorology.stats import ktkd as ktkd_stats
 from micrometeorology.stats.sky_condition import KT_CUMULATIVE_EDGES
 
@@ -49,6 +49,34 @@ def test_the_cumulative_covers_hours_the_kt_kd_plane_cannot():
     ).kt
 
     assert len(clearness) > len(paired)
+
+
+def test_both_artifacts_carry_the_same_run_stamp():
+    """A ``Ceu/`` meio atualizado so e detectavel pelo navegador se os dois
+    documentos concordarem sobre a versao em que foram produzidos."""
+    payloads = build_payloads(_hourly(), version="20260101T000000Z")
+
+    assert payloads["kt_cumulative.json"]["version"] == "20260101T000000Z"
+    assert payloads["ktkd.json"]["version"] == "20260101T000000Z"
+
+
+def test_the_command_writes_both_artifacts_into_the_output_directory(tmp_path):
+    """Every other test calls ``build_payloads``; the writing wrapper had none."""
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.export_sky import app
+
+    source = tmp_path / "station_hourly.parquet"
+    _hourly().to_parquet(source)
+    output_dir = tmp_path / "Ceu"
+
+    result = CliRunner().invoke(app, ["-i", str(source), "-o", str(output_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert sorted(path.name for path in output_dir.glob("*.json")) == [
+        "kt_cumulative.json",
+        "ktkd.json",
+    ]
 
 
 def test_both_artifacts_are_published_under_their_declared_schemas():
@@ -110,8 +138,12 @@ def test_the_cumulative_selects_exactly_what_the_climatology_histogram_selects()
         frame, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
     )
 
-    assert len(cumulative) == len(histogram)
-    np.testing.assert_allclose(np.sort(cumulative.to_numpy()), np.sort(histogram))
+    # The histogram sample carries a NaN wherever the daylight gate breaks the
+    # hour chain, so `n_effective` is not computed across a splice; the
+    # populations themselves are what must agree.
+    measured = histogram[np.isfinite(histogram)]
+    assert len(cumulative) == len(measured)
+    np.testing.assert_allclose(np.sort(cumulative.to_numpy()), np.sort(measured))
 
 
 def test_the_daylight_gate_brackets_the_whole_hour_not_only_its_midpoint():
@@ -145,6 +177,26 @@ def test_the_density_matrix_rows_match_the_kd_edges_the_renderer_checks():
     assert len(density["counts"][0]) == len(density["kt_edges"]) - 1
 
 
+def test_each_seasonal_recorte_carries_only_its_own_months():
+    """The recorte ids are a published contract, so a swapped tuple must fail here.
+
+    The synthetic year is season-symmetric on purpose everywhere else in this
+    file, which leaves the DJF/JJA split with nothing to hold it.
+    """
+    index = pd.date_range("2024-01-01", periods=366, freq="D")
+    month = index.month.to_numpy()
+    clearness = pd.Series(
+        np.select([np.isin(month, (12, 1, 2)), np.isin(month, (6, 7, 8))], [0.75, 0.25], 0.5),
+        index=index,
+    )
+
+    subsets = _seasonal_samples(clearness)
+
+    np.testing.assert_allclose(subsets["observed_djf"], 0.75)
+    np.testing.assert_allclose(subsets["observed_jja"], 0.25)
+    assert len(subsets["observed_all"]) == len(index)
+
+
 def test_neither_artifact_carries_a_non_finite_number():
     """Both are fetched by a browser that fails the whole document on a NaN token."""
     for payload in build_payloads(_hourly(), version="probe").values():
@@ -152,10 +204,25 @@ def test_neither_artifact_carries_a_non_finite_number():
 
 
 def test_a_record_with_no_usable_hour_refuses_to_publish_empty_artifacts():
-    dark = pd.DataFrame(
-        {"Sw_dw": np.zeros(48), "Sw_dif": np.zeros(48)},
+    """The global channel decides: with it absent neither document has a
+    population, so the run refuses rather than publishing empty subsets."""
+    blind = pd.DataFrame(
+        {"Sw_dw": np.full(48, np.nan), "Sw_dif": np.full(48, np.nan)},
         index=pd.date_range("2024-01-01", periods=48, freq="h"),
     )
 
     with pytest.raises(ValueError, match="no hour survived"):
-        build_payloads(dark, version="probe")
+        build_payloads(blind, version="probe")
+
+
+def test_a_dead_diffuse_sensor_still_publishes_the_cumulative():
+    """``prepare_ktkd`` needs the diffuse channel and ``kt_cumulative.json`` does
+    not, but the ``kt.empty`` refusal ran first and took both documents down on
+    every PSP outage."""
+    blind = _hourly(days=366)
+    blind["Sw_dif"] = np.nan
+
+    payloads = build_payloads(blind, version="probe")
+
+    assert set(payloads) == {"kt_cumulative.json"}
+    assert payloads["kt_cumulative.json"]["format"] == "labmim-kt-cumulative-v1"

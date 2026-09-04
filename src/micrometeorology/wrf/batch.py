@@ -10,9 +10,12 @@ work-unit pipeline where each worker reads the NetCDF itself.
 Cartopy Data Requirements
 -------------------------
 Cartopy needs Natural Earth data for coastlines and borders.  On systems
-without internet access, pre-download the data::
+without internet access, copy the shapefiles in from elsewhere and point cartopy
+at them with the ``CARTOPY_DATA_DIR`` environment variable, which is what
+``cartopy.config['pre_existing_data_dir']`` is read from.  The writable cache it
+falls back to otherwise is printed by::
 
-    python -c "import cartopy; cartopy.config['data_dir'] = '/path/to/data'"
+    python -c "import cartopy; print(cartopy.config['data_dir'])"
 
 See https://scitools.org.uk/cartopy/docs/latest/installing.html#data
 """
@@ -53,7 +56,7 @@ MAX_TASKS_PER_CHILD = int(os.environ.get("LABMIM_MAX_TASKS_PER_CHILD", "64"))
 WorkerBackend = Literal["auto", "serial", "memmap"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MapConfig:
     """Invariant per-domain map configuration, passed to every worker.
 
@@ -260,7 +263,9 @@ def _render_figure(task: FigureTask) -> str:
             )
 
         if task.overlay_data is not None:
-            levels = task.overlay_levels or [880, 900, 950, 1000, 1013]
+            levels = (
+                task.overlay_levels if task.overlay_levels is not None else PRESSURE_CONTOUR_LEVELS
+            )
             cs = ax.contour(
                 task.lon,
                 task.lat,
@@ -373,12 +378,7 @@ def build_tasks_for_domain(
         able to see on the console.
     """
     lon, lat = ds.read_grid()
-    bounds = (
-        float(np.amin(lon)),
-        float(np.amax(lon)),
-        float(np.amin(lat)),
-        float(np.amax(lat)),
-    )
+    bounds = ds.grid_bounds()
     grid = ds.grid_level.value
     map_config = build_map_config(grid, bounds, str(shapes_dir) if shapes_dir else None)
     time_meta = ds.build_date_metadata(skip_first_n=skip_first)
@@ -571,8 +571,6 @@ def run_figure_tasks(
         n_workers = min(n_workers, len(tasks)) if tasks else 1
     total = len(tasks)
 
-    if backend not in {"auto", "serial", "memmap"}:
-        raise ValueError(f"Unknown figure worker backend: {backend}")
     resolved_backend: Literal["serial", "memmap"] = (
         "serial" if backend == "serial" or (backend == "auto" and n_workers == 1) else "memmap"
     )
@@ -600,10 +598,7 @@ def run_figure_tasks(
         )
         return paths
 
-    if resolved_backend == "memmap":
-        return _run_figure_tasks_memmap(tasks, n_workers, tmp_dir, t0, executor=executor)
-
-    raise RuntimeError("unreachable figure backend resolution")
+    return _run_figure_tasks_memmap(tasks, n_workers, tmp_dir, t0, executor=executor)
 
 
 def _save_memmap_payload(

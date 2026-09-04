@@ -163,11 +163,18 @@ embedded bank of 125 glyph exemplars, allowing a ±3 px shift because narrow
 glyphs are positioned slightly differently between frames. Accuracy on the 15
 hand-labelled frames used to build the bank is 15/15 under leave-one-out.
 
-Reads are then *validated*, which is what makes them trustworthy: the date must
-be the video's day or the next, stamps must increase, and the implied interval
-must be between 20 s and 10 min. A frame failing any check is interpolated from
-its neighbours and flagged `interpolated`; a video where more than 20 % of frames
-fail is refused outright rather than timestamped from a guess.
+Reads are then *validated*, which is what makes them trustworthy. Two checks are
+fatal: the date must be the video's day or the next, and stamps must increase —
+a frame whose digits do not form a real date in that window has no timestamp, and
+is interpolated from its neighbours and flagged `interpolated`. A video where
+more than 20 % of frames fail is refused outright rather than timestamped from a
+guess, and a frame at either END of the video is not interpolated at all (there
+is no bracket) — it is dropped, so it carries no manifest row.
+
+The capture interval is a third check of a different kind: an implied interval
+outside 20 s–10 min is **counted and logged, not corrected**. Real captures run
+61–92 s apart and a paused camera is a fact about the day, not a misread digit
+(see `test_an_unusual_capture_interval_is_reported_but_kept`).
 
 Frame filenames keep the repo's minute-resolution convention
 (`allsky-YYYYMMDD-HHMM.jpg`) so they continue to match the manifest's
@@ -181,7 +188,7 @@ overwriting the first.
 (path, size, sha256, `Last-Modified`), the frame extraction (directory, count,
 `step`, `resize`, timestamp source) and every upload destination reached.
 
-Two rules matter:
+Four rules matter:
 
 - **Entries are never removed.** The server drops days off its rolling window;
   a ledger that forgot them would re-upload the whole Drive folder the first
@@ -192,10 +199,14 @@ Two rules matter:
   absent from its record. So an upload that failed yesterday retries today without
   re-downloading the video, and adding `--upload` after a plain backfill uploads
   the days you already hold.
-- **A re-extraction always re-uploads.** The frames destination is keyed by the
-  day alone, so the record of the set being replaced names the same remote folder
-  as its replacement; reading it as "already there" would leave Drive holding
-  frames that no longer exist locally, with nothing to reconcile them.
+- **A re-extraction always re-uploads, and the upload mirrors.** The frames
+  destination is keyed by the day alone, so the record of the set being replaced
+  names the same remote folder as its replacement; reading it as "already there"
+  would leave Drive holding frames that no longer exist locally. The upload runs
+  `rclone sync --include "*.jpg"` rather than `copy`, so the previous clock's
+  JPEGs are removed from the day's remote folder instead of landing beside the
+  new ones. The `--include` filter scopes the deletion: anything in that folder
+  that is not a JPEG is left alone.
 - **A day the overlay reader refuses is skipped, not fatal.** `sync-archive`
   follows the same rule `prepare-local` does below: the refusal is filed in the
   ledger against the extraction parameters and the video's digest, so the daily
@@ -248,7 +259,7 @@ Daily job, videos and frames to Drive. Day *D*'s video appears around 08:40 on
 *D+1*, so run after 10:00 local:
 
 ```cron
-30 10 * * * cd /home/brunosm/labmim/micrometeorology && \
+30 10 * * * cd /path/to/micrometeorology && \
   .venv/bin/allsky sync-archive --extract --step 10 --resize 512 \
   --upload both --drive-remote gdrive >> logs/allsky-sync.log 2>&1
 ```
@@ -266,9 +277,16 @@ Live frame, with a prediction:
   --sensor-csv data/processed/station-latest.csv
 ```
 
-The `--sensor-csv` file is the **processed** station export, in the published
-physical units and with a time column the reader recognises; what it must look
-like, and what happens to a reading it cannot screen, is in *The snapshot
+The `--sensor-csv` file must carry a NAMED time column. `labmim-sensor-process`
+does not write one today: its default export puts the timestamp in the DataFrame
+index with no header, so the file the line above names is not readable by the
+snapshot as it stands — pass an export written with the datetime columns
+included, or add the header yourself. The open defect is recorded in
+[allsky-label-join.md](allsky-label-join.md); giving the export an
+`index_label` would change its byte layout, which is a contract with the
+consumers already reading it. What the file must look like otherwise, in the
+published physical units, and what happens to a reading the screen rejects, is in
+*The snapshot
 prediction caveat* below.
 
 An **embedding-mode** checkpoint carries no backbone of its own: the live frame is
@@ -371,7 +389,7 @@ processing time, and is immaterial at the 15-minute sensor-pairing tolerance.
 ## The snapshot prediction caveat
 
 The multimodal models take a sky image **and** the engineered sensor vector.
-Four of its columns — solar elevation, zenith, azimuth sin/cos, day-of-year
+Six of its columns — solar elevation, zenith, azimuth sin/cos, day-of-year
 sin/cos — come from the timestamp and site, so a live frame always has them
 exactly. The rest (air temperature, dew point, humidity, pressure, wind) come
 from the station logger, which the camera does not publish.

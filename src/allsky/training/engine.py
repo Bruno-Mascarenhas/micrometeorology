@@ -3,7 +3,7 @@
 :func:`run_experiment` drives one experiment end to end from an
 :class:`allsky.config.ExperimentConfig`:
 
-#. seed everything (:func:`solrad_correction.utils.seeds.set_global_seed`) and
+#. seed everything (:func:`labmim_core.seeds.set_global_seed`) and
    resolve the device (clear error when ``cuda`` is requested but unavailable);
 #. load the v2 manifest parquet + meta sidecar and the persisted day split, then
    slice train/val rows by ``day_id`` (val required, test ignored here);
@@ -48,6 +48,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
+import numpy as np
 import pandas as pd
 import torch
 from torch import Tensor, nn
@@ -62,7 +63,12 @@ from allsky.config import (
     image_size_of,
     model_param,
 )
-from allsky.data.datasets import EmbeddingReader
+from allsky.data.contracts import DATASET_VERSION
+from allsky.data.datasets import (
+    EmbeddingReader,
+    MultimodalEmbeddingDataset,
+    MultimodalImageDataset,
+)
 from allsky.data.loading import (
     default_embedding_reader,
     load_manifest,
@@ -84,6 +90,7 @@ from allsky.training.checkpointing import (
     restore_rng_state,
     save_checkpoint,
 )
+from allsky.training.device import resolve_device
 from allsky.training.errors import TrainingError
 from allsky.training.run_dir import (
     MONITOR_CHANGE_SUFFIX,
@@ -101,6 +108,11 @@ from labmim_core.seeds import set_global_seed
 logger = logging.getLogger(__name__)
 
 __all__ = ["resolve_run_device", "run_experiment"]
+
+#: Multiplier of the run seed in the per-epoch train-sampler seed
+#: (``seed * this + epoch``): a prime far above any epoch budget, so the seeds of
+#: two neighbouring runs never land on the same batch permutation.
+_SAMPLER_SEED_STRIDE = 100003
 
 
 def resolve_run_device(requested: str) -> str:
@@ -127,8 +139,6 @@ def resolve_run_device(requested: str) -> str:
     RuntimeError
         If ``"cuda"`` was requested but no CUDA device is available.
     """
-    from allsky.training.device import resolve_device
-
     device = resolve_device(requested)
     if device == "cuda" and not torch.cuda.is_available():
         raise TrainingError(
@@ -196,9 +206,10 @@ def run_experiment(
     dict
         ``{best_metric, epochs_ran, epoch, global_step, final_val_metrics,
         output_dir, checkpoint_last, checkpoint_best, wall_seconds}``.
-        ``checkpoint_best`` is the path only when that file exists on disk and
-        ``None`` otherwise (a resume that trained nothing into a new run
-        directory), so the summary never names an artifact a caller cannot read.
+        ``checkpoint_last`` and ``checkpoint_best`` are paths only when the file
+        exists on disk and ``None`` otherwise (a resume that trained nothing into
+        a new run directory), so the summary never names an artifact a caller
+        cannot read.
 
     Raises
     ------
@@ -233,6 +244,7 @@ def run_experiment(
         root=root,
         embedding_reader=embedding_reader,
         utc_offset_hours=site_utc_offset_hours(meta),
+        frame_geometry=meta.get("frame_geometry"),
     )
     # Fitted from the dataset, not the manifest: the normalizer has to describe
     # the quantity the head actually receives, which the DHI parameterization
@@ -274,7 +286,7 @@ def run_experiment(
     climatology = model if isinstance(model, ClimatologyModel) else None
     is_climatology = climatology is not None
     if climatology is not None:
-        _fit_climatology(climatology, cfg, train_df, target_normalizers)
+        _fit_climatology(climatology, cfg, train_df, train_ds.served_targets, target_normalizers)
 
     optimizer, lr_labels = _build_optimizer(model, cfg)
     monitor_key = _monitor_key(cfg.train.early_stopping.monitor)
@@ -293,6 +305,12 @@ def run_experiment(
     loss_fn = MultitaskLoss(cfg.targets, target_normalizers).to(resolved_device)
 
     fields = csv_fields(cfg)
+    monitored = {field.removeprefix("val_") for field in fields if field.startswith("val_")}
+    if monitor_key not in monitored:
+        raise TrainingError(
+            f"early-stopping monitor {cfg.train.early_stopping.monitor!r} resolves to "
+            f"{monitor_key!r}, absent from the val metrics this run logs {sorted(monitored)}"
+        )
     start_epoch = 0
     global_step = 0
     best_value: float | None = None
@@ -380,7 +398,7 @@ def run_experiment(
         writer = SummaryWriter(log_dir=str(run_dir / "runs"))
         try:
             for epoch in range(start_epoch, cfg.train.epochs):
-                train_sampler_generator.manual_seed(cfg.seed * 100003 + epoch)
+                train_sampler_generator.manual_seed(cfg.seed * _SAMPLER_SEED_STRIDE + epoch)
                 # Augmentation seeds on (seed, epoch, idx); without advancing
                 # this, every epoch would replay the identical draw per sample.
                 train_ds.set_epoch(epoch)
@@ -394,7 +412,7 @@ def run_experiment(
                     autocast_device=autocast_device,
                     autocast_dtype=autocast_dtype,
                     scaler=scaler,
-                    grad_accum_steps=max(1, int(cfg.train.grad_accum_steps)),
+                    grad_accum_steps=int(cfg.train.grad_accum_steps),
                     grad_clip_norm=cfg.train.grad_clip_norm,
                     skip_optimization=is_climatology,
                     global_step=global_step,
@@ -468,7 +486,7 @@ def run_experiment(
                     **common,
                 )
                 if improved:
-                    # Deferred from _reset_stale_run_artifacts to the first
+                    # Deferred from reset_stale_run_artifacts to the first
                     # improving epoch: rotating at the start of a fresh run
                     # leaves the directory with no best.ckpt at all for a run
                     # that then dies, which is when the previous best matters most.
@@ -520,6 +538,7 @@ def run_experiment(
             )
 
     best_checkpoint = run_dir / BEST_CHECKPOINT
+    last_checkpoint = run_dir / LAST_CHECKPOINT
     return {
         "best_metric": {"name": monitor_key, "value": best_value, "epoch": best_epoch},
         "epochs_ran": epochs_ran,
@@ -527,7 +546,7 @@ def run_experiment(
         "global_step": global_step,
         "final_val_metrics": last_val_metrics,
         "output_dir": str(run_dir),
-        "checkpoint_last": str(run_dir / LAST_CHECKPOINT),
+        "checkpoint_last": str(last_checkpoint) if last_checkpoint.exists() else None,
         "checkpoint_best": str(best_checkpoint) if best_checkpoint.exists() else None,
         "wall_seconds": time.monotonic() - started,
     }
@@ -558,8 +577,6 @@ def _fit_target_normalizers(train_ds: Any) -> dict[str, TargetNormalizer]:
     normalizer fitted on the other one is not a smaller error, it is a different
     unit reported as W/m2.
     """
-    from allsky.features.normalization import TargetNormalizer
-
     return {name: TargetNormalizer.fit(values) for name, values in train_ds.served_targets.items()}
 
 
@@ -572,6 +589,7 @@ def _build_datasets(
     root: Path,
     embedding_reader: EmbeddingReader | None,
     utc_offset_hours: float,
+    frame_geometry: Mapping[str, Any] | None = None,
 ) -> tuple[Any, Any, int | None]:
     """Build the train/val datasets for the configured input mode.
 
@@ -587,8 +605,6 @@ def _build_datasets(
         ``(train_ds, val_ds, embedding_dim)`` where ``embedding_dim`` is the
         reader dimension in embedding mode and ``None`` in image mode.
     """
-    from allsky.data.datasets import MultimodalEmbeddingDataset, MultimodalImageDataset
-
     if cfg.data.input_mode == "embedding":
         reader = (
             embedding_reader
@@ -641,6 +657,7 @@ def _build_datasets(
         preprocess=preprocess,
         seed=cfg.seed,
         geometry_channels=geometry_channels_of(cfg),
+        frame_geometry=frame_geometry,
         dhi_parameterization=cfg.targets.dhi.parameterization,
         utc_offset_hours=utc_offset_hours,
         window=cfg.data.alignment.strategy,
@@ -656,6 +673,7 @@ def _build_datasets(
         stats=image_train.stats,
         preprocess=preprocess,
         geometry_channels=geometry_channels_of(cfg),
+        frame_geometry=frame_geometry,
         dhi_parameterization=cfg.targets.dhi.parameterization,
         utc_offset_hours=utc_offset_hours,
         window=cfg.data.alignment.strategy,
@@ -716,7 +734,7 @@ def _make_loader(
 
     - the shuffled (train) loader uses an explicit
       :class:`~torch.utils.data.RandomSampler` bound to *sampler_generator*, which
-      :func:`run_experiment` re-seeds per epoch to ``seed * 100003 + epoch``.  The
+      :func:`run_experiment` re-seeds per epoch to ``seed * _SAMPLER_SEED_STRIDE + epoch``.  The
       permutation is therefore a pure function of ``(seed, epoch)`` and identical
       whether an epoch is reached in one run or after a resume — including with
       ``persistent_workers`` on, where the sampler is re-drawn every epoch;
@@ -729,8 +747,21 @@ def _make_loader(
     No ``worker_init_fn`` is set: the datasets do no worker-side random
     augmentation (they read fixed features/embeddings), so worker RNG never
     influences a batch; add one here if augmentation is introduced.
+
+    ``persistent_workers`` is turned OFF for a dataset whose augmentation is
+    enabled.  Persistent workers pickle the dataset on the FIRST iteration and
+    never again, so ``set_epoch`` on the main-process object never reaches them
+    and every epoch replays the epoch-0 per-sample draw — measured in this
+    environment as epochs seen ``[[0], [0], [0]]`` with two persistent workers
+    against ``[[0], [1], [2]]`` without.  That also breaks the resume
+    equivalence stated above in image mode, since workers would snapshot the
+    epoch they were first started at.  Respawning costs a worker start per
+    epoch, against epochs of minutes; nothing else here reads the epoch, so
+    every other loader keeps its persistent workers.
     """
     num_workers = int(cfg.train.num_workers)
+    augment = getattr(dataset, "augment", None)
+    epoch_reaches_the_sample = augment is not None and bool(augment.enabled)
     loader_generator = torch.Generator()
     loader_generator.manual_seed(int(cfg.seed))
     sampler: RandomSampler | None = None
@@ -745,7 +776,7 @@ def _make_loader(
         shuffle=shuffle if sampler is None else False,
         num_workers=num_workers,
         pin_memory=device == "cuda",
-        persistent_workers=num_workers > 0,
+        persistent_workers=num_workers > 0 and not epoch_reaches_the_sample,
         drop_last=False,
         generator=loader_generator,
     )
@@ -755,12 +786,18 @@ def _fit_climatology(
     model: ClimatologyModel,
     cfg: ExperimentConfig,
     train_df: pd.DataFrame,
+    served_targets: Mapping[str, np.ndarray],
     target_normalizers: Mapping[str, TargetNormalizer],
 ) -> None:
-    """Fit the constant-prediction climatology model from raw train targets."""
+    """Fit the constant-prediction climatology model on the targets the heads receive.
+
+    The regression targets come from the dataset (*served_targets*), the same
+    arrays the normalizers were fitted on, so a ``clearsky_index`` run fits the
+    ratio and not the W/m2 column the normalizer no longer describes.
+    """
     model.fit_from_targets(
-        dhi=train_df["target_dhi"].to_numpy() if cfg.targets.dhi.enabled else None,
-        kindex=train_df["target_kindex"].to_numpy() if cfg.targets.kindex.enabled else None,
+        dhi=served_targets["dhi"] if cfg.targets.dhi.enabled else None,
+        kindex=served_targets["kindex"] if cfg.targets.kindex.enabled else None,
         cloud_fraction=(
             train_df["cloud_fraction"].to_numpy() if cfg.targets.cloud_fraction.enabled else None
         ),
@@ -1186,7 +1223,10 @@ def _check_resume_provenance(
     attention pooler's ``(1, 1, D)`` query is sequence-length independent and
     centre-frame shares the mean pooler, so ``load_state_dict`` would accept the
     old weights and the run would continue on differently-pooled inputs, with
-    ``best.ckpt`` selected across two regimes.
+    ``best.ckpt`` selected across two regimes.  ``targets.dhi.parameterization``
+    is checked for the same reason on the target side: it decides whether the
+    head receives W/m2 or a ratio to the clear-sky reference, and the head has
+    the same shape either way.
     """
     stored_cfg = checkpoint.get("config") or {}
     stored_data = stored_cfg.get("data") or {}
@@ -1203,6 +1243,11 @@ def _check_resume_provenance(
             "alignment.window_minutes",
             stored_alignment.get("window_minutes"),
             cfg.data.alignment.window_minutes,
+        ),
+        (
+            "targets.dhi.parameterization",
+            ((stored_cfg.get("targets") or {}).get("dhi") or {}).get("parameterization"),
+            cfg.targets.dhi.parameterization,
         ),
     ):
         if stored is None:
@@ -1390,12 +1435,35 @@ def _checkpoint_common(
         "config": cfg.model_dump(),
         "normalizers": normalizers,
         "feature_columns": feature_columns,
-        "feature_groups": active_feature_groups(cfg.features.feature_set),
+        "feature_groups": active_feature_groups(cfg.features.feature_set, cfg.features.extra),
         "dataset_version": _dataset_version(meta),
         "split_id": split_id,
         "manifest_sha256": meta.get("manifest_sha256"),
+        "sensor_pairing": _sensor_pairing(meta),
+        "frame_geometry": meta.get("frame_geometry"),
         "backbone_info": backbone_info,
         "code_version_info": code_version(),
+    }
+
+
+def _sensor_pairing(meta: Mapping[str, Any]) -> dict[str, float] | None:
+    """How this run's manifest paired a frame with a station row, for serving.
+
+    The pairing lives entirely in ``PrepareConfig``, which a checkpoint never
+    sees: ``ExperimentConfig`` has no ``sensor`` section at all.  Both numbers
+    are in the manifest sidecar; copying them in at save time is what lets
+    :func:`allsky.snapshot.predict_snapshot` pair the way the run trained.
+    ``None`` when the sidecar records neither, which leaves prediction on its
+    documented defaults rather than on a guess.
+    """
+    thresholds = meta.get("thresholds") or {}
+    offset = thresholds.get("sensor_timestamp_offset_minutes")
+    tolerance = thresholds.get("max_distance_minutes")
+    if offset is None and tolerance is None:
+        return None
+    return {
+        "timestamp_offset_minutes": float(offset or 0.0),
+        "tolerance_minutes": float(tolerance) if tolerance is not None else float("nan"),
     }
 
 
@@ -1410,7 +1478,6 @@ def _embedding_recipe(cfg: ExperimentConfig) -> dict[str, Any] | None:
     prediction to fall back on the store exactly as before rather than on a
     guess.
     """
-    from allsky.data.loading import resolve_against_root
     from allsky.snapshot import embedding_recipe_of
 
     if cfg.data.embeddings_dir is None:
@@ -1421,8 +1488,6 @@ def _embedding_recipe(cfg: ExperimentConfig) -> dict[str, Any] | None:
 
 def _dataset_version(meta: Mapping[str, Any]) -> str:
     """The dataset version a checkpoint records for *meta* (the code's when absent)."""
-    from allsky.data.contracts import DATASET_VERSION
-
     return str(meta.get("dataset_version", DATASET_VERSION))
 
 

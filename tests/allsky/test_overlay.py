@@ -85,12 +85,71 @@ def test_an_impossible_reading_yields_no_timestamp_rather_than_an_exception(impo
     assert reading.timestamp is None
 
 
+def _scattered_ink_frame(pixels_per_cell: int, seed: int) -> np.ndarray:
+    """A frame whose digit cells hold ink but no glyph."""
+    from allsky import overlay as module
+
+    frame = np.empty((fake.FRAME_HEIGHT, fake.FRAME_WIDTH, 3), dtype=np.uint8)
+    frame[:, :] = fake.OVERLAY_BACKGROUND
+    rows = module.OVERLAY_ROW_SLICE.stop - module.OVERLAY_ROW_SLICE.start
+    rng = np.random.default_rng(seed)
+    for left in module.DIGIT_CELL_LEFT_EDGES:
+        cell = frame[module.OVERLAY_ROW_SLICE, left : left + module.DIGIT_CELL_WIDTH]
+        chosen = rng.choice(rows * module.DIGIT_CELL_WIDTH, pixels_per_cell, replace=False)
+        lit = np.zeros(rows * module.DIGIT_CELL_WIDTH, dtype=bool)
+        lit[chosen] = True
+        cell[lit.reshape(rows, module.DIGIT_CELL_WIDTH)] = fake.OVERLAY_TEXT
+    return frame
+
+
+@pytest.mark.parametrize("pixels_per_cell", [5, 20, 30, 39])
+def test_a_cell_too_sparse_to_be_a_glyph_is_refused_instead_of_read_as_ones(
+    pixels_per_cell: int,
+):
+    """The gate stood at 20 ink pixels while the sparsest exemplar in the bank
+    carries 51 and the sparsest cell in 14 archive days carries 44, so a cell of
+    scattered ink well below any real glyph read as `1` in 200/200 trials — a
+    parseable, wrong minute instead of the honest failure the gate exists for."""
+    reading = read_frame_timestamp(_scattered_ink_frame(pixels_per_cell, seed=pixels_per_cell))
+
+    assert reading.text == ""
+    assert reading.timestamp is None
+
+
+def test_the_ink_floor_stays_below_every_cell_the_archive_actually_wrote():
+    """Measured over 4.326 cells of 14 archive days: the sparsest carries 44.
+    A floor at or above that refuses real frames, and an unreadable fraction
+    past `MAX_UNREADABLE_FRACTION` refuses the whole day."""
+    from allsky.overlay import MIN_CELL_INK_PIXELS
+
+    sparsest_real_cell_measured_on_the_archive = 44
+    assert sparsest_real_cell_measured_on_the_archive > MIN_CELL_INK_PIXELS
+
+
+def test_every_exemplar_clears_the_ink_floor():
+    """The bank is what a rendered frame is made of, so no exemplar may sit under
+    the gate that decides whether a cell is a glyph at all."""
+    from allsky.overlay import _BANK, MIN_CELL_INK_PIXELS
+
+    sparsest = min(int(exemplar.sum()) for exemplars in _BANK.values() for exemplar in exemplars)
+
+    assert sparsest >= MIN_CELL_INK_PIXELS
+
+
 def test_a_frame_too_narrow_to_hold_the_overlay_is_refused():
     narrow = fake.render_overlay_frame(
         "20260810120000", width=DIGIT_CELL_LEFT_EDGES[-1] + DIGIT_CELL_WIDTH
     )
     with pytest.raises(OverlayTimestampError, match="px wide"):
         read_frame_timestamp(narrow)
+
+
+def test_a_frame_too_short_to_hold_the_overlay_band_is_refused():
+    """Only the width was checked, so a frame shorter than the band reached the
+    matcher and died on a numpy broadcast error instead of the documented one."""
+    short = fake.render_overlay_frame("20260810120000")[:10]
+    with pytest.raises(OverlayTimestampError, match="overlay rows"):
+        read_frame_timestamp(short)
 
 
 def test_a_frame_without_colour_channels_is_refused():
@@ -111,7 +170,7 @@ def test_reading_a_video_returns_one_reading_per_frame_in_capture_order(tmp_path
     assert not any(item.interpolated for item in readings)
 
 
-def test_a_step_keeps_only_every_nth_frame_and_still_validates_the_interval(tmp_path: Path):
+def test_a_step_keeps_only_every_nth_frame(tmp_path: Path):
     readings = read_video_timestamps(_video(tmp_path, SIX_MINUTES), step=2)
     assert [item.index for item in readings] == [0, 2, 4]
     assert [item.timestamp for item in readings] == [
@@ -260,6 +319,82 @@ def test_extraction_creates_the_output_directory_and_honours_step_and_resize(tmp
     assert (out_dir / MANIFEST_FILENAME).is_file()
 
 
+def _ambiguous_video(tmp_path: Path) -> Path:
+    """Three frames where the middle one's minute cell is a 6/8 blend.
+
+    The sequence says the middle frame is 12:08; the pixels, on their own, read
+    12:06 with 8 a runner-up within the score margin. A minute apart because the
+    manifest's sample_id has minute resolution and would otherwise keep one row
+    of the three.
+    """
+    frames = np.stack(
+        [
+            fake.render_overlay_frame("20260810120700"),
+            fake.blended_overlay_frame("20260810120800", "20260810120600"),
+            fake.render_overlay_frame("20260810120900"),
+        ]
+    )
+    return fake.write_frames_video(tmp_path / "allsky-20260810.mp4", frames)
+
+
+def test_a_contested_cell_is_re_decided_from_the_pixels_of_a_real_frame(tmp_path: Path):
+    """The machinery was only ever driven from a hand-built alternatives list, so
+    ``_cell_scores`` and ``_cell_alternatives`` never produced a runner-up in any
+    test and the path from pixels to a correction was unexercised end to end.
+    """
+    readings = read_video_timestamps(_ambiguous_video(tmp_path))
+
+    assert [reading.text for reading in readings] == [
+        "20260810120700",
+        "20260810120600",
+        "20260810120900",
+    ]
+    assert readings[1].timestamp == _naive("2026-08-10 12:08")
+    assert [reading.corrected for reading in readings] == [False, True, False]
+
+
+def test_the_corrected_bit_reaches_the_manifest_the_extraction_writes(tmp_path: Path):
+    """``qc_frame_flags`` is a persisted column; losing ``TIMESTAMP_CORRECTED``
+    in the staging rename would not otherwise make anything fail.
+    """
+    manifest = extract_frames_with_overlay_timestamps(
+        _ambiguous_video(tmp_path), tmp_path / "frames"
+    )
+
+    flags = manifest["qc_frame_flags"].tolist()
+    assert flags == [0, int(QCFlag.TIMESTAMP_CORRECTED), 0]
+    assert manifest["timestamp"].tolist() == [
+        pd.Timestamp("2026-08-10 12:07"),
+        pd.Timestamp("2026-08-10 12:08"),
+        pd.Timestamp("2026-08-10 12:09"),
+    ]
+
+
+@pytest.mark.parametrize("position", [0, 1, -1])
+def test_an_unreadable_stamp_at_either_end_of_a_video_leaves_no_manifest_row(
+    tmp_path: Path, position: int
+):
+    """Interpolation needs a reading on both sides, so a frame at the boundary
+    is not repaired. What it does instead is documented here as it stands: the
+    frame simply does not appear in the manifest — no row, no flag, no gap
+    marker. Whether an unreadable boundary frame should be dropped or recorded
+    as an acquisition gap is a decision about the record, not about this code.
+    """
+    stamps = [f"2026081012{minute:02d}00" for minute in range(10)]
+    frames = [fake.render_overlay_frame(stamp) for stamp in stamps]
+    frames[position] = fake.render_overlay_frame("20261310120000")
+    video = fake.write_frames_video(tmp_path / "allsky-20260810.mp4", np.stack(frames))
+
+    readings = read_video_timestamps(video)
+    manifest = extract_frames_with_overlay_timestamps(video, tmp_path / "frames")
+
+    unreadable = readings[position]
+    interior = position not in (0, -1)
+    assert (unreadable.timestamp is not None) is interior
+    assert (unreadable.index in manifest["index"].tolist()) is interior
+    assert len(manifest) == len(stamps) - (0 if interior else 1)
+
+
 def test_a_lookalike_digit_is_re_decided_from_the_frames_around_it():
     readings = [
         OverlayReading(index=0, timestamp=_naive("2026-08-10 12:07"), text="20260810120700"),
@@ -380,6 +515,30 @@ def test_extraction_leaves_only_frames_and_the_manifest_in_the_output_directory(
     ]
 
 
+def test_extraction_sweeps_the_staging_debris_a_killed_run_left_and_nothing_else(tmp_path: Path):
+    """The staging directory is named uniquely per run and removed in a finally,
+    which a SIGKILL never reaches, so a directory extracted repeatedly accumulates
+    a full frame set of debris per kill — and the sweep must still not touch a
+    frame, a manifest, or a plain file that merely shares the prefix."""
+    from allsky.overlay import STAGING_DIR_PREFIX
+
+    out_dir = tmp_path / "frames"
+    out_dir.mkdir()
+    orphan = out_dir / f"{STAGING_DIR_PREFIX}dead"
+    orphan.mkdir()
+    (orphan / "00000000.jpg").write_bytes(b"debris")
+    kept_frame = out_dir / "allsky-20260809-1200.jpg"
+    kept_frame.write_bytes(b"an earlier day")
+    namesake = out_dir / f"{STAGING_DIR_PREFIX}notadir"
+    namesake.write_bytes(b"a file, not a directory")
+
+    extract_frames_with_overlay_timestamps(_video(tmp_path, MINUTE_APART), out_dir)
+
+    assert not orphan.exists()
+    assert kept_frame.read_bytes() == b"an earlier day"
+    assert namesake.read_bytes() == b"a file, not a directory"
+
+
 def test_a_video_the_reader_will_not_vouch_for_leaves_no_frame_behind(tmp_path: Path):
     stamps = ("20260810120000", "20260810120200", "20260810120100")
     out_dir = tmp_path / "frames"
@@ -394,3 +553,25 @@ def test_a_read_timestamp_carries_no_provenance_flag(tmp_path: Path):
         _video(tmp_path, MINUTE_APART), tmp_path / "frames"
     )
     assert (manifest["qc_frame_flags"] == 0).all()
+
+
+def test_an_unreadable_first_frame_is_reported_as_dropped_not_as_interpolated(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """The repair interpolates only between two readable neighbours, so an edge
+    frame stays unstamped and is reported as dropped."""
+    stamps = (
+        "20261310120000",
+        "20260810120100",
+        "20260810120200",
+        "20260810120300",
+        "20260810120400",
+        "20260810120500",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="allsky.overlay"):
+        readings = read_video_timestamps(_video(tmp_path, stamps))
+
+    assert readings[0].timestamp is None
+    assert "1 frame(s) at the edges" in caplog.text
+    assert "were interpolated" not in caplog.text

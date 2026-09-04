@@ -38,7 +38,7 @@ import scipy.constants
 from labmim_core.solar import eccentricity_correction
 from micrometeorology.common.types import VARIABLE_NETCDF_MAP, WRFVariable
 from micrometeorology.wrf import variables
-from micrometeorology.wrf.reader import WRFDataset
+from micrometeorology.wrf.reader import WRFDataset, product_timezone
 from micrometeorology.wrf.value_source import (
     DAYLIGHT_ONLY_VARIABLES,
     DERIVED_RADIATION_SOURCES,
@@ -170,11 +170,6 @@ Deliberately NOT cited, having been checked and found unsupportable:
 """
 
 
-# ---------------------------------------------------------------------------
-# 1. Physical constants
-# ---------------------------------------------------------------------------
-
-
 def test_solar_constant_matches_kopp_lean():
     """Kopp & Lean (2011) put total solar irradiance at 1360.8 +- 0.5 W/m2."""
     assert pytest.approx(1361.0, abs=1.0) == SOLAR_CONSTANT_WM2
@@ -193,9 +188,10 @@ def test_the_stefan_boltzmann_constant_matches_the_codata_table_scipy_ships():
 
 def test_the_whole_package_declares_the_stefan_boltzmann_constant_once():
     """Two copies of a constant are two things that can drift apart silently."""
+    root = Path(__file__).resolve().parents[2]
     declarations = sorted(
-        str(path)
-        for path in Path("src").rglob("*.py")
+        str(path.relative_to(root))
+        for path in (root / "src").rglob("*.py")
         if any(
             re.match(r"^STEFAN_BOLTZMANN\s*=", line)
             for line in path.read_text(encoding="utf-8").splitlines()
@@ -203,11 +199,6 @@ def test_the_whole_package_declares_the_stefan_boltzmann_constant_once():
     )
 
     assert declarations == ["src/micrometeorology/common/physics.py"]
-
-
-# ---------------------------------------------------------------------------
-# 2. Closed-form limits of the graybody law
-# ---------------------------------------------------------------------------
 
 
 def test_blackbody_surface_emits_sigma_t4_and_reflects_nothing():
@@ -241,11 +232,6 @@ def test_upwelling_longwave_hand_computed_value():
     lwup = compute_upwelling_longwave(np.array([0.95]), np.array([300.0]), np.array([400.0]))
 
     assert lwup[0] == pytest.approx(456.33531, abs=1e-4)
-
-
-# ---------------------------------------------------------------------------
-# 3. Budget identities -- the terms must add up
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -297,11 +283,6 @@ def test_net_radiation_expands_to_the_four_stream_budget(surface_state):
         rtol=1e-9,
         atol=1e-9,
     )
-
-
-# ---------------------------------------------------------------------------
-# 4. Literature value ranges
-# ---------------------------------------------------------------------------
 
 
 def test_net_longwave_can_turn_positive_under_a_warm_overcast():
@@ -372,9 +353,17 @@ def test_sky_emissivity_of_a_blackbody_sky_is_one():
     )
 
 
-# ---------------------------------------------------------------------------
-# 5. Clearness index
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("local_hour", "shortwave_publishes"),
+    [(5, False), (6, True), (18, True), (19, False)],
+)
+def test_the_daylight_window_keeps_its_edge_hours_and_drops_the_ones_beside_them(
+    local_hour, shortwave_publishes
+):
+    step = {"datetime_local": datetime(2026, 5, 3, local_hour, tzinfo=product_timezone())}
+
+    assert publishes_step(WRFVariable.SWDOWN, step) is shortwave_publishes
+    assert publishes_step(WRFVariable.TEMPERATURE, step) is True
 
 
 def test_clearness_index_matches_its_definition_at_high_sun():
@@ -405,8 +394,6 @@ def test_clearness_index_is_undefined_below_the_elevation_floor():
 
 def test_eccentricity_correction_stays_within_the_annual_swing():
     """E0 = (r0/r)^2 varies ~+-3.4% over the year (Spencer 1971)."""
-    from datetime import UTC, datetime
-
     days = [datetime(2026, 1, 1, 12, tzinfo=UTC).replace(month=m) for m in range(1, 13)]
     e0 = eccentricity_correction(pd.DatetimeIndex([d.replace(tzinfo=None) for d in days]))
 
@@ -416,10 +403,6 @@ def test_eccentricity_correction_stays_within_the_annual_swing():
     assert int(np.argmax(e0)) == 0
     assert int(np.argmin(e0)) == 6
 
-
-# ---------------------------------------------------------------------------
-# 6. Validation against WRF's own RRTMG fluxes (skips without the archive)
-# ---------------------------------------------------------------------------
 
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 _LWUPB_FILE = _DATA_DIR / "wrfout_d02_2013-07-01_01_00_00-004_"
@@ -476,6 +459,39 @@ def _read_operational(domain: str) -> dict:
     return fields
 
 
+#: A thousand cells of the 2013 d02 archive run, at four steps, carrying the four
+#: fields the reconstruction needs and the LWUPB that RRTMG itself wrote. Frozen
+#: from ``wrfout_d02_2013-07-01_01_00_00-004_`` (99x99 grid, seed 2026) because
+#: that file is 8 GB of gitignored bulk data: without this sample the only test
+#: that ever compares the derivation against a ground-truth flux is skipped in
+#: CI and in every clean checkout.
+_LWUPB_SAMPLE = Path(__file__).parent / "fixtures" / "rrtmg_lwupb_d02_2013-07-01.npz"
+
+
+def test_derived_lwup_reproduces_the_frozen_sample_of_wrfs_own_lwupb():
+    """The reconstruction against the flux RRTMG actually wrote, in CI.
+
+    Tolerances are the measurement, not a margin: over the four steps the mean
+    absolute error is 0.39, 1.28, 0.50 and 0.45 W/m2 on a ~420 W/m2 signal, and
+    the 99th percentile stays under 11. The residual is structural — the scheme
+    uses the LSM's canopy-adjusted radiative temperature where this uses grid-mean
+    TSK — so a tolerance loose enough to hide a formula change would be describing
+    nothing.
+    """
+    sample = np.load(_LWUPB_SAMPLE)
+
+    derived = compute_upwelling_longwave(
+        sample["EMISS"].astype(np.float64),
+        sample["TSK"].astype(np.float64),
+        sample["GLW"].astype(np.float64),
+    )
+
+    error = np.abs(derived - sample["LWUPB"].astype(np.float64))
+    for row, step in enumerate(sample["steps"]):
+        assert error[row].mean() < 1.5, f"step {step}: MAE {error[row].mean():.3f} W/m2"
+        assert np.percentile(error[row], 99) < 12.0, f"step {step}"
+
+
 @pytest.mark.skipif(not _LWUPB_FILE.exists(), reason="archive wrfout with LWUPB absent")
 def test_derived_lwup_reproduces_wrfs_own_lwupb():
     """The reconstruction is checked against the flux RRTMG actually wrote.
@@ -484,9 +500,10 @@ def test_derived_lwup_reproduces_wrfs_own_lwupb():
     atmosphere. It exists in the 2013 archive runs and NOT in the 2026
     operational runs, which is the whole reason this variable is derived.
 
-    Tolerance: the radiation scheme uses the LSM's canopy-adjusted radiative
-    temperature while we use grid-mean TSK, so a ~1-2 W/m2 land bias is
-    structural, not a bug. 5 W/m2 on a ~420 W/m2 signal is ~1%.
+    The whole grid, where the archive is on this machine; the frozen sample above
+    carries the same comparison everywhere else. Tolerance: the radiation scheme
+    uses the LSM's canopy-adjusted radiative temperature while we use grid-mean
+    TSK, so a ~0.4-1.3 W/m2 mean error is structural, not a bug.
     """
     with netCDF4.Dataset(_LWUPB_FILE) as ds:
         for step in (1, 12, 30, 48):
@@ -497,8 +514,8 @@ def test_derived_lwup_reproduces_wrfs_own_lwupb():
 
             error = np.abs(compute_upwelling_longwave(emiss, tsk, glw) - truth)
 
-            assert error.mean() < 5.0, f"step {step}: MAE {error.mean():.3f} W/m2"
-            assert np.percentile(error, 99) < 25.0
+            assert error.mean() < 1.5, f"step {step}: MAE {error.mean():.3f} W/m2"
+            assert np.percentile(error, 99) < 12.0
 
 
 @pytest.mark.skipif(not _SWUPB_FILE.exists(), reason="operational wrfout absent")
@@ -550,12 +567,6 @@ def test_published_radiation_fields_stay_in_physical_range_on_a_real_run():
                 assert values.min() >= low, f"{variable} step {step} min {values.min()}"
                 assert values.max() <= high, f"{variable} step {step} max {values.max()}"
             assert checked > 0, f"{variable} published no usable frame"
-
-
-# ---------------------------------------------------------------------------
-# 6b. The 2026 operational run: no LWUPB anywhere, so the derivation is held
-#     to published bounds and to the surface energy budget instead.
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("domain", _OPERATIONAL_DOMAINS)
@@ -728,11 +739,6 @@ def test_operational_swup_matches_swupb_where_the_radiation_call_aligns(domain):
     )
 
 
-# ---------------------------------------------------------------------------
-# 7. Wiring: registration, gating, and the missing-input path
-# ---------------------------------------------------------------------------
-
-
 def _write_radiation_wrf_file(path: Path, *, nt: int = 24, start_hour_utc: int = 3) -> None:
     """A minimal wrfout carrying exactly the derived-radiation inputs.
 
@@ -802,7 +808,9 @@ def test_only_the_solar_variables_are_daylight_gated():
         WRFVariable.SWNET,
         WRFVariable.CLEARNESS_INDEX,
     } == DAYLIGHT_ONLY_VARIABLES
-    night = {"datetime_local": __import__("datetime").datetime(2026, 5, 3, 2)}
+    # Naive station-local, as the WRF pipeline stamps every step: the daylight
+    # gate reads the clock the model wrote, never a converted one.
+    night = {"datetime_local": datetime(2026, 5, 3, 2)}  # noqa: DTZ001
     assert not publishes_step(WRFVariable.SWUP, night)
     assert not publishes_step(WRFVariable.CLEARNESS_INDEX, night)
     assert publishes_step(WRFVariable.LWUP, night)

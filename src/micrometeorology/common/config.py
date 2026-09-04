@@ -6,13 +6,9 @@ Usage::
     settings = get_settings()
     print(settings.data_dir)
 
-The configuration is loaded from up to three layers (later overrides earlier):
-1. ``configs/default.yaml``      — shipped defaults
-2. ``configs/<env>.yaml``        — environment-specific (server / local)
-3. Environment variables         — ``LABMIM_*`` prefix
-
-Set ``LABMIM_CONFIG_PATH`` to point to a custom YAML configuration.
-Set ``LABMIM_ENV`` to ``server`` or ``local`` to auto-load the matching file.
+:func:`get_settings` names the layers it merges and the order it merges them in;
+``LABMIM_ENV`` and ``LABMIM_CONFIG_PATH`` are how an operator selects two of
+them.
 """
 
 import os
@@ -55,11 +51,21 @@ def _load_named_yaml(path: Path, variable: str) -> dict[str, Any]:
 
     A missing *shipped* default is optional, so :func:`_load_yaml` returning
     ``{}`` is right for layer 1. A path the operator typed is not: a wrong one
-    would make the whole override layer vanish with no exception and exit code 0.
+    would make the whole override layer vanish with no exception and exit code 0,
+    and so would a file whose top level is a list or a scalar.
     """
     if not path.is_file():
         raise FileNotFoundError(f"{variable} points to {path}, which is not a file")
-    return _load_yaml(path)
+    with open(path, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise TypeError(
+            f"{variable} points to {path}, whose top level is a "
+            f"{type(data).__name__}, not a YAML mapping of settings"
+        )
+    return data
 
 
 class SensorRangeLimit(BaseModel):
@@ -181,13 +187,12 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO", description="Logging level")
 
-    def resolve_paths(self, root: Path | None = None) -> None:
-        """Resolve relative paths against the project root."""
-        base = root or _project_root()
+    def resolve_paths(self, root: Path) -> None:
+        """Resolve every relative path field against *root*."""
         for field_name in ("data_dir", "output_dir", "figures_dir", "shapes_dir", "configs_dir"):
             p = getattr(self, field_name)
             if not p.is_absolute():
-                object.__setattr__(self, field_name, (base / p).resolve())
+                object.__setattr__(self, field_name, (root / p).resolve())
 
 
 @lru_cache(maxsize=1)

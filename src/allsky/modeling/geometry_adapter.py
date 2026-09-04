@@ -74,10 +74,7 @@ class GeometryPatchProjection(nn.Module):
                 "stem ties each output channel to a subset of the input ones, so what the "
                 "extra planes should feed is a modelling decision, not a default"
             )
-        # Every geometric parameter is copied, not just kernel and stride: a
-        # ResNet stem is 7x7 stride 2 with padding 3, and an extra branch built
-        # without that padding produces a 109x109 map against the pretrained
-        # 112x112 — measured, and it fails at the sum rather than silently.
+        # Every geometric parameter is copied, not just kernel and stride.
         self.extra_proj = nn.Conv2d(
             extra_channels,
             int(pretrained.out_channels),

@@ -12,7 +12,8 @@
 #   export ALLSKY_DINOV3_WEIGHTS=/caminho/para/dinov3_vits16plus_pretrain_lvd1689m.pth
 #
 # e, se a árvore do DINOv3 não estiver no cache do torch.hub, também
-# ALLSKY_DINOV3_REPO. O download é por `wget`, como o repositório deles exige.#
+# ALLSKY_DINOV3_REPO. O download é por `wget`, como o repositório deles exige.
+#
 # Controle: o braço `iso` — 19,94 +/- 0,35 W/m2 de RMSE de DHI, MAE 13,94,
 # MBE -8,30, sobre as mesmas 7.138 linhas de teste. Difere só no backbone.
 extends: [../_base.yaml, ../../models/image_only.yaml]

@@ -3,7 +3,7 @@
 The four sky conditions are Escobedo, Gomes, Oliveira & Soares (2009), Applied
 Energy 86(3):299-309, sec. 3.1, with the Portuguese nomenclature of Teramoto &
 Escobedo (2012), RBEAA 16(9):985-992.  The bounds themselves are **not** declared
-here: they live in :data:`allsky.data.sky.SKY_CLASS_KT_UPPER_BOUNDS`, which
+here: they live in :data:`labmim_core.sky.SKY_CLASS_KT_UPPER_BOUNDS`, which
 the all-sky manifest also classifies against, so the two pipelines cannot drift
 onto different partitions of the same published quantity.
 
@@ -28,6 +28,7 @@ from numpy.typing import NDArray
 
 from labmim_core.sky import (
     SKY_CLASS_KT_UPPER_BOUNDS,
+    SKY_CLASS_MISSING,
     SKY_CLASS_NAMES,
     SKY_CLASS_NAMES_PT,
     SKY_CLASS_REFERENCE,
@@ -41,6 +42,7 @@ __all__ = [
     "build_kt_cumulative_payload",
     "classify_sky_condition",
     "cumulative_fractions",
+    "cumulative_subset",
     "sky_condition_summary",
 ]
 
@@ -65,8 +67,9 @@ def classify_sky_condition(kt: NDArray) -> NDArray:
     numpy.ndarray
         Class integers, shape ``(N,)``, dtype ``int64``: ``0`` cloudy, ``1``
         partly cloudy with diffuse dominance, ``2`` partly cloudy with clear
-        dominance, ``3`` clear.  Non-finite entries are ``-1``: an unlabelable
-        sample is never silently folded into a real class.
+        dominance, ``3`` clear.  Non-finite entries carry
+        :data:`labmim_core.sky.SKY_CLASS_MISSING`: an unlabelable sample is
+        never silently folded into a real class.
     """
     values = np.asarray(kt, dtype=np.float64)
     cloudy, diffuse_dominant, clear_dominant = SKY_CLASS_KT_UPPER_BOUNDS
@@ -75,7 +78,7 @@ def classify_sky_condition(kt: NDArray) -> NDArray:
         list(SKY_CLASS_VALUES[:3]),
         default=SKY_CLASS_VALUES[3],
     ).astype(np.int64)
-    labels[~np.isfinite(values)] = -1
+    labels[~np.isfinite(values)] = SKY_CLASS_MISSING
     return labels
 
 
@@ -123,15 +126,17 @@ def sky_condition_summary(kt: NDArray) -> dict[str, Any]:
     Returns
     -------
     dict
-        ``kt_upper_bounds``, ``reference`` and ``conditions``: one entry per
-        class with ``condition`` (1..4), ``id`` (``i``..``iv``), ``name``,
-        ``name_pt``, ``kt_range``, ``count`` and ``fraction``.  ``fraction`` is
-        None for every class when no sample is labelable.
+        ``kt_upper_bounds``, ``reference``, ``n`` — the labelable count, which
+        is the denominator of every fraction below — and ``conditions``: one
+        entry per class with ``condition`` (1..4), ``id`` (``i``..``iv``),
+        ``name``, ``name_pt``, ``kt_range``, ``count`` and ``fraction``.
+        ``fraction`` is None for every class when no sample is labelable.
     """
     labels = classify_sky_condition(kt)
-    labelable = labels >= 0
+    labelable = labels != SKY_CLASS_MISSING
     total = int(labelable.sum())
     lower_edges = (None, *SKY_CLASS_KT_UPPER_BOUNDS)
+    upper_edges = (*SKY_CLASS_KT_UPPER_BOUNDS, None)
 
     conditions = []
     for class_value in SKY_CLASS_VALUES:
@@ -142,12 +147,7 @@ def sky_condition_summary(kt: NDArray) -> dict[str, Any]:
                 "id": SKY_CONDITION_IDS[class_value],
                 "name": SKY_CLASS_NAMES[class_value],
                 "name_pt": SKY_CLASS_NAMES_PT[class_value],
-                "kt_range": [
-                    lower_edges[class_value],
-                    SKY_CLASS_KT_UPPER_BOUNDS[class_value]
-                    if class_value < len(SKY_CLASS_KT_UPPER_BOUNDS)
-                    else None,
-                ],
+                "kt_range": [lower_edges[class_value], upper_edges[class_value]],
                 "count": count,
                 "fraction": (count / total) if total else None,
             }
@@ -163,10 +163,16 @@ def sky_condition_summary(kt: NDArray) -> dict[str, Any]:
 #: Published schema tag of the artifact the sky page reads.
 KT_CUMULATIVE_SCHEMA = "labmim-kt-cumulative-v1"
 
-#: Frozen bin edges, deliberately the same set the climatology page bins Kt on:
-#: the two pages then describe one record on one axis, and 0.35 / 0.55 / 0.65 all
-#: land exactly on an edge, so each class share is read straight off the curve
-#: instead of interpolated.
+#: Frozen bin edges, deliberately the same set the climatology page bins Kt on,
+#: so the two pages describe one record on one axis.
+#:
+#: The 0.02 grid does NOT carry the partition's own bounds — 0.35, 0.55 and 0.65
+#: fall between 0.34/0.36, 0.54/0.56 and 0.64/0.66. That costs nothing, because
+#: the class shares are not read off this curve at all:
+#: :func:`sky_condition_summary` counts them from the sample itself, and the
+#: curve is the reader's own view of the distribution. Moving the grid onto the
+#: bounds would rewrite every published ``kt_cumulative.json``, which is a
+#: contract with the site.
 KT_CUMULATIVE_EDGES: tuple[float, ...] = tuple(round(0.02 * step, 2) for step in range(51))
 
 

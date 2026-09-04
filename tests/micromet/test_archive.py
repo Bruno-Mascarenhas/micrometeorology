@@ -24,6 +24,7 @@ from micrometeorology.sensors import archive
 from micrometeorology.sensors.archive import (
     ARCHIVE_END,
     ARCHIVE_START,
+    EXPECTED_LENTA_ROWS,
     LENTA_MANIFEST,
     RAIN_MANIFEST,
     mask_sentinels,
@@ -135,7 +136,6 @@ class TestStaging:
         )
         frame = pd.read_csv(staged, skiprows=[0, 2, 3])
         stamps = pd.to_datetime(frame["TIMESTAMP"]).tolist()
-        # The two mis-stamped rows move forward one hour; the late one does not.
         assert stamps == [
             pd.Timestamp("2020-02-28 12:45:00"),
             pd.Timestamp("2020-02-28 12:50:00"),
@@ -176,8 +176,9 @@ class TestStaging:
             tmp_path / "staged",
         )
         frame = pd.read_csv(staged, skiprows=[0, 2, 3])
-        # The correctly clocked 00:00 row stays; the mis-stamped tail goes.
-        assert frame["TIMESTAMP"].tolist() == ["2020-01-07 00:00:00"]
+        assert frame["TIMESTAMP"].tolist() == ["2020-01-07 00:00:00"], (
+            "the correctly clocked 00:00 row stays; the mis-stamped tail goes"
+        )
 
     def test_only_the_2023_block_of_the_spare_logger_is_kept(self, tmp_path):
         source = tmp_path / "CR5000_LBM_rain_18-21082023.dat"
@@ -226,6 +227,50 @@ class TestVerifyFrame:
             + [ARCHIVE_END]
         )
         return pd.DataFrame({"x": range(rows)}, index=index)
+
+    def _grown(self, rows: int, extra: int) -> pd.DataFrame:
+        """The audited span plus ``extra`` samples past its end, on the grid.
+
+        ``rows`` is the total count, so passing more than ``expected + extra``
+        is a merge that gained rows the span does not explain.
+        """
+        step = pd.Timedelta(minutes=5)
+        tail = [ARCHIVE_END + step * (i + 1) for i in range(extra)]
+        filler = rows - 2 - len(tail)
+        index = pd.DatetimeIndex(
+            [ARCHIVE_START]
+            + [ARCHIVE_START + step * i for i in range(1, filler + 1)]
+            + [ARCHIVE_END]
+            + tail
+        )
+        return pd.DataFrame({"x": range(len(index))}, index=index)
+
+    def test_growth_matching_the_sampling_grid_is_accepted(self):
+        """The invariant is growth, not equality: the surplus must be exactly the
+        grid between the audited end and the new one."""
+        report = verify_frame(self._grown(EXPECTED_LENTA_ROWS + 12, extra=12), "lenta")
+
+        assert report.problems == ()
+
+    def test_growth_that_does_not_match_the_grid_is_reported(self):
+        """One row more than the span explains is a merge that gained a row."""
+        report = verify_frame(self._grown(EXPECTED_LENTA_ROWS + 13, extra=12), "lenta")
+
+        assert any("sampling intervals" in problem for problem in report.problems)
+        assert report.rows == EXPECTED_LENTA_ROWS + 13
+
+    def test_a_timestamp_off_the_five_minute_grid_is_reported(self):
+        """The surplus rule already divides a span by the interval to get a row
+        count; nothing checked the rows sit ON that grid, so a staging repair that
+        shifts part of a file keeps both the count and the span intact."""
+        frame = self._grown(EXPECTED_LENTA_ROWS + 12, extra=12)
+        shifted = frame.index.to_list()
+        shifted[5] = shifted[5] + pd.Timedelta(seconds=30)
+        frame.index = pd.DatetimeIndex(shifted)
+
+        report = verify_frame(frame, "lenta")
+
+        assert any("grid" in problem for problem in report.problems)
 
     def test_a_short_merge_is_reported(self):
         report = verify_frame(self._full_span(10), "lenta")
@@ -321,7 +366,7 @@ class TestNightCorruptedDays:
         return pd.DataFrame(values, index=pd.DatetimeIndex(stamps))
 
     def test_a_clean_day_is_not_flagged(self) -> None:
-        # Local midday, so the sun is up and the flux is ordinary.
+        """Local midday: the sun is up and the flux is ordinary."""
         stamps = [f"2024-06-15 12:{minute:02d}" for minute in (0, 5, 10, 15)]
         frame = self._frame({"Sw_dw": [800.0, 810.0, 790.0, 805.0]}, stamps)
 
@@ -375,8 +420,8 @@ class TestNightCorruptedDays:
             "2024-06-15 02:00",
             "2024-06-15 02:05",
             "2024-06-15 02:10",
-            "2024-06-15 12:00",  # looks ordinary, same broken clock
-            "2024-06-16 12:00",  # the next day is untouched
+            "2024-06-15 12:00",
+            "2024-06-16 12:00",
         ]
         frame = self._frame(
             {
@@ -395,10 +440,10 @@ class TestNightCorruptedDays:
         assert masked["Sw_dw"].iloc[:4].isna().all()
         assert masked["Sw_par"].iloc[:4].isna().all()
         assert masked["Net_CNR1"].iloc[:4].isna().all()
-        assert masked["Sw_dw"].iloc[4] == 850.0, "the following day must survive"
-        # Non-radiation channels keep their values: the reading is real, only its
-        # timestamp is wrong, and dropping them would delete good measurements.
-        assert masked["T"].notna().all()
+        assert masked["Sw_dw"].iloc[4] == pytest.approx(850.0), "the following day must survive"
+        assert masked["T"].notna().all(), (
+            "a non-radiation reading is real; only its timestamp is wrong"
+        )
         assert removed == {"Sw_dw": 4, "Sw_par": 4, "Net_CNR1": 4}
 
 
@@ -491,7 +536,6 @@ class TestTheMasksReachTheRawTwin:
         masked, removed = archive.mask_impossible_shortwave(frame.copy(), sources)
 
         assert masked["Sw_dw"].isna().all(), "both samples exceed the BSRN ceiling"
-        # Each raw column loses only the sample inside its own era.
         assert masked["PSP1_Wm2_Avg"].to_list() == [
             pytest.approx(float("nan"), nan_ok=True),
             1400.0,
@@ -707,28 +751,51 @@ def test_the_ceiling_coefficient_is_the_cited_methods_not_the_tsi() -> None:
 
 
 def test_a_sample_between_the_two_constants_ceilings_survives() -> None:
-    """At 2026-07-05 09:00 (mu0 = 0.60450, E0 = 0.966588) the ceiling is 1183.4 W/m2.
+    """The row stamped 2026-07-05 09:00 averages ``(08:55, 09:00]``, whose centroid
+    is 08:57:30 (mu0 = 0.59822, E0 = 0.966588): the ceiling there is 1169.9 W/m2.
 
-    Scaling the Kopp & Lean TSI instead would put it at 1178.6, so this 1181 W/m2
+    Scaling the Kopp & Lean TSI instead would put it at 1165.2, so this 1168 W/m2
     sample is exactly the real cloud-enhancement reading that the wrong constant
     would delete as physically impossible.
     """
-    frame = pd.DataFrame({"Sw_dw": [1181.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
+    frame = pd.DataFrame({"Sw_dw": [1168.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
 
     masked, removed = archive.mask_impossible_shortwave(frame)
 
-    assert masked["Sw_dw"].iloc[0] == pytest.approx(1181.0)
+    assert masked["Sw_dw"].iloc[0] == pytest.approx(1168.0)
     assert removed == {}
 
 
 def test_a_sample_above_the_cited_ceiling_is_still_masked() -> None:
-    """The ceiling still bites: 1185 W/m2 at the same instant is above 1183.4."""
-    frame = pd.DataFrame({"Sw_dw": [1185.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
+    """The ceiling still bites: 1172 W/m2 over the same interval is above 1169.9."""
+    frame = pd.DataFrame({"Sw_dw": [1172.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
 
     masked, removed = archive.mask_impossible_shortwave(frame)
 
     assert np.isnan(masked["Sw_dw"].iloc[0])
     assert removed == {"Sw_dw": 1}
+
+
+def test_the_ceiling_is_evaluated_at_the_interval_centroid_not_the_end_stamp() -> None:
+    """The CR5000 end-stamps, so geometry at the raw stamp is 2.5 minutes late:
+    1175 W/m2 sat under the 09:00 ceiling of 1183.4 and above the 08:57:30 one of
+    1169.9, and every solar-geometry gate in this module read the late one."""
+    frame = pd.DataFrame({"Sw_dw": [1175.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
+
+    _masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert removed == {"Sw_dw": 1}
+
+
+def test_a_sample_at_the_horizon_is_classified_by_the_interval_it_averages() -> None:
+    """At the raw stamp 2024-06-01 05:55 the sun is 0.437 deg up (daylight); the
+    interval it averages is centred at 05:52:30, where it is 0.125 deg down —
+    so the nocturnal gates put every sunrise/sunset sample on the wrong side."""
+    index = pd.DatetimeIndex(["2024-06-01 05:55"])
+
+    elevation = archive.station_elevation_deg(index)
+
+    assert elevation[0] < archive.NOCTURNAL_ELEVATION_DEG
 
 
 def test_each_component_is_judged_by_its_own_ceiling_not_the_globals():
@@ -1056,7 +1123,7 @@ def test_the_sign_rule_does_not_reach_the_night() -> None:
 
 
 def test_the_pipeline_calls_its_radiation_stages_in_the_load_bearing_order() -> None:
-    """The order of run() is asserted nowhere else, and four comments depend on it.
+    """Four comments in the source depend on the order of run().
 
     Read off the source rather than executed, because executing run() needs the
     whole ``data/`` tree; what has to be pinned is the SEQUENCE, and reordering
@@ -1070,19 +1137,27 @@ def test_the_pipeline_calls_its_radiation_stages_in_the_load_bearing_order() -> 
     - ``night_corrupted_days`` before the nocturnal mask, or the clock-slip
       detector loses the only witness it has and reports zero corrupted days;
     - the nocturnal net recomposition after the nocturnal mask, or it folds the
-      thermal offset straight back into the saldo it exists to remove.
+      thermal offset straight back into the saldo it exists to remove;
+    - ``close_net_radiation`` before all of them, or the balance it closes is
+      closed over components a later mask has already removed.
+
+    Comments are stripped before the search, so a future comment naming a stage
+    cannot satisfy the check over a wrong order.
     """
     from micrometeorology.cli import build_archive as cli
 
     estagios = (
+        # Ahead of the four: it recomposes the net FROM the four components, so
+        # running it after any of their masks would close the balance over
+        # values those masks had already removed. It is also the stage whose
+        # misplacement the bullets below describe.
+        "close_net_radiation",
         "night_corrupted_days",
         "nocturnal_offset_statistics",
         "mask_impossible_shortwave",
         "mask_nocturnal_shortwave",
         "close_nocturnal_net_radiation",
     )
-    # Comments are stripped first: a future comment naming a stage would otherwise
-    # satisfy the check over a wrong order.
     fonte = "\n".join(linha.split("#", 1)[0] for linha in inspect.getsource(cli.run).splitlines())
     chamadas = re.findall(rf"\b({'|'.join(estagios)})\(", fonte)
 
@@ -1140,6 +1215,19 @@ def test_a_daytime_ceiling_violation_still_reaches_the_net() -> None:
     assert removed == {"Sw_dw": 1, "Net_CNR1": 1}
 
 
+def test_a_daytime_ceiling_violation_in_the_reflected_flux_reaches_the_net_too() -> None:
+    """``Sw_up`` is inside ``Net_CNR1`` exactly as ``Sw_dw`` is, yet only the global
+    carried its verdict to the net, against the docstring and
+    ``docs/station-archive.md``."""
+    stamps = pd.DatetimeIndex(["2026-07-05 09:00"])
+    frame = pd.DataFrame({"Sw_dw": [500.0], "Sw_up": [1400.0], "Net_CNR1": [-750.0]}, index=stamps)
+
+    masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert np.isnan(masked["Net_CNR1"].iloc[0])
+    assert removed == {"Sw_up": 1, "Net_CNR1": 1}
+
+
 def test_the_diffuse_may_exceed_the_global_inside_the_instruments_error() -> None:
     """Since the shade-ring correction the two channels carry the combined error
     of two instruments plus the isotropic ring model; a bare ``>`` rejected 3,018
@@ -1161,3 +1249,104 @@ def test_a_diffuse_well_past_the_global_is_still_a_fault() -> None:
 
     assert np.isnan(masked["Sw_dif"].iloc[0])
     assert removed == {"Sw_dif": 1}
+
+
+class TestTheUnshadedDiffuseEpisodeRules:
+    """Three rules decide a flagged day and none had a test: a per-day sample
+    floor, a persistence run of three days, and a one-day gap the run bridges.
+    Each one alone decides whether a real ring-off episode is reported."""
+
+    @staticmethod
+    def _days(days: list[str], ratio: float) -> pd.DataFrame:
+        return _clear_sky_days(days, "PSP_Wm2_Avg", ratio, {})
+
+    def test_one_day_over_the_limit_is_not_an_episode(self):
+        assert archive.unshaded_diffuse_days(self._days(["2025-07-01"], 0.7)) == []
+
+    def test_three_consecutive_days_are(self):
+        flagged = archive.unshaded_diffuse_days(
+            self._days(["2025-07-01", "2025-07-02", "2025-07-03"], 0.7)
+        )
+
+        assert [day for day, _median in flagged] == ["2025-07-01", "2025-07-02", "2025-07-03"]
+
+    def test_a_single_clouded_out_day_does_not_split_the_run(self):
+        """One day off is weather; the run has to bridge it or a real episode is
+        reported as three unrelated days below the persistence floor."""
+        flagged = archive.unshaded_diffuse_days(
+            self._days(["2025-07-01", "2025-07-03", "2025-07-05"], 0.7)
+        )
+
+        assert len(flagged) == 3
+
+    def test_two_clouded_out_days_do_split_it(self):
+        assert (
+            archive.unshaded_diffuse_days(
+                self._days(["2025-07-01", "2025-07-04", "2025-07-07"], 0.7)
+            )
+            == []
+        )
+
+    def test_a_ratio_beyond_doubt_is_reported_on_its_own(self):
+        """Above DIFFUSE_RATIO_CERTAIN the diffuse is reading the global; one day
+        of that needs no persistence to be a fault."""
+        flagged = archive.unshaded_diffuse_days(self._days(["2025-07-01"], 0.95))
+
+        assert [day for day, _median in flagged] == ["2025-07-01"]
+
+    def test_a_day_below_the_sample_floor_is_not_judged(self):
+        """Nineteen clear samples cannot establish a day's median ratio."""
+        stamps = pd.date_range("2025-07-01 09:00", periods=19, freq="5min")
+        frame = pd.DataFrame(
+            {"CM3Up_Wm2_Avg": [800.0] * 19, "PSP_Wm2_Avg": [800.0 * 0.95] * 19}, index=stamps
+        )
+
+        assert archive.unshaded_diffuse_days(frame) == []
+
+
+def test_a_dry_run_split_by_absent_rows_is_not_one_long_blocked_stretch() -> None:
+    """The runs are found with a cumsum over the samples that exist, so a month
+    with no rows at all would bridge two short dry spells into one long stretch
+    and report a blocked gauge where there was only a gap in acquisition."""
+    step = pd.Timedelta(minutes=5)
+    first = pd.date_range("2022-01-01", periods=20 * 24 * 12, freq=step)
+    second = pd.date_range("2022-03-01", periods=20 * 24 * 12, freq=step)
+    frame = pd.DataFrame(
+        {"PL01_mm_Tot": [0.0] * (len(first) + len(second))},
+        index=first.append(second),
+    )
+
+    assert archive.blocked_gauge_runs(frame, min_dry_days=30) == []
+
+
+def test_a_month_stepping_away_from_its_baseline_raises_the_drift_alarm() -> None:
+    """The alarm is the only pyranometer health check available without a
+    calibration lab: a ventilator failure or a degrading dome shows up here
+    months before it distorts a daytime statistic."""
+    step = pd.Timedelta(minutes=5)
+    stamps = pd.date_range("2024-01-01 02:00", "2025-03-31 03:00", freq=step)
+    deep_night = stamps[(stamps.hour >= 2) & (stamps.hour < 3)]
+    offsets = np.where(
+        pd.DatetimeIndex(deep_night).to_period("M").astype(str) == "2025-03", -6.0, -1.5
+    )
+    frame = pd.DataFrame({"Sw_dw": offsets}, index=deep_night)
+
+    measured = archive.nocturnal_offset_statistics(frame, columns=("Sw_dw",))
+
+    alarms = dict(measured["Sw_dw"].drift_alarms)
+    assert "2025-03" in alarms
+    assert alarms["2025-03"] == pytest.approx(-6.0)
+
+
+def test_a_month_moving_less_than_the_alarm_threshold_is_not_reported() -> None:
+    step = pd.Timedelta(minutes=5)
+    stamps = pd.date_range("2024-01-01 02:00", "2025-03-31 03:00", freq=step)
+    deep_night = stamps[(stamps.hour >= 2) & (stamps.hour < 3)]
+    offsets = np.where(
+        pd.DatetimeIndex(deep_night).to_period("M").astype(str) == "2025-03", -2.4, -1.5
+    )
+    frame = pd.DataFrame({"Sw_dw": offsets}, index=deep_night)
+
+    measured = archive.nocturnal_offset_statistics(frame, columns=("Sw_dw",))
+
+    assert dict(measured["Sw_dw"].drift_alarms) == {}

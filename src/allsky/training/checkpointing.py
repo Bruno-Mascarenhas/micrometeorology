@@ -42,6 +42,7 @@ import numpy as np
 
 from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
 from allsky.provenance import code_version
+from allsky.training.errors import TrainingError
 from labmim_core.atomic import atomic_write
 
 #: ``torch.nn.Module`` / ``torch.optim.Optimizer`` at runtime. Kept as aliases so
@@ -135,6 +136,8 @@ def save_checkpoint(
     dataset_version: str | None,
     split_id: str | None,
     manifest_sha256: str | None,
+    sensor_pairing: Mapping[str, float] | None = None,
+    frame_geometry: Mapping[str, Any] | None = None,
     backbone_info: Mapping[str, Any] | None = None,
     code_version_info: Mapping[str, Any] | None = None,
     rng_state: Mapping[str, Any] | None = None,
@@ -167,6 +170,14 @@ def save_checkpoint(
         The ordered engineered feature names and their group membership.
     dataset_version, split_id, manifest_sha256:
         Dataset provenance, checked before a resume is allowed.
+    sensor_pairing:
+        ``{timestamp_offset_minutes, tolerance_minutes}`` the manifest paired
+        with, so live prediction pairs the way the run trained; ``None`` when
+        the sidecar recorded neither.
+    frame_geometry:
+        The ``mask``/``crop``/``pad``/``resize`` the dataset's frames were
+        prepared with, so live prediction shapes the frame the same way;
+        ``None`` for a manifest built before the sidecar recorded it.
     backbone_info:
         Image-mode backbone identity (name / revision / pooling / dim / frozen);
         ``None`` in embedding mode.
@@ -199,6 +210,8 @@ def save_checkpoint(
         "dataset_version": dataset_version,
         "split_id": split_id,
         "manifest_sha256": manifest_sha256,
+        "sensor_pairing": dict(sensor_pairing) if sensor_pairing is not None else None,
+        "frame_geometry": dict(frame_geometry) if frame_geometry is not None else None,
         "backbone": dict(backbone_info) if backbone_info is not None else None,
         "code_version": dict(code_version_info)
         if code_version_info is not None
@@ -328,7 +341,7 @@ def _refuse_diverged_weights(checkpoint: Mapping[str, Any], *, path: Path) -> No
         if not isinstance(tensor, torch.Tensor) or not tensor.is_floating_point():
             continue
         if not bool(torch.isfinite(tensor).all()):
-            raise RuntimeError(
+            raise TrainingError(
                 f"{path} stores non-finite weights (model_state[{name!r}]): the run that "
                 "wrote it diverged, and resuming, evaluating or serving from it would carry "
                 f"NaN into every output. Load a converged checkpoint instead — "

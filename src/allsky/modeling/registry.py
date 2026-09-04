@@ -24,8 +24,8 @@ from typing import Any, Literal, cast
 
 from torch import nn
 
-from allsky.config import ExperimentConfig, geometry_channels_of
-from allsky.embeddings.backbone import Pooling
+from allsky.config import ExperimentConfig, geometry_channels_of, image_size_of
+from allsky.embeddings.backbone import POOLINGS, Pooling
 from allsky.features.policy import resolve_feature_set
 from allsky.modeling.baselines import ClimatologyModel, ImageOnlyModel, SensorOnlyModel
 from allsky.modeling.multimodal import MultimodalNet
@@ -90,6 +90,12 @@ _VISUAL_PARAMS = (
             "visual_out_dim",
             "backbone_frozen",
             "unfreeze_last_n",
+            # Kept as a RECOGNISED name although the builder never reads it: the
+            # engine and the evaluator both derive the pooler from
+            # `data.alignment.strategy` and pass it as an override that always
+            # wins, so a config setting it is inert. Dropping it from the known
+            # set would warn on the shipped configs that still carry it; the
+            # docstring of build_model states where the value really comes from.
             "temporal_pooling",
             "geometry_channels",
         }
@@ -246,6 +252,7 @@ def _multimodal_builder(fusion_name: str) -> ModelBuilder:
             fusion_name=fusion_name,
             input_mode=cfg.data.input_mode,
             feature_set=feature_set,
+            feature_extra=cfg.features.extra,
             embedding_dim=embedding_dim,
             image_backbone=image_backbone,
             sensor_hidden=_sensor_hidden(params),
@@ -285,6 +292,11 @@ def build_model(
     temporal_pooling: Literal["mean", "attention"] | None = None,
 ) -> nn.Module:
     """Build the model named by ``experiment_cfg.model.name``.
+
+    The temporal pooler is NOT read from ``model.temporal_pooling``: both
+    production callers — the engine and the evaluator — derive it from
+    ``data.alignment.strategy`` and pass it here as *temporal_pooling*, which
+    always wins, so the config key is inert wherever a run reaches this.
 
     Parameters
     ----------
@@ -352,11 +364,13 @@ def default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Callab
         params = dict(cfg.model.model_dump())
         name = str(params.get("backbone", "dinov2_vits14"))
         pooling = str(params.get("backbone_pooling", "cls"))
+        image_size = image_size_of(cfg)
         try:
             backbone = build_backbone(
                 name,
                 pooling=_backbone_pooling(pooling),
                 device=device,
+                image_size=image_size,
                 weights=params.get("backbone_weights"),
                 repo_dir=params.get("backbone_repo_dir"),
             )
@@ -365,6 +379,7 @@ def default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Callab
             raise TrainingError(
                 "failed to construct the default image backbone for input_mode='image' "
                 f"(model.backbone={name!r}, model.backbone_pooling={pooling!r}, "
+                f"model.image_size={image_size!r}, "
                 f"train.device={device!r}); fix those config knobs or inject an "
                 f"image_backbone_builder. Cause: {exc}"
             ) from exc
@@ -376,22 +391,17 @@ def _backbone_pooling(value: str) -> Pooling:
     """Narrow the free-form ``model.backbone_pooling`` string to the backbone's literal.
 
     ``ExperimentModelConfig`` is ``extra="allow"``, so the knob arrives as an
-    arbitrary string while :func:`allsky.embeddings.backbone.build_backbone` accepts
-    only these three names.  Rejecting anything else here does not change what a bad
-    value does to a run — it already ended as the ``RuntimeError``
-    :func:`default_image_backbone_builder` raises, since the only backbone that
-    reads ``pooling`` (``DinoV2Backbone``) rejects an unknown one, and the other
-    (``fake``) is not an ``nn.Module`` and exposes no ``load_torch_module``, so
-    ``coerce_image_backbone`` refuses it regardless of pooling.  It only moves the
-    failure one call earlier, onto a message that names the knob.
+    arbitrary string while the extraction path narrows it to :data:`POOLINGS`, read
+    from there so this and :data:`allsky.modeling.backbone_families.VIT_POOLINGS`
+    cannot drift.  Rejecting anything else here does not change what a bad value
+    does to a run — the DINOv2 and DINOv3 families reject an unknown pooling when
+    they build, ``ConvNetFamily`` rejects any token pooling at all, and ``fake`` is
+    not an ``nn.Module``, so ``coerce_image_backbone`` refuses it regardless.  It
+    only moves the failure one call earlier, onto a message that names the knob.
     """
-    if value == "cls":
-        return "cls"
-    if value == "mean":
-        return "mean"
-    if value == "cls+mean":
-        return "cls+mean"
-    raise ValueError(f"unknown backbone pooling {value!r}; expected 'cls', 'mean' or 'cls+mean'")
+    if value in POOLINGS:
+        return cast("Pooling", value)
+    raise ValueError(f"unknown backbone pooling {value!r}; expected one of {', '.join(POOLINGS)}")
 
 
 def restore_model(
@@ -460,8 +470,25 @@ def _warn_unknown_params(name: str, experiment_cfg: ExperimentConfig) -> None:
     ``ExperimentModelConfig`` keeps unknown keys (``extra="allow"``); this catches
     typos (a mistyped hyper-parameter that would otherwise be silently ignored)
     without failing the run.
+
+    A key that IS recognised but cannot act in this ``data.input_mode`` gets its
+    own message rather than the typo one: under ``input_mode='embedding'`` no
+    backbone is built and no pixel is read, so every image-only knob is accepted
+    and dropped without a word. It is not a typo — the shipped ``image_only``
+    fragment sets ``backbone_frozen`` deliberately and says so — but a run whose
+    log never mentions it reads as though the knob took effect.
     """
     known = KNOWN_MODEL_PARAMS.get(name, frozenset())
+    if experiment_cfg.data.input_mode == "embedding":
+        inert_here = _PIPELINE_VISUAL_PARAMS | {"backbone_frozen", "unfreeze_last_n"}
+        inert = sorted(set(_params(experiment_cfg)) & known & inert_here)
+        if inert:
+            logger.info(
+                "model %r: %s describe the image branch, and data.input_mode='embedding' "
+                "reads precomputed vectors, so they do not act on this run",
+                name,
+                inert,
+            )
     extras = sorted(set(_params(experiment_cfg)) - known)
     if extras:
         logger.warning(

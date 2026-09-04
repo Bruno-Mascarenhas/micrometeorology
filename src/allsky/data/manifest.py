@@ -39,12 +39,15 @@ from allsky.config import (
     SITE_UTC_OFFSET_HOURS,
     PrepareConfig,
     SiteConfig,
+    frame_geometry_of,
     manifest_meta_path,
 )
 from allsky.data.alignment import CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
     GEOMETRY_COLUMNS,
+    LABELABLE_MIN_ELEVATION_DEG,
+    SPLIT_COLUMN,
     QCFlag,
     manifest_column_dtypes,
     to_relative,
@@ -94,16 +97,24 @@ def _timezone_meta(site: SiteConfig) -> dict[str, Any]:
 
 
 def site_utc_offset_hours(meta: Mapping[str, Any]) -> float:
-    """The fixed clock offset, in hours, the manifest in *meta* was built against."""
+    """The fixed clock offset, in hours, the manifest in *meta* was built against.
+
+    Raises
+    ------
+    ValueError
+        When *meta* carries no ``timezone`` block. Every v2 sidecar
+        :func:`_build_meta` writes has one, so reaching this means a hand-edited
+        or foreign sidecar — and the alternative, assuming this station's
+        offset, computes another site's solar geometry on Salvador's clock
+        without failing anywhere.
+    """
     timezone_meta = meta.get("timezone")
     if isinstance(timezone_meta, Mapping) and "utc_offset_hours" in timezone_meta:
         return float(timezone_meta["utc_offset_hours"])
-    logger.warning(
-        "manifest meta carries no timezone block; assuming this station's %+g h offset. "
-        "A manifest from another site will have its solar geometry computed on the wrong clock",
-        SITE_UTC_OFFSET_HOURS,
+    raise ValueError(
+        "manifest meta carries no 'timezone' block, so the clock its solar geometry was "
+        "built against is unknown; every manifest this build writes records one"
     )
-    return float(SITE_UTC_OFFSET_HOURS)
 
 
 def build_manifest(
@@ -117,7 +128,7 @@ def build_manifest(
     diffuse_column: str | None = "PSP_Wm2_Avg",
     kindex_kind: str = "kstar",
     alignment: CenterFrame | None = None,
-    min_elevation_deg: float = 10.0,
+    min_elevation_deg: float = LABELABLE_MIN_ELEVATION_DEG,
     night_min_elevation_deg: float | None = 5.0,
     max_kindex: float | None = None,
     far_distance_minutes: float | None = None,
@@ -261,7 +272,7 @@ def build_manifest(
     matched_pos = pairing.sensor_pos[keep]
     distance_minutes = pairing.distance_minutes[keep]
 
-    paired_sensor = sensors.iloc[matched_pos].copy()
+    paired_sensor = sensors.iloc[matched_pos]
     paired_sensor.index = frame_times
 
     features = build_feature_frame(
@@ -338,6 +349,7 @@ def build_manifest(
     qc_flags = _qc_flags(
         elevation=elevation,
         ghi=ghi,
+        measured_dhi=target_dhi if diffuse_column is not None else None,
         distance_minutes=distance_minutes,
         kindex=kindex,
         min_elevation_deg=min_elevation_deg,
@@ -380,7 +392,7 @@ def build_manifest(
             "qc_flags": qc_flags,
             "dataset_version": [DATASET_VERSION] * n_rows,
             "alignment_id": [strategy.id] * n_rows,
-            "split": [None] * n_rows,
+            SPLIT_COLUMN: [None] * n_rows,
         }
     )
     manifest = pd.DataFrame(data, columns=list(dtypes)).astype(dtypes)
@@ -400,6 +412,7 @@ def build_manifest(
             "max_kindex": max_kindex,
             "far_distance_minutes": far_distance_minutes,
             "sensor_timestamp_offset_minutes": sensor_timestamp_offset_minutes,
+            "max_distance_minutes": strategy.max_distance_minutes,
         },
     )
     logger.info(
@@ -422,11 +435,19 @@ def build_manifest_from_prepare_config(
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Build a manifest from a :class:`~allsky.config.PrepareConfig`.
 
-    Every build parameter is read from *cfg*: the feature set from
-    ``cfg.features.feature_set`` (the ``features.set`` YAML key), the GHI column
-    from ``cfg.sensor.ghi_column``, plus the site, alignment window, diffuse
-    column, k-index kind, sky-class thresholds and the night drop threshold
-    (``cfg.night_filter.min_solar_elevation_deg`` -> ``night_min_elevation_deg``).
+    Forwarded from *cfg*: the feature set (``cfg.features.feature_set``, the
+    ``features.set`` YAML key) and the ``features.extra`` names beside it, the
+    GHI column (``cfg.sensor.ghi_column``), the site, the alignment window, the
+    diffuse column, the k-index kind, the sensor clock offset and both elevation
+    floors (``cfg.night_filter.min_solar_elevation_deg`` ->
+    ``night_min_elevation_deg``; ``cfg.night_filter.labelable_min_elevation_deg``
+    -> ``min_elevation_deg``). ``max_kindex``, ``far_distance_minutes`` and
+    ``sample_id_format`` keep their :func:`build_manifest` defaults — no config
+    key carries them. The sky-condition bins are not a build parameter at all:
+    they are the published bounds of
+    :data:`labmim_core.sky.SKY_CLASS_KT_UPPER_BOUNDS`, and
+    :class:`~allsky.config.PrepareTargetsConfig` forbids a config that tries to
+    set them.
 
     Parameters
     ----------
@@ -450,7 +471,7 @@ def build_manifest_from_prepare_config(
         window_minutes=cfg.alignment.window_minutes,
         max_distance_minutes=cfg.sensor.tolerance_minutes,
     )
-    return build_manifest(
+    manifest, meta = build_manifest(
         frames_manifest,
         sensor_df,
         site=cfg.site,
@@ -461,9 +482,16 @@ def build_manifest_from_prepare_config(
         kindex_kind=cfg.targets.kindex_kind,
         alignment=alignment,
         night_min_elevation_deg=cfg.night_filter.min_solar_elevation_deg,
+        min_elevation_deg=cfg.night_filter.labelable_min_elevation_deg,
         sensor_timestamp_offset_minutes=cfg.sensor.timestamp_offset_minutes,
+        extra_features=cfg.features.extra,
         config_sha256=config_sha256,
     )
+    # The pixels the frames on disk actually hold. Only this builder knows the
+    # PrepareConfig, and a checkpoint stores an ExperimentConfig, which carries
+    # no mask/crop/pad/resize at all.
+    meta["frame_geometry"] = frame_geometry_of(cfg)
+    return manifest, meta
 
 
 def write_manifest_parquet(
@@ -552,13 +580,13 @@ def attach_split_column(
     assignment, split_id = _split_assignment_and_id(split_artifact)
     day_ids = manifest["day_id"].astype("string")
     manifest = manifest.copy()
-    manifest["split"] = day_ids.map(assignment).astype("string")
+    manifest[SPLIT_COLUMN] = day_ids.map(assignment).astype("string")
 
     meta = {**meta, "split_id": split_id}
     written = write_manifest_parquet(manifest, meta, out)
     logger.info(
         "attach_split_column: filled %d split label(s) (split_id=%s); manifest_sha256 changed",
-        int(manifest["split"].notna().sum()),
+        int(manifest[SPLIT_COLUMN].notna().sum()),
         str(split_id)[:12],
     )
     return written
@@ -569,15 +597,19 @@ def _split_assignment_and_id(
 ) -> tuple[Mapping[str, str], str | None]:
     """Extract the ``day_id -> split`` map and ``split_id`` from either form.
 
-    A :class:`~allsky.data.splits.DaySplit` is recognised by its ``assignment``
-    attribute; the dict form carries the same two keys.
+    A :class:`~allsky.data.splits.DaySplit` is recognised by its type; the dict
+    form carries the same two keys.
     """
-    assignment = getattr(split_artifact, "assignment", None)
-    if assignment is not None:
-        split_id = getattr(split_artifact, "split_id", None)
-        return {str(k): str(v) for k, v in assignment.items()}, split_id
+    if isinstance(split_artifact, DaySplit):
+        return {
+            str(k): str(v) for k, v in split_artifact.assignment.items()
+        }, split_artifact.split_id
     if isinstance(split_artifact, dict):
-        raw = split_artifact.get("assignment", {})
+        raw = split_artifact["assignment"]
+        if not raw:
+            raise ValueError(
+                "split artifact carries no day assignment; refusing to blank every split label"
+            )
         return {str(k): str(v) for k, v in raw.items()}, split_artifact.get("split_id")
     raise TypeError(
         f"split_artifact must be a DaySplit or dict, got {type(split_artifact).__name__}"
@@ -610,7 +642,8 @@ def _reject_dead_channel(values: np.ndarray, column: str, remedy: str) -> None:
 
     Only an *identically zero* channel is refused: an all-NaN channel is a
     sensor gap, which ``QCFlag.SENSOR_GAP`` and the missing-label machinery
-    already handle, so it passes through untouched.
+    already handle — for the configured diffuse channel as well as for the
+    global one — so it passes through untouched.
     """
     finite = values[np.isfinite(values)]
     if finite.size == 0 or np.any(finite != 0.0):
@@ -664,17 +697,26 @@ def _qc_flags(
     *,
     elevation: np.ndarray,
     ghi: np.ndarray,
+    measured_dhi: np.ndarray | None,
     distance_minutes: np.ndarray,
     kindex: np.ndarray,
     min_elevation_deg: float,
     max_kindex: float,
     far_distance_minutes: float,
 ) -> np.ndarray:
-    """Assemble the per-row :class:`QCFlag` bitmask as int64."""
+    """Assemble the per-row :class:`QCFlag` bitmask as int64.
+
+    *measured_dhi* is the raw diffuse channel when one is configured, and
+    ``None`` for the Erbs pseudo-target, which is derived from *ghi* and carries
+    no gap of its own.  Its gaps set ``SENSOR_GAP`` alongside the global
+    channel's.
+    """
     n = len(elevation)
     flags = np.zeros(n, dtype=np.int64)
     flags[elevation < min_elevation_deg] |= int(QCFlag.LOW_SUN)
     flags[~np.isfinite(ghi)] |= int(QCFlag.SENSOR_GAP)
+    if measured_dhi is not None:
+        flags[~np.isfinite(measured_dhi)] |= int(QCFlag.SENSOR_GAP)
     far = np.isfinite(distance_minutes) & (distance_minutes > far_distance_minutes)
     flags[far] |= int(QCFlag.ALIGNMENT_FAR)
     artifact = np.isfinite(kindex) & (kindex > max_kindex)

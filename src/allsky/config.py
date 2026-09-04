@@ -4,10 +4,10 @@ Two roots sit at the top of the tree. :class:`ExperimentConfig` describes a
 multimodal training run — portable manifest, embeddings, model zoo, experiment
 engine. :class:`PrepareConfig` describes dataset preparation and drives
 ``prepare-local``, ``validate-dataset``, ``precompute-embeddings`` and
-``export-colab-bundle``. Both reuse the permissive :class:`VideoConfig` and
-:class:`SiteConfig` sections verbatim; every other section is strict
-(``extra="forbid"``), so a typo in a YAML key fails loudly instead of being
-ignored.
+``export-colab-bundle``. Both reuse the :class:`VideoConfig` and
+:class:`SiteConfig` sections verbatim; ``VideoConfig`` is the one permissive
+section left, every other one is strict (``extra="forbid"``), so a typo in a
+YAML key fails loudly instead of being ignored.
 
 YAML files compose through an ``extends:`` list that
 :func:`load_experiment_config` and :func:`load_prepare_config` resolve
@@ -21,6 +21,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from allsky.data.contracts import LABELABLE_MIN_ELEVATION_DEG
 from labmim_core.site import SiteConfig
 
 #: Fixed UTC offset of the LabMiM camera and datalogger clocks. Pinned rather
@@ -50,7 +51,7 @@ class VideoConfig(BaseModel):
     filename_date_format: str = "allsky-%Y%m%d"
     timestamps: Literal["overlay", "modelled"] = "overlay"
     start_time: str = "06:00"
-    minutes_per_frame: float = 1.0
+    minutes_per_frame: float = Field(default=1.0, gt=0)
 
 
 #: The :class:`VideoConfig` fields that decide *which capture* a given frame is,
@@ -73,7 +74,7 @@ VIDEO_TIME_FIELDS = (
 #: gate and the embedding store's both hash this, and two copies of the tuple
 #: would let one start covering a section the other does not — resuming an
 #: embedding store onto frames it was never extracted from.
-FRAME_PIXEL_SECTIONS = ("mask", "crop", "resize")
+FRAME_PIXEL_SECTIONS = ("mask", "crop", "pad", "resize")
 
 #: Filenames a prepared dataset is published under. The bundle writer and the
 #: prepare CLI both name these; separate copies let a rename land in one and not
@@ -130,13 +131,13 @@ class AlignmentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     strategy: AlignmentStrategyName = "center_frame"
-    window_minutes: float = 10.0
+    window_minutes: float = Field(default=10.0, gt=0.0)
     #: Cap on frames per window in IMAGE mode, evenly subsampled keeping the
     #: ends. The embedding path ignores it: an embedding is a 384-float read,
     #: while a frame is a JPEG decode plus a backbone forward, so a ten-minute
     #: window at this camera's one-frame-per-minute cadence would be eleven
     #: forwards per sample.
-    max_frames: int = 5
+    max_frames: int = Field(default=5, ge=1)
 
 
 class DataSourceConfig(BaseModel):
@@ -210,7 +211,7 @@ class FeaturesConfig(BaseModel):
     # Spelled out rather than imported from allsky.features.policy, which owns
     # the tiers: allsky.features.__init__ eagerly imports engineering, which
     # imports this module, so the import that would remove the copy closes a
-    # cycle. tests/allsky/test_config.py pins the two spellings equal.
+    # cycle.
     feature_set: Literal["bare", "minimal", "safe", "extended"] = Field(default="safe", alias="set")
 
     #: Feature names appended verbatim to the resolved set, for ablations over a
@@ -294,6 +295,23 @@ class TargetsConfig(BaseModel):
     sky: SkyClassTargetConfig = Field(default_factory=SkyClassTargetConfig)
     cloud_fraction: CloudFractionTargetConfig = Field(default_factory=CloudFractionTargetConfig)
 
+    @model_validator(mode="after")
+    def _at_least_one_head_is_enabled(self) -> TargetsConfig:
+        """Refuse a config that trains no head at all.
+
+        With every head off the multitask loss is a constant carrying no
+        ``grad_fn`` and the run dies inside ``backward()`` — after the seed, the
+        manifest, the normalizers, the model and the loaders — with an autograd
+        message that names none of the four switches.
+        """
+        if not any(head.enabled for head in (self.dhi, self.kindex, self.sky, self.cloud_fraction)):
+            raise ValueError(
+                "targets enables no head: set one of targets.dhi.enabled, "
+                "targets.kindex.enabled, targets.sky.enabled or "
+                "targets.cloud_fraction.enabled to true"
+            )
+        return self
+
 
 #: How the burned-in timestamp band is handled; see
 #: :func:`allsky.preprocessing.remove_timestamp_band`.
@@ -328,8 +346,10 @@ class PreprocessingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     overlay: OverlayPolicy = "keep"
-    band_fraction: float = TIMESTAMP_BAND_FRACTION
-    roi_radius_fraction: float | None = None
+    #: Both are fractions OF THE FRAME, so a value at or above 1 asks for a band
+    #: taller than the image or an ROI larger than it.
+    band_fraction: float = Field(default=TIMESTAMP_BAND_FRACTION, gt=0.0, lt=1.0)
+    roi_radius_fraction: float | None = Field(default=None, gt=0.0, le=1.0)
 
 
 class AugmentationConfig(BaseModel):
@@ -344,13 +364,13 @@ class AugmentationConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    p_exposure: float = 0.0
-    exposure_log2: float = 0.35
-    p_noise: float = 0.0
-    noise_sigma: float = 0.01
-    p_translate: float = 0.0
-    translate_px: int = 4
-    p_erase: float = 0.0
+    p_exposure: float = Field(default=0.0, ge=0.0, le=1.0)
+    exposure_log2: float = Field(default=0.35, ge=0.0)
+    p_noise: float = Field(default=0.0, ge=0.0, le=1.0)
+    noise_sigma: float = Field(default=0.01, ge=0.0)
+    p_translate: float = Field(default=0.0, ge=0.0, le=1.0)
+    translate_px: int = Field(default=4, ge=0)
+    p_erase: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class ExperimentModelConfig(BaseModel):
@@ -420,8 +440,8 @@ class ExperimentTrainConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     epochs: int = Field(default=20, ge=1)
-    batch_size: int = 32
-    lr: float = 3e-4
+    batch_size: int = Field(default=32, ge=1)
+    lr: float = Field(default=3e-4, gt=0.0)
     backbone_lr: float | None = None
     weight_decay: float = 1e-4
     # AdamW is the only algorithm allsky.training.engine builds. Declared as the
@@ -430,10 +450,10 @@ class ExperimentTrainConfig(BaseModel):
     optimizer: Literal["adamw"] = "adamw"
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     amp: AMPConfig = Field(default_factory=AMPConfig)
-    grad_accum_steps: int = 1
+    grad_accum_steps: int = Field(default=1, ge=1)
     grad_clip_norm: float | None = None
     early_stopping: EarlyStoppingConfig = Field(default_factory=EarlyStoppingConfig)
-    num_workers: int = 2
+    num_workers: int = Field(default=2, ge=0)
     device: str = "auto"
     out_subdir: str = "run"
 
@@ -458,6 +478,54 @@ class ExperimentConfig(BaseModel):
     model: ExperimentModelConfig = Field(default_factory=ExperimentModelConfig)
     train: ExperimentTrainConfig = Field(default_factory=ExperimentTrainConfig)
     augmentation: AugmentationConfig = Field(default_factory=AugmentationConfig)
+
+    @model_validator(mode="after")
+    def _geometry_channels_need_image_mode(self) -> ExperimentConfig:
+        """Refuse ``model.geometry_channels`` in embedding mode, where no pixel is read.
+
+        The registry widens the patch projection for the planes, but the
+        embedding branch of the visual encoder never receives them.
+        """
+        if self.data.input_mode == "embedding" and geometry_channels_of(self):
+            raise ValueError(
+                "model.geometry_channels asks for solar-geometry planes, but "
+                "data.input_mode='embedding' reads precomputed vectors and no pixel; "
+                "the planes would be dropped without a word"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _pixel_sections_need_image_mode(self) -> ExperimentConfig:
+        """Refuse preprocessing/augmentation in embedding mode, where no pixel is read.
+
+        Both sections describe transforms over a decoded frame, and embedding
+        mode reads precomputed vectors: the run would accept the section, never
+        apply it, and report metrics as though it had. Same reasoning as
+        :meth:`_geometry_channels_need_image_mode`, one section further out.
+        """
+        if self.data.input_mode != "embedding":
+            return self
+        asked = []
+        if self.preprocessing.overlay != "keep" or self.preprocessing.roi_radius_fraction:
+            asked.append("preprocessing")
+        if (
+            max(
+                self.augmentation.p_exposure,
+                self.augmentation.p_noise,
+                self.augmentation.p_translate,
+                self.augmentation.p_erase,
+            )
+            > 0.0
+        ):
+            asked.append("augmentation")
+        if asked:
+            raise ValueError(
+                f"{' and '.join(asked)} transform decoded pixels, but "
+                "data.input_mode='embedding' reads precomputed vectors and decodes none; "
+                "the section would be accepted and never applied"
+            )
+        return self
+
     preprocessing: PreprocessingConfig = Field(default_factory=PreprocessingConfig)
 
 
@@ -469,7 +537,7 @@ def model_param(cfg: ExperimentConfig, key: str, default: Any) -> Any:
     because the training engine, the evaluator and the live snapshot all need it
     and only one of them should own it.
     """
-    return dict(cfg.model.model_dump()).get(key, default)
+    return getattr(cfg.model, key, default)
 
 
 def image_size_of(cfg: ExperimentConfig) -> int:
@@ -542,11 +610,29 @@ class PadConfig(BaseModel):
 
 
 class NightFilterConfig(BaseModel):
-    """Drop frames whose solar elevation is below ``min_solar_elevation_deg``."""
+    """Drop frames whose solar elevation is below ``min_solar_elevation_deg``.
+
+    Two floors, and they are not the same question. ``min_solar_elevation_deg``
+    decides which rows EXIST in the manifest at all;
+    ``labelable_min_elevation_deg`` decides which of the surviving rows get a
+    finite ``target_kindex`` and a sky class rather than the ``LOW_SUN`` flag —
+    the band between the two is kept, labelled, and marked.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     min_solar_elevation_deg: float = 5.0
+    labelable_min_elevation_deg: float = LABELABLE_MIN_ELEVATION_DEG
+
+    @model_validator(mode="after")
+    def _night_floor_is_below_the_labelable_one(self) -> NightFilterConfig:
+        if self.min_solar_elevation_deg > self.labelable_min_elevation_deg:
+            raise ValueError(
+                f"night_filter.min_solar_elevation_deg ({self.min_solar_elevation_deg}) is above "
+                f"labelable_min_elevation_deg ({self.labelable_min_elevation_deg}): every row "
+                "that survives the night filter would then be flagged LOW_SUN"
+            )
+        return self
 
 
 class PrepareSensorConfig(BaseModel):
@@ -585,7 +671,7 @@ class PrepareTargetsConfig(BaseModel):
     (:func:`allsky.erbs.pseudo_diffuse`, ``target_source="erbs_pseudo"``).
 
     The sky-condition bins are not configurable: they are the published bounds
-    of :data:`allsky.data.sky.SKY_CLASS_KT_UPPER_BOUNDS`, always applied
+    of :data:`labmim_core.sky.SKY_CLASS_KT_UPPER_BOUNDS`, always applied
     to Kt. A config carrying the retired ``class_clear``/``class_overcast`` keys
     is rejected rather than silently ignored.
     """
@@ -641,19 +727,34 @@ class SplitsConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    val_fraction: float = 0.2
-    test_fraction: float = 0.1
+    val_fraction: float = Field(default=0.2, ge=0.0, lt=1.0)
+    test_fraction: float = Field(default=0.1, ge=0.0, lt=1.0)
     seed: int = 42
     strategy: Literal["chronological", "random"] = "chronological"
-    gap_days: int = 1
+    gap_days: int = Field(default=1, ge=0)
+
+    @model_validator(mode="after")
+    def _the_fractions_leave_days_to_train_on(self) -> SplitsConfig:
+        """Refuse a val/test pair that claims every day.
+
+        :func:`allsky.data.splits.create_day_splits` refuses it too, but only at
+        split time — after ``extract-frames`` and ``build-manifest`` have already
+        run over the archive.
+        """
+        if self.val_fraction + self.test_fraction >= 1.0:
+            raise ValueError(
+                f"val_fraction {self.val_fraction} + test_fraction {self.test_fraction} "
+                "leaves no day to train on; together they must stay below 1"
+            )
+        return self
 
 
 class PrepareConfig(BaseModel):
     """Root config for dataset preparation, embeddings and export.
 
-    ``video`` and ``site`` reuse the permissive legacy sections
-    (:class:`VideoConfig` / :class:`SiteConfig`); every prepare-specific section
-    is strict so typos fail loudly. ``features`` selects the sensor feature
+    ``video`` and ``site`` reuse the shared sections (:class:`VideoConfig`, still
+    permissive, and the strict :class:`SiteConfig`); every prepare-specific
+    section is strict so typos fail loudly. ``features`` selects the sensor feature
     policy baked into the manifest at build time — its YAML key is ``set``,
     aliasing the ``feature_set`` attribute.
     """
@@ -674,6 +775,24 @@ class PrepareConfig(BaseModel):
     output: DatasetOutputConfig = Field(default_factory=DatasetOutputConfig)
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     splits: SplitsConfig = Field(default_factory=SplitsConfig)
+
+
+def frame_geometry_of(cfg: PrepareConfig) -> dict[str, Any]:
+    """The prepare sections that decide which PIXELS a frame holds.
+
+    :data:`FRAME_PIXEL_SECTIONS` dumped from *cfg*, in a shape
+    :meth:`PrepareConfig.model_validate` accepts back, so a checkpoint can carry
+    the geometry its dataset was built with.  ``ExperimentConfig`` — the config a
+    checkpoint stores — has only ``preprocessing`` (overlay/ROI); mask, crop, pad
+    and resize live on ``PrepareConfig`` alone.
+
+    Returns
+    -------
+    dict
+        ``{"mask", "crop", "pad", "resize"}``, JSON-able.
+    """
+    dumped = cfg.model_dump(mode="json")
+    return {section: dumped[section] for section in FRAME_PIXEL_SECTIONS}
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

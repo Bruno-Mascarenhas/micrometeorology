@@ -26,13 +26,17 @@ __all__ = ["FeatureNormalizer", "TargetNormalizer", "fit_target_normalizers"]
 _MIN_STD = 1e-6
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class FeatureNormalizer:
     """Per-column standardization statistics for the engineered feature frame.
 
     Fit on the training split via :meth:`fit`; apply to any split with
     :meth:`transform`.  ``std`` entries below :data:`_MIN_STD` are clamped to
     1.0 so constant columns pass through as zeros instead of exploding.
+
+    Equality is identity (``eq=False``): a generated ``__eq__`` over the ``(F,)``
+    arrays answers with an array rather than a bool, and comparing statistics is a
+    float comparison, which this project only does with a declared tolerance.
 
     Attributes
     ----------

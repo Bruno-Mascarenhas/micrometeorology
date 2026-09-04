@@ -25,6 +25,7 @@ Torch-free: the helpers run over hand-built manifest rows.
 """
 
 import logging
+from datetime import timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -117,7 +118,7 @@ def test_a_kt_on_a_published_bound_lands_in_the_band_that_holds_its_sky_class(
     )
     frame = pd.DataFrame({"sample_id": split_df["sample_id"]})
 
-    _add_strata(frame, split_df)
+    _add_strata(frame, split_df, utc_offset_hours=SITE_UTC_OFFSET_HOURS)
 
     band = str(frame["kindex_band"].iloc[0])
     assert int(sky_class[0]) in _BAND_SKY_CLASSES.get(band, set())
@@ -137,7 +138,7 @@ def test_kindex_band_bins_the_index_its_bounds_are_published_on(
     )
     frame = pd.DataFrame({"sample_id": split_df["sample_id"]})
 
-    _add_strata(frame, split_df)
+    _add_strata(frame, split_df, utc_offset_hours=SITE_UTC_OFFSET_HOURS)
 
     assert frame["kindex_band"].tolist() == [expected_band]
 
@@ -149,7 +150,9 @@ def test_clearsky_reference_of_a_kt_dataset_is_the_clear_sky_clearness_index() -
         cos_zenith(local_times, _SITE, SITE_UTC_OFFSET_HOURS)
     ) / extraterrestrial_ghi(local_times, _SITE, SITE_UTC_OFFSET_HOURS)
 
-    reference = _clearsky_reference(frame, "kindex", kindex_kind="kt")
+    reference = _clearsky_reference(
+        frame, "kindex", kindex_kind="kt", utc_offset_hours=SITE_UTC_OFFSET_HOURS
+    )
 
     assert reference == pytest.approx(expected)
 
@@ -157,7 +160,9 @@ def test_clearsky_reference_of_a_kt_dataset_is_the_clear_sky_clearness_index() -
 def test_clearsky_reference_of_a_kstar_dataset_is_unity() -> None:
     frame = _manifest_rows(pd.date_range("2025-03-20 08:00", periods=5, freq="2h"))
 
-    reference = _clearsky_reference(frame, "kindex", kindex_kind="kstar")
+    reference = _clearsky_reference(
+        frame, "kindex", kindex_kind="kstar", utc_offset_hours=SITE_UTC_OFFSET_HOURS
+    )
 
     assert reference == pytest.approx(np.ones(len(frame)))
 
@@ -165,7 +170,12 @@ def test_clearsky_reference_of_a_kstar_dataset_is_unity() -> None:
 def test_no_clearsky_reference_is_invented_when_the_manifest_kindex_kind_is_unknown() -> None:
     frame = _manifest_rows(pd.date_range("2025-03-20 08:00", periods=5, freq="2h"))
 
-    assert _clearsky_reference(frame, "kindex", kindex_kind=None) is None
+    assert (
+        _clearsky_reference(
+            frame, "kindex", kindex_kind=None, utc_offset_hours=SITE_UTC_OFFSET_HOURS
+        )
+        is None
+    )
 
 
 def test_persistence_reference_is_the_previous_observation_of_the_same_day() -> None:
@@ -181,7 +191,13 @@ def test_persistence_reference_is_the_previous_observation_of_the_same_day() -> 
     observed = np.array([100.0, 110.0, 120.0, 500.0, 510.0])
     split_df = _manifest_rows(local_times, target_dhi=observed)
 
-    frame = _build_predictions_frame(split_df, {"dhi": observed}, ["dhi"], kindex_kind="kstar")
+    frame = _build_predictions_frame(
+        split_df,
+        {"dhi": observed},
+        ["dhi"],
+        kindex_kind="kstar",
+        utc_offset_hours=SITE_UTC_OFFSET_HOURS,
+    )
 
     np.testing.assert_array_equal(
         frame["persistence_dhi"].to_numpy(dtype=np.float64),
@@ -196,7 +212,11 @@ def test_stratified_persistence_is_the_split_cadence_not_the_stratum_neighbour()
     )
     split_df = _manifest_rows(local_times, target_dhi=observed)
     frame = _build_predictions_frame(
-        split_df, {"dhi": observed + 5.0}, ["dhi"], kindex_kind="kstar"
+        split_df,
+        {"dhi": observed + 5.0},
+        ["dhi"],
+        kindex_kind="kstar",
+        utc_offset_hours=SITE_UTC_OFFSET_HOURS,
     )
 
     stratified = _stratified_metrics(frame, ["dhi"], {"dhi": _target_metrics(frame, "dhi")})
@@ -214,7 +234,11 @@ def test_reference_rows_count_the_pairs_the_reference_was_scored_over() -> None:
     )
     split_df = _manifest_rows(local_times, target_dhi=observed)
     frame = _build_predictions_frame(
-        split_df, {"dhi": observed + 5.0}, ["dhi"], kindex_kind="kstar"
+        split_df,
+        {"dhi": observed + 5.0},
+        ["dhi"],
+        kindex_kind="kstar",
+        utc_offset_hours=SITE_UTC_OFFSET_HOURS,
     )
 
     stratified = _stratified_metrics(frame, ["dhi"], {"dhi": _target_metrics(frame, "dhi")})
@@ -230,7 +254,11 @@ def test_skill_scores_model_and_reference_over_the_same_rows() -> None:
     observed = np.array([100.0, 110.0, 120.0])
     split_df = _manifest_rows(local_times, target_dhi=observed)
     frame = _build_predictions_frame(
-        split_df, {"dhi": np.array([1000.0, 115.0, 125.0])}, ["dhi"], kindex_kind="kstar"
+        split_df,
+        {"dhi": np.array([1000.0, 115.0, 125.0])},
+        ["dhi"],
+        kindex_kind="kstar",
+        utc_offset_hours=SITE_UTC_OFFSET_HOURS,
     )
 
     metrics = _target_metrics(frame, "dhi")
@@ -244,7 +272,7 @@ def test_kindex_band_is_absent_for_a_manifest_built_before_target_kt() -> None:
     )
     frame = pd.DataFrame({"sample_id": split_df["sample_id"]})
 
-    _add_strata(frame, split_df)
+    _add_strata(frame, split_df, utc_offset_hours=SITE_UTC_OFFSET_HOURS)
 
     assert "kindex_band" not in frame.columns
 
@@ -258,7 +286,7 @@ def test_a_manifest_built_before_target_kt_warns_that_it_loses_the_kindex_breakd
     frame = pd.DataFrame({"sample_id": split_df["sample_id"]})
 
     with caplog.at_level(logging.WARNING, logger="allsky.evaluation.evaluator"):
-        _add_strata(frame, split_df)
+        _add_strata(frame, split_df, utc_offset_hours=SITE_UTC_OFFSET_HOURS)
 
     assert any("kindex_band breakdown is absent" in record.message for record in caplog.records)
 
@@ -271,7 +299,11 @@ def test_a_manifest_with_no_recorded_kindex_kind_warns_that_it_loses_the_clearsk
 
     with caplog.at_level(logging.WARNING, logger="allsky.evaluation.evaluator"):
         _build_predictions_frame(
-            split_df, {"kindex": np.full(len(local_times), 0.7)}, ["kindex"], kindex_kind=None
+            split_df,
+            {"kindex": np.full(len(local_times), 0.7)},
+            ["kindex"],
+            kindex_kind=None,
+            utc_offset_hours=SITE_UTC_OFFSET_HOURS,
         )
 
     assert [record.getMessage() for record in caplog.records if "kindex_kind" in record.msg] != []
@@ -285,7 +317,11 @@ def test_the_lost_clearsky_baseline_is_reported_once_not_once_per_row(
 
     with caplog.at_level(logging.WARNING, logger="allsky.evaluation.evaluator"):
         _build_predictions_frame(
-            split_df, {"kindex": np.full(len(local_times), 0.7)}, ["kindex"], kindex_kind=None
+            split_df,
+            {"kindex": np.full(len(local_times), 0.7)},
+            ["kindex"],
+            kindex_kind=None,
+            utc_offset_hours=SITE_UTC_OFFSET_HOURS,
         )
 
     assert len([record for record in caplog.records if "kindex_kind" in record.msg]) == 1
@@ -299,7 +335,11 @@ def test_a_known_kindex_kind_scores_its_clearsky_baseline_without_warning(
 
     with caplog.at_level(logging.WARNING, logger="allsky.evaluation.evaluator"):
         _build_predictions_frame(
-            split_df, {"kindex": np.full(len(local_times), 0.7)}, ["kindex"], kindex_kind="kstar"
+            split_df,
+            {"kindex": np.full(len(local_times), 0.7)},
+            ["kindex"],
+            kindex_kind="kstar",
+            utc_offset_hours=SITE_UTC_OFFSET_HOURS,
         )
 
     assert [record for record in caplog.records if "kindex_kind" in record.msg] == []
@@ -339,7 +379,11 @@ def test_a_stratum_that_pairs_no_persistence_row_publishes_no_persistence_metric
     observed = np.array([100.0, 110.0, 120.0, 500.0, 510.0, 520.0])
     split_df = _manifest_rows(local_times, target_dhi=observed)
     frame = _build_predictions_frame(
-        split_df, {"dhi": observed + 5.0}, ["dhi"], kindex_kind="kstar"
+        split_df,
+        {"dhi": observed + 5.0},
+        ["dhi"],
+        kindex_kind="kstar",
+        utc_offset_hours=SITE_UTC_OFFSET_HOURS,
     )
 
     stratified = _stratified_metrics(frame, ["dhi"], {"dhi": _target_metrics(frame, "dhi")})
@@ -354,7 +398,11 @@ def test_a_stratum_keeps_its_model_metrics_when_a_reference_pairs_nothing() -> N
     observed = np.array([100.0, 110.0, 120.0, 500.0, 510.0, 520.0])
     split_df = _manifest_rows(local_times, target_dhi=observed)
     frame = _build_predictions_frame(
-        split_df, {"dhi": observed + 5.0}, ["dhi"], kindex_kind="kstar"
+        split_df,
+        {"dhi": observed + 5.0},
+        ["dhi"],
+        kindex_kind="kstar",
+        utc_offset_hours=SITE_UTC_OFFSET_HOURS,
     )
 
     stratified = _stratified_metrics(frame, ["dhi"], {"dhi": _target_metrics(frame, "dhi")})
@@ -367,7 +415,11 @@ def test_an_unresolvable_clearsky_baseline_publishes_no_clearsky_metric() -> Non
     local_times = pd.date_range("2025-03-20 08:00", periods=5, freq="1h")
     split_df = _manifest_rows(local_times)
     frame = _build_predictions_frame(
-        split_df, {"kindex": np.full(len(local_times), 0.7)}, ["kindex"], kindex_kind=None
+        split_df,
+        {"kindex": np.full(len(local_times), 0.7)},
+        ["kindex"],
+        kindex_kind=None,
+        utc_offset_hours=SITE_UTC_OFFSET_HOURS,
     )
 
     stratified = _stratified_metrics(
@@ -382,7 +434,11 @@ def test_no_stratified_row_is_published_over_zero_pairs() -> None:
     observed = np.array([100.0, 110.0, 120.0, 500.0, 510.0, 520.0])
     split_df = _manifest_rows(local_times, target_dhi=observed)
     frame = _build_predictions_frame(
-        split_df, {"dhi": observed + 5.0}, ["dhi"], kindex_kind="kstar"
+        split_df,
+        {"dhi": observed + 5.0},
+        ["dhi"],
+        kindex_kind="kstar",
+        utc_offset_hours=SITE_UTC_OFFSET_HOURS,
     )
 
     stratified = _stratified_metrics(frame, ["dhi"], {"dhi": _target_metrics(frame, "dhi")})
@@ -407,7 +463,13 @@ def _two_days_with_a_dropped_persistence_row() -> tuple[pd.DataFrame, np.ndarray
 
 def test_published_model_rmse_is_measured_over_the_rows_paired_with_persistence() -> None:
     split_df, observed, predicted = _two_days_with_a_dropped_persistence_row()
-    frame = _build_predictions_frame(split_df, {"dhi": predicted}, ["dhi"], kindex_kind="kstar")
+    frame = _build_predictions_frame(
+        split_df,
+        {"dhi": predicted},
+        ["dhi"],
+        kindex_kind="kstar",
+        utc_offset_hours=SITE_UTC_OFFSET_HOURS,
+    )
     paired = np.array([False, True, False, True])
 
     metrics = _target_metrics(frame, "dhi")
@@ -419,7 +481,13 @@ def test_published_model_rmse_is_measured_over_the_rows_paired_with_persistence(
 
 def test_persistence_skill_reconciles_from_the_two_published_rmses() -> None:
     split_df, _observed, predicted = _two_days_with_a_dropped_persistence_row()
-    frame = _build_predictions_frame(split_df, {"dhi": predicted}, ["dhi"], kindex_kind="kstar")
+    frame = _build_predictions_frame(
+        split_df,
+        {"dhi": predicted},
+        ["dhi"],
+        kindex_kind="kstar",
+        utc_offset_hours=SITE_UTC_OFFSET_HOURS,
+    )
 
     metrics = _target_metrics(frame, "dhi")
 
@@ -430,7 +498,13 @@ def test_persistence_skill_reconciles_from_the_two_published_rmses() -> None:
 
 def test_the_paired_model_rmse_row_counts_the_pairs_not_the_whole_split() -> None:
     split_df, _observed, predicted = _two_days_with_a_dropped_persistence_row()
-    frame = _build_predictions_frame(split_df, {"dhi": predicted}, ["dhi"], kindex_kind="kstar")
+    frame = _build_predictions_frame(
+        split_df,
+        {"dhi": predicted},
+        ["dhi"],
+        kindex_kind="kstar",
+        utc_offset_hours=SITE_UTC_OFFSET_HOURS,
+    )
 
     stratified = _stratified_metrics(frame, ["dhi"], {"dhi": _target_metrics(frame, "dhi")})
 
@@ -438,3 +512,19 @@ def test_the_paired_model_rmse_row_counts_the_pairs_not_the_whole_split() -> Non
         stratified, stratum_kind="overall", stratum="all", metric="rmse_model_persistence"
     )
     assert int(row["n"]) == 2
+
+
+def test_the_strata_follow_the_manifests_site_offset_not_the_station_clock() -> None:
+    """The evaluator already resolves the manifest's offset for the dataset and the
+    clear-sky rescaling, but the hour and month strata converted with the pinned
+    Salvador zone: Folsom's solar noon was published in the 17 h stratum."""
+    local_noon = pd.DatetimeIndex(["2025-06-15 12:00"])
+    split_df = _manifest_rows(local_noon)
+    split_df["timestamp_utc"] = local_noon.tz_localize(timezone(timedelta(hours=-8))).tz_convert(
+        "UTC"
+    )
+    frame = pd.DataFrame({"sample_id": split_df["sample_id"]})
+
+    _add_strata(frame, split_df, utc_offset_hours=-8.0)
+
+    assert int(frame["hour"].iloc[0]) == 12

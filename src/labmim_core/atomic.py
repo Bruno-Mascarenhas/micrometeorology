@@ -11,12 +11,13 @@ place; the temp file is removed if the writer raises.
 Same-directory placement is deliberate: ``os.replace`` is only atomic within a
 single filesystem, so the temp file must never live in a system tempdir.
 
-Pure stdlib, and it imports nothing from this project: both packages write
-through it, so it has to sit under both. Callers that need torch — checkpoint
-saving — import it lazily inside the writer callable.
+Pure stdlib, and it imports nothing from this project: the three packages write
+through it, which is why it lives in ``labmim_core``. Callers that need torch —
+checkpoint saving — import it lazily inside the writer callable.
 """
 
 import json
+import math
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -58,7 +59,7 @@ def atomic_write(path: str | Path, writer: Callable[[Path], Any]) -> Path:
 
 
 def _fsync_path(path: Path) -> None:
-    """Flush a file's own blocks to disk, best-effort."""
+    """Flush a file's own blocks to disk; an OSError propagates and fails the write."""
     with open(path, "rb") as handle:
         os.fsync(handle.fileno())
 
@@ -106,6 +107,16 @@ def atomic_write_json(path: str | Path, obj: Any) -> Path:
     return atomic_write(path, _write)
 
 
+def _strict_json_default(value: Any) -> Any:
+    unwrap = getattr(value, "item", None)
+    if not callable(unwrap):
+        return str(value)
+    scalar = unwrap()
+    if isinstance(scalar, float) and not math.isfinite(scalar):
+        raise ValueError(f"Out of range float values are not JSON compliant: {scalar!r}")
+    return scalar
+
+
 def atomic_write_strict_json(path: str | Path, obj: Any) -> Path:
     """Atomically write *obj* to *path* as RFC-compliant indented UTF-8 JSON.
 
@@ -124,13 +135,20 @@ def atomic_write_strict_json(path: str | Path, obj: Any) -> Path:
     interchangeable: swapping one for the other rewrites every byte of the
     published payload.
 
-    The guard covers Python floats and their subclasses (``numpy.float64``);
-    types the encoder cannot serialize still go through ``default=str``, so a
-    ``numpy.float32`` NaN is written as the string ``"nan"``.  Pass plain floats.
+    A numpy scalar is unwrapped to its Python value first, so a
+    ``numpy.float32`` NaN is refused like a Python one rather than quoted as
+    the string ``"nan"``; every other unknown type is written as ``str``.
     """
 
     def _write(tmp: Path) -> None:
         with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(obj, handle, indent=2, ensure_ascii=False, default=str, allow_nan=False)
+            json.dump(
+                obj,
+                handle,
+                indent=2,
+                ensure_ascii=False,
+                default=_strict_json_default,
+                allow_nan=False,
+            )
 
     return atomic_write(path, _write)

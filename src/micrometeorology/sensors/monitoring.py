@@ -34,6 +34,7 @@ Add a new candidate spelling to the tuple; do not add a branch.
 
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 import pandas as pd
 
@@ -58,8 +59,12 @@ __all__ = [
     "resolve_wrf_column",
 ]
 
+type SeriesHue = Literal["net", "shortwave", "longwave"]
+type SeriesDirection = Literal["down", "up"]
+type ChartKind = Literal["line", "bar", "scatter"]
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, slots=True)
 class MonitoringSeries:
     """One line on a chart, and where its three layers come from.
 
@@ -90,11 +95,11 @@ class MonitoringSeries:
     label: str
     station: str
     wrf: tuple[str, ...] = ()
-    hue: str = "net"
-    direction: str = "down"
+    hue: SeriesHue = "net"
+    direction: SeriesDirection = "down"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MonitoringChart:
     """One card of the monitoring page, matching one of the nine legacy PNGs.
 
@@ -128,7 +133,7 @@ class MonitoringChart:
     id: str
     title: str
     unit: str
-    kind: str
+    kind: ChartKind
     series: tuple[MonitoringSeries, ...]
     y_limits: tuple[float, float] | None = None
     caveats: tuple[str, ...] = ()

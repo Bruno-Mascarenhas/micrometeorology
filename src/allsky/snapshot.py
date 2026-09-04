@@ -13,6 +13,7 @@ are documented in ``docs/allsky-archive.md``.
 import datetime as dt
 import logging
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeIs, runtime_checkable
 
@@ -21,9 +22,10 @@ import pandas as pd
 
 from allsky.config import (
     SITE_TZ,
-    SITE_UTC_OFFSET_HOURS,
     ExperimentConfig,
+    PrepareConfig,
     SiteConfig,
+    geometry_channels_of,
     image_size_of,
 )
 from allsky.embeddings.backbone import VisualBackbone
@@ -45,8 +47,11 @@ __all__ = [
 ]
 
 SNAPSHOT_STEM_FORMAT = "allsky-%Y%m%d-%H%M%S"
+#: Pairing window used when the checkpoint records none of its own. Wider than
+#: any training default on purpose: a checkpoint written before ``sensor_pairing``
+#: existed says nothing about how it paired, so the fallback keeps the behaviour
+#: those checkpoints were served under rather than inventing a tighter one.
 DEFAULT_SENSOR_TOLERANCE = pd.Timedelta(minutes=15)
-HTTP_DATE_FORMAT = "%a, %d %b %Y %H:%M:%S %Z"
 SENSOR_TIME_COLUMNS = ("timestamp", "TIMESTAMP", "datetime", "time")
 LIVE_FRAME_MAX_AGE = pd.Timedelta(minutes=10)
 STORE_RECIPE_KEYS = ("backbone", "pooling", "revision", "dim", "dtype")
@@ -65,7 +70,7 @@ class LiveFrameSource(Protocol):
 
 @dataclass(frozen=True)
 class Snapshot:
-    """One captured live frame, its provenance sidecar and any prediction over it.
+    """One captured live frame and its provenance sidecar.
 
     Attributes
     ----------
@@ -77,21 +82,11 @@ class Snapshot:
         headers and the code version.
     captured_at:
         Naive local capture time.
-    size:
-        Size of the fetched JPEG payload in bytes.
-    server_last_modified:
-        Raw ``Last-Modified`` header as the server sent it, or None.
-    prediction:
-        Payload from :func:`predict_snapshot`, or None when the capture was not
-        scored.
     """
 
     image_path: Path
     metadata_path: Path
     captured_at: pd.Timestamp
-    size: int
-    server_last_modified: str | None
-    prediction: dict[str, Any] | None = None
 
 
 def _site_now() -> pd.Timestamp:
@@ -104,10 +99,12 @@ def _naive_site_time_from_http_date(headers: dict[str, str]) -> pd.Timestamp | N
     if not raw:
         return None
     try:
-        parsed = dt.datetime.strptime(raw, HTTP_DATE_FORMAT).replace(tzinfo=dt.UTC)
+        parsed = parsedate_to_datetime(raw)
     except ValueError:
         logger.warning("unparseable Last-Modified header on the live frame: %r", raw)
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.UTC)
     return pd.Timestamp(parsed.astimezone(SITE_TZ).replace(tzinfo=None))
 
 
@@ -203,8 +200,6 @@ def capture_snapshot(
         image_path=image_path,
         metadata_path=metadata_path,
         captured_at=captured,
-        size=len(payload),
-        server_last_modified=headers.get("last-modified"),
     )
 
 
@@ -290,8 +285,14 @@ def _sensor_row_near(
     timestamp: pd.Timestamp,
     tolerance: pd.Timedelta,
     sensor_limits: list[SensorRangeLimit],
-) -> pd.DataFrame:
+    timestamp_offset_minutes: float = 0.0,
+) -> tuple[pd.DataFrame, float | None]:
     """Row of *sensor_csv* nearest *timestamp*, relabelled to it, or an empty frame.
+
+    *timestamp_offset_minutes* is the shift the manifest builder applied to the
+    station index before pairing — ``-2.5`` in production, because the CR5000
+    end-stamps its five-minute averages. Applied here with the same sign, so a
+    live prediction pairs against the same instant training did.
 
     The export is read on the same two contracts the training path holds it to.
     Its clock is the logger's, i.e. naive site-local, so an export that does
@@ -314,26 +315,28 @@ def _sensor_row_near(
     frame[time_column] = pd.to_datetime(frame[time_column], errors="coerce")
     frame = frame.dropna(subset=[time_column]).set_index(time_column).sort_index()
     if frame.empty:
-        return frame
+        return frame, None
     index = frame.index
     if isinstance(index, pd.DatetimeIndex) and index.tz is not None:
         frame.index = index.tz_convert(SITE_TZ).tz_localize(None)
-    position = int(frame.index.get_indexer(pd.DatetimeIndex([timestamp]), method="nearest")[0])
+    paired_index = pd.DatetimeIndex(frame.index) + pd.Timedelta(minutes=timestamp_offset_minutes)
+    position = int(paired_index.get_indexer(pd.DatetimeIndex([timestamp]), method="nearest")[0])
     if position < 0:
-        return frame.iloc[0:0]
-    gap = abs(pd.Timestamp(frame.index[position]) - timestamp)
+        return frame.iloc[0:0], None
+    gap = abs(pd.Timestamp(paired_index[position]) - timestamp)
+    gap_minutes = gap.total_seconds() / 60.0
     if gap > tolerance:
         logger.warning(
             "nearest sensor row is %s from the frame (tolerance %s) — imputing instead",
             gap,
             tolerance,
         )
-        return frame.iloc[0:0]
+        return frame.iloc[0:0], gap_minutes
     # Screened after the row is chosen, not before: every gate is row-wise, so
     # the outcome is identical, and the nearest-row lookup reads the index only.
     row = _screened_for_plausibility(frame.iloc[[position]], sensor_limits)
     row.index = pd.DatetimeIndex([timestamp])
-    return row
+    return row, gap_minutes
 
 
 def _with_absent_sources_as_nan(sensor: pd.DataFrame, feature_set: str) -> pd.DataFrame:
@@ -362,6 +365,54 @@ def _with_absent_sources_as_nan(sensor: pd.DataFrame, feature_set: str) -> pd.Da
     return filled
 
 
+@dataclass(frozen=True, slots=True)
+class _SensorPairing:
+    """How a live capture is paired with a station row.
+
+    Attributes
+    ----------
+    tolerance:
+        Largest gap still accepted between the frame and the paired row.
+    timestamp_offset_minutes:
+        Shift applied to the station index before the nearest-row lookup, the
+        same one the manifest builder applied.
+    from_checkpoint:
+        Whether both came from the run's own provenance rather than the
+        module defaults.
+    """
+
+    tolerance: pd.Timedelta
+    timestamp_offset_minutes: float
+    from_checkpoint: bool
+
+
+def _pairing_of(checkpoint: dict[str, Any], override: pd.Timedelta | None) -> _SensorPairing:
+    """Resolve the pairing rule for one prediction.
+
+    ``ExperimentConfig`` carries no ``sensor`` section, so both numbers come from
+    the checkpoint's own ``sensor_pairing``. An explicit *override* still wins —
+    it is the operator's own instruction.
+    """
+    recorded = checkpoint.get("sensor_pairing") or {}
+    raw_tolerance = recorded.get("tolerance_minutes")
+    tolerance_minutes = (
+        float(raw_tolerance)
+        if raw_tolerance is not None and np.isfinite(float(raw_tolerance))
+        else None
+    )
+    offset = float(recorded.get("timestamp_offset_minutes") or 0.0)
+    if override is not None:
+        return _SensorPairing(override, offset, from_checkpoint=False)
+    if tolerance_minutes is None:
+        logger.warning(
+            "this checkpoint records no sensor pairing; pairing within %s and applying "
+            "no timestamp offset, which is not necessarily how it trained",
+            DEFAULT_SENSOR_TOLERANCE,
+        )
+        return _SensorPairing(DEFAULT_SENSOR_TOLERANCE, offset, from_checkpoint=False)
+    return _SensorPairing(pd.Timedelta(minutes=tolerance_minutes), offset, from_checkpoint=True)
+
+
 def _feature_vector(
     timestamp: pd.Timestamp,
     *,
@@ -372,20 +423,21 @@ def _feature_vector(
     tolerance: pd.Timedelta,
     training_means: np.ndarray,
     sensor_limits: list[SensorRangeLimit],
-) -> tuple[np.ndarray, list[str]]:
+    timestamp_offset_minutes: float = 0.0,
+) -> tuple[np.ndarray, list[str], float | None]:
     from allsky.features.engineering import build_feature_frame
 
-    sensor = (
-        _sensor_row_near(sensor_csv, timestamp, tolerance, sensor_limits)
+    sensor, gap_minutes = (
+        _sensor_row_near(sensor_csv, timestamp, tolerance, sensor_limits, timestamp_offset_minutes)
         if sensor_csv is not None
-        else pd.DataFrame(index=pd.DatetimeIndex([]))
+        else (pd.DataFrame(index=pd.DatetimeIndex([])), None)
     )
     engineered = build_feature_frame(
         _with_absent_sources_as_nan(sensor, feature_set),
         [timestamp],
         site,
         feature_set,
-        utc_offset_hours=float(SITE_UTC_OFFSET_HOURS),
+        utc_offset_hours=float(site.utc_offset_hours),
     )
     unknown = [name for name in feature_columns if name not in engineered.columns]
     if unknown:
@@ -396,7 +448,7 @@ def _feature_vector(
     values = engineered.loc[:, feature_columns].to_numpy(dtype=np.float32)[0]
     finite = np.isfinite(values)
     imputed = [name for name, ok in zip(feature_columns, finite, strict=True) if not ok]
-    return np.where(finite, values, training_means).astype(np.float32), imputed
+    return np.where(finite, values, training_means).astype(np.float32), imputed, gap_minutes
 
 
 def _image_as_hwc(image_path: str | Path) -> np.ndarray:
@@ -404,13 +456,49 @@ def _image_as_hwc(image_path: str | Path) -> np.ndarray:
     return decode_rgb(image_path)
 
 
-def _image_as_chw(image_path: str | Path, size: int, cfg: ExperimentConfig) -> np.ndarray:
+def _frame_geometry(checkpoint: dict[str, Any]) -> PrepareConfig | None:
+    """The prepare geometry this checkpoint's frames were written through.
+
+    ``None`` when the run's manifest predates the sidecar recording it, in which
+    case the live frame is scored as decoded — which is what every checkpoint
+    got before, and is wrong for any dataset built with a crop or a pad, so it
+    warns rather than passing silently.
+
+    Raises
+    ------
+    ValueError
+        When the recorded geometry names a static mask this machine cannot read:
+        the mask zeroes pixels, so scoring without it is a different image.
+    """
+    recorded = checkpoint.get("frame_geometry")
+    if not recorded:
+        logger.warning(
+            "this checkpoint records no frame geometry; the live frame is scored as "
+            "decoded, which is not what the model saw if its dataset was built with a "
+            "mask, crop or pad (re-run prepare-local to record it)"
+        )
+        return None
+    geometry = PrepareConfig.model_validate(recorded)
+    if geometry.mask.path is not None and not Path(geometry.mask.path).is_file():
+        raise ValueError(
+            f"the checkpoint's frames were masked with {geometry.mask.path}, which is not "
+            "on this machine; scoring without it would feed the model pixels it never saw"
+        )
+    return geometry
+
+
+def _image_as_chw(
+    image_path: str | Path,
+    size: int,
+    cfg: ExperimentConfig,
+    geometry: PrepareConfig | None = None,
+) -> np.ndarray:
     """Decode one live frame the way :class:`MultimodalImageDataset` decodes a training one.
 
     This is the serving side of the train/serve pair, so the chain has to match
-    the dataset's exactly: decode -> ``[0, 1]`` -> preprocess at native
-    resolution -> resize -> standardize. Augmentation is training-only and has
-    no counterpart here.
+    the dataset's exactly: decode -> prepare geometry -> ``[0, 1]`` -> preprocess
+    -> resize -> standardize. Augmentation is training-only and has no
+    counterpart here.
 
     Parameters
     ----------
@@ -421,6 +509,10 @@ def _image_as_chw(image_path: str | Path, size: int, cfg: ExperimentConfig) -> n
     cfg:
         The checkpoint's own config, which carries the preprocessing settings
         the model was trained under.
+    geometry:
+        The mask/crop/pad/resize the dataset's own frames were written through,
+        from the checkpoint's ``frame_geometry``. ``ExperimentConfig`` cannot
+        express it.
 
     Returns
     -------
@@ -434,6 +526,7 @@ def _image_as_chw(image_path: str | Path, size: int, cfg: ExperimentConfig) -> n
         image_path,
         size=size,
         preprocess=PreprocessingPipeline.from_config(cfg),
+        geometry=geometry,
     )
     return imagenet_standardize(chw, copy=False)
 
@@ -468,7 +561,7 @@ def embedding_recipe_of(store: str | Path) -> dict[str, Any] | None:
 
     try:
         meta = read_meta(store)
-    except FileNotFoundError, OSError, ValueError:
+    except OSError, ValueError:
         return None
     if any(meta.get(key) is None for key in STORE_RECIPE_KEYS):
         return None
@@ -554,11 +647,22 @@ def _backbone_matching_recipe(source: str, meta: dict[str, Any], device: str) ->
     """
     from allsky.embeddings.backbone import build_backbone
 
+    # The COMPUTE dtype, falling back to the single `dtype` a store written
+    # before the two were told apart records — which is the storage one, so an
+    # fp32 run of that vintage still rebuilds at fp16 and says so.
+    compute_dtype = meta.get("compute_dtype") or meta["dtype"]
+    if meta.get("compute_dtype") is None:
+        logger.warning(
+            "%s records one dtype for both storage and computation; building the backbone "
+            "at %s, which is the STORAGE precision",
+            source,
+            compute_dtype,
+        )
     backbone = build_backbone(
         meta["backbone"],
         device=device,
         pooling=meta["pooling"],
-        dtype=meta["dtype"],
+        dtype=compute_dtype,
         fake_dim=int(meta["dim"]),
     )
     recorded_transform = meta.get("transform")
@@ -596,13 +700,96 @@ def _shipped_sensor_limits() -> list[SensorRangeLimit]:
     return limits
 
 
+def _image_input(
+    image_path: str | Path,
+    image_size: int,
+    cfg: ExperimentConfig,
+    *,
+    timestamp: pd.Timestamp,
+    site: SiteConfig,
+    geometry: PrepareConfig | None = None,
+) -> np.ndarray:
+    """The ``(3 + G, S, S)`` ``float32`` tensor the image branch of *cfg* was trained on.
+
+    The three standardized RGB planes come from :func:`_image_as_chw`, through
+    the run's own *geometry*; the ``G`` solar-geometry planes are the ones the
+    dataset stacks under ``model.geometry_channels``
+    (:func:`allsky.geometry.solar_geometry_maps`), built for *timestamp* on the
+    site's own clock and the isotropic lens calibration at *image_size*.
+    """
+    chw = _image_as_chw(image_path, image_size, cfg, geometry)
+    channels = geometry_channels_of(cfg)
+    if not channels:
+        return chw
+    from allsky.geometry import solar_geometry_maps
+    from allsky.lens import isotropic_calibration
+    from labmim_core.solar import solar_azimuth_deg, solar_elevation_deg
+
+    local = pd.DatetimeIndex([timestamp])
+    zenith_deg = 90.0 - float(solar_elevation_deg(local, site, site.utc_offset_hours)[0])
+    azimuth_deg = float(solar_azimuth_deg(local, site, site.utc_offset_hours)[0])
+    maps = solar_geometry_maps(
+        isotropic_calibration(image_size),
+        (image_size, image_size),
+        sun_zenith_rad=float(np.radians(zenith_deg)),
+        sun_azimuth_rad=float(np.radians(azimuth_deg)),
+        channels=channels,
+    )
+    return np.concatenate([chw, maps], axis=0).astype(np.float32, copy=False)
+
+
+def _clearsky_dhi_reference(timestamp: pd.Timestamp, site: SiteConfig) -> float:
+    """Clear-sky diffuse irradiance (W m-2) at *timestamp* on the site's clock.
+
+    The reference a ``clearsky_index`` DHI head is trained as a ratio to, so a
+    served index times this value is the diffuse irradiance in W m-2.
+    """
+    from allsky.clearsky import clearsky_diffuse
+    from labmim_core.solar import cos_zenith
+
+    local = pd.DatetimeIndex([timestamp])
+    zenith_deg = np.degrees(np.arccos(cos_zenith(local, site, site.utc_offset_hours)))
+    site_clock = dt.timezone(dt.timedelta(hours=site.utc_offset_hours))
+    times = pd.Series(local.tz_localize(site_clock).tz_convert("UTC"))
+    return float(np.asarray(clearsky_diffuse(zenith_deg, times, site.utc_offset_hours))[0])
+
+
+def _refuse_a_windowed_checkpoint(cfg: ExperimentConfig) -> None:
+    """Refuse to serve a checkpoint fitted on a window from a single frame.
+
+    A snapshot is one capture, so the batch carries one ``image``/``embedding``
+    and never the ``image_seq``/``embedding_seq`` a pooled window is served as.
+    The encoders fall back to their single-frame branch when the sequence key is
+    absent, so a ``mean_embedding`` or ``attention_pooling`` checkpoint would
+    score one frame where it was fitted on up to ``alignment.max_frames`` — no
+    error, no warning, and a plausible number. Silence is the one option ruled
+    out;
+    building the window here needs the frames around the capture, which a live
+    snapshot does not have.
+
+    Raises
+    ------
+    ValueError
+        Naming the strategy the checkpoint was trained under.
+    """
+    strategy = cfg.data.alignment.strategy
+    if strategy == "center_frame":
+        return
+    raise ValueError(
+        f"this checkpoint was trained with alignment.strategy={strategy!r}, which pools "
+        f"up to {cfg.data.alignment.max_frames} frames over "
+        f"{cfg.data.alignment.window_minutes:g} min; a snapshot is a single capture and "
+        "scoring it would silently use the model's single-frame path"
+    )
+
+
 def predict_snapshot(
     image_path: str | Path,
     checkpoint_path: str | Path,
     *,
     timestamp: pd.Timestamp,
     sensor_csv: str | Path | None = None,
-    tolerance: pd.Timedelta = DEFAULT_SENSOR_TOLERANCE,
+    tolerance: pd.Timedelta | None = None,
     site: SiteConfig | None = None,
     device: str = "cpu",
     trust_checkpoint: bool = False,
@@ -632,11 +819,14 @@ def predict_snapshot(
         sensor-derived column is imputed.
     tolerance:
         Largest gap between *timestamp* and the nearest sensor row still
-        accepted; beyond it the row is discarded and the columns imputed.
+        accepted; beyond it the row is discarded and the columns imputed. Left
+        None the checkpoint's own ``sensor_pairing`` decides, which is the
+        window the run trained under; a checkpoint carrying none falls back to
+        :data:`DEFAULT_SENSOR_TOLERANCE` with a warning.
     site:
         Observation site for the solar geometry; defaults to
-        :class:`~allsky.config.SiteConfig`. The geometry is built at the pinned
-        :data:`~allsky.config.SITE_UTC_OFFSET_HOURS` the manifest builder trains
+        :class:`~allsky.config.SiteConfig`. The geometry is built at the site's
+        declared ``utc_offset_hours``, the clock the manifest builder trains
         on, never at an offset inferred from the site longitude.
     device:
         Torch device the backbone and model run on.
@@ -657,7 +847,7 @@ def predict_snapshot(
         whichever heads the checkpoint has: ``dhi`` (diffuse horizontal
         irradiance, W m-2), ``kindex`` (dimensionless), ``cloud_fraction``
         (in [0, 1]), and ``sky_class`` with its ``sky_probabilities`` over
-        :data:`allsky.data.sky.SKY_CLASS_NAMES`. ``features`` records the
+        :data:`labmim_core.sky.SKY_CLASS_NAMES`. ``features`` records the
         raw values fed in and which of them were imputed.
 
     Raises
@@ -686,26 +876,36 @@ def predict_snapshot(
         )
     feature_columns: list[str] = list(checkpoint["feature_columns"])
     feature_normalizer, target_normalizers = normalizers_from_checkpoint(checkpoint)
+    resolved_site = site or SiteConfig()
 
-    raw_values, imputed = _feature_vector(
+    pairing = _pairing_of(checkpoint, tolerance)
+    raw_values, imputed, pairing_gap_minutes = _feature_vector(
         timestamp,
         feature_columns=feature_columns,
         feature_set=cfg.features.feature_set,
-        site=site or SiteConfig(),
+        site=resolved_site,
         sensor_csv=sensor_csv,
-        tolerance=tolerance,
+        tolerance=pairing.tolerance,
         training_means=feature_normalizer.mean,
         sensor_limits=sensor_limits if sensor_limits is not None else _shipped_sensor_limits(),
+        timestamp_offset_minutes=pairing.timestamp_offset_minutes,
     )
     standardized = feature_normalizer.transform(pd.DataFrame([raw_values], columns=feature_columns))
+    _refuse_a_windowed_checkpoint(cfg)
     image_size = image_size_of(cfg)
 
     batch: dict[str, Any] = {"features": torch.from_numpy(standardized).to(device)}
     embedding_dim = None
     if cfg.data.input_mode == "image":
-        batch["image"] = (
-            torch.from_numpy(_image_as_chw(image_path, image_size, cfg)).unsqueeze(0).to(device)
+        image = _image_input(
+            image_path,
+            image_size,
+            cfg,
+            timestamp=timestamp,
+            site=resolved_site,
+            geometry=_frame_geometry(checkpoint),
         )
+        batch["image"] = torch.from_numpy(image).unsqueeze(0).to(device)
     else:
         from allsky.embeddings.storage import META_FILENAME
 
@@ -727,9 +927,16 @@ def predict_snapshot(
         # contract takes a SEQUENCE of (H, W, 3) uint8 HWC frames and does its
         # own resize, ImageNet normalisation and stacking, and that is the
         # recipe precompute-embeddings fed the training store. Handing it the
-        # Handing it the (3, S, S) float array the image branch uses would embed
-        # an image prepared differently from the vectors the model was fitted on.
+        # (3, S, S) float array the image branch uses would embed an image
+        # prepared differently from the vectors the model was fitted on.
         vector = np.asarray(backbone.encode(backbone.transform([_image_as_hwc(image_path)])))
+        # Through the store's storage precision: every vector the model was
+        # fitted on went to disk as fp16 and came back rounded, and a live vector
+        # that skipped that round trip carries mantissa bits no training sample
+        # had.
+        storage_dtype = store_meta.get("storage_dtype") or store_meta["dtype"]
+        if storage_dtype == "fp16":
+            vector = vector.astype(np.float16)
         embedding = np.reshape(vector, (1, -1)).astype(np.float32)
         embedding_dim = int(embedding.shape[1])
         batch["embedding"] = torch.from_numpy(embedding).to(device)
@@ -747,6 +954,8 @@ def predict_snapshot(
         value = float(outputs[name].detach().cpu().numpy().reshape(-1)[0])
         normalizer = target_normalizers.get(name)
         predictions[name] = float(normalizer.denormalize(value)[()]) if normalizer else value
+    if "dhi" in predictions and cfg.targets.dhi.parameterization == "clearsky_index":
+        predictions["dhi"] *= _clearsky_dhi_reference(timestamp, resolved_site)
     if "sky_logits" in outputs:
         logits = outputs["sky_logits"].detach().cpu().numpy().reshape(-1)
         weights = np.exp(logits - logits.max())
@@ -765,6 +974,13 @@ def predict_snapshot(
             "values": [float(value) for value in raw_values],
             "imputed": imputed,
             "sensor_csv": str(sensor_csv) if sensor_csv is not None else None,
+            # The realized distance, not just accept/reject.
+            "sensor_pairing": {
+                "tolerance_minutes": pairing.tolerance.total_seconds() / 60.0,
+                "timestamp_offset_minutes": pairing.timestamp_offset_minutes,
+                "from_checkpoint": pairing.from_checkpoint,
+                "gap_minutes": pairing_gap_minutes,
+            },
         },
         "model": {
             "checkpoint": str(checkpoint_path),
@@ -772,6 +988,16 @@ def predict_snapshot(
             "architecture": cfg.model.name,
             "input_mode": cfg.data.input_mode,
             "device": device,
+            # Already loaded, so no extra I/O: without them a published
+            # prediction names a checkpoint path and nothing about the dataset
+            # or the code that produced it, and the path is the one thing that
+            # does not survive the file being copied off this machine.
+            "code_version": checkpoint.get("code_version"),
+            "dataset_version": checkpoint.get("dataset_version"),
+            "split_id": checkpoint.get("split_id"),
+            "manifest_sha256": checkpoint.get("manifest_sha256"),
+            "dhi_parameterization": cfg.targets.dhi.parameterization,
+            "kindex_kind": cfg.targets.kindex.kind,
         },
         "image": str(image_path),
     }

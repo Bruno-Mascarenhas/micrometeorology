@@ -31,6 +31,7 @@ from typing import Any
 
 from allsky.config import ExperimentConfig
 from allsky.training.checkpointing import BEST_CHECKPOINT, LAST_CHECKPOINT
+from allsky.training.errors import TrainingError
 from labmim_core.atomic import atomic_write, atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -169,26 +170,70 @@ def truncate_metrics(run_dir: Path, fields: list[str], resumed_epoch: int) -> li
     completed.  Only rows with ``epoch <= resumed_epoch`` (completed epochs) are
     kept; both files are atomically rewritten from them and the truncated history
     is returned for the loop to keep appending to.  ``metrics.json`` is the source
-    of truth (it is always present once a checkpoint exists); if it is somehow
-    absent the files are left untouched rather than risking data loss.
+    of truth (it is always present once a checkpoint exists); when it is absent
+    the history is rebuilt from ``metrics.csv``, which carries the same rows.
     """
     metrics_json = run_dir / "metrics.json"
     metrics_csv = run_dir / "metrics.csv"
     if not metrics_json.exists():
-        if metrics_csv.exists():
-            logger.warning(
-                "resume: metrics.json is missing but metrics.csv is present; leaving the "
-                "metrics files untouched (cannot safely truncate without the JSON history)"
-            )
-        return []
+        if not metrics_csv.exists():
+            return []
+        logger.warning(
+            "resume: metrics.json is missing; rebuilding the history from metrics.csv",
+        )
+        loaded = _rows_from_csv(metrics_csv)
+        history = [row for row in loaded if _row_epoch(row, metrics_csv) <= resumed_epoch]
+        rewrite_csv(metrics_csv, fields, history)
+        atomic_write_json(metrics_json, history)
+        return history
     loaded = json.loads(metrics_json.read_text(encoding="utf-8"))
-    history = [row for row in loaded if int(row.get("epoch", 0)) <= resumed_epoch]
+    history = [row for row in loaded if _row_epoch(row, metrics_json) <= resumed_epoch]
     dropped = len(loaded) - len(history)
     if dropped:
         logger.info("resume: dropped %d stale metrics row(s) past epoch %d", dropped, resumed_epoch)
     rewrite_csv(metrics_csv, fields, history)
     atomic_write_json(metrics_json, history)
     return history
+
+
+def _row_epoch(row: Mapping[str, Any], source: Path) -> int:
+    """The epoch *row* records, refusing a row of *source* that carries none.
+
+    Every row this package writes carries ``epoch``, so one without it can only
+    come from a corrupted file; read as epoch 0 it would satisfy every truncation
+    and be rewritten into the history as a completed epoch.
+    """
+    if "epoch" not in row:
+        raise TrainingError(
+            f"{source} holds a metrics row with no 'epoch' field, so the history cannot be "
+            "truncated at the resumed epoch: the file is corrupted. Delete it and resume - "
+            "the checkpoint carries the training state, only the recorded history is lost"
+        )
+    return int(row["epoch"])
+
+
+def _rows_from_csv(path: Path) -> list[dict[str, Any]]:
+    """Read ``metrics.csv`` back into the row dicts ``metrics.json`` holds.
+
+    Every value arrives as text; the numeric fields are converted back so the
+    rebuilt JSON is the same shape the writer produces, and a field that will
+    not parse is kept as the string it is rather than dropped.
+    """
+    with open(path, encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    parsed: list[dict[str, Any]] = []
+    for row in rows:
+        out: dict[str, Any] = {}
+        for key, value in row.items():
+            if value == "":
+                out[key] = None
+                continue
+            try:
+                out[key] = int(value) if key == "epoch" else float(value)
+            except ValueError:
+                out[key] = value
+        parsed.append(out)
+    return parsed
 
 
 def reset_stale_run_artifacts(run_dir: Path) -> None:

@@ -23,15 +23,17 @@ importing ``allsky.data.datasets`` never pulls torch.
 """
 
 import itertools
+import logging
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, get_args, runtime_checkable
 
 import numpy as np
 import pandas as pd
 
-from allsky.config import DEFAULT_IMAGE_SIZE, AlignmentStrategyName
+from allsky.clearsky import clearsky_diffuse
+from allsky.config import DEFAULT_IMAGE_SIZE, AlignmentStrategyName, DHIParameterization
 from allsky.data.contracts import NS_PER_MINUTE, resolve
 from allsky.features.normalization import FeatureNormalizer
 from allsky.geometry import solar_geometry_maps
@@ -43,6 +45,8 @@ if TYPE_CHECKING:
     # it at runtime would close a cycle through this package's __init__.
     from allsky.augmentation import AugmentationPipeline
     from allsky.preprocessing import PreprocessingPipeline
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "EmbeddingReader",
@@ -61,7 +65,6 @@ type SampleTensors = dict[str, Any]
 #: never disagree about which modes exist.
 type WindowMode = AlignmentStrategyName
 _WINDOW_MODES: tuple[WindowMode, ...] = get_args(AlignmentStrategyName)
-#: Window bounds are computed on int64 nanosecond timestamps.
 
 
 @runtime_checkable
@@ -144,7 +147,7 @@ class _BaseMultimodalDataset:
         *,
         train: bool = True,
         stats: FeatureNormalizer | None = None,
-        dhi_parameterization: str = "raw",
+        dhi_parameterization: DHIParameterization = "raw",
         utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
     ) -> None:
         self.manifest = manifest.reset_index(drop=True)
@@ -172,7 +175,7 @@ class _BaseMultimodalDataset:
             )
         self.stats = stats
 
-        self._features = stats.transform(self.manifest).astype(np.float32)
+        self._features = stats.transform(self.manifest)
         self._dhi_scale = self._dhi_scale_column(dhi_parameterization, utc_offset_hours)
         self._dhi = self._raw_target("target_dhi") / self._dhi_scale
         self._kindex = self._raw_target("target_kindex")
@@ -197,15 +200,19 @@ class _BaseMultimodalDataset:
         """
         self.epoch = epoch
 
-    def _dhi_scale_column(self, parameterization: str, utc_offset_hours: float) -> np.ndarray:
-        ones = np.ones(len(self.manifest), dtype=np.float32)
+    def _dhi_scale_column(
+        self, parameterization: DHIParameterization, utc_offset_hours: float
+    ) -> np.ndarray:
+        if parameterization == "raw":
+            return np.ones(len(self.manifest), dtype=np.float32)
         if parameterization != "clearsky_index":
-            return ones
+            raise ValueError(
+                f"unknown dhi_parameterization {parameterization!r}; expected 'raw' or "
+                "'clearsky_index'"
+            )
         missing = [c for c in ("solar_zenith", "timestamp_utc") if c not in self.manifest.columns]
         if missing:
             raise ValueError(f"the clear-sky-index DHI target needs the manifest columns {missing}")
-        from allsky.clearsky import clearsky_diffuse
-
         times = pd.to_datetime(self.manifest["timestamp_utc"], utc=True)
         scale = clearsky_diffuse(self.manifest["solar_zenith"], times, utc_offset_hours)
         if not np.all(np.isfinite(scale)) or float(np.min(scale)) <= 0.0:
@@ -331,7 +338,8 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         preprocess: PreprocessingPipeline | None = None,
         seed: int = 0,
         geometry_channels: Sequence[str] = (),
-        dhi_parameterization: str = "raw",
+        frame_geometry: Mapping[str, Any] | None = None,
+        dhi_parameterization: DHIParameterization = "raw",
         utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
         window: WindowMode = "center_frame",
         window_minutes: float = 10.0,
@@ -373,6 +381,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
             else []
         )
         self._geometry_channels = tuple(geometry_channels)
+        self.frame_geometry = frame_geometry
         self._geometry = (
             self._geometry_source(manifest, augment if train else None)
             if self._geometry_channels
@@ -398,7 +407,45 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
             raise ValueError(
                 "geometry channels need finite solar_zenith / solar_azimuth on every row"
             )
+        self._refuse_geometry_over_unknown_frames()
         return isotropic_calibration(self.image_size), zenith_deg, azimuth_deg
+
+    def _refuse_geometry_over_unknown_frames(self) -> None:
+        """Refuse the geometry planes for frames not written isotropically.
+
+        :func:`~allsky.lens.isotropic_calibration` describes ONE geometry: the
+        disc centred and inscribed by the prepare crop and pad, then resized
+        square. Applied to a frame that went through the plain 1920x1080 resize
+        it puts the horizon where the frame does not have one, and the planes
+        describe a lens the pixels were never taken through — silently, because
+        the shapes agree.
+
+        The manifest's ``frame_geometry`` is what says which of the two a
+        dataset holds. A manifest built before it was recorded says nothing, so
+        that case warns rather than refusing: every dataset of that vintage would
+        otherwise stop loading.
+
+        Raises
+        ------
+        ValueError
+            When the recorded geometry enables neither the crop nor the pad, so
+            the frames are not the inscribed disc the calibration describes.
+        """
+        if self.frame_geometry is None:
+            logger.warning(
+                "geometry channels are built on the isotropic lens calibration, and this "
+                "manifest records no frame_geometry to confirm its frames were written that "
+                "way; re-run prepare-local to record it"
+            )
+            return
+        crop = self.frame_geometry.get("crop") or {}
+        pad = self.frame_geometry.get("pad") or {}
+        if not crop.get("enabled") and not pad.get("enabled"):
+            raise ValueError(
+                "geometry channels need frames written through the isotropic crop/pad, but "
+                "this manifest's frame_geometry enables neither; the planes would describe a "
+                "lens these pixels were never taken through"
+            )
 
     def _load_image(self, image_path: Path, idx: int = 0) -> np.ndarray:
         """Load a JPEG as a standardized float32 CHW array, resized to ``image_size``.
@@ -412,7 +459,9 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         the six rows under the band). Augmentation runs on the ``[0, 1]`` frame
         because every transform in :mod:`allsky.augmentation` is defined there,
         and standardisation stays last so the backbone always receives its
-        pretraining distribution. ``idx`` seeds the augmentation together with the seed and the epoch.
+        pretraining distribution. ``idx`` seeds the augmentation together with the seed and the epoch, and it is
+        the SERVED row's index even when the frame read is a co-frame of that
+        row's window.
 
         PIL decode -> RGB (``convert`` channel-replicates grayscale) -> bilinear
         resize. ``image_path`` is already resolved against ``data_root``. On the
@@ -458,8 +507,24 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         if self.augment is None or not self.augment.enabled:
             return chw
         rng = np.random.default_rng((self._seed, self.epoch, idx))
-        augmented: np.ndarray = self.augment(chw, rng)
+        augmented: np.ndarray = self.augment(chw, rng, self._imaged_pixels(chw.shape[1:]))
         return augmented
+
+    def _imaged_pixels(self, shape: tuple[int, int]) -> np.ndarray | None:
+        """``(H, W)`` bool mask of the pixels the camera actually imaged.
+
+        Derived from the ROI this run's own preprocessing applies, which is the
+        one absent region the dataset can see. The isotropic pad is NOT covered:
+        it is written by ``PrepareConfig``, which no ``ExperimentConfig`` carries,
+        so a padded dataset still has its fill treated as sky by the two
+        transforms below. ``None`` when the run masks nothing.
+        """
+        from allsky.preprocessing import roi_keep_mask
+
+        radius = self.preprocess.roi_radius_fraction if self.preprocess is not None else None
+        if radius is None:
+            return None
+        return roi_keep_mask(shape[0], shape[1], radius)
 
     def __getitem__(self, idx: int) -> SampleTensors:
         """Row *idx*: the shared targets plus its frame, or its window of frames.
@@ -478,7 +543,11 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         frames = np.zeros((self.seq_len, *self._frame_shape()), dtype=np.float32)
         mask = np.zeros(self.seq_len, dtype=bool)
         for slot, position in enumerate(members):
-            frames[slot] = self._load_image(self._paths[position], position)
+            # Seeded on the SERVED row, never on the co-frame's own position: a
+            # per-frame draw gives each frame of one window an independent
+            # exposure and noise realisation, which is scintillation the sky did
+            # not produce — and the window exists precisely to average the sky.
+            frames[slot] = self._load_image(self._paths[position], idx)
             mask[slot] = True
         item["image_seq"] = torch.from_numpy(frames)
         item["frame_mask"] = torch.from_numpy(mask)
@@ -539,7 +608,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         stats: FeatureNormalizer | None = None,
         window: WindowMode = "center_frame",
         window_minutes: float = 10.0,
-        dhi_parameterization: str = "raw",
+        dhi_parameterization: DHIParameterization = "raw",
         utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
     ) -> None:
         super().__init__(
@@ -576,7 +645,13 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         return resolve_time_windows(self.manifest, self.window_minutes)
 
     def _read(self, sample_id: str) -> np.ndarray:
-        """Read + validate the ``(D,)`` float32 embedding for *sample_id*."""
+        """Read + validate the ``(D,)`` float32 embedding for *sample_id*.
+
+        The array may be a read-only view into the preloaded store, so every
+        caller copies before ``torch.from_numpy``: that wraps the buffer without
+        copying, and a tensor backed by read-only memory is undefined behaviour
+        the moment anything writes through it.
+        """
         embedding = np.asarray(self.embedding_reader(sample_id), dtype=np.float32)
         if embedding.ndim != 1:
             raise ValueError(
@@ -619,7 +694,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         item = self._target_item(idx)
         if self.window == "center_frame":
             embedding = self._read(self._sample_ids[idx])
-            item["embedding"] = torch.from_numpy(np.ascontiguousarray(embedding))
+            item["embedding"] = torch.from_numpy(np.array(embedding, copy=True))
             return item
 
         vectors = self._window_embeddings(idx)
@@ -628,7 +703,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
 
         if self.window == "mean_embedding":
             pooled = np.mean(np.stack(vectors, axis=0), axis=0).astype(np.float32)
-            item["embedding"] = torch.from_numpy(np.ascontiguousarray(pooled))
+            item["embedding"] = torch.from_numpy(np.array(pooled, copy=True))
             return item
 
         take = vectors[: self.seq_len]

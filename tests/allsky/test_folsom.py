@@ -2,9 +2,10 @@
 
 Everything asserted here is a defect the dataset's own users measured and
 published, encoded so this project cannot walk into it: the frame time is the
-file's modification time and not its name (25 W/m2 of RMSE apart), frames whose
-two timestamps disagree are dropped rather than mispaired, and the irradiance is
-interpolated onto the frame's own instant instead of rounded to the minute.
+file's modification time and not its name (25 W/m2 of RMSE apart), an extraction
+that lost those modification times is refused whole rather than silently retimed
+while a drifting clock keeps every frame, and the irradiance is interpolated onto
+the frame's own instant instead of rounded to the minute.
 """
 
 import os
@@ -18,6 +19,7 @@ from allsky.data.folsom import (
     FOLSOM_LOST_TIMESTAMPS_S,
     FOLSOM_SITE,
     FOLSOM_TIMESTAMP_OFFSET_S,
+    folsom_manifest_kwargs,
     folsom_sensor_at,
     read_folsom_frames,
     read_folsom_sensor,
@@ -124,6 +126,57 @@ class TestIrradianceInterpolation:
         assert list(aligned.index) == list(frames["timestamp"])
         assert bool(np.isfinite(aligned["ghi"]).all())
 
+    def test_a_gap_in_the_irradiance_is_bridged_however_long_it_is(self, tmp_path: Path):
+        """It is filled: ``limit_area='inside'`` bounds the fill to the measured
+        span but carries no ``limit``, so a two-hour outage comes back as a
+        straight line and reaches the manifest as measurement. Pinned as it stands — bounding the bridge is a decision
+        about the data, not about this code.
+        """
+        path = tmp_path / "irr.csv"
+        times = pd.date_range("2014-06-01 14:00:00", periods=240, freq="1min")
+        # A curved day, so a straight bridge across the hole is visibly not the
+        # signal: on a ramp the two coincide and the fabrication hides itself.
+        minutes = np.arange(240.0)
+        curved = 900.0 * np.sin(np.pi * minutes / 239.0)
+        frame = pd.DataFrame(
+            {"timeStamp": times, "ghi": curved, "dni": curved * 0.6, "dhi": curved * 0.3}
+        )
+        frame.loc[60:180, ["ghi", "dni", "dhi"]] = np.nan
+        frame.to_csv(path, index=False)
+        sensor = read_folsom_sensor(path)
+        named = pd.date_range("2014-06-01 16:00:00", periods=1, freq="1min", tz="UTC")
+        _write_frames_with_mtime_drift(tmp_path / "frames", named, np.zeros(1))
+        frames = read_folsom_frames(tmp_path / "frames")
+
+        aligned = folsom_sensor_at(sensor, frames)
+
+        bridged = float(aligned["ghi"].iloc[0])
+        assert np.isfinite(bridged)
+        # The chord between the two surviving readings, ~150 W/m2 below the
+        # curve the sensor would have measured at that minute.
+        chord = float(np.interp(120.0, [59.0, 181.0], [curved[59], curved[181]]))
+        assert bridged == pytest.approx(chord, rel=0.01)
+        assert curved[120] - bridged > 100.0
+
+    def test_a_frame_outside_the_measured_span_is_left_missing(self, tmp_path: Path):
+        """``limit_area='inside'`` is the one bound there is, and it must hold:
+        a frame before the first reading or after the last one has nothing to be
+        interpolated from, and zero is a physical irradiance.
+        """
+        sensor = read_folsom_sensor(_write_irradiance(tmp_path / "irr.csv"))
+        named = pd.DatetimeIndex(
+            [
+                pd.Timestamp("2014-06-01 12:00:00", tz="UTC"),
+                pd.Timestamp("2014-06-02 06:00:00", tz="UTC"),
+            ]
+        )
+        _write_frames_with_mtime_drift(tmp_path / "frames", named, np.zeros(2))
+        frames = read_folsom_frames(tmp_path / "frames")
+
+        aligned = folsom_sensor_at(sensor, frames)
+
+        assert bool(np.isnan(aligned["ghi"]).all())
+
     def test_the_measured_clock_offset_is_applied(self, tmp_path: Path):
         sensor = read_folsom_sensor(_write_irradiance(tmp_path / "irr.csv"))
         named = pd.date_range("2014-06-01 14:10:00", periods=1, freq="1min", tz="UTC")
@@ -146,3 +199,71 @@ class TestFolsomSite:
 
     def test_the_lost_timestamp_threshold_only_asks_whether_the_archive_kept_its_times(self):
         assert FOLSOM_LOST_TIMESTAMPS_S >= 3600.0
+
+
+class TestTheWeatherJoin:
+    """The irradiance file alone leaves `bare` short of its anemometer, so the join is what makes
+    the transfer dataset buildable at all."""
+
+    @staticmethod
+    def _write_weather(path: Path, periods: int = 240) -> Path:
+        times = pd.date_range("2014-06-01 14:00:00", periods=periods, freq="1min")
+        pd.DataFrame(
+            {
+                "timeStamp": times,
+                "windsp": np.full(periods, 3.5),
+                "winddir": np.full(periods, 190.0),
+                "air_temp": np.full(periods, 24.0),
+                "relhum": np.full(periods, 55.0),
+                "press": np.full(periods, 1011.0),
+            }
+        ).to_csv(path, index=False)
+        return path
+
+    def test_the_met_columns_arrive_renamed_on_the_site_clock(self, tmp_path: Path):
+        sensor = read_folsom_sensor(
+            _write_irradiance(tmp_path / "irr.csv"),
+            self._write_weather(tmp_path / "weather.csv"),
+        )
+
+        assert {"WS_ms", "WindDir", "AirT1_C_Avg", "RH1", "BP1_mbar_Avg"} <= set(sensor.columns)
+        assert sensor["WS_ms"].iloc[0] == pytest.approx(3.5)
+        assert sensor.index[0] == pd.Timestamp("2014-06-01 14:00:00") + UTC_MINUS_8
+
+    def test_the_joined_frame_carries_every_source_the_bare_tier_needs(self, tmp_path: Path):
+        """Which is the whole point of the join: without it the tier is short."""
+        from allsky.features.policy import resolve_feature_set, source_column
+
+        sensor = read_folsom_sensor(
+            _write_irradiance(tmp_path / "irr.csv"),
+            self._write_weather(tmp_path / "weather.csv"),
+        )
+        needed = {
+            column
+            for name in resolve_feature_set("bare")
+            if (column := source_column(name)) is not None
+        }
+
+        assert needed <= set(sensor.columns)
+
+    def test_a_weather_file_the_run_does_not_have_leaves_the_columns_absent(self, tmp_path: Path):
+        sensor = read_folsom_sensor(_write_irradiance(tmp_path / "irr.csv"))
+
+        assert "WS_ms" not in sensor.columns
+
+
+def test_the_folsom_manifest_arguments_name_its_own_site_and_id_prefix():
+    """`folsom_manifest_kwargs` has no caller in the repository, so nothing else
+    would notice it drifting from the format the frames are actually named in —
+    and a sample_id without the prefix could be mistaken for one of the
+    station's in a transfer workflow."""
+    kwargs = folsom_manifest_kwargs()
+
+    assert kwargs["site"] is FOLSOM_SITE
+    assert kwargs["ghi_column"] == "ghi"
+    assert kwargs["diffuse_column"] == "dhi"
+    assert kwargs["feature_set"] == "bare"
+    # Seconds, because the frames are stamped by modification time and land
+    # anywhere inside the minute.
+    assert kwargs["sample_id_format"] == "folsom-%Y%m%d-%H%M%S"
+    assert "%S" in kwargs["sample_id_format"]

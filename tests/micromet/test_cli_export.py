@@ -290,41 +290,63 @@ def test_cli_mis_cased_swdown_still_honours_the_daylight_gate(tmp_path):
     ]
 
 
-def test_cli_accepts_an_iso_date_and_rejects_a_malformed_one(tmp_path):
+def test_cli_accepts_an_iso_date(tmp_path):
     wrf_dir = tmp_path / "wrf"
     wrf_dir.mkdir()
     _write_full_wrf_file(wrf_dir / "wrfout_d02_2026-05-03_09:00:00", seed=49)
 
-    iso = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "2026-05-03")
-    assert iso.exit_code == 0, iso.output
+    result = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "2026-05-03")
+
+    assert result.exit_code == 0, result.output
     assert len(list((tmp_path / "json").glob("D02_TEMP_*.json"))) == NT
 
-    typo = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "may3")
-    assert typo.exit_code != 0
-    assert "--date must be YYYYMMDD" in typo.output
+
+def test_cli_rejects_a_malformed_date(tmp_path):
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+    _write_full_wrf_file(wrf_dir / "wrfout_d02_2026-05-03_09:00:00", seed=49)
+
+    result = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "may3")
+
+    assert result.exit_code != 0
+    assert "--date must be YYYYMMDD" in result.output
+
+
+def test_cli_exits_zero_and_says_so_when_nothing_is_selected(tmp_path):
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+
+    result = _invoke(tmp_path, "--wrf-dir", str(wrf_dir))
+
+    assert result.exit_code == 0, result.output
+    assert "No WRF files found." in result.output
 
 
 def test_cli_strict_exits_nonzero_when_nothing_is_selected(tmp_path):
     wrf_dir = tmp_path / "wrf"
     wrf_dir.mkdir()
 
-    lenient = _invoke(tmp_path, "--wrf-dir", str(wrf_dir))
-    assert lenient.exit_code == 0, lenient.output
-    assert "No WRF files found." in lenient.output
+    result = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--strict")
 
-    strict = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--strict")
-    assert strict.exit_code == 1
+    assert result.exit_code == 1
+
+
+def test_cli_publishes_the_domains_it_found_and_names_the_one_it_did_not(tmp_path):
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+    _write_full_wrf_file(wrf_dir / "wrfout_d01_2026-05-03_09:00:00", seed=50)
+
+    result = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "20260503", "--domains", "1,4")
+
+    assert result.exit_code == 0, result.output
+    assert "No wrfout file for requested domain d04" in result.output
+    assert len(list((tmp_path / "json").glob("D01_TEMP_*.json"))) == NT
 
 
 def test_cli_strict_aborts_on_a_missing_requested_domain_before_writing(tmp_path):
     wrf_dir = tmp_path / "wrf"
     wrf_dir.mkdir()
     _write_full_wrf_file(wrf_dir / "wrfout_d01_2026-05-03_09:00:00", seed=50)
-
-    lenient = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "20260503", "--domains", "1,4")
-    assert lenient.exit_code == 0, lenient.output
-    assert "No wrfout file for requested domain d04" in lenient.output
-    assert len(list((tmp_path / "json").glob("D01_TEMP_*.json"))) == NT
 
     strict_dir = tmp_path / "strict"
     strict = runner.invoke(
@@ -351,3 +373,65 @@ def test_cli_strict_aborts_on_a_missing_requested_domain_before_writing(tmp_path
     )
     assert strict.exit_code == 1
     assert not strict_dir.exists()
+
+
+def test_a_variables_option_naming_nothing_is_a_usage_error(tmp_path):
+    """``-v ,`` selects zero variables; a manifest with a new version stamp is
+    what the site reads as a complete new run."""
+    result = runner.invoke(
+        app, ["-o", str(tmp_path / "json"), "-g", str(tmp_path / "geo"), "-v", ","]
+    )
+
+    assert result.exit_code == 2
+    assert "names no variable" in result.output
+    assert list(tmp_path.rglob("manifest.json")) == []
+
+
+def test_the_artifact_variables_are_the_default_request_without_the_two_overlays():
+    """`features` vouches for the .series.bin/.summary.json byte offsets, which the
+    wind arrows and the isobars never write."""
+    from micrometeorology.cli.export_wrf_geojson import ARTIFACT_VARIABLES, DEFAULT_VARS
+
+    assert frozenset(DEFAULT_VARS) - {"wind_vectors", "isobars"} == ARTIFACT_VARIABLES
+
+
+def test_a_partial_variable_request_publishes_a_manifest_with_no_artifact_features(tmp_path):
+    """Fixed names mean last run's matrices are still on disk, so a manifest that
+    vouched for them would be read at the wrong byte offsets."""
+    wrf = tmp_path / "wrfout_d02_cli_features.nc"
+    _write_full_wrf_file(wrf, seed=23)
+    json_dir = tmp_path / "json"
+
+    result = runner.invoke(
+        app,
+        [
+            "-d",
+            str(wrf),
+            "-o",
+            str(json_dir),
+            "-g",
+            str(tmp_path / "geo"),
+            "-v",
+            "temperature",
+            "--workers",
+            "1",
+            "--log-level",
+            "WARNING",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    with open(json_dir / "manifest.json", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    assert "features" not in manifest
+
+
+def test_zero_workers_is_a_usage_error_rather_than_the_default(tmp_path):
+    """``--workers 0`` fell through ``workers or default_workers()`` to the default."""
+    result = runner.invoke(
+        app,
+        ["-o", str(tmp_path / "json"), "-g", str(tmp_path / "geo"), "-v", "temperature", "-w", "0"],
+    )
+
+    assert result.exit_code == 2
+    assert "--workers must be >= 1" in result.output

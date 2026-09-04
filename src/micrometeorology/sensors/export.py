@@ -1,4 +1,10 @@
-"""Formatted export of processed sensor data."""
+"""Formatted export of processed sensor data.
+
+Timestamps are naive station-local throughout, as they arrive from the
+datalogger's own clock (see :mod:`micrometeorology.sensors.ingestion`); the
+year/month/day/hour columns this module can write are therefore local
+wall-clock fields, never UTC ones.
+"""
 
 import logging
 from pathlib import Path

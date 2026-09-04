@@ -34,7 +34,7 @@ JPEG_QUALITY = 92
 MANIFEST_COLUMNS = ("frame_path", "timestamp", "video", "index")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FrameRecord:
     """A single decoded video frame with its wall-clock timestamp.
 
@@ -163,17 +163,25 @@ def extract_frames(
     Limitation
     ----------
     Filenames carry minute resolution: with ``minutes_per_frame < 1`` two
-    frames can map to the same name and overwrite each other.
+    frames map to the same name. The later one is dropped and counted in a
+    warning, so no frame overwrites another and no manifest row points at
+    bytes that belong to a different frame.
     """
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     video_name = Path(path).name
 
     rows: list[dict[str, object]] = []
+    written: set[Path] = set()
+    collisions = 0
     for record in iter_frames(path, cfg, step=step):
-        image = record.image if resize is None else resize_bilinear(record.image, resize)
         frame_file = out_path / f"allsky-{record.timestamp:%Y%m%d-%H%M}.jpg"
+        if frame_file in written:
+            collisions += 1
+            continue
+        image = record.image if resize is None else resize_bilinear(record.image, resize)
         iio.imwrite(frame_file, image, quality=JPEG_QUALITY)
+        written.add(frame_file)
         rows.append(
             {
                 "frame_path": str(frame_file),
@@ -183,6 +191,14 @@ def extract_frames(
             }
         )
 
+    if collisions:
+        logger.warning(
+            "%s: %d frame(s) mapped onto a filename already written this run and were "
+            "dropped; the modelled clock names frames to the minute and minutes_per_frame is %s",
+            video_name,
+            collisions,
+            cfg.minutes_per_frame,
+        )
     manifest = pd.DataFrame(rows, columns=list(MANIFEST_COLUMNS))
     manifest["timestamp"] = pd.to_datetime(manifest["timestamp"]).astype("datetime64[ns]")
     manifest["index"] = manifest["index"].astype("int64")

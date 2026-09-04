@@ -206,7 +206,7 @@ class SkyHead(nn.Module):
         Width of the trunk embedding this head reads.
     n_classes:
         Number of sky classes; defaults to
-        :data:`allsky.data.sky.SKY_CLASS_COUNT`, the Escobedo binning
+        :data:`labmim_core.sky.SKY_CLASS_COUNT`, the Escobedo binning
         (cloudy / partly_cloudy_diffuse / partly_cloudy_clear / clear).
     """
 

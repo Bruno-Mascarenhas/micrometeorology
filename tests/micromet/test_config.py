@@ -6,25 +6,13 @@ every key it declares must be a real field on ``Settings``, otherwise
 consumer of ``get_settings()`` fails on its first call.
 """
 
-from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
 from micrometeorology.common.config import Settings, get_settings
-
-
-@pytest.fixture(autouse=True)
-def hermetic_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Strip ambient ``LABMIM_*`` overrides and the process-global settings cache."""
-    monkeypatch.delenv("LABMIM_ENV", raising=False)
-    monkeypatch.delenv("LABMIM_CONFIG_PATH", raising=False)
-    for field_name in Settings.model_fields:
-        monkeypatch.delenv(f"LABMIM_{field_name.upper()}", raising=False)
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 def test_get_settings_accepts_the_shipped_default_yaml() -> None:
@@ -78,3 +66,17 @@ def test_a_limit_missing_a_field_the_gate_reads_fails_at_load_not_mid_run() -> N
     """A ``min_run`` left out used to surface as a KeyError deep inside the mask."""
     with pytest.raises(ValidationError):
         Settings.model_validate({"sensor_persistence_limits": [{"column": "Temp1_Avg"}]})
+
+
+def test_a_named_override_whose_top_level_is_not_a_mapping_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silently loading ``LABMIM_CONFIG_PATH`` as ``{}`` would vanish the whole
+    override layer with exit code 0, exactly what naming the file is meant to
+    prevent."""
+    override = tmp_path / "override.yaml"
+    override.write_text("- sensor_limits: []\n", encoding="utf-8")
+    monkeypatch.setenv("LABMIM_CONFIG_PATH", str(override))
+
+    with pytest.raises(TypeError, match="not a YAML mapping"):
+        get_settings()

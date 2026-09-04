@@ -139,6 +139,37 @@ class TestExportRoundtrip:
                 assert not PurePosixPath(name).is_absolute()
                 assert ".." not in PurePosixPath(name).parts
 
+    def test_a_bundle_whose_member_escapes_the_directory_is_refused(self, tmp_path: Path):
+        """The writer never produces one, so the reader's guard was only ever
+        checked as a pure function. A bundle arrives from elsewhere — that is
+        what a bundle is for — and dropping the loop over the member names left
+        the whole suite green.
+        """
+        hostile = tmp_path / "hostile.tar.gz"
+        payload = tmp_path / "manifest.parquet"
+        payload.write_bytes(b"not really a parquet")
+        with tarfile.open(hostile, "w:gz") as tar:
+            info = tar.gettarinfo(str(payload), arcname="../escape/manifest.parquet")
+            with payload.open("rb") as handle:
+                tar.addfile(info, handle)
+
+        with pytest.raises(ValueError, match="unsafe"):
+            validate_bundle(hostile)
+
+    def test_a_bundle_carrying_a_symlink_member_is_refused(self, tmp_path: Path):
+        """A link member writes wherever it points once extracted, and its own
+        name passes every path check.
+        """
+        hostile = tmp_path / "linked.tar.gz"
+        with tarfile.open(hostile, "w:gz") as tar:
+            info = tarfile.TarInfo("allsky_bundle/manifest.parquet")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            tar.addfile(info)
+
+        with pytest.raises(ValueError, match="not a regular file"):
+            validate_bundle(hostile)
+
     def test_validate_bundle_verifies_manifest_sha256(self, dataset_dir: Path, tmp_path: Path):
         out = tmp_path / "bundle.tar.gz"
         export_colab_bundle(out, manifest_path=dataset_dir / "manifest.parquet")
@@ -261,3 +292,17 @@ class TestTarHygiene:
                 assert (member.uid, member.gid) == (0, 0), member.name
                 assert (member.uname, member.gname) == ("", ""), member.name
                 assert member.mtime == 0, member.name
+
+
+def test_a_bundle_carrying_a_link_member_is_refused(tmp_path: Path) -> None:
+    """Only member names were checked; a symlink member with a ``../`` linkname
+    passed both gates while the README told the reader plain ``tar -xzf`` was safe."""
+    bundle = tmp_path / "bundle.tar.gz"
+    with tarfile.open(bundle, "w:gz") as tar:
+        link = tarfile.TarInfo(name="dataset/frames/escape.jpg")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../outside/secret.txt"
+        tar.addfile(link)
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        validate_bundle(bundle)

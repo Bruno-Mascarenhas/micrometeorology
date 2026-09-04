@@ -90,7 +90,6 @@ class TestResumeCompleteness:
         config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
         assert _prepare(config).exit_code == 0
 
-        # Exactly what extract_frames leaves behind when the QC pass is killed.
         vman = dataset_dir / "frames" / "allsky-20260101" / "manifest.parquet"
         frames = pd.read_parquet(vman).drop(columns=["qc_frame_flags"])
         frames.to_parquet(vman, index=False)
@@ -102,6 +101,28 @@ class TestResumeCompleteness:
 
         manifest = pd.read_parquet(dataset_dir / "manifest.parquet")
         assert (manifest["qc_flags"] & int(QCFlag.FRAME_DARK)).all()
+
+    def test_frames_deleted_from_disk_are_re_extracted_not_resumed_onto(
+        self,
+        tmp_path: Path,
+        dark_video: Path,
+        synthetic_dat: Path,
+    ):
+        """The gate read the parquet and the sidecar and never the disk, so a day
+        whose JPEGs were cleaned away still printed "frames already present" and the
+        manifest was rebuilt with image_path values naming files that were gone."""
+        config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
+        assert _prepare(config).exit_code == 0
+        jpeg_dir = dataset_dir / "frames" / "allsky-20260101"
+        removed = sorted(path.name for path in jpeg_dir.glob("*.jpg"))
+        for jpeg in jpeg_dir.glob("*.jpg"):
+            jpeg.unlink()
+
+        result = _prepare(config)
+
+        assert result.exit_code == 0, result.output
+        assert "re-extracting" in result.output
+        assert sorted(path.name for path in jpeg_dir.glob("*.jpg")) == removed
 
     def test_complete_frame_manifest_still_resumes(
         self,
@@ -127,8 +148,6 @@ class TestBuildManifestWithoutExtract:
         dark_video: Path,
         synthetic_dat: Path,
     ):
-        # The documented `allsky extract-frames` -> `prepare-local --steps
-        # build-manifest` flow: no qc_frame_flags anywhere, must stay exit 0.
         config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
         assert _prepare(config).exit_code == 0
 
@@ -186,8 +205,6 @@ class TestApplyFrameQC:
         assert "no qc_frame_flags" in capsys.readouterr().out
 
     def test_mixed_concat_warns_instead_of_raising(self, capsys: pytest.CaptureFixture[str]):
-        # pd.concat of a QC'd manifest with a QC-less one yields float64 + NaN,
-        # which used to die in .astype("int64") with a bare IntCastingNaNError.
         mixed = pd.concat(
             [
                 self._frames(qc_bits=[int(QCFlag.FRAME_SATURATED), 0]).iloc[[0]],
@@ -393,10 +410,36 @@ def test_a_non_utf8_frame_provenance_is_read_as_absent(tmp_path: Path):
     assert _read_frames_key(video_dir) is None
 
 
-def test_a_changed_video_filename_date_format_moves_the_frame_provenance_hash():
-    renamed = PrepareConfig.model_validate({"video": {"filename_date_format": "allsky_%Y%m%d"}})
+#: One case per field the frame key claims to cover — the four pixel sections and
+#: the four video time fields. A field that quietly left the formula makes the
+#: resume reuse frames extracted under a different config, which is the one thing
+#: the key exists to prevent.
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"video": {"filename_date_format": "allsky_%Y%m%d"}},
+        {"video": {"timestamps": "modelled"}},
+        {"video": {"start_time": "07:00"}},
+        {"video": {"minutes_per_frame": 2.0}},
+        {"mask": {"threshold": 200}},
+        {"crop": {"enabled": True, "top": 40}},
+        {"pad": {"enabled": True, "top": 40}},
+        {"resize": 224},
+    ],
+)
+def test_a_config_edit_that_changes_an_extracted_frame_moves_its_provenance_hash(patch: dict):
+    edited = PrepareConfig.model_validate(patch)
 
-    assert _frames_inputs_sha256(renamed) != _frames_inputs_sha256(PrepareConfig())
+    assert _frames_inputs_sha256(edited) != _frames_inputs_sha256(PrepareConfig())
+
+
+def test_an_edit_that_reaches_no_frame_leaves_the_provenance_hash_alone():
+    """The gate has to distinguish a re-extraction from an unrelated edit, or
+    every config touch would discard hours of extracted frames.
+    """
+    unrelated = PrepareConfig.model_validate({"embeddings": {"batch_size": 3}})
+
+    assert _frames_inputs_sha256(unrelated) == _frames_inputs_sha256(PrepareConfig())
 
 
 def _write_mask(path: Path, *, blacked_rows: int, size: int = 64) -> Path:
@@ -429,7 +472,7 @@ class TestMaskBytesAreInTheFrameProvenanceHash:
     def test_a_maskless_config_hashes_as_before_the_mask_bytes_were_folded_in(self):
         assert _frames_inputs_sha256(PrepareConfig()) == config_subset_sha256(
             PrepareConfig(),
-            sections=("mask", "crop", "resize"),
+            sections=("mask", "crop", "pad", "resize"),
             nested_fields={"video": VIDEO_TIME_FIELDS},
             subject="the frame provenance hash",
         )
@@ -453,3 +496,12 @@ def test_rewriting_the_mask_png_in_place_re_extracts_instead_of_resuming(
     ]
     assert shipped
     assert all(not frame[:32].any() for frame in shipped)
+
+
+def test_a_changed_pad_section_moves_the_frame_provenance_hash():
+    """``pad`` rewrites the pixels as much as ``crop`` does, yet it was missing from
+    ``FRAME_PIXEL_SECTIONS``: the isotropic re-extraction hashed identically to the
+    unpadded one, so frames and embeddings resumed across the change."""
+    padded = PrepareConfig.model_validate({"pad": {"enabled": True, "top": 254, "bottom": 377}})
+
+    assert _frames_inputs_sha256(padded) != _frames_inputs_sha256(PrepareConfig())

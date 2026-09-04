@@ -66,11 +66,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from allsky.lens import LensCalibration
-
 __all__ = [
     "AugmentationPipeline",
-    "LensCalibration",
     "exposure_jitter",
     "polar_unwrap",
     "random_erasing",
@@ -81,6 +78,7 @@ __all__ = [
 #: sRGB display gamma. Exposure is a linear-space operation, so a gain applied
 #: to gamma-encoded pixels would not be a gain at all.
 SRGB_GAMMA = 2.2
+ERASE_PLACEMENT_ATTEMPTS = 10
 
 
 def exposure_jitter(
@@ -124,10 +122,41 @@ def exposure_jitter(
     return encoded
 
 
-def sensor_noise(chw: np.ndarray, rng: np.random.Generator, *, sigma: float = 0.01) -> np.ndarray:
-    """Add zero-mean Gaussian noise of standard deviation *sigma*."""
+def sensor_noise(
+    chw: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    sigma: float = 0.01,
+    valid: np.ndarray | None = None,
+) -> np.ndarray:
+    """Add zero-mean Gaussian noise of standard deviation *sigma*.
+
+    Parameters
+    ----------
+    chw:
+        ``(3, H, W)`` float32 in ``[0, 1]``, gamma-encoded.
+    rng:
+        Seeded generator; the caller owns reproducibility.
+    sigma:
+        Standard deviation of the noise, in the same ``[0, 1]`` intensity units
+        as *chw*.
+    valid:
+        ``(H, W)`` bool keep-mask of the pixels the camera actually imaged.
+        Where it is False the pixel is ABSENCE, not a dark reading — the ROI mask
+        zeroes it and the isotropic pad fills it — and noising it turns "nothing
+        was measured here" into a faint signal the model can learn from. ``None``
+        noises every pixel, which is right for a frame with no absent region.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(3, H, W)`` float32, clipped back into ``[0, 1]``.
+    """
     noisy = chw + rng.normal(0.0, sigma, size=chw.shape).astype(np.float32)
-    return np.clip(noisy, 0.0, 1.0, out=noisy)
+    np.clip(noisy, 0.0, 1.0, out=noisy)
+    if valid is not None:
+        noisy = np.where(valid[None, :, :], noisy, chw)
+    return noisy
 
 
 def random_erasing(
@@ -138,27 +167,52 @@ def random_erasing(
     aspect_range: tuple[float, float] = (0.4, 2.5),
     keep_solar_disc: tuple[int, int] | None = None,
     disc_radius: int = 12,
+    valid: np.ndarray | None = None,
 ) -> np.ndarray:
     """Erase one random rectangle, filled with the frame's own mean.
 
     Parameters
     ----------
+    chw:
+        ``(3, H, W)`` float32 in ``[0, 1]``.
+    rng:
+        Seeded generator; the caller owns reproducibility.
+    area_range:
+        Bounds of the rectangle's area as a fraction of the frame, drawn
+        uniformly.
+    aspect_range:
+        Bounds of its height-to-width ratio, drawn uniformly.
     keep_solar_disc:
-        ``(row, col)`` of the sun. When given, a patch overlapping the solar
-        disc is redrawn: occluding the sun itself is not a nuisance, it changes
-        the physics the model is being asked about.
+        ``(row, col)`` of the sun in image coordinates. When given, a patch
+        overlapping the solar disc is redrawn: occluding the sun itself is not a
+        nuisance, it changes the physics the model is being asked about.
     disc_radius:
         Radius in pixels of the protected disc.
+    valid:
+        ``(H, W)`` bool keep-mask of the pixels the camera actually imaged; the
+        fill averages only those.
 
     Returns
     -------
     numpy.ndarray
-        A copy with one rectangle erased.
+        ``(3, H, W)`` float32 copy with one rectangle erased — or an untouched
+        copy, when every placement drawn fell outside the frame or on the
+        protected disc.
     """
     _, height, width = chw.shape
     out = chw.copy()
-    fill = np.asarray(chw.mean(axis=(1, 2)), dtype=np.float32).reshape(3, 1, 1)
-    for _ in range(10):
+    # Averaged over the imaged pixels only: the ROI mask and the isotropic pad
+    # write exact zeros over regions the camera never saw, and folding those into
+    # the mean drags the fill toward black — an erasure darker than any sky.
+    if valid is None:
+        channel_mean = chw.mean(axis=(1, 2))
+    else:
+        imaged = int(valid.sum())
+        channel_mean = (
+            (chw * valid[None, :, :]).sum(axis=(1, 2)) / imaged if imaged else chw.mean(axis=(1, 2))
+        )
+    fill = np.asarray(channel_mean, dtype=np.float32).reshape(3, 1, 1)
+    for _ in range(ERASE_PLACEMENT_ATTEMPTS):
         area = rng.uniform(*area_range) * height * width
         aspect = rng.uniform(*aspect_range)
         h = round(float(np.sqrt(area * aspect)))
@@ -169,9 +223,6 @@ def random_erasing(
         left = int(rng.integers(0, width - w))
         if keep_solar_disc is not None:
             sr, sc = keep_solar_disc
-            # Rectangle-vs-square overlap. Testing whether the sun's CENTRE
-            # falls inside the rectangle is not enough: a corner can clip the
-            # protected square while the centre stays outside it.
             if not (
                 top > sr + disc_radius
                 or top + h - 1 < sr - disc_radius
@@ -195,6 +246,21 @@ def translate(chw: np.ndarray, rng: np.random.Generator, *, max_shift: int = 4) 
     pastes the horizon from one side of the dome onto the other, which is the
     same class of physically impossible content that rules flips out in the
     first place.
+
+    Parameters
+    ----------
+    chw:
+        ``(3, H, W)`` float32 in ``[0, 1]``.
+    rng:
+        Seeded generator; the caller owns reproducibility.
+    max_shift:
+        Largest shift in pixels; the row and column shifts are drawn
+        independently and uniformly from ``[-max_shift, max_shift]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(3, H, W)`` float32; the input array itself when both draws are zero.
     """
     dr = int(rng.integers(-max_shift, max_shift + 1))
     dc = int(rng.integers(-max_shift, max_shift + 1))
@@ -235,14 +301,19 @@ def polar_unwrap(
     chw:
         ``(3, H, W)`` float32 in ``[0, 1]``.
     sun_row, sun_col:
-        The sun's pixel position, from :meth:`LensCalibration.pixel_of`.
+        The sun's pixel position in image (row, column) coordinates, from
+        :meth:`~allsky.lens.LensCalibration.pixel_of`.
     out_shape:
         ``(angles, radii)``; defaults to the input's own ``(H, W)``.
 
     Returns
     -------
     numpy.ndarray
-        ``(3, angles, radii)`` float32.
+        ``(3, angles, radii)`` float32. Row 0 is ``theta = 0``, which points
+        along +row (down the image) and grows toward +column; that is the
+        image's own convention, not the clockwise-from-north azimuth
+        :meth:`~allsky.lens.LensCalibration.pixel_of` takes. Columns run from
+        the sun outward.
 
     Notes
     -----
@@ -310,15 +381,28 @@ class AugmentationPipeline:
         """True when at least one transform can fire."""
         return max(self.p_exposure, self.p_noise, self.p_translate, self.p_erase) > 0.0
 
-    def __call__(self, chw: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-        """Apply the pipeline to one CHW frame in ``[0, 1]``."""
+    def __call__(
+        self,
+        chw: np.ndarray,
+        rng: np.random.Generator,
+        valid: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Apply the pipeline to one CHW frame in ``[0, 1]``.
+
+        *valid* is the ``(H, W)`` bool mask of the pixels the camera imaged. The
+        two transforms that would otherwise treat an absent pixel as a dark
+        reading take it: :func:`sensor_noise` leaves the absent ones alone and
+        :func:`random_erasing` averages its fill over the imaged ones. Exposure
+        and translation need no mask — the first is multiplicative, so zero stays
+        zero, and the second moves absence with the frame.
+        """
         out = chw
         if self.p_exposure and rng.random() < self.p_exposure:
             out = exposure_jitter(out, rng, log2_range=self.exposure_log2)
         if self.p_noise and rng.random() < self.p_noise:
-            out = sensor_noise(out, rng, sigma=self.noise_sigma)
+            out = sensor_noise(out, rng, sigma=self.noise_sigma, valid=valid)
         if self.p_translate and rng.random() < self.p_translate:
             out = translate(out, rng, max_shift=self.translate_px)
         if self.p_erase and rng.random() < self.p_erase:
-            out = random_erasing(out, rng)
+            out = random_erasing(out, rng, valid=valid)
         return np.ascontiguousarray(out, dtype=np.float32)

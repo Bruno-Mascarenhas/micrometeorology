@@ -9,9 +9,12 @@ weighted sum.
 Target/prediction spaces
 ------------------------
 Model regression outputs live in **normalized** space (the heads predict the
-standardized quantity).  Targets arrive in the batch as **raw physical units**,
-so this module normalizes ``dhi`` and ``kindex`` internally with the supplied
-:class:`TargetNormalizer` before comparing them to the model outputs.
+standardized quantity).  Targets arrive in the batch in the unit the dataset
+serves them in — ``dhi`` in W m-2 under ``targets.dhi.parameterization="raw"``,
+and a dimensionless ratio to the clear-sky reference under
+``"clearsky_index"`` — so this module normalizes ``dhi`` and ``kindex``
+internally with the supplied :class:`TargetNormalizer`, which was fitted on that
+same served quantity, before comparing them to the model outputs.
 ``cloud_fraction`` is the one exception: it is already a bounded fraction in
 ``[0, 1]`` (the head is sigmoid-bounded), so it is compared raw with no
 normalization.
@@ -79,9 +82,8 @@ class MultitaskLoss(nn.Module):
     where the total is the weighted sum and every ``loss_<head>`` component is
     the **unweighted** per-head loss (only enabled heads appear).
 
-    ``TargetsConfig.cloud_fraction`` carries no configurable loss kind, so the
-    cloud head defaults to ``"mse"``; a ``loss`` attribute is honoured if the
-    config ever grows one.
+    ``TargetsConfig.cloud_fraction`` declares no loss kind and forbids extra keys,
+    so the cloud head is MSE by construction.
     """
 
     def __init__(
@@ -110,7 +112,7 @@ class MultitaskLoss(nn.Module):
         self._sky_weight = float(targets.sky.weight)
         self._cloud_enabled = bool(targets.cloud_fraction.enabled)
         self._cloud_weight = float(targets.cloud_fraction.weight)
-        self._cloud_kind = str(getattr(targets.cloud_fraction, "loss", "mse"))
+        self._cloud_kind = "mse"
 
         self._dhi_mean, self._dhi_std = _norm_stats(target_normalizers, "dhi")
         self._kindex_mean, self._kindex_std = _norm_stats(target_normalizers, "kindex")
@@ -124,7 +126,9 @@ class MultitaskLoss(nn.Module):
             The model's :class:`allsky.modeling.contracts.ModelOutputs` (only
             the enabled heads' keys are read).
         batch:
-            Batch dict with raw physical targets ``dhi`` ``(B,)`` in W m-2,
+            Batch dict with the served targets: ``dhi`` ``(B,)`` in W m-2 under
+            ``targets.dhi.parameterization="raw"`` and dimensionless under
+            ``"clearsky_index"``,
             ``kindex`` ``(B,)`` (dimensionless ratio) and ``cloud_fraction``
             ``(B,)`` in ``[0, 1]`` — all ``float``, NaN = missing — plus
             ``sky_class`` ``(B,)`` ``int64`` with ``-1`` = missing.
@@ -181,16 +185,11 @@ class MultitaskLoss(nn.Module):
             )
         log_var: Tensor = outputs["dhi_log_var"]
         mask = torch.isfinite(target)
-        if not bool(mask.any()):
-            return (pred * 0.0).sum() + (log_var * 0.0).sum()
-        normalized = (target[mask] - self._dhi_mean) / self._dhi_std
-        residual = pred[mask] - normalized
-        masked_log_var = log_var[mask]
-        # Gaussian NLL (dropping the 0.5*log(2*pi) constant): larger log-variance
-        # trades a linear penalty for a shrunk squared-error term, so it lowers
-        # the loss for large residuals and raises it for small ones.
-        nll = 0.5 * (torch.exp(-masked_log_var) * residual.pow(2) + masked_log_var)
-        return nll.mean()
+        normalized = (_sanitised(target, mask) - self._dhi_mean) / self._dhi_std
+        residual = pred - normalized
+        # Gaussian NLL dropping the constant 0.5*log(2*pi).
+        nll = 0.5 * (torch.exp(-log_var) * residual.pow(2) + log_var)
+        return _masked_mean(nll, mask)
 
     def _regression_loss(
         self, pred: Tensor, target: Tensor, kind: str, mean: float, std: float
@@ -199,23 +198,51 @@ class MultitaskLoss(nn.Module):
         if kind not in _REGRESSION_KINDS:
             raise ValueError(f"unknown regression loss kind {kind!r}; expected {_REGRESSION_KINDS}")
         mask = torch.isfinite(target)
-        if not bool(mask.any()):
-            return (pred * 0.0).sum()
-        normalized = (target[mask] - mean) / std
-        selected = pred[mask]
+        normalized = (_sanitised(target, mask) - mean) / std
         if kind == "mse":
-            return functional.mse_loss(selected, normalized)
-        if kind == "mae":
-            return functional.l1_loss(selected, normalized)
-        return functional.huber_loss(selected, normalized, delta=self._huber_delta)
+            per_row = functional.mse_loss(pred, normalized, reduction="none")
+        elif kind == "mae":
+            per_row = functional.l1_loss(pred, normalized, reduction="none")
+        else:
+            per_row = functional.huber_loss(
+                pred, normalized, delta=self._huber_delta, reduction="none"
+            )
+        return _masked_mean(per_row, mask)
 
     @staticmethod
     def _sky_loss(logits: Tensor, sky_class: Tensor) -> Tensor:
         """Masked cross-entropy over rows with a valid (``>= 0``) class label."""
         mask = sky_class >= 0
-        if not bool(mask.any()):
-            return (logits * 0.0).sum()
-        return functional.cross_entropy(logits[mask], sky_class[mask])
+        # `clamp(min=0)` only feeds the masked-out rows a valid index; their loss
+        # is zeroed below. `ignore_index=-1` with the default reduction would do
+        # the masking too, but returns NaN for a batch where every row is masked.
+        per_row = functional.cross_entropy(logits, sky_class.clamp(min=0), reduction="none")
+        return _masked_mean(per_row, mask)
+
+
+def _sanitised(target: Tensor, mask: Tensor) -> Tensor:
+    """*target* with its masked-out entries replaced by a finite placeholder.
+
+    Boolean-mask INDEXING (``target[mask]``) copies to a host-shaped result, so
+    it has to know how many rows survive — a device synchronisation, once per
+    head per batch, which the engine's own loop is written to avoid. Every loss
+    below therefore computes over the whole batch and zeroes the rows it does
+    not want, which needs the masked entries to be finite: a NaN times zero is
+    still NaN, and it would reach the gradient.
+    """
+    return torch.where(mask, target, torch.zeros_like(target))
+
+
+def _masked_mean(per_row: Tensor, mask: Tensor) -> Tensor:
+    """Mean of *per_row* over the rows *mask* keeps, zero when it keeps none.
+
+    The denominator is clamped rather than branched on, for the same reason: a
+    Python ``if`` over a device tensor is a synchronisation. A batch with no
+    valid row yields exactly ``0.0`` with the gradient path intact, which is
+    what the branch it replaces returned.
+    """
+    kept = torch.where(mask, per_row, torch.zeros_like(per_row))
+    return kept.sum() / mask.sum().clamp(min=1)
 
 
 def _accumulate(total: Tensor | None, weight: float, component: Tensor) -> Tensor:

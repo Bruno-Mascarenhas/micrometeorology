@@ -132,6 +132,12 @@ class TestChannelSelection:
         with pytest.raises(ValueError, match="empty list"):
             resolve_geometry_channels([])
 
+    def test_a_bare_string_is_refused_instead_of_being_read_letter_by_letter(self):
+        """`geometry_channels: solar_disc` in a YAML arrives as a str, which is a
+        Sequence[str]."""
+        with pytest.raises(ValueError, match="must be a list of names"):
+            resolve_geometry_channels("solar_disc")
+
     def test_a_repeated_channel_is_refused(self):
         with pytest.raises(ValueError, match="repeats a channel"):
             resolve_geometry_channels(["cos_sun_angle", "cos_sun_angle"])
@@ -246,6 +252,28 @@ class TestImageEncoderWiring:
             plain = encoder({"image": frame[:, :3]})
 
         assert torch.equal(widened, plain)
+
+    def test_the_adapter_appears_under_both_names_in_the_state_dict(self):
+        """``attach_extra_input_channels`` installs the adapter inside the
+        backbone and the encoder also binds the same object as
+        ``extra_channel_projection``, so every tensor is saved twice under two
+        key prefixes. Checkpoints already on disk carry both, and dropping
+        either registration silently changes what an old checkpoint restores —
+        so the duplication is pinned rather than left to be tidied away by
+        accident.
+        """
+        encoder = ImageEncoder(_StubViT(), extra_input_channels=3)
+
+        state = encoder.state_dict()
+
+        inside = {k: v for k, v in state.items() if k.startswith("backbone.patch_embed.proj.")}
+        alongside = {k: v for k, v in state.items() if k.startswith("extra_channel_projection.")}
+        assert inside
+        assert {k.split(".", 3)[3] for k in inside} == {k.split(".", 1)[1] for k in alongside}
+        for suffix in (k.split(".", 1)[1] for k in alongside):
+            saved = state[f"extra_channel_projection.{suffix}"]
+            nested = state[f"backbone.patch_embed.proj.{suffix}"]
+            assert saved.data_ptr() == nested.data_ptr()
 
     def test_no_adapter_is_installed_when_no_extra_channels_are_asked_for(self):
         assert ImageEncoder(_StubViT()).extra_channel_projection is None
@@ -483,13 +511,59 @@ class TestBackboneTablesAgree:
     fine-tune.
     """
 
-    def test_every_advertised_backbone_resolves_to_a_family(self):
-        for name in AVAILABLE_BACKBONES:
-            if name == "fake":
-                continue
-            pooling = "mean" if name.startswith(("resnet", "efficientnet")) else "cls"
+    @pytest.mark.parametrize("name", [n for n in AVAILABLE_BACKBONES if n != "fake"])
+    def test_every_advertised_backbone_resolves_to_a_family(self, name: str):
+        pooling = "mean" if name.startswith(("resnet", "efficientnet")) else "cls"
 
-            assert family_for(name, pooling) is not None, name
+        family = family_for(name, pooling)
+
+        assert family.name == name
+        # `pooling` is per-family state and not part of the BackboneFamily
+        # interface; what the interface promises is that an unacceptable pooling
+        # is refused rather than silently accepted.
+        with pytest.raises(BackboneCapabilityError):
+            family_for(name, "cls+max")
 
     def test_the_vit_poolings_are_the_extraction_path_s_own(self):
         assert set(VIT_POOLINGS) == set(POOLINGS)
+
+
+class TestGeometryPlanesNeedIsotropicFrames:
+    """`isotropic_calibration` describes ONE geometry: the disc centred and
+    inscribed by the prepare crop and pad, then resized square. Applied to a
+    frame that went through the plain 1920x1080 resize it puts the horizon where
+    the frame has none — silently, because the shapes agree."""
+
+    @staticmethod
+    def _dataset(tmp_path, frame_geometry):
+        from allsky.data.datasets import MultimodalImageDataset
+        from allsky.features.policy import resolve_feature_set
+
+        manifest, root = _manifest(tmp_path)
+        return MultimodalImageDataset(
+            manifest,
+            resolve_feature_set("safe"),
+            data_root=root,
+            image_size=FRAME_PX,
+            train=True,
+            geometry_channels=("cos_sun_angle",),
+            frame_geometry=frame_geometry,
+        )
+
+    def test_frames_written_without_crop_or_pad_are_refused(self, tmp_path):
+        plain = {"crop": {"enabled": False}, "pad": {"enabled": False}, "resize": 512}
+
+        with pytest.raises(ValueError, match="isotropic crop/pad"):
+            self._dataset(tmp_path, plain)
+
+    def test_frames_written_through_the_isotropic_crop_are_accepted(self, tmp_path):
+        isotropic = {"crop": {"enabled": True}, "pad": {"enabled": True}, "resize": 512}
+
+        assert self._dataset(tmp_path, isotropic) is not None
+
+    def test_a_manifest_predating_the_record_warns_instead_of_refusing(self, tmp_path, caplog):
+        """Every dataset of that vintage would otherwise stop loading."""
+        with caplog.at_level("WARNING"):
+            self._dataset(tmp_path, None)
+
+        assert "records no frame_geometry" in caplog.text

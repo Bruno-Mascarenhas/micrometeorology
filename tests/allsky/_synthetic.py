@@ -43,13 +43,33 @@ class DictEmbeddingReader:
         return list(self._data)
 
 
+#: Clearness the synthetic day sweeps through, from overcast to nearly clear.
+#: The sweep runs WITHIN each day so a single-day split still spans several
+#: classes and several k-index bands.
+_CLEARNESS_SWEEP = (0.22, 0.75)
+
+#: One deliberately impossible hour, above the k* ceiling of 1.5, so the fixture
+#: carries a flagged row and the QC stratum is not a single value either.
+_ARTIFACT_CLEARNESS = 2.4
+
+
 def _sensor(site: SiteConfig, first: pd.Timestamp, last: pd.Timestamp) -> pd.DataFrame:
     index = pd.date_range(first + pd.Timedelta(hours=8), last + pd.Timedelta(hours=19), freq="5min")
     rng = np.random.default_rng(0)
     e0h = solar.extraterrestrial_ghi(index, site)
     data = {k: rng.uniform(lo, hi, len(index)) for k, (lo, hi) in _MET.items()}
-    data["CM3Up_Wm2_Avg"] = np.clip(0.7 * e0h, 0.0, None)
-    data["PSP_Wm2_Avg"] = np.clip(0.2 * e0h, 0.0, None)
+
+    day_offset = (index.normalize() - first.normalize()).days
+    through_the_day = (index.hour - 8 + index.minute / 60.0) / 11.0
+    low, high = _CLEARNESS_SWEEP
+    phase = (through_the_day + 0.25 * day_offset) % 1.0
+    clearness = np.asarray(low + (high - low) * phase, dtype=float)
+
+    midday = np.flatnonzero((day_offset == 0) & (index.hour == 12) & (index.minute == 0))
+    clearness[midday] = _ARTIFACT_CLEARNESS
+
+    data["CM3Up_Wm2_Avg"] = np.clip(clearness * e0h, 0.0, None)
+    data["PSP_Wm2_Avg"] = np.clip(0.3 * clearness * e0h, 0.0, None)
     return pd.DataFrame(data, index=index)
 
 
@@ -110,8 +130,28 @@ def write_frame_images(root: Path, manifest: pd.DataFrame, *, image_px: int = 8)
         iio.imwrite(full, rng.integers(0, 256, (image_px, image_px, 3), dtype=np.uint8), quality=90)
 
 
+#: The repository experiment a tmp config inherits from (``extends`` resolves it,
+#: and its own chain reaches ``_base.yaml`` + ``models/sensor_only.yaml``).
+REPO_V1 = (
+    Path(__file__).resolve().parents[2]
+    / "configs"
+    / "allsky"
+    / "experiments"
+    / "v1_sensor_only.yaml"
+)
+
+
 def make_embeddings_store(
-    root: Path, manifest: pd.DataFrame, *, dim: int = 8, shard_size: int = 16, subdir: str = "emb"
+    root: Path,
+    manifest: pd.DataFrame,
+    *,
+    dim: int = 8,
+    shard_size: int = 16,
+    subdir: str = "emb",
+    revision: str = "fake-v1",
+    pooling: str = "fake",
+    dtype: str = "fp16",
+    transform: str = "identity",
 ) -> Path:
     """Write a real safetensors embedding store (shards + index + meta) under ``root/subdir``.
 
@@ -137,13 +177,13 @@ def make_embeddings_store(
         out,
         {
             "backbone": "fake",
-            "revision": "fake-v1",
-            "pooling": "fake",
+            "revision": revision,
+            "pooling": pooling,
             "dim": dim,
-            "transform": "identity",
+            "transform": transform,
             "config_sha256": None,
             "count": len(ids),
-            "dtype": "fp16",
+            "dtype": dtype,
         },
     )
     return out
@@ -183,6 +223,19 @@ def make_config(
             },
         }
     )
+
+
+def write_config_yaml(path: Path, config: ExperimentConfig) -> Path:
+    """Serialise an experiment config to YAML for the CLI to load.
+
+    The dispatch tests drive ``allsky train`` by path, which is the only reason
+    they need a file; everything about the config itself comes from
+    :func:`make_config`, so the two do not drift apart.
+    """
+    import yaml
+
+    path.write_text(yaml.safe_dump(config.model_dump(mode="json")), encoding="utf-8")
+    return path
 
 
 def reader_for(manifest: pd.DataFrame, dim: int = 8) -> DictEmbeddingReader:

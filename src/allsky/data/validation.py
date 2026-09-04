@@ -37,14 +37,26 @@ import pandas as pd
 from allsky.data.contracts import (
     DATASET_VERSION,
     DEGRADABLE_TARGET_COLUMNS,
+    LABELABLE_MIN_ELEVATION_DEG,
     META_COLUMNS,
+    SPLIT_COLUMN,
     TARGET_COLUMNS,
+    QCFlag,
     resolve,
 )
 from allsky.features.policy import FORBIDDEN_FEATURES
 from labmim_core.sky import SKY_CLASS_MISSING, SKY_CLASS_VALUES
 
-__all__ = ["ManifestValidationError", "ValidationReport", "validate_manifest"]
+__all__ = [
+    "STRICT_LOW_SUN_ELEVATION_DEG",
+    "ManifestValidationError",
+    "ValidationReport",
+    "validate_manifest",
+]
+
+#: The floor ``strict=True`` flags rows below, read from the one name the build
+#: and the config also read.
+STRICT_LOW_SUN_ELEVATION_DEG = LABELABLE_MIN_ELEVATION_DEG
 
 
 class ManifestValidationError(ValueError):
@@ -111,9 +123,12 @@ def validate_manifest(
         Root that ``image_path`` values resolve against (for existence checks).
     split_artifact:
         Optional loaded split artifact; if given, its day assignment is checked
-        for day-level leakage across splits.
+        for day-level leakage across splits and against the manifest's ``split``
+        column. One carrying no day assignment at all is an error, not a pass.
     strict:
-        Promote warnings (low sun, far k-index) to errors.
+        Also record an error for rows in the low-sun band — elevation at or above
+        *min_elevation_deg* but below :data:`STRICT_LOW_SUN_ELEVATION_DEG`. It
+        promotes nothing: the report's warnings are unaffected.
     min_elevation_deg:
         Elevation floor; rows below it are errors (default ``0`` — only truly
         below-horizon/night rows fail).
@@ -148,10 +163,16 @@ def validate_manifest(
     _check_forbidden_columns(manifest, feature_columns, report)
     _check_elevation(manifest, min_elevation_deg, report, strict=strict)
     _check_targets(manifest, max_kindex, report)
+    _check_qc_flags(manifest, report)
     _check_constant_provenance(manifest, meta, report)
     if check_files:
         _check_image_files(manifest, data_root, report)
     if split_artifact is not None:
+        if not _day_to_splits(split_artifact):
+            report.add_error(
+                "the split artifact carries neither an 'assignment' nor a 'splits' map, so "
+                "the leakage and split-column checks inspected nothing"
+            )
         _check_split_leakage(split_artifact, report)
         _check_split_column(manifest, split_artifact, report)
     _check_normalization_versions(normalization_versions, meta, report)
@@ -264,9 +285,12 @@ def _check_elevation(
         report.add_error(message)
     if not strict:
         return
-    low_sun = (elevation >= min_elevation_deg) & (elevation < 10.0)
+    low_sun = (elevation >= min_elevation_deg) & (elevation < STRICT_LOW_SUN_ELEVATION_DEG)
     if low_sun.any():
-        report.add_error(f"strict: {int(low_sun.sum())} low-sun row(s) (elevation < 10 deg)")
+        report.add_error(
+            f"strict: {int(low_sun.sum())} low-sun row(s) "
+            f"(elevation < {STRICT_LOW_SUN_ELEVATION_DEG} deg)"
+        )
 
 
 def _check_targets(manifest: pd.DataFrame, max_kindex: float, report: ValidationReport) -> None:
@@ -289,6 +313,32 @@ def _check_targets(manifest: pd.DataFrame, max_kindex: float, report: Validation
         if invalid.any():
             offenders = sorted({int(v) for v in classes[invalid]})
             report.add_error(f"sky_class values outside {sorted(allowed)} present: {offenders}")
+
+
+def _check_qc_flags(manifest: pd.DataFrame, report: ValidationReport) -> None:
+    """``qc_flags`` must be a bitmask this build can read.
+
+    The column is an int64 bitmask over :class:`~allsky.data.contracts.QCFlag`,
+    and nothing else validated it: a negative value (an unsigned mask written
+    through a signed column) or a bit no member declares reaches the evaluator's
+    QC stratification, which only asks whether the mask is zero, and lands the
+    row in whichever stratum the arithmetic happens to give it.
+    """
+    if "qc_flags" not in manifest.columns:
+        return
+    flags = manifest["qc_flags"].dropna()
+    if flags.empty:
+        return
+    values = flags.to_numpy(dtype=np.int64)
+    declared = 0
+    for member in QCFlag:
+        declared |= int(member)
+    offending = (values < 0) | ((values & ~declared) != 0)
+    if bool(offending.any()):
+        report.add_error(
+            f"{int(offending.sum())} row(s) carry a qc_flags value outside the declared "
+            f"QCFlag bits (0..{declared}): {sorted({int(v) for v in values[offending]})[:5]}"
+        )
 
 
 def _check_image_files(
@@ -337,15 +387,24 @@ def _check_split_column(
     manifest: pd.DataFrame, split_artifact: dict[str, Any], report: ValidationReport
 ) -> None:
     """A filled ``split`` column must agree with the split artifact by ``day_id``."""
-    if "split" not in manifest.columns or "day_id" not in manifest.columns:
+    if SPLIT_COLUMN not in manifest.columns or "day_id" not in manifest.columns:
         return
-    filled = manifest["split"].notna()
+    filled = manifest[SPLIT_COLUMN].notna()
     if not bool(filled.any()):
+        # A manifest handed a non-empty artifact is meant to carry the labels;
+        # entirely unfilled means attach_split_column never ran (or ran against
+        # another artifact), and every consumer then silently trains on rows
+        # whose split nothing assigned.
+        if _day_to_splits(split_artifact):
+            report.add_warning(
+                "a split artifact was supplied but the manifest's split column is entirely "
+                "unfilled; run the splits step, or attach_split_column, before training"
+            )
         return
     day_map = {day: min(s) for day, s in _day_to_splits(split_artifact).items()}
     sub = manifest.loc[filled]
     expected = sub["day_id"].astype(str).map(day_map)
-    actual = sub["split"].astype(str)
+    actual = sub[SPLIT_COLUMN].astype(str)
     disagree = expected.notna() & (expected.to_numpy() != actual.to_numpy())
     if bool(disagree.any()):
         days = sorted({str(d) for d in sub.loc[disagree, "day_id"]})
@@ -355,8 +414,14 @@ def _check_split_column(
 def _check_constant_provenance(
     manifest: pd.DataFrame, meta: dict[str, Any], report: ValidationReport
 ) -> None:
-    """``dataset_version`` / ``alignment_id`` columns must be constant + match meta."""
-    for column in ("dataset_version", "alignment_id"):
+    """Row-constant provenance columns must be constant AND match the meta.
+
+    ``kindex_kind`` and ``target_source`` are here for the same reason the other
+    two are: the evaluator reads both from the meta while every metric it
+    computes comes from the column, so a manifest whose column and sidecar
+    disagree is scored under one parameterization and reported under another.
+    """
+    for column in ("dataset_version", "alignment_id", "kindex_kind", "target_source"):
         if column not in manifest.columns:
             continue
         values = manifest[column].dropna().unique().tolist()

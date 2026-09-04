@@ -76,18 +76,40 @@ class TestManifestColumnDtypes:
 
 
 class TestQCFlag:
-    def test_distinct_powers_of_two(self):
-        values = [
-            QCFlag.LOW_SUN,
-            QCFlag.SENSOR_GAP,
-            QCFlag.ALIGNMENT_FAR,
-            QCFlag.KT_ARTIFACT,
-            QCFlag.FRAME_DARK,
-            QCFlag.FRAME_SATURATED,
-        ]
-        ints = [int(v) for v in values]
-        assert len(set(ints)) == len(ints)
-        assert all(v and (v & (v - 1)) == 0 for v in ints)  # each a power of two
+    def test_every_flag_is_a_distinct_single_bit(self):
+        """Enumerating by hand left the three newest flags unpinned. Read the
+        members instead: ``__members__`` and not ``iter(QCFlag)``, because
+        iterating an IntFlag yields only canonical single-bit members and so
+        skips exactly an accidental multi-bit value.
+        """
+        values = {
+            name: int(member)
+            for name, member in QCFlag.__members__.items()
+            if member is not QCFlag.NONE
+        }
+
+        assert len(set(values.values())) == len(values)
+        for name, value in values.items():
+            assert value != 0, name
+            assert value & (value - 1) == 0, name
+
+    def test_the_persisted_bit_of_every_flag_is_frozen(self):
+        """``qc_flags`` is an int64 column of every manifest already written, so
+        these numbers are a byte contract with files on disk: reassigning one
+        reinterprets history rather than breaking anything visibly.
+        """
+        assert {name: int(member) for name, member in QCFlag.__members__.items()} == {
+            "NONE": 0,
+            "LOW_SUN": 1,
+            "SENSOR_GAP": 2,
+            "ALIGNMENT_FAR": 4,
+            "KT_ARTIFACT": 8,
+            "FRAME_DARK": 16,
+            "FRAME_SATURATED": 32,
+            "TIMESTAMP_INTERPOLATED": 64,
+            "TIMESTAMP_CORRECTED": 128,
+            "FRAME_UNREADABLE": 256,
+        }
 
 
 class TestSkyClasses:

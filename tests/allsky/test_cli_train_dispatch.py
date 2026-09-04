@@ -8,120 +8,28 @@ the command; that torch-free behaviour is covered in ``test_cli.py``.
 
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
+import pytest
 from typer.testing import CliRunner
 
 from allsky.cli import app
-from allsky.data.manifest import build_manifest, write_manifest_parquet
-from allsky.data.splits import create_day_splits, save_split_artifact
-from allsky.embeddings.storage import save_shard, shard_path, write_index, write_meta
 from allsky.training.checkpointing import load_checkpoint as _load_checkpoint
 from allsky.training.errors import TrainingError
-from labmim_core import solar
-from labmim_core.site import SiteConfig
+from tests.allsky import _synthetic as synthetic
 
 runner = CliRunner()
 
-_MET = {
-    "AirT1_C_Avg": (20.0, 30.0),
-    "DP1_C_Avg": (10.0, 20.0),
-    "RH1": (50.0, 90.0),
-    "BP1_mbar_Avg": (1005.0, 1015.0),
-    "WS_ms": (0.0, 8.0),
-    "WindDir": (0.0, 360.0),
-}
-
-_EXPERIMENT_YAML = """\
-experiment: true
-seed: 0
-output_dir: {out}
-data:
-  manifest: manifest.parquet
-  data_root: {root}
-  split_artifact: splits.json
-  embeddings_dir: emb
-  input_mode: embedding
-features:
-  set: safe
-targets:
-  dhi:
-    enabled: true
-    loss: huber
-model:
-  name: sensor_only
-train:
-  epochs: 2
-  batch_size: 8
-  num_workers: 0
-  device: cpu
-  early_stopping:
-    monitor: val_loss
-    patience: 100
-"""
-
 
 def _build_experiment(tmp_path: Path, dim: int = 8) -> tuple[Path, Path]:
-    """Build a manifest + split + on-disk embeddings; return (root, config_path)."""
-    site = SiteConfig()
-    root = tmp_path / "data"
-    root.mkdir(parents=True, exist_ok=True)
-    days = pd.date_range("2025-03-20", periods=3, freq="D")
-    rows = []
-    idx = 0
-    for day in days:
-        for ts in pd.date_range(day + pd.Timedelta(hours=9), periods=20, freq="30min"):
-            rows.append(
-                {
-                    "frame_path": f"frames/allsky-{ts:%Y%m%d-%H%M}.jpg",
-                    "timestamp": ts,
-                    "video": "v.mp4",
-                    "index": idx,
-                }
-            )
-            idx += 1
-    frames = pd.DataFrame(rows)
+    """Build a manifest + split + on-disk embeddings; return (root, config_path).
 
-    index = pd.date_range(
-        days[0] + pd.Timedelta(hours=8), days[-1] + pd.Timedelta(hours=19), freq="5min"
+    The dataset, the store and the config all come from ``_synthetic``.
+    """
+    root, manifest, _split = synthetic.make_dataset(tmp_path)
+    synthetic.make_embeddings_store(root, manifest, dim=dim)
+    config = synthetic.make_config(
+        root, epochs=2, targets={"dhi": {"enabled": True, "loss": "huber"}}
     )
-    rng = np.random.default_rng(0)
-    e0h = solar.extraterrestrial_ghi(index, site)
-    sensor_data = {k: rng.uniform(lo, hi, len(index)) for k, (lo, hi) in _MET.items()}
-    sensor_data["CM3Up_Wm2_Avg"] = np.clip(0.7 * e0h, 0.0, None)
-    sensor_data["PSP_Wm2_Avg"] = np.clip(0.2 * e0h, 0.0, None)
-    sensor = pd.DataFrame(sensor_data, index=index)
-
-    manifest, meta = build_manifest(frames, sensor, site=site, data_root=root)
-    write_manifest_parquet(manifest, meta, root / "manifest.parquet")
-    split = create_day_splits(
-        manifest["day_id"].tolist(), val_fraction=0.34, test_fraction=0.0, seed=0
-    )
-    save_split_artifact(split, root / "splits.json")
-
-    # On-disk embeddings covering every sample_id (the CLI builds a real reader).
-    sample_ids = [str(s) for s in manifest["sample_id"]]
-    emb_dir = root / "emb"
-    emb_dir.mkdir(parents=True, exist_ok=True)
-    embeddings = np.random.default_rng(1).standard_normal((len(sample_ids), dim)).astype(np.float32)
-    save_shard(shard_path(emb_dir, 0), embeddings)
-    write_index(
-        emb_dir, pd.DataFrame({"sample_id": sample_ids, "shard": 0, "row": range(len(sample_ids))})
-    )
-    write_meta(
-        emb_dir,
-        {
-            "backbone": "fake",
-            "revision": "r0",
-            "pooling": "cls",
-            "dim": dim,
-            "count": len(sample_ids),
-        },
-    )
-
-    config_path = tmp_path / "experiment.yaml"
-    config_path.write_text(_EXPERIMENT_YAML.format(out=root / "out", root=root), encoding="utf-8")
-    return root, config_path
+    return root, synthetic.write_config_yaml(tmp_path / "experiment.yaml", config)
 
 
 class TestExperimentDispatch:
@@ -195,6 +103,38 @@ class TestExperimentDispatch:
         assert result.exit_code == 0, result.output
         assert (run_dir / "last.ckpt").exists()
 
+    def test_the_batch_size_and_device_overrides_reach_the_engine(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Both flags mutate the loaded config in place and ExperimentTrainConfig has
+        no validate_assignment, so the assignment skips every pydantic check."""
+        seen: list[tuple[int, str]] = []
+
+        def record_the_config(cfg, **_kwargs):
+            seen.append((cfg.train.batch_size, cfg.train.device))
+            return {"ok": True}
+
+        monkeypatch.setattr("allsky.training.run_experiment", record_the_config)
+        root, config_path = _build_experiment(tmp_path)
+
+        result = runner.invoke(
+            app,
+            [
+                "train",
+                "--config",
+                str(config_path),
+                "--data-root",
+                str(root),
+                "--batch-size",
+                "3",
+                "--device",
+                "mps",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert seen == [(3, "mps")]
+
     def test_bad_resume_path_errors(self, tmp_path: Path):
         root, config_path = _build_experiment(tmp_path)
         result = runner.invoke(
@@ -211,11 +151,17 @@ class TestExperimentDispatch:
                 str(tmp_path / "nope" / "last.ckpt"),
             ],
         )
-        assert result.exit_code != 0
+        assert result.exit_code == 2, result.output
+        assert "resume checkpoint does not exist" in result.output
 
 
 class TestTrustCheckpointFlag:
-    def test_the_flag_reaches_the_resume_load(self, tmp_path: Path, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        ("extra_flags", "expected"), [([], False), (["--trust-checkpoint"], True)]
+    )
+    def test_the_flag_reaches_the_resume_load(
+        self, tmp_path: Path, monkeypatch, extra_flags: list[str], expected: bool
+    ) -> None:
         """The restricted-unpickler default must be overridable from the CLI.
 
         Without a flag, a checkpoint the allowlist refuses could only be resumed
@@ -230,14 +176,13 @@ class TestTrustCheckpointFlag:
         monkeypatch.setattr("allsky.training.run_experiment", record_trust)
         root, config_path = _build_experiment(tmp_path)
 
-        for extra_flags, expected in (([], False), (["--trust-checkpoint"], True)):
-            trust_values.clear()
-            result = runner.invoke(
-                app,
-                ["train", "--config", str(config_path), "--data-root", str(root), *extra_flags],
-            )
-            assert result.exit_code == 0, result.output
-            assert trust_values == [expected]
+        result = runner.invoke(
+            app,
+            ["train", "--config", str(config_path), "--data-root", str(root), *extra_flags],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert trust_values == [expected]
 
     def test_a_resumed_checkpoint_is_read_under_the_restricted_reader_by_default(
         self, tmp_path: Path, monkeypatch

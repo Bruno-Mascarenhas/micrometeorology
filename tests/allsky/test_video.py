@@ -1,6 +1,7 @@
 """Tests for allsky.video — frame/time mapping, streaming, extraction."""
 
 import itertools
+import logging
 from datetime import date
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import imageio.v3 as iio
 import numpy as np
 import pandas as pd
 import pytest
+from pydantic import ValidationError
 
 from allsky.config import VideoConfig
 from allsky.video import (
@@ -134,3 +136,24 @@ def test_iter_frames_real_video():
     assert records[1].timestamp - records[0].timestamp == spacing
     assert records[2].timestamp - records[1].timestamp == spacing
     assert records[0].timestamp == pd.Timestamp("2026-06-25 06:00")
+
+
+def test_a_sub_minute_modelled_clock_drops_colliding_frames_instead_of_overwriting(
+    synthetic_video: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """Two frames half a minute apart share one ``HHMM`` filename: the second used
+    to overwrite the first while the manifest kept a row for each."""
+    cfg = VideoConfig(minutes_per_frame=0.5)
+
+    with caplog.at_level(logging.WARNING, logger="allsky.video"):
+        manifest = extract_frames(synthetic_video, tmp_path, cfg)
+
+    assert manifest["index"].tolist() == [0, 2, 4, 6]
+    assert len(list(tmp_path.glob("*.jpg"))) == 4
+    assert "4 frame(s)" in caplog.text
+
+
+def test_a_non_positive_frame_interval_is_rejected_at_load():
+    """``minutes_per_frame: 0`` collapsed a whole day onto a single filename."""
+    with pytest.raises(ValidationError, match="minutes_per_frame"):
+        VideoConfig(minutes_per_frame=0)

@@ -10,6 +10,7 @@ import typer
 
 from micrometeorology.cli import (
     compute_metrics,
+    export_operational_series,
     export_wrf_geojson,
     render_wrf_maps,
     run_wrf_pipeline,
@@ -59,8 +60,13 @@ class TestParseIntCsv:
 
 
 def test_every_wrf_cli_shares_one_parser_pair() -> None:
-    """A fix to the parsing must not have to be applied four times."""
-    for module in (render_wrf_maps, export_wrf_geojson, run_wrf_pipeline):
+    """A fix to the parsing must not have to be applied once per console script."""
+    for module in (
+        render_wrf_maps,
+        export_wrf_geojson,
+        run_wrf_pipeline,
+        export_operational_series,
+    ):
         assert module.parse_csv is parse_csv
         assert module.parse_int_csv is parse_int_csv
     assert compute_metrics.parse_csv is parse_csv

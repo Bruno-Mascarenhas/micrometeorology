@@ -40,6 +40,64 @@ def _install_fallback_spy(monkeypatch):
     return calls
 
 
+#: Every other test here, the frozen oracle in ``_reference.py`` and the streaming
+#: and jobs suites all compare against ``vertical_interpolate`` itself, so a wrong
+#: weight is invisible everywhere. These columns are small enough to interpolate on
+#: paper: the expected value is written from the two bracketing levels, never read
+#: back from the function.
+@pytest.mark.parametrize(
+    ("heights", "values", "target", "expected"),
+    [
+        ([0.0, 100.0], [0.0, 10.0], 25.0, 2.5),
+        ([0.0, 100.0], [0.0, 10.0], 75.0, 7.5),
+        ([120.0, 500.0], [4.0, 23.0], 310.0, 13.5),
+        # Unequal levels: the weight is a fraction of THIS bracket, not of the column.
+        ([0.0, 10.0, 1000.0], [0.0, 1.0, 100.0], 5.0, 0.5),
+        ([0.0, 10.0, 1000.0], [0.0, 1.0, 100.0], 505.0, 50.5),
+        # Below the lowest and above the highest level: the bracket at that end is
+        # extended, so both ends extrapolate along the nearest pair's slope.
+        ([100.0, 200.0], [10.0, 20.0], 50.0, 5.0),
+        ([100.0, 200.0], [10.0, 20.0], 250.0, 25.0),
+    ],
+)
+def test_a_two_level_column_interpolates_to_the_value_computed_by_hand(
+    heights, values, target, expected
+):
+    column = vertical_interpolate(
+        np.array(values, dtype=np.float64).reshape(-1, 1),
+        np.array(heights, dtype=np.float64).reshape(-1, 1),
+        target,
+    )
+
+    assert column[0] == pytest.approx(expected, rel=1e-12)
+
+
+def test_a_column_with_one_usable_level_returns_it_without_extrapolating():
+    """With no second level there is no slope to extend, and inventing one would
+    publish a wind at 80 m from a single reading 300 m up.
+    """
+    column = vertical_interpolate(np.array([[7.5], [np.nan]]), np.array([[300.0], [np.nan]]), 80.0)
+
+    assert column[0] == pytest.approx(7.5)
+
+
+def test_a_column_with_no_usable_level_is_nan_not_a_number():
+    column = vertical_interpolate(
+        np.array([[np.nan], [np.nan]]), np.array([[np.nan], [np.nan]]), 80.0
+    )
+
+    assert np.isnan(column[0])
+
+
+def test_a_collapsed_bracket_takes_the_lower_level_rather_than_dividing_by_zero():
+    """Two levels at one height give a zero denominator; the documented answer
+    is the lower level's value, not an infinity propagating into the field.
+    """
+    column = vertical_interpolate(np.array([[3.0], [9.0]]), np.array([[150.0], [150.0]]), 150.0)
+
+    assert column[0] == pytest.approx(3.0)
+
+
 def test_vertical_interpolator_fast_path_matches_reference_float32(monkeypatch):
     shape = (4, 12, 9, 7)
     heights = _monotonic_heights(shape, axis=1, seed=1)

@@ -5,16 +5,18 @@ logs persisted to Google Drive.
 
 ## Opening a notebook in Colab
 
-Every notebook in this repository can be opened directly from GitHub:
+Every notebook in this repository can be opened directly from GitHub. `<PATH>`
+is the notebook's path under `notebooks/`, subdirectory included:
 
 ```
-https://colab.research.google.com/github/Bruno-Mascarenhas/micrometeorology/blob/main/notebooks/<NOTEBOOK>.ipynb
+https://colab.research.google.com/github/Bruno-Mascarenhas/micrometeorology/blob/main/notebooks/<PATH>.ipynb
 ```
 
 | Notebook | Purpose |
 |---|---|
 | [`allsky_multimodal_colab.ipynb`](allsky_multimodal_colab.ipynb) | Train the **multimodal** all-sky pipeline (V0–V7 DHI / k-index / sky models) from a prepared Colab bundle |
 | [`tcc/02_colab_training.ipynb`](tcc/02_colab_training.ipynb) | Train the **solrad_correction** models (SVM / LSTM / Transformer) via `solrad-colab` |
+| `colab/01_calibracao.ipynb`, `colab/02_backbones_pesados.ipynb`, `colab/03_portfolio_24h.ipynb` | The Colab Pro+ GPU campaign, in that order: 01 reproduces the local reference and **gates** the other two, 02 tests backbone capacity and input resolution, 03 is the 24-hour portfolio. All three drive `colab/_colab_runner.py` |
 | `exploratory/*.ipynb` | Local data exploration (sensor merging, WRF time series) — no GPU needed |
 
 The multimodal notebook is **thin**: it provisions a CPython 3.14 venv with `uv`
@@ -96,7 +98,9 @@ solrad-colab --config experiment.yaml --output-dir .../runs/solrad --resume .../
 
 ## Session-restart checklist
 
-1. Re-run the install cell (`%pip install ...`) — the environment resets.
+1. Re-run the bootstrap cell — the environment resets. The all-sky notebooks
+   rebuild their `uv` venv; `tcc/02_colab_training.ipynb` re-runs its
+   `%pip install`.
 2. Re-mount Drive.
 3. Skip extraction/index steps if their outputs already exist on Drive.
 4. Use the resume cell instead of the train cell.

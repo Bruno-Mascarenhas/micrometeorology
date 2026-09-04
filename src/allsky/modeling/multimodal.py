@@ -24,6 +24,29 @@ from allsky.modeling.visual_encoder import build_visual_encoder, split_backbone_
 __all__ = ["MultimodalNet"]
 
 
+def _assert_every_column_is_a_token(
+    feature_columns: Sequence[str], groups: dict[str, list[str]]
+) -> None:
+    """Refuse a cross-attention build whose groups do not cover every column.
+
+    :func:`allsky.modeling.contracts.group_slices` drops a column no group
+    claims without erroring or logging, so a column that reaches the sensor
+    encoder but no attention token claims is invisible everywhere.
+
+    Raises
+    ------
+    ValueError
+        Naming the columns no group claims.
+    """
+    claimed = {member for members in groups.values() for member in members}
+    orphans = [name for name in feature_columns if name not in claimed]
+    if orphans:
+        raise ValueError(
+            "cross_attention fusion would drop "
+            f"{orphans} from the sensor tokens: no feature group claims them"
+        )
+
+
 class MultimodalNet(nn.Module):
     """Full multimodal model: ``visual + sensor -> fusion -> trunk -> heads``.
 
@@ -42,6 +65,9 @@ class MultimodalNet(nn.Module):
     feature_set:
         Feature-set name used to resolve cross-attention groups; the groups are
         intersected with *feature_columns*, so a superset name is harmless.
+    feature_extra:
+        The ``features.extra`` names *feature_columns* was resolved with, so the
+        cross-attention token set covers them too.
     embedding_dim, image_backbone:
         Visual-source inputs for the two modes.
     sensor_hidden:
@@ -70,6 +96,7 @@ class MultimodalNet(nn.Module):
         fusion_name: str = "concat",
         input_mode: Literal["image", "embedding"] = "embedding",
         feature_set: str = "safe",
+        feature_extra: Sequence[str] = (),
         embedding_dim: int | None = None,
         image_backbone: nn.Module | None = None,
         sensor_hidden: Sequence[int] = (64, 128),
@@ -106,7 +133,13 @@ class MultimodalNet(nn.Module):
         visual_dim = cast("int", self.visual_encoder.out_dim)
         sensor_dim = int(self.sensor_encoder.out_dim)
 
-        groups = active_feature_groups(feature_set) if fusion_name == "cross_attention" else None
+        groups = (
+            active_feature_groups(feature_set, feature_extra)
+            if fusion_name == "cross_attention"
+            else None
+        )
+        if groups is not None:
+            _assert_every_column_is_a_token(self.feature_columns, groups)
         self.fusion = build_fusion(
             fusion_name,
             visual_dim,

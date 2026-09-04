@@ -1,6 +1,5 @@
 """End-to-end tests for the labmim-sensor-process CLI."""
 
-from collections.abc import Iterator
 from pathlib import Path
 
 import pandas as pd
@@ -14,18 +13,6 @@ from micrometeorology.sensors.export import export_csv
 from tests.micromet.test_ingestion import _write_toa5
 
 runner = CliRunner()
-
-
-@pytest.fixture(autouse=True)
-def hermetic_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Strip ambient ``LABMIM_*`` overrides and the process-global settings cache."""
-    monkeypatch.delenv("LABMIM_ENV", raising=False)
-    monkeypatch.delenv("LABMIM_CONFIG_PATH", raising=False)
-    for field_name in Settings.model_fields:
-        monkeypatch.delenv(f"LABMIM_{field_name.upper()}", raising=False)
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 def _write_one_hour_of_samples(directory: Path) -> None:
@@ -60,8 +47,12 @@ def test_cli_reports_a_configs_dir_without_sensor_config_files(
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
     _write_one_hour_of_samples(raw_dir)
-    settings = Settings(configs_dir=tmp_path / "configs-without-sensor-files")
-    monkeypatch.setattr(ingest_sensor_data, "get_settings", lambda: settings)
+    _write_config_layer(
+        tmp_path,
+        monkeypatch,
+        sensor_limits=[],
+        configs_dir=str(tmp_path / "configs-without-sensor-files"),
+    )
 
     result = runner.invoke(
         ingest_sensor_data.app,
@@ -143,28 +134,18 @@ class TestDatetimeColumnsGuard:
         with pytest.raises(ValueError, match="missing timestamp"):
             export_csv(frame, tmp_path / "with_nat.csv", include_datetime_columns=True)
 
-    def test_a_sub_hourly_index_is_still_refused_for_losing_its_minute(
-        self, tmp_path: Path
-    ) -> None:
-        index = pd.date_range("2025-06-25 12:00", periods=3, freq="30min")
-        frame = pd.DataFrame({"Temp1": [25.0, 26.0, 27.0]}, index=index)
-
-        with pytest.raises(ValueError, match="year/month/day/hour"):
-            export_csv(frame, tmp_path / "sub_hourly.csv", include_datetime_columns=True)
-
     @pytest.mark.parametrize("freq", ["30min", "90min"])
     def test_a_freq_that_opens_windows_off_the_hour_is_rejected_before_any_read(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, freq: str
+        self, tmp_path: Path, freq: str
     ) -> None:
+        """An empty input directory is what makes the ORDER visible.
+
+        Reaching the reader at all would raise the ``no files matching`` refusal
+        instead, so the message alone says which guard ran first.
+        """
         raw_dir = tmp_path / "raw"
         raw_dir.mkdir()
-        _write_one_hour_of_samples(raw_dir)
         output_path = tmp_path / "out.csv"
-
-        def _refuse_to_read(*_args: object, **_kwargs: object) -> pd.DataFrame:
-            raise AssertionError("incompatible flags must be caught before ingestion")
-
-        monkeypatch.setattr(ingest_sensor_data, "merge_dat_files", _refuse_to_read)
 
         result = runner.invoke(
             ingest_sensor_data.app,
@@ -184,7 +165,17 @@ class TestDatetimeColumnsGuard:
         assert result.exit_code == 2, result.output
         assert "--datetime-columns" in result.output
         assert "--freq" in result.output
+        assert "no files matching" not in result.output
         assert not output_path.exists()
+
+
+@pytest.mark.parametrize("freq", ["1h", "2h", "D", "W"])
+def test_a_freq_whose_windows_open_on_the_hour_is_accepted(freq: str) -> None:
+    """As quatro colunas inteiras de data carregam a hora, entao um tick de hora
+    inteira e todo offset de calendario sao compativeis com --datetime-columns."""
+    from micrometeorology.cli.ingest_sensor_data import _opens_windows_off_the_hour
+
+    assert not _opens_windows_off_the_hour(freq)
 
 
 def test_cli_min_samples_falls_back_to_the_configured_value(
@@ -249,6 +240,222 @@ def test_the_window_mode_reads_the_live_tables_instead_of_the_manifest(tmp_path)
     assert (saida / "station_hourly.parquet").exists()
 
 
+def test_the_window_mode_fails_strict_on_a_window_that_merged_to_nothing(tmp_path) -> None:
+    """``--source`` built ``reports = []``, so ``--strict``'s only gate was always
+    empty and the operational mode — the one that runs hourly — verified nothing
+    at all. The audited row counts cannot judge a window, but its own shape can."""
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    fatores = tmp_path / "teorica_2016-2030.csv"
+    fatores.write_text("ano_i,mes_i,dia_i,hor_i,min_i,fc\n", encoding="utf-8")
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(lenta, ["CM3Up_Wm2_Avg"], [])
+    saida = tmp_path / "out"
+
+    resultado = CliRunner().invoke(
+        app, ["-d", str(tmp_path), "-o", str(saida), "--source", str(lenta), "--strict"]
+    )
+
+    assert resultado.exit_code == 1, resultado.output
+    assert "merged to no row at all" in resultado.output
+
+
+@pytest.mark.parametrize("logger_net", ["NAN", 100.0])
+def test_a_dead_balance_component_fails_strict_instead_of_blanking_the_chart(
+    tmp_path, logger_net
+) -> None:
+    """``close_net_radiation`` drops every sample whose component is missing, and
+    ``net_dropped`` was only ever printed. Chained onto export_monitoring, which
+    OMITS an all-null series by design, one dead component made the balance chart
+    disappear from the published page with zero error anywhere in the pipeline.
+
+    Both spellings of the same window: the CR5000 computes ITS net from these
+    four channels, so the realistic case has the logger's own net empty too and
+    ``net_dropped`` counts nothing — keying the block on it would have missed
+    exactly the case it exists for.
+    """
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    fatores = tmp_path / "teorica_2016-2030.csv"
+    fatores.write_text(
+        "ano_i,mes_i,dia_i,hor_i,min_i,fc\n"
+        + "".join(f"2026,8,15,12,{minute},1.18\n" for minute in range(0, 60, 5)),
+        encoding="utf-8",
+    )
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(
+        lenta,
+        [
+            "CM3Up_Wm2_Avg",
+            "CM3Dn_Wm2_Avg",
+            "CG3Up_Wm2Cr_Avg",
+            "CG3Dn_Wm2Cr_Avg",
+            "Net_Wm2_Avg",
+        ],
+        [
+            (f"2026-08-15 12:{minute:02d}:00", [500.0, "NAN", 400.0, 450.0, logger_net])
+            for minute in range(0, 60, 5)
+        ],
+    )
+    saida = tmp_path / "out"
+
+    resultado = CliRunner().invoke(
+        app, ["-d", str(tmp_path), "-o", str(saida), "--source", str(lenta), "--strict"]
+    )
+
+    assert resultado.exit_code == 1, resultado.output
+    assert "saldo recomposto ficou inteiramente ausente" in resultado.output
+    assert "Sw_dw" in resultado.output
+
+
+def test_the_window_build_writes_csv_artifacts_when_the_format_asks_for_them(tmp_path) -> None:
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    fatores = tmp_path / "teorica_2016-2030.csv"
+    fatores.write_text(
+        "ano_i,mes_i,dia_i,hor_i,min_i,fc\n"
+        + "".join(f"2026,8,15,12,{minute},1.18\n" for minute in range(0, 60, 5)),
+        encoding="utf-8",
+    )
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(
+        lenta,
+        ["CM3Up_Wm2_Avg"],
+        [(f"2026-08-15 12:{minute:02d}:00", [500.0]) for minute in range(0, 60, 5)],
+    )
+    saida = tmp_path / "out"
+
+    resultado = CliRunner().invoke(
+        app,
+        ["-d", str(tmp_path), "-o", str(saida), "--source", str(lenta), "--format", "csv"],
+    )
+
+    assert resultado.exit_code == 0, resultado.output
+    assert sorted(path.name for path in saida.glob("*.csv")) == [
+        "station_5min_qc.csv",
+        "station_5min_raw.csv",
+        "station_hourly.csv",
+    ]
+
+
+def test_an_unknown_output_format_is_refused_before_any_artifact_is_written(tmp_path) -> None:
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(lenta, ["CM3Up_Wm2_Avg"], [("2026-08-15 12:00:00", [500.0])])
+    saida = tmp_path / "out"
+
+    resultado = CliRunner().invoke(
+        app,
+        ["-d", str(tmp_path), "-o", str(saida), "--source", str(lenta), "--format", "xml"],
+    )
+
+    assert resultado.exit_code == 2, resultado.output
+    assert not saida.exists()
+
+
+def test_the_archive_report_counts_the_window_and_keeps_every_stage_key(tmp_path) -> None:
+    """O relatorio e a contabilidade da corrida e nada era afirmado sobre ele."""
+    import json
+
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    fatores = tmp_path / "teorica_2016-2030.csv"
+    fatores.write_text(
+        "ano_i,mes_i,dia_i,hor_i,min_i,fc\n"
+        + "".join(f"2026,8,15,12,{minute},1.18\n" for minute in range(0, 60, 5)),
+        encoding="utf-8",
+    )
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(
+        lenta,
+        ["CM3Up_Wm2_Avg"],
+        [(f"2026-08-15 12:{minute:02d}:00", [500.0]) for minute in range(0, 60, 5)],
+    )
+    saida = tmp_path / "out"
+
+    resultado = CliRunner().invoke(
+        app, ["-d", str(tmp_path), "-o", str(saida), "--source", str(lenta)]
+    )
+
+    assert resultado.exit_code == 0, resultado.output
+    report = json.loads((saida / "archive_report.json").read_text(encoding="utf-8"))
+    assert report["format"] == "labmim-station-archive-v1"
+    assert report["five_minute_rows"] == 12
+    assert report["hourly_rows"] == 1
+    assert [entry["kind"] for entry in report["verification"]] == ["lenta"]
+    for stage in ("sentinels_removed", "physical_limits_removed", "step_excursions_removed"):
+        assert stage in report
+
+
+def test_an_archive_with_no_declared_physical_limit_fails_strict(tmp_path, monkeypatch) -> None:
+    """The range gate is fail-open: no declared limit means no sample is ever
+    refused, and the run publishes an ungated archive with exit 0 — silence
+    indistinguishable from "every sample was inside its bounds"."""
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    _write_config_layer(tmp_path, monkeypatch, sensor_limits=[])
+    fatores = tmp_path / "teorica_2016-2030.csv"
+    fatores.write_text("ano_i,mes_i,dia_i,hor_i,min_i,fc\n", encoding="utf-8")
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(
+        lenta,
+        ["CM3Up_Wm2_Avg"],
+        [(f"2026-08-15 12:{minute:02d}:00", [500.0]) for minute in range(0, 60, 5)],
+    )
+
+    resultado = CliRunner().invoke(
+        app, ["-d", str(tmp_path), "-o", str(tmp_path / "out"), "--source", str(lenta), "--strict"]
+    )
+
+    assert resultado.exit_code == 1, resultado.output
+    assert "nenhum limite fisico declarado" in resultado.output
+
+
+def test_an_archive_built_without_calibrations_fails_strict(tmp_path, monkeypatch) -> None:
+    """No calibrations file means no instrument factor and no era-spanning column
+    is unified: the archive publishes raw logger counts under the names the
+    unified channels would have had, and every consumer reads them as
+    calibrated."""
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    empty_configs = tmp_path / "configs-sem-calibracoes"
+    empty_configs.mkdir()
+    fatores = tmp_path / "teorica_2016-2030.csv"
+    fatores.write_text("ano_i,mes_i,dia_i,hor_i,min_i,fc\n", encoding="utf-8")
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(
+        lenta,
+        ["CM3Up_Wm2_Avg"],
+        [(f"2026-08-15 12:{minute:02d}:00", [500.0]) for minute in range(0, 60, 5)],
+    )
+    from micrometeorology.cli import build_archive
+
+    monkeypatch.setattr(build_archive, "get_settings", lambda: Settings(configs_dir=empty_configs))
+
+    resultado = CliRunner().invoke(
+        app,
+        ["-d", str(tmp_path), "-o", str(tmp_path / "out"), "--source", str(lenta), "--strict"],
+    )
+
+    assert resultado.exit_code == 1, resultado.output
+    assert "sem calibracoes" in resultado.output
+
+
 def test_without_sources_the_manifest_still_refuses_a_missing_entry(tmp_path) -> None:
     """The historical build must keep failing loud: a dropped entry shortens the record."""
     from typer.testing import CliRunner
@@ -274,3 +481,89 @@ def test_a_directory_with_no_matching_file_exits_non_zero_instead_of_reporting_s
 
     assert result.exit_code != 0
     assert not output_path.exists()
+
+
+def test_the_csv_export_keeps_every_digit_the_parquet_keeps(tmp_path: Path) -> None:
+    """``float_format="%.6g"`` wrote the logger's RECORD counter as 1.01786e+06 and
+    rounded pressure to six significant digits, diverging from the Parquet of
+    the same build."""
+    from micrometeorology.cli.build_archive import OutputFormat, _write
+
+    frame = pd.DataFrame(
+        {"RECORD": [1017857.0], "Pmb_WXT": [1013.2571]},
+        index=pd.DatetimeIndex(["2026-08-15 12:00"], name="TIMESTAMP"),
+    )
+
+    path = _write(frame, tmp_path / "station_5min_raw", OutputFormat.csv)
+
+    text = path.read_text(encoding="utf-8")
+    assert "1017857.0" in text
+    assert "1013.2571" in text
+
+
+def test_a_source_file_matching_neither_table_is_refused_instead_of_dropped(
+    tmp_path: Path,
+) -> None:
+    """A ``--source`` whose name carries neither ``lenta`` nor ``rain`` was silently
+    left out while the summary line counted it as used."""
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    slow = tmp_path / "LBM_slow_2025.dat"
+    for path in (lenta, slow):
+        _write_toa5(path, ["CM3Up_Wm2_Avg"], [("2026-08-15 12:00:00", [500.0])])
+
+    resultado = CliRunner().invoke(
+        app,
+        [
+            "-d",
+            str(tmp_path),
+            "-o",
+            str(tmp_path / "out"),
+            "--source",
+            str(lenta),
+            "--source",
+            str(slow),
+        ],
+    )
+
+    assert resultado.exit_code == 2, resultado.output
+    assert "LBM_slow_2025.dat" in resultado.output
+    assert not (tmp_path / "out" / "station_hourly.parquet").exists()
+
+
+def test_files_are_merged_in_chronological_order_not_lexicographic(tmp_path: Path) -> None:
+    """`merge_dat_files` resolves an overlapping stamp as "the first file in
+    CHRONOLOGICAL order wins", and the glob sorts by name — for the station's own
+    names a different order: `LBM_lenta.dat` sorts before `LBM_lenta_2019.dat`
+    while covering 2019 itself, so the later file's value won the conflict."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    _write_toa5(
+        raw_dir / "z_starts_earlier.dat",
+        ["Temp1"],
+        [("2025-06-25 11:00:00", [20.0]), ("2025-06-25 12:00:00", [21.0])],
+    )
+    _write_toa5(raw_dir / "a_starts_later.dat", ["Temp1"], [("2025-06-25 12:00:00", [99.0])])
+    output_path = tmp_path / "out.csv"
+
+    result = runner.invoke(
+        ingest_sensor_data.app,
+        [
+            "-i",
+            str(raw_dir),
+            "-o",
+            str(output_path),
+            "--min-samples",
+            "1",
+            "--log-level",
+            "WARNING",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    exported = pd.read_csv(output_path, index_col=0)
+    noon = exported.loc[exported.index.astype(str).str.contains("12:00")]
+    assert noon["Temp1"].iloc[0] == pytest.approx(21.0)

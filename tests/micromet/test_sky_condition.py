@@ -11,8 +11,10 @@ import pytest
 
 from labmim_core.sky import SKY_CLASS_KT_UPPER_BOUNDS
 from micrometeorology.stats.sky_condition import (
+    KT_CUMULATIVE_EDGES,
     classify_sky_condition,
     cumulative_fractions,
+    cumulative_subset,
     sky_condition_summary,
 )
 
@@ -95,3 +97,29 @@ def test_a_sample_with_nothing_labelable_publishes_no_fraction_rather_than_zero(
     assert summary["n"] == 0
     assert all(c["fraction"] is None for c in summary["conditions"])
     assert all(c["count"] == 0 for c in summary["conditions"])
+
+
+def test_the_class_shares_are_counted_from_the_sample_not_read_off_the_curve():
+    """The 0.02 grid does not carry the partition's bounds — 0.55 falls between
+    0.54 and 0.56 — so the published caveat promises the shares come from the
+    sample, not from interpolating the curve. Two samples inside that one cell,
+    one on each side of the bound, separate the two mechanisms: reading off the
+    edge below gives 0 and 2, the edge above gives 2 and 0, counting gives 1
+    and 1.
+    """
+    sample = np.array([0.545, 0.555])
+
+    subset = cumulative_subset(sample, label="astride")
+
+    shares = {entry["id"]: entry["count"] for entry in subset["sky_conditions"]["conditions"]}
+    assert [shares[key] for key in ("ii", "iii")] == [1, 1]
+
+
+def test_the_cumulative_edges_are_the_climatology_specs_own_edges():
+    """The two pages print the same axis; a drift between them would show as two
+    clearness histograms a reader cannot reconcile."""
+    from micrometeorology.stats.climatology_export import CLIMATOLOGY_VARIABLES
+
+    spec = next(s for s in CLIMATOLOGY_VARIABLES if s.id == "clearness_index")
+
+    assert tuple(KT_CUMULATIVE_EDGES) == tuple(spec.edges)

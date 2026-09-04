@@ -10,7 +10,8 @@
 # escolhido para manter a entrada idêntica à do controle `iso` — trocar
 # resolução e arquitetura ao mesmo tempo não deixaria atribuir a diferença.
 #
-# `unfreeze_last_n` conta blocos de feature: esta família expõe 8.#
+# `unfreeze_last_n` conta blocos de feature: esta família expõe 8.
+#
 # Controle: o braço `iso` — 19,94 +/- 0,35 W/m2 de RMSE de DHI, MAE 13,94,
 # MBE -8,30, sobre as mesmas 7.138 linhas de teste. Difere só no backbone.
 extends: [../_base.yaml, ../../models/image_only.yaml]

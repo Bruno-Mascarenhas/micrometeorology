@@ -115,7 +115,6 @@ def train(
             exp_cfg,
             data_root=data_root,
             output_dir=out_dir,
-            device=str(device) if device is not None else None,
             amp=amp,
             resume=resume,
             trust_checkpoint=trust_checkpoint,

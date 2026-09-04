@@ -23,7 +23,11 @@ measured.
 Timestamps are naive station-local throughout, stamped by the logger's own
 clock; two of the repairs below exist precisely because that clock has slipped.
 Solar geometry therefore needs an explicit offset, pinned here as
-:data:`STATION_UTC_OFFSET_HOURS` rather than read from the host time zone.
+:data:`STATION_UTC_OFFSET_HOURS` rather than read from the host time zone.  The
+stamps are also END-stamps — the row at ``t`` averages ``(t - 5 min, t]`` — so
+every stage that asks the sun's position asks it at
+:func:`averaging_centroid` of the index, never at the closing edge; see
+:data:`AVERAGING_CENTROID_OFFSET` and docs/quality-control.md.
 
 Relationship to the neighbouring modules
 ----------------------------------------
@@ -36,11 +40,12 @@ Relationship to the neighbouring modules
 """
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from itertools import pairwise
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -65,17 +70,18 @@ __all__ = [
     "EXPECTED_LENTA_ROWS",
     "EXPECTED_RAIN_ROWS",
     "LENTA_MANIFEST",
+    "NET_RADIATION_COMPONENTS",
     "NIGHT_CORRUPTION_CHANNELS",
     "NIGHT_CORRUPTION_FLUX_WM2",
     "NOCTURNAL_SHORTWAVE_CHANNELS",
     "OFFSET_DRIFT_ALARM_WM2",
     "RAIN_MANIFEST",
-    "SAMPLING_INTERVAL",
     "STATUS_COLUMNS",
     "UNGATED_RADIATION_TWINS",
     "ArchiveFile",
     "ArchiveReport",
     "NocturnalOffset",
+    "averaging_centroid",
     "blocked_gauge_runs",
     "build_five_minute_frame",
     "close_net_radiation",
@@ -84,6 +90,7 @@ __all__ = [
     "mask_night_corrupted_days",
     "mask_nocturnal_shortwave",
     "mask_sentinels",
+    "months_never_reaching_saturation",
     "night_corrupted_days",
     "nocturnal_offset_statistics",
     "stage_archive",
@@ -91,6 +98,7 @@ __all__ = [
     "unquantised_rain_samples",
     "unshaded_diffuse_days",
     "verify_frame",
+    "verify_window",
 ]
 
 # Measured over the manifests below. A merge that does not reproduce these has
@@ -104,10 +112,12 @@ ARCHIVE_END = pd.Timestamp("2026-08-12 00:00:00")
 # coercion unless named explicitly (see ingestion.read_campbell_dat).
 STATUS_COLUMNS = ("MetSENS1_Status", "MetSENS2_Status", "MetSENS_Status")
 
+type StagingDirective = Literal["clock+1h", "drop-late-tail", "keep-2023-block"]
+
 # Staging directives, dispatched through _STAGERS in stage_archive.
-_CLOCK_PLUS_ONE_HOUR = "clock+1h"
-_DROP_LATE_TAIL = "drop-late-tail"
-_KEEP_2023_BLOCK = "keep-2023-block"
+_CLOCK_PLUS_ONE_HOUR: StagingDirective = "clock+1h"
+_DROP_LATE_TAIL: StagingDirective = "drop-late-tail"
+_KEEP_2023_BLOCK: StagingDirective = "keep-2023-block"
 
 # The 2020 clock slip: rows stamped at or before this instant are one hour early,
 # per a RECORD-join of the lenta and rain tables across the window.
@@ -117,7 +127,7 @@ _CLOCK_SLIP_LAST = pd.Timestamp("2020-02-28 11:50:00")
 _LATE_TAIL_FIRST = pd.Timestamp("2020-01-07 01:05:00")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ArchiveFile:
     """One table of the station record, with why it is in (or how it is repaired).
 
@@ -132,7 +142,7 @@ class ArchiveFile:
     """
 
     path: str
-    staging: str | None = None
+    staging: StagingDirective | None = None
     note: str = ""
 
 
@@ -210,7 +220,13 @@ RAIN_MANIFEST: tuple[ArchiveFile, ...] = (
 )
 
 
-@dataclass(frozen=True)
+#: The two manifests this module verifies. A bare ``str`` let any spelling other
+#: than ``"lenta"`` pick the RAIN expectation in silence, so a typo compared the
+#: slow table against the rain gauge's audited row count.
+type ArchiveKind = Literal["lenta", "rain"]
+
+
+@dataclass(frozen=True, slots=True)
 class ArchiveReport:
     """What a merged frame actually contains, against what the audit measured.
 
@@ -235,7 +251,7 @@ class ArchiveReport:
         One sentence per mismatch, empty when the frame matches the audit.
     """
 
-    kind: str
+    kind: ArchiveKind
     rows: int
     expected_rows: int
     columns: int
@@ -316,7 +332,7 @@ def _stage_keep_2023_block(source: Path, destination: Path) -> None:
     )
 
 
-_STAGERS = {
+_STAGERS: Mapping[StagingDirective, Callable[[Path, Path], None]] = {
     _CLOCK_PLUS_ONE_HOUR: _stage_clock_shift,
     _DROP_LATE_TAIL: _stage_drop_late_tail,
     _KEEP_2023_BLOCK: _stage_keep_2023_block,
@@ -413,7 +429,57 @@ def build_five_minute_frame(
     )
 
 
-def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
+def verify_window(frame: pd.DataFrame, kind: ArchiveKind) -> ArchiveReport:
+    """Check a rolling window against the invariants that hold for any window.
+
+    :func:`verify_frame` is anchored to the audited historical record — its row
+    count, its first stamp, its last — so it cannot judge the operational
+    ``--source`` window, which is a handful of days of whatever the logger is
+    writing now.  What still holds regardless of the
+    window is the frame's own shape: an index that never goes backwards, no
+    stamp appearing twice, and at least one row.
+
+    Parameters
+    ----------
+    frame:
+        The merged 5-minute window.
+    kind:
+        ``"lenta"`` or ``"rain"``, named in every problem sentence.
+
+    Returns
+    -------
+    ArchiveReport
+        ``expected_rows`` is zero: no audited count applies to a window.
+        ``problems`` is empty when the window is well formed.
+    """
+    index = frame.index
+    first = pd.Timestamp(index.min()) if len(index) else None
+    last = pd.Timestamp(index.max()) if len(index) else None
+    duplicated = int(index.duplicated().sum())
+    monotonic = bool(index.is_monotonic_increasing)
+
+    problems: list[str] = []
+    if len(frame) == 0:
+        problems.append(f"{kind}: the window merged to no row at all")
+    if duplicated:
+        problems.append(f"{kind}: {duplicated} duplicated timestamps")
+    if not monotonic:
+        problems.append(f"{kind}: index is not monotonically increasing")
+
+    return ArchiveReport(
+        kind=kind,
+        rows=len(frame),
+        expected_rows=0,
+        columns=len(frame.columns),
+        first=first,
+        last=last,
+        duplicated=duplicated,
+        monotonic=monotonic,
+        problems=tuple(problems),
+    )
+
+
+def verify_frame(frame: pd.DataFrame, kind: ArchiveKind) -> ArchiveReport:
     """Check a merged frame against the row count, span and shape the audit measured.
 
     A file dropped from a manifest, a staging repair that stops matching its
@@ -432,7 +498,7 @@ def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
     ArchiveReport
         ``problems`` is empty when everything matches.
     """
-    expected = EXPECTED_LENTA_ROWS if kind == "lenta" else EXPECTED_RAIN_ROWS
+    expected = {"lenta": EXPECTED_LENTA_ROWS, "rain": EXPECTED_RAIN_ROWS}[kind]
     index = frame.index
     first = pd.Timestamp(index.min()) if len(index) else None
     last = pd.Timestamp(index.max()) if len(index) else None
@@ -463,6 +529,17 @@ def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
         problems.append(f"{kind}: {duplicated} duplicated timestamps")
     if not monotonic:
         problems.append(f"{kind}: index is not monotonically increasing")
+    # The surplus rule above assumes the grid — it converts a span into a row
+    # count by dividing by SAMPLING_INTERVAL — so the rows have to sit ON it.
+    stamps = pd.DatetimeIndex(index)
+    # Through the offset from midnight, not through `asi8`: this index carries
+    # microsecond resolution, so the integer view is in microseconds while
+    # SAMPLING_INTERVAL.value is nanoseconds, and the comparison would call the
+    # whole archive off-grid. Timedelta arithmetic carries its own unit.
+    since_midnight = stamps - stamps.normalize()
+    off_grid = int((since_midnight % SAMPLING_INTERVAL != pd.Timedelta(0)).sum())
+    if off_grid:
+        problems.append(f"{kind}: {off_grid} timestamp(s) are not on the {SAMPLING_INTERVAL} grid")
 
     return ArchiveReport(
         kind=kind,
@@ -478,7 +555,8 @@ def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
 
 
 # The values a logger writes instead of "missing", per column.
-# read_campbell_dat's -900 threshold catches NONE of these; each entry came from
+# read_campbell_dat's -900 threshold reaches only the three rails below it
+# (-7999, -6673, -1000) and leaves the rest standing; each entry came from
 # the exact-value histogram of a column, where a sentinel shows up as one value
 # repeating thousands of times. A VALUE rule holds for the whole record because
 # the value is physically impossible; a WINDOW rule is date-scoped because the
@@ -985,8 +1063,6 @@ BSRN_CEILING_GAIN = 1.5
 BSRN_CEILING_MU0_EXPONENT = 1.2
 BSRN_CEILING_OFFSET_WM2 = 100.0
 
-IMPOSSIBLE_SHORTWAVE_CHANNELS = ("Sw_dw", "Net_CNR1")
-
 #: Radiation channels carrying the sensor's raw count or bridge voltage rather
 #: than a flux. They have no range gate, no BSRN envelope and no nocturnal mask,
 #: because every one of those is written against the ``_Wm2_`` twin — so they
@@ -1075,6 +1151,35 @@ DIFFUSE_EXCEEDS_GLOBAL_MIN_WM2 = 200.0
 SourceWindows = Mapping[str, Sequence[tuple[str, pd.Timestamp, pd.Timestamp]]]
 
 
+#: Shift from a logger stamp to the centre of the interval it averages.
+#: The CR5000 END-stamps: the row at ``t`` averages ``(t - 5 min, t]``, measured
+#: against the 1-minute truth at RMS 0.083 W/m2 and r = 1.000000 in
+#: docs/allsky-label-join.md, which is why the all-sky pipeline carries the same
+#: correction as ``PrepareSensorConfig.timestamp_offset_minutes = -2.5``.
+#: Solar geometry describes an instant, so it belongs at the interval's centroid,
+#: not at its closing edge: evaluated at the raw stamp, a sample within about
+#: 5 minutes of sunrise or sunset falls on the wrong side of the horizon — at
+#: 2024-06-01 05:55 the raw stamp gives +0.437 deg (daylight) while the centroid
+#: 05:52:30 gives -0.125 deg (still night).
+AVERAGING_CENTROID_OFFSET = -SAMPLING_INTERVAL / 2
+
+
+def averaging_centroid(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """Move end-stamped rows to the centre of the interval each one averages.
+
+    Parameters
+    ----------
+    index:
+        Naive station-local stamps as the logger wrote them, ``(N,)``.
+
+    Returns
+    -------
+    pandas.DatetimeIndex
+        The same stamps shifted by :data:`AVERAGING_CENTROID_OFFSET`, ``(N,)``.
+    """
+    return index + AVERAGING_CENTROID_OFFSET
+
+
 def _mask_column(frame: pd.DataFrame, column: str, mask: NDArray, removed: dict[str, int]) -> None:
     """Blank *column* where *mask* selects a populated sample, tallying into *removed*."""
     if column not in frame.columns:
@@ -1130,10 +1235,11 @@ def mask_impossible_shortwave(
     if "Sw_dw" not in frame.columns:
         return frame, removed
     index = pd.DatetimeIndex(frame.index)
-    mu0 = np.clip(cos_zenith(index, STATION_SITE, STATION_UTC_OFFSET_HOURS), 0.0, None)
+    centroid = averaging_centroid(index)
+    mu0 = np.clip(cos_zenith(centroid, STATION_SITE, STATION_UTC_OFFSET_HOURS), 0.0, None)
     geometry = (
         BSRN_CEILING_SOLAR_CONSTANT_WM2
-        * eccentricity_correction(index)
+        * eccentricity_correction(centroid)
         * mu0**BSRN_CEILING_MU0_EXPONENT
     )
 
@@ -1162,7 +1268,7 @@ def mask_impossible_shortwave(
         # the four components, so a component the sun cannot produce is inside it.
         # Only the daytime verdicts: the floor fires on the nocturnal offset, over
         # a component whose true value is zero, and the night net is longwave.
-        if column == "Sw_dw":
+        if column in NET_RADIATION_COMPONENTS:
             _blank("Net_CNR1", daytime_fault)
 
     # A shaded sensor measures a subset of what the unshaded one sees, so this is
@@ -1361,6 +1467,9 @@ def nocturnal_offset_statistics(
         nocturnal masking.
     columns:
         Shortwave channels to measure. A column absent from *frame* is skipped.
+    elevation_deg:
+        Solar elevation over *frame*'s index in degrees, ``(N,)``, when the
+        caller already holds it; computed here otherwise.
 
     Returns
     -------
@@ -1396,9 +1505,7 @@ def nocturnal_offset_statistics(
                 for year, median in values.groupby(stamps.year).median().items()
             },
             monthly_median_wm2={str(month): float(median) for month, median in monthly.items()},
-            drift_alarms=[
-                (str(month), float(monthly[month])) for month in monthly.index[drift.fillna(False)]
-            ],
+            drift_alarms=[(str(month), float(monthly[month])) for month in monthly.index[drift]],
         )
     return statistics
 
@@ -1408,18 +1515,21 @@ def station_elevation_deg(index: pd.DatetimeIndex) -> NDArray:
 
     One spelling for every stage that needs it: a second copy of the call is a
     second definition of "night", free to drift from the first without failing.
+    The geometry is evaluated at :func:`averaging_centroid` of *index*, not at
+    the logger's own end-stamp.
 
     Parameters
     ----------
     index:
-        Naive station-local stamps, ``(N,)``.
+        Naive station-local stamps as the logger wrote them, ``(N,)``.
 
     Returns
     -------
     numpy.ndarray
-        Degrees above the local horizon, ``(N,)``.
+        Degrees above the local horizon at the centre of each averaging
+        interval, ``(N,)``.
     """
-    return solar_elevation_deg(index, STATION_SITE, STATION_UTC_OFFSET_HOURS)
+    return solar_elevation_deg(averaging_centroid(index), STATION_SITE, STATION_UTC_OFFSET_HOURS)
 
 
 def mask_nocturnal_shortwave(
@@ -1451,6 +1561,9 @@ def mask_nocturnal_shortwave(
     sources:
         Raw columns per unified channel, or ``None`` to mask the unified columns
         alone.
+    elevation_deg:
+        Solar elevation over *frame*'s index in degrees, ``(N,)``, when the
+        caller already holds it; computed here otherwise.
 
     Returns
     -------
@@ -1530,6 +1643,9 @@ def close_nocturnal_net_radiation(
     frame:
         Frame in W/m2 with a naive station-local index, holding ``Lw_dw``,
         ``Lw_up`` and ``Net_CNR1``.
+    elevation_deg:
+        Solar elevation over *frame*'s index in degrees, ``(N,)``, when the
+        caller already holds it; computed here otherwise.
 
     Returns
     -------

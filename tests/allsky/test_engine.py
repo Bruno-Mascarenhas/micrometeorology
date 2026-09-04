@@ -11,6 +11,7 @@ short circuit and the discarded best on a monitor change.
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from allsky.data.splits import create_day_splits, save_split_artifact
 from allsky.evaluation.evaluator import evaluate_checkpoint
 from allsky.training.checkpointing import capture_rng_state, load_checkpoint
 from allsky.training.engine import _restore, run_experiment
+from allsky.training.errors import TrainingError
 from labmim_core import solar
 from labmim_core.site import SiteConfig
 
@@ -245,6 +247,42 @@ class TestResumeEquivalenceMultiWorker:
             assert summary_b["final_val_metrics"][key] == pytest.approx(value, abs=1e-5, rel=1e-4)
 
 
+class _DaySplit:
+    """Stand-in for the split artifact: ``_select_splits`` reads only ``days_for``."""
+
+    def __init__(self, train: list[str], val: list[str]) -> None:
+        self._days = {"train": train, "val": val}
+
+    def days_for(self, name: str) -> list[str]:
+        return self._days[name]
+
+
+def _manifest_of_days(*day_ids: str) -> pd.DataFrame:
+    """A manifest carrying only the column ``_select_splits`` slices on."""
+    return pd.DataFrame({"day_id": list(day_ids)})
+
+
+def test_a_split_with_no_validation_days_is_refused_before_anything_is_built():
+    from allsky.training.engine import _select_splits
+
+    with pytest.raises(TrainingError, match="no validation days"):
+        _select_splits(_manifest_of_days("2025-03-20"), _DaySplit(["2025-03-20"], []))
+
+
+def test_train_days_absent_from_the_manifest_are_refused_rather_than_training_on_nothing():
+    from allsky.training.engine import _select_splits
+
+    with pytest.raises(TrainingError, match="no train rows"):
+        _select_splits(_manifest_of_days("2025-03-20"), _DaySplit(["2025-03-19"], ["2025-03-20"]))
+
+
+def test_val_days_absent_from_the_manifest_are_refused_rather_than_validating_on_nothing():
+    from allsky.training.engine import _select_splits
+
+    with pytest.raises(TrainingError, match="no val rows"):
+        _select_splits(_manifest_of_days("2025-03-20"), _DaySplit(["2025-03-20"], ["2025-03-21"]))
+
+
 class TestMetricsResumeTruncation:
     def test_stale_row_past_checkpoint_is_dropped_on_resume(self, tmp_path: Path):
         # metrics.csv/json are flushed before last.ckpt each epoch, so a crash in
@@ -282,6 +320,32 @@ class TestMetricsResumeTruncation:
         rows = pd.read_csv(run_dir / "metrics.csv")
         assert list(rows["epoch"]) == [1, 2, 3]
         assert len(json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))) == 3
+
+
+def test_a_sample_id_the_embedding_store_does_not_carry_is_named_before_the_first_epoch():
+    """Without this the reader raises a bare KeyError mid-epoch, after the datasets and
+    the model are already built."""
+    from allsky.training.engine import _validate_embedding_coverage
+
+    reader = DictEmbeddingReader(["a", "b"])
+    train_df = pd.DataFrame({"sample_id": ["a", "b"]})
+    val_df = pd.DataFrame({"sample_id": ["c"]})
+
+    with pytest.raises(TrainingError, match=r"missing 1 required sample_id\(s\): c"):
+        _validate_embedding_coverage(reader, train_df, val_df)
+
+
+def test_more_missing_sample_ids_than_the_preview_holds_are_counted_and_elided():
+    from allsky.training.engine import _validate_embedding_coverage
+
+    reader = DictEmbeddingReader(["s00"])
+    train_df = pd.DataFrame({"sample_id": [f"s{i:02d}" for i in range(12)]})
+    val_df = pd.DataFrame({"sample_id": ["s00"]})
+
+    with pytest.raises(TrainingError, match="missing 11 required") as excinfo:
+        _validate_embedding_coverage(reader, train_df, val_df)
+
+    assert str(excinfo.value).endswith(" ...")
 
 
 class TestWindowStrategies:
@@ -352,6 +416,113 @@ class TestResumeProvenance:
         assert (run_dir / "metrics.json").read_text(encoding="utf-8") == history_before
         assert list(pd.read_csv(run_dir / "metrics.csv")["epoch"]) == [1, 2]
 
+    def test_resume_into_another_dhi_parameterization_is_refused(self, tmp_path: Path):
+        """The head has the same shape under ``raw`` and ``clearsky_index``, and
+        run_experiment refits the target normalizer on the dataset before the
+        checkpoint is read."""
+        root, manifest, _ = _make_dataset(tmp_path, n_days=3)
+        run_dir = tmp_path / "run"
+        run_experiment(
+            _cfg(root, epochs=1),
+            data_root=root,
+            output_dir=run_dir,
+            embedding_reader=_reader(manifest),
+        )
+        rescaled = _cfg(
+            root,
+            epochs=2,
+            targets={
+                "dhi": {"enabled": True, "loss": "huber", "parameterization": "clearsky_index"},
+                "sky": {"enabled": True},
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="parameterization"):
+            run_experiment(
+                rescaled,
+                data_root=root,
+                output_dir=run_dir,
+                resume="auto",
+                embedding_reader=_reader(manifest),
+            )
+
+    @pytest.mark.parametrize(
+        ("field", "replacement"),
+        [
+            ("manifest_sha256", "0" * 64),
+            ("dataset_version", "not-the-version-this-ran-on"),
+        ],
+    )
+    def test_a_checkpoint_from_another_dataset_build_is_refused(
+        self, tmp_path: Path, field: str, replacement: str
+    ):
+        """Six fields are compared and only ``split_id`` had a test. These two
+        say the manifest itself was rebuilt under the same day split, which
+        leaves the weights valid-looking and the target scaling wrong.
+        """
+        root, manifest, _ = _make_dataset(tmp_path, n_days=3)
+        run_dir = tmp_path / "run"
+        run_experiment(
+            _cfg(root, epochs=1),
+            data_root=root,
+            output_dir=run_dir,
+            embedding_reader=_reader(manifest),
+        )
+
+        checkpoint = load_checkpoint(run_dir / "last.ckpt")
+        checkpoint[field] = replacement
+        torch.save(checkpoint, run_dir / "last.ckpt")
+
+        with pytest.raises(RuntimeError, match=field):
+            run_experiment(
+                _cfg(root, epochs=2),
+                data_root=root,
+                output_dir=run_dir,
+                resume="auto",
+                embedding_reader=_reader(manifest),
+            )
+
+    @pytest.mark.parametrize(
+        ("path_in_config", "replacement", "named"),
+        [
+            (("data", "alignment", "strategy"), "nearest", "alignment.strategy"),
+            (("data", "alignment", "window_minutes"), 99.0, "alignment.window_minutes"),
+            (("data", "input_mode"), "image", "input_mode"),
+        ],
+    )
+    def test_a_checkpoint_pooled_another_way_is_refused(
+        self, tmp_path: Path, path_in_config: tuple[str, ...], replacement: object, named: str
+    ):
+        """These decide what every sample's embedding IS and leave no
+        architectural trace: the attention pooler's ``(1, 1, D)`` query does not
+        depend on the sequence length, so ``load_state_dict`` accepts the old
+        weights and the run carries on over differently-pooled inputs.
+        """
+        root, manifest, _ = _make_dataset(tmp_path, n_days=3)
+        run_dir = tmp_path / "run"
+        run_experiment(
+            _cfg(root, epochs=1),
+            data_root=root,
+            output_dir=run_dir,
+            embedding_reader=_reader(manifest),
+        )
+
+        checkpoint = load_checkpoint(run_dir / "last.ckpt")
+        section = checkpoint["config"]
+        for key in path_in_config[:-1]:
+            section = section[key]
+        section[path_in_config[-1]] = replacement
+        torch.save(checkpoint, run_dir / "last.ckpt")
+
+        with pytest.raises(RuntimeError, match=re.escape(named)):
+            run_experiment(
+                _cfg(root, epochs=2),
+                data_root=root,
+                output_dir=run_dir,
+                resume="auto",
+                embedding_reader=_reader(manifest),
+            )
+
     def test_pre_provenance_checkpoint_still_resumes(self, tmp_path: Path):
         # save_checkpoint allows split_id / manifest_sha256 to be None, so a
         # checkpoint carrying no provenance at all must still resume.
@@ -416,6 +587,49 @@ class TestResumeCosineHorizon:
 
 
 class TestEarlyStopping:
+    def test_climatology_under_clearsky_index_is_fitted_on_the_ratio_the_head_sees(
+        self, tmp_path: Path
+    ):
+        """The baseline was fitted on the W/m2 column while its normalizer described
+        the ratio to clear sky, so it predicted a constant about a hundred times the
+        physical diffuse and every skill score against it was meaningless."""
+        root, manifest, _ = _make_dataset(tmp_path)
+        cfg = _cfg(
+            root,
+            model="climatology",
+            epochs=1,
+            targets={
+                "dhi": {"enabled": True, "loss": "huber", "parameterization": "clearsky_index"},
+                "sky": {"enabled": True},
+            },
+        )
+
+        summary = run_experiment(
+            cfg, data_root=root, output_dir=tmp_path / "run", embedding_reader=_reader(manifest)
+        )
+
+        assert summary["final_val_metrics"]["dhi_mae"] < 500.0
+
+    def test_a_misspelt_monitor_is_refused_before_the_first_epoch_trains(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The monitor was only checked against the first epoch's val metrics, so a
+        typo cost a whole epoch of GPU before it surfaced."""
+        root, manifest, _ = _make_dataset(tmp_path)
+
+        def _never_trains(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("an epoch trained before the monitor was checked")
+
+        monkeypatch.setattr("allsky.training.engine._train_epoch", _never_trains)
+
+        with pytest.raises(TrainingError, match="val_dhi_mea"):
+            run_experiment(
+                _cfg(root, epochs=2, monitor="val_dhi_mea"),
+                data_root=root,
+                output_dir=tmp_path / "run",
+                embedding_reader=_reader(manifest),
+            )
+
     def test_climatology_plateau_triggers_early_stop(self, tmp_path: Path):
         root, manifest, _ = _make_dataset(tmp_path)
         cfg = _cfg(
@@ -652,3 +866,71 @@ class TestDeviceErrors:
                 device="cuda",
                 embedding_reader=_reader(manifest),
             )
+
+
+class _EpochProbeDataset:
+    """The `set_epoch` contract, reduced to what a worker actually returns.
+
+    `_make_loader` decides persistence from the dataset's `augment`, so the probe
+    carries one; each item is the epoch the process serving it holds, which is
+    exactly what the augmentation RNG seeds on.
+    """
+
+    class _Augment:
+        enabled = True
+
+    def __init__(self, *, augmenting: bool) -> None:
+        self.epoch = 0
+        self.augment = self._Augment() if augmenting else None
+
+    def __len__(self) -> int:
+        return 2
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        return {"epoch": torch.tensor(self.epoch)}
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+
+def _epochs_seen_by_workers(dataset: _EpochProbeDataset, cfg: ExperimentConfig) -> list[set[int]]:
+    from allsky.training.engine import _make_loader
+
+    loader = _make_loader(dataset, cfg, "cpu", batch_size=2, shuffle=False)
+    seen = []
+    for epoch in range(3):
+        dataset.set_epoch(epoch)
+        seen.append({int(value) for batch in loader for value in batch["epoch"]})
+    return seen
+
+
+class TestSetEpochReachesTheWorkers:
+    """Persistent workers pickle the dataset on the FIRST iteration and never
+    again, so every `set_epoch` after it was invisible to them: the augmentation
+    draw the engine's own comment says must vary per epoch replayed epoch 0 for
+    the whole run, and a resumed run froze at its start epoch instead."""
+
+    def test_an_augmenting_dataset_advances_the_epoch_in_its_workers(self, tmp_path: Path):
+        cfg = _cfg(tmp_path, num_workers=2)
+
+        assert _epochs_seen_by_workers(_EpochProbeDataset(augmenting=True), cfg) == [
+            {0},
+            {1},
+            {2},
+        ]
+
+    def test_a_dataset_that_does_not_read_the_epoch_keeps_its_persistent_workers(
+        self, tmp_path: Path
+    ):
+        """Nothing else reads the epoch, so nothing else pays the respawn."""
+        from allsky.training.engine import _make_loader
+
+        loader = _make_loader(
+            _EpochProbeDataset(augmenting=False),
+            _cfg(tmp_path, num_workers=2),
+            "cpu",
+            batch_size=2,
+            shuffle=False,
+        )
+
+        assert loader.persistent_workers is True

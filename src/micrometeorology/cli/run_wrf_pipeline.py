@@ -35,6 +35,10 @@ from micrometeorology.wrf.batch import FigureTask, _max_tasks_per_child, default
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
+#: What this pipeline renders AND exports by default. Deliberately shorter than
+#: :data:`micrometeorology.cli.export_wrf_geojson.DEFAULT_VARS`: the nine ids
+#: that list adds are JSON-only products with no figure. Coverage of the
+#: manifest is therefore judged against that list, never against this one.
 DEFAULT_VARS = [
     "temperature",
     "pressure",
@@ -91,6 +95,7 @@ def run(
 ) -> None:
     """Run WRF processing locally: figures + GeoJSON + WebM."""
     setup_logging(log_level)
+    from micrometeorology.cli import export_wrf_geojson
     from micrometeorology.cli.render_wrf_maps import resolve_selection
     from micrometeorology.cli.wrfout_selection import reject_output_id_variables
     from micrometeorology.wrf import reader as wrf_reader
@@ -101,9 +106,6 @@ def run(
     geojson_dir = base_out / "GeoJSON"
     video_dir = base_out / "videos"
 
-    resolved_workers = workers or default_workers()
-    if resolved_workers < 1:
-        raise typer.BadParameter("--workers must be >= 1")
     # Phase 3 encodes the PNGs Phase 1 rendered, so --no-figures leaves it
     # nothing to do: its `also_video and png_paths` gate would be unconditionally
     # false and the run would exit 0 having produced none of the requested
@@ -112,10 +114,15 @@ def run(
         raise typer.BadParameter("--also-video encodes the rendered figures; drop --no-figures")
 
     var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
+    if variables is not None and not var_list:
+        raise typer.BadParameter(f"--variables names no variable (got {variables!r})")
     # An output file id (-v TSK) reaches the raw-NetCDF passthrough in BOTH
     # phases and publishes unconverted Kelvin into the PNGs and JSONs that
     # skin_temperature owns, so it is refused before a frame is rendered.
     reject_output_id_variables(var_list)
+    resolved_workers = default_workers() if workers is None else workers
+    if resolved_workers < 1:
+        raise typer.BadParameter("--workers must be >= 1")
     paths = resolve_selection(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")
@@ -200,7 +207,10 @@ def run(
             json_dir,
             results,
             json_var_list,
-            covers_every_variable=set(json_var_list) >= set(DEFAULT_VARS),
+            # Against the JSON producer's OWN default, not this pipeline's: the
+            # two lists differ (this one omits the nine derived-radiation and
+            # overlay ids).
+            covers_every_variable=set(json_var_list) >= set(export_wrf_geojson.DEFAULT_VARS),
         )
         if manifest_path:
             typer.echo(f"  ✓ Manifest: {manifest_path}")

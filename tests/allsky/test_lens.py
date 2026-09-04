@@ -44,8 +44,12 @@ class TestPixelOf:
         equidistant = LensCalibration(**common, equidistant=True)
         equisolid = LensCalibration(**common, equidistant=False)
 
-        assert equidistant.pixel_of(np.pi / 4, 0.0) != equisolid.pixel_of(np.pi / 4, 0.0)
-        assert equidistant.pixel_of(0.0, 0.0) == equisolid.pixel_of(0.0, 0.0)
+        one_pixel = 1.0
+        off_axis_equidistant = equidistant.pixel_of(np.pi / 4, 0.0)
+        off_axis_equisolid = equisolid.pixel_of(np.pi / 4, 0.0)
+
+        assert abs(off_axis_equidistant[0] - off_axis_equisolid[0]) > one_pixel
+        assert equidistant.pixel_of(0.0, 0.0) == pytest.approx(equisolid.pixel_of(0.0, 0.0))
 
 
 class TestKeepMask:

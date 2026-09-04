@@ -158,7 +158,7 @@ def r_squared(observed: NDArray, predicted: NDArray, clean: bool = True) -> floa
         return float("nan")
     ss_res = np.sum(np.square(obs - pred))
     ss_tot = np.sum(np.square(obs - np.mean(obs)))
-    if ss_tot == 0:
+    if np.isclose(np.std(obs), 0.0):
         return float("nan")
     return float(1.0 - ss_res / ss_tot)
 
@@ -215,7 +215,7 @@ def d_index(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
     obs_mean = np.mean(obs)
     numerator = np.sum(np.square(obs - pred))
     denominator = np.sum(np.square(np.abs(pred - obs_mean) + np.abs(obs - obs_mean)))
-    if denominator == 0:
+    if np.isclose(np.std(obs), 0.0):
         return float("nan")
     return float(1.0 - numerator / denominator)
 
@@ -245,7 +245,7 @@ def ioa(observed: NDArray, predicted: NDArray, clean: bool = True) -> float:
     obs_mean = np.mean(obs)
     numerator = np.sum(np.abs(pred - obs))
     denominator = 2.0 * np.sum(np.abs(obs - obs_mean))
-    if denominator == 0:
+    if np.isclose(np.std(obs), 0.0):
         return float("nan")
     ratio = numerator / denominator
     if ratio <= 1:
@@ -304,7 +304,10 @@ CIRCULAR_METRICS = frozenset({"RMSE", "MAE", "MBE"})
 # (``WindDir_SD``, ``Wd_StdDev``, ``WindDir_SD1_WVT``) are excluded first: a
 # standard deviation of direction is an ordinary scalar spread, so suppressing
 # its R² and r would throw away valid numbers.
-_CIRCULAR_EXACT = frozenset({"wd", "winddir", "wind_dir", "wind_direction", "direction"})
+#: ``wdir`` is the wrf-python / NCL spelling, which is what the WRF comparison
+#: CLIs ingest. On the line, 10 deg against 350 deg reads as 340 deg of error
+#: instead of 20.
+_CIRCULAR_EXACT = frozenset({"wd", "wdir", "winddir", "wind_dir", "wind_direction", "direction"})
 # Every prefix keeps its separator ("dir_", not "dir") so that a direct-beam
 # radiation column such as ``Direct_Wm2`` is not mistaken for a bearing.
 _CIRCULAR_PREFIXES = ("wd_", "winddir", "wind_dir", "wind_direction", "direction_", "dir_")
@@ -346,7 +349,9 @@ def compute_all(
     observed, predicted:
         Aligned samples of one variable, shape ``(N,)``, in the variable's own
         physical unit. Coerced to ``float64``; non-finite pairs are dropped once
-        here rather than by each metric.
+        here and every metric is then called with ``clean=False``. Letting each
+        of the eight refilter costs a second pair of full-array isfinite scans
+        apiece, measured at +28 % over the archive's 1,037,789 rows.
     circular:
         Set for a bearing in degrees. Residuals are then wrapped to the shortest
         angular separation and only :data:`CIRCULAR_METRICS` are computed; the
@@ -359,9 +364,6 @@ def compute_all(
         is parsed downstream — so a suppressed metric is an empty cell, not a
         missing row, and fewer than two valid pairs give every key ``NaN``.
     """
-    # Filtered once here and handed to every metric with clean=False: letting
-    # each of the eight refilter costs a second pair of full-array isfinite
-    # scans apiece, measured at +28 % over the archive's 1,037,789 rows.
     obs, pred = _clean_pairs(observed, predicted)
     if len(obs) < 2:
         return {name: float("nan") for name in ALL_METRICS}

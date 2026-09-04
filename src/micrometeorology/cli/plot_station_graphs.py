@@ -8,15 +8,18 @@ analysis of this repository can see it.
 
 The nine-image contract (``site`` command)::
 
-    temperatura.png      <- AirT1_C_Avg    (line,    Temperatura do Ar)
-    umidade.png          <- RH1            (line,    Umidade Relativa do Ar)
-    pressao.png          <- BP1_mbar_Avg   (line,    Pressao Atmosferica)
-    precipitacao.png     <- PL01_mm_Tot    (bar,     Precipitacao)
-    velocidade.png       <- WS_ms          (line,    Velocidade do Vento)
-    direcao.png          <- WindDir        (scatter, Direcao do Vento, 0-360)
-    balanco.png          <- Net_Wm2_Avg    (line + optional CM3/CG3 components)
-    radiacao_difusa.png  <- PSP_Wm2_Avg    (line,    Radiacao Difusa)
-    radiacao_par.png     <- PAR_Wm2_Avg    (line,    Radiacao PAR)
+    temperatura.png      <- T -> AirT1_C_Avg         (line,    Temperatura do Ar)
+    umidade.png          <- ur -> RH1                (line,    Umidade Relativa do Ar)
+    pressao.png          <- pressure -> BP1_mbar_Avg (line,    Pressao Atmosferica)
+    precipitacao.png     <- precip -> PL01_mm_Tot    (bar,     Precipitacao)
+    velocidade.png       <- WS -> WS_ms              (line,    Velocidade do Vento)
+    direcao.png          <- WD -> WindDir            (scatter, Direcao do Vento, 0-360)
+    balanco.png          <- Net_CNR1 -> Net_Wm2_Avg  (line + optional CM3/CG3 components)
+    radiacao_difusa.png  <- Sw_dif -> PSP_Wm2_Avg    (line,    Radiacao Difusa)
+    radiacao_par.png     <- Sw_par -> PAR_Wm2_Avg    (line,    Radiacao PAR)
+
+The left name of each chain is the unified archive column, the right one the raw
+logger column; the first present in the frame is the one plotted.
 
 Column names are **overridable** (a logger change must not require a code edit):
 per-graph via repeatable ``--col KEY=COLUMN`` options, or in bulk via a small
@@ -45,7 +48,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import matplotlib
 
@@ -88,7 +91,7 @@ app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class GraphSpec:
     """One entry of the nine-image monitoring-page contract.
 
@@ -110,9 +113,12 @@ class GraphSpec:
     key: str
     filename: str
     ylabel: str
-    kind: str
+    kind: Literal["line", "scatter", "bar", "balance"]
     ylim: tuple[float, float] | None = None
 
+
+# 90% of one hour, in matplotlib's date units (days).
+HOURLY_BAR_WIDTH_DAYS = 0.9 / 24.0
 
 # Ordered exactly as the monitoring page lays the cards out.
 GRAPH_SPECS: tuple[GraphSpec, ...] = (
@@ -258,7 +264,7 @@ def load_graph_config(
         )
         raw_dir = data.get("direction_components")
         if raw_dir:
-            if len(raw_dir) != 2:
+            if not isinstance(raw_dir, list | tuple) or len(raw_dir) != 2:
                 raise ValueError("direction_components must be a [u, v] pair")
             direction_components = (str(raw_dir[0]), str(raw_dir[1]))
 
@@ -272,6 +278,30 @@ def load_graph_config(
         columns[key] = _as_chain(value)
 
     return columns, balance, direction_components
+
+
+def _read_time_indexed(path: Path) -> pd.DataFrame:
+    """Read a Parquet or CSV frame and return it on a sorted ``DatetimeIndex``.
+
+    Parameters
+    ----------
+    path:
+        ``.parquet`` from ``labmim-archive``, or the CSV ``labmim-sensor-process``
+        exports with the timestamp in its first column.
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``(N, C)``, indexed by naive station-local stamps in ascending order.
+    """
+    frame = (
+        pd.read_parquet(path)
+        if path.suffix == ".parquet"
+        else pd.read_csv(path, index_col=0, parse_dates=True)
+    )
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        frame.index = pd.to_datetime(frame.index)
+    return frame.sort_index()
 
 
 def load_hourly_csv(input_path: Path, last_days: int) -> pd.DataFrame:
@@ -294,14 +324,7 @@ def load_hourly_csv(input_path: Path, last_days: int) -> pd.DataFrame:
     pandas.DataFrame
         The (optionally clipped) frame with a sorted ``DatetimeIndex``.
     """
-    df = (
-        pd.read_parquet(input_path)
-        if input_path.suffix == ".parquet"
-        else pd.read_csv(input_path, index_col=0, parse_dates=True)
-    )
-    if not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index)
-    df = df.sort_index()
+    df = _read_time_indexed(input_path)
 
     if last_days > 0 and not df.empty:
         cutoff = df.index.max() - pd.Timedelta(days=last_days)
@@ -400,22 +423,30 @@ def _plot_scatter(ax: plt.Axes, series: pd.Series, *, label: str) -> None:
 
 def _plot_bar(ax: plt.Axes, series: pd.Series, *, label: str) -> None:
     """Draw hourly precipitation accumulation as bars."""
-    width = 0.9 / 24.0  # matplotlib date units are days; ~90% of one hour
-    ax.bar(series.index, series.to_numpy(), width=width, color="tab:blue", label=label)
+    ax.bar(
+        series.index,
+        series.to_numpy(),
+        width=HOURLY_BAR_WIDTH_DAYS,
+        color="tab:blue",
+        label=label,
+    )
 
 
 def _plot_balance(
     ax: plt.Axes,
-    net: pd.Series,
+    net: pd.Series | None,
     components: dict[str, pd.Series],
 ) -> None:
     """Draw net radiation plus any available four-stream components.
 
     ``Rn = (SW_down - SW_up) + (LW_down - LW_up)``: the upward channels are
     plotted negated so the lines visually sum toward ``Rn``, following the
-    legacy ``graficos1_UFBA_v5.py`` convention.
+    legacy ``graficos1_UFBA_v5.py`` convention.  *net* is ``None`` when the
+    logger's own net column carries nothing over the window, which leaves the
+    four measured components to speak for the balance on their own.
     """
-    ax.plot(net.index, net.to_numpy(), "p-", color="black", label="Rn")
+    if net is not None:
+        ax.plot(net.index, net.to_numpy(), "p-", color="black", label="Rn")
     styling = {
         "sw_down": ("SW_dw", 1.0),
         "sw_up": ("SW_up", -1.0),
@@ -479,7 +510,6 @@ def render_site_graphs(
     *,
     raw: pd.DataFrame | None = None,
     wrf: pd.DataFrame | None = None,
-    wrf_columns: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[list[Path], list[str], list[str]]:
     """Render every contract graph whose source column is present.
 
@@ -501,9 +531,6 @@ def render_site_graphs(
         chart stays one quantity.
     wrf:
         Optional model frame drawn on top, hourly, on a time index.
-    wrf_columns:
-        Graph key → candidate model columns, best first;
-        :data:`DEFAULT_WRF_COLUMNS` when omitted.
 
     Returns
     -------
@@ -548,8 +575,9 @@ def render_site_graphs(
             series = df[column]
 
         fig, ax = create_figure()
+        drawn_raw = raw is not None and column in raw.columns
         try:
-            if raw is not None and column in raw.columns:
+            if raw is not None and drawn_raw:
                 _plot_raw(
                     ax,
                     raw[column] % 360.0 if spec.kind == "scatter" else raw[column],
@@ -560,8 +588,18 @@ def render_site_graphs(
             # A column that EXISTS but holds no finite value over the window is
             # skipped like an absent one: it draws nothing yet still registers a
             # legend entry, which reads as a line off the scale.
-            drawn_raw = raw is not None and column in raw.columns
-            if not series.notna().any():
+            present = (
+                {
+                    channel: df[resolved_component]
+                    for channel, chain in balance_components.items()
+                    if (resolved_component := resolve_column(df, chain)) is not None
+                    and df[resolved_component].notna().any()
+                }
+                if spec.kind == "balance"
+                else {}
+            )
+            station_drawn = series.notna().any()
+            if not station_drawn and not present:
                 logger.warning(
                     "Column %r has no value over the plotted window -- "
                     "drawing %s without the station layer",
@@ -576,14 +614,18 @@ def render_site_graphs(
             elif spec.kind == "bar":
                 _plot_bar(ax, series, label=column)
             elif spec.kind == "balance":
-                present = {
-                    channel: df[resolved_component]
-                    for channel, chain in balance_components.items()
-                    if (resolved_component := resolve_column(df, chain)) is not None
-                }
-                _plot_balance(ax, series, present)
+                if not station_drawn:
+                    logger.warning(
+                        "Column %r has no value over the plotted window -- "
+                        "drawing %s from the four components alone",
+                        column,
+                        spec.filename,
+                    )
+                _plot_balance(ax, series if station_drawn else None, present)
+            else:
+                raise ValueError(f"{spec.filename}: unknown graph kind {spec.kind!r}")
 
-            model, resolved = _wrf_series(wrf, spec.key, wrf_columns or DEFAULT_WRF_COLUMNS)
+            model, resolved = _wrf_series(wrf, spec.key, DEFAULT_WRF_COLUMNS)
             if model is not None:
                 _plot_wrf(
                     ax,
@@ -620,14 +662,8 @@ def render_site_graphs(
 
 def _load_raw_layer(path: Path, hourly: pd.DataFrame) -> pd.DataFrame:
     """Load the raw record and clip it to the window the hourly frame covers."""
-    frame = (
-        pd.read_parquet(path)
-        if path.suffix == ".parquet"
-        else pd.read_csv(path, index_col=0, parse_dates=True)
-    )
-    if not isinstance(frame.index, pd.DatetimeIndex):
-        frame.index = pd.to_datetime(frame.index)
-    clipped: pd.DataFrame = frame.sort_index().loc[hourly.index.min() : hourly.index.max()]
+    frame = _read_time_indexed(path)
+    clipped: pd.DataFrame = frame.loc[hourly.index.min() : hourly.index.max()]
     logger.info("raw layer: %d samples over the plotted window", len(clipped))
     return clipped
 
@@ -636,7 +672,9 @@ def _load_wrf(path: Path, hourly: pd.DataFrame) -> pd.DataFrame:
     """Load the model series through the shared defensive reader and clip it."""
     from micrometeorology.wrf.operational_record import read_wrf_series
 
-    frame = read_wrf_series(path)
+    frame = read_wrf_series(
+        path, consumes=[name for chain in DEFAULT_WRF_COLUMNS.values() for name in chain]
+    )
     clipped: pd.DataFrame = frame.loc[hourly.index.min() : hourly.index.max()]
     logger.info("wrf layer: %d hours over the plotted window", len(clipped))
     return clipped
@@ -715,7 +753,10 @@ def site(
     """
     setup_logging(log_level)
 
-    columns, balance_components, direction_components = load_graph_config(config, col)
+    try:
+        columns, balance_components, direction_components = load_graph_config(config, col)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     df = load_hourly_csv(input_path, last_days)
 
     if df.empty:

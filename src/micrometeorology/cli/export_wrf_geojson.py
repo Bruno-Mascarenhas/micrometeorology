@@ -86,11 +86,6 @@ def _missing_domains(paths: list[Path], domains: tuple[int, ...]) -> tuple[int, 
     return tuple(d for d in sorted(set(domains)) if f"d{d:02d}" not in found)
 
 
-def _matching_wrfout_paths(wrf_dir: Path | str, date: str, domains: tuple[int, ...]) -> list[Path]:
-    """Glob the requested day, reporting a mistyped ``--date`` as a usage error."""
-    return glob_wrfout_day(wrf_dir, date, domains)
-
-
 def _resolve_paths(
     wrf_dir: Path | str | None,
     date: str | None,
@@ -121,7 +116,7 @@ def _resolve_paths(
         if not paths:
             typer.echo(f"  ⚠ No wrfout files found in {wrf_dir}")
     else:
-        paths = _matching_wrfout_paths(wrf_dir, date, domains)
+        paths = glob_wrfout_day(wrf_dir, date, domains)
         if not paths:
             typer.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
     return paths, _missing_domains(paths, domains)
@@ -197,8 +192,13 @@ def run(
     setup_logging(log_level)
 
     var_list = list(parse_csv(variables)) if variables else DEFAULT_VARS
+    if variables is not None and not var_list:
+        raise typer.BadParameter(f"--variables names no variable (got {variables!r})")
     var_list = jobs.normalize_var_list(var_list, collapse_heights=False)
     reject_output_id_variables(var_list)
+    resolved_workers = default_workers() if workers is None else workers
+    if resolved_workers < 1:
+        raise typer.BadParameter("--workers must be >= 1")
     paths, missing_domains = _resolve_paths(wrf_dir, date, parse_int_csv(domains), dataset)
     if not paths:
         typer.echo("No WRF files found.")
@@ -207,10 +207,6 @@ def run(
         typer.echo(f"  ⚠ No wrfout file for requested domain d{domain:02d}")
     if strict and missing_domains:
         raise typer.Exit(code=1)
-
-    resolved_workers = workers or default_workers()
-    if resolved_workers < 1:
-        raise typer.BadParameter("--workers must be >= 1")
 
     typer.echo(f"Files: {[p.name for p in paths]}")
     typer.echo(f"Variables: {var_list}")

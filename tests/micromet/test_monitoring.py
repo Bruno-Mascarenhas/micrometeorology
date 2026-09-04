@@ -11,6 +11,7 @@ reported, and the present case must be picked up.
 """
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -23,8 +24,10 @@ from micrometeorology.cli.export_monitoring import (
     PAYLOAD_FORMAT,
     _axis,
     _regular,
+    _round,
 )
 from micrometeorology.cli.export_monitoring import app as monitoring_app
+from micrometeorology.sensors.calibration import load_sensor_switches
 from micrometeorology.sensors.monitoring import (
     MONITORING_CHARTS,
     MonitoringSeries,
@@ -32,6 +35,8 @@ from micrometeorology.sensors.monitoring import (
 )
 
 runner = CliRunner()
+
+_CALIBRATIONS = Path(__file__).resolve().parents[2] / "configs" / "micromet" / "calibrations.yaml"
 
 STATION_COLUMNS = [
     "T",
@@ -79,10 +84,17 @@ class TestChartCatalogue:
             assert len(ids) == len(set(ids)), chart.id
 
     def test_every_station_column_exists_in_the_archive_schema(self) -> None:
-        """A typo here would render an empty chart with no error anywhere."""
+        """A typo here would render an empty chart with no error anywhere.
+
+        The oracle is the shipped ``calibrations.yaml``, which is where the
+        unified names the archive writes are declared: a hand-typed list here
+        would keep the old spelling on the day one of them is renamed.
+        """
+        unified = {switch.unified_name for switch in load_sensor_switches(_CALIBRATIONS)}
+
         for chart in MONITORING_CHARTS:
             for series in chart.series:
-                assert series.station in STATION_COLUMNS, f"{chart.id}/{series.id}"
+                assert series.station in unified, f"{chart.id}/{series.id}"
 
     def test_kinds_and_encodings_stay_within_the_contract(self) -> None:
         for chart in MONITORING_CHARTS:
@@ -140,8 +152,13 @@ class TestExporter:
         return payload
 
     def test_writes_the_declared_format(self, archive: Path, tmp_path: Path) -> None:
+        """The literal, not the constant it is produced from: the page matches
+        this string, so renaming the constant and the payload together would keep
+        this test green while every deployed reader stopped recognising the
+        document."""
         payload = self._payload(archive, tmp_path)
-        assert payload["format"] == PAYLOAD_FORMAT
+        assert payload["format"] == "labmim-monitoring-v1"
+        assert PAYLOAD_FORMAT == "labmim-monitoring-v1"
         assert len(payload["charts"]) == len(MONITORING_CHARTS)
 
     def test_axis_is_start_plus_step_not_one_stamp_per_sample(
@@ -155,9 +172,13 @@ class TestExporter:
         assert chart["layers"]["hourly"]["axis"]["step_minutes"] == 60
 
     @staticmethod
-    def _wrf_dat(tmp_path: Path) -> Path:
-        """A model file carrying temperature and nothing else."""
-        index = pd.date_range("2022-07-01", periods=169, freq="h")
+    def _wrf_dat(tmp_path: Path, index: pd.DatetimeIndex | None = None) -> Path:
+        """A model file carrying temperature and nothing else.
+
+        *index* defaults to the week of hours the ``archive`` fixture covers.
+        """
+        if index is None:
+            index = pd.date_range("2022-07-01", periods=169, freq="h")
         dat = tmp_path / "series_operacional.dat"
         pd.DataFrame(
             {
@@ -185,6 +206,32 @@ class TestExporter:
         candidates = charts["precipitacao"]["wrf_pending"]["precip"]
         assert "precip_mm" in candidates
         assert "RAINNC" not in candidates, "an accumulated field is not a per-interval layer"
+
+    def test_a_column_present_but_empty_this_window_is_reported_as_pending(
+        self, archive: Path, tmp_path: Path
+    ) -> None:
+        """An extraction that stops writing a variable empties one column rather
+        than shifting every column after it — the designed signal. Resolved on
+        presence alone, that column produced neither the model line (``_layer``
+        drops an all-null series) nor the pending note, which is the one case
+        the note exists for."""
+        index = pd.date_range("2022-07-01", periods=169, freq="h")
+        dat = tmp_path / "series_operacional.dat"
+        pd.DataFrame(
+            {
+                "year": index.year,
+                "month": index.month,
+                "day": index.day,
+                "hour": index.hour,
+                "T": np.full(len(index), np.nan),
+            }
+        ).to_csv(dat, index=False)
+
+        payload = self._payload(archive, tmp_path, "-w", str(dat))
+
+        charts = {chart["id"]: chart for chart in payload["charts"]}
+        assert charts["temperatura"]["layers"]["wrf"] is None
+        assert "t" in charts["temperatura"]["wrf_pending"]
 
     def test_gaps_serialise_as_null(self, archive: Path, tmp_path: Path) -> None:
         frame = pd.read_parquet(archive / "station_hourly.parquet")
@@ -233,17 +280,7 @@ class TestExporter:
         """``read_wrf_series`` drops hour 21 of every day, so the model index has
         a hole per day by construction. The published axis must still land the
         last sample on its real timestamp."""
-        index = pd.date_range("2022-07-01", periods=169, freq="h")
-        dat = tmp_path / "series_operacional.dat"
-        pd.DataFrame(
-            {
-                "year": index.year,
-                "month": index.month,
-                "day": index.day,
-                "hour": index.hour,
-                "T": np.arange(len(index), dtype=float),
-            }
-        ).to_csv(dat, index=False)
+        dat = self._wrf_dat(tmp_path)
 
         charts = {
             chart["id"]: chart
@@ -384,16 +421,7 @@ class TestExporter:
         station_last = pd.read_parquet(archive / "station_5min_qc.parquet").index.max()
         # Three days of model beyond the newest observation.
         index = pd.date_range(hourly.index.min(), station_last + pd.Timedelta(days=3), freq="h")
-        dat = tmp_path / "accumulating.dat"
-        pd.DataFrame(
-            {
-                "year": index.year,
-                "month": index.month,
-                "day": index.day,
-                "hour": index.hour,
-                "T": np.arange(len(index), dtype=float),
-            }
-        ).to_csv(dat, index=False)
+        dat = self._wrf_dat(tmp_path, index)
 
         payload = self._payload(archive, tmp_path, "-w", str(dat))
         window = payload["window"]
@@ -436,3 +464,100 @@ class TestExporter:
 
         assert pd.Timestamp(window["station_end"]) <= pd.Timestamp(window["end"])
         assert pd.Timestamp(window["station_end"]) >= pd.Timestamp(window["start"])
+
+
+class TestTheSerialisedNumbersCarryTheirUnitsPrecision:
+    """The CSV download must never carry a digit its chart does not show, and the
+    zero-decimal path is what keeps a W/m2 sample three characters shorter across
+    the whole payload."""
+
+    def test_a_zero_decimal_unit_is_written_as_an_int_not_a_rounded_float(self) -> None:
+        rounded = _round(pd.Series([-0.3, 489.5, np.nan]), 0)
+
+        assert rounded == [0, 490, None]
+        assert all(isinstance(value, int) for value in rounded if value is not None)
+        assert ".0" not in json.dumps(rounded)
+
+    def test_a_unit_with_decimals_keeps_them(self) -> None:
+        assert _round(pd.Series([12.3456, np.nan]), 1) == [12.3, None]
+
+    def test_a_chart_declaring_a_unit_with_no_declared_precision_is_refused(
+        self, archive: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`.get(unit, 2)` gave a new chart two decimals nobody chose."""
+        import typer
+
+        from micrometeorology.cli import export_monitoring
+
+        charts = list(MONITORING_CHARTS)
+        monkeypatch.setattr(
+            export_monitoring,
+            "MONITORING_CHARTS",
+            [replace(charts[0], unit="furlongs")],
+        )
+
+        result = runner.invoke(
+            monitoring_app,
+            ["-i", str(archive), "-o", str(tmp_path / "out"), "--log-level", "WARNING"],
+        )
+
+        assert result.exit_code != 0
+        assert "furlongs" in result.output
+        assert isinstance(result.exception, (SystemExit, typer.BadParameter)) or result.exception
+
+
+def test_a_duplicated_stamp_is_named_instead_of_escaping_as_a_pandas_error() -> None:
+    """`reindex` raises "cannot reindex on an axis with duplicate labels", which
+    reaches the operator as a traceback naming neither the file nor the cadence;
+    the axis guard cannot see it either, since a repeat is a zero delta among
+    many rather than a second cadence."""
+    index = pd.DatetimeIndex(["2022-07-01 00:00", "2022-07-01 00:00", "2022-07-01 01:00"])
+    frame = pd.DataFrame({"T": [1.0, 2.0, 3.0]}, index=index)
+
+    with pytest.raises(ValueError, match="duplicated timestamp"):
+        _regular(frame, index, "h")
+
+
+class TestThePayloadRoundsToItsUnitsPrecision:
+    """The CSV download must never carry a digit its chart does not show, and only
+    precipitation's three decimals were pinned — the other four units could have
+    started publishing two decimals from the fallback with nothing saying so."""
+
+    @pytest.fixture
+    def marked_archive(self, tmp_path: Path) -> Path:
+        directory = tmp_path / "archive"
+        directory.mkdir()
+        for periods, freq, name, seed in (
+            (2016, "5min", "station_5min_qc.parquet", 3),
+            (168, "h", "station_hourly.parquet", 4),
+        ):
+            frame = _frame(periods, freq, STATION_COLUMNS, seed=seed)
+            frame["T"] = 12.3456
+            frame["pressure"] = 1013.26
+            frame["Sw_dw"] = 800.6
+            frame.to_parquet(directory / name)
+        return directory
+
+    def _series(self, payload: dict, chart_id: str, series_id: str) -> list:
+        charts = {chart["id"]: chart for chart in payload["charts"]}
+        values: list = charts[chart_id]["layers"]["hourly"]["series"][series_id]
+        return values
+
+    def test_a_celsius_chart_keeps_one_decimal(self, marked_archive: Path, tmp_path: Path) -> None:
+        payload = TestExporter()._payload(marked_archive, tmp_path)
+
+        assert self._series(payload, "temperatura", "t")[0] == pytest.approx(12.3)
+
+    def test_a_pressure_chart_keeps_one_decimal(self, marked_archive: Path, tmp_path: Path) -> None:
+        payload = TestExporter()._payload(marked_archive, tmp_path)
+
+        assert self._series(payload, "pressao", "pressure")[0] == pytest.approx(1013.3)
+
+    def test_an_irradiance_chart_is_an_integer(self, marked_archive: Path, tmp_path: Path) -> None:
+        """A tenth of a W/m2 is noise, and the int is three characters shorter
+        per sample across the whole payload."""
+        payload = TestExporter()._payload(marked_archive, tmp_path)
+
+        value = self._series(payload, "balanco", "sw_down")[0]
+        assert value == 801
+        assert isinstance(value, int)

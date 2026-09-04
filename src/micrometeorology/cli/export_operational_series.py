@@ -49,12 +49,12 @@ Bring the historical file onto the v2 schema (once, before the first append)::
     labmim-wrf-series migrate -i data/series_operacional.dat
 """
 
-import logging
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from labmim_core.site import STATION_UTC_OFFSET_HOURS
 from micrometeorology.cli.wrfout_selection import glob_wrfout_day
 from micrometeorology.common.cli_options import parse_csv, parse_int_csv
 from micrometeorology.common.logging import setup_logging
@@ -82,8 +82,6 @@ from micrometeorology.wrf.operational_series import (
 from micrometeorology.wrf.reader import WRFDataset
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
-
-logger = logging.getLogger(__name__)
 
 
 def _resolve_datasets(
@@ -166,7 +164,8 @@ def _publish(
         f"a {block.distance_km:.2f} km"
     )
     typer.echo(
-        f"    {block.frame.index[0]} .. {block.frame.index[-1]} (hora local, UTC-03), "
+        f"    {block.frame.index[0]} .. {block.frame.index[-1]} "
+        f"(hora local, UTC{STATION_UTC_OFFSET_HOURS:+03.0f}), "
         f"{len(block.frame.columns)} colunas, {len(empty)} sem valor"
     )
     if empty:
@@ -274,6 +273,8 @@ def run(
     paths = _resolve_datasets(datasets, wrf_dir, date, parse_int_csv(domains))
     wanted = _resolve_stations(tuple(parse_csv(stations)), station_list)
     requested = list(parse_csv(variables)) or None
+    if variables is not None and requested is None:
+        raise typer.BadParameter(f"--variables names no variable (got {variables!r})")
 
     typer.echo(f"Rodada:    {len(paths)} dominio(s) — {', '.join(p.name for p in paths)}")
     try:
@@ -283,9 +284,6 @@ def run(
         # interrupted mid-transfer surfaces here rather than at extraction.
         raise typer.BadParameter(f"could not be read as NetCDF: {error}") from error
     typer.echo(f"Estacoes:  {len(wanted)} pedida(s), {len(assignments)} atendida(s)")
-
-    if not dry_run:
-        output_dir.mkdir(parents=True, exist_ok=True)
 
     by_path: dict[Path, list[DomainAssignment]] = {}
     for assignment in assignments:

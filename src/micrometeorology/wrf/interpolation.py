@@ -1,8 +1,9 @@
 """Vertical interpolation utilities for WRF data.
 
 ``vertical_interpolate`` is the fully vectorized reference implementation
-(argsort-based, NaN-robust); ``VerticalInterpolator`` prepares a height stack
-once and serves the monotonic bracket fast path with automatic fallback.
+(argsort-based; robust to a missing HEIGHT, not to a missing value -- see its
+``Returns``); ``VerticalInterpolator`` prepares a height stack once and serves
+the monotonic bracket fast path with automatic fallback.
 """
 
 import logging
@@ -42,7 +43,10 @@ def vertical_interpolate(
         least float32. A column with no valid level comes back ``NaN``; one with
         exactly one valid level comes back that level's value, unextrapolated;
         one whose bracket collapses (``h2 == h1``) forces the fraction to zero
-        and so comes back the lower level's value.
+        and so comes back the lower level's value. The sort is by HEIGHT, so a
+        ``NaN`` height is pushed out of the way but a ``NaN`` VALUE at a level
+        inside the bracket propagates: such a column comes back ``NaN`` even
+        when two finite levels straddle *target_height*.
 
     Raises
     ------

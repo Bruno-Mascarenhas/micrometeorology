@@ -89,16 +89,17 @@ class ClimatologyModel(nn.Module):
         """Set the constant buffers from raw train-split target arrays.
 
         Only the arrays provided are used; missing ones keep their zero default.
-        Regression means are computed over finite values and normalized with
-        *target_normalizers* (keyed by ``"dhi"`` / ``"kindex"`` /
-        ``"cloud_fraction"``) when available.  Sky logits are the
-        log-frequencies of the valid (``>= 0``) class labels.
+        The ``dhi`` and ``kindex`` means are computed over finite values and
+        normalized with *target_normalizers* when available; the ``cloud_fraction``
+        mean is published raw in ``[0, 1]``, the space its sigmoid head predicts in.
+        Sky logits are the log-frequencies of the valid (``>= 0``) class labels.
 
         Parameters
         ----------
         dhi:
-            ``(N,)`` raw train-split diffuse horizontal irradiance in W m-2;
-            NaN marks a missing target.
+            ``(N,)`` train-split diffuse target as the head receives it: W m-2,
+            or the ratio to the clear-sky reference under the ``clearsky_index``
+            parameterization; NaN marks a missing target.
         kindex:
             ``(N,)`` raw train-split clear-sky index (dimensionless ratio);
             NaN marks a missing target.
@@ -109,8 +110,8 @@ class ClimatologyModel(nn.Module):
             ``(N,)`` integer sky-class labels; ``-1`` marks a missing label and
             is excluded from the frequency count.
         target_normalizers:
-            Train-split normalizers used to map each regression mean into the
-            normalized space the trained models predict in.
+            Train-split normalizers, read for ``"dhi"`` and ``"kindex"``, which map
+            those means into the normalized space the trained models predict in.
 
         Raises
         ------
@@ -135,19 +136,35 @@ class ClimatologyModel(nn.Module):
                     "0 W m-2 is a physically valid reading rather than a missing one"
                 )
             mean = float(finite.mean())
-            if target_normalizers is not None and name in target_normalizers:
+            if name != "cloud_fraction" and target_normalizers and name in target_normalizers:
                 mean = float(target_normalizers[name].normalize(mean))
             getattr(self, f"{name}_const").fill_(mean)
 
         if sky_class is not None:
             labels = np.asarray(sky_class)
             valid = labels[labels >= 0].astype(np.int64)
+            if not valid.size:
+                raise ValueError(
+                    "climatology target 'sky_class' has no labelled row to count; a uniform "
+                    "prior would be reported as a fitted baseline, exactly what the "
+                    "regression branch above refuses for the same reason"
+                )
+            out_of_range = valid[valid >= self.n_classes]
+            if out_of_range.size:
+                raise ValueError(
+                    f"sky_class carries label(s) {sorted({int(v) for v in out_of_range})} outside "
+                    f"the {self.n_classes} declared classes; silently dropping them fits the "
+                    "prior to a different population than the one it is scored against"
+                )
             counts = np.bincount(valid, minlength=self.n_classes)[: self.n_classes].astype(
                 np.float64
             )
-            total = counts.sum()
-            freq = counts / total if total > 0 else np.full(self.n_classes, 1.0 / self.n_classes)
-            logits = np.log(np.clip(freq, 1e-8, None))
+            # A class absent from the training split gets the smallest positive
+            # float64 rather than a magic epsilon: log(0) is -inf, which poisons
+            # the whole softmax, while any finite floor is a probability nobody
+            # measured. This one is the least such floor representable.
+            freq = counts / counts.sum()
+            logits = np.log(np.clip(freq, np.finfo(np.float64).tiny, None))
             self.sky_logits_const.copy_(torch.tensor(logits, dtype=torch.float32))
 
     def forward(self, batch: dict[str, Tensor]) -> ModelOutputs:

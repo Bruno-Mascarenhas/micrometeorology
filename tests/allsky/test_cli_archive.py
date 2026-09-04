@@ -32,6 +32,7 @@ from allsky.cli import app
 from allsky.cli.archive import (
     FRAMES_SUBDIR,
     REMOTE_FRAMES,
+    REMOTE_SNAPSHOTS,
     REMOTE_VIDEOS,
     STATE_SUBDIR,
     VIDEOS_SUBDIR,
@@ -181,12 +182,6 @@ def test_a_day_already_downloaded_extracted_and_uploaded_everywhere_has_no_work_
     plan = _plan(entry, ledger, tmp_path, target=TARGET, extract=True, upload=UploadChoice.both)
 
     assert plan.has_work is False
-    assert (plan.download, plan.extract, plan.upload_video, plan.upload_frames) == (
-        False,
-        False,
-        False,
-        False,
-    )
 
 
 def test_asking_for_upload_after_the_fact_replans_an_already_held_day(
@@ -294,28 +289,15 @@ def test_describe_names_every_step_the_plan_still_owes(entry: ArchiveEntry):
     assert plan.describe() == f"{entry.filename}: download, upload-video, upload-frames"
 
 
-@pytest.mark.parametrize(
-    ("flags", "expected"),
-    [
-        ((False, False, False, False), False),
-        ((True, False, False, False), True),
-        ((False, True, False, False), True),
-        ((False, False, True, False), True),
-        ((False, False, False, True), True),
-    ],
-)
-def test_has_work_is_the_disjunction_of_the_four_steps(
-    entry: ArchiveEntry, flags: tuple[bool, bool, bool, bool], expected: bool
-):
-    download, extract, upload_video, upload_frames = flags
+def test_a_plan_that_owes_nothing_reports_no_work(entry: ArchiveEntry):
+    """The only case of the disjunction worth a test: every planner test above
+    already covers a plan that owes something.
+    """
     plan = DayPlan(
-        entry=entry,
-        download=download,
-        extract=extract,
-        upload_video=upload_video,
-        upload_frames=upload_frames,
+        entry=entry, download=False, extract=False, upload_video=False, upload_frames=False
     )
-    assert plan.has_work is expected
+
+    assert plan.has_work is False
 
 
 def test_a_first_sync_mirrors_every_published_day_and_the_next_one_finds_nothing_to_do(
@@ -436,6 +418,9 @@ def _prepare_config(path: Path, clock: str) -> Path:
 def test_the_config_timestamp_model_names_frames_from_a_fixed_start_time_instead(
     mirror: fake.ArchiveMirror, tmp_path: Path
 ):
+    """The modelled clock is filed with a digest of its own cadence fields: two
+    configs that both say "modelled" describe different frames whenever
+    start_time or minutes_per_frame differs."""
     data = tmp_path / "data"
     modelled = _prepare_config(tmp_path / "configs" / "modelled.yaml", "modelled")
     result = _sync(
@@ -459,7 +444,7 @@ def test_the_config_timestamp_model_names_frames_from_a_fixed_start_time_instead
     ]
     recorded = _reload(data).frames(DAY_NEW)
     assert recorded is not None
-    assert recorded["timestamps"] == "config"
+    assert recorded["timestamps"].startswith("config:")
 
 
 def test_a_config_that_names_the_overlay_clock_extracts_under_the_overlay_clock(
@@ -640,7 +625,8 @@ def test_a_re_extraction_that_fails_keeps_the_record_of_the_frames_it_could_not_
 
     recorded = _reload(data).frames(DAY_LATER)
     assert recorded is not None
-    assert (recorded["timestamps"], recorded["count"]) == ("config", 3)
+    assert recorded["timestamps"].startswith("config:")
+    assert recorded["count"] == 3
 
 
 def test_a_re_extraction_that_fails_leaves_no_half_written_frame_set_behind(
@@ -721,6 +707,30 @@ def test_days_a_previous_release_clocked_ambiguously_are_named_before_any_work_s
         "recorded 'config' as the clock" in record.getMessage() and DAY_NEW in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_a_config_given_with_the_overlay_clock_is_announced_as_ignored(
+    mirror: fake.ArchiveMirror, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """`-c` carries nothing on the overlay path: the frames are named from the stamp
+    burned into each frame, not from the modelled 06:00 start the YAML asks for."""
+    data = tmp_path / "data"
+    modelled = _prepare_config(tmp_path / "configs" / "modelled.yaml", "modelled")
+
+    with caplog.at_level(logging.WARNING, logger="allsky.cli.archive"):
+        result = _sync(data, mirror, "--extract", "-c", str(modelled), "--since", "2026-08-10")
+
+    assert result.exit_code == 0, result.output
+    assert any(
+        "--config is ignored with --timestamps overlay" in record.getMessage()
+        for record in caplog.records
+    )
+    frames_dir = data / FRAMES_SUBDIR / DAY_NEW
+    assert sorted(path.name for path in frames_dir.glob("*.jpg")) == [
+        f"allsky-{DAY_NEW}-1200.jpg",
+        f"allsky-{DAY_NEW}-1201.jpg",
+        f"allsky-{DAY_NEW}-1202.jpg",
+    ]
 
 
 def test_recording_a_new_frame_set_forgets_the_upload_of_the_one_it_replaced(
@@ -858,7 +868,14 @@ def test_pruning_deletes_the_local_video_but_keeps_what_the_ledger_knows_about_i
 def test_extra_rclone_flags_reach_every_invocation(
     mirror: fake.ArchiveMirror, tmp_path: Path, rclone_log: Path
 ):
-    _sync(
+    """The flag has to reach the transfers, not merely every line that happened.
+
+    ``rclone_invocations`` returns [] when the log is absent and ``all([])`` is
+    True, so a run that uploaded nothing satisfied this on its own; and the
+    uploader appends the extra args to every command including the ``lsd``
+    pre-flight, so 'every line carries it' held without a single copy running.
+    """
+    result = _sync(
         tmp_path / "data",
         mirror,
         "--upload",
@@ -868,7 +885,12 @@ def test_extra_rclone_flags_reach_every_invocation(
         "--rclone-arg",
         "--transfers=8",
     )
-    assert all(line.endswith("--transfers=8") for line in fake.rclone_invocations(rclone_log))
+
+    assert result.exit_code == 0, result.output
+    invocations = fake.rclone_invocations(rclone_log)
+    copies = [line for line in invocations if line.startswith("copyto")]
+    assert copies
+    assert all(line.endswith("--transfers=8") for line in invocations)
 
 
 def test_a_second_sync_cannot_start_while_another_holds_the_ledger_lock(
@@ -976,6 +998,43 @@ def _snapshot_recording_prediction_kwargs(
         ],
     )
     return result, recorded
+
+
+def test_features_imputed_at_the_training_mean_are_named_in_the_output(
+    mirror: fake.ArchiveMirror, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A prediction standing on training means where the live sensor had no row is
+    not a fully informed prediction, and this line is the only place the operator
+    is told which features it stood on."""
+
+    def predict_on_imputed_features(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "predictions": {"dhi": 137.0},
+            "features": {"imputed": ["wind_speed_ms", "air_temp_c"]},
+        }
+
+    monkeypatch.setattr("allsky.snapshot.predict_snapshot", predict_on_imputed_features)
+    checkpoint = tmp_path / "moved.ckpt"
+    checkpoint.write_bytes(b"checkpoint-bytes")
+
+    result = runner.invoke(
+        app,
+        [
+            "snapshot",
+            "--out",
+            str(tmp_path / "snapshots"),
+            "--base-url",
+            mirror.base_url,
+            "--insecure",
+            "--checkpoint",
+            str(checkpoint),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "2 feature(s) imputed" in result.output
+    assert "wind_speed_ms" in result.output
+    assert "air_temp_c" in result.output
 
 
 def test_the_embeddings_dir_flag_overrides_the_store_baked_into_the_checkpoint(
@@ -1089,3 +1148,173 @@ def test_the_capture_clock_is_the_sites_not_the_hosts(
     metadata = json.loads(snapshot.metadata_path.read_text(encoding="utf-8"))
     assert metadata["captured_at_source"] == "overlay"
     assert metadata["server_last_modified_as_local"] == naive_site_now.isoformat()
+
+
+def test_two_modelled_cadences_are_different_clocks_in_the_ledger():
+    """`_clock` collapsed every `modelled` config to the bare string "config", so
+    the resume gate answered "already extracted" for a day whose frames carry the
+    other cadence — and the frames on disk are named after their own timestamps,
+    so the two sets would have survived side by side."""
+    from allsky.cli.archive import _clock_record
+    from allsky.config import VideoConfig
+
+    one_per_minute = _clock_record(VideoConfig(timestamps="modelled", minutes_per_frame=1.0))
+    two_per_minute = _clock_record(VideoConfig(timestamps="modelled", minutes_per_frame=0.5))
+    later_start = _clock_record(
+        VideoConfig(timestamps="modelled", minutes_per_frame=1.0, start_time="07:00")
+    )
+
+    assert one_per_minute != two_per_minute
+    assert one_per_minute != later_start
+    assert _clock_record(VideoConfig(timestamps="overlay")) == "overlay"
+
+
+def test_the_same_modelled_cadence_is_the_same_clock():
+    """Otherwise every run would re-extract every day."""
+    from allsky.cli.archive import _clock_record
+    from allsky.config import VideoConfig
+
+    first = _clock_record(VideoConfig(timestamps="modelled", minutes_per_frame=1.0))
+    second = _clock_record(VideoConfig(timestamps="modelled", minutes_per_frame=1.0))
+
+    assert first == second
+
+
+class TestTheCaptureClockFallbackChain:
+    """Three sources in order — the burned-in overlay, the server's
+    Last-Modified, then the host clock. The last is the exact regression the
+    docs warn about: a container in UTC names the snapshot three hours off and
+    nothing fails."""
+
+    @staticmethod
+    def _capture(tmp_path: Path, payload: bytes, headers: dict[str, str]):
+        from allsky.snapshot import capture_snapshot
+
+        return capture_snapshot(_StubLiveCamera(payload, headers), tmp_path)
+
+    def _sidecar(self, snapshot) -> dict:
+        loaded: dict = json.loads(snapshot.metadata_path.read_text(encoding="utf-8"))
+        return loaded
+
+    def test_a_fresh_overlay_wins(self, tmp_path: Path):
+        now = dt.datetime.now(tz=SITE_TZ).replace(microsecond=0, tzinfo=None)
+        snapshot = self._capture(tmp_path, _overlay_jpeg(now), {})
+
+        assert self._sidecar(snapshot)["captured_at_source"] == "overlay"
+
+    def test_a_stale_overlay_falls_to_a_fresh_last_modified(self, tmp_path: Path):
+        stale = dt.datetime.now(tz=SITE_TZ).replace(microsecond=0, tzinfo=None) - dt.timedelta(
+            days=3
+        )
+        fresh = dt.datetime.now(tz=dt.UTC).replace(microsecond=0)
+        headers = {"last-modified": fresh.strftime("%a, %d %b %Y %H:%M:%S GMT")}
+
+        snapshot = self._capture(tmp_path, _overlay_jpeg(stale), headers)
+
+        assert self._sidecar(snapshot)["captured_at_source"] == "server-last-modified"
+
+    def test_a_stale_overlay_and_an_unparseable_header_fall_to_the_host_clock(
+        self, tmp_path: Path, caplog
+    ):
+        stale = dt.datetime.now(tz=SITE_TZ).replace(microsecond=0, tzinfo=None) - dt.timedelta(
+            days=3
+        )
+
+        with caplog.at_level("WARNING"):
+            snapshot = self._capture(tmp_path, _overlay_jpeg(stale), {"last-modified": "nonsense"})
+
+        assert self._sidecar(snapshot)["captured_at_source"] == "local-clock"
+        assert "local clock" in caplog.text
+
+    def test_an_empty_payload_is_refused(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="empty live frame"):
+            self._capture(tmp_path, b"", {})
+
+
+def test_uploading_both_mirrors_the_frames_and_records_the_destination(
+    mirror: fake.ArchiveMirror, tmp_path: Path, rclone_log: Path
+):
+    """`--upload both` is the cron recipe's own invocation: the frames branch
+    both mirrors and records what it mirrored."""
+    data = tmp_path / "data"
+
+    result = _sync(data, mirror, "--extract", "--upload", "both", "--drive-remote", "labmim")
+
+    assert result.exit_code == 0, result.output
+    invocations = fake.rclone_invocations(rclone_log)
+    frames = [line for line in invocations if line.startswith("sync")]
+    assert frames, invocations
+    for line in frames:
+        assert "--include *.jpg" in line
+        assert f"{REMOTE_FRAMES}/" in line
+    ledger = _reload(data)
+    assert ledger.uploaded(DAY_NEW, TARGET.path(REMOTE_FRAMES, DAY_NEW))
+    assert ledger.frames(DAY_NEW) is not None
+
+
+@pytest.mark.usefixtures("rclone_log")
+def test_a_second_upload_both_run_leaves_the_frames_alone(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    data = tmp_path / "data"
+    first = _sync(data, mirror, "--extract", "--upload", "both", "--drive-remote", "labmim")
+    assert first.exit_code == 0, first.output
+
+    second = _sync(data, mirror, "--extract", "--upload", "both", "--drive-remote", "labmim")
+
+    assert "nothing to do" in second.output
+
+
+def test_a_snapshot_publishes_its_frame_and_sidecar_to_drive(
+    mirror: fake.ArchiveMirror, tmp_path: Path, rclone_log: Path
+):
+    """The whole Drive publish path of `snapshot` is the branch the hourly cron
+    runs: the JPEG and its provenance sidecar are uploaded, and with no
+    checkpoint configured there is no prediction file to go with them."""
+    out_dir = tmp_path / "snapshots"
+
+    result = runner.invoke(
+        app,
+        [
+            "snapshot",
+            "--out",
+            str(out_dir),
+            "--base-url",
+            mirror.base_url,
+            "--insecure",
+            "--drive-remote",
+            "labmim",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    copied = [line for line in fake.rclone_invocations(rclone_log) if line.startswith("copyto")]
+    assert len(copied) == 2
+    day = f"{next(out_dir.glob('*.jpg')).stem.split('-')[1]}"
+    assert all(f"{REMOTE_SNAPSHOTS}/{day}/" in line for line in copied), copied
+
+
+def test_a_snapshot_whose_upload_fails_exits_one(
+    mirror: fake.ArchiveMirror, tmp_path: Path, rclone_log: Path
+):
+    """The frame is on disk either way; what must not happen is exit 0 while the
+    site never received it."""
+    fake.write_fake_rclone(rclone_log.parent / "bin", rclone_log, fail_on="copyto")
+    out_dir = tmp_path / "snapshots"
+
+    result = runner.invoke(
+        app,
+        [
+            "snapshot",
+            "--out",
+            str(out_dir),
+            "--base-url",
+            mirror.base_url,
+            "--insecure",
+            "--drive-remote",
+            "labmim",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert list(out_dir.glob("*.jpg")), "the capture itself must survive the failed upload"

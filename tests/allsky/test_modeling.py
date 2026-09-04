@@ -11,14 +11,23 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from pydantic import ValidationError
 from torch import nn
 
-from allsky.config import ExperimentConfig, TargetsConfig, load_experiment_config
+from allsky.config import (
+    CloudFractionTargetConfig,
+    DHITargetConfig,
+    ExperimentConfig,
+    KIndexTargetConfig,
+    SkyClassTargetConfig,
+    TargetsConfig,
+    load_experiment_config,
+)
 from allsky.features import active_feature_groups, resolve_feature_set
 from allsky.features.normalization import TargetNormalizer
 from allsky.modeling import heads as heads_module
 from allsky.modeling.baselines import ClimatologyModel
-from allsky.modeling.contracts import ModelOutputs, MultimodalModel
+from allsky.modeling.contracts import ModelOutputs
 from allsky.modeling.fusion import (
     ConcatFusion,
     CrossAttentionFusion,
@@ -129,7 +138,6 @@ def test_registry_model_builds_and_forwards_all_heads(model_name: str):
     for key, value in out.items():
         assert value.dtype == torch.float32, key
         assert bool(torch.isfinite(value).all()), key
-    assert isinstance(model, MultimodalModel)  # structural contract
 
 
 @pytest.mark.parametrize("model_name", list(MODEL_BUILDERS))
@@ -240,9 +248,9 @@ def _cross_fusion(num_heads: int = 4, token_dim: int = EMBED_DIM, sensor_dim: in
 
 
 def test_cross_attention_masked_group_changes_nothing():
+    torch.manual_seed(2)
     fusion = _cross_fusion()
     fusion.eval()
-    torch.manual_seed(2)
     visual = torch.randn(BATCH, EMBED_DIM)
     sensor = torch.randn(BATCH, 16)
     features = torch.randn(BATCH, N_FEATURES)
@@ -263,9 +271,9 @@ def test_cross_attention_masked_group_changes_nothing():
 
 
 def test_cross_attention_unmasked_group_matters():
+    torch.manual_seed(3)
     fusion = _cross_fusion()
     fusion.eval()
-    torch.manual_seed(3)
     visual = torch.randn(BATCH, EMBED_DIM)
     sensor = torch.randn(BATCH, 16)
     features = torch.randn(BATCH, N_FEATURES)
@@ -305,7 +313,6 @@ def test_cross_attention_rejects_indivisible_heads():
 def test_climatology_fit_constants_and_frequency_logits():
     cfg = _cfg("climatology")
     model = ClimatologyModel(cfg.targets)
-    import numpy as np
 
     dhi = np.array([100.0, 200.0, 300.0, np.nan])  # mean of finite = 200
     kindex = np.array([0.4, 0.6, 0.8])  # mean 0.6
@@ -318,8 +325,6 @@ def test_climatology_fit_constants_and_frequency_logits():
     assert torch.allclose(out["dhi"], torch.full((BATCH,), 200.0))
     assert torch.allclose(out["kindex"], torch.full((BATCH,), 0.6))
     assert torch.allclose(out["cloud_fraction"], torch.full((BATCH,), 0.2))
-    # every row identical (constant model)
-    assert torch.allclose(out["dhi"], out["dhi"][0])
     # frequency logits: class 2 dominates, softmax matches empirical frequency
     freq = torch.softmax(out["sky_logits"][0].detach(), dim=-1)
     assert int(out["sky_logits"][0].argmax()) == 2
@@ -329,7 +334,6 @@ def test_climatology_fit_constants_and_frequency_logits():
 def test_climatology_uses_normalized_space_means():
     cfg = _cfg("climatology", targets={"dhi": {"enabled": True, "loss": "huber"}})
     model = ClimatologyModel(cfg.targets)
-    import numpy as np
 
     normalizer = TargetNormalizer(mean=100.0, std=50.0)
     model.fit_from_targets(dhi=np.array([200.0, 200.0]), target_normalizers={"dhi": normalizer})
@@ -486,6 +490,26 @@ def test_documented_image_knobs_do_not_warn(caplog):
     assert not any("unknown hyper-parameter" in record.getMessage() for record in caplog.records)
 
 
+def test_the_frame_size_the_run_feeds_the_backbone_is_checked_at_construction():
+    """``model.image_size`` is what the dataset emits, and the patch-multiple guard lives
+    in the backbone constructor: unthreaded, it only ever validated the constructor
+    default and a 322-pixel DINOv3 arm died inside the hub module on the first batch."""
+    from allsky.modeling.registry import default_image_backbone_builder
+    from allsky.training.errors import TrainingError
+
+    cfg = ExperimentConfig.model_validate(
+        {
+            "features": {"set": "safe"},
+            "targets": {"dhi": {"enabled": True, "loss": "huber"}},
+            "model": {"name": "film", "backbone": "dinov3_vits16plus", "image_size": 322},
+            "data": {"input_mode": "image"},
+        }
+    )
+
+    with pytest.raises(TrainingError, match="multiple of DINOv3's patch size"):
+        default_image_backbone_builder(cfg, "cpu")()
+
+
 def test_shipped_experiment_configs_are_discovered():
     assert SHIPPED_EXPERIMENT_CONFIGS, "no shipped experiment configs found to check for drift"
 
@@ -498,6 +522,20 @@ def test_shipped_experiment_configs_have_no_unknown_params(config_path: Path, ca
     with caplog.at_level(logging.WARNING, logger="allsky.modeling.registry"):
         _warn_unknown_params(cfg.model.name, cfg)
     assert not any("unknown hyper-parameter" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("pooling", ["cls", "mean", "cls+mean"])
+def test_every_pooling_the_extraction_path_accepts_survives_the_registry_narrowing(pooling: str):
+    from allsky.modeling.registry import _backbone_pooling
+
+    assert _backbone_pooling(pooling) == pooling
+
+
+def test_a_pooling_no_backbone_accepts_is_refused_naming_the_ones_that_exist():
+    from allsky.modeling.registry import _backbone_pooling
+
+    with pytest.raises(ValueError, match=r"cls\+mean"):
+        _backbone_pooling("cls_mean")
 
 
 def test_trunk_shape_and_residual():
@@ -521,10 +559,31 @@ def test_heads_heteroscedastic_log_var_clamped():
 
 
 def test_heads_empty_when_nothing_enabled():
-    cfg = _cfg("concat", targets={"dhi": {"enabled": False}})
-    heads = Heads(64, cfg.targets)
+    """``Heads`` builds an empty pack rather than raising, which is what makes the
+    config-level refusal the only thing standing between a run and an optimizer
+    with no parameters. The config is built past its validator on purpose here:
+    ``TargetsConfig`` now refuses this combination at load, and the two halves
+    are pinned separately.
+    """
+    targets = TargetsConfig.model_construct(
+        dhi=DHITargetConfig(enabled=False),
+        kindex=KIndexTargetConfig(enabled=False),
+        sky=SkyClassTargetConfig(enabled=False),
+        cloud_fraction=CloudFractionTargetConfig(enabled=False),
+    )
+
+    heads = Heads(64, targets)
+
     assert len(heads.heads) == 0
     assert heads(torch.randn(BATCH, 64)) == {}
+
+
+def test_a_config_enabling_no_head_at_all_is_refused_at_load():
+    """Nothing downstream refuses it: the loss sums an empty list and the failure
+    arrives from autograd, after the dataset, the model and the optimizer are up.
+    """
+    with pytest.raises(ValidationError, match="enables no head"):
+        _cfg("concat", targets={"dhi": {"enabled": False}})
 
 
 def test_image_encoder_param_groups_separate_backbone_lr():
@@ -576,6 +635,20 @@ def test_multimodal_param_groups_split_backbone():
     assert len(model.param_groups()) == 1
 
 
+def test_the_cloud_fraction_climatology_stays_in_the_raw_fraction_its_head_predicts():
+    """The cloud-fraction head is a sigmoid over [0, 1] and its loss compares at mean 0,
+    std 1, so normalizing the fitted constant would put the baseline in a space the
+    trained head never predicts in."""
+    model = ClimatologyModel(TargetsConfig())
+
+    model.fit_from_targets(
+        cloud_fraction=np.array([0.2, 0.4, 0.6]),
+        target_normalizers={"cloud_fraction": TargetNormalizer(mean=0.4, std=0.1)},
+    )
+
+    assert float(model.cloud_fraction_const) == pytest.approx(0.4)
+
+
 def test_the_climatology_baseline_refuses_an_all_nan_target_instead_of_reporting_zero():
     model = ClimatologyModel(TargetsConfig())
     with pytest.raises(ValueError, match="no finite value"):
@@ -600,3 +673,47 @@ def test_sky_logits_documentation_drops_the_retired_three_class_vocabulary(
     documented: str, retired_name: str
 ):
     assert retired_name not in documented
+
+
+def test_a_frozen_convnet_backbone_keeps_its_running_statistics_still():
+    """`requires_grad_(False)` freezes parameters; a BatchNorm's running mean and
+    variance are buffers that keep moving on every forward in train mode, so a
+    "frozen" ConvNet still drifted with the batches it saw and the frozen and
+    fine-tuned arms of an ablation stopped being the same encoder."""
+    from allsky.modeling.visual_encoder import ImageEncoder
+
+    class _ConvBackbone(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dim = 4
+            self.conv = torch.nn.Conv2d(3, 4, 3, padding=1)
+            self.norm = torch.nn.BatchNorm2d(4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            pooled: torch.Tensor = self.norm(self.conv(x)).mean(dim=(2, 3))
+            return pooled
+
+    backbone = _ConvBackbone()
+    encoder = ImageEncoder(backbone, frozen=True)
+    encoder.train()
+    running_mean = backbone.norm.running_mean
+    assert running_mean is not None
+    before = running_mean.clone()
+
+    for _ in range(3):
+        encoder({"image": torch.randn(8, 3, 8, 8) * 5.0 + 2.0})
+
+    assert backbone.norm.training is False
+    torch.testing.assert_close(running_mean, before)
+
+
+def test_a_climatology_with_no_labelled_sky_row_refuses_to_fit():
+    """A uniform prior reported as a fitted baseline is exactly what the
+    regression branch beside it already refuses."""
+    from allsky.modeling.baselines import ClimatologyModel
+
+    cfg = ExperimentConfig.model_validate({"targets": {"sky": {"enabled": True}}})
+    model = ClimatologyModel(cfg.targets)
+
+    with pytest.raises(ValueError, match="no labelled row"):
+        model.fit_from_targets(sky_class=np.array([-1, -1, -1]))

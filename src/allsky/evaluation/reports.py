@@ -3,13 +3,15 @@
 :func:`write_evaluation_report` serializes an
 :class:`~allsky.evaluation.evaluator.EvaluationResult` into a report directory:
 
-- ``metrics.json`` — global metrics per target + provenance;
+- ``eval_metrics.json`` — global metrics per target + provenance. Named apart
+  from the training engine's own ``metrics.json``, whose schema is a per-epoch
+  history and whose directory an evaluation may legitimately be written into;
 - ``stratified.csv`` — the long-form breakdown table;
 - ``confusion.csv`` — the sky-class confusion matrix (only when the sky head ran);
 - ``predictions.parquet`` — the per-sample frame (optional, via ``predictions``);
 - ``report.md`` — a human-readable summary with a per-target metrics table.
 
-:func:`compare_experiments` reads the ``metrics.json`` of several report
+:func:`compare_experiments` reads the ``eval_metrics.json`` of several report
 directories and builds one cross-model table (returned as a DataFrame, and
 written as ``comparison.csv`` / ``comparison.md`` when an ``out_dir`` is given).
 
@@ -27,7 +29,7 @@ from typing import Any
 import pandas as pd
 
 from allsky.evaluation.evaluator import EvaluationResult
-from labmim_core.atomic import atomic_write, atomic_write_json
+from labmim_core.atomic import atomic_write, atomic_write_strict_json
 
 __all__ = ["compare_experiments", "write_evaluation_report"]
 
@@ -40,6 +42,31 @@ _MARKDOWN_CLASSIFICATION_METRICS: tuple[str, ...] = (
     "macro_f1",
     "n",
 )
+
+
+#: Filename of the evaluation summary. Deliberately not ``metrics.json``: the
+#: training engine writes a per-epoch history under that name in the run
+#: directory an evaluation is often pointed at, and one would silently replace
+#: the other.
+EVALUATION_METRICS_FILENAME = "eval_metrics.json"
+
+
+def _json_safe(payload: Any) -> Any:
+    """Recursively replace every non-finite float with ``None``.
+
+    A metric that could not be computed is a missing measurement, and it has to
+    reach the writer already encoded as null: a bare ``NaN`` token fails a strict
+    ``json.loads`` on the WHOLE document, so one unmeasurable skill score would
+    make the entire report unreadable to any consumer that does not opt into
+    Python's non-standard extension.
+    """
+    if isinstance(payload, Mapping):
+        return {key: _json_safe(value) for key, value in payload.items()}
+    if isinstance(payload, (list, tuple)):
+        return [_json_safe(item) for item in payload]
+    if isinstance(payload, float) and not math.isfinite(payload):
+        return None
+    return payload
 
 
 def write_evaluation_report(
@@ -76,7 +103,13 @@ def write_evaluation_report(
         "meta": result.meta,
         "global": result.global_metrics,
     }
-    written["metrics"] = str(atomic_write_json(report_root / "metrics.json", metrics_payload))
+    # Named apart from the engine's own metrics.json, which an evaluation written
+    # into a run directory would otherwise overwrite with a different schema.
+    written["metrics"] = str(
+        atomic_write_strict_json(
+            report_root / EVALUATION_METRICS_FILENAME, _json_safe(metrics_payload)
+        )
+    )
     written["stratified"] = str(_atomic_csv(report_root / "stratified.csv", result.stratified))
 
     if result.confusion is not None:
@@ -103,7 +136,7 @@ def compare_experiments(
 ) -> pd.DataFrame:
     """Build a cross-model comparison table from several report directories.
 
-    Each directory's ``metrics.json`` contributes one row keyed by its experiment
+    Each directory's ``eval_metrics.json`` contributes one row keyed by its experiment
     ``name`` and ``model``, with the scalar global metrics flattened into
     ``<target>_<metric>`` columns (nested confusion matrices are skipped).
 
@@ -122,9 +155,9 @@ def compare_experiments(
     """
     rows: list[dict[str, Any]] = []
     for report_dir in report_dirs:
-        metrics_path = Path(report_dir) / "metrics.json"
+        metrics_path = Path(report_dir) / EVALUATION_METRICS_FILENAME
         if not metrics_path.exists():
-            raise FileNotFoundError(f"no metrics.json in report dir {report_dir}")
+            raise FileNotFoundError(f"no {EVALUATION_METRICS_FILENAME} in report dir {report_dir}")
         payload = json.loads(metrics_path.read_text(encoding="utf-8"))
         rows.append(_comparison_row(payload))
 

@@ -138,7 +138,7 @@ _VARIANCE_FLOOR = 1e-12
 _LAMBDA_BRACKET = (-60.0, 60.0)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Histogram:
     """Counts and density of a sample on a frozen bin edge set.
 
@@ -178,7 +178,7 @@ class Histogram:
         return midpoints
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DistributionFit:
     """A fitted family plus the sample it was estimated from.
 
@@ -195,7 +195,7 @@ class DistributionFit:
     n: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FitQuality:
     """How far a fit sits from its sample. Distances only — see the module docstring.
 
@@ -231,7 +231,7 @@ class FitQuality:
     lag1_autocorrelation: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class VonMisesMixture:
     """A finite mixture of von Mises components on the circle.
 
@@ -254,7 +254,7 @@ class VonMisesMixture:
     n: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Family:
     """One entry of :data:`FAMILIES`: how to fit a law and how to evaluate it.
 
@@ -377,7 +377,7 @@ def _weibull_shape(log_sample: NDArray, start: float) -> float:
         g(k) = \frac{\sum x_i^k \ln x_i}{\sum x_i^k} - \frac{1}{k}
                - \overline{\ln x} = 0
 
-    which is monotone decreasing in ``k``. Everything is evaluated as
+    which is monotone increasing in ``k``. Everything is evaluated as
     ``exp(k ln x - max)`` rather than ``x**k``: at k around 10 a 40 m/s gust
     overflows float64, and the ratio the equation needs is unchanged by the
     shift.
@@ -710,7 +710,7 @@ def _fit_hollands_huget(values: NDArray, *, kt_max: float | None = None) -> dict
     on the bracket is unconditionally stable where a Newton step is not.
     """
     sample = _clean(values)
-    sample = sample[(sample >= 0.0) & np.isfinite(sample)]
+    sample = sample[sample >= 0.0]
     if sample.size < 2:
         return {"lambda": float("nan"), "kt_max": float("nan")}
 
@@ -838,11 +838,10 @@ def _mixture_arrays(params: Mapping[str, Any]) -> tuple[NDArray, NDArray]:
     """The scale mixture's scales and weights, as arrays.
 
     ``gain`` multiplies the scales here rather than being folded into them by the
-    caller. It is the one estimated number in an albedo- or PAR-scaled curve —
-    0,4475 against 0,2579 is the whole PAR era comparison — so it stays a named
-    parameter the page can print instead of disappearing into sixty products.
+    caller. It is the one estimated scalar the page prints beside the curve, so
+    it stays a named parameter instead of disappearing into sixty products.
     """
-    scales = float(params.get("gain", 1.0)) * np.asarray(params["scales"], dtype=float)
+    scales = float(params["gain"]) * np.asarray(params["scales"], dtype=float)
     weights = np.asarray(params["weights"], dtype=float)
     return scales, weights
 
@@ -960,14 +959,16 @@ def _brightness(flux: NDArray) -> NDArray:
 def _fit_power_normal_mixture(values: NDArray, *, components: int = 2) -> dict[str, Any]:
     """Fit the mixture on the brightness temperature the flux maps to.
 
-    A sample smaller than the component count returns NaN parameters rather than
-    raising, which is the contract every family here follows: an empty subset is
-    a normal state of the page (a season with no observation) and must produce a
-    chart with no curve, not a failed export.
+    A sample smaller than the component count, or one with no spread, returns
+    NaN parameters rather than raising, which is the contract every family here
+    follows: an empty subset is a normal state of the page (a season with no
+    observation) and must produce a chart with no curve, not a failed export. A
+    constant sample would otherwise fit every sigma at the variance floor and
+    publish a curve of Diracs that passes the finiteness gate.
     """
     count = int(components)
     sample = np.asarray(values, dtype=float)
-    if sample.size < count:
+    if sample.size < count or float(np.ptp(sample)) <= 0.0:
         nan = [float("nan")] * count
         return {"weights": nan, "mu": list(nan), "sigma": list(nan)}
     # The component count is not in the parameters: it is an input, and every
@@ -1015,12 +1016,11 @@ def _power_normal_cdf(x: NDArray, params: Mapping[str, Any]) -> NDArray:
 
 
 def _power_normal_ppf(q: NDArray, params: Mapping[str, Any]) -> NDArray:
-    _weights, mu, sigma = _power_normal_components(params)
+    weights, mu, sigma = _power_normal_components(params)
 
     def temperature_cdf(middle: NDArray) -> NDArray:
         summed: NDArray = np.sum(
-            np.asarray(params["weights"], dtype=float)
-            * special.ndtr((middle[..., None] - mu) / sigma),
+            weights * special.ndtr((middle[..., None] - mu) / sigma),
             axis=-1,
         )
         return summed
@@ -1244,7 +1244,12 @@ def fit_distribution(family: str, values: NDArray, **options: object) -> Distrib
         raise ValueError(f"{family} does not accept option(s) {sorted(unexpected)}")
 
     sample = _within_support(_clean(values), specification.support)
-    params = specification.fit(sample, **options) if options else specification.fit(sample)
+    params = specification.fit(sample, **options)
+    # Through the family's own ceiling where it declares one: hollands_huget
+    # discards every sample above ``kt_max`` INSIDE the estimator.
+    kt_max = options.get("kt_max")
+    if kt_max is not None:
+        sample = sample[sample <= float(kt_max)]  # type: ignore[arg-type]
     return DistributionFit(family=family, params=params, n=int(sample.size))
 
 

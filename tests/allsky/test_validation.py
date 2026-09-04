@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from allsky.data.contracts import DEGRADABLE_TARGET_COLUMNS, TARGET_COLUMNS
+from allsky.data.contracts import (
+    DEGRADABLE_TARGET_COLUMNS,
+    META_COLUMNS,
+    TARGET_COLUMNS,
+    QCFlag,
+)
 from allsky.data.manifest import build_manifest, write_manifest_parquet
 from allsky.data.validation import (
     ManifestValidationError,
@@ -258,9 +263,10 @@ class TestProvenanceAndSplitColumn:
 
 
 @pytest.mark.parametrize(
-    "column", [name for name in TARGET_COLUMNS if name not in DEGRADABLE_TARGET_COLUMNS]
+    "column",
+    [name for name in (*META_COLUMNS, *TARGET_COLUMNS) if name not in DEGRADABLE_TARGET_COLUMNS],
 )
-def test_a_manifest_missing_a_declared_target_column_fails_validation(
+def test_a_manifest_missing_a_declared_column_fails_validation(
     site: SiteConfig, tmp_path: Path, column: str
 ):
     manifest, meta = _clean_manifest(site, tmp_path)
@@ -296,3 +302,71 @@ def test_meta_without_feature_columns_warns_that_the_finiteness_check_was_skippe
     report = validate_manifest(manifest, truncated_meta, data_root=tmp_path, check_files=False)
 
     assert any("feature_columns" in w for w in report.warnings)
+
+
+def test_an_absolute_image_path_is_refused(site: SiteConfig, tmp_path: Path):
+    """`image_path` is stored relative to the data root so a dataset stays portable;
+    an absolute one resolves to the machine that built it and nowhere else."""
+    manifest, meta = _clean_manifest(site, tmp_path)
+    manifest.loc[0, "image_path"] = str(tmp_path / "elsewhere.jpg")
+
+    # check_files=True: the portability rule lives in `resolve`, which only the
+    # existence pass calls.
+    report = validate_manifest(manifest, meta, data_root=tmp_path, check_files=True)
+
+    assert any("absolute" in error or "elsewhere.jpg" in error for error in report.errors)
+
+
+@pytest.mark.parametrize("bogus", [-1, 1 << 20])
+def test_a_qc_flags_value_outside_the_declared_bits_is_refused(
+    site: SiteConfig, tmp_path: Path, bogus: int
+):
+    """The mask is int64 over QCFlag and nothing validated its values: the only
+    consumer asks whether it is zero, so a negative or undeclared bit lands the
+    row in whichever stratum the arithmetic happens to give it."""
+    manifest, meta = _clean_manifest(site, tmp_path)
+    manifest.loc[0, "qc_flags"] = bogus
+
+    report = validate_manifest(manifest, meta, data_root=tmp_path, check_files=False)
+
+    assert any("qc_flags" in error for error in report.errors)
+
+
+def test_a_declared_qc_flag_combination_still_validates(site: SiteConfig, tmp_path: Path):
+    manifest, meta = _clean_manifest(site, tmp_path)
+    manifest.loc[0, "qc_flags"] = int(QCFlag.LOW_SUN) | int(QCFlag.SENSOR_GAP)
+
+    report = validate_manifest(manifest, meta, data_root=tmp_path, check_files=False)
+
+    assert not any("qc_flags" in error for error in report.errors)
+
+
+@pytest.mark.parametrize("column", ["kindex_kind", "target_source"])
+def test_a_provenance_column_disagreeing_with_the_meta_fails(
+    site: SiteConfig, tmp_path: Path, column: str
+):
+    """Both are row-constant and mirrored in the meta, and the evaluator reads the
+    meta while every metric comes from the column."""
+    manifest, meta = _clean_manifest(site, tmp_path)
+    meta = {**meta, column: "something_else"}
+
+    report = validate_manifest(manifest, meta, data_root=tmp_path, check_files=False)
+
+    assert any(
+        f"{column} column" in error and "does not match meta" in error for error in report.errors
+    )
+
+
+def test_an_entirely_unfilled_split_column_warns_when_an_artifact_was_supplied(
+    site: SiteConfig, tmp_path: Path
+):
+    """A manifest handed a non-empty artifact is meant to carry the labels;
+    entirely unfilled means attach_split_column never ran against it."""
+    manifest, meta = _clean_manifest(site, tmp_path)
+    artifact = {"assignment": {"2025-03-21": "train"}}
+
+    report = validate_manifest(
+        manifest, meta, data_root=tmp_path, split_artifact=artifact, check_files=False
+    )
+
+    assert any("split column is entirely unfilled" in warning for warning in report.warnings)

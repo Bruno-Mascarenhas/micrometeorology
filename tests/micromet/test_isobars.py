@@ -28,6 +28,9 @@ SEA_LEVEL_PRESSURE_PA = 101325.0
 SEA_LEVEL_TEMPERATURE_K = 288.15
 STANDARD_LAPSE_RATE = 0.0065
 
+#: MM5/RIP4 seaprs: TC, the ceiling the "ridiculous" correction bends back to.
+HOT_SURFACE_THRESHOLD_K = 273.16 + 17.5
+
 
 def _standard_atmosphere_column(
     terrain_m: float, *, levels: int = 60, thickness_m: float = 300.0
@@ -69,14 +72,55 @@ def test_one_air_mass_reduces_to_one_pressure_whatever_terrain_it_sits_on(terrai
     assert reduced == pytest.approx(SEA_LEVEL_PRESSURE_PA / 100.0, abs=0.1)
 
 
-def test_a_tropical_afternoon_over_high_terrain_stays_in_a_physical_range():
-    """Exercises the RIP hot-surface branch, which exists to bound exactly this."""
+def _reduced_by_hand(surface_temperature_k: float, terrain_m: float, *, correct: bool) -> float:
+    """RIP4 seaprs for one dry ICAO column, written out from the algorithm.
+
+    The reference level is found by inverting the analytic pressure profile
+    instead of interpolating between model levels, so this is an oracle and not
+    a second reading of the code under test.
+    """
+    lowest_pressure = SEA_LEVEL_PRESSURE_PA * (
+        1.0 - STANDARD_LAPSE_RATE * terrain_m / SEA_LEVEL_TEMPERATURE_K
+    ) ** (9.80665 / (287.04 * STANDARD_LAPSE_RATE))
+    reference_pressure = lowest_pressure - 10000.0
+    reference_height = (SEA_LEVEL_TEMPERATURE_K / STANDARD_LAPSE_RATE) * (
+        1.0
+        - (reference_pressure / SEA_LEVEL_PRESSURE_PA) ** (287.04 * STANDARD_LAPSE_RATE / 9.80665)
+    )
+    reference_temperature = surface_temperature_k - STANDARD_LAPSE_RATE * (
+        reference_height - terrain_m
+    )
+
+    extrapolated_surface = reference_temperature * (lowest_pressure / reference_pressure) ** (
+        STANDARD_LAPSE_RATE * 287.04 / 9.81
+    )
+    sea_level_temperature = reference_temperature + STANDARD_LAPSE_RATE * reference_height
+    if correct and extrapolated_surface > HOT_SURFACE_THRESHOLD_K:
+        sea_level_temperature = (
+            HOT_SURFACE_THRESHOLD_K - 0.005 * (extrapolated_surface - HOT_SURFACE_THRESHOLD_K) ** 2
+        )
+
+    reduced_pa = lowest_pressure * np.exp(
+        2.0 * 9.81 * terrain_m / (287.04 * (sea_level_temperature + extrapolated_surface))
+    )
+    return float(reduced_pa / 100.0)
+
+
+def test_a_tropical_afternoon_over_high_terrain_is_bent_back_by_the_hot_surface_branch():
+    """Exercises the RIP hot-surface branch, which exists to bound exactly this.
+
+    Uncorrected, a 320 K surface extrapolates to a sea-level temperature of
+    327.8 K and reduces to 995.4 hPa — a fictitious low over the Chapada. The
+    branch caps it at 286.1 K and gives 1004.1 hPa. Both sit inside any window
+    wide enough to be called 'physical', so the assertion is on the number.
+    """
     pressure, height, _temperature, vapor = _standard_atmosphere_column(1200.0)
     scorching = 320.0 - STANDARD_LAPSE_RATE * (height - height[0])
 
     reduced = sea_level_pressure_hpa(pressure, height, scorching, vapor)[0, 0]
 
-    assert 950.0 < reduced < 1080.0
+    assert reduced == pytest.approx(_reduced_by_hand(320.0, 1200.0, correct=True), abs=0.01)
+    assert _reduced_by_hand(320.0, 1200.0, correct=False) == pytest.approx(995.37, abs=0.01)
 
 
 def test_a_column_whose_top_never_clears_the_reference_level_refuses_to_guess():
@@ -116,14 +160,40 @@ def test_a_column_bracketed_by_a_missing_level_refuses_rather_than_returning_nan
         sea_level_pressure_hpa(pressure, height, temperature, vapor)
 
 
-def test_the_spacing_is_the_coarsest_that_still_fills_a_typical_step():
-    """A 12 hPa run takes 2 hPa lines; anything coarser leaves the map nearly bare."""
-    assert isobars.choose_interval_hpa(12.0) == 2.0
+@pytest.mark.parametrize(
+    ("typical_range_hpa", "interval_hpa"),
+    [
+        (1.14, 1.0),
+        (4.9, 1.0),
+        (9.9, 1.0),
+        (10.0, 2.0),
+        (12.0, 2.0),
+        (19.9, 2.0),
+        (20.0, 4.0),
+    ],
+)
+def test_the_spacing_is_the_coarsest_that_still_fills_a_typical_step(
+    typical_range_hpa, interval_hpa
+):
+    """The rungs are the published legend, so both sides of each are pinned.
+
+    1.14 hPa is the innermost domain's median range and takes the 1 hPa floor;
+    a 12 hPa run takes 2 hPa lines, and only
+    from 20 hPa on is 4 coarse enough to still fill the map.
+    """
+    assert isobars.choose_interval_hpa(typical_range_hpa) == interval_hpa
 
 
-def test_a_field_flatter_than_any_chart_spacing_takes_the_floor_not_a_finer_rung():
-    """1.14 hPa is the innermost domain's median range; it used to earn 0.2 hPa."""
-    assert isobars.choose_interval_hpa(1.14) == 1.0
+def test_the_contouring_smoother_damps_a_cell_scale_spike_without_moving_the_field():
+    """The sigma is in CELLS, so one cell is damped and the field's mass stays put."""
+    field = np.full((21, 21), 1010.0)
+    field[10, 10] = 1020.0
+
+    smoothed = isobars.smooth_for_contouring(field)
+
+    assert smoothed.shape == field.shape
+    assert smoothed[10, 10] < 1013.0
+    assert smoothed.mean() == pytest.approx(field.mean(), abs=1e-9)
 
 
 @pytest.mark.parametrize("unusable", [np.nan, 0.0, -3.0])
@@ -187,6 +257,74 @@ def test_paths_are_published_as_lon_lat_pairs_on_the_grids_own_coordinates():
     np.testing.assert_allclose(drawn[:, 0], -38.5, atol=1e-3)
     assert drawn[:, 1].min() == pytest.approx(lat.min(), abs=1e-3)
     assert drawn[:, 1].max() == pytest.approx(lat.max(), abs=1e-3)
+
+
+def test_the_published_document_is_the_whole_schema_the_page_reads():
+    """``map-manager.renderIsobars`` reads ``metadata.interval`` and draws
+    ``isobars[].paths``; the document is a byte contract, so it is frozen whole
+    here rather than key by key. A five-cell ramp gives one straight meridian,
+    which is short enough to write out.
+    """
+    lon, lat, field = _ramp_grid(size=5)
+
+    payload = isobars.create_isobars_json(
+        lon,
+        lat,
+        field,
+        levels_hpa=np.array([1013.0]),
+        interval_hpa=1.0,
+        date_time="03/05/2026 12:00:00",
+    )
+
+    reread = json.loads(json.dumps(payload))
+    # `1013 == 1013.0` in Python, so equality alone would accept an integer level
+    # and the page's `toFixed` would then read a different string.
+    assert isinstance(reread["isobars"][0]["level"], float)
+    assert reread == {
+        "metadata": {
+            "date_time": "03/05/2026 12:00:00",
+            "unit": "hPa",
+            "interval": 1.0,
+            "smoothing_sigma_cells": 1.5,
+        },
+        "isobars": [
+            {
+                "level": 1013.0,
+                "paths": [
+                    [
+                        [-38.5, -11.0],
+                        [-38.5, -11.75],
+                        [-38.5, -12.5],
+                        [-38.5, -13.25],
+                        [-38.5, -14.0],
+                    ]
+                ],
+            }
+        ],
+    }
+
+
+def test_the_coordinates_are_published_rounded_to_four_decimals():
+    """Four decimals is about 10 m at this latitude and keeps the step files
+    small; an unrounded float64 would triple them and change every byte.
+    """
+    lon, lat, field = _ramp_grid(size=7)
+    off_grid = lon - 0.000123456
+
+    payload = isobars.create_isobars_json(
+        off_grid,
+        lat,
+        field,
+        levels_hpa=np.array([1013.0]),
+        interval_hpa=1.0,
+        date_time="03/05/2026 12:00:00",
+    )
+
+    drawn = [point for line in payload["isobars"] for path in line["paths"] for point in path]
+    assert drawn
+    for longitude, latitude in drawn:
+        assert longitude == round(longitude, 4)
+        assert latitude == round(latitude, 4)
 
 
 def test_a_level_the_field_never_reaches_is_not_published_as_an_empty_line():
@@ -335,9 +473,8 @@ def test_the_published_overlay_reduces_a_standard_atmosphere_to_its_real_pressur
     for written in result.files:
         payload = json.loads(Path(written).read_text(encoding="utf-8"))
         assert payload["isobars"], f"{Path(written).name} published no line"
-        levels = [line["level"] for line in payload["isobars"]]
-        assert min(levels) > 1010.0
-        assert max(levels) < 1020.0
+        levels = sorted({line["level"] for line in payload["isobars"]})
+        assert levels == [1014.0, 1015.0, 1016.0, 1017.0]
 
 
 def test_the_manifest_tells_the_page_which_variables_the_overlay_belongs_over(tmp_path):
@@ -381,3 +518,19 @@ def test_a_step_with_no_contour_publishes_an_empty_overlay(tmp_path):
     assert flat["metadata"]["unit"] == "hPa"
     drawn = json.loads((tmp_path / "json" / "D03_ISOBARS_000.json").read_text(encoding="utf-8"))
     assert drawn["isobars"]
+
+
+def test_a_humid_column_reduces_lower_than_the_same_column_dry():
+    """`vapor_mixing_ratio` reaches the reduction only through the virtual
+    temperature. Moist air is lighter, so a warmer virtual column needs
+    less pressure below it: the reduced value must come out lower."""
+    pressure, height, temperature, dry = _standard_atmosphere_column(1200.0)
+    humid = np.full_like(dry, 0.018)  # 18 g/kg, a moist tropical column
+
+    reduced_dry = sea_level_pressure_hpa(pressure, height, temperature, dry)[0, 0]
+    reduced_humid = sea_level_pressure_hpa(pressure, height, temperature, humid)[0, 0]
+
+    assert reduced_humid < reduced_dry
+    # 0.608 * 0.018 = 1.09% on the virtual temperature, which over 1200 m of
+    # hypsometric extrapolation is about 1.5 hPa.
+    assert reduced_dry - reduced_humid == pytest.approx(1.5, abs=0.5)

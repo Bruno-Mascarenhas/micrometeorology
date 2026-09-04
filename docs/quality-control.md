@@ -37,6 +37,7 @@ apply_calibrations               1,227               a `factor: null` record voi
 apply_shade_ring_correction      733,433 scaled      geometric shade-ring factor on the diffuse
 mask_step_excursions             839       ← statistical
 mask_persistent_runs             60,824    ← statistical
+apply_physical_limits (2nd)      631                 re-check in calibrated units, before the copy
 unify_sensor_columns                                 era-to-era channel unification (COPIES)
 close_net_radiation              36,241 recomposed
 mask_night_corrupted_days        195,833             55 days of timestamp corruption
@@ -44,7 +45,6 @@ nocturnal_offset_statistics      0 (measures only)   drift monitor, read before 
 mask_impossible_shortwave        89,672              BSRN ceiling, BSRN floor, and the daylight sign rule
 mask_nocturnal_shortwave         3,627,765           shortwave with the sun below the horizon
 close_nocturnal_net_radiation    395,040 recomposed  the night saldo is the longwave difference alone
-apply_physical_limits (2nd)      631                 re-check in calibrated units
   └─ write station_5min_qc
 aggregate_to_hourly                                  means, sums, vector means
   └─ write station_hourly        86,579 hours
@@ -67,6 +67,36 @@ other one.
 
 Masking per raw alias also means **per instrument**, so no era boundary can
 manufacture a false step across a sensor swap.
+
+---
+
+## Where the solar geometry is evaluated
+
+The CR5000 END-stamps its 5-minute averages: the row labelled `t` covers
+`(t − 5 min, t]`, measured against the 1-minute truth at RMS 0.083 W/m² and
+r = 1.000000 in `docs/allsky-label-join.md`, which is why the all-sky pipeline
+carries the same correction as `PrepareSensorConfig.timestamp_offset_minutes =
+−2.5`.
+
+Solar geometry describes an instant, so every gate that asks "was the sun up?"
+evaluates it at the **centre** of the interval a row averages —
+`archive.averaging_centroid`, i.e. the stamp minus half the sampling interval —
+and not at the closing edge the logger wrote. At the raw stamp 2024-06-01 05:55
+the sun reads 0.437° above the horizon (daylight); the interval that row
+actually averages is centred at 05:52:30, where it is 0.125° below.
+
+Corrected on 2026-09-03. Measured over the 1,022,917 five-minute rows of the
+archive, the correction moves:
+
+| gate | samples that change side |
+|---|---|
+| `mask_nocturnal_shortwave` (elevation < 0°) | 3,110 |
+| `night_corrupted_days` (deep night, < −10°) | 3,386 |
+| `nocturnal_offset_statistics` (drift monitor) | 3,386 |
+
+and the BSRN ceiling on `Sw_dw` rejects 2,893 samples instead of 2,886 (+7).
+Every one of them sits within about five minutes of sunrise or sunset, which is
+exactly where the two conventions disagree.
 
 ---
 
@@ -209,8 +239,13 @@ diffuse. With the correction the same bin reads 0.97.
 diffuse-fraction models lose most of the positive bias previously attributed to
 them. Marques Filho et al. (2016) goes from MBE +0.071 to +0.004, Lemos et al.
 (2017) crosses to -0.018 and the BRL model of Ridley et al. (2010) from +0.130 to
-+0.069. The "systematic overestimation by all three models" reported before this
-correction was in large part the missing shade-ring factor, not the models.
++0.069. Both BRL figures were measured with the apparent-solar-time coefficient
+transcribed as -0.006. Re-measured on the current archive (23,795 hours), the
+transcribed sign gives an MBE of +0.068 and the published +0.006 (corrected on
+2026-09-02) an MBE of +0.044 with an RMSE of 0.118. The "systematic
+overestimation by all three models" reported
+before this correction was in large part the missing shade-ring factor, not the
+models.
 
 A missing factor raises `MissingShadeRingFactorError` rather than becoming NaN or
 1.0: the first would erase a measurement in silence and the second would publish
@@ -432,8 +467,12 @@ habit alone.
   range gate and no statistical test, while every sibling T and RH channel of the
   same instrument has both.
 - **`WindDir_SD1_WVT`**, 267,252 samples of σ-θ, has only a range gate.
-- **Nine wind channels** have no persistence rule, including `WindDir` with
-  212,681 samples.
+- **Five wind channels** have no persistence rule: `Ws_Mean`,
+  `Wd_MeanUnitVector`, `Wd_StdDev`, `WindDir_SD` and `WindDir_SD1_WVT`.
+  `WindDir`, `WindDir_GMX` and `WS_ms_GMX` left this list when
+  `sensor_persistence_limits` gained them (see the comment there for the
+  measurement); the two σ-θ channels are a dispersion statistic, for which a
+  streak rule may be the wrong shape rather than a missing one.
 
 ### Sources consulted that produced a deliberate negative
 
@@ -449,7 +488,10 @@ Recording these so the same ground is not covered twice.
   values rather than reject them.
 - **Jiménez, P. A. et al. (2010)**, J. Appl. Meteor. Climatol. 49, 308–325 — the
   wind-direction step test, declined for the reason Shafer et al. give.
-- **Long & Shi (2008)** minimum of −4 W/m² — measured here as 100 % false
+- **Long & Shi (2008)** minimum of −4 W/m² — adopted, but only after the offset
+  it would have hidden was measured first. Applied blind it reads as 100 % false
   positive: 21,256 samples of uncorrected thermal offset from IR loss, exactly
-  the effect the same paper describes. Masking would bias the night mean upward
-  and destroy the diagnostic.
+  the effect the same paper describes, and masking them would bias the night mean
+  upward and destroy the diagnostic. It is in production as
+  `BSRN_PPL_FLOOR_WM2 = -4.0` alongside the nocturnal offset monitor that keeps
+  that measurement visible; see *Nocturnal shortwave: a deliberate deviation*.

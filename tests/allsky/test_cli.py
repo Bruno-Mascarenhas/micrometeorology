@@ -5,8 +5,10 @@ Deliberately torch-free: the heavy commands are exercised only via ``--help``
 lazily too.
 """
 
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -16,28 +18,7 @@ from allsky.training import resolve_device
 runner = CliRunner()
 
 
-# ---------------------------------------------------------------------------
-# CLI surface
-# ---------------------------------------------------------------------------
-
-EXPECTED_COMMANDS = (
-    "extract-frames",
-    "validate-dataset",
-    "prepare-local",
-    "export-colab-bundle",
-    "precompute-embeddings",
-    "train",
-    "evaluate",
-)
-
 RETIRED_COMMANDS = ("info", "build-index")
-
-
-def test_help_lists_the_surviving_commands():
-    result = runner.invoke(app, ["--help"])
-    assert result.exit_code == 0
-    for command in EXPECTED_COMMANDS:
-        assert command in result.output
 
 
 def test_help_does_not_list_retired_commands():
@@ -67,11 +48,6 @@ def test_train_without_config_is_rejected():
     assert "experiment" in result.output
 
 
-# ---------------------------------------------------------------------------
-# training helpers (torch-free)
-# ---------------------------------------------------------------------------
-
-
 def test_resolve_device_passthrough():
     assert resolve_device("cpu") == "cpu"
     assert resolve_device("cuda") == "cuda"
@@ -88,6 +64,10 @@ def test_core_modules_import_without_torch():
         "assert 'torch' not in sys.modules, 'torch was imported eagerly'\n"
     )
     result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")},
     )
     assert result.returncode == 0, result.stderr

@@ -165,33 +165,29 @@ def extract_embeddings(
             raise ValueError(f"manifest is missing required column {column!r}")
 
     out = Path(out_dir)
-    pooling = getattr(backbone, "pooling", "n/a")
-    dtype = "fp16"  # storage dtype (safetensors shards are always fp16)
+    pooling = backbone.pooling
+    # Two different dtypes, recorded apart because they are read for different
+    # things: the shards are always fp16 on disk, while the backbone may have
+    # computed in fp32.
+    storage_dtype = "fp16"
+    compute_dtype = str(getattr(backbone, "dtype", storage_dtype))
+    dtype = storage_dtype
     decode_threads = min(decode_workers, os.cpu_count() or 1)
 
-    # Resume must not silently mix incompatible embeddings into one store: if a
-    # prior meta exists, the incoming backbone/config must match it exactly.
     if resume:
         _check_resume_compatible(out, backbone, pooling, config_sha256)
 
-    # Resume bookkeeping: the index (consolidated + any un-consolidated parts from
-    # an interrupted run) is the source of truth for done work.  A non-resume run
-    # ignores it; its stale index/parts are dropped below, after the dry-run and
-    # nothing-to-do early returns and before any shard is written.
     existing_index = _read_index_and_parts(out) if resume else None
     done_ids: set[str] = set()
     next_shard = 0
     prior_rows = 0
-    # Rows carried forward for the final consolidation (seeded from existing work).
+    prior_index: pd.DataFrame | None = None
     index_rows: list[dict[str, Any]] = []
     if existing_index is not None and len(existing_index) > 0:
         done_ids = {str(s) for s in existing_index["sample_id"]}
         next_shard = int(existing_index["shard"].max()) + 1
         prior_rows = len(existing_index)
-        index_rows = [
-            {"sample_id": str(rec["sample_id"]), "shard": int(rec["shard"]), "row": int(rec["row"])}
-            for rec in existing_index.to_dict("records")
-        ]
+        prior_index = existing_index
 
     samples = [
         (str(sid), str(path))
@@ -208,6 +204,8 @@ def extract_embeddings(
         "pooling": pooling,
         "dim": int(backbone.dim),
         "dtype": dtype,
+        "storage_dtype": storage_dtype,
+        "compute_dtype": compute_dtype,
         "device": device,
         "total": total,
         "skipped": skipped,
@@ -232,9 +230,7 @@ def extract_embeddings(
     if not samples:
         logger.info("extract_embeddings: all %d sample(s) already embedded; nothing to do", total)
         if existing_index is not None:
-            # Consolidate any parts left by an interrupted prior run into
-            # index.parquet, and refresh provenance for this backbone/config.
-            _consolidate_index(out, index_rows)
+            _consolidate_index(out, index_rows, prior_index)
             _write_meta(
                 out,
                 backbone,
@@ -248,17 +244,8 @@ def extract_embeddings(
 
     out.mkdir(parents=True, exist_ok=True)
     if not resume:
-        # index.parquet describes the shard bytes this run is about to overwrite
-        # from shard 0 onward, so it goes before the first flush: a crash then
-        # leaves an index-less store that fails loudly, instead of an index that
-        # silently maps sample_ids onto other samples' rows.
         _remove_index_parts(out)
         (out / INDEX_FILENAME).unlink(missing_ok=True)
-    # Provenance before the first shard, not only at completion: any store with a
-    # shard on disk is then self-describing, so a later resume cannot slip past
-    # _check_resume_compatible (which short-circuits on a missing meta) and append
-    # a different backbone's vectors onto these shards.  The final _write_meta
-    # only corrects ``count``.
     _write_meta(
         out,
         backbone,
@@ -288,8 +275,6 @@ def extract_embeddings(
                 for row, sid in enumerate(shard_ids)
             ]
             index_rows.extend(part_rows)
-            # Write only this shard's index part (O(shard_size)), atomically and
-            # AFTER the shard lands, so the part never references a missing shard.
             _write_index_part(out, next_shard, part_rows)
             logger.info("extract_embeddings: wrote shard %s (%d embeddings)", path.name, take)
             shards_written += 1
@@ -298,10 +283,8 @@ def extract_embeddings(
             buffer = remainder if len(remainder) > 0 else None
             buffer_ids = buffer_ids[take:]
 
-    # Pillow releases the GIL while decoding, so a small thread pool overlaps the
-    # batch's JPEG decodes.  One pool for the whole run and one batch in flight:
-    # ``Executor.map`` returns results in submission order, so shard/row assignment
-    # (and therefore the index) is exactly as it is single-threaded.
+    # Threaded JPEG decode with ``Executor.map``, which returns in submission
+    # order: the store is the single-threaded one.
     from PIL import Image
 
     Image.preinit()  # register the JPEG plugin here, not in N threads at once
@@ -326,9 +309,7 @@ def extract_embeddings(
             flush(final=False)
 
     flush(final=True)
-    # Consolidate all parts (+ prior rows) into a single index.parquet atomically,
-    # then remove the parts. index.parquet is the source of truth for the reader.
-    _consolidate_index(out, index_rows)
+    _consolidate_index(out, index_rows, prior_index)
     _write_meta(
         out,
         backbone,
@@ -415,9 +396,19 @@ def _check_resume_compatible(
     )
 
 
-def _index_frame(index_rows: list[dict[str, Any]]) -> pd.DataFrame:
-    """Build the canonical-dtype index DataFrame from accumulated rows."""
+def _index_frame(
+    index_rows: list[dict[str, Any]], prior: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    """Build the canonical-dtype index DataFrame from accumulated rows.
+
+    *prior* is the consolidated index a resume inherited, kept as the frame it was
+    read as and concatenated ahead of *index_rows*: those rows are already columnar,
+    and taking them apart into one dict per sample only to rebuild them here costs
+    a dict per stored embedding.
+    """
     frame = pd.DataFrame(index_rows, columns=["sample_id", "shard", "row"])
+    if prior is not None and len(prior) > 0:
+        frame = prior if frame.empty else pd.concat([prior, frame], ignore_index=True)
     return frame.astype({"sample_id": "string", "shard": "int64", "row": "int64"})
 
 
@@ -459,15 +450,17 @@ def _read_index_and_parts(out: Path) -> pd.DataFrame | None:
     return merged
 
 
-def _consolidate_index(out: Path, index_rows: list[dict[str, Any]]) -> None:
+def _consolidate_index(
+    out: Path, index_rows: list[dict[str, Any]], prior: pd.DataFrame | None = None
+) -> None:
     """Write the single consolidated ``index.parquet`` atomically, then drop parts.
 
-    The consolidated index equals the union of all per-shard parts plus any prior
-    consolidated rows (carried in *index_rows*).  Parts are removed only after the
+    The consolidated index equals the union of all per-shard parts (*index_rows*)
+    plus any rows a resume inherited (*prior*).  Parts are removed only after the
     consolidated file lands, so an interrupted consolidation leaves the parts in
     place for the next resume.
     """
-    write_index(out, _index_frame(index_rows))
+    write_index(out, _index_frame(index_rows, prior))
     _remove_index_parts(out)
 
 
@@ -491,6 +484,11 @@ def _write_meta(
         "config_sha256": config_sha256,
         "pixel_config_sha256": pixel_config_sha256,
         "count": count,
+        # `dtype` is the STORAGE precision, kept under its original name for the
+        # stores already on disk; `compute_dtype` is what the backbone ran at,
+        # which a live prediction has to rebuild the encoder with.
         "dtype": dtype,
+        "storage_dtype": dtype,
+        "compute_dtype": str(getattr(backbone, "dtype", dtype)),
     }
     write_meta(out, meta)

@@ -115,6 +115,11 @@ class VisualBackbone(Protocol):
         Pinned code/weight revision (a commit SHA for DINOv2).
     dim:
         Output embedding dimension (columns of the ``(B, dim)`` encode result).
+    pooling:
+        How the backbone reduces its output to one vector (``"cls"``, ``"mean"``,
+        ``"cls+mean"``; ``"fake"`` for the test backbone).  It is recorded in the
+        store's provenance and compared on resume, so it belongs to the interface
+        rather than being read off whichever backbone happens to carry it.
 
     Methods
     -------
@@ -131,6 +136,7 @@ class VisualBackbone(Protocol):
     name: str
     revision: str
     dim: int
+    pooling: str
 
     def transform(self, images: Sequence[np.ndarray]) -> Any:
         """Map ``uint8`` HWC frames to a model-ready batch."""
@@ -388,11 +394,12 @@ class TorchvisionBackbone(_TorchModuleBackbone):
             raise ValueError(
                 f"unknown torchvision backbone {model!r}; expected one of {sorted(self.HEADS)}"
             )
+        self.dim = embedding_dim(model, pooling)
+        self._head_attribute = self.HEADS[model][1]
         import torchvision
 
         self.name = model
         self.revision = f"torchvision {torchvision.__version__}"
-        self.dim, self._head_attribute = self.HEADS[model]
         self._weights = weights
         super().__init__(pooling=pooling, device=device, dtype=dtype, image_size=image_size)
 
@@ -597,6 +604,7 @@ def build_backbone(
     pooling: Pooling = "cls",
     device: str = "auto",
     dtype: Literal["fp16", "fp32"] = "fp16",
+    image_size: int = DEFAULT_IMAGE_SIZE,
     fake_dim: int = 32,
     weights: str | None = None,
     repo_dir: str | Path | None = None,
@@ -606,10 +614,14 @@ def build_backbone(
     Parameters
     ----------
     name:
-        ``"dinov2_vits14"`` (the real DINOv2 backbone) or ``"fake"`` (the
-        deterministic test/dev backbone).
-    pooling, device, dtype:
-        Forwarded to :class:`DinoV2Backbone` (ignored by :class:`FakeBackbone`).
+        Any name in :data:`AVAILABLE_BACKBONES`: the four ``dinov2_*`` entrypoints,
+        the four ``dinov3_*`` ones, the two torchvision convolutional networks, or
+        ``"fake"`` (the deterministic test/dev backbone).
+    pooling, device, dtype, image_size:
+        Forwarded to whichever of :class:`DinoV2Backbone`, :class:`Dinov3Backbone`
+        and :class:`TorchvisionBackbone` *name* selects; :class:`FakeBackbone` reads
+        none of them.  ``image_size`` is the square input the backbone is built for,
+        and the two transformer families refuse one their patch size cannot tile.
     fake_dim:
         Embedding dimension for :class:`FakeBackbone`.
     weights:
@@ -635,7 +647,9 @@ def build_backbone(
     if name == "fake":
         return FakeBackbone(dim=fake_dim)
     if name in _TOKEN_DIM:
-        return DinoV2Backbone(model=name, pooling=pooling, device=device, dtype=dtype)
+        return DinoV2Backbone(
+            model=name, pooling=pooling, device=device, dtype=dtype, image_size=image_size
+        )
     if name in Dinov3Backbone.TOKEN_DIM:
         return Dinov3Backbone(
             model=name,
@@ -644,10 +658,16 @@ def build_backbone(
             pooling=pooling,
             device=device,
             dtype=dtype,
+            image_size=image_size,
         )
     if name in TorchvisionBackbone.HEADS:
         return TorchvisionBackbone(
-            model=name, pooling=pooling, device=device, dtype=dtype, weights=weights
+            model=name,
+            pooling=pooling,
+            device=device,
+            dtype=dtype,
+            image_size=image_size,
+            weights=weights,
         )
     raise ValueError(
         f"unknown backbone {name!r}; available backbones: {', '.join(AVAILABLE_BACKBONES)}"

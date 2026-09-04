@@ -128,6 +128,19 @@ class TestSplitArtifact:
             "created_at",
         }
 
+    def test_an_artifact_without_a_split_id_is_refused_not_rehashed(self, tmp_path: Path):
+        """Dropping the key switched the corruption check off: an edited assignment
+        loaded clean under a freshly recomputed split_id."""
+        split = create_day_splits(DAYS, seed=1)
+        path = tmp_path / "splits.json"
+        save_split_artifact(split, path)
+        payload = json.loads(path.read_text())
+        del payload["split_id"]
+        path.write_text(json.dumps(payload))
+
+        with pytest.raises(KeyError, match="split_id"):
+            load_split_artifact(path)
+
     def test_saving_identical_split_is_idempotent(self, tmp_path: Path):
         split = create_day_splits(DAYS, seed=1)
         path = tmp_path / "splits.json"
@@ -191,10 +204,7 @@ class TestLeakageSelfCheck:
         with pytest.raises(ValueError, match="leakage"):
             check_split_leakage(["a", "b"], ["b", "c"], ["d"])
 
-    def test_from_dict_runs_leakage_check(self):
-        # Hand-built assignment cannot leak (day -> one split); a malformed
-        # split_id-free payload with duplicate-day intent is caught by the
-        # disjoint check via days_for.
+    def test_from_dict_round_trips_the_assignment_it_was_given(self):
         split = DaySplit(
             assignment={"2025-01-01": "train", "2025-01-02": "val"},
             seed=0,
