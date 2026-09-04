@@ -318,6 +318,13 @@ def run(
                 f"{', '.join(limits_absent_columns[:6])}"
             )
             blocking.append(f"{len(limits_absent_columns)} limite(s) nomeiam coluna ausente")
+    else:
+        # The gate is fail-open by construction: no declared limit means no
+        # sample is ever refused, and the run publishes an ungated archive with
+        # exit 0. Silence there is indistinguishable from "every sample was
+        # inside its bounds".
+        typer.echo("\n  ! nenhum limite fisico declarado: o portao de faixa nao rodou")
+        blocking.append("nenhum limite fisico declarado")
     calibrations_path = settings.configs_dir / "calibrations.yaml"
     sources: dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]] = {}
     if calibrations_path.is_file():
@@ -421,9 +428,14 @@ def run(
             for unified_name, column, start, end in gaps[:8]:
                 typer.echo(f"    {unified_name:9s} <- {column:16s} {start.date()} .. {end.date()}")
     else:
+        # Without the file no instrument factor is applied and no era-spanning
+        # column is unified: the archive publishes raw logger counts under the
+        # names the unified channels would have had, and every consumer reads
+        # them as calibrated. Exit 0 there says the build is sound.
         typer.echo(
             f"  ! sem calibracoes em {calibrations_path}: exportando sem correcao nem unificacao"
         )
+        blocking.append(f"sem calibracoes em {calibrations_path}")
 
     # After unification: the 2017 episodes exist only in the unified column.
     # Radiation in deep night is a slipped clock, not a sky, and the flat gates

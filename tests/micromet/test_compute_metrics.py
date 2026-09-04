@@ -121,3 +121,64 @@ def test_nearest_join_with_no_pair_inside_the_tolerance_is_an_error_not_a_table_
 
     assert result.exit_code == 1, result.output
     assert "No overlapping data after alignment" in result.output
+
+
+def test_nearest_join_pairs_rows_offset_by_less_than_the_tolerance(tmp_path: Path) -> None:
+    """The successful half of `--join nearest` — and `--tolerance` itself — had no
+    test: only the two refusals were pinned, so the pairing the flag exists for
+    was never executed."""
+    index_a = pd.date_range("2024-01-01 00:00", periods=6, freq="1h", name="TIMESTAMP")
+    index_b = index_a + pd.Timedelta(minutes=10)
+    dataset_a = tmp_path / "a.csv"
+    dataset_b = tmp_path / "b.csv"
+    pd.DataFrame({"T2": [20.0] * 6}, index=index_a).to_csv(dataset_a)
+    pd.DataFrame({"T2": [21.0] * 6}, index=index_b).to_csv(dataset_b)
+    output = tmp_path / "out" / "metrics.csv"
+
+    result = CliRunner().invoke(
+        compute_metrics.app,
+        [
+            "-a",
+            str(dataset_a),
+            "-b",
+            str(dataset_b),
+            "--join",
+            "nearest",
+            "--tolerance",
+            "30min",
+            "-o",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    table = pd.read_csv(output, index_col=0)
+    assert list(table.loc["n"]) == [6]
+
+
+def test_a_tolerance_tighter_than_the_offset_pairs_nothing(tmp_path: Path) -> None:
+    """The same two files, refused: the tolerance is what decides, so it has to be
+    read from the flag rather than from a default nobody passes."""
+    index_a = pd.date_range("2024-01-01 00:00", periods=6, freq="1h", name="TIMESTAMP")
+    index_b = index_a + pd.Timedelta(minutes=10)
+    dataset_a = tmp_path / "a.csv"
+    dataset_b = tmp_path / "b.csv"
+    pd.DataFrame({"T2": [20.0] * 6}, index=index_a).to_csv(dataset_a)
+    pd.DataFrame({"T2": [21.0] * 6}, index=index_b).to_csv(dataset_b)
+
+    result = CliRunner().invoke(
+        compute_metrics.app,
+        [
+            "-a",
+            str(dataset_a),
+            "-b",
+            str(dataset_b),
+            "--join",
+            "nearest",
+            "--tolerance",
+            "5min",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "No overlapping data after alignment" in result.output

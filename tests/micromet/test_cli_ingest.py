@@ -321,6 +321,64 @@ def test_a_dead_balance_component_fails_strict_instead_of_blanking_the_chart(
     assert "Sw_dw" in resultado.output
 
 
+def test_an_archive_with_no_declared_physical_limit_fails_strict(tmp_path, monkeypatch) -> None:
+    """The range gate is fail-open: no declared limit means no sample is ever
+    refused, and the run publishes an ungated archive with exit 0 — silence
+    indistinguishable from "every sample was inside its bounds"."""
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    _write_config_layer(tmp_path, monkeypatch, sensor_limits=[])
+    fatores = tmp_path / "teorica_2016-2030.csv"
+    fatores.write_text("ano_i,mes_i,dia_i,hor_i,min_i,fc\n", encoding="utf-8")
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(
+        lenta,
+        ["CM3Up_Wm2_Avg"],
+        [(f"2026-08-15 12:{minute:02d}:00", [500.0]) for minute in range(0, 60, 5)],
+    )
+
+    resultado = CliRunner().invoke(
+        app, ["-d", str(tmp_path), "-o", str(tmp_path / "out"), "--source", str(lenta), "--strict"]
+    )
+
+    assert resultado.exit_code == 1, resultado.output
+    assert "nenhum limite fisico declarado" in resultado.output
+
+
+def test_an_archive_built_without_calibrations_fails_strict(tmp_path, monkeypatch) -> None:
+    """No calibrations file means no instrument factor and no era-spanning column
+    is unified: the archive publishes raw logger counts under the names the
+    unified channels would have had, and every consumer reads them as
+    calibrated."""
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    empty_configs = tmp_path / "configs-sem-calibracoes"
+    empty_configs.mkdir()
+    fatores = tmp_path / "teorica_2016-2030.csv"
+    fatores.write_text("ano_i,mes_i,dia_i,hor_i,min_i,fc\n", encoding="utf-8")
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(
+        lenta,
+        ["CM3Up_Wm2_Avg"],
+        [(f"2026-08-15 12:{minute:02d}:00", [500.0]) for minute in range(0, 60, 5)],
+    )
+    from micrometeorology.cli import build_archive
+
+    monkeypatch.setattr(build_archive, "get_settings", lambda: Settings(configs_dir=empty_configs))
+
+    resultado = CliRunner().invoke(
+        app,
+        ["-d", str(tmp_path), "-o", str(tmp_path / "out"), "--source", str(lenta), "--strict"],
+    )
+
+    assert resultado.exit_code == 1, resultado.output
+    assert "sem calibracoes" in resultado.output
+
+
 def test_without_sources_the_manifest_still_refuses_a_missing_entry(tmp_path) -> None:
     """The historical build must keep failing loud: a dropped entry shortens the record."""
     from typer.testing import CliRunner
@@ -397,3 +455,40 @@ def test_a_source_file_matching_neither_table_is_refused_instead_of_dropped(
     assert resultado.exit_code == 2, resultado.output
     assert "LBM_slow_2025.dat" in resultado.output
     assert not (tmp_path / "out" / "station_hourly.parquet").exists()
+
+
+def test_files_are_merged_in_chronological_order_not_lexicographic(tmp_path: Path) -> None:
+    """`merge_dat_files` resolves an overlapping stamp as "the first file in
+    CHRONOLOGICAL order wins", and the glob sorts by name — for the station's own
+    names a different order: `LBM_lenta.dat` sorts before `LBM_lenta_2019.dat`
+    while covering 2019 itself, so the later file's value won the conflict."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    # Sorts SECOND by name, starts FIRST in time, and carries the shared stamp.
+    _write_toa5(
+        raw_dir / "z_starts_earlier.dat",
+        ["Temp1"],
+        [("2025-06-25 11:00:00", [20.0]), ("2025-06-25 12:00:00", [21.0])],
+    )
+    # Sorts FIRST by name, starts SECOND in time, same shared stamp.
+    _write_toa5(raw_dir / "a_starts_later.dat", ["Temp1"], [("2025-06-25 12:00:00", [99.0])])
+    output_path = tmp_path / "out.csv"
+
+    result = runner.invoke(
+        ingest_sensor_data.app,
+        [
+            "-i",
+            str(raw_dir),
+            "-o",
+            str(output_path),
+            "--min-samples",
+            "1",
+            "--log-level",
+            "WARNING",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    exported = pd.read_csv(output_path, index_col=0)
+    noon = exported.loc[exported.index.astype(str).str.contains("12:00")]
+    assert noon["Temp1"].iloc[0] == pytest.approx(21.0)

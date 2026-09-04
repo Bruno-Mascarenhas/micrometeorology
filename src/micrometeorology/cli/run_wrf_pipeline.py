@@ -35,6 +35,10 @@ from micrometeorology.wrf.batch import FigureTask, _max_tasks_per_child, default
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
+#: What this pipeline renders AND exports by default. Deliberately shorter than
+#: :data:`micrometeorology.cli.export_wrf_geojson.DEFAULT_VARS`: the nine ids
+#: that list adds are JSON-only products with no figure. Coverage of the
+#: manifest is therefore judged against that list, never against this one.
 DEFAULT_VARS = [
     "temperature",
     "pressure",
@@ -91,6 +95,7 @@ def run(
 ) -> None:
     """Run WRF processing locally: figures + GeoJSON + WebM."""
     setup_logging(log_level)
+    from micrometeorology.cli import export_wrf_geojson
     from micrometeorology.cli.render_wrf_maps import resolve_selection
     from micrometeorology.cli.wrfout_selection import reject_output_id_variables
     from micrometeorology.wrf import reader as wrf_reader
@@ -202,7 +207,11 @@ def run(
             json_dir,
             results,
             json_var_list,
-            covers_every_variable=set(json_var_list) >= set(DEFAULT_VARS),
+            # Against the JSON producer's OWN default, not this pipeline's: the
+            # two lists differ (this one omits the nine derived-radiation and
+            # overlay ids), so measuring coverage against the shorter one made
+            # the manifest vouch for products the run never wrote.
+            covers_every_variable=set(json_var_list) >= set(export_wrf_geojson.DEFAULT_VARS),
         )
         if manifest_path:
             typer.echo(f"  ✓ Manifest: {manifest_path}")
