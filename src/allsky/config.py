@@ -459,6 +459,22 @@ class ExperimentConfig(BaseModel):
     train: ExperimentTrainConfig = Field(default_factory=ExperimentTrainConfig)
     augmentation: AugmentationConfig = Field(default_factory=AugmentationConfig)
 
+    @model_validator(mode="after")
+    def _geometry_channels_need_image_mode(self) -> ExperimentConfig:
+        """Refuse ``model.geometry_channels`` in embedding mode, where no pixel is read.
+
+        The registry widens the patch projection for the planes, but the
+        embedding branch of the visual encoder never receives them, so the
+        knob was accepted and silently dropped.
+        """
+        if self.data.input_mode == "embedding" and geometry_channels_of(self):
+            raise ValueError(
+                "model.geometry_channels asks for solar-geometry planes, but "
+                "data.input_mode='embedding' reads precomputed vectors and no pixel; "
+                "the planes would be dropped without a word"
+            )
+        return self
+
     preprocessing: PreprocessingConfig = Field(default_factory=PreprocessingConfig)
 
 

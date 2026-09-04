@@ -108,3 +108,15 @@ def test_a_misspelt_site_key_is_rejected_instead_of_keeping_the_station_clock():
     ``site:`` block computed a UTC-8 station on Salvador's clock without failing."""
     with pytest.raises(ValidationError, match="utc_offset_hour"):
         SiteConfig.model_validate({"utc_offset_hour": -8.0})
+
+
+def test_geometry_channels_are_refused_in_embedding_mode():
+    """``build_model`` returned a PrecomputedEmbedding with no extra-channel
+    projection and no warning for a config that asked for the planes."""
+    with pytest.raises(ValidationError, match="geometry_channels"):
+        ExperimentConfig.model_validate(
+            {
+                "data": {"input_mode": "embedding"},
+                "model": {"name": "image_only", "geometry_channels": True},
+            }
+        )
