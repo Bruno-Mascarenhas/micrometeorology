@@ -110,7 +110,9 @@ def daily_clearness_index(global_radiation: pd.Series, extraterrestrial: pd.Seri
 
     The ratio of the day's summed global to the day's summed extraterrestrial
     irradiance — a ratio of daily totals, not the mean of hourly ratios, which
-    would weight a noisy sunrise hour like a bright midday one.
+    would weight a noisy sunrise hour like a bright midday one. Both sums run
+    over the hours the global channel measured: an hour with no global sample
+    leaves both totals alone, so a gap shrinks the day's sample, not its ratio.
 
     Parameters
     ----------
@@ -124,7 +126,8 @@ def daily_clearness_index(global_radiation: pd.Series, extraterrestrial: pd.Seri
         is zero (a polar-night case this site never sees, guarded anyway).
     """
     day = pd.DatetimeIndex(global_radiation.index).normalize()
-    totals = pd.DataFrame({"g": global_radiation, "e": extraterrestrial}).groupby(day).sum()
+    measured = extraterrestrial.where(global_radiation.notna())
+    totals = pd.DataFrame({"g": global_radiation, "e": measured}).groupby(day).sum()
     ratio = (totals["g"] / totals["e"]).replace([np.inf, -np.inf], np.nan)
     return ratio.reindex(day).set_axis(global_radiation.index)
 

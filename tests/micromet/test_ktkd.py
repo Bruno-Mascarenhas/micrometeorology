@@ -211,3 +211,17 @@ def test_the_published_payload_carries_no_non_finite_number():
     )
 
     json.dumps(payload, allow_nan=False)
+
+
+def test_a_gap_in_the_global_record_leaves_the_daily_clearness_untouched():
+    """``groupby().sum()`` counts a missing global hour as zero while the
+    extraterrestrial hour still enters the denominator: a day with four missing
+    noon hours published half its real Kt."""
+    index = pd.date_range("2024-06-01 06:00", periods=12, freq="h")
+    extraterrestrial = pd.Series(np.linspace(100.0, 1000.0, 12), index=index)
+    global_flux = 0.6 * extraterrestrial
+    global_flux.iloc[4:8] = np.nan
+
+    kt = ktkd.daily_clearness_index(global_flux, extraterrestrial)
+
+    assert kt.iloc[0] == pytest.approx(0.6)
