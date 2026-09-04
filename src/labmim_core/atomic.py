@@ -11,9 +11,9 @@ place; the temp file is removed if the writer raises.
 Same-directory placement is deliberate: ``os.replace`` is only atomic within a
 single filesystem, so the temp file must never live in a system tempdir.
 
-Pure stdlib, and it imports nothing from this project: both packages write
-through it, so it has to sit under both. Callers that need torch — checkpoint
-saving — import it lazily inside the writer callable.
+Pure stdlib, and it imports nothing from this project: the three packages write
+through it, which is why it lives in ``labmim_core``. Callers that need torch —
+checkpoint saving — import it lazily inside the writer callable.
 """
 
 import json
@@ -59,7 +59,7 @@ def atomic_write(path: str | Path, writer: Callable[[Path], Any]) -> Path:
 
 
 def _fsync_path(path: Path) -> None:
-    """Flush a file's own blocks to disk, best-effort."""
+    """Flush a file's own blocks to disk; an OSError propagates and fails the write."""
     with open(path, "rb") as handle:
         os.fsync(handle.fileno())
 

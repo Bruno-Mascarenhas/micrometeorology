@@ -10,6 +10,7 @@ import contextlib
 import importlib
 import os
 import sys
+from pathlib import Path
 
 
 def pytest_configure() -> None:
@@ -41,9 +42,9 @@ def pytest_configure() -> None:
 
         conda_prefix = os.environ.get("CONDA_PREFIX")
         if conda_prefix:
-            lib_bin = os.path.join(conda_prefix, "Library", "bin")
-            if os.path.isdir(lib_bin):
-                os.add_dll_directory(lib_bin)
+            lib_bin = Path(conda_prefix) / "Library" / "bin"
+            if lib_bin.is_dir():
+                os.add_dll_directory(str(lib_bin))
 
         # Eagerly import torch so that its DLL loading happens before
         # pytest's collector changes the process DLL state.

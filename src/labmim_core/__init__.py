@@ -10,4 +10,14 @@ not be done without touching the third.
 Nothing here imports any of the three. That is the whole rule of this package,
 and it is what makes the graph a DAG: the three depend on this, this depends on
 nobody.
+
+``__version__`` is ``0+unknown`` when the package is imported from the source
+tree before installation.
 """
+
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("labmim-micrometeorology")
+except PackageNotFoundError:
+    __version__ = "0+unknown"

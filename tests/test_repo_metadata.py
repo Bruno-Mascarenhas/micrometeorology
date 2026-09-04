@@ -197,7 +197,7 @@ def test_clone_cell_takes_its_ref_from_the_branch_knob() -> None:
 
 
 def test_every_package_reports_the_distribution_version() -> None:
-    """All three packages ship in ONE distribution, so all three must say 1.3.1.
+    """Every package here ships in ONE distribution, so each must report its version.
 
     ``allsky`` and ``solrad_correction`` carried a hand-written ``0.1.0`` while
     the distribution was at 1.3.1, so anything introspecting them — including a
@@ -208,12 +208,14 @@ def test_every_package_reports_the_distribution_version() -> None:
     from importlib.metadata import version
 
     import allsky
+    import labmim_core
     import micrometeorology
     import solrad_correction
 
     distribution = version("labmim-micrometeorology")
     assert micrometeorology.__version__ == distribution
     assert allsky.__version__ == distribution
+    assert labmim_core.__version__ == distribution
     assert solrad_correction.__version__ == distribution
 
 

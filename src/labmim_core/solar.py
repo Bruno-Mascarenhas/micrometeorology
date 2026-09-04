@@ -50,6 +50,14 @@ __all__ = [
 #: Total solar irradiance at 1 AU (Kopp & Lean 2011), W m-2.
 SOLAR_CONSTANT_WM2 = 1361.0
 
+#: Longitude spanned by one hour of Earth rotation, degrees; the standard
+#: meridian of a clock offset in the NOAA solar equations sheet.
+_DEGREES_PER_HOUR = 15.0
+
+#: Minutes of solar time per degree of longitude, the inverse of the above; the
+#: ``4*longitude`` and ``tst/4`` factors of the NOAA solar equations sheet.
+_MINUTES_PER_DEGREE = 4.0
+
 
 def _as_datetime_index(timestamps: DatetimeLike) -> pd.DatetimeIndex:
     """Normalize any datetime-like sequence to a naive DatetimeIndex."""
@@ -204,17 +212,18 @@ def hour_angle_deg(
         before noon.  It is not wrapped to ``[-180, 180)``.
     """
     times = _as_datetime_index(timestamps)
-    # Explicit offset when given, else the standard meridian for this longitude.
-    offset = utc_offset_hours if utc_offset_hours is not None else round(longitude / 15.0)
+    offset = (
+        utc_offset_hours if utc_offset_hours is not None else round(longitude / _DEGREES_PER_HOUR)
+    )
     eqtime = equation_of_time(times)
-    time_offset = eqtime + 4.0 * longitude - 60.0 * offset
+    time_offset = eqtime + _MINUTES_PER_DEGREE * longitude - 60.0 * offset
     tst = (
         times.hour.to_numpy(dtype=np.float64) * 60.0
         + times.minute.to_numpy(dtype=np.float64)
         + times.second.to_numpy(dtype=np.float64) / 60.0
         + time_offset
     )
-    return tst / 4.0 - 180.0
+    return tst / _MINUTES_PER_DEGREE - 180.0
 
 
 def cos_zenith(

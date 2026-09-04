@@ -18,7 +18,7 @@ __all__ = ["STATION_SITE", "STATION_UTC_OFFSET_HOURS", "SiteConfig"]
 class SiteConfig(BaseModel):
     """Observation site (LabMiM/UFBA, Salvador-BA by default)."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     #: LabMiM tower, Instituto de Física, UFBA — Ondina, Salvador. These are the
     #: canonical coordinates for the station: every package reads them from
@@ -48,6 +48,8 @@ class SiteConfig(BaseModel):
 #: The station itself, at those default coordinates.
 STATION_SITE = SiteConfig()
 
-#: Salvador keeps UTC-3 all year — DST never applied to Bahia and Brazil
-#: abolished it in 2019 — so a fixed offset is exact, not an approximation.
+#: Salvador keeps UTC-3 all year in this archive: Bahia observed DST in the
+#: 2011/2012 season only and Brazil abolished it in 2019, and the datalogger and
+#: camera clocks never followed DST — so a fixed offset is exact, not an
+#: approximation.
 STATION_UTC_OFFSET_HOURS = -3.0

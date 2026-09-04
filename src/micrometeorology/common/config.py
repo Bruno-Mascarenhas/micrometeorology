@@ -6,13 +6,9 @@ Usage::
     settings = get_settings()
     print(settings.data_dir)
 
-The configuration is loaded from up to three layers (later overrides earlier):
-1. ``configs/default.yaml``      — shipped defaults
-2. ``configs/<env>.yaml``        — environment-specific (server / local)
-3. Environment variables         — ``LABMIM_*`` prefix
-
-Set ``LABMIM_CONFIG_PATH`` to point to a custom YAML configuration.
-Set ``LABMIM_ENV`` to ``server`` or ``local`` to auto-load the matching file.
+:func:`get_settings` names the layers it merges and the order it merges them in;
+``LABMIM_ENV`` and ``LABMIM_CONFIG_PATH`` are how an operator selects two of
+them.
 """
 
 import os
@@ -191,13 +187,12 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO", description="Logging level")
 
-    def resolve_paths(self, root: Path | None = None) -> None:
-        """Resolve relative paths against the project root."""
-        base = root or _project_root()
+    def resolve_paths(self, root: Path) -> None:
+        """Resolve every relative path field against *root*."""
         for field_name in ("data_dir", "output_dir", "figures_dir", "shapes_dir", "configs_dir"):
             p = getattr(self, field_name)
             if not p.is_absolute():
-                object.__setattr__(self, field_name, (base / p).resolve())
+                object.__setattr__(self, field_name, (root / p).resolve())
 
 
 @lru_cache(maxsize=1)

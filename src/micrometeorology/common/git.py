@@ -9,8 +9,9 @@ exclusive for this call. S607 (partial executable path) demands the binary be
 resolved rather than found on PATH, while S603 stays silent only when *every*
 argv element is a string literal -- which a resolved path never is. Resolving is
 the safer half of the trade (it also turns "git is not installed" into a plain
-``None`` instead of an exec failure), so this module takes S603, documents it,
-and is the only place in the tree that has to.
+``None`` instead of an exec failure), so this module takes S603 and documents it
+once; :mod:`allsky.drive` makes the same trade for the rclone binary and points
+its own suppression back here.
 
 Pure stdlib: importing this never pulls pandas, torch or any package internals.
 """
