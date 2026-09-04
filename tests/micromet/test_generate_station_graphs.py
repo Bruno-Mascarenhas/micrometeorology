@@ -214,8 +214,45 @@ def test_the_diffuse_graph_draws_the_models_diffuse_and_not_only_its_global():
 
     Its legend said ``SW_dw-wrf``, but it was the only model line on an axes
     whose other curves are the measured diffuse, so the site read the model's
-    global irradiance as its diffuse. Both channels are drawn now, and the two
-    shipped producers agree on which column ``radiacao_difusa`` means.
+    global irradiance as its diffuse. Read off the axes the producer actually
+    draws, not off the constants it is configured with: the strokes the two
+    curves get are decided at the call site, and asserting on literals the test
+    itself passed to ``_plot_wrf_overlay`` never reached that decision.
+    """
+    from micrometeorology.cli.generate_station_graphs import _draw_radiacao_difusa
+
+    index = pd.to_datetime(["2026-01-01 12:00", "2026-01-01 13:00"])
+    measured = pd.DataFrame(
+        {"CM3Up_Wm2_Avg": [900.0, 950.0], "PSP_Wm2_Avg": [130.0, 150.0]}, index=index
+    )
+    model = pd.DataFrame(
+        {"swdown_w_m2": [800.0, 900.0], "swddif_w_m2": [120.0, 140.0]}, index=index
+    )
+
+    figure, axes = plt.subplots()
+    try:
+        _draw_radiacao_difusa(axes, measured, measured, model)
+        drawn = {line.get_label(): line for line in axes.get_lines()}
+
+        assert {"SW_dw-wrf 1h", "SW_df-wrf 1h"} <= set(drawn)
+        np.testing.assert_allclose(
+            np.asarray(drawn["SW_dw-wrf 1h"].get_ydata(), dtype=float), [800.0, 900.0]
+        )
+        np.testing.assert_allclose(
+            np.asarray(drawn["SW_df-wrf 1h"].get_ydata(), dtype=float), [120.0, 140.0]
+        )
+        # Two dashed black lines are how the global came to be read as the diffuse.
+        assert (drawn["SW_dw-wrf 1h"].get_linestyle(), drawn["SW_dw-wrf 1h"].get_color()) != (
+            drawn["SW_df-wrf 1h"].get_linestyle(),
+            drawn["SW_df-wrf 1h"].get_color(),
+        )
+    finally:
+        plt.close(figure)
+
+
+def test_the_two_shipped_producers_agree_on_which_column_the_diffuse_is():
+    """One page, two producers: a rename in only one of them republishes the
+    static figure and the interactive one from different model channels.
     """
     from micrometeorology.cli.generate_station_graphs import WRF_COLUMNS
     from micrometeorology.cli.plot_station_graphs import DEFAULT_WRF_COLUMNS
@@ -224,26 +261,6 @@ def test_the_diffuse_graph_draws_the_models_diffuse_and_not_only_its_global():
     assert WRF_COLUMNS["radiacao_difusa"] == SWDDIF_W_M2
     assert WRF_COLUMNS["radiacao_global"] == SWDOWN_W_M2
     assert DEFAULT_WRF_COLUMNS["radiacao_difusa"] == (WRF_COLUMNS["radiacao_difusa"],)
-
-
-def test_two_model_curves_on_one_axes_get_different_strokes():
-    """Two dashed black lines are how the global came to be read as the diffuse."""
-    from micrometeorology.cli.generate_station_graphs import _plot_wrf_overlay
-
-    figure, axes = plt.subplots()
-    try:
-        frame = pd.DataFrame(
-            {"swdown_w_m2": [800.0, 900.0], "swddif_w_m2": [120.0, 140.0]},
-            index=pd.to_datetime(["2026-01-01 12:00", "2026-01-01 13:00"]),
-        )
-        _plot_wrf_overlay(axes, frame, "swdown_w_m2", label="SW_dw-wrf 1h")
-        _plot_wrf_overlay(
-            axes, frame, "swddif_w_m2", label="SW_df-wrf 1h", linestyle="-.", color="#e07a1f"
-        )
-        strokes = {(line.get_linestyle(), line.get_color()) for line in axes.get_lines()}
-        assert len(strokes) == 2
-    finally:
-        plt.close(figure)
 
 
 def test_the_model_overlay_never_backtracks_in_time():

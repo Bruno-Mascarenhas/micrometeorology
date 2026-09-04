@@ -16,7 +16,7 @@ from matplotlib import pyplot as plt
 from matplotlib.colors import to_hex
 from typer.testing import CliRunner
 
-from micrometeorology.cli import generate_station_graphs
+from micrometeorology.cli import generate_station_graphs, plot_station_graphs
 from micrometeorology.cli.plot_station_graphs import (
     DEFAULT_BALANCE_COMPONENTS,
     DEFAULT_COLUMNS,
@@ -26,6 +26,7 @@ from micrometeorology.cli.plot_station_graphs import (
     _plot_balance,
     app,
     load_graph_config,
+    load_hourly_csv,
     render_site_graphs,
     resolve_column,
 )
@@ -189,6 +190,37 @@ class TestSiteCommand:
         assert result.exit_code == 0, result.output
         assert len(list(out.glob("*.png"))) == len(CONTRACT_PNGS)
 
+
+class TestTheLoadedWindow:
+    """Nine filenames come out whatever the window, so the clip is pinned here."""
+
+    def test_the_window_reaches_exactly_last_days_back_from_the_newest_row(self, tmp_path):
+        csv = _write_hourly_csv(tmp_path / "long.csv", days=10)
+
+        clipped = load_hourly_csv(csv, 3)
+
+        newest = clipped.index.max()
+        assert newest == pd.Timestamp("2026-06-10 23:00:00")
+        assert clipped.index.min() == newest - pd.Timedelta(days=3)
+        assert len(clipped) == 3 * 24 + 1
+
+    @pytest.mark.parametrize("last_days", [0, -1])
+    def test_a_window_of_zero_days_or_less_keeps_the_whole_file(self, tmp_path, last_days):
+        """The flag's documented 'keep everything' escape hatch."""
+        csv = _write_hourly_csv(tmp_path / "long.csv", days=10)
+
+        assert len(load_hourly_csv(csv, last_days)) == 10 * 24
+
+    def test_a_parquet_archive_loads_to_the_same_frame_as_the_csv(self, tmp_path):
+        """`labmim-archive` writes parquet and only it carries the unified names,
+        so the branch that reads it must not be the untested one.
+        """
+        csv = _write_hourly_csv(tmp_path / "long.csv", days=4)
+        parquet = tmp_path / "station_hourly.parquet"
+        pd.read_csv(csv, index_col=0, parse_dates=True).to_parquet(parquet)
+
+        pd.testing.assert_frame_equal(load_hourly_csv(parquet, 2), load_hourly_csv(csv, 2))
+
     def test_missing_column_warns_and_skips_but_exits_zero(self, tmp_path):
         df = pd.read_csv(_write_hourly_csv(tmp_path / "src.csv"), index_col=0, parse_dates=True)
         df = df.drop(columns=[_logger_name("temperatura")])
@@ -338,8 +370,22 @@ class TestThreeLayers:
     layers, so this is pinned here as well as in ``test_monitoring.py``.
     """
 
-    def test_raw_and_wrf_layers_reach_every_graph_that_has_them(self, hourly_csv, tmp_path):
-        out = tmp_path / "three"
+    def test_raw_and_wrf_layers_reach_every_graph_that_has_them(
+        self, hourly_csv, tmp_path, monkeypatch
+    ):
+        """Counting the nine filenames proves nothing: the command writes the same
+        nine with no --raw and no --wrf at all. The layers are read off the axes
+        of each figure as it is saved.
+        """
+        drawn: dict[str, list[str]] = {}
+        original = plot_station_graphs.save_figure
+
+        def _record(fig, path):
+            drawn[Path(path).name] = list(fig.axes[0].get_legend_handles_labels()[1])
+            return original(fig, path)
+
+        monkeypatch.setattr(plot_station_graphs, "save_figure", _record)
+
         result = runner.invoke(
             app,
             [
@@ -347,7 +393,7 @@ class TestThreeLayers:
                 "-i",
                 str(hourly_csv),
                 "-o",
-                str(out),
+                str(tmp_path / "three"),
                 "--raw",
                 str(_write_raw_parquet(tmp_path / "raw.parquet", hourly_csv)),
                 "--wrf",
@@ -356,8 +402,49 @@ class TestThreeLayers:
                 "WARNING",
             ],
         )
+
         assert result.exit_code == 0, result.output
-        assert sorted(p.name for p in out.glob("*.png")) == sorted(CONTRACT_PNGS)
+        assert sorted(drawn) == sorted(CONTRACT_PNGS)
+        for filename, labels in drawn.items():
+            assert "bruto 5 min" in labels, filename
+        # The synthetic .dat carries T and Swdw only, so exactly the two graphs
+        # whose WRF candidate resolves may announce a model layer.
+        with_model = {name for name, labels in drawn.items() if any("WRF 1h" in x for x in labels)}
+        assert with_model == {"temperatura.png", "balanco.png"}
+
+    def test_the_raw_direction_layer_is_wrapped_onto_the_compass(self, tmp_path, monkeypatch):
+        """The raw record is degrees from a vane and can carry 360 or a negative
+        residue; the scatter axis is [0, 360), so the layer is taken modulo 360
+        before it is drawn. Unwrapped, the points leave the axis silently.
+        """
+        drawn: dict[str, np.ndarray] = {}
+        original = plot_station_graphs.save_figure
+
+        def _record(fig, path):
+            (raw_line,) = [
+                line for line in fig.axes[0].get_lines() if line.get_label() == "bruto 5 min"
+            ]
+            drawn[Path(path).name] = np.asarray(raw_line.get_ydata())
+            return original(fig, path)
+
+        monkeypatch.setattr(plot_station_graphs, "save_figure", _record)
+
+        index = pd.date_range("2026-06-01", periods=48, freq="h")
+        hourly = pd.DataFrame({_logger_name("direcao"): np.linspace(0.0, 359.0, 48)}, index=index)
+        raw = pd.DataFrame({_logger_name("direcao"): np.linspace(-45.0, 405.0, 48)}, index=index)
+
+        render_site_graphs(
+            hourly,
+            tmp_path / "compass",
+            DEFAULT_COLUMNS,
+            DEFAULT_BALANCE_COMPONENTS,
+            DEFAULT_DIRECTION_COMPONENTS,
+            raw=raw,
+        )
+
+        points = drawn["direcao.png"]
+        assert points.min() >= 0.0
+        assert points.max() < 360.0
 
     def test_a_wrf_column_the_extraction_lacks_is_skipped_not_fatal(self, hourly_csv, tmp_path):
         """`series_operacional.dat` has no PAR and no rain; that is normal."""
