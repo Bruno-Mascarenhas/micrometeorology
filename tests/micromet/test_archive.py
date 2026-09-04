@@ -24,6 +24,7 @@ from micrometeorology.sensors import archive
 from micrometeorology.sensors.archive import (
     ARCHIVE_END,
     ARCHIVE_START,
+    EXPECTED_LENTA_ROWS,
     LENTA_MANIFEST,
     RAIN_MANIFEST,
     mask_sentinels,
@@ -226,6 +227,50 @@ class TestVerifyFrame:
             + [ARCHIVE_END]
         )
         return pd.DataFrame({"x": range(rows)}, index=index)
+
+    def _grown(self, rows: int, extra: int) -> pd.DataFrame:
+        """The audited span plus ``extra`` samples past its end, on the grid.
+
+        ``rows`` is the total count, so passing more than ``expected + extra``
+        is a merge that gained rows the span does not explain.
+        """
+        step = pd.Timedelta(minutes=5)
+        tail = [ARCHIVE_END + step * (i + 1) for i in range(extra)]
+        filler = rows - 2 - len(tail)
+        index = pd.DatetimeIndex(
+            [ARCHIVE_START]
+            + [ARCHIVE_START + step * i for i in range(1, filler + 1)]
+            + [ARCHIVE_END]
+            + tail
+        )
+        return pd.DataFrame({"x": range(len(index))}, index=index)
+
+    def test_growth_matching_the_sampling_grid_is_accepted(self):
+        """The invariant is growth, not equality: the surplus must be exactly the
+        grid between the audited end and the new one."""
+        report = verify_frame(self._grown(EXPECTED_LENTA_ROWS + 12, extra=12), "lenta")
+
+        assert report.problems == ()
+
+    def test_growth_that_does_not_match_the_grid_is_reported(self):
+        """One row more than the span explains is a merge that gained a row."""
+        report = verify_frame(self._grown(EXPECTED_LENTA_ROWS + 13, extra=12), "lenta")
+
+        assert any("sampling intervals" in problem for problem in report.problems)
+        assert report.rows == EXPECTED_LENTA_ROWS + 13
+
+    def test_a_timestamp_off_the_five_minute_grid_is_reported(self):
+        """The surplus rule already divides a span by the interval to get a row
+        count; nothing checked the rows sit ON that grid, so a staging repair that
+        shifts part of a file keeps both the count and the span intact."""
+        frame = self._grown(EXPECTED_LENTA_ROWS + 12, extra=12)
+        shifted = frame.index.to_list()
+        shifted[5] = shifted[5] + pd.Timedelta(seconds=30)
+        frame.index = pd.DatetimeIndex(shifted)
+
+        report = verify_frame(frame, "lenta")
+
+        assert any("grid" in problem for problem in report.problems)
 
     def test_a_short_merge_is_reported(self):
         report = verify_frame(self._full_span(10), "lenta")
@@ -1093,11 +1138,19 @@ def test_the_pipeline_calls_its_radiation_stages_in_the_load_bearing_order() -> 
     - ``night_corrupted_days`` before the nocturnal mask, or the clock-slip
       detector loses the only witness it has and reports zero corrupted days;
     - the nocturnal net recomposition after the nocturnal mask, or it folds the
-      thermal offset straight back into the saldo it exists to remove.
+      thermal offset straight back into the saldo it exists to remove;
+    - ``close_net_radiation`` before all of them, or the balance it closes is
+      closed over components a later mask has already removed.
     """
     from micrometeorology.cli import build_archive as cli
 
     estagios = (
+        # Ahead of the four: it recomposes the net FROM the four components, so
+        # running it after any of their masks would close the balance over
+        # values those masks had already removed. It is also the stage whose
+        # misplacement the bullets below describe, and it was the one absent
+        # from this pin.
+        "close_net_radiation",
         "night_corrupted_days",
         "nocturnal_offset_statistics",
         "mask_impossible_shortwave",
@@ -1197,3 +1250,104 @@ def test_a_diffuse_well_past_the_global_is_still_a_fault() -> None:
 
     assert np.isnan(masked["Sw_dif"].iloc[0])
     assert removed == {"Sw_dif": 1}
+
+
+class TestTheUnshadedDiffuseEpisodeRules:
+    """Three rules decide a flagged day and none had a test: a per-day sample
+    floor, a persistence run of three days, and a one-day gap the run bridges.
+    Each one alone decides whether a real ring-off episode is reported."""
+
+    @staticmethod
+    def _days(days: list[str], ratio: float) -> pd.DataFrame:
+        return _clear_sky_days(days, "PSP_Wm2_Avg", ratio, {})
+
+    def test_one_day_over_the_limit_is_not_an_episode(self):
+        assert archive.unshaded_diffuse_days(self._days(["2025-07-01"], 0.7)) == []
+
+    def test_three_consecutive_days_are(self):
+        flagged = archive.unshaded_diffuse_days(
+            self._days(["2025-07-01", "2025-07-02", "2025-07-03"], 0.7)
+        )
+
+        assert [day for day, _median in flagged] == ["2025-07-01", "2025-07-02", "2025-07-03"]
+
+    def test_a_single_clouded_out_day_does_not_split_the_run(self):
+        """One day off is weather; the run has to bridge it or a real episode is
+        reported as three unrelated days below the persistence floor."""
+        flagged = archive.unshaded_diffuse_days(
+            self._days(["2025-07-01", "2025-07-03", "2025-07-05"], 0.7)
+        )
+
+        assert len(flagged) == 3
+
+    def test_two_clouded_out_days_do_split_it(self):
+        assert (
+            archive.unshaded_diffuse_days(
+                self._days(["2025-07-01", "2025-07-04", "2025-07-07"], 0.7)
+            )
+            == []
+        )
+
+    def test_a_ratio_beyond_doubt_is_reported_on_its_own(self):
+        """Above DIFFUSE_RATIO_CERTAIN the diffuse is reading the global; one day
+        of that needs no persistence to be a fault."""
+        flagged = archive.unshaded_diffuse_days(self._days(["2025-07-01"], 0.95))
+
+        assert [day for day, _median in flagged] == ["2025-07-01"]
+
+    def test_a_day_below_the_sample_floor_is_not_judged(self):
+        """Nineteen clear samples cannot establish a day's median ratio."""
+        stamps = pd.date_range("2025-07-01 09:00", periods=19, freq="5min")
+        frame = pd.DataFrame(
+            {"CM3Up_Wm2_Avg": [800.0] * 19, "PSP_Wm2_Avg": [800.0 * 0.95] * 19}, index=stamps
+        )
+
+        assert archive.unshaded_diffuse_days(frame) == []
+
+
+def test_a_dry_run_split_by_absent_rows_is_not_one_long_blocked_stretch() -> None:
+    """The runs are found with a cumsum over the samples that exist, so a month
+    with no rows at all would bridge two short dry spells into one long stretch
+    and report a blocked gauge where there was only a gap in acquisition."""
+    step = pd.Timedelta(minutes=5)
+    first = pd.date_range("2022-01-01", periods=20 * 24 * 12, freq=step)
+    second = pd.date_range("2022-03-01", periods=20 * 24 * 12, freq=step)
+    frame = pd.DataFrame(
+        {"PL01_mm_Tot": [0.0] * (len(first) + len(second))},
+        index=first.append(second),
+    )
+
+    assert archive.blocked_gauge_runs(frame, min_dry_days=30) == []
+
+
+def test_a_month_stepping_away_from_its_baseline_raises_the_drift_alarm() -> None:
+    """The alarm is the only pyranometer health check available without a
+    calibration lab, and nothing exercised it: a ventilator failure or a
+    degrading dome shows up here months before it distorts a daytime statistic."""
+    step = pd.Timedelta(minutes=5)
+    stamps = pd.date_range("2024-01-01 02:00", "2025-03-31 03:00", freq=step)
+    deep_night = stamps[(stamps.hour >= 2) & (stamps.hour < 3)]
+    offsets = np.where(
+        pd.DatetimeIndex(deep_night).to_period("M").astype(str) == "2025-03", -6.0, -1.5
+    )
+    frame = pd.DataFrame({"Sw_dw": offsets}, index=deep_night)
+
+    measured = archive.nocturnal_offset_statistics(frame, columns=("Sw_dw",))
+
+    alarms = dict(measured["Sw_dw"].drift_alarms)
+    assert "2025-03" in alarms
+    assert alarms["2025-03"] == pytest.approx(-6.0)
+
+
+def test_a_month_moving_less_than_the_alarm_threshold_is_not_reported() -> None:
+    step = pd.Timedelta(minutes=5)
+    stamps = pd.date_range("2024-01-01 02:00", "2025-03-31 03:00", freq=step)
+    deep_night = stamps[(stamps.hour >= 2) & (stamps.hour < 3)]
+    offsets = np.where(
+        pd.DatetimeIndex(deep_night).to_period("M").astype(str) == "2025-03", -2.4, -1.5
+    )
+    frame = pd.DataFrame({"Sw_dw": offsets}, index=deep_night)
+
+    measured = archive.nocturnal_offset_statistics(frame, columns=("Sw_dw",))
+
+    assert dict(measured["Sw_dw"].drift_alarms) == {}

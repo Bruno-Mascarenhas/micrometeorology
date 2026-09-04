@@ -312,3 +312,43 @@ def test_a_sample_whose_speed_alone_is_missing_still_bears_on_the_direction() ->
     )
 
     assert hourly["WindDir"].iloc[0] == pytest.approx(45.0, abs=0.1)
+
+
+@pytest.mark.parametrize(
+    ("valid_count", "expected_is_nan"),
+    [(6, False), (5, True)],
+)
+@pytest.mark.parametrize("kind", ["mean", "sum"])
+def test_the_completeness_floor_decides_the_hour_on_its_exact_boundary(
+    valid_count: int, expected_is_nan: bool, kind: str
+) -> None:
+    """`min_samples` is what makes an hour representable at all, and the sum path
+    publishes the hourly rainfall the site prints. Neither side of the boundary
+    was pinned, so an off-by-one would have published a partial hour as a whole
+    one or withheld a complete one."""
+    stamps = pd.date_range("2024-06-15 00:00", periods=12, freq="5min")
+    values = [1.0] * valid_count + [np.nan] * (12 - valid_count)
+    column = "precip" if kind == "sum" else "Temp"
+    frame = pd.DataFrame({column: values}, index=stamps)
+
+    hourly = aggregate_to_hourly(
+        frame, min_samples=6, sum_columns=[column] if kind == "sum" else []
+    )
+
+    assert bool(np.isnan(hourly[column].iloc[0])) is expected_is_nan
+
+
+def test_an_hour_of_exact_zeros_is_a_measured_zero_not_a_gap() -> None:
+    """`sum(min_count=1)` is what tells a dry hour the gauge measured from an hour
+    it never sampled: without it both come back as 0.0 and the record loses the
+    difference."""
+    stamps = pd.date_range("2024-06-15 00:00", periods=12, freq="5min")
+    measured = pd.DataFrame({"precip": [0.0] * 12}, index=stamps)
+    absent = pd.DataFrame({"precip": [np.nan] * 12}, index=stamps)
+
+    assert aggregate_to_hourly(measured, min_samples=6, sum_columns=["precip"])["precip"].iloc[
+        0
+    ] == pytest.approx(0.0)
+    assert np.isnan(
+        aggregate_to_hourly(absent, min_samples=6, sum_columns=["precip"])["precip"].iloc[0]
+    )

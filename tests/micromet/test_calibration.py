@@ -33,6 +33,11 @@ def sample_data() -> pd.DataFrame:
     )
 
 
+CALIBRATIONS_YAML = (
+    Path(__file__).resolve().parents[2] / "configs" / "micromet" / "calibrations.yaml"
+)
+
+
 class TestApplyCalibrations:
     def test_multiplicative_factor(self, sample_data):
         cals = [
@@ -297,18 +302,20 @@ class TestARecordThatClosesBeforeTheDataBegins:
             apply_calibrations(one_row.copy(), calibrations)
 
     def test_the_shipped_calibrations_load_against_a_recent_file(self) -> None:
-        """The shipped config must apply end to end against a 2025 frame."""
-        from micrometeorology.common.config import get_settings
+        """The shipped config must apply end to end against a 2025 frame.
+
+        Resolved from this file, not from ``configs_dir``: reading through the
+        settings meant an ambient ``LABMIM_CONFIGS_DIR`` pointing anywhere else
+        made the test SKIP, which is the exact misconfiguration it exists to
+        catch. And the assertion is on the factor the record declares, not on a
+        row count the calibration cannot change.
+        """
         from micrometeorology.sensors.calibration import load_calibrations
 
-        settings = get_settings()
-        path = settings.configs_dir / "calibrations.yaml"
-        if not path.is_file():  # pragma: no cover - only in a stripped checkout
-            pytest.skip("shipped calibrations not present")
+        result = apply_calibrations(self._frame().copy(), load_calibrations(CALIBRATIONS_YAML))
 
-        result = apply_calibrations(self._frame().copy(), load_calibrations(path))
-
-        assert len(result) == 48
+        # 9.38 / 9.52, the CMP21 sensitivity revision the shipped record names.
+        assert result["CMP21_Wm2_Avg"].iloc[0] == pytest.approx(100.0 * 9.38 / 9.52, abs=1e-4)
 
 
 class TestACalibrationSurvivesAColumnRename:

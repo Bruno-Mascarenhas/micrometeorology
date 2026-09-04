@@ -32,6 +32,40 @@ def test_a_value_that_leaves_and_returns_is_masked_but_its_neighbours_are_not():
     assert frame["BP1_mbar_Avg"].isna().tolist() == [False, False, True, False, False]
 
 
+@pytest.mark.parametrize(
+    ("values", "expected_removed"),
+    [
+        # Two interior samples: exactly max_len, so the excursion is masked.
+        ([1013.0, 1013.0, 996.0, 996.0, 1013.0, 1013.0], 2),
+        # Three: one past max_len, so the series is judged to have moved.
+        ([1013.0, 1013.0, 996.0, 996.0, 996.0, 1013.0, 1013.0], 0),
+    ],
+)
+def test_max_len_is_decided_on_its_own_boundary(values: list[float], expected_removed: int):
+    """`max_len` is what separates a dropout from a real move of the series, and
+    neither side of it was pinned: an off-by-one would either cut convective
+    events or leave dropouts in the published record."""
+    frame = _frame("BP1_mbar_Avg", values)
+
+    _frame_out, removed = mask_step_excursions(
+        frame, [SensorStepLimit(column="BP1_mbar_Avg", threshold=1.0, return_tol=1.0, max_len=2)]
+    )
+
+    assert removed == expected_removed
+
+
+def test_missing_samples_inside_an_excursion_do_not_make_it_adjacent():
+    """Adjacency is what the whole test rests on: two readings separated by NaNs
+    never stood next to each other, whatever their stamps say."""
+    frame = _frame("BP1_mbar_Avg", [1013.0, float("nan"), float("nan"), 996.0, 1013.0, 1013.0])
+
+    _frame_out, removed = mask_step_excursions(
+        frame, [SensorStepLimit(column="BP1_mbar_Avg", threshold=1.0, return_tol=1.0, max_len=2)]
+    )
+
+    assert removed == 0
+
+
 def test_a_step_that_stays_down_is_left_alone():
     """A cold pool does not recover in five minutes; a sensor dropout does.
 

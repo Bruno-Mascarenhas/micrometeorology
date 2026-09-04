@@ -189,3 +189,34 @@ class TestTheGateAlsoHoldsAfterCalibration:
 
     def test_a_column_the_frame_lacks_is_not_a_violation(self):
         assert values_outside_declared_limits(pd.DataFrame({"other": [1.0]}), self.LIMITS) == {}
+
+
+class TestTextColumnsSurviveTheNumericCoercion:
+    """The hourly `*_ok_fraction` columns are computed from the logger's own text
+    quality flag, so a reader that coerced it to NaN would publish a completeness
+    the station never reported — and nothing pinned the preservation."""
+
+    def test_a_declared_text_column_keeps_its_strings(self, tmp_path: Path) -> None:
+        path = tmp_path / "station.dat"
+        _write_toa5(
+            path,
+            ["MetSENS1_Status", "AirT1_C_Avg"],
+            [
+                ("2025-06-25 12:00:00", ["OK", 25.0]),
+                ("2025-06-25 12:05:00", ["Unknown Fault", 25.1]),
+            ],
+        )
+
+        frame = read_campbell_dat(path, text_columns=["MetSENS1_Status"])
+
+        assert frame["MetSENS1_Status"].tolist() == ["OK", "Unknown Fault"]
+        assert frame["AirT1_C_Avg"].iloc[0] == pytest.approx(25.0)
+
+    def test_the_same_column_read_without_the_declaration_becomes_nan(self, tmp_path: Path) -> None:
+        """Which is why the declaration exists: numeric coercion is the default."""
+        path = tmp_path / "station.dat"
+        _write_toa5(path, ["MetSENS1_Status"], [("2025-06-25 12:00:00", ["OK"])])
+
+        frame = read_campbell_dat(path)
+
+        assert frame["MetSENS1_Status"].isna().all()

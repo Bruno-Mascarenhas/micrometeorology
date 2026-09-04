@@ -45,6 +45,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date
 from itertools import pairwise
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -217,6 +218,12 @@ RAIN_MANIFEST: tuple[ArchiveFile, ...] = (
 )
 
 
+#: The two manifests this module verifies. A bare ``str`` let any spelling other
+#: than ``"lenta"`` pick the RAIN expectation in silence, so a typo compared the
+#: slow table against the rain gauge's audited row count.
+type ArchiveKind = Literal["lenta", "rain"]
+
+
 @dataclass(frozen=True)
 class ArchiveReport:
     """What a merged frame actually contains, against what the audit measured.
@@ -242,7 +249,7 @@ class ArchiveReport:
         One sentence per mismatch, empty when the frame matches the audit.
     """
 
-    kind: str
+    kind: ArchiveKind
     rows: int
     expected_rows: int
     columns: int
@@ -420,7 +427,7 @@ def build_five_minute_frame(
     )
 
 
-def verify_window(frame: pd.DataFrame, kind: str) -> ArchiveReport:
+def verify_window(frame: pd.DataFrame, kind: ArchiveKind) -> ArchiveReport:
     """Check a rolling window against the invariants that hold for any window.
 
     :func:`verify_frame` is anchored to the audited historical record — its row
@@ -471,7 +478,7 @@ def verify_window(frame: pd.DataFrame, kind: str) -> ArchiveReport:
     )
 
 
-def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
+def verify_frame(frame: pd.DataFrame, kind: ArchiveKind) -> ArchiveReport:
     """Check a merged frame against the row count, span and shape the audit measured.
 
     A file dropped from a manifest, a staging repair that stops matching its
@@ -490,7 +497,7 @@ def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
     ArchiveReport
         ``problems`` is empty when everything matches.
     """
-    expected = EXPECTED_LENTA_ROWS if kind == "lenta" else EXPECTED_RAIN_ROWS
+    expected = {"lenta": EXPECTED_LENTA_ROWS, "rain": EXPECTED_RAIN_ROWS}[kind]
     index = frame.index
     first = pd.Timestamp(index.min()) if len(index) else None
     last = pd.Timestamp(index.max()) if len(index) else None
@@ -521,6 +528,20 @@ def verify_frame(frame: pd.DataFrame, kind: str) -> ArchiveReport:
         problems.append(f"{kind}: {duplicated} duplicated timestamps")
     if not monotonic:
         problems.append(f"{kind}: index is not monotonically increasing")
+    # The surplus rule above already assumes the grid — it converts a span into a
+    # row count by dividing by SAMPLING_INTERVAL — but nothing checked that the
+    # rows sit ON it. A staging repair that shifts part of a file, or a merge
+    # that lands rows off the 5-minute grid, keeps the count and the span intact
+    # and only shows up here.
+    stamps = pd.DatetimeIndex(index)
+    # Through the offset from midnight, not through `asi8`: this index carries
+    # microsecond resolution, so the integer view is in microseconds while
+    # SAMPLING_INTERVAL.value is nanoseconds, and the comparison would call the
+    # whole archive off-grid. Timedelta arithmetic carries its own unit.
+    since_midnight = stamps - stamps.normalize()
+    off_grid = int((since_midnight % SAMPLING_INTERVAL != pd.Timedelta(0)).sum())
+    if off_grid:
+        problems.append(f"{kind}: {off_grid} timestamp(s) are not on the {SAMPLING_INTERVAL} grid")
 
     return ArchiveReport(
         kind=kind,
