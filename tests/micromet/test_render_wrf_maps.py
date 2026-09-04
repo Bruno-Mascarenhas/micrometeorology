@@ -5,6 +5,7 @@ overlay of every published PNG/WebM frame, so the snapshot below pins that
 whole surface.
 """
 
+import sys
 from pathlib import Path
 from typing import NamedTuple
 
@@ -297,11 +298,19 @@ def test_an_empty_image_group_produces_no_video(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_no_images_writes_no_video_and_hands_back_the_path_it_would_have_written(tmp_path):
+def test_no_images_writes_no_video_without_reaching_the_encoder(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "moviepy", None)
     out = tmp_path / "TEMP_D02.webm"
 
     assert animation.create_webm_from_images([], out) == out
     assert not out.exists()
+
+
+def test_frames_to_encode_without_the_video_extra_name_the_install(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "moviepy", None)
+
+    with pytest.raises(ImportError, match="uv sync --extra video"):
+        animation.create_webm_from_images([tmp_path / "frame.png"], tmp_path / "TEMP_D02.webm")
 
 
 def test_cli_exits_non_zero_when_every_figure_fails(tmp_path, monkeypatch):

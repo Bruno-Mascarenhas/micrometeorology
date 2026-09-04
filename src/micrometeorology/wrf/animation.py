@@ -49,8 +49,14 @@ def create_webm_from_images(
     Raises
     ------
     ImportError
-        When the ``video`` extra is not installed.
+        When there are frames to encode and the ``video`` extra is not
+        installed. An empty *image_paths* encodes nothing, so it needs no
+        encoder.
     """
+    if not image_paths:
+        logger.warning("No images to create WebM")
+        return Path(output_path)
+
     try:
         from moviepy import ImageSequenceClip
     except ImportError as exc:
@@ -60,10 +66,6 @@ def create_webm_from_images(
             "moviepy caps pillow below the CVE floor this project pins, so a bare "
             "pip install of the extra cannot resolve)."
         ) from exc
-
-    if not image_paths:
-        logger.warning("No images to create WebM")
-        return Path(output_path)
 
     out = Path(output_path)
     ensure_dir(out.parent)
