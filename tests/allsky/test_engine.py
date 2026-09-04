@@ -11,6 +11,7 @@ short circuit and the discarded best on a monitor change.
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -378,6 +379,83 @@ class TestResumeProvenance:
         with pytest.raises(RuntimeError, match="parameterization"):
             run_experiment(
                 rescaled,
+                data_root=root,
+                output_dir=run_dir,
+                resume="auto",
+                embedding_reader=_reader(manifest),
+            )
+
+    @pytest.mark.parametrize(
+        ("field", "replacement"),
+        [
+            ("manifest_sha256", "0" * 64),
+            ("dataset_version", "not-the-version-this-ran-on"),
+        ],
+    )
+    def test_a_checkpoint_from_another_dataset_build_is_refused(
+        self, tmp_path: Path, field: str, replacement: str
+    ):
+        """Six fields are compared and only ``split_id`` had a test. These two
+        say the manifest itself was rebuilt under the same day split, which
+        leaves the weights valid-looking and the target scaling wrong.
+        """
+        root, manifest, _ = _make_dataset(tmp_path, n_days=3)
+        run_dir = tmp_path / "run"
+        run_experiment(
+            _cfg(root, epochs=1),
+            data_root=root,
+            output_dir=run_dir,
+            embedding_reader=_reader(manifest),
+        )
+
+        checkpoint = load_checkpoint(run_dir / "last.ckpt")
+        checkpoint[field] = replacement
+        torch.save(checkpoint, run_dir / "last.ckpt")
+
+        with pytest.raises(RuntimeError, match=field):
+            run_experiment(
+                _cfg(root, epochs=2),
+                data_root=root,
+                output_dir=run_dir,
+                resume="auto",
+                embedding_reader=_reader(manifest),
+            )
+
+    @pytest.mark.parametrize(
+        ("path_in_config", "replacement", "named"),
+        [
+            (("data", "alignment", "strategy"), "nearest", "alignment.strategy"),
+            (("data", "alignment", "window_minutes"), 99.0, "alignment.window_minutes"),
+            (("data", "input_mode"), "image", "input_mode"),
+        ],
+    )
+    def test_a_checkpoint_pooled_another_way_is_refused(
+        self, tmp_path: Path, path_in_config: tuple[str, ...], replacement: object, named: str
+    ):
+        """These decide what every sample's embedding IS and leave no
+        architectural trace: the attention pooler's ``(1, 1, D)`` query does not
+        depend on the sequence length, so ``load_state_dict`` accepts the old
+        weights and the run carries on over differently-pooled inputs.
+        """
+        root, manifest, _ = _make_dataset(tmp_path, n_days=3)
+        run_dir = tmp_path / "run"
+        run_experiment(
+            _cfg(root, epochs=1),
+            data_root=root,
+            output_dir=run_dir,
+            embedding_reader=_reader(manifest),
+        )
+
+        checkpoint = load_checkpoint(run_dir / "last.ckpt")
+        section = checkpoint["config"]
+        for key in path_in_config[:-1]:
+            section = section[key]
+        section[path_in_config[-1]] = replacement
+        torch.save(checkpoint, run_dir / "last.ckpt")
+
+        with pytest.raises(RuntimeError, match=re.escape(named)):
+            run_experiment(
+                _cfg(root, epochs=2),
                 data_root=root,
                 output_dir=run_dir,
                 resume="auto",

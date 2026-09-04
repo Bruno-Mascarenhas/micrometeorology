@@ -247,6 +247,28 @@ class TestImageEncoderWiring:
 
         assert torch.equal(widened, plain)
 
+    def test_the_adapter_appears_under_both_names_in_the_state_dict(self):
+        """``attach_extra_input_channels`` installs the adapter inside the
+        backbone and the encoder also binds the same object as
+        ``extra_channel_projection``, so every tensor is saved twice under two
+        key prefixes. Checkpoints already on disk carry both, and dropping
+        either registration silently changes what an old checkpoint restores —
+        so the duplication is pinned rather than left to be tidied away by
+        accident.
+        """
+        encoder = ImageEncoder(_StubViT(), extra_input_channels=3)
+
+        state = encoder.state_dict()
+
+        inside = {k: v for k, v in state.items() if k.startswith("backbone.patch_embed.proj.")}
+        alongside = {k: v for k, v in state.items() if k.startswith("extra_channel_projection.")}
+        assert inside
+        assert {k.split(".", 3)[3] for k in inside} == {k.split(".", 1)[1] for k in alongside}
+        for suffix in (k.split(".", 1)[1] for k in alongside):
+            saved = state[f"extra_channel_projection.{suffix}"]
+            nested = state[f"backbone.patch_embed.proj.{suffix}"]
+            assert saved.data_ptr() == nested.data_ptr()
+
     def test_no_adapter_is_installed_when_no_extra_channels_are_asked_for(self):
         assert ImageEncoder(_StubViT()).extra_channel_projection is None
 

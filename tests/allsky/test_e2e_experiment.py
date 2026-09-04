@@ -117,7 +117,7 @@ def test_train_resume_evaluate_end_to_end(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert (run_dir / "last.ckpt").exists()
     assert (run_dir / "best.ckpt").exists()
-    assert (run_dir / "metrics.csv").exists()
+    assert len(pd.read_csv(run_dir / "metrics.csv")) == 2
 
     # 2) Resume for one more epoch (auto-discovers last.ckpt in the run dir).
     resumed = runner.invoke(
@@ -137,8 +137,13 @@ def test_train_resume_evaluate_end_to_end(tmp_path: Path) -> None:
             "--no-amp",
         ],
     )
+    # Both of the old assertions here were already true at the end of step 1: if
+    # --epochs 3 stopped being applied, `range(start_epoch, cfg.train.epochs)`
+    # would be empty, the run would exit 0 with nothing done and the step would
+    # still pass. metrics.csv is appended one row per epoch, so it is the
+    # artifact that changes.
     assert resumed.exit_code == 0, resumed.output
-    assert (run_dir / "last.ckpt").exists()
+    assert len(pd.read_csv(run_dir / "metrics.csv")) == 3
 
     # 3) Evaluate the best checkpoint on the validation split.
     report_dir = tmp_path / "eval"

@@ -135,6 +135,35 @@ class TestWindowedImageDataset:
         assert item["frame_mask"].shape == (4,)
         assert bool(item["frame_mask"][0])
 
+    def test_the_stack_carries_the_windows_own_frames_in_window_order(self, tmp_path: Path):
+        """Shape, mask and padding all hold for a stack of T copies of one frame.
+        Serving ``self._paths[idx]`` instead of ``self._paths[position]`` would
+        do exactly that and show the model a constant window, so the content is
+        compared frame by frame against the paths the window resolved to.
+        """
+        manifest, root = _manifest(tmp_path)
+        dataset = MultimodalImageDataset(
+            manifest,
+            resolve_feature_set("bare"),
+            data_root=root,
+            image_size=FRAME_PX,
+            window="mean_embedding",
+            window_minutes=6.0,
+            window_max_frames=4,
+        )
+        row = len(dataset) // 2
+        members = dataset._windows[row]
+        assert len(members) > 1, "the fixture must resolve a window of several frames"
+
+        item = dataset[row]
+
+        expected = np.stack([dataset._load_image(dataset._paths[p], row) for p in members])
+        np.testing.assert_array_equal(item["image_seq"][: len(members)].numpy(), expected)
+        assert item["frame_mask"][: len(members)].all()
+        # And the slots past the window are zeros, not a repeat of the last frame.
+        assert not item["frame_mask"][len(members) :].any()
+        assert float(item["image_seq"][len(members) :].abs().sum()) == 0.0
+
     def test_a_days_first_row_has_its_padding_slots_marked_false(self, tmp_path: Path):
         manifest, root = _manifest(tmp_path)
         dataset = MultimodalImageDataset(
