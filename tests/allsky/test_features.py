@@ -279,6 +279,12 @@ class TestFeatureNormalizer:
         np.testing.assert_allclose(out[:, 0], 0.0)
         assert np.isfinite(out).all()
 
+    def test_comparing_two_normalizers_answers_one_bool_and_not_an_array(self):
+        frame = pd.DataFrame({"a": [1.0, 2.0], "b": [10.0, 20.0]})
+        norm = FeatureNormalizer.fit(frame)
+
+        assert isinstance(norm == FeatureNormalizer.fit(frame), bool)
+
     def test_json_roundtrip(self, sensor_frame: pd.DataFrame, site: SiteConfig):
         import json
 

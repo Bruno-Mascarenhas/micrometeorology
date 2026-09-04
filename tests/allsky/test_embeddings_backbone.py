@@ -46,6 +46,19 @@ class TestEmbeddingDim:
 
 
 class TestBackboneSelection:
+    @pytest.mark.parametrize(
+        ("model", "image_size", "message"),
+        [
+            ("dinov2_vits14", 300, "multiple of the patch size"),
+            ("dinov3_vits16plus", 322, "multiple of DINOv3's patch size"),
+        ],
+    )
+    def test_a_frame_size_the_patch_grid_cannot_tile_is_refused_at_construction(
+        self, model: str, image_size: int, message: str
+    ):
+        with pytest.raises(ValueError, match=message):
+            build_backbone(model, image_size=image_size, weights="none")
+
     def test_the_larger_variants_are_selectable(self):
         assert "dinov2_vitb14" in AVAILABLE_BACKBONES
         assert "dinov2_vitl14" in AVAILABLE_BACKBONES

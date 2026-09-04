@@ -201,6 +201,12 @@ class CrossAttentionFusion(nn.Module):
             raise ValueError("no non-empty feature groups for cross-attention tokens")
         self.group_names: list[str] = list(slices)
         self._group_indices: list[list[int]] = [slices[name] for name in self.group_names]
+        for position, indices in enumerate(self._group_indices):
+            self.register_buffer(
+                f"_group_index_{position}",
+                torch.tensor(indices, dtype=torch.long),
+                persistent=False,
+            )
         self.group_proj = nn.ModuleList(
             nn.Linear(len(indices), resolved_token_dim) for indices in self._group_indices
         )
@@ -243,8 +249,8 @@ class CrossAttentionFusion(nn.Module):
             concatenated with *sensor*.
         """
         tokens = [
-            proj(features[:, indices])
-            for proj, indices in zip(self.group_proj, self._group_indices, strict=True)
+            proj(features[:, self.get_buffer(f"_group_index_{position}")])
+            for position, proj in enumerate(self.group_proj)
         ]
         keys = torch.stack(tokens, dim=1)
         query = self.visual_proj(visual).unsqueeze(1)

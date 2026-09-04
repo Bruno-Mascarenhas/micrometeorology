@@ -247,6 +247,42 @@ class TestResumeEquivalenceMultiWorker:
             assert summary_b["final_val_metrics"][key] == pytest.approx(value, abs=1e-5, rel=1e-4)
 
 
+class _DaySplit:
+    """Stand-in for the split artifact: ``_select_splits`` reads only ``days_for``."""
+
+    def __init__(self, train: list[str], val: list[str]) -> None:
+        self._days = {"train": train, "val": val}
+
+    def days_for(self, name: str) -> list[str]:
+        return self._days[name]
+
+
+def _manifest_of_days(*day_ids: str) -> pd.DataFrame:
+    """A manifest carrying only the column ``_select_splits`` slices on."""
+    return pd.DataFrame({"day_id": list(day_ids)})
+
+
+def test_a_split_with_no_validation_days_is_refused_before_anything_is_built():
+    from allsky.training.engine import _select_splits
+
+    with pytest.raises(TrainingError, match="no validation days"):
+        _select_splits(_manifest_of_days("2025-03-20"), _DaySplit(["2025-03-20"], []))
+
+
+def test_train_days_absent_from_the_manifest_are_refused_rather_than_training_on_nothing():
+    from allsky.training.engine import _select_splits
+
+    with pytest.raises(TrainingError, match="no train rows"):
+        _select_splits(_manifest_of_days("2025-03-20"), _DaySplit(["2025-03-19"], ["2025-03-20"]))
+
+
+def test_val_days_absent_from_the_manifest_are_refused_rather_than_validating_on_nothing():
+    from allsky.training.engine import _select_splits
+
+    with pytest.raises(TrainingError, match="no val rows"):
+        _select_splits(_manifest_of_days("2025-03-20"), _DaySplit(["2025-03-20"], ["2025-03-21"]))
+
+
 class TestMetricsResumeTruncation:
     def test_stale_row_past_checkpoint_is_dropped_on_resume(self, tmp_path: Path):
         # metrics.csv/json are flushed before last.ckpt each epoch, so a crash in
@@ -284,6 +320,32 @@ class TestMetricsResumeTruncation:
         rows = pd.read_csv(run_dir / "metrics.csv")
         assert list(rows["epoch"]) == [1, 2, 3]
         assert len(json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))) == 3
+
+
+def test_a_sample_id_the_embedding_store_does_not_carry_is_named_before_the_first_epoch():
+    """Without this the reader raises a bare KeyError mid-epoch, after the datasets and
+    the model are already built."""
+    from allsky.training.engine import _validate_embedding_coverage
+
+    reader = DictEmbeddingReader(["a", "b"])
+    train_df = pd.DataFrame({"sample_id": ["a", "b"]})
+    val_df = pd.DataFrame({"sample_id": ["c"]})
+
+    with pytest.raises(TrainingError, match=r"missing 1 required sample_id\(s\): c"):
+        _validate_embedding_coverage(reader, train_df, val_df)
+
+
+def test_more_missing_sample_ids_than_the_preview_holds_are_counted_and_elided():
+    from allsky.training.engine import _validate_embedding_coverage
+
+    reader = DictEmbeddingReader(["s00"])
+    train_df = pd.DataFrame({"sample_id": [f"s{i:02d}" for i in range(12)]})
+    val_df = pd.DataFrame({"sample_id": ["s00"]})
+
+    with pytest.raises(TrainingError, match="missing 11 required") as excinfo:
+        _validate_embedding_coverage(reader, train_df, val_df)
+
+    assert str(excinfo.value).endswith(" ...")
 
 
 class TestWindowStrategies:

@@ -89,10 +89,10 @@ class ClimatologyModel(nn.Module):
         """Set the constant buffers from raw train-split target arrays.
 
         Only the arrays provided are used; missing ones keep their zero default.
-        Regression means are computed over finite values and normalized with
-        *target_normalizers* (keyed by ``"dhi"`` / ``"kindex"`` /
-        ``"cloud_fraction"``) when available.  Sky logits are the
-        log-frequencies of the valid (``>= 0``) class labels.
+        The ``dhi`` and ``kindex`` means are computed over finite values and
+        normalized with *target_normalizers* when available; the ``cloud_fraction``
+        mean is published raw in ``[0, 1]``, the space its sigmoid head predicts in.
+        Sky logits are the log-frequencies of the valid (``>= 0``) class labels.
 
         Parameters
         ----------
@@ -110,8 +110,8 @@ class ClimatologyModel(nn.Module):
             ``(N,)`` integer sky-class labels; ``-1`` marks a missing label and
             is excluded from the frequency count.
         target_normalizers:
-            Train-split normalizers used to map each regression mean into the
-            normalized space the trained models predict in.
+            Train-split normalizers, read for ``"dhi"`` and ``"kindex"``, which map
+            those means into the normalized space the trained models predict in.
 
         Raises
         ------
@@ -136,7 +136,7 @@ class ClimatologyModel(nn.Module):
                     "0 W m-2 is a physically valid reading rather than a missing one"
                 )
             mean = float(finite.mean())
-            if target_normalizers is not None and name in target_normalizers:
+            if name != "cloud_fraction" and target_normalizers and name in target_normalizers:
                 mean = float(target_normalizers[name].normalize(mean))
             getattr(self, f"{name}_const").fill_(mean)
 

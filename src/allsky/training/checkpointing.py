@@ -42,6 +42,7 @@ import numpy as np
 
 from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
 from allsky.provenance import code_version
+from allsky.training.errors import TrainingError
 from labmim_core.atomic import atomic_write
 
 #: ``torch.nn.Module`` / ``torch.optim.Optimizer`` at runtime. Kept as aliases so
@@ -340,7 +341,7 @@ def _refuse_diverged_weights(checkpoint: Mapping[str, Any], *, path: Path) -> No
         if not isinstance(tensor, torch.Tensor) or not tensor.is_floating_point():
             continue
         if not bool(torch.isfinite(tensor).all()):
-            raise RuntimeError(
+            raise TrainingError(
                 f"{path} stores non-finite weights (model_state[{name!r}]): the run that "
                 "wrote it diverged, and resuming, evaluating or serving from it would carry "
                 f"NaN into every output. Load a converged checkpoint instead — "

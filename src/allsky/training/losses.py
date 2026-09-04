@@ -82,9 +82,8 @@ class MultitaskLoss(nn.Module):
     where the total is the weighted sum and every ``loss_<head>`` component is
     the **unweighted** per-head loss (only enabled heads appear).
 
-    ``TargetsConfig.cloud_fraction`` carries no configurable loss kind, so the
-    cloud head defaults to ``"mse"``; a ``loss`` attribute is honoured if the
-    config ever grows one.
+    ``TargetsConfig.cloud_fraction`` declares no loss kind and forbids extra keys,
+    so the cloud head is MSE by construction.
     """
 
     def __init__(
@@ -113,7 +112,7 @@ class MultitaskLoss(nn.Module):
         self._sky_weight = float(targets.sky.weight)
         self._cloud_enabled = bool(targets.cloud_fraction.enabled)
         self._cloud_weight = float(targets.cloud_fraction.weight)
-        self._cloud_kind = str(getattr(targets.cloud_fraction, "loss", "mse"))
+        self._cloud_kind = "mse"
 
         self._dhi_mean, self._dhi_std = _norm_stats(target_normalizers, "dhi")
         self._kindex_mean, self._kindex_std = _norm_stats(target_normalizers, "kindex")
@@ -188,9 +187,8 @@ class MultitaskLoss(nn.Module):
         mask = torch.isfinite(target)
         normalized = (_sanitised(target, mask) - self._dhi_mean) / self._dhi_std
         residual = pred - normalized
-        # Gaussian NLL (dropping the 0.5*log(2*pi) constant): larger log-variance
-        # trades a linear penalty for a shrunk squared-error term, so it lowers
-        # the loss for large residuals and raises it for small ones.
+        # Gaussian NLL dropping the constant 0.5*log(2*pi); the monotonicity in
+        # log-variance is pinned by test_higher_log_var_lowers_loss_for_large_errors.
         nll = 0.5 * (torch.exp(-log_var) * residual.pow(2) + log_var)
         return _masked_mean(nll, mask)
 

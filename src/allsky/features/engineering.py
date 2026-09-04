@@ -88,9 +88,7 @@ def build_feature_frame(
     index = pd.DatetimeIndex(timestamps)
     resolved = resolve_feature_set(feature_set, extra)
 
-    # source_column() answers None for every name a dedicated transform builds
-    # (the solar geometry, the cyclic pairs), so those drop out here on their own.
-    required = {col for name in resolved for col in (source_column(name),) if col is not None}
+    required = {column for name in resolved if (column := source_column(name)) is not None}
     missing = sorted(required - set(sensor_df.columns))
     if missing:
         raise KeyError(f"sensor frame is missing required feature columns: {missing}")
@@ -131,7 +129,4 @@ def build_feature_frame(
         else:
             columns[name] = met[source_column(name)].to_numpy(dtype=np.float64)
 
-    # `columns` was filled iterating `resolved`, which resolve_feature_set
-    # returns without duplicates, so the dict already carries exactly those
-    # names in that order; reindexing would only copy the (N, F) frame again.
     return pd.DataFrame(columns, index=index)

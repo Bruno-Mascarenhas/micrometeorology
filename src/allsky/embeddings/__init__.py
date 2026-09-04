@@ -5,9 +5,10 @@ training stack consumes through :class:`allsky.data.datasets.MultimodalEmbedding
 
 Three concerns, three modules:
 
-- :mod:`~allsky.embeddings.backbone` — the :class:`VisualBackbone` protocol, the
-  DINOv2 (``torch.hub``) backbone pinned to a fixed revision, and a torch-free
-  :class:`FakeBackbone` used by every test.
+- :mod:`~allsky.embeddings.backbone` — the :class:`VisualBackbone` protocol and the
+  families :data:`AVAILABLE_BACKBONES` names: DINOv2 through ``torch.hub`` pinned to
+  a fixed revision, DINOv3 from a local source tree, the two torchvision
+  convolutional networks, and a torch-free :class:`FakeBackbone` used by every test.
 - :mod:`~allsky.embeddings.storage` — safetensors shards + a parquet index +
   ``embeddings.meta.json``, plus :class:`SafetensorsEmbeddingReader` (satisfies
   the :class:`allsky.data.datasets.EmbeddingReader` protocol) and

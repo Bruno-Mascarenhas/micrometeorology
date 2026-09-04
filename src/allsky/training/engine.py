@@ -3,7 +3,7 @@
 :func:`run_experiment` drives one experiment end to end from an
 :class:`allsky.config.ExperimentConfig`:
 
-#. seed everything (:func:`solrad_correction.utils.seeds.set_global_seed`) and
+#. seed everything (:func:`labmim_core.seeds.set_global_seed`) and
    resolve the device (clear error when ``cuda`` is requested but unavailable);
 #. load the v2 manifest parquet + meta sidecar and the persisted day split, then
    slice train/val rows by ``day_id`` (val required, test ignored here);
@@ -63,7 +63,12 @@ from allsky.config import (
     image_size_of,
     model_param,
 )
-from allsky.data.datasets import EmbeddingReader
+from allsky.data.contracts import DATASET_VERSION
+from allsky.data.datasets import (
+    EmbeddingReader,
+    MultimodalEmbeddingDataset,
+    MultimodalImageDataset,
+)
 from allsky.data.loading import (
     default_embedding_reader,
     load_manifest,
@@ -85,6 +90,7 @@ from allsky.training.checkpointing import (
     restore_rng_state,
     save_checkpoint,
 )
+from allsky.training.device import resolve_device
 from allsky.training.errors import TrainingError
 from allsky.training.run_dir import (
     MONITOR_CHANGE_SUFFIX,
@@ -102,6 +108,11 @@ from labmim_core.seeds import set_global_seed
 logger = logging.getLogger(__name__)
 
 __all__ = ["resolve_run_device", "run_experiment"]
+
+#: Multiplier of the run seed in the per-epoch train-sampler seed
+#: (``seed * this + epoch``): a prime far above any epoch budget, so the seeds of
+#: two neighbouring runs never land on the same batch permutation.
+_SAMPLER_SEED_STRIDE = 100003
 
 
 def resolve_run_device(requested: str) -> str:
@@ -128,8 +139,6 @@ def resolve_run_device(requested: str) -> str:
     RuntimeError
         If ``"cuda"`` was requested but no CUDA device is available.
     """
-    from allsky.training.device import resolve_device
-
     device = resolve_device(requested)
     if device == "cuda" and not torch.cuda.is_available():
         raise TrainingError(
@@ -389,7 +398,7 @@ def run_experiment(
         writer = SummaryWriter(log_dir=str(run_dir / "runs"))
         try:
             for epoch in range(start_epoch, cfg.train.epochs):
-                train_sampler_generator.manual_seed(cfg.seed * 100003 + epoch)
+                train_sampler_generator.manual_seed(cfg.seed * _SAMPLER_SEED_STRIDE + epoch)
                 # Augmentation seeds on (seed, epoch, idx); without advancing
                 # this, every epoch would replay the identical draw per sample.
                 train_ds.set_epoch(epoch)
@@ -477,7 +486,7 @@ def run_experiment(
                     **common,
                 )
                 if improved:
-                    # Deferred from _reset_stale_run_artifacts to the first
+                    # Deferred from reset_stale_run_artifacts to the first
                     # improving epoch: rotating at the start of a fresh run
                     # leaves the directory with no best.ckpt at all for a run
                     # that then dies, which is when the previous best matters most.
@@ -568,8 +577,6 @@ def _fit_target_normalizers(train_ds: Any) -> dict[str, TargetNormalizer]:
     normalizer fitted on the other one is not a smaller error, it is a different
     unit reported as W/m2.
     """
-    from allsky.features.normalization import TargetNormalizer
-
     return {name: TargetNormalizer.fit(values) for name, values in train_ds.served_targets.items()}
 
 
@@ -598,8 +605,6 @@ def _build_datasets(
         ``(train_ds, val_ds, embedding_dim)`` where ``embedding_dim`` is the
         reader dimension in embedding mode and ``None`` in image mode.
     """
-    from allsky.data.datasets import MultimodalEmbeddingDataset, MultimodalImageDataset
-
     if cfg.data.input_mode == "embedding":
         reader = (
             embedding_reader
@@ -729,7 +734,7 @@ def _make_loader(
 
     - the shuffled (train) loader uses an explicit
       :class:`~torch.utils.data.RandomSampler` bound to *sampler_generator*, which
-      :func:`run_experiment` re-seeds per epoch to ``seed * 100003 + epoch``.  The
+      :func:`run_experiment` re-seeds per epoch to ``seed * _SAMPLER_SEED_STRIDE + epoch``.  The
       permutation is therefore a pure function of ``(seed, epoch)`` and identical
       whether an epoch is reached in one run or after a resume — including with
       ``persistent_workers`` on, where the sampler is re-drawn every epoch;
@@ -1476,7 +1481,6 @@ def _embedding_recipe(cfg: ExperimentConfig) -> dict[str, Any] | None:
     prediction to fall back on the store exactly as before rather than on a
     guess.
     """
-    from allsky.data.loading import resolve_against_root
     from allsky.snapshot import embedding_recipe_of
 
     if cfg.data.embeddings_dir is None:
@@ -1487,8 +1491,6 @@ def _embedding_recipe(cfg: ExperimentConfig) -> dict[str, Any] | None:
 
 def _dataset_version(meta: Mapping[str, Any]) -> str:
     """The dataset version a checkpoint records for *meta* (the code's when absent)."""
-    from allsky.data.contracts import DATASET_VERSION
-
     return str(meta.get("dataset_version", DATASET_VERSION))
 
 

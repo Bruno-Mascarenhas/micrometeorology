@@ -495,6 +495,26 @@ def test_documented_image_knobs_do_not_warn(caplog):
     assert not any("unknown hyper-parameter" in record.getMessage() for record in caplog.records)
 
 
+def test_the_frame_size_the_run_feeds_the_backbone_is_checked_at_construction():
+    """``model.image_size`` is what the dataset emits, and the patch-multiple guard lives
+    in the backbone constructor: unthreaded, it only ever validated the constructor
+    default and a 322-pixel DINOv3 arm died inside the hub module on the first batch."""
+    from allsky.modeling.registry import default_image_backbone_builder
+    from allsky.training.errors import TrainingError
+
+    cfg = ExperimentConfig.model_validate(
+        {
+            "features": {"set": "safe"},
+            "targets": {"dhi": {"enabled": True, "loss": "huber"}},
+            "model": {"name": "film", "backbone": "dinov3_vits16plus", "image_size": 322},
+            "data": {"input_mode": "image"},
+        }
+    )
+
+    with pytest.raises(TrainingError, match="multiple of DINOv3's patch size"):
+        default_image_backbone_builder(cfg, "cpu")()
+
+
 def test_shipped_experiment_configs_are_discovered():
     assert SHIPPED_EXPERIMENT_CONFIGS, "no shipped experiment configs found to check for drift"
 
@@ -507,6 +527,20 @@ def test_shipped_experiment_configs_have_no_unknown_params(config_path: Path, ca
     with caplog.at_level(logging.WARNING, logger="allsky.modeling.registry"):
         _warn_unknown_params(cfg.model.name, cfg)
     assert not any("unknown hyper-parameter" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("pooling", ["cls", "mean", "cls+mean"])
+def test_every_pooling_the_extraction_path_accepts_survives_the_registry_narrowing(pooling: str):
+    from allsky.modeling.registry import _backbone_pooling
+
+    assert _backbone_pooling(pooling) == pooling
+
+
+def test_a_pooling_no_backbone_accepts_is_refused_naming_the_ones_that_exist():
+    from allsky.modeling.registry import _backbone_pooling
+
+    with pytest.raises(ValueError, match=r"cls\+mean"):
+        _backbone_pooling("cls_mean")
 
 
 def test_trunk_shape_and_residual():
@@ -604,6 +638,20 @@ def test_multimodal_param_groups_split_backbone():
     assert any(g.get("lr") == 1e-5 for g in groups)
     # without a backbone_lr it collapses to a single group
     assert len(model.param_groups()) == 1
+
+
+def test_the_cloud_fraction_climatology_stays_in_the_raw_fraction_its_head_predicts():
+    """The cloud-fraction head is a sigmoid over [0, 1] and its loss compares at mean 0,
+    std 1, so normalizing the fitted constant would put the baseline in a space the
+    trained head never predicts in."""
+    model = ClimatologyModel(TargetsConfig())
+
+    model.fit_from_targets(
+        cloud_fraction=np.array([0.2, 0.4, 0.6]),
+        target_normalizers={"cloud_fraction": TargetNormalizer(mean=0.4, std=0.1)},
+    )
+
+    assert float(model.cloud_fraction_const) == pytest.approx(0.4)
 
 
 def test_the_climatology_baseline_refuses_an_all_nan_target_instead_of_reporting_zero():

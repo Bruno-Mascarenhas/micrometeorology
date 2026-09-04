@@ -5,6 +5,7 @@ on torch; no DINOv2 / network is ever exercised.
 """
 
 from pathlib import Path
+from typing import Any
 
 import imageio.v3 as iio
 import numpy as np
@@ -471,6 +472,27 @@ class TestValidation:
                 out,
                 data_root=tmp_path,
             )
+
+    def test_a_backbone_whose_vectors_are_wider_than_it_declares_is_refused(self, tmp_path: Path):
+        """``embeddings.meta.json`` is the only source of the reader's width, which sizes
+        the visual encoder, so shards wider than the declared dim never reach disk."""
+
+        class _WiderThanDeclared(FakeBackbone):
+            def encode(self, batch: Any) -> np.ndarray:
+                return np.zeros((len(batch), self.dim + 1), dtype=np.float32)
+
+        out = tmp_path / "emb"
+
+        with pytest.raises(ValueError, match="produced dim 9, expected 8"):
+            extract_embeddings(
+                _make_dataset(tmp_path, n=2),
+                _WiderThanDeclared(dim=8),
+                out,
+                data_root=tmp_path,
+                batch_size=2,
+            )
+
+        assert not shard_path(out, 0).exists()
 
     def test_bad_batch_size_raises(self, tmp_path: Path):
         with pytest.raises(ValueError, match="batch_size"):

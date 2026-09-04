@@ -26,7 +26,7 @@ never pulls torch.
 
 import itertools
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta, timezone
 from pathlib import Path
@@ -68,7 +68,7 @@ _ELEVATION_EDGES: tuple[float, ...] = (10.0, 20.0, 35.0, 50.0, 90.0)
 
 #: k-index band edges used as a **partial-sun proxy**: the continuous clearness
 #: index ``target_kt`` (not the pre-binned ``sky_class``) split at the outer
-#: bounds of :data:`~allsky.data.sky.SKY_CLASS_KT_UPPER_BOUNDS`, so the
+#: bounds of :data:`~labmim_core.sky.SKY_CLASS_KT_UPPER_BOUNDS`, so the
 #: middle band is the partial-cloud regime where diffuse is hardest to predict.
 #: The bounds are published on Kt, so the frozen ``target_kindex`` column is not
 #: what they may be applied to: under ``kindex_kind="kstar"`` it holds k*, whose
@@ -153,11 +153,10 @@ def evaluate_checkpoint(
     batch_size: int | None = None,
     num_workers: int | None = None,
     device: str | None = None,
-    report_dir: str | Path | None = None,
     strict: bool = False,
     trust_checkpoint: bool = False,
     embedding_reader: EmbeddingReader | None = None,
-    image_backbone_builder: Any | None = None,
+    image_backbone_builder: Callable[[], Any] | None = None,
 ) -> EvaluationResult:
     """Evaluate *checkpoint_path* on *split* and return an :class:`EvaluationResult`.
 
@@ -179,11 +178,8 @@ def evaluate_checkpoint(
         must overlap the forward pass) and to ``0`` in embedding mode, whose
         preloaded resident array would only be copied into each worker.
     device:
-        ``"auto"`` | ``"cpu"`` | ``"cuda"`` | ``"mps"`` (defaults to the config's
-        train device); a clear error is raised for unavailable CUDA.
-    report_dir:
-        Accepted for signature symmetry with the CLI; report writing lives in
-        :func:`allsky.evaluation.reports.write_evaluation_report`.
+        ``"auto"`` | ``"cpu"`` | ``"cuda"`` | ``"mps"`` (default ``"cpu"``); a clear
+        error is raised for unavailable CUDA.
     strict:
         When ``True`` a manifest-hash or split-id mismatch raises instead of only
         logging a warning.
@@ -214,8 +210,6 @@ def evaluate_checkpoint(
         manifest; and, under ``strict``, on a manifest-hash, split-id or
         k-index-kind mismatch between the checkpoint and the data on disk.
     """
-    del report_dir
-
     from allsky.training.checkpointing import load_checkpoint
     from allsky.training.engine import resolve_run_device
 
@@ -599,6 +593,7 @@ def _build_predictions_frame(
     *utc_offset_hours* is the clock the manifest was built on: the hour and
     month strata and the clear-sky references are all derived on it.
     """
+    times = pd.to_datetime(split_df["timestamp_utc"], utc=True)
     frame = pd.DataFrame(
         {
             "sample_id": split_df["sample_id"].astype(str).to_numpy(),
@@ -622,7 +617,11 @@ def _build_predictions_frame(
             frame[f"obs_{name}"] = observed
             frame[f"pred_{name}"] = np.asarray(predicted[name], dtype=np.float64)
     _attach_reference_columns(
-        frame, enabled_targets, kindex_kind=kindex_kind, utc_offset_hours=utc_offset_hours
+        frame,
+        enabled_targets,
+        times=times,
+        kindex_kind=kindex_kind,
+        utc_offset_hours=utc_offset_hours,
     )
     return frame
 
@@ -631,10 +630,14 @@ def _attach_reference_columns(
     frame: pd.DataFrame,
     enabled_targets: Sequence[str],
     *,
+    times: pd.Series,
     kindex_kind: str | None,
     utc_offset_hours: float,
 ) -> None:
     """Attach the per-sample baseline references, built over the whole split.
+
+    *times* is the split's ``timestamp_utc`` parsed once by the caller: the frame's
+    own copy is the stringified one this path would otherwise reparse.
 
     A stratified metric slices these columns instead of rebuilding a baseline
     from the stratum's own rows: persistence rebuilt inside a stratum pairs rows
@@ -646,7 +649,6 @@ def _attach_reference_columns(
     evaluation otherwise still succeeds with one baseline fewer than it scored
     before.
     """
-    times = pd.to_datetime(frame["timestamp_utc"], utc=True)
     clearsky_pair = (
         _clearsky_ghi_and_kt(frame, times, utc_offset_hours)
         if "solar_zenith" in frame.columns
@@ -763,16 +765,12 @@ def _global_metrics(
 def _target_metrics(frame: pd.DataFrame, name: str) -> dict[str, Any]:
     """Metrics for one target over *frame* (regression or classification)."""
     if name == "sky":
-        if "obs_sky" not in frame.columns:
-            return classification_metrics(np.empty(0), np.empty(0))
         return classification_metrics(
             frame["obs_sky"].to_numpy(),
             frame["pred_sky"].to_numpy(),
             n_classes=len(SKY_CLASS_NAMES),
         )
     obs_col, pred_col = f"obs_{name}", f"pred_{name}"
-    if obs_col not in frame.columns:
-        return regression_metrics(np.empty(0), np.empty(0))
     observed = frame[obs_col].to_numpy(dtype=np.float64)
     metrics = regression_metrics(observed, frame[pred_col].to_numpy())
     metrics.update(_skill_against_references(frame, name, observed))

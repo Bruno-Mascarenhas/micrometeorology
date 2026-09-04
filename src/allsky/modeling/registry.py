@@ -24,8 +24,8 @@ from typing import Any, Literal, cast
 
 from torch import nn
 
-from allsky.config import ExperimentConfig, geometry_channels_of
-from allsky.embeddings.backbone import Pooling
+from allsky.config import ExperimentConfig, geometry_channels_of, image_size_of
+from allsky.embeddings.backbone import POOLINGS, Pooling
 from allsky.features.policy import resolve_feature_set
 from allsky.modeling.baselines import ClimatologyModel, ImageOnlyModel, SensorOnlyModel
 from allsky.modeling.multimodal import MultimodalNet
@@ -364,11 +364,13 @@ def default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Callab
         params = dict(cfg.model.model_dump())
         name = str(params.get("backbone", "dinov2_vits14"))
         pooling = str(params.get("backbone_pooling", "cls"))
+        image_size = image_size_of(cfg)
         try:
             backbone = build_backbone(
                 name,
                 pooling=_backbone_pooling(pooling),
                 device=device,
+                image_size=image_size,
                 weights=params.get("backbone_weights"),
                 repo_dir=params.get("backbone_repo_dir"),
             )
@@ -377,6 +379,7 @@ def default_image_backbone_builder(cfg: ExperimentConfig, device: str) -> Callab
             raise TrainingError(
                 "failed to construct the default image backbone for input_mode='image' "
                 f"(model.backbone={name!r}, model.backbone_pooling={pooling!r}, "
+                f"model.image_size={image_size!r}, "
                 f"train.device={device!r}); fix those config knobs or inject an "
                 f"image_backbone_builder. Cause: {exc}"
             ) from exc
@@ -388,22 +391,17 @@ def _backbone_pooling(value: str) -> Pooling:
     """Narrow the free-form ``model.backbone_pooling`` string to the backbone's literal.
 
     ``ExperimentModelConfig`` is ``extra="allow"``, so the knob arrives as an
-    arbitrary string while :func:`allsky.embeddings.backbone.build_backbone` accepts
-    only these three names.  Rejecting anything else here does not change what a bad
-    value does to a run — it already ended as the ``RuntimeError``
-    :func:`default_image_backbone_builder` raises, since the only backbone that
-    reads ``pooling`` (``DinoV2Backbone``) rejects an unknown one, and the other
-    (``fake``) is not an ``nn.Module`` and exposes no ``load_torch_module``, so
-    ``coerce_image_backbone`` refuses it regardless of pooling.  It only moves the
-    failure one call earlier, onto a message that names the knob.
+    arbitrary string while the extraction path narrows it to :data:`POOLINGS`, read
+    from there so this and :data:`allsky.modeling.backbone_families.VIT_POOLINGS`
+    cannot drift.  Rejecting anything else here does not change what a bad value
+    does to a run — the DINOv2 and DINOv3 families reject an unknown pooling when
+    they build, ``ConvNetFamily`` rejects any token pooling at all, and ``fake`` is
+    not an ``nn.Module``, so ``coerce_image_backbone`` refuses it regardless.  It
+    only moves the failure one call earlier, onto a message that names the knob.
     """
-    if value == "cls":
-        return "cls"
-    if value == "mean":
-        return "mean"
-    if value == "cls+mean":
-        return "cls+mean"
-    raise ValueError(f"unknown backbone pooling {value!r}; expected 'cls', 'mean' or 'cls+mean'")
+    if value in POOLINGS:
+        return cast("Pooling", value)
+    raise ValueError(f"unknown backbone pooling {value!r}; expected one of {', '.join(POOLINGS)}")
 
 
 def restore_model(
