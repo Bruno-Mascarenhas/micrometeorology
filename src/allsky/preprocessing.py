@@ -206,6 +206,17 @@ def _band_rows(height: int, band_fraction: float) -> int:
 
 
 @lru_cache(maxsize=8)
+def roi_keep_mask(height: int, width: int, radius_fraction: float) -> np.ndarray:
+    """Read-only ``(H, W)`` BOOL keep-mask for the ROI disc.
+
+    The same disc :func:`_roi_keep` multiplies by, as the mask the augmentation
+    needs to tell an absent pixel from a dark one.
+    """
+    keep = _roi_keep(height, width, radius_fraction) > 0.0
+    keep.flags.writeable = False
+    return keep
+
+
 def _roi_keep(height: int, width: int, radius_fraction: float) -> np.ndarray:
     """Read-only ``(H, W)`` float32 keep-mask, built once per geometry.
 

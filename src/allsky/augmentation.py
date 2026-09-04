@@ -124,10 +124,29 @@ def exposure_jitter(
     return encoded
 
 
-def sensor_noise(chw: np.ndarray, rng: np.random.Generator, *, sigma: float = 0.01) -> np.ndarray:
-    """Add zero-mean Gaussian noise of standard deviation *sigma*."""
+def sensor_noise(
+    chw: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    sigma: float = 0.01,
+    valid: np.ndarray | None = None,
+) -> np.ndarray:
+    """Add zero-mean Gaussian noise of standard deviation *sigma*.
+
+    Parameters
+    ----------
+    valid:
+        ``(H, W)`` bool keep-mask of the pixels the camera actually imaged.
+        Where it is False the pixel is ABSENCE, not a dark reading — the ROI mask
+        zeroes it and the isotropic pad fills it — and noising it turns "nothing
+        was measured here" into a faint signal the model can learn from. ``None``
+        noises every pixel, which is right for a frame with no absent region.
+    """
     noisy = chw + rng.normal(0.0, sigma, size=chw.shape).astype(np.float32)
-    return np.clip(noisy, 0.0, 1.0, out=noisy)
+    np.clip(noisy, 0.0, 1.0, out=noisy)
+    if valid is not None:
+        noisy = np.where(valid[None, :, :], noisy, chw)
+    return noisy
 
 
 def random_erasing(
@@ -138,6 +157,7 @@ def random_erasing(
     aspect_range: tuple[float, float] = (0.4, 2.5),
     keep_solar_disc: tuple[int, int] | None = None,
     disc_radius: int = 12,
+    valid: np.ndarray | None = None,
 ) -> np.ndarray:
     """Erase one random rectangle, filled with the frame's own mean.
 
@@ -147,6 +167,9 @@ def random_erasing(
         ``(row, col)`` of the sun. When given, a patch overlapping the solar
         disc is redrawn: occluding the sun itself is not a nuisance, it changes
         the physics the model is being asked about.
+    valid:
+        ``(H, W)`` bool keep-mask of the pixels the camera actually imaged; the
+        fill averages only those.
     disc_radius:
         Radius in pixels of the protected disc.
 
@@ -157,7 +180,17 @@ def random_erasing(
     """
     _, height, width = chw.shape
     out = chw.copy()
-    fill = np.asarray(chw.mean(axis=(1, 2)), dtype=np.float32).reshape(3, 1, 1)
+    # Averaged over the imaged pixels only: the ROI mask and the isotropic pad
+    # write exact zeros over regions the camera never saw, and folding those into
+    # the mean drags the fill toward black — an erasure darker than any sky.
+    if valid is None:
+        channel_mean = chw.mean(axis=(1, 2))
+    else:
+        imaged = int(valid.sum())
+        channel_mean = (
+            (chw * valid[None, :, :]).sum(axis=(1, 2)) / imaged if imaged else chw.mean(axis=(1, 2))
+        )
+    fill = np.asarray(channel_mean, dtype=np.float32).reshape(3, 1, 1)
     for _ in range(10):
         area = rng.uniform(*area_range) * height * width
         aspect = rng.uniform(*aspect_range)
@@ -310,15 +343,28 @@ class AugmentationPipeline:
         """True when at least one transform can fire."""
         return max(self.p_exposure, self.p_noise, self.p_translate, self.p_erase) > 0.0
 
-    def __call__(self, chw: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-        """Apply the pipeline to one CHW frame in ``[0, 1]``."""
+    def __call__(
+        self,
+        chw: np.ndarray,
+        rng: np.random.Generator,
+        valid: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Apply the pipeline to one CHW frame in ``[0, 1]``.
+
+        *valid* is the ``(H, W)`` bool mask of the pixels the camera imaged. The
+        two transforms that would otherwise treat an absent pixel as a dark
+        reading take it: :func:`sensor_noise` leaves the absent ones alone and
+        :func:`random_erasing` averages its fill over the imaged ones. Exposure
+        and translation need no mask — the first is multiplicative, so zero stays
+        zero, and the second moves absence with the frame.
+        """
         out = chw
         if self.p_exposure and rng.random() < self.p_exposure:
             out = exposure_jitter(out, rng, log2_range=self.exposure_log2)
         if self.p_noise and rng.random() < self.p_noise:
-            out = sensor_noise(out, rng, sigma=self.noise_sigma)
+            out = sensor_noise(out, rng, sigma=self.noise_sigma, valid=valid)
         if self.p_translate and rng.random() < self.p_translate:
             out = translate(out, rng, max_shift=self.translate_px)
         if self.p_erase and rng.random() < self.p_erase:
-            out = random_erasing(out, rng)
+            out = random_erasing(out, rng, valid=valid)
         return np.ascontiguousarray(out, dtype=np.float32)

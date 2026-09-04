@@ -595,11 +595,31 @@ class PadConfig(BaseModel):
 
 
 class NightFilterConfig(BaseModel):
-    """Drop frames whose solar elevation is below ``min_solar_elevation_deg``."""
+    """Drop frames whose solar elevation is below ``min_solar_elevation_deg``.
+
+    Two floors, and they are not the same question. ``min_solar_elevation_deg``
+    decides which rows EXIST in the manifest at all;
+    ``labelable_min_elevation_deg`` decides which of the surviving rows get a
+    finite ``target_kindex`` and a sky class rather than the ``LOW_SUN`` flag —
+    the band between the two is kept, labelled, and marked. The second was a
+    Python default no config could reach, so the band the dataset publishes was
+    not a property of the config that built it.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     min_solar_elevation_deg: float = 5.0
+    labelable_min_elevation_deg: float = 10.0
+
+    @model_validator(mode="after")
+    def _night_floor_is_below_the_labelable_one(self) -> NightFilterConfig:
+        if self.min_solar_elevation_deg > self.labelable_min_elevation_deg:
+            raise ValueError(
+                f"night_filter.min_solar_elevation_deg ({self.min_solar_elevation_deg}) is above "
+                f"labelable_min_elevation_deg ({self.labelable_min_elevation_deg}): every row "
+                "that survives the night filter would then be flagged LOW_SUN"
+            )
+        return self
 
 
 class PrepareSensorConfig(BaseModel):

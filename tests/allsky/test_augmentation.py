@@ -176,3 +176,45 @@ class TestAugmentationPipeline:
         assert out.dtype == np.float32
         assert out.flags["C_CONTIGUOUS"]
         assert 0.0 <= out.min() <= out.max() <= 1.0
+
+
+class TestAbsentPixelsAreNotSkySignal:
+    """The ROI mask and the isotropic pad write exact zeros over regions the
+    camera never imaged. Treated as dark readings, the noise turns "nothing was
+    measured here" into a faint signal and the erasing fill is dragged toward
+    black — an erasure darker than any sky."""
+
+    @staticmethod
+    def _frame_and_mask() -> tuple[np.ndarray, np.ndarray]:
+        chw = np.full((3, 16, 16), 0.6, dtype=np.float32)
+        valid = np.ones((16, 16), dtype=bool)
+        valid[:, :8] = False  # the absent half
+        chw[:, :, :8] = 0.0
+        return chw, valid
+
+    def test_noise_leaves_the_absent_pixels_exactly_zero(self):
+        chw, valid = self._frame_and_mask()
+
+        noisy = sensor_noise(chw, np.random.default_rng(0), sigma=0.05, valid=valid)
+
+        assert np.array_equal(noisy[:, :, :8], np.zeros_like(noisy[:, :, :8]))
+        assert not np.array_equal(noisy[:, :, 8:], chw[:, :, 8:])
+
+    def test_without_the_mask_the_absent_pixels_are_noised(self):
+        """Which is the behaviour the mask exists to stop."""
+        chw, _valid = self._frame_and_mask()
+
+        noisy = sensor_noise(chw, np.random.default_rng(0), sigma=0.05)
+
+        assert not np.array_equal(noisy[:, :, :8], np.zeros_like(noisy[:, :, :8]))
+
+    def test_the_erasing_fill_averages_only_the_imaged_pixels(self):
+        chw, valid = self._frame_and_mask()
+
+        erased = random_erasing(chw, np.random.default_rng(3), area_range=(0.5, 0.6), valid=valid)
+
+        # The imaged half is a flat 0.6, so the fill must be 0.6 — not the 0.3
+        # the whole-frame mean would give.
+        written = erased[:, :, 8:][erased[:, :, 8:] != 0.6]
+        assert written.size > 0, "the patch must land inside the imaged half"
+        assert float(written.max()) == pytest.approx(0.6, abs=1e-6)

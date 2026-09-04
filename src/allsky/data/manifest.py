@@ -475,6 +475,7 @@ def build_manifest_from_prepare_config(
         kindex_kind=cfg.targets.kindex_kind,
         alignment=alignment,
         night_min_elevation_deg=cfg.night_filter.min_solar_elevation_deg,
+        min_elevation_deg=cfg.night_filter.labelable_min_elevation_deg,
         sensor_timestamp_offset_minutes=cfg.sensor.timestamp_offset_minutes,
         extra_features=cfg.features.extra,
         config_sha256=config_sha256,

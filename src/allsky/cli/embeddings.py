@@ -44,10 +44,13 @@ def _pixel_config_sha256(cfg: PrepareConfig) -> str:
     Recorded in ``embeddings.meta.json`` beside the full resume digest, because
     the two answer different questions.  The full digest moves whenever its own
     formula widens, which says nothing about whether a single pixel changed; this
-    one moves only when the frames themselves would.  That is what lets
-    :func:`allsky.embeddings.extract._check_resume_compatible` migrate a store
-    across a formula change without having to take the encoder's word for the
-    preprocessing behind it.
+    one moves only when the frames themselves would.
+
+    It is PROVENANCE, not a migration key: ``_check_resume_compatible`` refuses
+    any divergence of ``config_sha256`` outright, and nothing reads this hash to
+    carry a store across a formula change. The way out of a refused resume is
+    ``--no-resume``, which re-encodes; what this hash buys is a reader of the
+    store being able to tell "the formula widened" from "the pixels changed".
     """
     from allsky.provenance import config_subset_sha256
 

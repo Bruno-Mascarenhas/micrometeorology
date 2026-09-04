@@ -992,6 +992,16 @@ def predict_snapshot(
             "architecture": cfg.model.name,
             "input_mode": cfg.data.input_mode,
             "device": device,
+            # Already loaded, so no extra I/O: without them a published
+            # prediction names a checkpoint path and nothing about the dataset
+            # or the code that produced it, and the path is the one thing that
+            # does not survive the file being copied off this machine.
+            "code_version": checkpoint.get("code_version"),
+            "dataset_version": checkpoint.get("dataset_version"),
+            "split_id": checkpoint.get("split_id"),
+            "manifest_sha256": checkpoint.get("manifest_sha256"),
+            "dhi_parameterization": cfg.targets.dhi.parameterization,
+            "kindex_kind": cfg.targets.kindex.kind,
         },
         "image": str(image_path),
     }

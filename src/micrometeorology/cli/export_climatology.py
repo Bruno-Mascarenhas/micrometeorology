@@ -10,9 +10,11 @@ gitignored there and attached at deploy time.
 
 The hourly database and the WRF series both enter as naive station-local stamps,
 each carrying its instrument's own clock. This module is the manifest boundary:
-the ``UTC-03`` it stamps into the published artifacts comes from the pinned
-:data:`~labmim_core.site.STATION_UTC_OFFSET_HOURS`, never from the
-host's zone.
+the pinned :data:`~labmim_core.site.STATION_UTC_OFFSET_HOURS` is what every
+solar-geometry call here runs on, never the host's zone, and it is published as
+``station.utc_offset_hours`` in the manifest so an artifact records the clock its
+periods are stated in rather than leaving a reader to infer it from the station
+name.
 
 Examples
 --------
@@ -29,6 +31,7 @@ Restrict to the observed record (no model subsets) by leaving ``-w`` out::
 
 import functools
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Annotated, Literal
@@ -87,6 +90,10 @@ STATION = {
     "longitude": SITE.longitude,
     "elevation_m": 46.0,
     "timezone": "America/Bahia",
+    # The number, not just the zone name: every `period` in this manifest is a
+    # naive station-local stamp, and a reader with only "America/Bahia" has to
+    # know that Bahia never applied DST to turn one into an instant.
+    "utc_offset_hours": UTC_OFFSET_HOURS,
 }
 
 # The four options the page shows. Every source-by-season pair is computed
@@ -643,35 +650,55 @@ def _bulk_ratio(numerator: pd.Series, denominator: pd.Series) -> float:
 
 
 def _check_caveats_quote_the_published_scalar(spec: object, payload: dict) -> None:
-    """Warn when a caveat's printed number no longer matches the fitted one.
+    """Warn when a caveat prints a four-decimal literal instead of the marker.
 
     The induced curves carry one estimated scalar — the era's PAR fraction, the
-    albedo — that the caveats print as a prose literal three lines from the
-    computed parameter, so the two drift apart whenever the archive changes.
+    albedo — and the caveats quote it through a ``{param:...}`` marker resolved
+    against the fitted value, so a caveat that USES the marker cannot drift.
+    Which is why the old form of this check could never fire: it compared the
+    fitted number against the sentences that had already been interpolated from
+    it.
+
+    What does drift is a literal typed in by hand — the transcription of a
+    sibling era's fit, which is how ``par_late``'s prose came to cite
+    ``par_early``'s number. Those are what this looks for: a decimal written to
+    exactly the marker's precision, in a caveat that resolved no marker of its
+    own.
 
     A warning, not a failure: which of the two is wrong is the laboratory's
     judgement, and it is printed at generation time, when someone is watching.
     """
-    # The PUBLISHED sentences, not the specs' templates: a ``{{param:...}}`` marker
-    # resolves to the fitted value, and checking the unresolved template would
-    # report every interpolated sentence as missing the number it must carry.
-    caveats = payload.get("caveats", ())
     fit = (payload.get("subsets", {}).get("observed_all") or {}).get("fit")
-    if not caveats or not fit:
+    if not fit:
         return
-    gain = fit.get("params", {}).get("gain")
-    # 1.0 is the identity the families carry when no scalar is estimated at all
-    # (the incoming shortwave rides its own law), so there is no prose to check.
-    if gain is None or gain == 1.0:
-        return
-    quoted = f"{gain:.4f}".replace(".", ",")
-    if not any(quoted in caveat for caveat in caveats):
-        logger.warning(
-            "%s: the fitted scalar is %s but no caveat quotes it; the printed prose and "
-            "the published parameter disagree on the same screen",
-            getattr(spec, "id", "?"),
-            quoted,
-        )
+    resolved = {
+        _quoted(value)
+        for value in (fit.get("params") or {}).values()
+        if isinstance(value, (int, float))
+    }
+    for index, caveat in enumerate(payload.get("caveats", ())):
+        stale = [
+            literal for literal in _FOUR_DECIMAL_LITERAL.findall(caveat) if literal not in resolved
+        ]
+        if stale:
+            logger.warning(
+                "%s caveat %d prints %s, which no fitted parameter of this variable carries; "
+                "a number typed in by hand does not move when the archive does",
+                getattr(spec, "id", "?"),
+                index,
+                ", ".join(sorted(set(stale))),
+            )
+
+
+#: A decimal written to the precision a resolved ``{param:...}`` marker produces,
+#: with the comma this page prints. A literal in that exact shape is prose that
+#: was transcribed from a fit rather than interpolated from one.
+_FOUR_DECIMAL_LITERAL = re.compile(r"\b\d+,\d{4}\b")
+
+
+def _quoted(value: float) -> str:
+    """A fitted scalar as the caveats print it."""
+    return f"{value:.4f}".replace(".", ",")
 
 
 def _induced_options(

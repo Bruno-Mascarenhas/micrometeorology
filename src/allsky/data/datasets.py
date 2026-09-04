@@ -467,8 +467,24 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         if self.augment is None or not self.augment.enabled:
             return chw
         rng = np.random.default_rng((self._seed, self.epoch, idx))
-        augmented: np.ndarray = self.augment(chw, rng)
+        augmented: np.ndarray = self.augment(chw, rng, self._imaged_pixels(chw.shape[1:]))
         return augmented
+
+    def _imaged_pixels(self, shape: tuple[int, int]) -> np.ndarray | None:
+        """``(H, W)`` bool mask of the pixels the camera actually imaged.
+
+        Derived from the ROI this run's own preprocessing applies, which is the
+        one absent region the dataset can see. The isotropic pad is NOT covered:
+        it is written by ``PrepareConfig``, which no ``ExperimentConfig`` carries,
+        so a padded dataset still has its fill treated as sky by the two
+        transforms below. ``None`` when the run masks nothing.
+        """
+        from allsky.preprocessing import roi_keep_mask
+
+        radius = self.preprocess.roi_radius_fraction if self.preprocess is not None else None
+        if radius is None:
+            return None
+        return roi_keep_mask(shape[0], shape[1], radius)
 
     def __getitem__(self, idx: int) -> SampleTensors:
         """Row *idx*: the shared targets plus its frame, or its window of frames.

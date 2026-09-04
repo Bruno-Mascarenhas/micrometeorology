@@ -186,16 +186,13 @@ class MultitaskLoss(nn.Module):
             )
         log_var: Tensor = outputs["dhi_log_var"]
         mask = torch.isfinite(target)
-        if not bool(mask.any()):
-            return (pred * 0.0).sum() + (log_var * 0.0).sum()
-        normalized = (target[mask] - self._dhi_mean) / self._dhi_std
-        residual = pred[mask] - normalized
-        masked_log_var = log_var[mask]
+        normalized = (_sanitised(target, mask) - self._dhi_mean) / self._dhi_std
+        residual = pred - normalized
         # Gaussian NLL (dropping the 0.5*log(2*pi) constant): larger log-variance
         # trades a linear penalty for a shrunk squared-error term, so it lowers
         # the loss for large residuals and raises it for small ones.
-        nll = 0.5 * (torch.exp(-masked_log_var) * residual.pow(2) + masked_log_var)
-        return nll.mean()
+        nll = 0.5 * (torch.exp(-log_var) * residual.pow(2) + log_var)
+        return _masked_mean(nll, mask)
 
     def _regression_loss(
         self, pred: Tensor, target: Tensor, kind: str, mean: float, std: float
@@ -204,23 +201,51 @@ class MultitaskLoss(nn.Module):
         if kind not in _REGRESSION_KINDS:
             raise ValueError(f"unknown regression loss kind {kind!r}; expected {_REGRESSION_KINDS}")
         mask = torch.isfinite(target)
-        if not bool(mask.any()):
-            return (pred * 0.0).sum()
-        normalized = (target[mask] - mean) / std
-        selected = pred[mask]
+        normalized = (_sanitised(target, mask) - mean) / std
         if kind == "mse":
-            return functional.mse_loss(selected, normalized)
-        if kind == "mae":
-            return functional.l1_loss(selected, normalized)
-        return functional.huber_loss(selected, normalized, delta=self._huber_delta)
+            per_row = functional.mse_loss(pred, normalized, reduction="none")
+        elif kind == "mae":
+            per_row = functional.l1_loss(pred, normalized, reduction="none")
+        else:
+            per_row = functional.huber_loss(
+                pred, normalized, delta=self._huber_delta, reduction="none"
+            )
+        return _masked_mean(per_row, mask)
 
     @staticmethod
     def _sky_loss(logits: Tensor, sky_class: Tensor) -> Tensor:
         """Masked cross-entropy over rows with a valid (``>= 0``) class label."""
         mask = sky_class >= 0
-        if not bool(mask.any()):
-            return (logits * 0.0).sum()
-        return functional.cross_entropy(logits[mask], sky_class[mask])
+        # `clamp(min=0)` only feeds the masked-out rows a valid index; their loss
+        # is zeroed below. `ignore_index=-1` with the default reduction would do
+        # the masking too, but returns NaN for a batch where every row is masked.
+        per_row = functional.cross_entropy(logits, sky_class.clamp(min=0), reduction="none")
+        return _masked_mean(per_row, mask)
+
+
+def _sanitised(target: Tensor, mask: Tensor) -> Tensor:
+    """*target* with its masked-out entries replaced by a finite placeholder.
+
+    Boolean-mask INDEXING (``target[mask]``) copies to a host-shaped result, so
+    it has to know how many rows survive — a device synchronisation, once per
+    head per batch, which the engine's own loop is written to avoid. Every loss
+    below therefore computes over the whole batch and zeroes the rows it does
+    not want, which needs the masked entries to be finite: a NaN times zero is
+    still NaN, and it would reach the gradient.
+    """
+    return torch.where(mask, target, torch.zeros_like(target))
+
+
+def _masked_mean(per_row: Tensor, mask: Tensor) -> Tensor:
+    """Mean of *per_row* over the rows *mask* keeps, zero when it keeps none.
+
+    The denominator is clamped rather than branched on, for the same reason: a
+    Python ``if`` over a device tensor is a synchronisation. A batch with no
+    valid row yields exactly ``0.0`` with the gradient path intact, which is
+    what the branch it replaces returned.
+    """
+    kept = torch.where(mask, per_row, torch.zeros_like(per_row))
+    return kept.sum() / mask.sum().clamp(min=1)
 
 
 def _accumulate(total: Tensor | None, weight: float, component: Tensor) -> Tensor:
