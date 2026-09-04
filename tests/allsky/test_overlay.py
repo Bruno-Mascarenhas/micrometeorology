@@ -311,6 +311,84 @@ def test_extraction_creates_the_output_directory_and_honours_step_and_resize(tmp
     assert (out_dir / MANIFEST_FILENAME).is_file()
 
 
+def _ambiguous_video(tmp_path: Path) -> Path:
+    """Three frames where the middle one's minute cell is a 6/8 blend.
+
+    The sequence says the middle frame is 12:08; the pixels, on their own, read
+    12:06 with 8 a runner-up within the score margin. A minute apart because the
+    manifest's sample_id has minute resolution and would otherwise keep one row
+    of the three.
+    """
+    frames = np.stack(
+        [
+            fake.render_overlay_frame("20260810120700"),
+            fake.blended_overlay_frame("20260810120800", "20260810120600"),
+            fake.render_overlay_frame("20260810120900"),
+        ]
+    )
+    return fake.write_frames_video(tmp_path / "allsky-20260810.mp4", frames)
+
+
+def test_a_contested_cell_is_re_decided_from_the_pixels_of_a_real_frame(tmp_path: Path):
+    """The machinery was only ever driven from a hand-built alternatives list, so
+    ``_cell_scores`` and ``_cell_alternatives`` never produced a runner-up in any
+    test and the path from pixels to a correction was unexercised end to end.
+    """
+    readings = read_video_timestamps(_ambiguous_video(tmp_path))
+
+    assert [reading.text for reading in readings] == [
+        "20260810120700",
+        "20260810120600",
+        "20260810120900",
+    ]
+    assert readings[1].timestamp == _naive("2026-08-10 12:08")
+    assert [reading.corrected for reading in readings] == [False, True, False]
+
+
+def test_the_corrected_bit_reaches_the_manifest_the_extraction_writes(tmp_path: Path):
+    """``qc_frame_flags`` is a persisted column, and ``TIMESTAMP_CORRECTED``
+    appeared in no test in the repo: the bit could have been lost in the staging
+    rename without anything failing.
+    """
+    manifest = extract_frames_with_overlay_timestamps(
+        _ambiguous_video(tmp_path), tmp_path / "frames"
+    )
+
+    flags = manifest["qc_frame_flags"].tolist()
+    assert flags == [0, int(QCFlag.TIMESTAMP_CORRECTED), 0]
+    assert manifest["timestamp"].tolist() == [
+        pd.Timestamp("2026-08-10 12:07"),
+        pd.Timestamp("2026-08-10 12:08"),
+        pd.Timestamp("2026-08-10 12:09"),
+    ]
+
+
+@pytest.mark.parametrize("position", [0, 1, -1])
+def test_an_unreadable_stamp_at_either_end_of_a_video_leaves_no_manifest_row(
+    tmp_path: Path, position: int
+):
+    """Interpolation needs a reading on both sides, so a frame at the boundary
+    is not repaired. What it does instead is documented here as it stands: the
+    frame simply does not appear in the manifest — no row, no flag, no gap
+    marker. Whether an unreadable boundary frame should be dropped or recorded
+    as an acquisition gap is a decision about the record, not about this code.
+    """
+    stamps = [f"2026081012{minute:02d}00" for minute in range(10)]
+    frames = [fake.render_overlay_frame(stamp) for stamp in stamps]
+    # An impossible month: read digit for digit, refused as a date.
+    frames[position] = fake.render_overlay_frame("20261310120000")
+    video = fake.write_frames_video(tmp_path / "allsky-20260810.mp4", np.stack(frames))
+
+    readings = read_video_timestamps(video)
+    manifest = extract_frames_with_overlay_timestamps(video, tmp_path / "frames")
+
+    unreadable = readings[position]
+    interior = position not in (0, -1)
+    assert (unreadable.timestamp is not None) is interior
+    assert (unreadable.index in manifest["index"].tolist()) is interior
+    assert len(manifest) == len(stamps) - (0 if interior else 1)
+
+
 def test_a_lookalike_digit_is_re_decided_from_the_frames_around_it():
     readings = [
         OverlayReading(index=0, timestamp=_naive("2026-08-10 12:07"), text="20260810120700"),

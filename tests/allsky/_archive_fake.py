@@ -55,15 +55,28 @@ def render_overlay_frame(
     return frame
 
 
-def write_overlay_video(
-    path: str | Path,
-    stamps: Sequence[str],
+def blended_overlay_frame(
+    one: str,
+    other: str,
     *,
     height: int = FRAME_HEIGHT,
     width: int = FRAME_WIDTH,
-) -> Path:
-    """Encode one stamped frame per entry of *stamps*, losslessly so the glyphs survive."""
-    frames = np.stack([render_overlay_frame(s, height=height, width=width) for s in stamps])
+) -> np.ndarray:
+    """A frame whose glyphs are the pixel-wise mean of two stamps'.
+
+    Real ambiguity comes from the neighbouring cell's ink reaching into the shift
+    window, and no cleanly rendered frame produces it: measured over six stamps
+    and six exemplars, 0 of 504 cells had a runner-up. Averaging two stamps that
+    differ in one cell reproduces the state the correction pass exists for, from
+    pixels rather than from a hand-built list of alternatives.
+    """
+    left = render_overlay_frame(one, height=height, width=width).astype(np.int32)
+    right = render_overlay_frame(other, height=height, width=width).astype(np.int32)
+    return ((left + right) // 2).astype(np.uint8)
+
+
+def write_frames_video(path: str | Path, frames: np.ndarray) -> Path:
+    """Encode *frames* ``(N, H, W, 3)`` losslessly, so the glyphs survive."""
     out = Path(path)
     iio.imwrite(
         out,
@@ -75,6 +88,19 @@ def write_overlay_video(
         output_params=["-crf", "0"],
     )
     return out
+
+
+def write_overlay_video(
+    path: str | Path,
+    stamps: Sequence[str],
+    *,
+    height: int = FRAME_HEIGHT,
+    width: int = FRAME_WIDTH,
+) -> Path:
+    """Encode one stamped frame per entry of *stamps*."""
+    return write_frames_video(
+        path, np.stack([render_overlay_frame(s, height=height, width=width) for s in stamps])
+    )
 
 
 def build_index_html(filenames: Sequence[str]) -> str:
