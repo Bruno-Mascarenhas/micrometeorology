@@ -193,9 +193,10 @@ def test_the_stefan_boltzmann_constant_matches_the_codata_table_scipy_ships():
 
 def test_the_whole_package_declares_the_stefan_boltzmann_constant_once():
     """Two copies of a constant are two things that can drift apart silently."""
+    root = Path(__file__).resolve().parents[2]
     declarations = sorted(
-        str(path)
-        for path in Path("src").rglob("*.py")
+        str(path.relative_to(root))
+        for path in (root / "src").rglob("*.py")
         if any(
             re.match(r"^STEFAN_BOLTZMANN\s*=", line)
             for line in path.read_text(encoding="utf-8").splitlines()
@@ -418,8 +419,6 @@ def test_clearness_index_is_undefined_below_the_elevation_floor():
 
 def test_eccentricity_correction_stays_within_the_annual_swing():
     """E0 = (r0/r)^2 varies ~+-3.4% over the year (Spencer 1971)."""
-    from datetime import UTC, datetime
-
     days = [datetime(2026, 1, 1, 12, tzinfo=UTC).replace(month=m) for m in range(1, 13)]
     e0 = eccentricity_correction(pd.DatetimeIndex([d.replace(tzinfo=None) for d in days]))
 
@@ -849,7 +848,9 @@ def test_only_the_solar_variables_are_daylight_gated():
         WRFVariable.SWNET,
         WRFVariable.CLEARNESS_INDEX,
     } == DAYLIGHT_ONLY_VARIABLES
-    night = {"datetime_local": __import__("datetime").datetime(2026, 5, 3, 2)}
+    # Naive station-local, as the WRF pipeline stamps every step: the daylight
+    # gate reads the clock the model wrote, never a converted one.
+    night = {"datetime_local": datetime(2026, 5, 3, 2)}  # noqa: DTZ001
     assert not publishes_step(WRFVariable.SWUP, night)
     assert not publishes_step(WRFVariable.CLEARNESS_INDEX, night)
     assert publishes_step(WRFVariable.LWUP, night)

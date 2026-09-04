@@ -26,12 +26,17 @@ def _daylight_frame(days: int = 12) -> pd.DataFrame:
 
 
 def test_marques_filho_matches_the_published_logistic_by_hand():
-    """Kd = 0.13 + 0.86 / (1 + exp(-6.29 + 12.26 Kt)) — Marques Filho et al. (2016)."""
+    """Kd = 0.13 + 0.86 / (1 + exp(-6.29 + 12.26 Kt)) — Marques Filho et al. (2016).
+
+    The three expected values are the logistic evaluated away from this package,
+    not its coded expression retyped: a coefficient mistranscribed in both places
+    would otherwise agree with itself.
+    """
     kt = np.array([0.2, 0.5, 0.75])
 
-    expected = 0.13 + 0.86 / (1.0 + np.exp(-6.29 + 12.26 * kt))
-
-    np.testing.assert_allclose(ktkd.marques_filho_2016(kt), expected, rtol=1e-12)
+    np.testing.assert_allclose(
+        ktkd.marques_filho_2016(kt), [0.9718690, 0.5943268, 0.1746400], rtol=1e-6
+    )
 
 
 def test_the_two_brl_models_differ_only_in_their_coefficients():
@@ -99,6 +104,8 @@ def test_apparent_solar_time_is_twelve_at_solar_noon():
     )
 
     assert ast[noon] == pytest.approx(12.0, abs=0.2)
+    assert np.all(np.diff(ast) > 0), "apparent solar time runs with the clock"
+    assert ast[index.get_loc(pd.Timestamp("2024-03-20 09:00"))] < 12.0
 
 
 def test_persistence_is_the_mean_of_the_two_neighbouring_hours():

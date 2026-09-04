@@ -6,11 +6,17 @@ import pytest
 from micrometeorology.wrf.safety import assert_reasonable_array_size, estimate_array_nbytes
 
 
-def test_estimate_array_nbytes_multiplies_elements_by_itemsize():
-    assert estimate_array_nbytes((3, 4), np.float64) == 96
-    assert estimate_array_nbytes([2, 5], np.float32) == 40
-    assert estimate_array_nbytes((), np.float64) == 8
-    assert estimate_array_nbytes((0, 10), np.float64) == 0
+@pytest.mark.parametrize(
+    ("shape", "dtype", "nbytes"),
+    [
+        ((3, 4), np.float64, 96),
+        ([2, 5], np.float32, 40),
+        ((), np.float64, 8),
+        ((0, 10), np.float64, 0),
+    ],
+)
+def test_estimate_array_nbytes_multiplies_elements_by_itemsize(shape, dtype, nbytes):
+    assert estimate_array_nbytes(shape, dtype) == nbytes
 
 
 def test_estimate_array_nbytes_rejects_negative_dimensions():

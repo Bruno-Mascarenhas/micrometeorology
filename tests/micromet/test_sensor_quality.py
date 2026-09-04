@@ -105,6 +105,24 @@ def test_a_gap_in_the_record_is_not_a_step():
     assert removed == 0
 
 
+def test_an_index_that_steps_backwards_is_not_adjacency():
+    """Two samples out of order never stood next to each other in time.
+
+    Differencing across a backwards jump measures an arbitrary interval, so the
+    excursion these five values would form on an ordered index must not be found
+    on a shuffled one.
+    """
+    frame = _frame("BP1_mbar_Avg", [1013.0, 1013.0, 996.0, 1013.0, 1013.0])
+    stamps = list(frame.index)
+    frame.index = pd.DatetimeIndex([stamps[0], stamps[3], stamps[2], stamps[1], stamps[4]])
+
+    _frame_out, removed = mask_step_excursions(
+        frame, [SensorStepLimit(column="BP1_mbar_Avg", threshold=1.0, return_tol=1.0, max_len=2)]
+    )
+
+    assert removed == 0
+
+
 def test_a_run_longer_than_the_column_tolerates_is_masked():
     frame = _frame("RH1_Avg", [50.0] + [72.47] * 6 + [55.0])
 
@@ -137,7 +155,7 @@ def test_a_gap_breaks_a_run_rather_than_bridging_it():
     assert removed == 0
 
 
-def test_an_anemometer_frozen_above_calm_is_masked_despite_the_exemption():
+def test_an_anemometer_frozen_at_a_nonzero_speed_is_masked():
     """The 18-day rail this test exists for sat at 0.281 m/s, not at zero."""
     frame = _frame("WS_ms_S_WVT", [0.281] * 8)
 
@@ -237,4 +255,6 @@ def test_a_double_dip_does_not_consume_the_reading_between_the_two():
     )
 
     assert removed == 2
-    assert frame["BP1_mbar_Avg"].iloc[3] == 1013.30, "the reading between the dips is ambient"
+    assert frame["BP1_mbar_Avg"].iloc[3] == pytest.approx(1013.30), (
+        "the reading between the dips is ambient"
+    )

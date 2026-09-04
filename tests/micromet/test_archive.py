@@ -136,7 +136,6 @@ class TestStaging:
         )
         frame = pd.read_csv(staged, skiprows=[0, 2, 3])
         stamps = pd.to_datetime(frame["TIMESTAMP"]).tolist()
-        # The two mis-stamped rows move forward one hour; the late one does not.
         assert stamps == [
             pd.Timestamp("2020-02-28 12:45:00"),
             pd.Timestamp("2020-02-28 12:50:00"),
@@ -177,8 +176,9 @@ class TestStaging:
             tmp_path / "staged",
         )
         frame = pd.read_csv(staged, skiprows=[0, 2, 3])
-        # The correctly clocked 00:00 row stays; the mis-stamped tail goes.
-        assert frame["TIMESTAMP"].tolist() == ["2020-01-07 00:00:00"]
+        assert frame["TIMESTAMP"].tolist() == ["2020-01-07 00:00:00"], (
+            "the correctly clocked 00:00 row stays; the mis-stamped tail goes"
+        )
 
     def test_only_the_2023_block_of_the_spare_logger_is_kept(self, tmp_path):
         source = tmp_path / "CR5000_LBM_rain_18-21082023.dat"
@@ -366,7 +366,7 @@ class TestNightCorruptedDays:
         return pd.DataFrame(values, index=pd.DatetimeIndex(stamps))
 
     def test_a_clean_day_is_not_flagged(self) -> None:
-        # Local midday, so the sun is up and the flux is ordinary.
+        """Local midday: the sun is up and the flux is ordinary."""
         stamps = [f"2024-06-15 12:{minute:02d}" for minute in (0, 5, 10, 15)]
         frame = self._frame({"Sw_dw": [800.0, 810.0, 790.0, 805.0]}, stamps)
 
@@ -420,8 +420,8 @@ class TestNightCorruptedDays:
             "2024-06-15 02:00",
             "2024-06-15 02:05",
             "2024-06-15 02:10",
-            "2024-06-15 12:00",  # looks ordinary, same broken clock
-            "2024-06-16 12:00",  # the next day is untouched
+            "2024-06-15 12:00",
+            "2024-06-16 12:00",
         ]
         frame = self._frame(
             {
@@ -440,10 +440,10 @@ class TestNightCorruptedDays:
         assert masked["Sw_dw"].iloc[:4].isna().all()
         assert masked["Sw_par"].iloc[:4].isna().all()
         assert masked["Net_CNR1"].iloc[:4].isna().all()
-        assert masked["Sw_dw"].iloc[4] == 850.0, "the following day must survive"
-        # Non-radiation channels keep their values: the reading is real, only its
-        # timestamp is wrong, and dropping them would delete good measurements.
-        assert masked["T"].notna().all()
+        assert masked["Sw_dw"].iloc[4] == pytest.approx(850.0), "the following day must survive"
+        assert masked["T"].notna().all(), (
+            "a non-radiation reading is real; only its timestamp is wrong"
+        )
         assert removed == {"Sw_dw": 4, "Sw_par": 4, "Net_CNR1": 4}
 
 
@@ -536,7 +536,6 @@ class TestTheMasksReachTheRawTwin:
         masked, removed = archive.mask_impossible_shortwave(frame.copy(), sources)
 
         assert masked["Sw_dw"].isna().all(), "both samples exceed the BSRN ceiling"
-        # Each raw column loses only the sample inside its own era.
         assert masked["PSP1_Wm2_Avg"].to_list() == [
             pytest.approx(float("nan"), nan_ok=True),
             1400.0,
@@ -1141,6 +1140,9 @@ def test_the_pipeline_calls_its_radiation_stages_in_the_load_bearing_order() -> 
       thermal offset straight back into the saldo it exists to remove;
     - ``close_net_radiation`` before all of them, or the balance it closes is
       closed over components a later mask has already removed.
+
+    Comments are stripped before the search, so a future comment naming a stage
+    cannot satisfy the check over a wrong order.
     """
     from micrometeorology.cli import build_archive as cli
 
@@ -1157,8 +1159,6 @@ def test_the_pipeline_calls_its_radiation_stages_in_the_load_bearing_order() -> 
         "mask_nocturnal_shortwave",
         "close_nocturnal_net_radiation",
     )
-    # Comments are stripped first: a future comment naming a stage would otherwise
-    # satisfy the check over a wrong order.
     fonte = "\n".join(linha.split("#", 1)[0] for linha in inspect.getsource(cli.run).splitlines())
     chamadas = re.findall(rf"\b({'|'.join(estagios)})\(", fonte)
 

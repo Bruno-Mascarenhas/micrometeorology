@@ -178,7 +178,6 @@ def test_build_date_metadata_uses_pinned_product_timezone(tmp_path, monkeypatch)
     path = tmp_path / "wrfout_d01_synthetic_tz.nc"
     _write_tiny_wrf_file(path)
 
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     with WRFDataset(path) as wrf:
         entries = wrf.build_date_metadata()
     assert entries[0]["datetime_local"].utcoffset() == timedelta(hours=-3)

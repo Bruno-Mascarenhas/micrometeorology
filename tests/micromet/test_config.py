@@ -6,7 +6,6 @@ every key it declares must be a real field on ``Settings``, otherwise
 consumer of ``get_settings()`` fails on its first call.
 """
 
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -14,18 +13,6 @@ import pytest
 from pydantic import ValidationError
 
 from micrometeorology.common.config import Settings, get_settings
-
-
-@pytest.fixture(autouse=True)
-def hermetic_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Strip ambient ``LABMIM_*`` overrides and the process-global settings cache."""
-    monkeypatch.delenv("LABMIM_ENV", raising=False)
-    monkeypatch.delenv("LABMIM_CONFIG_PATH", raising=False)
-    for field_name in Settings.model_fields:
-        monkeypatch.delenv(f"LABMIM_{field_name.upper()}", raising=False)
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 def test_get_settings_accepts_the_shipped_default_yaml() -> None:

@@ -14,7 +14,7 @@ import pandas as pd
 import pytest
 
 from labmim_core.site import STATION_SITE, STATION_UTC_OFFSET_HOURS
-from micrometeorology.cli.export_sky import SUBSET_LABELS, build_payloads
+from micrometeorology.cli.export_sky import SUBSET_LABELS, _seasonal_samples, build_payloads
 from micrometeorology.stats import ktkd as ktkd_stats
 from micrometeorology.stats.sky_condition import KT_CUMULATIVE_EDGES
 
@@ -175,6 +175,26 @@ def test_the_density_matrix_rows_match_the_kd_edges_the_renderer_checks():
 
     assert len(density["counts"]) == len(density["kd_edges"]) - 1
     assert len(density["counts"][0]) == len(density["kt_edges"]) - 1
+
+
+def test_each_seasonal_recorte_carries_only_its_own_months():
+    """The recorte ids are a published contract, so a swapped tuple must fail here.
+
+    The synthetic year is season-symmetric on purpose everywhere else in this
+    file, which leaves the DJF/JJA split with nothing to hold it.
+    """
+    index = pd.date_range("2024-01-01", periods=366, freq="D")
+    month = index.month.to_numpy()
+    clearness = pd.Series(
+        np.select([np.isin(month, (12, 1, 2)), np.isin(month, (6, 7, 8))], [0.75, 0.25], 0.5),
+        index=index,
+    )
+
+    subsets = _seasonal_samples(clearness)
+
+    np.testing.assert_allclose(subsets["observed_djf"], 0.75)
+    np.testing.assert_allclose(subsets["observed_jja"], 0.25)
+    assert len(subsets["observed_all"]) == len(index)
 
 
 def test_neither_artifact_carries_a_non_finite_number():

@@ -165,11 +165,6 @@ def test_failed_render_is_logged_with_the_frame_it_lost(tmp_path, caplog):
     assert "1 of 1 figure tasks failed to render" in caplog.text
 
 
-# ---------------------------------------------------------------------------
-# In-process rendering behaviour
-# ---------------------------------------------------------------------------
-
-
 class _StopBeforeSavefigError(Exception):
     """Raised from a stubbed colormap lookup to end a render early."""
 
@@ -219,9 +214,18 @@ def test_municipality_outlines_are_drawn_from_the_shapes_dir(tmp_path, monkeypat
     ]
 
 
-@pytest.mark.parametrize("shapes_dir", [None, "unset"])
+def _inner_domain_without_shapes_task(output_path: Path) -> FigureTask:
+    """D03 with no ``--shapes-dir``: the overlay has no source to read."""
+    return _inner_domain_task(output_path, None)
+
+
+@pytest.mark.parametrize(
+    "build_task",
+    [_inner_domain_without_shapes_task, _figure_task],
+    ids=["inner-domain-without-shapes", "outer-domain"],
+)
 def test_municipality_outlines_are_skipped_without_shapes_or_inner_domain(
-    tmp_path, monkeypatch, shapes_dir
+    tmp_path, monkeypatch, build_task
 ):
     from cartopy.mpl import geoaxes
 
@@ -235,13 +239,8 @@ def test_municipality_outlines_are_skipped_without_shapes_or_inner_domain(
     )
     monkeypatch.setattr(plotting, "saturated_cmap", _stop_before_savefig)
 
-    task = (
-        _inner_domain_task(tmp_path / "figure.png", None)
-        if shapes_dir is None
-        else _figure_task(tmp_path / "figure.png")  # D01: no municipality overlay
-    )
     with pytest.raises(_StopBeforeSavefigError):
-        batch._render_figure(task)
+        batch._render_figure(build_task(tmp_path / "figure.png"))
 
     assert drawn == []
 

@@ -117,32 +117,46 @@ def _run_units(wrf_path: Path, out_root: Path, workers: int) -> list[jobs.UnitRe
     return jobs.execute_units(units, workers)
 
 
-def test_value_frame_source_exposes_named_scale_and_step_contract(tmp_path):
-    wrf = tmp_path / "wrfout_d02_frame_source.nc"
-    _write_full_wrf_file(wrf, seed=6)
+@pytest.fixture(scope="module")
+def frame_source_wrf(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The seeded wrfout the frame-source contract is pinned against."""
+    path = Path(tmp_path_factory.mktemp("frame_source")) / "wrfout_d02_frame_source.nc"
+    _write_full_wrf_file(path, seed=6)
+    return path
 
-    with jobs.WRFDataset(wrf) as dataset:
-        temperature_source = build_value_frame_source(dataset, "temperature")
-        assert isinstance(temperature_source, ValueFrameSource)
 
-        temperature_kelvin, expected_min, expected_max = jobs.variables.extract_temperature(dataset)
-        assert temperature_source.scale_min == expected_min
-        assert temperature_source.scale_max == expected_max
-        np.testing.assert_array_equal(
-            temperature_source.frame_for_step(2),
-            jobs.variables.extract_temperature_step(temperature_kelvin[2:3, :, :]),
-        )
+def test_the_temperature_source_publishes_the_pinned_celsius_scale(frame_source_wrf):
+    """The bounds reach every published PNG and values-JSON, in degrees Celsius."""
+    with jobs.WRFDataset(frame_source_wrf) as dataset:
+        source = build_value_frame_source(dataset, "temperature")
 
-        wind_source = build_value_frame_source(dataset, "wind")
-        assert isinstance(wind_source, ValueFrameSource)
-        u10_values, v10_values, expected_min, expected_max = jobs.variables.extract_wind(dataset)
-        assert wind_source.scale_min == expected_min
-        assert wind_source.scale_max == expected_max
-        np.testing.assert_array_equal(
-            wind_source.frame_for_step(1),
-            np.hypot(u10_values[1], v10_values[1]),
-        )
+        assert isinstance(source, ValueFrameSource)
+        assert source.scale_min == pytest.approx(16.9297119, abs=1e-6)
+        assert source.scale_max == pytest.approx(31.6584106, abs=1e-6)
 
+
+def test_the_temperature_source_reads_one_step_in_celsius(frame_source_wrf):
+    with jobs.WRFDataset(frame_source_wrf) as dataset:
+        source = build_value_frame_source(dataset, "temperature")
+        assert source is not None
+        frame = source.frame_for_step(2)
+
+        assert frame.shape == (4, 5)
+        assert frame[0, 0] == pytest.approx(21.5306091, abs=1e-6)
+
+
+def test_the_wind_source_publishes_the_speed_of_its_two_components(frame_source_wrf):
+    with jobs.WRFDataset(frame_source_wrf) as dataset:
+        source = build_value_frame_source(dataset, "wind")
+
+        assert isinstance(source, ValueFrameSource)
+        assert source.scale_min == pytest.approx(1.2728842, abs=1e-6)
+        assert source.scale_max == pytest.approx(10.6438017, abs=1e-6)
+        assert source.frame_for_step(1)[0, 0] == pytest.approx(2.9978814, abs=1e-6)
+
+
+def test_a_variable_the_file_does_not_carry_has_no_frame_source(frame_source_wrf):
+    with jobs.WRFDataset(frame_source_wrf) as dataset:
         assert build_value_frame_source(dataset, "GLW") is None
 
 
@@ -311,7 +325,7 @@ print(json.dumps([[r.label, r.error is not None, len(r.files)] for r in results]
         )
         if proc.returncode != 0:
             continue
-        rows = {label: (failed, n) for label, failed, n in __import__("json").loads(proc.stdout)}
+        rows = {label: (failed, n) for label, failed, n in json.loads(proc.stdout)}
         innocents_ok = all(
             not failed for label, (failed, _n) in rows.items() if not label.endswith(":pressure")
         )
@@ -378,14 +392,23 @@ def test_single_timestep_file_processes_without_errors(tmp_path):
     assert not (json_dir / "D02_RAIN_000.json").exists()
 
 
-def test_parse_poteolico_heights_maps_names_to_targets():
-    assert jobs.parse_poteolico_heights("poteolico") == (50, 100, 150)
-    assert jobs.parse_poteolico_heights("poteolico50") == (50,)
-    assert jobs.parse_poteolico_heights("poteolico100") == (100,)
-    assert jobs.parse_poteolico_heights("poteolico150") == (150,)
-    for bad in ("poteolico75", "poteolico1000", "poteolicoXY", "weibull"):
-        with pytest.raises(ValueError, match="poteolico"):
-            jobs.parse_poteolico_heights(bad)
+@pytest.mark.parametrize(
+    ("name", "heights"),
+    [
+        ("poteolico", (50, 100, 150)),
+        ("poteolico50", (50,)),
+        ("poteolico100", (100,)),
+        ("poteolico150", (150,)),
+    ],
+)
+def test_parse_poteolico_heights_maps_names_to_targets(name, heights):
+    assert jobs.parse_poteolico_heights(name) == heights
+
+
+@pytest.mark.parametrize("name", ["poteolico75", "poteolico1000", "poteolicoXY", "weibull"])
+def test_a_name_that_names_no_published_height_is_refused(name):
+    with pytest.raises(ValueError, match="poteolico"):
+        jobs.parse_poteolico_heights(name)
 
 
 def test_poteolico_single_height_writes_only_that_height(tmp_path):
@@ -462,11 +485,6 @@ def test_normalize_var_list_keeps_single_height_requests_distinct():
         "temperature",
         "poteolico",
     ]
-
-
-# ---------------------------------------------------------------------------
-# Consolidated site artifacts (series.bin / summary.json) and manifest v2
-# ---------------------------------------------------------------------------
 
 
 def _series_matrix(path: Path, n_steps: int) -> np.ndarray:
@@ -577,8 +595,7 @@ def test_the_arrow_overlay_publishes_one_file_per_step_on_the_stride_four_subgri
         assert payload["metadata"]["date_time"] == values_file["metadata"]["date_time"]
 
 
-def test_manifest_v2_timeline_availability_and_features(tmp_path, monkeypatch):
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+def test_manifest_v2_timeline_availability_and_features(tmp_path):
     wrf = tmp_path / "wrfout_d02_jobs_manifest.nc"
     # 19..23 UTC = 16..20 local (America/Bahia): SWDOWN's 6-18h daylight gate
     # keeps only the first three steps, exercising the availability ranges.
@@ -640,7 +657,7 @@ def test_values_json_rejects_non_finite_scale_bounds(tmp_path):
     arr = np.full((2, 2), np.nan, dtype=np.float32)
     with pytest.raises(ValueError, match=r"[Nn]on-finite scale bounds"):
         write_values_json_stream(tmp_path / "bad.json", arr, float("nan"), float("nan"), "N/A")
-    assert not (tmp_path / "bad.json").exists() or (tmp_path / "bad.json").stat().st_size == 0
+    assert not (tmp_path / "bad.json").exists()
 
 
 def test_sweep_removes_dead_pid_debris_on_healthy_run(tmp_path):
@@ -697,7 +714,7 @@ def test_an_opted_in_hdf5_locking_policy_reaches_the_pool_environment(monkeypatc
     assert os.environ["HDF5_USE_FILE_LOCKING"] == "BEST_EFFORT"
 
 
-def test_manifest_omits_features_when_any_unit_failed(tmp_path):
+def test_manifest_omits_features_when_an_artifact_writing_unit_failed(tmp_path):
     """A failed unit can leave LAST run's consolidated artifacts in place;
     the manifest must not vouch for them (the site falls back to per-step
     JSONs), while the timeline fields — derived from actually written files —
@@ -729,9 +746,39 @@ def test_manifest_omits_features_when_any_unit_failed(tmp_path):
     assert manifest["index_max"] == NT - 1
 
 
-def test_a_variable_that_publishes_no_step_withholds_the_directory_wide_features(
-    tmp_path, monkeypatch
-):
+def test_the_manifest_keeps_its_features_when_only_an_overlay_unit_failed(tmp_path):
+    """Only the units that WRITE the consolidated artifacts can invalidate them.
+
+    A wind-vector or isobar overlay is drawn beside them and writes neither, so
+    revoking the byte offsets over its failure would send the site back to the
+    per-step JSONs for a run whose matrices are complete.
+    """
+    wrf = tmp_path / "wrfout_d02_jobs_overlay.nc"
+    _write_full_wrf_file(wrf, seed=43)
+    json_dir = tmp_path / "json"
+    geo_dir = tmp_path / "geo"
+
+    units = jobs.build_units([wrf], ["temperature"], json_dir, geo_dir)
+    units.append(
+        jobs.WorkUnit(
+            kind="wind_vectors",
+            wrf_path=str(tmp_path / "missing_wrfout"),
+            variable="wind_vectors",
+            json_dir=str(json_dir),
+            geojson_dir=str(geo_dir),
+        )
+    )
+    results = jobs.execute_units(units, workers=1)
+    assert any(r.error for r in results)
+
+    manifest_path = jobs.write_run_manifest(json_dir, results)
+
+    assert manifest_path is not None
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    assert set(manifest["features"]) == {"domain_summary", "cell_series"}
+
+
+def test_a_variable_that_publishes_no_step_withholds_the_directory_wide_features(tmp_path):
     """A gated-out variable leaves LAST run's .series.bin newest on disk.
 
     00..04 UTC is 21..01 local, entirely outside SWDOWN's 6-18h daylight gate, so
@@ -741,7 +788,6 @@ def test_a_variable_that_publishes_no_step_withholds_the_directory_wide_features
     count — reading every cell at the wrong byte offset if the two runs differ in
     length.
     """
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_jobs_allnight.nc"
     _write_full_wrf_file(wrf, seed=57, start_hour_utc=0)
     json_dir = tmp_path / "json"
@@ -920,6 +966,7 @@ def test_a_raw_netcdf_request_that_published_no_step_is_advertised_as_empty(tmp_
         ("poteolico", "poteolico100", ("POT_EOLICO_100M",)),
         ("poteolico", "poteolico99", ()),
         ("wind_vectors", "wind_vectors", ("WIND_VECTORS",)),
+        ("isobars", "isobars", ("ISOBARS",)),
         ("grid_geojson", "", ()),
     ],
 )
@@ -1139,7 +1186,7 @@ def test_the_timeline_scanner_matches_the_names_the_writers_actually_produce():
     assert jobs._TIMESTEP_FILE_RE.match("D01_TEMP.summary.json") is None
 
 
-def test_a_step_with_no_finite_cell_is_not_published_at_all(tmp_path, monkeypatch):
+def test_a_step_with_no_finite_cell_is_not_published_at_all(tmp_path):
     """The daylight window is a clock rule; a value can still be undefined inside it.
 
     The clearness index is null wherever cos(z) falls below its cutoff, so every
@@ -1150,7 +1197,6 @@ def test_a_step_with_no_finite_cell_is_not_published_at_all(tmp_path, monkeypatc
     finite cell. The site reads the first for its map slider and the second for
     its panel.
     """
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_kt_sunrise.nc"
     _write_full_wrf_file(wrf, seed=7)
     with netCDF4.Dataset(str(wrf), "a") as ds:
@@ -1324,7 +1370,16 @@ def test_availability_is_the_intersection_across_domains(tmp_path):
     )
 
 
-def test_a_value_past_the_int32_series_range_fails_instead_of_clipping():
+@pytest.mark.parametrize(
+    "extreme",
+    [
+        (jobs._SERIES_INT_MAX / jobs.SERIES_SCALE) * 10,
+        (jobs.SERIES_MISSING / jobs.SERIES_SCALE) * 10,
+        jobs.SERIES_MISSING / jobs.SERIES_SCALE,
+    ],
+    ids=["above-the-ceiling", "below-the-floor", "on-the-missing-sentinel"],
+)
+def test_a_value_past_the_int32_series_range_fails_instead_of_clipping(extreme):
     """Clipping would give an unrepresentable value a representation, silently.
 
     The per-step JSON and the summary carry the true number while the series the
@@ -1332,17 +1387,19 @@ def test_a_value_past_the_int32_series_range_fails_instead_of_clipping():
     artifacts of one run disagreeing, with nothing saying which is real.
     """
     accumulator = jobs._SiteArtifactAccumulator(n_steps=2)
-    beyond = (jobs._SERIES_INT_MAX / jobs.SERIES_SCALE) * 10
 
     with pytest.raises(ValueError, match="int32 series"):
-        accumulator.add(0, np.array([1.0, beyond]), "01/01/2024 00:00:00")
+        accumulator.add(0, np.array([1.0, extreme]), "01/01/2024 00:00:00")
 
 
-def test_an_ordinary_magnitude_still_encodes():
+def test_an_ordinary_magnitude_reaches_the_matrix_as_hundredths():
     accumulator = jobs._SiteArtifactAccumulator(n_steps=1)
 
     accumulator.add(0, np.array([1.5, -2.25]), "01/01/2024 00:00:00")
 
+    matrix = accumulator._matrix
+    assert matrix is not None
+    assert matrix[:, 0].tolist() == [150, -225]
     assert accumulator.means[0] == pytest.approx(-0.38, abs=0.01)
 
 

@@ -66,22 +66,15 @@ class TestAggregateToHourly:
         result = aggregate_to_hourly(data, min_samples=6)
         assert np.isnan(result["Temp"].iloc[0])
 
-    def test_wind_direction_vector_mean(self, sample_5min_data):
-        result = aggregate_to_hourly(
-            sample_5min_data,
-            wind_dir_columns=["WD_WXT"],
-        )
-        assert "WD_WXT" in result.columns
-        for val in result["WD_WXT"].dropna():
-            assert 0 <= val < 360
+    def test_the_vector_mean_is_taken_per_hour_not_once_over_the_frame(self):
+        """Two opposite hours: over the whole frame their resultant would cancel."""
+        idx = pd.date_range("2024-01-01 00:00", periods=24, freq="5min")
+        frame = pd.DataFrame({"WD_WXT": [45.0] * 12 + [225.0] * 12}, index=idx)
 
-        # The vector mean is taken per hour, not once over the whole frame.
-        dir1 = result["WD_WXT"].iloc[0]
-        dir2 = result["WD_WXT"].iloc[1]
-        assert abs(dir1 - dir2) > 1.0, f"Hours 1 and 2 identical: {dir1} == {dir2}"
+        result = aggregate_to_hourly(frame, min_samples=6, wind_dir_columns=["WD_WXT"])
 
-        arithmetic = sample_5min_data["WD_WXT"][:12].mean()
-        assert dir1 != pytest.approx(arithmetic, abs=1.0)
+        assert result["WD_WXT"].iloc[0] == pytest.approx(45.0, abs=0.01)
+        assert result["WD_WXT"].iloc[1] == pytest.approx(225.0, abs=0.01)
 
     def test_wind_direction_wraps_around_north(self):
         """350° and 10° in the same hour average to 0°, not to the arithmetic 180°."""
@@ -107,10 +100,12 @@ class TestAggregateToHourly:
             wind_speed_column_map={"WD_WXT": "WS_WXT"},
         )
         unit = aggregate_to_hourly(df, min_samples=6, wind_dir_columns=["WD_WXT"])
-        # The 10 m/s easterly dominates the 1 m/s southerly
-        assert weighted["WD_WXT"].iloc[0] == pytest.approx(95.71, abs=0.5)
-        # Unit speeds give the plain bisector of 090 and 180
-        assert unit["WD_WXT"].iloc[0] == pytest.approx(135.0, abs=0.5)
+        assert weighted["WD_WXT"].iloc[0] == pytest.approx(95.71, abs=0.5), (
+            "the 10 m/s easterly dominates the 1 m/s southerly"
+        )
+        assert unit["WD_WXT"].iloc[0] == pytest.approx(135.0, abs=0.5), (
+            "unit speeds give the plain bisector of 090 and 180"
+        )
 
     def test_unit_speed_fallback_when_mapped_speed_column_is_absent(self):
         idx = pd.date_range("2024-01-01 00:00", periods=12, freq="5min")

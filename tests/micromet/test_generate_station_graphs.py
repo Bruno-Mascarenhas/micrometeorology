@@ -15,10 +15,10 @@ from matplotlib import pyplot as plt
 from typer.testing import CliRunner
 
 from micrometeorology.cli.generate_station_graphs import app
+from tests.micromet.test_ingestion import _write_toa5
 
 runner = CliRunner()
 
-# Every source column the ten graphs know how to draw.
 FULL_LENTA_COLUMNS = (
     "CM3Up_Wm2_Avg",
     "CM3Dn_Wm2_Avg",
@@ -32,32 +32,28 @@ FULL_LENTA_COLUMNS = (
     "WS_WXT_Avg",
     "WD_WXT_Avg",
 )
+"""Every source column the ten graphs know how to draw."""
 
-# What survives when the radiation, pressure, direction and rain sensors are
-# unplugged: only temperatura, umidade and velocidade can still be drawn.
 SPARSE_LENTA_COLUMNS = ("Temp1_Avg", "RH1_Avg", "WS_WXT_Avg")
+"""What survives when the radiation, pressure, direction and rain sensors are
+unplugged: only temperatura, umidade and velocidade can still be drawn."""
 
 START_DATE = "2026-07-21"
-SAMPLES = 576  # two days of 5-minute records
+SAMPLES = 576
+"""Two days of 5-minute records."""
 
 
-def _write_toa5(path: Path, columns: tuple[str, ...]) -> Path:
-    """Write a synthetic TOA5 file with the real 4-line header structure."""
-    index = np.arange(SAMPLES)
-    names = ",".join(f'"{c}"' for c in ("TIMESTAMP", "RECORD", *columns))
-    units = ",".join(f'"{u}"' for u in ("TS", "RN", *["W/meter^2"] * len(columns)))
-    aggs = ",".join(f'"{a}"' for a in ("", "", *["Avg"] * len(columns)))
-    lines = [
-        '"TOA5","CR5000","CR5000","2754","CR5000.Std.06","CPU:PRG_LABMIM.CR5","49836","LBM"',
-        names,
-        units,
-        aggs,
-    ]
-    stamps = np.datetime64(f"{START_DATE}T00:00:00") + index * np.timedelta64(5, "m")
-    for row, stamp in enumerate(stamps):
-        cells = ",".join(f"{20.0 + (row % 7) + i:.3f}" for i in range(len(columns)))
-        lines.append(f'"{stamp}",{row},{cells}')
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+def _write_lenta_dat(path: Path, columns: tuple[str, ...]) -> Path:
+    """Two days of 5-minute records over *columns*, in the shared TOA5 shape."""
+    stamps = np.datetime64(f"{START_DATE}T00:00:00") + np.arange(SAMPLES) * np.timedelta64(5, "m")
+    _write_toa5(
+        path,
+        list(columns),
+        [
+            (str(stamp), [20.0 + (row % 7) + i for i in range(len(columns))])
+            for row, stamp in enumerate(stamps)
+        ],
+    )
     return path
 
 
@@ -89,8 +85,8 @@ def _claimed_ok(output: str) -> set[str]:
 @pytest.fixture
 def full_station(tmp_path: Path) -> tuple[Path, Path]:
     return (
-        _write_toa5(tmp_path / "lenta.dat", FULL_LENTA_COLUMNS),
-        _write_toa5(tmp_path / "rain.dat", ("PL01_mm_Tot",)),
+        _write_lenta_dat(tmp_path / "lenta.dat", FULL_LENTA_COLUMNS),
+        _write_lenta_dat(tmp_path / "rain.dat", ("PL01_mm_Tot",)),
     )
 
 
@@ -98,8 +94,8 @@ def full_station(tmp_path: Path) -> tuple[Path, Path]:
 def sparse_station(tmp_path: Path) -> tuple[Path, Path]:
     """A logger whose radiation, pressure, direction and rain channels are gone."""
     return (
-        _write_toa5(tmp_path / "lenta.dat", SPARSE_LENTA_COLUMNS),
-        _write_toa5(tmp_path / "rain.dat", ("PL02_mm_Tot",)),
+        _write_lenta_dat(tmp_path / "lenta.dat", SPARSE_LENTA_COLUMNS),
+        _write_lenta_dat(tmp_path / "rain.dat", ("PL02_mm_Tot",)),
     )
 
 
@@ -198,14 +194,23 @@ def test_an_empty_window_honours_strict_instead_of_reporting_success(full_statio
     lenta, rain = full_station
     out = tmp_path / "graphs"
 
-    # A window that predates the file: the date filter selects zero rows.
     strict = _invoke(lenta, rain, out, "--strict", "--start-date", "2001-01-01")
+
     assert strict.exit_code == 1, strict.output
     assert "nothing to plot" in strict.output
     assert not list(out.glob("*.png")) if out.exists() else True
 
-    # Without --strict the historical behaviour is unchanged.
+
+def test_an_empty_window_exits_zero_without_strict(full_station, tmp_path):
+    """Without ``--strict`` the historical behaviour is unchanged.
+
+    The window predates the file, so the date filter selects zero rows.
+    """
+    lenta, rain = full_station
+    out = tmp_path / "graphs"
+
     lenient = _invoke(lenta, rain, out, "--start-date", "2001-01-01")
+
     assert lenient.exit_code == 0, lenient.output
 
 
@@ -263,19 +268,30 @@ def test_the_two_shipped_producers_agree_on_which_column_the_diffuse_is():
     assert DEFAULT_WRF_COLUMNS["radiacao_difusa"] == (WRF_COLUMNS["radiacao_difusa"],)
 
 
-def test_the_model_overlay_never_backtracks_in_time():
+def test_the_model_overlay_never_backtracks_in_time(tmp_path):
     """``series_operacional.dat`` is an append-only log of successive runs.
 
     Read without sorting it plots a line that runs backwards every time a new
     run is appended, with the initialisation hour's identically-zero fluxes
-    still on it.
+    still on it. The fixture carries all three shapes at once: hours out of
+    order, one hour written twice and the 21h spin-up row.
     """
-    from micrometeorology.cli.generate_station_graphs import read_wrf_series
+    from micrometeorology.wrf.operational_record import read_wrf_series
 
-    source = Path("data/series_operacional.dat")
-    if not source.exists():
-        pytest.skip("the operational record is not on this machine")
+    hours = [22, 23, 20, 21, 19, 20, 22]
+    source = tmp_path / "series_operacional.dat"
+    pd.DataFrame(
+        {
+            "year": [2026] * len(hours),
+            "month": [7] * len(hours),
+            "day": [21] * len(hours),
+            "hour": hours,
+            "t2_c": np.arange(len(hours), dtype=float),
+        }
+    ).to_csv(source, index=False)
+
     index = pd.DatetimeIndex(read_wrf_series(source).index)
+
     assert index.is_monotonic_increasing
     assert not index.duplicated().any()
     assert not (index.hour == 21).any()

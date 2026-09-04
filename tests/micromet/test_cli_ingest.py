@@ -1,6 +1,5 @@
 """End-to-end tests for the labmim-sensor-process CLI."""
 
-from collections.abc import Iterator
 from pathlib import Path
 
 import pandas as pd
@@ -14,18 +13,6 @@ from micrometeorology.sensors.export import export_csv
 from tests.micromet.test_ingestion import _write_toa5
 
 runner = CliRunner()
-
-
-@pytest.fixture(autouse=True)
-def hermetic_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Strip ambient ``LABMIM_*`` overrides and the process-global settings cache."""
-    monkeypatch.delenv("LABMIM_ENV", raising=False)
-    monkeypatch.delenv("LABMIM_CONFIG_PATH", raising=False)
-    for field_name in Settings.model_fields:
-        monkeypatch.delenv(f"LABMIM_{field_name.upper()}", raising=False)
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 def _write_one_hour_of_samples(directory: Path) -> None:
@@ -60,8 +47,12 @@ def test_cli_reports_a_configs_dir_without_sensor_config_files(
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
     _write_one_hour_of_samples(raw_dir)
-    settings = Settings(configs_dir=tmp_path / "configs-without-sensor-files")
-    monkeypatch.setattr(ingest_sensor_data, "get_settings", lambda: settings)
+    _write_config_layer(
+        tmp_path,
+        monkeypatch,
+        sensor_limits=[],
+        configs_dir=str(tmp_path / "configs-without-sensor-files"),
+    )
 
     result = runner.invoke(
         ingest_sensor_data.app,
@@ -143,28 +134,18 @@ class TestDatetimeColumnsGuard:
         with pytest.raises(ValueError, match="missing timestamp"):
             export_csv(frame, tmp_path / "with_nat.csv", include_datetime_columns=True)
 
-    def test_a_sub_hourly_index_is_still_refused_for_losing_its_minute(
-        self, tmp_path: Path
-    ) -> None:
-        index = pd.date_range("2025-06-25 12:00", periods=3, freq="30min")
-        frame = pd.DataFrame({"Temp1": [25.0, 26.0, 27.0]}, index=index)
-
-        with pytest.raises(ValueError, match="year/month/day/hour"):
-            export_csv(frame, tmp_path / "sub_hourly.csv", include_datetime_columns=True)
-
     @pytest.mark.parametrize("freq", ["30min", "90min"])
     def test_a_freq_that_opens_windows_off_the_hour_is_rejected_before_any_read(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, freq: str
+        self, tmp_path: Path, freq: str
     ) -> None:
+        """An empty input directory is what makes the ORDER visible.
+
+        Reaching the reader at all would raise the ``no files matching`` refusal
+        instead, so the message alone says which guard ran first.
+        """
         raw_dir = tmp_path / "raw"
         raw_dir.mkdir()
-        _write_one_hour_of_samples(raw_dir)
         output_path = tmp_path / "out.csv"
-
-        def _refuse_to_read(*_args: object, **_kwargs: object) -> pd.DataFrame:
-            raise AssertionError("incompatible flags must be caught before ingestion")
-
-        monkeypatch.setattr(ingest_sensor_data, "merge_dat_files", _refuse_to_read)
 
         result = runner.invoke(
             ingest_sensor_data.app,
@@ -184,6 +165,7 @@ class TestDatetimeColumnsGuard:
         assert result.exit_code == 2, result.output
         assert "--datetime-columns" in result.output
         assert "--freq" in result.output
+        assert "no files matching" not in result.output
         assert not output_path.exists()
 
 

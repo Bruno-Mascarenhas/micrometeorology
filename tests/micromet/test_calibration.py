@@ -40,6 +40,9 @@ CALIBRATIONS_YAML = (
 
 class TestApplyCalibrations:
     def test_multiplicative_factor(self, sample_data):
+        """A date-only end_date is inclusive of the WHOLE boundary day: every
+        sub-daily sample of 2018-12-31 is calibrated, and 2019-01-01 00:00
+        onward is untouched."""
         cals = [
             CalibrationRecord(
                 column="CM3Up_Wm2_Avg",
@@ -52,9 +55,6 @@ class TestApplyCalibrations:
         original = sample_data["CM3Up_Wm2_Avg"].copy()
         apply_calibrations(sample_data, cals)
 
-        # A date-only end_date is inclusive of the WHOLE boundary day: every
-        # sub-daily sample of 2018-12-31 is calibrated, and 2019-01-01 00:00
-        # onward is untouched.
         mask_before = sample_data.index <= pd.Timestamp("2018-12-31 23:59:59")
         mask_after = sample_data.index >= pd.Timestamp("2019-01-01")
 
@@ -92,9 +92,9 @@ class TestBoundaryDayCalibration:
             ],
         )
         end_day = five_min_data.loc["2018-12-31", "CM3Up_Wm2_Avg"]
-        assert len(end_day) == 288  # all 5-min samples of the day
-        assert (end_day == 50.0).all()
-        assert (five_min_data.loc["2019-01-01", "CM3Up_Wm2_Avg"] == 100.0).all()
+        assert len(end_day) == 288, "every 5-minute sample of the boundary day"
+        np.testing.assert_allclose(end_day, 50.0)
+        np.testing.assert_allclose(five_min_data.loc["2019-01-01", "CM3Up_Wm2_Avg"], 100.0)
 
     def test_null_factor_nans_whole_end_day(self, five_min_data):
         apply_calibrations(
@@ -125,9 +125,9 @@ class TestBoundaryDayCalibration:
                 )
             ],
         )
-        assert five_min_data.loc["2018-12-31 12:00", "CM3Up_Wm2_Avg"] == 50.0
-        assert five_min_data.loc["2018-12-31 12:05", "CM3Up_Wm2_Avg"] == 100.0
-        assert (five_min_data.loc["2018-12-31 00:00":"2018-12-31 12:00"] == 50.0).all().all()
+        assert five_min_data.loc["2018-12-31 12:00", "CM3Up_Wm2_Avg"] == pytest.approx(50.0)
+        assert five_min_data.loc["2018-12-31 12:05", "CM3Up_Wm2_Avg"] == pytest.approx(100.0)
+        np.testing.assert_allclose(five_min_data.loc["2018-12-31 00:00":"2018-12-31 12:00"], 50.0)
 
     def test_unify_has_no_boundary_day_hole(self, five_min_data):
         five_min_data["B"] = 20.0
@@ -150,7 +150,7 @@ class TestBoundaryDayCalibration:
         )
         assert five_min_data.loc["2018-12-31", "U"].notna().all()
         assert (five_min_data.loc["2018-12-31", "U"] == 100.0).all()
-        assert (five_min_data.loc["2019-01-01", "U"] == 20.0).all()
+        np.testing.assert_allclose(five_min_data.loc["2019-01-01", "U"], 20.0)
 
 
 class TestOverlapGuard:
@@ -195,7 +195,6 @@ class TestOverlapGuard:
         ]
         original = sample_data["CM3Up_Wm2_Avg"].copy()
         apply_calibrations(sample_data, cals)
-        # Whole boundary day gets the FIRST factor; next day starts the second.
         end_day = sample_data.loc["2018-12-31", "CM3Up_Wm2_Avg"]
         np.testing.assert_allclose(end_day, original.loc["2018-12-31"] * 0.5)
         next_day = sample_data.loc["2019-01-01", "CM3Up_Wm2_Avg"]
@@ -236,15 +235,15 @@ class TestARecordThatClosesBeforeTheDataBegins:
         return pd.DataFrame({"CMP21_Wm2_Avg": np.full(48, 100.0)}, index=index)
 
     def test_the_empty_record_does_not_raise_a_spurious_overlap(self) -> None:
+        """The first record closes six years before this frame starts, so it is
+        empty here and only the second one applies."""
         calibrations: list[CalibrationRecord] = [
-            # Closes six years before this frame starts: empty here.
             CalibrationRecord(
                 column="CMP21_Wm2_Avg",
                 end_date="2019-10-12",
                 factor=None,
                 description="not installed yet",
             ),
-            # The one that actually applies.
             CalibrationRecord(
                 column="CMP21_Wm2_Avg",
                 start_date="2019-10-13",
@@ -260,8 +259,11 @@ class TestARecordThatClosesBeforeTheDataBegins:
 
     def test_a_genuine_overlap_is_still_refused(self) -> None:
         """The guard must not be weakened: two records that really do cover the
-        same day are still a configuration error."""
-        # Both resolve to real intervals inside the 48-hour frame, sharing 2025-05-14.
+        same day are still a configuration error.
+
+        Both records resolve to real intervals inside the 48-hour frame, sharing
+        2025-05-14.
+        """
         calibrations: list[CalibrationRecord] = [
             CalibrationRecord(
                 column="CMP21_Wm2_Avg",

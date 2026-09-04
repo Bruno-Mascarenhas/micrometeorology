@@ -369,9 +369,23 @@ class TestEffectiveSampleSize:
         assert lag1 > 0.9
         assert n_effective < 0.1 * series.size
 
-    def test_short_or_degenerate_input_is_not_a_crash(self):
-        assert effective_sample_size(np.array([1.0]))[0] == 1.0
+    def test_a_single_sample_keeps_its_size(self):
+        n_effective, lag1 = effective_sample_size(np.array([1.0]))
+
+        assert n_effective == pytest.approx(1.0)
+        assert np.isnan(lag1)
+
+    def test_a_constant_sample_reports_no_autocorrelation(self):
         assert np.isnan(effective_sample_size(np.ones(10))[1])
+
+    def test_a_gapped_sample_counts_only_its_finite_entries(self):
+        """``n_effective`` counts samples, and a NaN inside the gap is not one."""
+        values = np.random.default_rng(7).normal(size=200)
+        values[50:60] = np.nan
+
+        n_effective, _lag1 = effective_sample_size(values)
+
+        assert n_effective == pytest.approx(float(np.isfinite(values).sum()))
 
 
 class TestCircularStatistics:
@@ -488,20 +502,25 @@ class TestVonMisesMixture:
 
 
 class TestPublicShapes:
-    def test_every_family_round_trips_cdf_and_ppf(self):
+    @pytest.mark.parametrize(
+        ("family", "sample"),
+        [
+            ("weibull", stats.weibull_min.rvs(1.9, scale=2.4, size=5_000, random_state=31)),
+            ("gamma", stats.gamma.rvs(0.9, scale=2.0, size=5_000, random_state=32)),
+            ("beta", stats.beta.rvs(3.0, 2.0, size=5_000, random_state=33)),
+            ("normal", stats.norm.rvs(20.0, 3.0, size=5_000, random_state=34)),
+            ("hollands_huget", stats.beta.rvs(2.0, 2.0, size=5_000, random_state=35) * 0.8),
+        ],
+        ids=["weibull", "gamma", "beta", "normal", "hollands_huget"],
+    )
+    def test_every_family_round_trips_cdf_and_ppf(self, family, sample):
         """A quantile fed back through the CDF must return the probability it came from."""
         probabilities = np.array([0.05, 0.25, 0.5, 0.75, 0.95])
-        samples = {
-            "weibull": stats.weibull_min.rvs(1.9, scale=2.4, size=5_000, random_state=31),
-            "gamma": stats.gamma.rvs(0.9, scale=2.0, size=5_000, random_state=32),
-            "beta": stats.beta.rvs(3.0, 2.0, size=5_000, random_state=33),
-            "normal": stats.norm.rvs(20.0, 3.0, size=5_000, random_state=34),
-            "hollands_huget": stats.beta.rvs(2.0, 2.0, size=5_000, random_state=35) * 0.8,
-        }
-        for family, sample in samples.items():
-            fitted = fit_distribution(family, sample)
-            recovered = cdf(fitted, ppf(fitted, probabilities))
-            np.testing.assert_allclose(recovered, probabilities, atol=1e-8, err_msg=family)
+
+        fitted = fit_distribution(family, sample)
+        recovered = cdf(fitted, ppf(fitted, probabilities))
+
+        np.testing.assert_allclose(recovered, probabilities, atol=1e-8)
 
 
 def test_a_constant_flux_sample_gets_no_mixture_rather_than_diracs() -> None:

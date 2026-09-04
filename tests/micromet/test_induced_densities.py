@@ -13,11 +13,13 @@ import numpy as np
 import pytest
 from scipy import integrate
 
+from micrometeorology.stats import climatology_export
 from micrometeorology.stats import distributions as dist
 from micrometeorology.stats.climatology_export import (
     _REFERENCE_MARKER,
     CLIMATOLOGY_VARIABLES,
     REFERENCES,
+    Reference,
 )
 from tests.micromet.conftest import required_fit_options
 
@@ -190,11 +192,28 @@ class TestCompoundHollandsGaussian:
 
 
 class TestPublishedBibliography:
-    def test_no_record_cites_itself(self):
-        """The failure mode a global rename of the prose citations once caused."""
-        for key, reference in REFERENCES.items():
-            joined = f"{reference.short} {reference.citation} {reference.url}"
-            assert not _REFERENCE_MARKER.search(joined), key
+    def test_a_record_that_cites_itself_is_refused(self, monkeypatch):
+        """The failure mode a global rename of the prose citations once caused.
+
+        The check runs at import, so the shipped records are stood aside and a
+        self-citing one is put in their place.
+        """
+        monkeypatch.setattr(climatology_export, "CLIMATOLOGY_VARIABLES", ())
+        monkeypatch.setattr(
+            climatology_export,
+            "REFERENCES",
+            {
+                "selfcite": Reference(
+                    key="selfcite",
+                    short="[[selfcite]]",
+                    citation="A record whose own prose carries its marker.",
+                    url="https://doi.org/10.1000/selfcite",
+                )
+            },
+        )
+
+        with pytest.raises(ValueError, match=r"contain a \[\[marker\]\] of their own"):
+            climatology_export._assert_references()
 
     def test_every_declared_reference_is_actually_cited(self):
         """A record nobody cites is a record nobody maintains."""

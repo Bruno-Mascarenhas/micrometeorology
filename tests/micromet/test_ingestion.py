@@ -83,7 +83,7 @@ class TestMergeDatFiles:
             tmp_path / "late.dat",
             ["shared", "only_late"],
             [
-                ("2025-06-25 12:00:00", [999.0, 77.0]),  # overlaps early at 12:00
+                ("2025-06-25 12:00:00", [999.0, 77.0]),
                 ("2025-06-25 12:05:00", [450.0, 78.0]),
             ],
         )
@@ -91,7 +91,7 @@ class TestMergeDatFiles:
         merged = merge_dat_files([early, late])
 
         assert merged.index.is_monotonic_increasing
-        assert len(merged) == 3  # 12:00, 12:05, 12:10 (12:00 collapsed)
+        assert len(merged) == 3, "12:00 is written by both files and collapses to one row"
         overlap = merged.loc["2025-06-25 12:00:00"]
         assert overlap["only_late"] == pytest.approx(77.0)
         assert overlap["only_early"] == pytest.approx(11.0)
@@ -120,7 +120,7 @@ class TestMergeDatFiles:
         early = _write_toa5(
             tmp_path / "early.dat",
             ["shared"],
-            [("2025-06-25 12:00:00", [-999.0])],  # sentinel -> NaN
+            [("2025-06-25 12:00:00", [-999.0])],
         )
         late = _write_toa5(
             tmp_path / "late.dat",

@@ -32,9 +32,12 @@ from micrometeorology.stats.daylight import SELECTION_BRACKET_OFFSETS
 
 AVERAGING_WINDOW_MIDPOINT = pd.Timedelta(minutes=30)
 
-# Two hours of 2024-03-20 the 10 deg floor falls inside: at 06:00 the sun is at
-# 4,43 deg and at 11,73 deg half an hour later, at 17:00 at 10,18 deg and 2,87 deg.
 TERMINATOR_HOURS = ("2024-03-20 06:00", "2024-03-20 17:00")
+"""Two hours of 2024-03-20 the 10 deg elevation floor falls inside.
+
+At 06:00 the sun is at 4,43 deg and at 11,73 deg half an hour later; at 17:00 it
+is at 10,18 deg and at 2,87 deg.
+"""
 
 
 def _hourly(column: str, values: list[float], labels: list[str]) -> pd.DataFrame:

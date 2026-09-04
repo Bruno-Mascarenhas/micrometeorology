@@ -110,7 +110,8 @@ class TestBothSourcesAreConditionedIdentically:
         assert atoms[0].count == 1
         assert len(values) == 3
 
-    def test_both_sources_publish_the_same_value_based_atoms(self):
+    @pytest.mark.parametrize("spec_id", ["relative_humidity", "wind_speed", "wind_direction"])
+    def test_both_sources_publish_the_same_value_based_atoms(self, spec_id):
         """Parity is over the masses a VALUE creates, not over instrument history.
 
         ``arithmetic_mean_era`` is deliberately one-sided: it removes the window
@@ -121,12 +122,12 @@ class TestBothSourcesAreConditionedIdentically:
         observed, model = self._paired([70.0, 80.0, 90.0, 99.9], [0.1, 2.0, 3.0, 4.0])
         instrument_only = {"arithmetic_mean_era"}
 
-        for spec_id in ("relative_humidity", "wind_speed", "wind_direction"):
-            _obs, obs_atoms = _observed_sample(spec_id, observed)
-            _wrf, wrf_atoms = _wrf_sample(spec_id, model)
-            assert [a.id for a in obs_atoms if a.id not in instrument_only] == [
-                a.id for a in wrf_atoms if a.id not in instrument_only
-            ], spec_id
+        _obs, obs_atoms = _observed_sample(spec_id, observed)
+        _wrf, wrf_atoms = _wrf_sample(spec_id, model)
+
+        assert [a.id for a in obs_atoms if a.id not in instrument_only] == [
+            a.id for a in wrf_atoms if a.id not in instrument_only
+        ]
 
 
 class TestAVariableWithNoPointMassGetsNoAtom:
@@ -157,7 +158,8 @@ class TestCoverageMeansSensorAvailability:
         assert atoms[0].count == 3
         assert _available_hours("precipitation", frame) == 5
 
-    def test_the_published_identity_is_n_plus_the_atoms(self):
+    @pytest.mark.parametrize("spec_id", ["wind_speed", "relative_humidity"])
+    def test_the_published_identity_is_n_plus_the_atoms(self, spec_id):
         """coverage == n + sum(atom counts), checkable from the bytes alone."""
         frame = _frame(
             {
@@ -166,12 +168,12 @@ class TestCoverageMeansSensorAvailability:
             }
         )
 
-        for spec_id in ("wind_speed", "relative_humidity"):
-            sample, atoms = _observed_sample(spec_id, frame)
-            # The break markers are not hours: every published count is over the
-            # finite entries, which is what `histogram` and `fit_distribution` see.
-            measured = int(np.isfinite(sample).sum())
-            assert _available_hours(spec_id, frame) == measured + sum(a.count for a in atoms)
+        sample, atoms = _observed_sample(spec_id, frame)
+        # The break markers are not hours: every published count is over the
+        # finite entries, which is what `histogram` and `fit_distribution` see.
+        measured = int(np.isfinite(sample).sum())
+
+        assert _available_hours(spec_id, frame) == measured + sum(a.count for a in atoms)
 
     def test_the_daylight_gate_marks_where_it_breaks_the_hour_chain(self):
         """``effective_sample_size`` correlates consecutive ENTRIES, and the

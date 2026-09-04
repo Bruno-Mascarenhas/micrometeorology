@@ -27,6 +27,7 @@ from micrometeorology.cli.export_monitoring import (
     _round,
 )
 from micrometeorology.cli.export_monitoring import app as monitoring_app
+from micrometeorology.sensors.calibration import load_sensor_switches
 from micrometeorology.sensors.monitoring import (
     MONITORING_CHARTS,
     MonitoringSeries,
@@ -34,6 +35,8 @@ from micrometeorology.sensors.monitoring import (
 )
 
 runner = CliRunner()
+
+_CALIBRATIONS = Path(__file__).resolve().parents[2] / "configs" / "micromet" / "calibrations.yaml"
 
 STATION_COLUMNS = [
     "T",
@@ -81,10 +84,17 @@ class TestChartCatalogue:
             assert len(ids) == len(set(ids)), chart.id
 
     def test_every_station_column_exists_in_the_archive_schema(self) -> None:
-        """A typo here would render an empty chart with no error anywhere."""
+        """A typo here would render an empty chart with no error anywhere.
+
+        The oracle is the shipped ``calibrations.yaml``, which is where the
+        unified names the archive writes are declared: a hand-typed list here
+        would keep the old spelling on the day one of them is renamed.
+        """
+        unified = {switch.unified_name for switch in load_sensor_switches(_CALIBRATIONS)}
+
         for chart in MONITORING_CHARTS:
             for series in chart.series:
-                assert series.station in STATION_COLUMNS, f"{chart.id}/{series.id}"
+                assert series.station in unified, f"{chart.id}/{series.id}"
 
     def test_kinds_and_encodings_stay_within_the_contract(self) -> None:
         for chart in MONITORING_CHARTS:
@@ -162,9 +172,13 @@ class TestExporter:
         assert chart["layers"]["hourly"]["axis"]["step_minutes"] == 60
 
     @staticmethod
-    def _wrf_dat(tmp_path: Path) -> Path:
-        """A model file carrying temperature and nothing else."""
-        index = pd.date_range("2022-07-01", periods=169, freq="h")
+    def _wrf_dat(tmp_path: Path, index: pd.DatetimeIndex | None = None) -> Path:
+        """A model file carrying temperature and nothing else.
+
+        *index* defaults to the week of hours the ``archive`` fixture covers.
+        """
+        if index is None:
+            index = pd.date_range("2022-07-01", periods=169, freq="h")
         dat = tmp_path / "series_operacional.dat"
         pd.DataFrame(
             {
@@ -266,17 +280,7 @@ class TestExporter:
         """``read_wrf_series`` drops hour 21 of every day, so the model index has
         a hole per day by construction. The published axis must still land the
         last sample on its real timestamp."""
-        index = pd.date_range("2022-07-01", periods=169, freq="h")
-        dat = tmp_path / "series_operacional.dat"
-        pd.DataFrame(
-            {
-                "year": index.year,
-                "month": index.month,
-                "day": index.day,
-                "hour": index.hour,
-                "T": np.arange(len(index), dtype=float),
-            }
-        ).to_csv(dat, index=False)
+        dat = self._wrf_dat(tmp_path)
 
         charts = {
             chart["id"]: chart
@@ -417,16 +421,7 @@ class TestExporter:
         station_last = pd.read_parquet(archive / "station_5min_qc.parquet").index.max()
         # Three days of model beyond the newest observation.
         index = pd.date_range(hourly.index.min(), station_last + pd.Timedelta(days=3), freq="h")
-        dat = tmp_path / "accumulating.dat"
-        pd.DataFrame(
-            {
-                "year": index.year,
-                "month": index.month,
-                "day": index.day,
-                "hour": index.hour,
-                "T": np.arange(len(index), dtype=float),
-            }
-        ).to_csv(dat, index=False)
+        dat = self._wrf_dat(tmp_path, index)
 
         payload = self._payload(archive, tmp_path, "-w", str(dat))
         window = payload["window"]

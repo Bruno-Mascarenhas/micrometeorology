@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from scipy import stats
 
+from micrometeorology.stats import climatology_export
 from micrometeorology.stats.climatology_export import (
     CLIMATOLOGY_VARIABLES,
     MANIFEST_FORMAT,
@@ -130,11 +131,24 @@ class TestVariablePayload:
         assert empty["fit"] is None
         assert empty["curve"] is None
 
-    def test_display_range_is_shared_by_every_subset(self, wind_spec, wind_samples):
-        """A per-subset axis would silently rescale under the reader between clicks."""
-        payload = build_variable_payload(wind_spec, wind_samples, version="v1")
+    def test_display_range_is_shared_by_every_subset(self, wind_spec):
+        """A per-subset axis would silently rescale under the reader between clicks.
+
+        The two subsets are given disjoint supports, so a window computed from
+        ``observed_all`` alone would leave the other one off the axis.
+        """
+        slow = np.full(500, 1.5)
+        fast = np.full(500, 8.5)
+
+        payload = build_variable_payload(
+            wind_spec, {"observed_all": slow, "observed_jja": fast}, version="v1"
+        )
+
         first, last = payload["display_range"]
-        assert 0 <= first < last <= len(payload["edges"]) - 2
+        edges = payload["edges"]
+        assert 0 <= first < last <= len(edges) - 2
+        assert edges[first] <= 1.5
+        assert edges[last + 1] >= 8.5
 
     def test_display_range_ignores_a_lone_far_outlier(self, wind_spec):
         """One gust must not stretch the axis over a range blank for everything else."""
@@ -262,14 +276,16 @@ class TestReferenceLinks:
             assert ">" not in doi, f"{ref.key}: percent-encode > in the URL"
             assert " " not in doi, ref.key
 
-    def test_reference_keys_and_markers_agree(self) -> None:
-        """A marker with no record renders as raw ``[[key]]`` to the reader."""
-        marker = re.compile(r"\[\[([a-z0-9]+)\]\]")
-        cited = set()
-        for spec in CLIMATOLOGY_VARIABLES:
-            for text in (*spec.caveats, spec.family_label):
-                cited.update(marker.findall(text))
-        assert cited <= set(REFERENCES), sorted(cited - set(REFERENCES))
+    def test_a_marker_with_no_record_stops_the_build(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A marker with no record renders as raw ``[[key]]`` to the reader.
+
+        ``_assert_references`` runs at import, so with the shipped records in
+        place the condition can only be reached by taking them away.
+        """
+        monkeypatch.setattr(climatology_export, "REFERENCES", {})
+
+        with pytest.raises(ValueError, match="undeclared reference marker"):
+            climatology_export._assert_references()
 
 
 class TestSubsetTotalsAgree:

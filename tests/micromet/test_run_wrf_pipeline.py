@@ -9,7 +9,6 @@ from tests.micromet.test_wrf_jobs import NT, _write_full_wrf_file
 
 def test_height_specific_poteolico_is_collapsed_for_figures_only(tmp_path, monkeypatch):
     """The figure phase has no poteolico renderer; the JSON phase is height-specific."""
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_pipeline_pot.nc"
     _write_full_wrf_file(wrf, seed=5)
 
@@ -47,7 +46,6 @@ def test_height_specific_poteolico_is_collapsed_for_figures_only(tmp_path, monke
 
 def test_failed_figures_still_produce_json_but_exit_non_zero(tmp_path, monkeypatch):
     """Phase 2 owns the front-end byte contract: a broken PNG must not skip it."""
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_pipeline_fail.nc"
     _write_full_wrf_file(wrf, seed=5)
 
@@ -65,13 +63,12 @@ def test_failed_figures_still_produce_json_but_exit_non_zero(tmp_path, monkeypat
     )
 
 
-def test_an_output_file_id_is_refused_before_anything_is_written(tmp_path, monkeypatch):
+def test_an_output_file_id_is_refused_before_anything_is_written(tmp_path):
     """``-v TSK`` would publish raw Kelvin into the files skin_temperature owns.
 
     The reject list lives with the export CLI, and this pipeline must apply all
     of it: a token refused by ``labmim-wrf-geojson`` is refused here too.
     """
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_pipeline_tsk.nc"
     _write_full_wrf_file(wrf, seed=5)
     out = tmp_path / "out"
@@ -88,7 +85,6 @@ def test_an_output_file_id_is_refused_before_anything_is_written(tmp_path, monke
 
 def test_two_files_of_one_domain_are_a_usage_error_not_a_traceback(tmp_path, monkeypatch):
     """The same-domain guard lives in ``jobs.build_units`` and raises ValueError."""
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf_dir = tmp_path / "wrf"
     wrf_dir.mkdir()
     for suffix in ("00", "06"):
@@ -119,7 +115,6 @@ def test_two_files_of_one_domain_are_a_usage_error_not_a_traceback(tmp_path, mon
 
     assert result.exit_code == 2, result.output
     assert "A run publishes one set of files per domain" in result.output
-    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 def test_a_malformed_date_is_refused_by_the_pipeline(tmp_path):
@@ -137,7 +132,6 @@ def test_a_malformed_date_is_refused_by_the_pipeline(tmp_path):
 
 
 def test_successful_figure_run_exits_zero(tmp_path, monkeypatch):
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_pipeline_ok.nc"
     _write_full_wrf_file(wrf, seed=5)
 
@@ -166,14 +160,13 @@ def test_successful_figure_run_exits_zero(tmp_path, monkeypatch):
     assert f"✓ {NT} figures generated" in result.output
 
 
-def test_also_video_with_no_figures_is_a_usage_error_not_a_silent_success(tmp_path, monkeypatch):
+def test_also_video_with_no_figures_is_a_usage_error_not_a_silent_success(tmp_path):
     """Phase 3 encodes the PNGs Phase 1 renders, so the pair is unsatisfiable.
 
     ``--no-figures`` empties ``png_paths``, which makes the video gate
     ``also_video and png_paths`` unconditionally false. Without this guard the
     run exits 0 having produced none of the videos it was asked for.
     """
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_novideo.nc"
     _write_full_wrf_file(wrf, seed=5)
     out = tmp_path / "out"

@@ -179,8 +179,7 @@ class TestNonFinitePairsAreDropped:
         pred = np.array([1.0, 2.0, 3.0, 4.0])
         with caplog.at_level("WARNING", logger="micrometeorology.stats.metrics"):
             rmse(obs, pred)
-        assert "1" in caplog.text
-        assert "4" in caplog.text
+        assert "dropped 1 non-finite pairs of 4" in caplog.text
 
     def test_all_finite_input_is_untouched(self):
         obs, pred = self._pairs()

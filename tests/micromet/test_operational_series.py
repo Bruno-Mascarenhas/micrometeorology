@@ -827,7 +827,7 @@ def test_migration_leaves_the_file_uniformly_as_wide_as_its_header(tmp_path):
 def test_migration_passes_untouched_cells_through_verbatim(tmp_path):
     path = tmp_path / "serie.dat"
     _v1_file(path, [_v1_row()])
-    original = dict(zip(V1_COLUMNS, path.read_text().splitlines()[1].split(","), strict=False))
+    original = dict(zip(V1_COLUMNS, path.read_text().splitlines()[1].split(","), strict=True))
 
     migrate_to_v2(path)
 

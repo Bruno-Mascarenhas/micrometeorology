@@ -160,14 +160,40 @@ def test_a_column_bracketed_by_a_missing_level_refuses_rather_than_returning_nan
         sea_level_pressure_hpa(pressure, height, temperature, vapor)
 
 
-def test_the_spacing_is_the_coarsest_that_still_fills_a_typical_step():
-    """A 12 hPa run takes 2 hPa lines; anything coarser leaves the map nearly bare."""
-    assert isobars.choose_interval_hpa(12.0) == 2.0
+@pytest.mark.parametrize(
+    ("typical_range_hpa", "interval_hpa"),
+    [
+        (1.14, 1.0),
+        (4.9, 1.0),
+        (9.9, 1.0),
+        (10.0, 2.0),
+        (12.0, 2.0),
+        (19.9, 2.0),
+        (20.0, 4.0),
+    ],
+)
+def test_the_spacing_is_the_coarsest_that_still_fills_a_typical_step(
+    typical_range_hpa, interval_hpa
+):
+    """The rungs are the published legend, so both sides of each are pinned.
+
+    1.14 hPa is the innermost domain's median range and takes the 1 hPa floor,
+    which it used to undercut at 0.2; a 12 hPa run takes 2 hPa lines, and only
+    from 20 hPa on is 4 coarse enough to still fill the map.
+    """
+    assert isobars.choose_interval_hpa(typical_range_hpa) == interval_hpa
 
 
-def test_a_field_flatter_than_any_chart_spacing_takes_the_floor_not_a_finer_rung():
-    """1.14 hPa is the innermost domain's median range; it used to earn 0.2 hPa."""
-    assert isobars.choose_interval_hpa(1.14) == 1.0
+def test_the_contouring_smoother_damps_a_cell_scale_spike_without_moving_the_field():
+    """The sigma is in CELLS, so one cell is damped and the field's mass stays put."""
+    field = np.full((21, 21), 1010.0)
+    field[10, 10] = 1020.0
+
+    smoothed = isobars.smooth_for_contouring(field)
+
+    assert smoothed.shape == field.shape
+    assert smoothed[10, 10] < 1013.0
+    assert smoothed.mean() == pytest.approx(field.mean(), abs=1e-9)
 
 
 @pytest.mark.parametrize("unusable", [np.nan, 0.0, -3.0])
@@ -447,9 +473,8 @@ def test_the_published_overlay_reduces_a_standard_atmosphere_to_its_real_pressur
     for written in result.files:
         payload = json.loads(Path(written).read_text(encoding="utf-8"))
         assert payload["isobars"], f"{Path(written).name} published no line"
-        levels = [line["level"] for line in payload["isobars"]]
-        assert min(levels) > 1010.0
-        assert max(levels) < 1020.0
+        levels = sorted({line["level"] for line in payload["isobars"]})
+        assert levels == [1014.0, 1015.0, 1016.0, 1017.0]
 
 
 def test_the_manifest_tells_the_page_which_variables_the_overlay_belongs_over(tmp_path):

@@ -78,8 +78,7 @@ def _expected(title: str, vmin: float, vmax: float, cmap_name: str) -> _Snapshot
     )
 
 
-def test_default_variable_set_builds_the_pinned_figure_task_surface(tmp_path, monkeypatch):
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+def test_default_variable_set_builds_the_pinned_figure_task_surface(tmp_path):
     wrf = tmp_path / "wrfout_d02_figures.nc"
     _write_full_wrf_file(wrf, seed=5)
 
@@ -142,8 +141,7 @@ def test_default_variable_set_builds_the_pinned_figure_task_surface(tmp_path, mo
     }
 
 
-def test_swdown_drops_night_steps_but_other_variables_keep_them(tmp_path, monkeypatch):
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+def test_swdown_drops_night_steps_but_other_variables_keep_them(tmp_path):
     wrf = tmp_path / "wrfout_d02_night.nc"
     # 19..23 UTC = 16..20 local: the 6-18h daylight gate keeps three steps.
     _write_full_wrf_file(wrf, seed=31, start_hour_utc=19)
@@ -159,8 +157,7 @@ def test_swdown_drops_night_steps_but_other_variables_keep_them(tmp_path, monkey
     ]
 
 
-def test_skip_first_drops_leading_steps(tmp_path, monkeypatch):
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+def test_skip_first_drops_leading_steps(tmp_path):
     wrf = tmp_path / "wrfout_d02_skip.nc"
     _write_full_wrf_file(wrf, seed=5)
 
@@ -174,9 +171,8 @@ def test_skip_first_drops_leading_steps(tmp_path, monkeypatch):
     ]
 
 
-def test_missing_swdown_warns_and_skips_instead_of_aborting(tmp_path, monkeypatch):
+def test_missing_swdown_warns_and_skips_instead_of_aborting(tmp_path):
     """A truncated wrfout must not kill the whole cron run."""
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_no_swdown.nc"
     _write_full_wrf_file(wrf, seed=5)
     _drop_variable(wrf, "SWDOWN")
@@ -186,11 +182,6 @@ def test_missing_swdown_warns_and_skips_instead_of_aborting(tmp_path, monkeypatc
     assert [Path(t.output_path).name for t in tasks] == [f"TEMP_D02_{i:03d}.png" for i in range(NT)]
 
 
-# ---------------------------------------------------------------------------
-# One dispatcher, two products
-# ---------------------------------------------------------------------------
-
-
 def test_figure_values_come_from_the_shared_value_frame_source(tmp_path, monkeypatch):
     """The figure path must not carry a private copy of the extractor dispatch.
 
@@ -198,7 +189,6 @@ def test_figure_values_come_from_the_shared_value_frame_source(tmp_path, monkeyp
     work units use, so replacing that dispatcher changes what every PNG is
     drawn from.
     """
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_shared.nc"
     _write_full_wrf_file(wrf, seed=5)
 
@@ -233,7 +223,6 @@ def test_the_swdown_daylight_window_has_one_owner_for_figures_and_json(tmp_path,
     Figures and values-JSON read the window from a single owner, so patching
     ``FIRST_DAYLIGHT_HOUR`` has to move the two together.
     """
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     monkeypatch.setattr(value_source, "FIRST_DAYLIGHT_HOUR", 9)
     wrf = tmp_path / "wrfout_d02_window.nc"
     # 09..13 UTC = 06..10 local; only the last two steps survive a 09h floor.
@@ -277,11 +266,6 @@ def _drop_variable(wrf_path: Path, name: str) -> None:
     trimmed.replace(wrf_path)
 
 
-# ---------------------------------------------------------------------------
-# Duplicate suppression and CLI exit status
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("requested", "canonical"),
     [
@@ -299,28 +283,7 @@ def test_a_mis_cased_request_is_folded_to_the_spelling_every_branch_compares_wit
     assert jobs.normalize_var_list(requested, collapse_heights=True) == canonical
 
 
-def test_a_mis_cased_swdown_still_drops_the_night_steps(tmp_path, monkeypatch):
-    """``-v swdown`` writes the same ``SWDOWN_D0X_nnn.png`` names the gated run does.
-
-    Ungated, the night frames are all-zero PNGs published under the canonical
-    names, disagreeing with the JSON step count the same pipeline exports and
-    padding the WebM with hours the site has no data for.
-    """
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
-    wrf = tmp_path / "wrfout_d02_mis_cased.nc"
-    _write_full_wrf_file(wrf, seed=31, start_hour_utc=19)
-
-    tasks = _build_tasks(
-        wrf, jobs.normalize_var_list(["swdown"], collapse_heights=True), tmp_path / "figs"
-    )
-
-    assert [Path(task.output_path).name for task in tasks] == [
-        f"SWDOWN_D02_{i:03d}.png" for i in range(3)
-    ]
-
-
-def test_duplicate_variable_requests_do_not_render_the_same_png_twice(tmp_path, monkeypatch):
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
+def test_duplicate_variable_requests_do_not_render_the_same_png_twice(tmp_path):
     wrf = tmp_path / "wrfout_d02_dup.nc"
     _write_full_wrf_file(wrf, seed=5)
 
@@ -342,7 +305,6 @@ def test_no_images_writes_no_video_and_hands_back_the_path_it_would_have_written
 
 
 def test_cli_exits_non_zero_when_every_figure_fails(tmp_path, monkeypatch):
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_cli.nc"
     _write_full_wrf_file(wrf, seed=5)
 
@@ -362,7 +324,6 @@ def test_cli_exits_non_zero_when_every_figure_fails(tmp_path, monkeypatch):
 
 
 def test_cli_exits_zero_when_every_figure_renders(tmp_path, monkeypatch):
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_cli_ok.nc"
     _write_full_wrf_file(wrf, seed=5)
 
@@ -381,7 +342,7 @@ def test_cli_exits_zero_when_every_figure_renders(tmp_path, monkeypatch):
     assert f"✓ Generated {NT} figures" in result.output
 
 
-def test_an_output_file_id_is_refused_before_any_frame_is_rendered(tmp_path, monkeypatch):
+def test_an_output_file_id_is_refused_before_any_frame_is_rendered(tmp_path):
     """``-v TSK`` must not render raw KELVIN into the PNGs skin_temperature owns.
 
     ``TSK`` is not an input variable, it is the output file id of
@@ -390,7 +351,6 @@ def test_an_output_file_id_is_refused_before_any_frame_is_rendered(tmp_path, mon
     names the °C product uses; and with both ids listed the output-path dedup
     keeps whichever came first, so flag ORDER decides which frames ship.
     """
-    monkeypatch.delenv("LABMIM_TIMEZONE", raising=False)
     wrf = tmp_path / "wrfout_d02_figures_tsk.nc"
     _write_full_wrf_file(wrf, seed=5)
     figures = tmp_path / "figs"

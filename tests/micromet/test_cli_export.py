@@ -290,41 +290,63 @@ def test_cli_mis_cased_swdown_still_honours_the_daylight_gate(tmp_path):
     ]
 
 
-def test_cli_accepts_an_iso_date_and_rejects_a_malformed_one(tmp_path):
+def test_cli_accepts_an_iso_date(tmp_path):
     wrf_dir = tmp_path / "wrf"
     wrf_dir.mkdir()
     _write_full_wrf_file(wrf_dir / "wrfout_d02_2026-05-03_09:00:00", seed=49)
 
-    iso = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "2026-05-03")
-    assert iso.exit_code == 0, iso.output
+    result = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "2026-05-03")
+
+    assert result.exit_code == 0, result.output
     assert len(list((tmp_path / "json").glob("D02_TEMP_*.json"))) == NT
 
-    typo = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "may3")
-    assert typo.exit_code != 0
-    assert "--date must be YYYYMMDD" in typo.output
+
+def test_cli_rejects_a_malformed_date(tmp_path):
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+    _write_full_wrf_file(wrf_dir / "wrfout_d02_2026-05-03_09:00:00", seed=49)
+
+    result = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "may3")
+
+    assert result.exit_code != 0
+    assert "--date must be YYYYMMDD" in result.output
+
+
+def test_cli_exits_zero_and_says_so_when_nothing_is_selected(tmp_path):
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+
+    result = _invoke(tmp_path, "--wrf-dir", str(wrf_dir))
+
+    assert result.exit_code == 0, result.output
+    assert "No WRF files found." in result.output
 
 
 def test_cli_strict_exits_nonzero_when_nothing_is_selected(tmp_path):
     wrf_dir = tmp_path / "wrf"
     wrf_dir.mkdir()
 
-    lenient = _invoke(tmp_path, "--wrf-dir", str(wrf_dir))
-    assert lenient.exit_code == 0, lenient.output
-    assert "No WRF files found." in lenient.output
+    result = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--strict")
 
-    strict = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--strict")
-    assert strict.exit_code == 1
+    assert result.exit_code == 1
+
+
+def test_cli_publishes_the_domains_it_found_and_names_the_one_it_did_not(tmp_path):
+    wrf_dir = tmp_path / "wrf"
+    wrf_dir.mkdir()
+    _write_full_wrf_file(wrf_dir / "wrfout_d01_2026-05-03_09:00:00", seed=50)
+
+    result = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "20260503", "--domains", "1,4")
+
+    assert result.exit_code == 0, result.output
+    assert "No wrfout file for requested domain d04" in result.output
+    assert len(list((tmp_path / "json").glob("D01_TEMP_*.json"))) == NT
 
 
 def test_cli_strict_aborts_on_a_missing_requested_domain_before_writing(tmp_path):
     wrf_dir = tmp_path / "wrf"
     wrf_dir.mkdir()
     _write_full_wrf_file(wrf_dir / "wrfout_d01_2026-05-03_09:00:00", seed=50)
-
-    lenient = _invoke(tmp_path, "--wrf-dir", str(wrf_dir), "--date", "20260503", "--domains", "1,4")
-    assert lenient.exit_code == 0, lenient.output
-    assert "No wrfout file for requested domain d04" in lenient.output
-    assert len(list((tmp_path / "json").glob("D01_TEMP_*.json"))) == NT
 
     strict_dir = tmp_path / "strict"
     strict = runner.invoke(
