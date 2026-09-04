@@ -322,6 +322,64 @@ def test_download_of_a_day_the_server_no_longer_serves_fails_loudly(
         client.download(entry, tmp_path / "videos")
 
 
+def test_a_server_side_fault_is_retried_and_the_transfer_still_completes(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    """503 and 429 say 'come back', so the loop must come back. The mirror only
+    ever produced 404 before, where 'broke on a 4xx' and 'ran out of attempts'
+    print the same message and no assertion can tell them apart.
+    """
+    client = ArchiveClient(
+        mirror.base_url, allow_plaintext=True, retries=3, delay=0.0, backoff=0.0, timeout=10.0
+    )
+    entry = client.list_videos()[0]
+    mirror.fail_with[mirror.video_url_path(entry.filename)] = [503]
+    mirror.requests.clear()
+
+    result = client.download(entry, tmp_path / "videos")
+
+    assert result.path.is_file()
+    assert result.downloaded
+    assert len([line for line in mirror.requests if entry.filename in line]) == 2
+
+
+def test_a_rate_limit_is_retried_like_a_server_fault(mirror: fake.ArchiveMirror, tmp_path: Path):
+    """429 is a 4xx by number and a 'come back later' by meaning, so it is the
+    one 4xx the loop must not treat as final.
+    """
+    client = ArchiveClient(
+        mirror.base_url, allow_plaintext=True, retries=3, delay=0.0, backoff=0.0, timeout=10.0
+    )
+    entry = client.list_videos()[0]
+    mirror.fail_with[mirror.video_url_path(entry.filename)] = [429]
+    mirror.requests.clear()
+
+    result = client.download(entry, tmp_path / "videos")
+
+    assert result.path.is_file()
+    assert result.downloaded
+    assert len([line for line in mirror.requests if entry.filename in line]) == 2
+
+
+def test_a_client_side_refusal_is_final_and_costs_one_request(
+    mirror: fake.ArchiveMirror, tmp_path: Path
+):
+    """A 403 will be a 403 again: retrying it spends the whole GET budget on a
+    file the server will not serve, and delays the days that would have worked.
+    """
+    client = ArchiveClient(
+        mirror.base_url, allow_plaintext=True, retries=3, delay=0.0, backoff=0.0, timeout=10.0
+    )
+    entry = client.list_videos()[0]
+    mirror.fail_with[mirror.video_url_path(entry.filename)] = [403, 403, 403]
+    mirror.requests.clear()
+
+    with pytest.raises(ArchiveError):
+        client.download(entry, tmp_path / "videos")
+
+    assert len([line for line in mirror.requests if entry.filename in line]) == 1
+
+
 def test_the_client_refuses_a_file_url_because_its_opener_carries_no_file_handler(
     client: ArchiveClient,
 ):

@@ -92,11 +92,21 @@ def build_index_html(filenames: Sequence[str]) -> str:
 
 
 def _handler_factory(
-    directory: Path, requests: list[str], truncate: dict[str, int]
+    directory: Path,
+    requests: list[str],
+    truncate: dict[str, int],
+    fail_with: dict[str, list[int]],
 ) -> Callable[..., http.server.SimpleHTTPRequestHandler]:
     class Handler(http.server.SimpleHTTPRequestHandler):
         def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
             requests.append(f"{self.path} {code} {size}")
+
+        def do_GET(self) -> None:
+            queued = fail_with.get(self.path)
+            if queued:
+                self.send_error(queued.pop(0))
+                return
+            super().do_GET()
 
         def copyfile(self, source, outputfile):
             keep = truncate.get(self.path)
@@ -117,10 +127,15 @@ class ArchiveMirror:
         self.videos_dir.mkdir(parents=True, exist_ok=True)
         self.requests: list[str] = []
         self.truncate: dict[str, int] = {}
+        #: Statuses to answer a path with before serving it, one per request and
+        #: consumed in order: the retry policy treats 5xx/429 and 4xx differently
+        #: and a mirror that only ever 404s cannot tell the two apart.
+        self.fail_with: dict[str, list[int]] = {}
         self._listed: list[str] = []
         self._write_index()
         self._server = http.server.ThreadingHTTPServer(
-            ("127.0.0.1", 0), _handler_factory(self.root, self.requests, self.truncate)
+            ("127.0.0.1", 0),
+            _handler_factory(self.root, self.requests, self.truncate, self.fail_with),
         )
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()

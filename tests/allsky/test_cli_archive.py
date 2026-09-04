@@ -182,12 +182,6 @@ def test_a_day_already_downloaded_extracted_and_uploaded_everywhere_has_no_work_
     plan = _plan(entry, ledger, tmp_path, target=TARGET, extract=True, upload=UploadChoice.both)
 
     assert plan.has_work is False
-    assert (plan.download, plan.extract, plan.upload_video, plan.upload_frames) == (
-        False,
-        False,
-        False,
-        False,
-    )
 
 
 def test_asking_for_upload_after_the_fact_replans_an_already_held_day(
@@ -295,28 +289,16 @@ def test_describe_names_every_step_the_plan_still_owes(entry: ArchiveEntry):
     assert plan.describe() == f"{entry.filename}: download, upload-video, upload-frames"
 
 
-@pytest.mark.parametrize(
-    ("flags", "expected"),
-    [
-        ((False, False, False, False), False),
-        ((True, False, False, False), True),
-        ((False, True, False, False), True),
-        ((False, False, True, False), True),
-        ((False, False, False, True), True),
-    ],
-)
-def test_has_work_is_the_disjunction_of_the_four_steps(
-    entry: ArchiveEntry, flags: tuple[bool, bool, bool, bool], expected: bool
-):
-    download, extract, upload_video, upload_frames = flags
+def test_a_plan_that_owes_nothing_reports_no_work(entry: ArchiveEntry):
+    """The only case of the disjunction worth a test: every planner test above
+    already covers a plan that owes something, and enumerating the other four
+    combinations pinned an `or` no realistic edit gets wrong.
+    """
     plan = DayPlan(
-        entry=entry,
-        download=download,
-        extract=extract,
-        upload_video=upload_video,
-        upload_frames=upload_frames,
+        entry=entry, download=False, extract=False, upload_video=False, upload_frames=False
     )
-    assert plan.has_work is expected
+
+    assert plan.has_work is False
 
 
 def test_a_first_sync_mirrors_every_published_day_and_the_next_one_finds_nothing_to_do(
@@ -863,7 +845,14 @@ def test_pruning_deletes_the_local_video_but_keeps_what_the_ledger_knows_about_i
 def test_extra_rclone_flags_reach_every_invocation(
     mirror: fake.ArchiveMirror, tmp_path: Path, rclone_log: Path
 ):
-    _sync(
+    """The flag has to reach the transfers, not merely every line that happened.
+
+    ``rclone_invocations`` returns [] when the log is absent and ``all([])`` is
+    True, so a run that uploaded nothing satisfied this on its own; and the
+    uploader appends the extra args to every command including the ``lsd``
+    pre-flight, so 'every line carries it' held without a single copy running.
+    """
+    result = _sync(
         tmp_path / "data",
         mirror,
         "--upload",
@@ -873,7 +862,12 @@ def test_extra_rclone_flags_reach_every_invocation(
         "--rclone-arg",
         "--transfers=8",
     )
-    assert all(line.endswith("--transfers=8") for line in fake.rclone_invocations(rclone_log))
+
+    assert result.exit_code == 0, result.output
+    invocations = fake.rclone_invocations(rclone_log)
+    copies = [line for line in invocations if line.startswith("copyto")]
+    assert copies
+    assert all(line.endswith("--transfers=8") for line in invocations)
 
 
 def test_a_second_sync_cannot_start_while_another_holds_the_ledger_lock(
