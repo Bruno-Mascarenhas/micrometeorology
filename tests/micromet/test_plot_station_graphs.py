@@ -534,6 +534,30 @@ class TestAnEmptyStationColumnDoesNotBecomeALegendEntry:
         assert "pressao.png" in [p.name for p in written]
         assert "pressao" in empty
 
+    def test_the_balance_draws_its_four_components_when_only_net_is_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """`balanco` is the one multi-series chart, and the emptiness gate read
+        only its aggregate Net column: a logger that stopped writing Rn dropped
+        the four measured streams with it, even fully populated."""
+        frame = self._frame()
+        shape = np.clip(np.sin((frame.index.hour.to_numpy() - 6) / 12.0 * np.pi), 0.0, None)
+        frame["CM3Up_Wm2_Avg"] = 900.0 * shape
+        frame["CM3Dn_Wm2_Avg"] = 180.0 * shape
+        frame["CG3Up_Wm2Cr_Avg"] = np.full(48, 400.0)
+        frame["CG3Dn_Wm2Cr_Avg"] = np.full(48, 450.0)
+
+        written, _missing, empty = render_site_graphs(
+            frame,
+            tmp_path,
+            DEFAULT_COLUMNS,
+            DEFAULT_BALANCE_COMPONENTS,
+            DEFAULT_DIRECTION_COMPONENTS,
+        )
+
+        assert "balanco.png" in [path.name for path in written]
+        assert "balanco" not in empty
+
     def test_strict_fails_on_a_missing_column_but_not_on_an_empty_one(self, tmp_path: Path) -> None:
         """The distinction is a broken configuration against a broken instrument.
 

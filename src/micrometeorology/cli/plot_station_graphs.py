@@ -406,16 +406,19 @@ def _plot_bar(ax: plt.Axes, series: pd.Series, *, label: str) -> None:
 
 def _plot_balance(
     ax: plt.Axes,
-    net: pd.Series,
+    net: pd.Series | None,
     components: dict[str, pd.Series],
 ) -> None:
     """Draw net radiation plus any available four-stream components.
 
     ``Rn = (SW_down - SW_up) + (LW_down - LW_up)``: the upward channels are
     plotted negated so the lines visually sum toward ``Rn``, following the
-    legacy ``graficos1_UFBA_v5.py`` convention.
+    legacy ``graficos1_UFBA_v5.py`` convention.  *net* is ``None`` when the
+    logger's own net column carries nothing over the window, which leaves the
+    four measured components to speak for the balance on their own.
     """
-    ax.plot(net.index, net.to_numpy(), "p-", color="black", label="Rn")
+    if net is not None:
+        ax.plot(net.index, net.to_numpy(), "p-", color="black", label="Rn")
     styling = {
         "sw_down": ("SW_dw", 1.0),
         "sw_up": ("SW_up", -1.0),
@@ -561,7 +564,22 @@ def render_site_graphs(
             # skipped like an absent one: it draws nothing yet still registers a
             # legend entry, which reads as a line off the scale.
             drawn_raw = raw is not None and column in raw.columns
-            if not series.notna().any():
+            # `balance` is the one multi-series kind: its four component streams
+            # are independent of the aggregate net column, so deciding the whole
+            # chart on the net series alone dropped four fully-populated
+            # channels whenever the logger's own Rn was the missing one.
+            present = (
+                {
+                    channel: df[resolved_component]
+                    for channel, chain in balance_components.items()
+                    if (resolved_component := resolve_column(df, chain)) is not None
+                    and df[resolved_component].notna().any()
+                }
+                if spec.kind == "balance"
+                else {}
+            )
+            station_drawn = series.notna().any()
+            if not station_drawn and not present:
                 logger.warning(
                     "Column %r has no value over the plotted window -- "
                     "drawing %s without the station layer",
@@ -576,12 +594,14 @@ def render_site_graphs(
             elif spec.kind == "bar":
                 _plot_bar(ax, series, label=column)
             elif spec.kind == "balance":
-                present = {
-                    channel: df[resolved_component]
-                    for channel, chain in balance_components.items()
-                    if (resolved_component := resolve_column(df, chain)) is not None
-                }
-                _plot_balance(ax, series, present)
+                if not station_drawn:
+                    logger.warning(
+                        "Column %r has no value over the plotted window -- "
+                        "drawing %s from the four components alone",
+                        column,
+                        spec.filename,
+                    )
+                _plot_balance(ax, series if station_drawn else None, present)
 
             model, resolved = _wrf_series(wrf, spec.key, wrf_columns or DEFAULT_WRF_COLUMNS)
             if model is not None:
