@@ -960,14 +960,16 @@ def _brightness(flux: NDArray) -> NDArray:
 def _fit_power_normal_mixture(values: NDArray, *, components: int = 2) -> dict[str, Any]:
     """Fit the mixture on the brightness temperature the flux maps to.
 
-    A sample smaller than the component count returns NaN parameters rather than
-    raising, which is the contract every family here follows: an empty subset is
-    a normal state of the page (a season with no observation) and must produce a
-    chart with no curve, not a failed export.
+    A sample smaller than the component count, or one with no spread, returns
+    NaN parameters rather than raising, which is the contract every family here
+    follows: an empty subset is a normal state of the page (a season with no
+    observation) and must produce a chart with no curve, not a failed export. A
+    constant sample would otherwise fit every sigma at the variance floor and
+    publish a curve of Diracs that passes the finiteness gate.
     """
     count = int(components)
     sample = np.asarray(values, dtype=float)
-    if sample.size < count:
+    if sample.size < count or float(np.ptp(sample)) <= 0.0:
         nan = [float("nan")] * count
         return {"weights": nan, "mu": list(nan), "sigma": list(nan)}
     # The component count is not in the parameters: it is an input, and every

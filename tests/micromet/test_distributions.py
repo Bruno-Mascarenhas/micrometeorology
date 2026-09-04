@@ -15,6 +15,7 @@ from scipy import stats
 
 from micrometeorology.stats.distributions import (
     FAMILIES,
+    _fit_power_normal_mixture,
     cdf,
     circular_summary,
     effective_sample_size,
@@ -513,3 +514,13 @@ class TestPublicShapes:
             fitted = fit_distribution(family, sample)
             recovered = cdf(fitted, ppf(fitted, probabilities))
             np.testing.assert_allclose(recovered, probabilities, atol=1e-8, err_msg=family)
+
+
+def test_a_constant_flux_sample_gets_no_mixture_rather_than_diracs() -> None:
+    """Two or four hundred identical samples fitted finite means with every sigma at
+    the 1e-6 floor, and the publication gate, which only checks finiteness, let a
+    curve of Diracs through; ``_fit_normal`` already returns NaN for no spread."""
+    params = _fit_power_normal_mixture(np.full(400, 306.4))
+
+    assert all(np.isnan(value) for value in params["mu"])
+    assert all(np.isnan(value) for value in params["sigma"])
