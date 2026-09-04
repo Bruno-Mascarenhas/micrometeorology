@@ -58,6 +58,7 @@ Three findings the archive paid for, all reproducible from this repository:
 
 ```
 src/
+├── labmim_core/                  # Shared primitives: solar geometry, site, sky classes, seeds, atomic writes
 ├── micrometeorology/             # Core data pipelines, WRF spatial processing, and APIs
 │   ├── common/                   # Cross-platform config, logging, types
 │   ├── sensors/                  # Datalogger ingestion and calibration algorithms
@@ -69,7 +70,7 @@ src/
 │   └── evaluation/               # Experiment reporting and validation metrics
 └── allsky/                       # All-sky camera + radiation fusion (multimodal V0–V7)
     ├── video.py / data/          # Frame extraction, v2 manifest, splits, datasets
-    ├── solar.py / erbs.py        # Solar geometry, clearness index, Erbs decomposition
+    ├── erbs.py / clearsky.py     # Erbs decomposition, Haurwitz clear-sky index k*
     ├── embeddings/ / modeling/   # DINOv2 embeddings, sensor/visual fusion model zoo
     └── training/ / evaluation/   # Experiment engine and stratified evaluation
 
@@ -138,10 +139,15 @@ uv sync --locked --extra dev --extra tcc --extra video --extra allsky
 The tree is kept free of checker-silencing workarounds — when ruff or mypy
 complains, the code gets fixed, not suppressed:
 
-- **No `# noqa` or `# type: ignore`.** The handful that remain are rules that do
-  not *apply* rather than defects being waived (the legacy global RNG that
-  scikit-learn and torch actually draw from, last-resort guards in best-effort
-  provenance paths, and two mutually exclusive `subprocess` rules). Each is
+- **No `# noqa` or `# type: ignore`.** The few that remain are rules that do not
+  *apply* rather than defects being waived. In `src/`: the legacy global RNG
+  scikit-learn and torch actually draw from (`NPY002`), last-resort guards on
+  best-effort paths that must not sink the work they annotate (`BLE001`), two
+  mutually exclusive `subprocess` rules (`S603`), a third-party public parameter
+  name (`N803`), a domain `ValueError` where `TRY004` would ask for a
+  `TypeError`, and one pandas overload the stubs do not carry
+  (`type: ignore[arg-type]`). In `tests/`: the same global RNG, one `S311`, and
+  three deliberate type violations the tests exist to reject. Each is
   documented at its own call site, and the file-scoped ones live in
   `[tool.ruff.lint.per-file-ignores]` with the reason attached.
 - **No `from __future__ import annotations`** — Python 3.14 evaluates
@@ -414,6 +420,10 @@ make audit                # dependency vulnerability gate (mirrors CI)
 | [`docs/allsky.md`](docs/allsky.md) | All-sky camera + radiation fusion: frame extraction, v2 dataset prep, the multimodal CLI/config quickstart, Colab GPU training, FAQ |
 | [`docs/allsky-archive.md`](docs/allsky-archive.md) | Mirroring the Planetário da UFBA camera archive: `sync-archive`/`snapshot`, the broken TLS chain and its repair, overlay-read frame timestamps, ledger dedup, rclone uploads to Google Drive |
 | [`docs/allsky-architecture.md`](docs/allsky-architecture.md) | Multimodal v2 architecture: local→bundle→Colab flow, module map, artifact contracts, anti-leakage policy, V0–V7 model ladder, reproduction commands, limitations |
+| [`docs/quality-control.md`](docs/quality-control.md) | Quality control of the published station record: every stage in the order it runs with its tally, the range and statistical gates and where their thresholds come from, where solar geometry is evaluated |
+| [`docs/station-archive.md`](docs/station-archive.md) | For variable X in period Y: which LBM `.dat` file is the source and which logger column carries the measurement |
+| [`docs/allsky-label-join.md`](docs/allsky-label-join.md) | The image–sensor label join: why the pairing was offset, the −2.5 min correction, and the factorial that measured its cost |
+| [`docs/open-sky-datasets.md`](docs/open-sky-datasets.md) | Catalogue of the open sky-image datasets considered for pre-training, why UCSD-Folsom was chosen, and which Folsom timestamp is the capture instant |
 
 ---
 

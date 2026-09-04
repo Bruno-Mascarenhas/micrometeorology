@@ -223,6 +223,10 @@ convention = "numpy"
 # A frozen copy of the pre-deletion writer, kept for bitwise diffing against the
 # production ones; its docstring forbids editing the body.
 "tests/micromet/_reference.py" = ["BLE001"]
+# The training notebooks spawn `uv` and this package's own CLIs from the venv
+# they provision in their first cell. S603/S607 are silent only when every argv
+# element is a string literal, which a per-run config path can never be. The
+# pattern covers the subdirectories too: ruff's `*` crosses `/` here.
 "notebooks/*.ipynb" = ["S603", "S607"]
 # Spawns this package's own `allsky` CLI, resolved from the venv this notebook
 # just built and prepended to PATH. S603/S607 are silent only when every argv

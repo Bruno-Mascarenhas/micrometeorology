@@ -41,7 +41,7 @@ jobs:
       - name: Audit dependencies for known vulnerabilities
         run: |
           uv export --frozen --extra dev --extra video --extra allsky --no-emit-package torch --format requirements-txt --no-emit-project -o requirements-audit.txt
-          uvx pip-audit --strict --disable-pip -r requirements-audit.txt
+          uvx pip-audit@2.10.1 --strict --disable-pip -r requirements-audit.txt
 
   # Flags vulnerable or malicious dependency changes introduced by a PR.
   dependency-review:
@@ -121,7 +121,7 @@ jobs:
 
       - name: Typecheck with MyPy
         run: |
-          uv run mypy src tests
+          uv run mypy src tests scripts notebooks/colab
 
       - name: Test with pytest
         run: |

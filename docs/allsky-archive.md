@@ -188,7 +188,7 @@ overwriting the first.
 (path, size, sha256, `Last-Modified`), the frame extraction (directory, count,
 `step`, `resize`, timestamp source) and every upload destination reached.
 
-Two rules matter:
+Four rules matter:
 
 - **Entries are never removed.** The server drops days off its rolling window;
   a ledger that forgot them would re-upload the whole Drive folder the first
@@ -259,7 +259,7 @@ Daily job, videos and frames to Drive. Day *D*'s video appears around 08:40 on
 *D+1*, so run after 10:00 local:
 
 ```cron
-30 10 * * * cd /home/brunosm/labmim/micrometeorology && \
+30 10 * * * cd /path/to/micrometeorology && \
   .venv/bin/allsky sync-archive --extract --step 10 --resize 512 \
   --upload both --drive-remote gdrive >> logs/allsky-sync.log 2>&1
 ```
@@ -389,7 +389,7 @@ processing time, and is immaterial at the 15-minute sensor-pairing tolerance.
 ## The snapshot prediction caveat
 
 The multimodal models take a sky image **and** the engineered sensor vector.
-Four of its columns — solar elevation, zenith, azimuth sin/cos, day-of-year
+Six of its columns — solar elevation, zenith, azimuth sin/cos, day-of-year
 sin/cos — come from the timestamp and site, so a live frame always has them
 exactly. The rest (air temperature, dew point, humidity, pressure, wind) come
 from the station logger, which the camera does not publish.

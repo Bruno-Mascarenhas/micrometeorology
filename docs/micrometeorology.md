@@ -185,19 +185,22 @@ The Campbell Scientific datalogger allows sensors to be added or removed at any 
 Calibrations are **immutable historical facts**. Each record specifies:
 
 ```yaml
-# configs/micromet/calibrations.yaml
+# configs/micromet/calibrations.yaml — the two shipped CMP21 records
 calibrations:
-  - column: CM3Up
-    start_date: "2018-11-01"
-    end_date: "2019-06-30"
-    factor: 1.0526
-    description: "Post-maintenance calibration Nov/2018"
+  # Column names carry the logger's exact suffixes, as merge_dat_files()
+  # produces them: `CMP21` without `_Wm2_Avg` matches nothing, and
+  # unify_sensor_columns() then builds no unified column at all.
+  - column: CMP21_Wm2_Avg
+    start_date: null              # null = from the start of the data
+    end_date: "2019-10-12"
+    factor: null                  # null = invalid data for this period → NaN
+    description: "CMP21 not installed before 2019-10-12; data is invalid"
 
-  - column: CM3Up
-    start_date: "2019-07-01"
-    end_date: null      # null = until end of data
-    factor: null         # null = invalid data for this period → NaN
-    description: "Sensor malfunction"
+  - column: CMP21_Wm2_Avg
+    start_date: "2019-10-13"
+    end_date: null                # null = until end of data
+    factor: 0.9852941176          # 9.38 / 9.52
+    description: "CMP21 sensitivity correction: 9.38 / 9.52"
 ```
 
 ```python
@@ -653,9 +656,10 @@ distance of 0.55).
 `REFERENCES` carries sixteen records — authors, title, venue, resolvable link —
 and labels and caveats cite them with `[[key]]` markers instead of prose. The
 manifest publishes the registry once and the site turns each marker into a link
-with the full record in its tooltip. A `doi.org` link only where the identifier
-was verified; otherwise a Crossref title search, which cannot point at the wrong
-paper. Two guards run at import: a marker with no record, and a record
+with the full record in its tooltip. Every record links through `doi.org`, each
+identifier resolved and checked to land on the cited work; a search URL is
+refused by test, because a search that silently returns nothing still answers
+200. Two guards run at import: a marker with no record, and a record
 containing a marker of its own — the second because a global rename of the prose
 citations produced exactly that during development.
 
@@ -857,9 +861,9 @@ repair the record's maximum is 99.80% and no hour exceeds saturation.
 
 Shortening the header alone was never an option: pandas refuses a row wider than
 its header, so the 47-field rows and a 35-name header cannot coexist. That is
-why this is a file migration and not a header edit. Both readers of the record
-(`export_climatology.read_wrf_series`, `generate_station_graphs.read_wrf_series`)
-call `rename_v1_columns`, so a file still on v1 is read under the v2 names and no
+why this is a file migration and not a header edit. Every reader of the record
+goes through `wrf.operational_record.read_wrf_series`, which calls
+`rename_v1_columns`, so a file still on v1 is read under the v2 names and no
 consumer needs to know which schema is on disk.
 
 ### Monitoring window artifacts (`labmim-monitoring`)

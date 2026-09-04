@@ -37,6 +37,7 @@ apply_calibrations               1,227               a `factor: null` record voi
 apply_shade_ring_correction      733,433 scaled      geometric shade-ring factor on the diffuse
 mask_step_excursions             839       ← statistical
 mask_persistent_runs             60,824    ← statistical
+apply_physical_limits (2nd)      631                 re-check in calibrated units, before the copy
 unify_sensor_columns                                 era-to-era channel unification (COPIES)
 close_net_radiation              36,241 recomposed
 mask_night_corrupted_days        195,833             55 days of timestamp corruption
@@ -44,7 +45,6 @@ nocturnal_offset_statistics      0 (measures only)   drift monitor, read before 
 mask_impossible_shortwave        89,672              BSRN ceiling, BSRN floor, and the daylight sign rule
 mask_nocturnal_shortwave         3,627,765           shortwave with the sun below the horizon
 close_nocturnal_net_radiation    395,040 recomposed  the night saldo is the longwave difference alone
-apply_physical_limits (2nd)      631                 re-check in calibrated units
   └─ write station_5min_qc
 aggregate_to_hourly                                  means, sums, vector means
   └─ write station_hourly        86,579 hours

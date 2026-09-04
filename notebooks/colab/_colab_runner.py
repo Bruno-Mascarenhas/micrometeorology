@@ -76,14 +76,15 @@ def stage_bundle(bundle: str, data_dir: str, *, python: str | None = None) -> st
     """
     import tarfile
 
-    os.makedirs(data_dir, exist_ok=True)
-    local = Path(data_dir).parent / "bundle.tar.gz"
+    data_root = Path(data_dir)
+    data_root.mkdir(parents=True, exist_ok=True)
+    local = data_root.parent / "bundle.tar.gz"
     started = time.time()
     shutil.copy(bundle, local)
     with tarfile.open(local) as tar:
-        tar.extractall(data_dir, filter="data")
-    root = str(Path(data_dir) / "allsky_bundle")
-    print(f"staged em {time.time() - started:.0f}s -> {sorted(os.listdir(root))}")
+        tar.extractall(data_root, filter="data")
+    root = data_root / "allsky_bundle"
+    print(f"staged em {time.time() - started:.0f}s -> {sorted(p.name for p in root.iterdir())}")
 
     if python is not None:
         # The console script sits beside the interpreter that installed it; the
@@ -93,7 +94,7 @@ def stage_bundle(bundle: str, data_dir: str, *, python: str | None = None) -> st
                 str(Path(python).with_name("allsky")),
                 "validate-dataset",
                 "--manifest",
-                f"{root}/manifest.parquet",
+                str(root / "manifest.parquet"),
             ],
             capture_output=True,
             text=True,
@@ -102,7 +103,7 @@ def stage_bundle(bundle: str, data_dir: str, *, python: str | None = None) -> st
         print(checked.stdout.strip() or checked.stderr.strip()[-500:])
         if checked.returncode != 0:
             raise RuntimeError("validate-dataset falhou: o bundle nao esta integro")
-    return root
+    return str(root)
 
 
 def write_config(
@@ -143,8 +144,12 @@ def write_config(
     return path
 
 
-def run_experiment(config: Path, *, split: str = "test") -> dict[str, Any]:
+def run_experiment(config: Path, *, python: str, split: str = "test") -> dict[str, Any]:
     """Train then evaluate one config; return a flat metrics row.
+
+    *python* is the venv interpreter, as :func:`stage_bundle` takes: the
+    ``allsky`` console script sits beside it, so the CLI is resolved by path and
+    not by whatever ``PATH`` happens to hold when the cell runs.
 
     A failure is recorded and returned rather than raised: one bad arm must not
     end a 24-hour session that still has other arms to run.
@@ -154,10 +159,11 @@ def run_experiment(config: Path, *, split: str = "test") -> dict[str, Any]:
     cfg = yaml.safe_load(config.read_text())
     run_dir = Path(cfg["output_dir"]) / "run"
     row: dict[str, Any] = {"name": cfg["name"], "seed": cfg["seed"], "config": str(config)}
+    allsky_cli = str(Path(python).with_name("allsky"))
 
     started = time.time()
     train = subprocess.run(
-        ["allsky", "train", "-c", str(config)], capture_output=True, text=True, check=False
+        [allsky_cli, "train", "-c", str(config)], capture_output=True, text=True, check=False
     )
     if train.returncode != 0:
         row["status"] = "train_failed"
@@ -166,7 +172,7 @@ def run_experiment(config: Path, *, split: str = "test") -> dict[str, Any]:
 
     evaluate = subprocess.run(
         [
-            "allsky",
+            allsky_cli,
             "evaluate",
             "-k",
             str(run_dir / "best.ckpt"),

@@ -7,7 +7,10 @@
 video:
   pattern: "data/all-sky/videos/allsky-*.mp4"
   filename_date_format: "allsky-%Y%m%d"
-  start_time: "06:00"            # local time of frame 0 — match the camera schedule
+  # start_time and minutes_per_frame are read ONLY under `timestamps: modelled`,
+  # which this camera does not follow — see docs/allsky-archive.md.
+  timestamps: overlay            # the capture time the camera burns into each frame
+  start_time: "06:00"
   minutes_per_frame: 1.0
 
 site:
@@ -24,7 +27,7 @@ features:
   set: bare
 
 mask:
-  path: null                     # static horizon/obstruction mask; null -> auto
+  path: null                     # static horizon/obstruction mask; null -> no mask applied
   threshold: null
 
 crop:
@@ -56,7 +59,7 @@ targets:
   diffuse_column: "PSP_Wm2_Avg"  # live diffuse sensor; null -> Erbs pseudo (target_source flags it)
   kindex_kind: "kstar"           # k* = GHI / Haurwitz clear-sky GHI
   # sky_class is not configurable: the four published conditions are binned on
-  # Kt by allsky.data.contracts.SKY_CLASS_KT_UPPER_BOUNDS.
+  # Kt by labmim_core.sky.SKY_CLASS_KT_UPPER_BOUNDS.
 
 alignment:
   strategy: "center_frame"       # nearest frame to the window centre (build-time pairing)

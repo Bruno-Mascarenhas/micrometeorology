@@ -21,7 +21,7 @@ The pipeline has four stages, each with its own CLI command:
 
 The models learn diffuse irradiance and, per the experiment's `targets` block, optionally a clear-sky index (k\*) and a weak sky-condition class. Diffuse targets are a measured pyranometer column by default (`PSP_Wm2_Avg`), or an Erbs-decomposition **pseudo-target** derived from GHI when no measured column is configured. Every manifest row carries a `target_source` column (`"measured"` or `"erbs_pseudo"`) so pseudo rows can be identified and replaced later.
 
-All timestamps in the pipeline are **naive local standard time** (the Campbell datalogger clock — no timezone conversion). The UTC offset for solar geometry is inferred from the site longitude as `round(longitude / 15)`; for Salvador-BA (longitude −38.51) this yields UTC−3, correct year-round since Brazil abolished DST in 2019.
+All timestamps in the pipeline are **naive local standard time** (the Campbell datalogger clock — no timezone conversion). The UTC offset for solar geometry is `SiteConfig.utc_offset_hours`, pinned per site (−3 for the station, −8 for the UCSD-Folsom arm) and published in the manifest meta's `timezone` block; it is never read from the host clock nor inferred from the longitude.
 
 ---
 
@@ -37,10 +37,13 @@ src/allsky/
 ├── drive.py           # rclone uploads to Google Drive
 ├── snapshot.py        # Live-frame capture + single-image prediction
 ├── preprocessing.py   # Static mask / crop / resize + per-frame visual QC
-├── solar.py           # NOAA/Spencer solar position, extraterrestrial GHI, clearness index kt
 ├── clearsky.py        # Haurwitz clear-sky GHI + clear-sky index k*
 ├── erbs.py            # Erbs (1982) diffuse-fraction decomposition -> pseudo diffuse targets
-├── atomic.py          # Atomic file / JSON writes         provenance.py # code + content hashes
+├── geometry.py        # Solar geometry drawn into the frame's own pixels
+├── lens.py            # Fisheye optics of the camera: sky direction <-> pixel
+├── frame_pixels.py    # Frame decode + bilinear resize, one implementation
+├── augmentation.py    # Transforms for fixed all-sky camera frames
+├── provenance.py      # Git commit, code version and content hashes
 ├── bundle.py          # Colab bundle export
 ├── cli/               # frames, prepare, embeddings, train, evaluate command groups
 ├── data/              # manifest, contracts, alignment, splits, datasets, loading, validation
@@ -52,6 +55,11 @@ src/allsky/
 ```
 
 Configs live under `configs/allsky/`; tests are under `tests/allsky/`.
+
+Solar geometry, the station's coordinates, the sky-condition partition, the
+seeding helper and the atomic writer are not here: they live in `labmim_core`
+(`solar.py`, `site.py`, `sky.py`, `seeds.py`, `atomic.py`), the package all
+three others import and which imports none of them.
 
 ---
 

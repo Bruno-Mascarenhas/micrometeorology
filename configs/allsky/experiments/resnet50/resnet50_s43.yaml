@@ -16,7 +16,8 @@
 # transformer. 6 aqui é aproximadamente a mesma fração de rede que 12 lá.
 #
 # `backbone_pooling: mean` não é escolha: uma rede convolucional não emite
-# token, e pedir `cls` levanta erro em vez de devolver outra coisa.#
+# token, e pedir `cls` levanta erro em vez de devolver outra coisa.
+#
 # Controle: o braço `iso` — 19,94 +/- 0,35 W/m2 de RMSE de DHI, MAE 13,94,
 # MBE -8,30, sobre as mesmas 7.138 linhas de teste. Difere só no backbone.
 extends: [../_base.yaml, ../../models/image_only.yaml]

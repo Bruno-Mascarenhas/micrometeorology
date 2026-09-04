@@ -47,7 +47,7 @@ fix: require-conda
 	$(RUN) ruff check --fix .
 
 typecheck: require-conda
-	$(RUN) mypy src tests
+	$(RUN) mypy src tests scripts notebooks/colab
 
 test: require-conda
 	$(RUN) pytest -n auto tests/
@@ -62,7 +62,7 @@ test-verbose: require-conda
 # (safetensors, tensorboard, imageio-ffmpeg) gets audited.
 audit:
 	$(UV) export --frozen --extra dev --extra video --extra allsky --no-emit-package torch --format requirements-txt --no-emit-project -o requirements-audit.txt
-	uvx pip-audit --strict --disable-pip -r requirements-audit.txt
+	uvx pip-audit@2.10.1 --strict --disable-pip -r requirements-audit.txt
 	rm -f requirements-audit.txt
 
 # Fails when uv.lock is out of sync with pyproject.toml (offline, fast).
@@ -87,7 +87,7 @@ clean:
 check: require-conda lock-check
 	$(RUN) ruff format --check .
 	$(RUN) ruff check .
-	$(RUN) mypy src tests
+	$(RUN) mypy src tests scripts notebooks/colab
 	$(RUN) pytest -n auto tests/
 
 all: fix check

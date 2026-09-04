@@ -18,7 +18,8 @@
 # O DADO. 230.791 linhas em 351 dias (contra 46.014 em 81 dias aqui), 38,642 N,
 # elevacao solar ate 74,8 graus. O carimbo de tempo de cada frame e a data de
 # MODIFICACAO e nao o nome do arquivo: usar o nome parearia 45,7 % das imagens
-# com a irradiancia do minuto errado. Ver auditoria-2026-08-30-09h, Parte III.
+# com a irradiancia do minuto errado. Ver docs/open-sky-datasets.md, secao
+# "The Folsom clock: which timestamp is the capture instant".
 #
 # CUSTO. Os frames sao 1536x1536 nativos, contra os 512 da nossa reextracao, e
 # sao decodificados a cada epoca. Isto e candidato ao Colab, nao a RTX 2060.
