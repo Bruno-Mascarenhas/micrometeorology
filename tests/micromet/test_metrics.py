@@ -110,6 +110,19 @@ class TestComputeAll:
         assert result["IOA"] == pytest.approx(7 / 12)
         assert result["NRMSE"] == pytest.approx(0.25)
 
+    def test_residuals_of_different_magnitudes_separate_mae_from_rmse(self):
+        """Every other case here uses a constant-magnitude residual, where MAE and
+        RMSE are equal by construction — so the two could have been wired to the
+        same function and nothing would have said so."""
+        obs = np.zeros(5)
+        pred = np.array([1.0, -3.0, 2.0, 0.0, -2.0])
+
+        result = compute_all(obs, pred)
+
+        assert result["MAE"] == pytest.approx(1.6)
+        assert result["RMSE"] == pytest.approx(np.sqrt(3.6))
+        assert result["MAE"] != pytest.approx(result["RMSE"])
+
     def test_insufficient_data(self):
         obs = np.array([1.0, np.nan])
         pred = np.array([np.nan, 2.0])
@@ -287,3 +300,28 @@ def test_a_constant_observation_yields_nan_not_a_degenerate_number(metric):
     pred = obs + 0.5
 
     assert np.isnan(metric(obs, pred))
+
+
+@pytest.mark.parametrize("metric", [r_squared, d_index, ioa])
+def test_an_observation_with_no_dispersion_scores_nan_not_a_number(metric):
+    """All three divide by the observation's own variance, and a channel stuck on
+    one value has none. The `== 0` guard on a float never fired, so a railed
+    sensor published R² = -1.98e28 as though it were a measurement.
+
+    The constant is not exactly representable and the length is not a power of
+    two, so a sum that only ALMOST cancels still has to be caught by a tolerance
+    rather than by luck.
+    """
+    obs = np.full(7, 21.3)
+    pred = obs + np.linspace(-1.0, 1.0, 7)
+
+    assert np.isnan(metric(obs, pred))
+
+
+@pytest.mark.parametrize("metric", [r_squared, d_index, ioa])
+def test_the_same_metrics_are_finite_the_moment_the_observation_moves(metric):
+    obs = np.full(7, 21.3)
+    obs[0] += 1e-3
+    pred = obs + np.linspace(-1.0, 1.0, 7)
+
+    assert np.isfinite(metric(obs, pred))

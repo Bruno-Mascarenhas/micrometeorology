@@ -141,8 +141,13 @@ class TestExporter:
         return payload
 
     def test_writes_the_declared_format(self, archive: Path, tmp_path: Path) -> None:
+        """The literal, not the constant it is produced from: the page matches
+        this string, so renaming the constant and the payload together would keep
+        this test green while every deployed reader stopped recognising the
+        document."""
         payload = self._payload(archive, tmp_path)
-        assert payload["format"] == PAYLOAD_FORMAT
+        assert payload["format"] == "labmim-monitoring-v1"
+        assert PAYLOAD_FORMAT == "labmim-monitoring-v1"
         assert len(payload["charts"]) == len(MONITORING_CHARTS)
 
     def test_axis_is_start_plus_step_not_one_stamp_per_sample(
@@ -515,3 +520,48 @@ def test_a_duplicated_stamp_is_named_instead_of_escaping_as_a_pandas_error() -> 
 
     with pytest.raises(ValueError, match="duplicated timestamp"):
         _regular(frame, index, "h")
+
+
+class TestThePayloadRoundsToItsUnitsPrecision:
+    """The CSV download must never carry a digit its chart does not show, and only
+    precipitation's three decimals were pinned — the other four units could have
+    started publishing two decimals from the fallback with nothing saying so."""
+
+    @pytest.fixture
+    def marked_archive(self, tmp_path: Path) -> Path:
+        directory = tmp_path / "archive"
+        directory.mkdir()
+        for periods, freq, name, seed in (
+            (2016, "5min", "station_5min_qc.parquet", 3),
+            (168, "h", "station_hourly.parquet", 4),
+        ):
+            frame = _frame(periods, freq, STATION_COLUMNS, seed=seed)
+            frame["T"] = 12.3456
+            frame["pressure"] = 1013.26
+            frame["Sw_dw"] = 800.6
+            frame.to_parquet(directory / name)
+        return directory
+
+    def _series(self, payload: dict, chart_id: str, series_id: str) -> list:
+        charts = {chart["id"]: chart for chart in payload["charts"]}
+        values: list = charts[chart_id]["layers"]["hourly"]["series"][series_id]
+        return values
+
+    def test_a_celsius_chart_keeps_one_decimal(self, marked_archive: Path, tmp_path: Path) -> None:
+        payload = TestExporter()._payload(marked_archive, tmp_path)
+
+        assert self._series(payload, "temperatura", "t")[0] == pytest.approx(12.3)
+
+    def test_a_pressure_chart_keeps_one_decimal(self, marked_archive: Path, tmp_path: Path) -> None:
+        payload = TestExporter()._payload(marked_archive, tmp_path)
+
+        assert self._series(payload, "pressao", "pressure")[0] == pytest.approx(1013.3)
+
+    def test_an_irradiance_chart_is_an_integer(self, marked_archive: Path, tmp_path: Path) -> None:
+        """A tenth of a W/m2 is noise, and the int is three characters shorter
+        per sample across the whole payload."""
+        payload = TestExporter()._payload(marked_archive, tmp_path)
+
+        value = self._series(payload, "balanco", "sw_down")[0]
+        assert value == 801
+        assert isinstance(value, int)

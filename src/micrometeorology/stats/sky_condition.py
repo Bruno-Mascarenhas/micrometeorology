@@ -163,10 +163,16 @@ def sky_condition_summary(kt: NDArray) -> dict[str, Any]:
 #: Published schema tag of the artifact the sky page reads.
 KT_CUMULATIVE_SCHEMA = "labmim-kt-cumulative-v1"
 
-#: Frozen bin edges, deliberately the same set the climatology page bins Kt on:
-#: the two pages then describe one record on one axis, and 0.35 / 0.55 / 0.65 all
-#: land exactly on an edge, so each class share is read straight off the curve
-#: instead of interpolated.
+#: Frozen bin edges, deliberately the same set the climatology page bins Kt on,
+#: so the two pages describe one record on one axis.
+#:
+#: The 0.02 grid does NOT carry the partition's own bounds — 0.35, 0.55 and 0.65
+#: fall between 0.34/0.36, 0.54/0.56 and 0.64/0.66. That costs nothing, because
+#: the class shares are not read off this curve at all:
+#: :func:`sky_condition_summary` counts them from the sample itself, and the
+#: curve is the reader's own view of the distribution. Moving the grid onto the
+#: bounds would rewrite every published ``kt_cumulative.json``, which is a
+#: contract with the site.
 KT_CUMULATIVE_EDGES: tuple[float, ...] = tuple(round(0.02 * step, 2) for step in range(51))
 
 
