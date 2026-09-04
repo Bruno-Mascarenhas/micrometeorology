@@ -125,6 +125,59 @@ class TestIrradianceInterpolation:
         assert list(aligned.index) == list(frames["timestamp"])
         assert bool(np.isfinite(aligned["ghi"]).all())
 
+    def test_a_gap_in_the_irradiance_is_bridged_however_long_it_is(self, tmp_path: Path):
+        """Both existing tests run on a continuous 240-minute ramp, so nothing
+        asked what happens over a hole. It is filled: ``limit_area='inside'``
+        bounds the fill to the measured span but carries no ``limit``, so a
+        two-hour outage comes back as a straight line and reaches the manifest
+        as measurement. Pinned as it stands — bounding the bridge is a decision
+        about the data, not about this code.
+        """
+        path = tmp_path / "irr.csv"
+        times = pd.date_range("2014-06-01 14:00:00", periods=240, freq="1min")
+        # A curved day, so a straight bridge across the hole is visibly not the
+        # signal: on a ramp the two coincide and the fabrication hides itself.
+        minutes = np.arange(240.0)
+        curved = 900.0 * np.sin(np.pi * minutes / 239.0)
+        frame = pd.DataFrame(
+            {"timeStamp": times, "ghi": curved, "dni": curved * 0.6, "dhi": curved * 0.3}
+        )
+        frame.loc[60:180, ["ghi", "dni", "dhi"]] = np.nan
+        frame.to_csv(path, index=False)
+        sensor = read_folsom_sensor(path)
+        named = pd.date_range("2014-06-01 16:00:00", periods=1, freq="1min", tz="UTC")
+        _write_frames_with_mtime_drift(tmp_path / "frames", named, np.zeros(1))
+        frames = read_folsom_frames(tmp_path / "frames")
+
+        aligned = folsom_sensor_at(sensor, frames)
+
+        bridged = float(aligned["ghi"].iloc[0])
+        assert np.isfinite(bridged)
+        # The chord between the two surviving readings, ~150 W/m2 below the
+        # curve the sensor would have measured at that minute.
+        chord = float(np.interp(120.0, [59.0, 181.0], [curved[59], curved[181]]))
+        assert bridged == pytest.approx(chord, rel=0.01)
+        assert curved[120] - bridged > 100.0
+
+    def test_a_frame_outside_the_measured_span_is_left_missing(self, tmp_path: Path):
+        """``limit_area='inside'`` is the one bound there is, and it must hold:
+        a frame before the first reading or after the last one has nothing to be
+        interpolated from, and zero is a physical irradiance.
+        """
+        sensor = read_folsom_sensor(_write_irradiance(tmp_path / "irr.csv"))
+        named = pd.DatetimeIndex(
+            [
+                pd.Timestamp("2014-06-01 12:00:00", tz="UTC"),
+                pd.Timestamp("2014-06-02 06:00:00", tz="UTC"),
+            ]
+        )
+        _write_frames_with_mtime_drift(tmp_path / "frames", named, np.zeros(2))
+        frames = read_folsom_frames(tmp_path / "frames")
+
+        aligned = folsom_sensor_at(sensor, frames)
+
+        assert bool(np.isnan(aligned["ghi"]).all())
+
     def test_the_measured_clock_offset_is_applied(self, tmp_path: Path):
         sensor = read_folsom_sensor(_write_irradiance(tmp_path / "irr.csv"))
         named = pd.date_range("2014-06-01 14:10:00", periods=1, freq="1min", tz="UTC")

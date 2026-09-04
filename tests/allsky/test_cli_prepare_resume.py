@@ -393,10 +393,36 @@ def test_a_non_utf8_frame_provenance_is_read_as_absent(tmp_path: Path):
     assert _read_frames_key(video_dir) is None
 
 
-def test_a_changed_video_filename_date_format_moves_the_frame_provenance_hash():
-    renamed = PrepareConfig.model_validate({"video": {"filename_date_format": "allsky_%Y%m%d"}})
+#: One case per field the frame key claims to cover — the four pixel sections and
+#: the four video time fields. A field that quietly left the formula makes the
+#: resume reuse frames extracted under a different config, which is the one thing
+#: the key exists to prevent.
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"video": {"filename_date_format": "allsky_%Y%m%d"}},
+        {"video": {"timestamps": "modelled"}},
+        {"video": {"start_time": "07:00"}},
+        {"video": {"minutes_per_frame": 2.0}},
+        {"mask": {"threshold": 200}},
+        {"crop": {"enabled": True, "top": 40}},
+        {"pad": {"enabled": True, "top": 40}},
+        {"resize": 224},
+    ],
+)
+def test_a_config_edit_that_changes_an_extracted_frame_moves_its_provenance_hash(patch: dict):
+    edited = PrepareConfig.model_validate(patch)
 
-    assert _frames_inputs_sha256(renamed) != _frames_inputs_sha256(PrepareConfig())
+    assert _frames_inputs_sha256(edited) != _frames_inputs_sha256(PrepareConfig())
+
+
+def test_an_edit_that_reaches_no_frame_leaves_the_provenance_hash_alone():
+    """The gate has to distinguish a re-extraction from an unrelated edit, or
+    every config touch would discard hours of extracted frames.
+    """
+    unrelated = PrepareConfig.model_validate({"embeddings": {"batch_size": 3}})
+
+    assert _frames_inputs_sha256(unrelated) == _frames_inputs_sha256(PrepareConfig())
 
 
 def _write_mask(path: Path, *, blacked_rows: int, size: int = 64) -> Path:

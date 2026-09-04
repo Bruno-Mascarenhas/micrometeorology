@@ -54,10 +54,36 @@ class TestCenterCrop:
         assert out.shape == (16, 16, 3)
         assert out.dtype == np.uint8
 
-    def test_offsets_shift_and_clip(self):
-        # A huge top offset clips to keep the box inside the frame.
-        out = center_crop(_rgb(32, 48), CropConfig(enabled=True, height=16, width=16, top=100))
-        assert out.shape == (16, 16, 3)
+    def test_the_offsets_move_the_box_by_the_pixels_they_name(self):
+        """``crop.top``/``crop.left`` come from a config file and re-centre the
+        box on a sky disc that is not centred: they decide which pixels reach the
+        model. Asserting the shape alone holds for any offset, zero included, so
+        the frame carries a positional marker and the window is read back.
+        """
+        frame = _rgb(32, 48, fill=0)
+        rows, columns = np.mgrid[0:32, 0:48]
+        frame[..., 0] = rows
+        frame[..., 1] = columns
+
+        moved = center_crop(frame, CropConfig(enabled=True, height=16, width=16, top=4, left=-4))
+
+        # Centred, the box starts at row (32-16)//2 = 8 and column (48-16)//2 = 16.
+        assert moved[0, 0, 0] == 8 + 4
+        assert moved[0, 0, 1] == 16 - 4
+        assert moved.shape == (16, 16, 3)
+
+    def test_an_offset_past_the_edge_is_clipped_to_the_last_whole_box(self):
+        """Clipping is what keeps the box inside the frame; without it the slice
+        would silently come back short and the resize would stretch it.
+        """
+        frame = _rgb(32, 48, fill=0)
+        frame[..., 0] = np.mgrid[0:32, 0:48][0]
+
+        past_the_edge = center_crop(frame, CropConfig(enabled=True, height=16, width=16, top=100))
+        largest_possible = center_crop(frame, CropConfig(enabled=True, height=16, width=16, top=8))
+
+        assert np.array_equal(past_the_edge, largest_possible)
+        assert past_the_edge[0, 0, 0] == 16
 
     def test_none_dims_fall_back_to_full_extent(self):
         out = center_crop(_rgb(32, 48), CropConfig(enabled=True))

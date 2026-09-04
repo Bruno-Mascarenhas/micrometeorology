@@ -151,14 +151,25 @@ def test_missing_manifest_errors(tmp_path: Path):
     assert "manifest not found" in result.output
 
 
+#: One case per field the digest claims to cover: the four pixel sections, the
+#: four video time fields and the encoder's own knobs. A field the formula
+#: silently stopped folding in resumes a store onto vectors of the old pixels
+#: (or of the old encoder), with every sample_id already in the index.
 @pytest.mark.parametrize(
     "patch",
     [
         {"mask": {"path": "masks/horizon.png"}},
+        {"mask": {"threshold": 200}},
         {"crop": {"enabled": True, "top": 40}},
+        {"pad": {"enabled": True, "top": 40}},
         {"resize": 224},
         {"video": {"timestamps": "modelled"}},
         {"video": {"filename_date_format": "allsky_%Y%m%d"}},
+        {"video": {"start_time": "07:00"}},
+        {"video": {"minutes_per_frame": 2.0}},
+        {"embeddings": {"backbone": "dinov2_vitb14"}},
+        {"embeddings": {"pooling": "mean"}},
+        {"embeddings": {"dtype": "fp32"}},
     ],
 )
 def test_a_config_edit_that_changes_the_encoded_pixels_changes_the_resume_hash(patch: dict):
