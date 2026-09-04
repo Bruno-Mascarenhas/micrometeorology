@@ -6,6 +6,7 @@ an unnamed leading column, and losing them makes every downstream alignment
 positional.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ import pytest
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
 
+import micrometeorology
 from micrometeorology.sensors.export import export_csv
 from micrometeorology.stats.comparison import (
     UnreadableDatasetError,
@@ -191,8 +193,13 @@ def test_reading_and_scoring_a_dataset_does_not_import_matplotlib() -> None:
         "import sys, micrometeorology.stats.comparison, micrometeorology.cli.compute_metrics; "
         "print(any(m == 'matplotlib' or m.startswith('matplotlib.') for m in sys.modules))"
     )
+    source_root = Path(micrometeorology.__file__).resolve().parents[1]
     result = subprocess.run(
-        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "PYTHONPATH": str(source_root)},
     )
 
     assert result.stdout.strip() == "False", result.stdout
