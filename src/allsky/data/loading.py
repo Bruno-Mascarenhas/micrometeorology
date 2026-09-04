@@ -21,6 +21,7 @@ import pandas as pd
 from allsky.config import ExperimentConfig, manifest_meta_path
 from allsky.data.datasets import EmbeddingReader
 from allsky.data.splits import DaySplit, load_split_artifact
+from allsky.provenance import content_sha256
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,15 @@ def resolve_against_root(path: str | Path, root: Path) -> Path:
 def load_manifest(manifest_path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Read the manifest parquet and its ``<name>.meta.json`` sidecar (if any).
 
+    The sidecar's ``manifest_sha256`` is re-derived from the parquet that was
+    actually read, here and nowhere else.  The two files are written by two
+    independent atomic writes with no transaction linking them, so a crash
+    between them leaves a new parquet beside a stale sidecar; and both hash
+    guards downstream (the evaluator's and the resume provenance check) compare
+    a checkpoint's stored string against the sidecar's stored string, never
+    against the bytes.  Verifying once at the door makes both of them mean what
+    they say.
+
     Returns
     -------
     tuple[pandas.DataFrame, dict]
@@ -53,6 +63,8 @@ def load_manifest(manifest_path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
     ------
     FileNotFoundError
         If *manifest_path* does not exist.
+    ValueError
+        If the sidecar's ``manifest_sha256`` does not describe the parquet.
     """
     if not manifest_path.exists():
         raise FileNotFoundError(f"manifest parquet not found: {manifest_path}")
@@ -61,6 +73,15 @@ def load_manifest(manifest_path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
     meta: dict[str, Any] = {}
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        recorded = meta.get("manifest_sha256")
+        if recorded is not None:
+            actual = content_sha256(manifest)
+            if actual != recorded:
+                raise ValueError(
+                    f"{meta_path.name} records manifest_sha256={recorded[:12]} but "
+                    f"{manifest_path.name} hashes to {actual[:12]}: the two were written "
+                    "by separate atomic writes and one of them is from another build"
+                )
     else:
         logger.warning(
             "no manifest meta sidecar at %s; provenance fields are null and the "
