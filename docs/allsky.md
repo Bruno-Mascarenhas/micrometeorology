@@ -111,7 +111,7 @@ It writes JPEGs named `allsky-YYYYMMDD-HHMM.jpg` (quality 92) plus a `manifest.p
 
 ## Video → Time Mapping
 
-Videos are **one-day timelapse files** named by date. `labmim-allsky sync-archive`
+Videos are **one-day timelapse files** named by date. `allsky sync-archive`
 writes them to `data/all-sky/videos/allsky-YYYYMMDD.mp4`, which is what the shipped
 `configs/allsky/data/local_prepare*.yaml` point at; the `VideoConfig.pattern` default
 (`data/all-sky/allsky-*.mp4`) is for videos placed there by hand.

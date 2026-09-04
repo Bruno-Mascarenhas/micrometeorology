@@ -279,7 +279,7 @@ labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
 ### 2. All-Sky Diffuse Radiation (multimodal DNN)
 
 The `allsky` package pairs all-sky camera timelapses (`data/all-sky/videos/allsky-YYYYMMDD.mp4`,
-where `labmim-allsky sync-archive` puts them; one frame per minute) with the radiation sensors into a portable **v2 dataset** and
+where `allsky sync-archive` puts them; one frame per minute) with the radiation sensors into a portable **v2 dataset** and
 trains a ladder of multimodal models (V0–V7) that predict diffuse horizontal
 irradiance — and optionally a clear-sky index and one of the four Escobedo sky
 conditions — from the sky image plus non-radiometric sensor context. The

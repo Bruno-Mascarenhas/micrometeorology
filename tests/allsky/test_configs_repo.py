@@ -181,7 +181,7 @@ def test_no_two_experiments_resolve_to_the_same_run() -> None:
         key = json.dumps(dumped, sort_keys=True)
         resolved.setdefault(key, []).append(f"{path.parent.name}/{path.stem}")
 
-    duplicates = {tuple(sorted(arms)) for arms in resolved.values() if len(arms) > 1 for _ in (0,)}
+    duplicates = {tuple(sorted(arms)) for arms in resolved.values() if len(arms) > 1}
     unexpected = {
         pair
         for group in duplicates
