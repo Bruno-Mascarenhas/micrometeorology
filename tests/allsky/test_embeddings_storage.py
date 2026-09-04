@@ -324,3 +324,23 @@ class TestPreloadReadOnly:
         # Parity with the lazy path is unaffected by the write protection.
         lazy = SafetensorsEmbeddingReader(tmp_path)
         np.testing.assert_array_equal(np.asarray(vector), lazy(ids[0]))
+
+
+@pytest.mark.parametrize(
+    ("block", "message"),
+    [
+        (np.array([[np.nan, 1.0, 2.0, 3.0]], dtype=np.float32), "non-finite"),
+        (np.array([[1.0e6, 1.0, 2.0, 3.0]], dtype=np.float32), "fp16"),
+    ],
+    ids=["nan", "overflow"],
+)
+def test_a_shard_refuses_a_non_finite_embedding(
+    tmp_path: Path, block: np.ndarray, message: str
+) -> None:
+    """NaN went through the fp16 cast intact and 1e6 became inf with a numpy warning
+    nothing stopped on; the store was then stamped complete and resume skipped the
+    sample forever."""
+    with pytest.raises(ValueError, match=message):
+        save_shard(tmp_path / shard_filename(0), block)
+
+    assert not (tmp_path / shard_filename(0)).exists()

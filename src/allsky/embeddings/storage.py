@@ -93,13 +93,24 @@ def save_shard(path: str | Path, embeddings: np.ndarray) -> Path:
     Raises
     ------
     ValueError
-        If *embeddings* is not 2-D.
+        If *embeddings* is not 2-D, carries a non-finite value, or holds a
+        magnitude the fp16 store cannot represent (it would be written as inf).
     """
     from safetensors.numpy import save_file
 
-    arr = np.ascontiguousarray(np.asarray(embeddings), dtype=np.float16)
-    if arr.ndim != 2:
-        raise ValueError(f"embeddings must be 2-D (N, dim), got shape {arr.shape}")
+    source = np.asarray(embeddings)
+    if source.ndim != 2:
+        raise ValueError(f"embeddings must be 2-D (N, dim), got shape {source.shape}")
+    if not np.isfinite(source).all():
+        rows = np.flatnonzero(~np.isfinite(source).all(axis=1)).tolist()
+        raise ValueError(f"embeddings carry non-finite values in rows {rows[:10]}")
+    arr = np.ascontiguousarray(source, dtype=np.float16)
+    if not np.isfinite(arr).all():
+        rows = np.flatnonzero(~np.isfinite(arr).all(axis=1)).tolist()
+        raise ValueError(
+            f"embeddings overflow the fp16 store in rows {rows[:10]}; a magnitude above "
+            "65504 would be written as inf"
+        )
     out = Path(path)
     atomic_write(out, lambda tmp: save_file({EMBEDDINGS_TENSOR_KEY: arr}, str(tmp)))
     return out
