@@ -20,6 +20,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from labmim_core.site import SiteConfig
+from labmim_core.solar import solar_elevation_deg
 
 __all__ = ["MIN_SOLAR_ELEVATION_DEG", "SELECTION_BRACKET_OFFSETS", "elevation_bounds"]
 
@@ -60,8 +61,6 @@ def elevation_bounds(
         Minimum and maximum solar elevation in degrees, ``(N,)`` each, in the
         input's own order.
     """
-    from labmim_core.solar import solar_elevation_deg
-
     elevations = np.stack(
         [
             solar_elevation_deg(times + offset, site, utc_offset_hours)

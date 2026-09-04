@@ -349,7 +349,9 @@ def compute_all(
     observed, predicted:
         Aligned samples of one variable, shape ``(N,)``, in the variable's own
         physical unit. Coerced to ``float64``; non-finite pairs are dropped once
-        here rather than by each metric.
+        here and every metric is then called with ``clean=False``. Letting each
+        of the eight refilter costs a second pair of full-array isfinite scans
+        apiece, measured at +28 % over the archive's 1,037,789 rows.
     circular:
         Set for a bearing in degrees. Residuals are then wrapped to the shortest
         angular separation and only :data:`CIRCULAR_METRICS` are computed; the
@@ -362,9 +364,6 @@ def compute_all(
         is parsed downstream — so a suppressed metric is an empty cell, not a
         missing row, and fewer than two valid pairs give every key ``NaN``.
     """
-    # Filtered once here and handed to every metric with clean=False: letting
-    # each of the eight refilter costs a second pair of full-array isfinite
-    # scans apiece, measured at +28 % over the archive's 1,037,789 rows.
     obs, pred = _clean_pairs(observed, predicted)
     if len(obs) < 2:
         return {name: float("nan") for name in ALL_METRICS}

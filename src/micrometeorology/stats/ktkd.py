@@ -33,21 +33,26 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from labmim_core.site import SiteConfig
-from labmim_core.solar import hour_angle_deg, solar_elevation_deg
-from micrometeorology.stats.daylight import elevation_bounds
+from labmim_core.solar import extraterrestrial_ghi, hour_angle_deg, solar_elevation_deg
+from micrometeorology.stats.daylight import MIN_SOLAR_ELEVATION_DEG, elevation_bounds
 
 __all__ = [
     "KTKD_SCHEMA",
+    "MAX_RATIO",
+    "MIN_GLOBAL_WM2",
     "MODEL_LABELS",
     "MODEL_REFERENCES",
     "PreparedKtKd",
     "apparent_solar_time_hours",
+    "build_ktkd_payload",
     "daily_clearness_index",
     "density_2d",
     "lemos_2017",
     "marques_filho_2016",
     "model_band",
     "persistence_index",
+    "prepare_clearness",
+    "prepare_ktkd",
     "regression_scores",
     "ridley_brl_2010",
 ]
@@ -98,8 +103,11 @@ def apparent_solar_time_hours(
     Returns
     -------
     numpy.ndarray
-        Apparent solar time, ``(N,)``, in hours on ``[0, 24)``: noon is 12 by
-        construction, since the hour angle is zero at solar noon.
+        Apparent solar time, ``(N,)``, in hours: noon is 12 by construction,
+        since the hour angle is zero at solar noon.  The hour angle arrives
+        unwrapped from :func:`labmim_core.solar.hour_angle_deg`, so a stamp past
+        lower transit leaves ``[0, 24)``; the daylight-gated callers here never
+        hand it one.
     """
     angle = hour_angle_deg(timestamps, longitude, utc_offset_hours=utc_offset_hours)
     return np.asarray(12.0 + angle / 15.0, dtype=np.float64)
@@ -150,10 +158,22 @@ def persistence_index(kt: pd.Series) -> pd.Series:
     -------
     pandas.Series
         ψ aligned to *kt*.
+
+    Raises
+    ------
+    ValueError
+        If the index repeats a stamp.  The neighbouring hours are read by
+        reindexing on *kt*'s own index, which pandas allows only when it is
+        unique; the offending hours are named here instead of surfacing a bare
+        internal message to a caller that did not come through the resampled
+        hourly archive.
     """
     # Narrowed at the boundary, the way the climatology exporter narrows its own
     # index: the arithmetic below is only defined on a DatetimeIndex.
     index = pd.DatetimeIndex(kt.index)
+    if not index.is_unique:
+        repeated = index[index.duplicated()].tolist()
+        raise ValueError(f"persistence_index: repeated hourly stamps {repeated}")
     hour = pd.Timedelta(hours=1)
     previous = kt.reindex(index - hour).set_axis(index)
     following = kt.reindex(index + hour).set_axis(index)
@@ -441,7 +461,7 @@ def prepare_clearness(
     *,
     site: SiteConfig,
     utc_offset_hours: float,
-    min_elevation_deg: float = 10.0,
+    min_elevation_deg: float = MIN_SOLAR_ELEVATION_DEG,
     global_column: str = "Sw_dw",
 ) -> pd.Series:
     """Gate the record down to the hours whose clearness index means something.
@@ -459,8 +479,6 @@ def prepare_clearness(
         Kt on the surviving hours, with the extraterrestrial denominator
         evaluated at the averaging window's midpoint (BSRN).
     """
-    from labmim_core.solar import extraterrestrial_ghi
-
     index = pd.DatetimeIndex(hourly.index)
     midpoint = index + pd.Timedelta(minutes=30)
     extraterrestrial = pd.Series(
@@ -521,7 +539,7 @@ def prepare_ktkd(
     *,
     site: SiteConfig,
     utc_offset_hours: float,
-    min_elevation_deg: float = 10.0,
+    min_elevation_deg: float = MIN_SOLAR_ELEVATION_DEG,
     global_column: str = "Sw_dw",
     diffuse_column: str = "Sw_dif",
 ) -> PreparedKtKd:
@@ -537,8 +555,6 @@ def prepare_ktkd(
     PreparedKtKd
         The surviving pairs, their predictors and the gates applied.
     """
-    from labmim_core.solar import extraterrestrial_ghi
-
     index = pd.DatetimeIndex(hourly.index)
     midpoint = index + pd.Timedelta(minutes=30)
     extraterrestrial = pd.Series(
@@ -566,9 +582,7 @@ def prepare_ktkd(
         kt=kt,
         kd=kd,
         ast=apparent_solar_time_hours(kept_midpoint, site.longitude, utc_offset_hours),
-        elevation=solar_elevation_for(
-            kept_midpoint, site.latitude, site.longitude, utc_offset_hours
-        ),
+        elevation=solar_elevation_deg(kept_midpoint, site, utc_offset_hours),
         daily_kt=daily_clearness_index(global_flux, extraterrestrial)[kt.index].to_numpy(),
         psi=persistence_index(kt_all)[kt.index].to_numpy(),
         filters=[
@@ -594,7 +608,6 @@ def build_ktkd_payload(
     caveats: list[str],
     version: str,
     min_samples_per_bin: int = 30,
-    include_points: bool = True,
 ) -> dict[str, Any]:
     """Assemble the published ``labmim-ktkd-v1`` payload.
 
@@ -658,25 +671,14 @@ def build_ktkd_payload(
         "sky_conditions": sky_conditions,
         "caveats": caveats,
     }
-    if include_points:
-        # Positional [kt, kd, t], which the reader accepts and which drops three
-        # repeated keys per observation: the production host serves this JSON
-        # uncompressed, so those bytes are bytes on the wire. Three decimals is
-        # finer than the 0.02 bins the density is drawn on; `t` stays because the
-        # page's CSV export reads it.
-        payload["points"] = [
-            [round(float(x), 3), round(float(y), 3), stamp.isoformat()]
-            for stamp, x, y in zip(kt.index, kt.to_numpy(), kd.to_numpy(), strict=True)
-        ]
-        payload["points_format"] = ["kt", "kd", "t"]
+    # Positional [kt, kd, t], which the reader accepts and which drops three
+    # repeated keys per observation: the production host serves this JSON
+    # uncompressed, so those bytes are bytes on the wire. Three decimals is
+    # finer than the 0.02 bins the density is drawn on; `t` stays because the
+    # page's CSV export reads it.
+    payload["points"] = [
+        [round(float(x), 3), round(float(y), 3), stamp.isoformat()]
+        for stamp, x, y in zip(kt.index, kt.to_numpy(), kd.to_numpy(), strict=True)
+    ]
+    payload["points_format"] = ["kt", "kd", "t"]
     return payload
-
-
-def solar_elevation_for(
-    timestamps: pd.DatetimeIndex, latitude: float, longitude: float, utc_offset_hours: float
-) -> NDArray:
-    """Solar elevation in degrees for the model predictors, from :mod:`labmim_core.solar`."""
-    from labmim_core.site import SiteConfig
-
-    site = SiteConfig(latitude=latitude, longitude=longitude)
-    return np.asarray(solar_elevation_deg(timestamps, site, utc_offset_hours), dtype=np.float64)
