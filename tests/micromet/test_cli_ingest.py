@@ -187,6 +187,15 @@ class TestDatetimeColumnsGuard:
         assert not output_path.exists()
 
 
+@pytest.mark.parametrize("freq", ["1h", "2h", "D", "W"])
+def test_a_freq_whose_windows_open_on_the_hour_is_accepted(freq: str) -> None:
+    """As quatro colunas inteiras de data carregam a hora, entao um tick de hora
+    inteira e todo offset de calendario sao compativeis com --datetime-columns."""
+    from micrometeorology.cli.ingest_sensor_data import _opens_windows_off_the_hour
+
+    assert not _opens_windows_off_the_hour(freq)
+
+
 def test_cli_min_samples_falls_back_to_the_configured_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -321,6 +330,93 @@ def test_a_dead_balance_component_fails_strict_instead_of_blanking_the_chart(
     assert "Sw_dw" in resultado.output
 
 
+def test_the_window_build_writes_csv_artifacts_when_the_format_asks_for_them(tmp_path) -> None:
+    """``--format csv`` e o caminho da planilha e nenhum teste o percorria."""
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    fatores = tmp_path / "teorica_2016-2030.csv"
+    fatores.write_text(
+        "ano_i,mes_i,dia_i,hor_i,min_i,fc\n"
+        + "".join(f"2026,8,15,12,{minute},1.18\n" for minute in range(0, 60, 5)),
+        encoding="utf-8",
+    )
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(
+        lenta,
+        ["CM3Up_Wm2_Avg"],
+        [(f"2026-08-15 12:{minute:02d}:00", [500.0]) for minute in range(0, 60, 5)],
+    )
+    saida = tmp_path / "out"
+
+    resultado = CliRunner().invoke(
+        app,
+        ["-d", str(tmp_path), "-o", str(saida), "--source", str(lenta), "--format", "csv"],
+    )
+
+    assert resultado.exit_code == 0, resultado.output
+    assert sorted(path.name for path in saida.glob("*.csv")) == [
+        "station_5min_qc.csv",
+        "station_5min_raw.csv",
+        "station_hourly.csv",
+    ]
+
+
+def test_an_unknown_output_format_is_refused_before_any_artifact_is_written(tmp_path) -> None:
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(lenta, ["CM3Up_Wm2_Avg"], [("2026-08-15 12:00:00", [500.0])])
+    saida = tmp_path / "out"
+
+    resultado = CliRunner().invoke(
+        app,
+        ["-d", str(tmp_path), "-o", str(saida), "--source", str(lenta), "--format", "xml"],
+    )
+
+    assert resultado.exit_code == 2, resultado.output
+    assert not saida.exists()
+
+
+def test_the_archive_report_counts_the_window_and_keeps_every_stage_key(tmp_path) -> None:
+    """O relatorio e a contabilidade da corrida e nada era afirmado sobre ele."""
+    import json
+
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    fatores = tmp_path / "teorica_2016-2030.csv"
+    fatores.write_text(
+        "ano_i,mes_i,dia_i,hor_i,min_i,fc\n"
+        + "".join(f"2026,8,15,12,{minute},1.18\n" for minute in range(0, 60, 5)),
+        encoding="utf-8",
+    )
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(
+        lenta,
+        ["CM3Up_Wm2_Avg"],
+        [(f"2026-08-15 12:{minute:02d}:00", [500.0]) for minute in range(0, 60, 5)],
+    )
+    saida = tmp_path / "out"
+
+    resultado = CliRunner().invoke(
+        app, ["-d", str(tmp_path), "-o", str(saida), "--source", str(lenta)]
+    )
+
+    assert resultado.exit_code == 0, resultado.output
+    report = json.loads((saida / "archive_report.json").read_text(encoding="utf-8"))
+    assert report["format"] == "labmim-station-archive-v1"
+    assert report["five_minute_rows"] == 12
+    assert report["hourly_rows"] == 1
+    assert [entry["kind"] for entry in report["verification"]] == ["lenta"]
+    for stage in ("sentinels_removed", "physical_limits_removed", "step_excursions_removed"):
+        assert stage in report
+
+
 def test_an_archive_with_no_declared_physical_limit_fails_strict(tmp_path, monkeypatch) -> None:
     """The range gate is fail-open: no declared limit means no sample is ever
     refused, and the run publishes an ungated archive with exit 0 — silence
@@ -410,14 +506,14 @@ def test_the_csv_export_keeps_every_digit_the_parquet_keeps(tmp_path: Path) -> N
     """``float_format="%.6g"`` wrote the logger's RECORD counter as 1.01786e+06 and
     rounded pressure to six significant digits, diverging from the Parquet of
     the same build."""
-    from micrometeorology.cli.build_archive import _write
+    from micrometeorology.cli.build_archive import OutputFormat, _write
 
     frame = pd.DataFrame(
         {"RECORD": [1017857.0], "Pmb_WXT": [1013.2571]},
         index=pd.DatetimeIndex(["2026-08-15 12:00"], name="TIMESTAMP"),
     )
 
-    path = _write(frame, tmp_path / "station_5min_raw", "csv")
+    path = _write(frame, tmp_path / "station_5min_raw", OutputFormat.csv)
 
     text = path.read_text(encoding="utf-8")
     assert "1017857.0" in text

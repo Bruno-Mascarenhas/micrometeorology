@@ -33,8 +33,9 @@ import functools
 import logging
 import re
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -54,6 +55,7 @@ from micrometeorology.stats.climatology_export import (
     MANIFEST_FILENAME,
     RAIN_BUCKET_MM,
     Atom,
+    VariableSpec,
     build_manifest,
     build_variable_payload,
     write_json,
@@ -187,6 +189,10 @@ RATIO_DENOMINATOR_FLOOR = 50.0
 # Above this, PAR would exceed 60% of the global flux it is a sub-band of, which
 # no instrument state explains. Removed as a point mass rather than clipped.
 MAX_PAR_FRACTION = 0.6
+
+# Below this many paired daylight hours the local regression of net radiation on
+# shortwave is not fitted and the variable publishes bars without a curve.
+MIN_NET_RADIATION_PAIRS = 100
 
 # Equal-count bins of the extraterrestrial irradiance used to marginalise every
 # induced density. Sixty is enough: against the exact mixture over all 35,436
@@ -478,6 +484,30 @@ def _paired_speed(
     return frame[name].reindex(series.index) if name in frame.columns else None
 
 
+def _solar_gate(spec_id: str, series: pd.Series, frame: pd.DataFrame) -> pd.Series:
+    """Restrict *series* to the hours its variable is defined over, then drop NaN.
+
+    Parameters
+    ----------
+    spec_id:
+        Variable id, matched against :data:`DAYTIME_ONLY` / :data:`NIGHTTIME_ONLY`.
+    series:
+        One variable's hourly values, ``(N,)``, in the variable's own unit.
+    frame:
+        The block the selection is evaluated over, indexed like *series*.
+
+    Returns
+    -------
+    pandas.Series
+        The gated series with its missing hours removed, ``(M,)``, ``M <= N``.
+    """
+    if spec_id in DAYTIME_ONLY:
+        series = series.loc[_daytime_selection(frame)]
+    elif spec_id in NIGHTTIME_ONLY:
+        series = series.loc[_nighttime_selection(frame)]
+    return series.dropna()
+
+
 def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Atom]]:
     """Select, gate and de-atomise one variable from the observed hourly frame."""
     if spec_id == "clearness_index":
@@ -489,11 +519,7 @@ def _observed_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, lis
         return np.array([]), []
     series = frame[column]
 
-    if spec_id in DAYTIME_ONLY:
-        series = series.loc[_daytime_selection(frame)]
-    elif spec_id in NIGHTTIME_ONLY:
-        series = series.loc[_nighttime_selection(frame)]
-    series = series.dropna()
+    series = _solar_gate(spec_id, series, frame)
 
     if spec_id == "par_early":
         series = series.loc[series.index < ERA_SPLIT]
@@ -604,11 +630,7 @@ def _wrf_sample(spec_id: str, frame: pd.DataFrame) -> tuple[np.ndarray, list[Ato
     # The SAME solar gate and de-atomisation as the observed side — the gate is
     # source-independent by construction — since conditioning the two histograms on
     # different events makes the comparison meaningless.
-    if spec_id in DAYTIME_ONLY:
-        series = series.loc[_daytime_selection(frame)]
-    elif spec_id in NIGHTTIME_ONLY:
-        series = series.loc[_nighttime_selection(frame)]
-    series = series.dropna()
+    series = _solar_gate(spec_id, series, frame)
     return _strip_atoms(
         spec_id, series, _paired_speed(spec_id, frame, series, WRF_COLUMN["wind_speed"])
     )
@@ -626,8 +648,7 @@ def _scale_mixture(extraterrestrial: np.ndarray) -> tuple[list[float], list[floa
     if finite.size == 0:
         return [], []
     groups = np.array_split(finite, min(INDUCED_BINS, finite.size))
-    groups = [group for group in groups if group.size]
-    total = float(sum(group.size for group in groups))
+    total = float(finite.size)
     return (
         [float(group.mean()) for group in groups],
         [group.size / total for group in groups],
@@ -649,7 +670,9 @@ def _bulk_ratio(numerator: pd.Series, denominator: pd.Series) -> float:
     return float(paired.iloc[:, 0].sum() / paired.iloc[:, 1].sum())
 
 
-def _check_caveats_quote_the_published_scalar(spec: object, payload: dict) -> None:
+def _check_caveats_quote_the_published_scalar(
+    spec: VariableSpec, payload: Mapping[str, Any]
+) -> None:
     """Warn when a caveat prints a four-decimal literal instead of the marker.
 
     The induced curves carry one estimated scalar — the era's PAR fraction, the
@@ -684,7 +707,7 @@ def _check_caveats_quote_the_published_scalar(spec: object, payload: dict) -> No
             logger.warning(
                 "%s caveat %d prints %s, which no fitted parameter of this variable carries; "
                 "a number typed in by hand does not move when the archive does",
-                getattr(spec, "id", "?"),
+                spec.id,
                 index,
                 ", ".join(sorted(set(stale))),
             )
@@ -702,7 +725,7 @@ def _quoted(value: float) -> str:
 
 
 def _induced_options(
-    spec_id: str, frame: pd.DataFrame, source: GeometrySource
+    spec: VariableSpec, frame: pd.DataFrame, source: GeometrySource
 ) -> dict[str, object] | None:
     """The covariate-derived options one induced curve needs for one subset.
 
@@ -711,7 +734,7 @@ def _induced_options(
     variable follows, and what keeps the induced curve consistent with the
     clearness-index panel beside it.
     """
-    spec = {item.id: item for item in CLIMATOLOGY_VARIABLES}[spec_id]
+    spec_id = spec.id
     if not spec.fit_options:
         return None
 
@@ -783,7 +806,7 @@ def _net_radiation_line(daylight: pd.DataFrame) -> dict[str, object] | None:
     if any(column not in daylight.columns for column in columns):
         return None
     paired = daylight[columns].dropna()
-    if len(paired) < 100:
+    if len(paired) < MIN_NET_RADIATION_PAIRS:
         return None
     incoming = paired.iloc[:, 0].to_numpy()
     net = paired.iloc[:, 1].to_numpy()
@@ -808,30 +831,34 @@ def _available_hours(spec_id: str, block: pd.DataFrame) -> int:
     return int(np.isfinite(sample).sum()) + sum(atom.count for atom in atoms)
 
 
+def _hours_per_variable(block: pd.DataFrame) -> dict[str, int]:
+    """Valid hours per variable over one block, in catalogue order."""
+    return {spec.id: _available_hours(spec.id, block) for spec in CLIMATOLOGY_VARIABLES}
+
+
 def _coverage(frame: pd.DataFrame) -> dict[str, object]:
     """Valid hours per year and per season, per variable — the honesty panel."""
     years = []
     for year, block in frame.groupby(_times(frame).year):
-        hours = {}
-        for spec in CLIMATOLOGY_VARIABLES:
-            hours[spec.id] = _available_hours(spec.id, block)
-        years.append({"year": int(str(year)), "hours": hours})
+        years.append({"year": int(year), "hours": _hours_per_variable(block)})
 
     seasons = []
     for name, block in _season_slices(frame).items():
         if name == "all":
             continue
         present = sorted({int(year) for year in _times(block).year})
-        hours = {}
-        for spec in CLIMATOLOGY_VARIABLES:
-            hours[spec.id] = _available_hours(spec.id, block)
-        seasons.append({"season": name, "years": present, "hours": hours})
+        seasons.append({"season": name, "years": present, "hours": _hours_per_variable(block)})
 
     return {
         "variables": [spec.id for spec in CLIMATOLOGY_VARIABLES],
         "years": years,
         "seasons": seasons,
     }
+
+
+def _period(frame: pd.DataFrame) -> dict[str, str]:
+    """First and last stamp of *frame*, as the manifest publishes them."""
+    return {"start": str(frame.index.min()), "end": str(frame.index.max())}
 
 
 @app.command()
@@ -867,11 +894,11 @@ def run(
         {
             "id": "observed",
             "label": "Estação LabMiM (registro observado)",
-            "period": {"start": str(observed.index.min()), "end": str(observed.index.max())},
+            "period": _period(observed),
         }
     ]
-    blocks: dict[str, tuple[GeometrySource, pd.DataFrame]] = {
-        f"observed_{season.lower()}": ("observed", block)
+    blocks: dict[str, tuple[GeometrySource, str, pd.DataFrame]] = {
+        f"observed_{season.lower()}": ("observed", season.lower(), block)
         for season, block in _season_slices(observed).items()
     }
 
@@ -882,11 +909,11 @@ def run(
             {
                 "id": "wrf",
                 "label": "Modelo WRF (extração no ponto da estação)",
-                "period": {"start": str(model.index.min()), "end": str(model.index.max())},
+                "period": _period(model),
             }
         )
         blocks |= {
-            f"wrf_{season.lower()}": ("wrf", block)
+            f"wrf_{season.lower()}": ("wrf", season.lower(), block)
             for season, block in _season_slices(model).items()
         }
 
@@ -894,10 +921,10 @@ def run(
         {
             "id": subset_id,
             "source": source,
-            "season": subset_id.split("_", 1)[1],
-            "label": _subset_label(source, subset_id.split("_", 1)[1]),
+            "season": season,
+            "label": _subset_label(source, season),
         }
-        for subset_id, (source, _block) in blocks.items()
+        for subset_id, (source, season, _block) in blocks.items()
     ]
     selector = [subset_id for subset_id in SELECTOR if subset_id in blocks]
 
@@ -905,7 +932,7 @@ def run(
         version=version,
         generated_utc=version,
         station=STATION,
-        period={"start": str(observed.index.min()), "end": str(observed.index.max())},
+        period=_period(observed),
         sources=sources,
         subsets=subsets,
         selector=selector,
@@ -916,16 +943,14 @@ def run(
             "Horário local de Salvador (UTC-03), sem horário de verão.",
         ],
         package_version=_package_version(),
-        commit=_commit(),
+        commit=short_commit(),
     )
-    write_json(output_dir / MANIFEST_FILENAME, manifest)
-
     for spec in CLIMATOLOGY_VARIABLES:
         samples: dict[str, np.ndarray] = {}
         atoms: dict[str, list[Atom]] = {}
         options: dict[str, dict[str, object]] = {}
         curveless: set[str] = set()
-        for subset_id, (source, block) in blocks.items():
+        for subset_id, (source, _season, block) in blocks.items():
             if source == "observed":
                 sample, subset_atoms = _observed_sample(spec.id, block)
             else:
@@ -933,7 +958,7 @@ def run(
             samples[subset_id] = sample
             atoms[subset_id] = subset_atoms
             if spec.fit_options and len(sample):
-                subset_options = _induced_options(spec.id, block, source)
+                subset_options = _induced_options(spec, block, source)
                 if subset_options is None:
                     # No covariate means no curve, but the bars still publish:
                     # dropping the sample would delete measurements over a missing
@@ -958,6 +983,8 @@ def run(
         )
         typer.echo(f"  [ok] {path.name:28s} {counts}")
 
+    write_json(output_dir / MANIFEST_FILENAME, manifest)
+
     typer.echo(f"\n>> {len(CLIMATOLOGY_VARIABLES) + 1} arquivos em {output_dir}")
 
 
@@ -965,11 +992,6 @@ def _subset_label(source: str, season: str) -> str:
     seasons = {"all": "Ano inteiro", "djf": "Verão (DJF)", "jja": "Inverno (JJA)"}
     name = seasons.get(season, season)
     return name if source == "observed" else f"WRF — {name.lower()}"
-
-
-def _commit() -> str | None:
-    """Short commit of the checkout that produced these bytes, for provenance."""
-    return short_commit()
 
 
 def _package_version() -> str | None:

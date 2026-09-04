@@ -9,7 +9,6 @@ Compare all common columns:
     labmim-metrics -a observations.csv -b predictions.csv -o metrics.csv
 """
 
-import sys
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
@@ -100,7 +99,7 @@ def run(
 
     if not cols:
         typer.echo("Error: No common columns found between the two datasets")
-        sys.exit(1)
+        raise typer.Exit(code=1)
 
     typer.echo(f"Comparing {len(cols)} columns: {cols}")
 
@@ -138,7 +137,7 @@ def run(
 
     if aligned.empty:
         typer.echo("Error: No overlapping data after alignment")
-        sys.exit(1)
+        raise typer.Exit(code=1)
 
     typer.echo(f"Aligned {len(aligned)} rows")
 

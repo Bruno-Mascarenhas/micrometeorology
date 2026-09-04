@@ -61,7 +61,7 @@ def run(
     for label, path, frame in (("--obs", obs, df_obs), ("--model", model, df_model)):
         if not isinstance(frame.index, pd.DatetimeIndex):
             raise typer.BadParameter(
-                f"{Path(path).name}: no time index could be read, so it cannot be paired by time. "
+                f"{path.name}: no time index could be read, so it cannot be paired by time. "
                 "Provide a TIMESTAMP column, year/month/day/hour columns, or a leading index "
                 "column named timestamp/datetime/date/time (or left unnamed).",
                 param_hint=label,
@@ -75,8 +75,8 @@ def run(
     if not shared:
         raise typer.BadParameter(
             f"no column name is common to the two files, so nothing can be compared.\n"
-            f"  {Path(obs).name}: {', '.join(map(str, df_obs.columns))}\n"
-            f"  {Path(model).name}: {', '.join(map(str, df_model.columns))}",
+            f"  {obs.name}: {', '.join(map(str, df_obs.columns))}\n"
+            f"  {model.name}: {', '.join(map(str, df_model.columns))}",
             param_hint="--obs/--model",
         )
 

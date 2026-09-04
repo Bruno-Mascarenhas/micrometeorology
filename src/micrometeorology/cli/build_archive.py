@@ -34,12 +34,14 @@ smaller for this frame)::
 
 import json
 import logging
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
 import pandas as pd
 import typer
 
+from labmim_core.atomic import atomic_write
 from micrometeorology.common.config import get_settings
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.paths import ensure_dir
@@ -95,7 +97,14 @@ app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 logger = logging.getLogger(__name__)
 
 
-def _write(frame: pd.DataFrame, base: Path, output_format: str) -> Path:
+class OutputFormat(StrEnum):
+    """Encoding of the three published artifacts."""
+
+    parquet = "parquet"
+    csv = "csv"
+
+
+def _write(frame: pd.DataFrame, base: Path, output_format: OutputFormat) -> Path:
     """Write one artifact, defaulting to Parquet.
 
     The 5-minute frame is ~988k rows by 94 columns: ~1 GB as CSV, with dtypes
@@ -104,15 +113,20 @@ def _write(frame: pd.DataFrame, base: Path, output_format: str) -> Path:
     """
     if output_format == "csv":
         path = base.with_suffix(".csv")
-        frame.to_csv(path)
+        atomic_write(path, lambda tmp: frame.to_csv(tmp))
     else:
         path = base.with_suffix(".parquet")
-        frame.to_parquet(path)
+        atomic_write(path, lambda tmp: frame.to_parquet(tmp))
     size_mb = path.stat().st_size / 1024 / 1024
     typer.echo(
         f"  [ok] {path.name}  {len(frame):,} linhas x {len(frame.columns)} colunas  {size_mb:.1f} MB"
     )
     return path
+
+
+def _largest(counts: dict[str, int], limit: int = 8) -> list[tuple[str, int]]:
+    """The *limit* columns with the highest counts, largest first."""
+    return sorted(counts.items(), key=lambda item: -item[1])[:limit]
 
 
 def _echo_report(report: ArchiveReport) -> None:
@@ -137,12 +151,13 @@ def run(
     staging_dir: Annotated[
         Path | None,
         typer.Option(
-            "--staging", help="Scratch dir for clock-repaired copies. Default: <output>/_staged."
+            "--staging",
+            help="Scratch dir for clock-repaired copies. Default: `<output>/_staged`.",
         ),
     ] = None,
     output_format: Annotated[
-        str, typer.Option("--format", help="`parquet` (default) or `csv`.")
-    ] = "parquet",
+        OutputFormat, typer.Option("--format", help="`parquet` (default) or `csv`.")
+    ] = OutputFormat.parquet,
     strict: Annotated[
         bool,
         typer.Option(
@@ -178,8 +193,6 @@ def run(
     """
     setup_logging(log_level)
     settings = get_settings()
-    if output_format not in {"parquet", "csv"}:
-        raise typer.BadParameter("--format must be 'parquet' or 'csv'")
 
     out = ensure_dir(output_dir)
     staging = staging_dir or (out / "_staged")
@@ -218,8 +231,8 @@ def run(
         for report in reports:
             _echo_report(report)
     else:
-        lenta = build_five_minute_frame(LENTA_MANIFEST, data_dir, Path(staging) / "lenta")
-        rain = build_five_minute_frame(RAIN_MANIFEST, data_dir, Path(staging) / "rain")
+        lenta = build_five_minute_frame(LENTA_MANIFEST, data_dir, staging / "lenta")
+        rain = build_five_minute_frame(RAIN_MANIFEST, data_dir, staging / "rain")
 
         typer.echo("\nVerificacao contra a auditoria do acervo:")
         reports = [verify_frame(lenta, "lenta"), verify_frame(rain, "rain")]
@@ -230,6 +243,8 @@ def run(
     # concatenated, which would double the index.
     rain_columns = [column for column in rain.columns if column not in lenta.columns]
     raw = lenta.join(rain[rain_columns], how="outer")
+    period = {"start": str(raw.index.min()), "end": str(raw.index.max())}
+    five_minute_rows = len(raw)
     typer.echo(f"\nBase unificada de 5 min: {len(raw):,} linhas x {len(raw.columns)} colunas")
 
     failed = [problem for report in reports for problem in report.problems]
@@ -251,13 +266,15 @@ def run(
     typer.echo("\nArtefatos:")
     _write(raw, out / "station_5min_raw", output_format)
 
-    qc = raw.copy()
+    # Aliased, not copied: every stage below mutates in place and returns the same
+    # frame, and the three scalars the manifest needs were captured above.
+    qc = raw
     qc, sentinels_removed = mask_sentinels(qc)
     typer.echo(
         f"\nSentinelas mascaradas: {sum(sentinels_removed.values()):,} amostras "
         f"em {len(sentinels_removed)} colunas"
     )
-    for column, count in sorted(sentinels_removed.items(), key=lambda item: -item[1])[:8]:
+    for column, count in _largest(sentinels_removed):
         typer.echo(f"  {column:20s} {count:,}")
 
     # INVALID_WINDOWS is hand-curated and goes stale silently when the shade ring
@@ -310,7 +327,7 @@ def run(
             f"\nLimites fisicos: {len(settings.sensor_limits)} declarados, "
             f"{len(limits_fired)} dispararam, {sum(limits_fired.values()):,} amostras removidas"
         )
-        for column, count in sorted(limits_fired.items(), key=lambda item: -item[1])[:8]:
+        for column, count in _largest(limits_fired):
             typer.echo(f"  {column:20s} {count:,}")
         if limits_absent_columns:
             typer.echo(
@@ -328,8 +345,9 @@ def run(
     calibrations_path = settings.configs_dir / "calibrations.yaml"
     sources: dict[str, list[tuple[str, pd.Timestamp, pd.Timestamp]]] = {}
     if calibrations_path.is_file():
+        calibrations = load_calibrations(calibrations_path)
         before_calibration = qc.notna().sum()
-        qc = apply_calibrations(qc, load_calibrations(calibrations_path))
+        qc = apply_calibrations(qc, calibrations)
         # A `factor: null` record NaNs its whole window, which is a removal like
         # any other and belongs in the tally.
         invalidated = {
@@ -378,9 +396,7 @@ def run(
                 f"{sum(outside_after_calibration.values()):,} amostra(s) "
                 f"em {len(outside_after_calibration)} coluna(s) cruzaram o portao ao serem escaladas"
             )
-            for column, count in sorted(
-                outside_after_calibration.items(), key=lambda item: -item[1]
-            )[:8]:
+            for column, count in _largest(outside_after_calibration):
                 typer.echo(f"  {column:22s} {count:,}")
 
         # Without this the sensor_switches block parses and does nothing, and
@@ -419,7 +435,7 @@ def run(
 
         # Reported, never fatal: the sensitivity is a laboratory decision, and
         # failing the build would trade a scaling error for no record.
-        gaps = uncalibrated_mapping_windows(qc, load_calibrations(calibrations_path), switches)
+        gaps = uncalibrated_mapping_windows(qc, calibrations, switches)
         if gaps:
             typer.echo(
                 f"\n  ! {len(gaps)} janela(s) alimentam uma serie unificada sem nenhuma "
@@ -533,8 +549,8 @@ def run(
 
     manifest = {
         "format": "labmim-station-archive-v1",
-        "period": {"start": str(raw.index.min()), "end": str(raw.index.max())},
-        "five_minute_rows": len(raw),
+        "period": period,
+        "five_minute_rows": five_minute_rows,
         "hourly_rows": len(hourly),
         "min_samples_per_hour": settings.sensor_min_samples_per_hour,
         "verification": [
@@ -589,7 +605,12 @@ def run(
         },
     }
     report_path = out / "archive_report.json"
-    report_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write(
+        report_path,
+        lambda tmp: tmp.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+        ),
+    )
     typer.echo(f"  [ok] {report_path.name}")
 
     if blocking:

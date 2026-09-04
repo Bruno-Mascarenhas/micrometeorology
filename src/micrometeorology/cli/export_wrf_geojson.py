@@ -86,11 +86,6 @@ def _missing_domains(paths: list[Path], domains: tuple[int, ...]) -> tuple[int, 
     return tuple(d for d in sorted(set(domains)) if f"d{d:02d}" not in found)
 
 
-def _matching_wrfout_paths(wrf_dir: Path | str, date: str, domains: tuple[int, ...]) -> list[Path]:
-    """Glob the requested day, reporting a mistyped ``--date`` as a usage error."""
-    return glob_wrfout_day(wrf_dir, date, domains)
-
-
 def _resolve_paths(
     wrf_dir: Path | str | None,
     date: str | None,
@@ -121,7 +116,7 @@ def _resolve_paths(
         if not paths:
             typer.echo(f"  ⚠ No wrfout files found in {wrf_dir}")
     else:
-        paths = _matching_wrfout_paths(wrf_dir, date, domains)
+        paths = glob_wrfout_day(wrf_dir, date, domains)
         if not paths:
             typer.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
     return paths, _missing_domains(paths, domains)

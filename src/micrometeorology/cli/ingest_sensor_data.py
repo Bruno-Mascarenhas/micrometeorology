@@ -161,8 +161,6 @@ def run(
         ),
         sum_columns=settings.sensor_sum_columns,
         wind_dir_columns=settings.sensor_wind_dir_columns,
-        # Weights each direction by its own speed: under unit weight instead,
-        # about one hourly bearing in six lands more than 5 deg off.
         wind_speed_column_map=settings.sensor_wind_speed_column_map,
         freq=freq,
     )

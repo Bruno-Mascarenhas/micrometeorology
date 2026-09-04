@@ -659,6 +659,41 @@ def _v1_file(path: Path, rows: list[str]) -> None:
     path.write_text(V1_HEADER + "," * 12 + "\n" + "\n".join(rows) + "\n")
 
 
+def test_the_migrate_command_rewrites_the_record_and_leaves_a_backup(tmp_path):
+    """A migracao so tinha cobertura por baixo da CLI: migrate_to_v2 era chamado
+    direto, entao o eco do cabecalho e a copia .bak nunca rodaram pelo comando."""
+    path = tmp_path / "serie.dat"
+    _v1_file(path, [_v1_row()])
+
+    result = CliRunner().invoke(app, ["migrate", "-i", str(path)])
+
+    assert result.exit_code == 0, result.output
+    assert "v1 -> v2" in result.output
+    assert read_header(path) == DEFAULT_HEADER
+    assert (tmp_path / "serie.dat.bak").exists()
+
+
+def test_the_glob_selection_refuses_a_wrf_dir_without_a_date(tmp_path):
+    """--wrf-dir/--date e a forma que a linha operacional diaria usa, e so o ramo
+    -d/--dataset do resolvedor tinha teste."""
+    result = CliRunner().invoke(
+        app, ["run", "--wrf-dir", str(tmp_path), "-o", str(tmp_path / "series")]
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "--wrf-dir together with --date" in result.output
+
+
+def test_a_day_with_no_wrfout_is_refused_by_name(tmp_path):
+    result = CliRunner().invoke(
+        app,
+        ["run", "--wrf-dir", str(tmp_path), "--date", "20990101", "-o", str(tmp_path / "series")],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "no wrfout for 20990101" in result.output
+
+
 def test_the_v1_header_reads_as_thirty_five_columns(tmp_path):
     path = tmp_path / "serie.dat"
     _v1_file(path, [_v1_row()])

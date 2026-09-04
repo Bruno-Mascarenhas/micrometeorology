@@ -35,10 +35,11 @@ import pandas as pd
 import typer
 from matplotlib.axes import Axes
 
-matplotlib.use("Agg")  # headless backend for server
+matplotlib.use("Agg")
 
 from micrometeorology.cli.plot_station_graphs import GRAPH_SPECS
 from micrometeorology.common.logging import setup_logging
+from micrometeorology.common.paths import ensure_dir
 from micrometeorology.common.timeparse import parse_naive_timestamp
 from micrometeorology.sensors.aggregation import aggregate_to_hourly
 from micrometeorology.sensors.ingestion import read_campbell_dat
@@ -740,8 +741,7 @@ def run(
     and wind graphs.
     """
     setup_logging(log_level)
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
+    out = ensure_dir(output_dir)
     # Campbell .dat timestamps carry no UTC offset, so `read_campbell_dat`
     # builds a naive station-local index. Both date bounds below must stay
     # naive to match it -- an aware Timestamp raises TypeError on comparison.
@@ -779,7 +779,7 @@ def run(
             ) from exc
         date_end = date_start + pd.Timedelta(days=days)
     else:
-        date_end = pd.Timestamp(now)
+        date_end = now
         date_start = date_end - pd.Timedelta(days=days)
 
     mask_lenta = (df_lenta.index >= date_start) & (df_lenta.index <= date_end)

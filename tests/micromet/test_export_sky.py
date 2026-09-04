@@ -51,6 +51,34 @@ def test_the_cumulative_covers_hours_the_kt_kd_plane_cannot():
     assert len(clearness) > len(paired)
 
 
+def test_both_artifacts_carry_the_same_run_stamp():
+    """A ``Ceu/`` meio atualizado so e detectavel pelo navegador se os dois
+    documentos concordarem sobre a versao em que foram produzidos."""
+    payloads = build_payloads(_hourly(), version="20260101T000000Z")
+
+    assert payloads["kt_cumulative.json"]["version"] == "20260101T000000Z"
+    assert payloads["ktkd.json"]["version"] == "20260101T000000Z"
+
+
+def test_the_command_writes_both_artifacts_into_the_output_directory(tmp_path):
+    """Every other test calls ``build_payloads``; the writing wrapper had none."""
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.export_sky import app
+
+    source = tmp_path / "station_hourly.parquet"
+    _hourly().to_parquet(source)
+    output_dir = tmp_path / "Ceu"
+
+    result = CliRunner().invoke(app, ["-i", str(source), "-o", str(output_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert sorted(path.name for path in output_dir.glob("*.json")) == [
+        "kt_cumulative.json",
+        "ktkd.json",
+    ]
+
+
 def test_both_artifacts_are_published_under_their_declared_schemas():
     payloads = build_payloads(_hourly(), version="probe")
 

@@ -29,7 +29,6 @@ complete)::
         --end 2022-07-08
 """
 
-import logging
 import time
 from pathlib import Path
 from typing import Annotated
@@ -40,12 +39,11 @@ import typer
 
 from micrometeorology.common.git import short_commit
 from micrometeorology.common.logging import setup_logging
-from micrometeorology.common.site_json import write_json
+from micrometeorology.common.site_json import rounded_list, write_json
+from micrometeorology.common.timeparse import parse_naive_timestamp
 from micrometeorology.sensors.monitoring import MONITORING_CHARTS, resolve_wrf_column
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
-
-logger = logging.getLogger(__name__)
 
 PAYLOAD_FORMAT = "labmim-monitoring-v1"
 PAYLOAD_FILENAME = "monitoring.json"
@@ -96,10 +94,7 @@ def _round(values: pd.Series, decimals: int) -> list[float | int | None]:
             None if not np.isfinite(value) else round(float(value))
             for value in values.to_numpy(dtype=float)
         ]
-    return [
-        None if not np.isfinite(value) else round(float(value), decimals)
-        for value in values.to_numpy(dtype=float)
-    ]
+    return rounded_list(values.to_numpy(dtype=float).tolist(), decimals)
 
 
 def _regular(
@@ -201,7 +196,7 @@ def run(
         Path | None, typer.Option("-w", "--wrf", help="series_operacional.dat for the model layer.")
     ] = None,
     days: Annotated[
-        int, typer.Option("--days", help="Length of the rolling window.")
+        int, typer.Option("--days", min=1, help="Length of the rolling window.")
     ] = DEFAULT_DAYS,
     end: Annotated[
         str | None,
@@ -239,9 +234,12 @@ def run(
     # days of record behind them; only the END reaches forward. `--end` is an
     # explicit instruction and overrides both.
     station_last = pd.Timestamp(raw.index.max())
-    if end:
-        first = pd.Timestamp(end) - pd.Timedelta(days=days)
-        last = pd.Timestamp(end)
+    if end is not None:
+        try:
+            last = parse_naive_timestamp(end, "%Y-%m-%d")
+        except ValueError as exc:
+            raise typer.BadParameter(f"--end must be a YYYY-MM-DD date (got {end!r})") from exc
+        first = last - pd.Timedelta(days=days)
     else:
         first = station_last - pd.Timedelta(days=days)
         last = station_last

@@ -177,7 +177,6 @@ def run(
     setup_logging()
     version = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
     hourly = pd.read_parquet(input_path)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     payloads = build_payloads(hourly, version=version)
     for filename, payload in payloads.items():

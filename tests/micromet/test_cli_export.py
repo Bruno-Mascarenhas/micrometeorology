@@ -365,6 +365,45 @@ def test_a_variables_option_naming_nothing_is_a_usage_error(tmp_path):
     assert list(tmp_path.rglob("manifest.json")) == []
 
 
+def test_the_artifact_variables_are_the_default_request_without_the_two_overlays():
+    """`features` vouches for the .series.bin/.summary.json byte offsets, which the
+    wind arrows and the isobars never write."""
+    from micrometeorology.cli.export_wrf_geojson import ARTIFACT_VARIABLES, DEFAULT_VARS
+
+    assert frozenset(DEFAULT_VARS) - {"wind_vectors", "isobars"} == ARTIFACT_VARIABLES
+
+
+def test_a_partial_variable_request_publishes_a_manifest_with_no_artifact_features(tmp_path):
+    """Fixed names mean last run's matrices are still on disk, so a manifest that
+    vouched for them would be read at the wrong byte offsets."""
+    wrf = tmp_path / "wrfout_d02_cli_features.nc"
+    _write_full_wrf_file(wrf, seed=23)
+    json_dir = tmp_path / "json"
+
+    result = runner.invoke(
+        app,
+        [
+            "-d",
+            str(wrf),
+            "-o",
+            str(json_dir),
+            "-g",
+            str(tmp_path / "geo"),
+            "-v",
+            "temperature",
+            "--workers",
+            "1",
+            "--log-level",
+            "WARNING",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    with open(json_dir / "manifest.json", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    assert "features" not in manifest
+
+
 def test_zero_workers_is_a_usage_error_rather_than_the_default(tmp_path):
     """``--workers 0`` fell through ``workers or default_workers()`` to the default."""
     result = runner.invoke(
