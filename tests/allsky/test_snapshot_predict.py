@@ -32,6 +32,7 @@ from allsky.embeddings import backbone as backbone_module
 from allsky.embeddings.storage import META_FILENAME, read_meta, write_meta
 from allsky.snapshot import (
     DEFAULT_SENSOR_TOLERANCE,
+    _clearsky_dhi_reference,
     _feature_vector,
     _image_as_hwc,
     _sensor_row_near,
@@ -80,6 +81,26 @@ def embedding_checkpoint(tmp_path: Path) -> Path:
     config = tmp_path / "probe.yaml"
     config.write_text(
         _EMBEDDING_EXPERIMENT.format(repo_v1=_REPO_V1, out=run_dir, root=root),
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        app,
+        ["train", "--config", str(config), "--data-root", str(root), "--out-dir", str(run_dir)],
+    )
+    assert result.exit_code == 0, result.output
+    return run_dir / "best.ckpt"
+
+
+def _train_probe(tmp_path: Path, extra_yaml: str = "") -> Path:
+    """Train one epoch of the embedding-mode probe, with *extra_yaml* appended to its config."""
+    root, manifest, _ = synthetic.make_dataset(tmp_path)
+    _write_embeddings(root, manifest, dim=32)
+    store = root / "emb"
+    write_meta(store, {**read_meta(store), "revision": "fake-v1", "dtype": "fp32"})
+    run_dir = tmp_path / "run"
+    config = tmp_path / "probe.yaml"
+    config.write_text(
+        _EMBEDDING_EXPERIMENT.format(repo_v1=_REPO_V1, out=run_dir, root=root) + extra_yaml,
         encoding="utf-8",
     )
     result = runner.invoke(
@@ -446,3 +467,32 @@ def test_a_moved_checkpoint_predicts_against_the_store_it_is_pointed_at(
     )
 
     assert np.isfinite(prediction["predictions"]["dhi"])
+
+
+def test_a_clearsky_index_checkpoint_is_served_in_watts_per_square_metre(
+    tmp_path: Path, sky_image: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The head fitted DHI / DHI_clearsky and the evaluator multiplies the
+    prediction back by the row's clear-sky reference; the live snapshot
+    denormalized and stopped, serving the dimensionless index under a field
+    the docstring promises in W m-2."""
+    import allsky.clearsky
+
+    checkpoint = _train_probe(
+        tmp_path,
+        "targets:\n  dhi:\n    enabled: true\n    parameterization: clearsky_index\n",
+    )
+    timestamp = pd.Timestamp("2025-03-20 12:00:00")
+    served = predict_snapshot(
+        sky_image, checkpoint, timestamp=timestamp, sensor_limits=[], trust_checkpoint=True
+    )["predictions"]["dhi"]
+
+    monkeypatch.setattr(allsky.clearsky, "clearsky_diffuse", lambda *_args, **_kw: np.ones(1))
+    index = predict_snapshot(
+        sky_image, checkpoint, timestamp=timestamp, sensor_limits=[], trust_checkpoint=True
+    )["predictions"]["dhi"]
+    monkeypatch.undo()
+
+    reference = _clearsky_dhi_reference(timestamp, SiteConfig())
+    assert reference > 10.0
+    assert served == pytest.approx(index * reference, rel=1e-6)

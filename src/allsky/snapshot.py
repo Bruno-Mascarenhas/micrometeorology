@@ -583,6 +583,22 @@ def _shipped_sensor_limits() -> list[SensorRangeLimit]:
     return limits
 
 
+def _clearsky_dhi_reference(timestamp: pd.Timestamp, site: SiteConfig) -> float:
+    """Clear-sky diffuse irradiance (W m-2) at *timestamp* on the site's clock.
+
+    The reference a ``clearsky_index`` DHI head is trained as a ratio to, so a
+    served index times this value is the diffuse irradiance in W m-2.
+    """
+    from allsky.clearsky import clearsky_diffuse
+    from labmim_core.solar import cos_zenith
+
+    local = pd.DatetimeIndex([timestamp])
+    zenith_deg = np.degrees(np.arccos(cos_zenith(local, site, site.utc_offset_hours)))
+    site_clock = dt.timezone(dt.timedelta(hours=site.utc_offset_hours))
+    times = pd.Series(local.tz_localize(site_clock).tz_convert("UTC"))
+    return float(np.asarray(clearsky_diffuse(zenith_deg, times, site.utc_offset_hours))[0])
+
+
 def predict_snapshot(
     image_path: str | Path,
     checkpoint_path: str | Path,
@@ -673,12 +689,13 @@ def predict_snapshot(
         )
     feature_columns: list[str] = list(checkpoint["feature_columns"])
     feature_normalizer, target_normalizers = normalizers_from_checkpoint(checkpoint)
+    resolved_site = site or SiteConfig()
 
     raw_values, imputed = _feature_vector(
         timestamp,
         feature_columns=feature_columns,
         feature_set=cfg.features.feature_set,
-        site=site or SiteConfig(),
+        site=resolved_site,
         sensor_csv=sensor_csv,
         tolerance=tolerance,
         training_means=feature_normalizer.mean,
@@ -734,6 +751,8 @@ def predict_snapshot(
         value = float(outputs[name].detach().cpu().numpy().reshape(-1)[0])
         normalizer = target_normalizers.get(name)
         predictions[name] = float(normalizer.denormalize(value)[()]) if normalizer else value
+    if "dhi" in predictions and cfg.targets.dhi.parameterization == "clearsky_index":
+        predictions["dhi"] *= _clearsky_dhi_reference(timestamp, resolved_site)
     if "sky_logits" in outputs:
         logits = outputs["sky_logits"].detach().cpu().numpy().reshape(-1)
         weights = np.exp(logits - logits.max())
