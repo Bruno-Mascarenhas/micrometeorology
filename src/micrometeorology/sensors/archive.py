@@ -985,8 +985,6 @@ BSRN_CEILING_GAIN = 1.5
 BSRN_CEILING_MU0_EXPONENT = 1.2
 BSRN_CEILING_OFFSET_WM2 = 100.0
 
-IMPOSSIBLE_SHORTWAVE_CHANNELS = ("Sw_dw", "Net_CNR1")
-
 #: Radiation channels carrying the sensor's raw count or bridge voltage rather
 #: than a flux. They have no range gate, no BSRN envelope and no nocturnal mask,
 #: because every one of those is written against the ``_Wm2_`` twin — so they
