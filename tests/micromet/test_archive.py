@@ -707,28 +707,51 @@ def test_the_ceiling_coefficient_is_the_cited_methods_not_the_tsi() -> None:
 
 
 def test_a_sample_between_the_two_constants_ceilings_survives() -> None:
-    """At 2026-07-05 09:00 (mu0 = 0.60450, E0 = 0.966588) the ceiling is 1183.4 W/m2.
+    """The row stamped 2026-07-05 09:00 averages ``(08:55, 09:00]``, whose centroid
+    is 08:57:30 (mu0 = 0.59822, E0 = 0.966588): the ceiling there is 1169.9 W/m2.
 
-    Scaling the Kopp & Lean TSI instead would put it at 1178.6, so this 1181 W/m2
+    Scaling the Kopp & Lean TSI instead would put it at 1165.2, so this 1168 W/m2
     sample is exactly the real cloud-enhancement reading that the wrong constant
     would delete as physically impossible.
     """
-    frame = pd.DataFrame({"Sw_dw": [1181.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
+    frame = pd.DataFrame({"Sw_dw": [1168.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
 
     masked, removed = archive.mask_impossible_shortwave(frame)
 
-    assert masked["Sw_dw"].iloc[0] == pytest.approx(1181.0)
+    assert masked["Sw_dw"].iloc[0] == pytest.approx(1168.0)
     assert removed == {}
 
 
 def test_a_sample_above_the_cited_ceiling_is_still_masked() -> None:
-    """The ceiling still bites: 1185 W/m2 at the same instant is above 1183.4."""
-    frame = pd.DataFrame({"Sw_dw": [1185.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
+    """The ceiling still bites: 1172 W/m2 over the same interval is above 1169.9."""
+    frame = pd.DataFrame({"Sw_dw": [1172.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
 
     masked, removed = archive.mask_impossible_shortwave(frame)
 
     assert np.isnan(masked["Sw_dw"].iloc[0])
     assert removed == {"Sw_dw": 1}
+
+
+def test_the_ceiling_is_evaluated_at_the_interval_centroid_not_the_end_stamp() -> None:
+    """The CR5000 end-stamps, so geometry at the raw stamp is 2.5 minutes late:
+    1175 W/m2 sat under the 09:00 ceiling of 1183.4 and above the 08:57:30 one of
+    1169.9, and every solar-geometry gate in this module read the late one."""
+    frame = pd.DataFrame({"Sw_dw": [1175.0]}, index=pd.DatetimeIndex(["2026-07-05 09:00"]))
+
+    _masked, removed = archive.mask_impossible_shortwave(frame)
+
+    assert removed == {"Sw_dw": 1}
+
+
+def test_a_sample_at_the_horizon_is_classified_by_the_interval_it_averages() -> None:
+    """At the raw stamp 2024-06-01 05:55 the sun is 0.437 deg up (daylight); the
+    interval it averages is centred at 05:52:30, where it is 0.125 deg down —
+    so the nocturnal gates put every sunrise/sunset sample on the wrong side."""
+    index = pd.DatetimeIndex(["2024-06-01 05:55"])
+
+    elevation = archive.station_elevation_deg(index)
+
+    assert elevation[0] < archive.NOCTURNAL_ELEVATION_DEG
 
 
 def test_each_component_is_judged_by_its_own_ceiling_not_the_globals():

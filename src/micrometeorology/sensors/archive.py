@@ -23,7 +23,11 @@ measured.
 Timestamps are naive station-local throughout, stamped by the logger's own
 clock; two of the repairs below exist precisely because that clock has slipped.
 Solar geometry therefore needs an explicit offset, pinned here as
-:data:`STATION_UTC_OFFSET_HOURS` rather than read from the host time zone.
+:data:`STATION_UTC_OFFSET_HOURS` rather than read from the host time zone.  The
+stamps are also END-stamps — the row at ``t`` averages ``(t - 5 min, t]`` — so
+every stage that asks the sun's position asks it at
+:func:`averaging_centroid` of the index, never at the closing edge; see
+:data:`AVERAGING_CENTROID_OFFSET` and docs/quality-control.md.
 
 Relationship to the neighbouring modules
 ----------------------------------------
@@ -76,6 +80,7 @@ __all__ = [
     "ArchiveFile",
     "ArchiveReport",
     "NocturnalOffset",
+    "averaging_centroid",
     "blocked_gauge_runs",
     "build_five_minute_frame",
     "close_net_radiation",
@@ -1125,6 +1130,35 @@ DIFFUSE_EXCEEDS_GLOBAL_MIN_WM2 = 200.0
 SourceWindows = Mapping[str, Sequence[tuple[str, pd.Timestamp, pd.Timestamp]]]
 
 
+#: Shift from a logger stamp to the centre of the interval it averages.
+#: The CR5000 END-stamps: the row at ``t`` averages ``(t - 5 min, t]``, measured
+#: against the 1-minute truth at RMS 0.083 W/m2 and r = 1.000000 in
+#: docs/allsky-label-join.md, which is why the all-sky pipeline carries the same
+#: correction as ``PrepareSensorConfig.timestamp_offset_minutes = -2.5``.
+#: Solar geometry describes an instant, so it belongs at the interval's centroid,
+#: not at its closing edge: evaluated at the raw stamp, a sample within about
+#: 5 minutes of sunrise or sunset falls on the wrong side of the horizon — at
+#: 2024-06-01 05:55 the raw stamp gives +0.437 deg (daylight) while the centroid
+#: 05:52:30 gives -0.125 deg (still night).
+AVERAGING_CENTROID_OFFSET = -SAMPLING_INTERVAL / 2
+
+
+def averaging_centroid(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """Move end-stamped rows to the centre of the interval each one averages.
+
+    Parameters
+    ----------
+    index:
+        Naive station-local stamps as the logger wrote them, ``(N,)``.
+
+    Returns
+    -------
+    pandas.DatetimeIndex
+        The same stamps shifted by :data:`AVERAGING_CENTROID_OFFSET`, ``(N,)``.
+    """
+    return index + AVERAGING_CENTROID_OFFSET
+
+
 def _mask_column(frame: pd.DataFrame, column: str, mask: NDArray, removed: dict[str, int]) -> None:
     """Blank *column* where *mask* selects a populated sample, tallying into *removed*."""
     if column not in frame.columns:
@@ -1180,10 +1214,11 @@ def mask_impossible_shortwave(
     if "Sw_dw" not in frame.columns:
         return frame, removed
     index = pd.DatetimeIndex(frame.index)
-    mu0 = np.clip(cos_zenith(index, STATION_SITE, STATION_UTC_OFFSET_HOURS), 0.0, None)
+    centroid = averaging_centroid(index)
+    mu0 = np.clip(cos_zenith(centroid, STATION_SITE, STATION_UTC_OFFSET_HOURS), 0.0, None)
     geometry = (
         BSRN_CEILING_SOLAR_CONSTANT_WM2
-        * eccentricity_correction(index)
+        * eccentricity_correction(centroid)
         * mu0**BSRN_CEILING_MU0_EXPONENT
     )
 
@@ -1458,18 +1493,21 @@ def station_elevation_deg(index: pd.DatetimeIndex) -> NDArray:
 
     One spelling for every stage that needs it: a second copy of the call is a
     second definition of "night", free to drift from the first without failing.
+    The geometry is evaluated at :func:`averaging_centroid` of *index*, not at
+    the logger's own end-stamp.
 
     Parameters
     ----------
     index:
-        Naive station-local stamps, ``(N,)``.
+        Naive station-local stamps as the logger wrote them, ``(N,)``.
 
     Returns
     -------
     numpy.ndarray
-        Degrees above the local horizon, ``(N,)``.
+        Degrees above the local horizon at the centre of each averaging
+        interval, ``(N,)``.
     """
-    return solar_elevation_deg(index, STATION_SITE, STATION_UTC_OFFSET_HOURS)
+    return solar_elevation_deg(averaging_centroid(index), STATION_SITE, STATION_UTC_OFFSET_HOURS)
 
 
 def mask_nocturnal_shortwave(

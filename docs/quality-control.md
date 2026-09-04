@@ -70,6 +70,36 @@ manufacture a false step across a sensor swap.
 
 ---
 
+## Where the solar geometry is evaluated
+
+The CR5000 END-stamps its 5-minute averages: the row labelled `t` covers
+`(t − 5 min, t]`, measured against the 1-minute truth at RMS 0.083 W/m² and
+r = 1.000000 in `docs/allsky-label-join.md`, which is why the all-sky pipeline
+carries the same correction as `PrepareSensorConfig.timestamp_offset_minutes =
+−2.5`.
+
+Solar geometry describes an instant, so every gate that asks "was the sun up?"
+evaluates it at the **centre** of the interval a row averages —
+`archive.averaging_centroid`, i.e. the stamp minus half the sampling interval —
+and not at the closing edge the logger wrote. At the raw stamp 2024-06-01 05:55
+the sun reads 0.437° above the horizon (daylight); the interval that row
+actually averages is centred at 05:52:30, where it is 0.125° below.
+
+Corrected on 2026-09-03. Measured over the 1,022,917 five-minute rows of the
+archive, the correction moves:
+
+| gate | samples that change side |
+|---|---|
+| `mask_nocturnal_shortwave` (elevation < 0°) | 3,110 |
+| `night_corrupted_days` (deep night, < −10°) | 3,386 |
+| `nocturnal_offset_statistics` (drift monitor) | 3,386 |
+
+and the BSRN ceiling on `Sw_dw` rejects 2,893 samples instead of 2,886 (+7).
+Every one of them sits within about five minutes of sunrise or sunset, which is
+exactly where the two conventions disagree.
+
+---
+
 ## The range gates
 
 `sensor_limits` in `configs/micromet/default.yaml`. Each bound is the wider of the
