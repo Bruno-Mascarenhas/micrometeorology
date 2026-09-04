@@ -35,6 +35,7 @@ from allsky.snapshot import (
     _clearsky_dhi_reference,
     _feature_vector,
     _image_as_hwc,
+    _image_input,
     _sensor_row_near,
     _shipped_sensor_limits,
     predict_snapshot,
@@ -496,3 +497,28 @@ def test_a_clearsky_index_checkpoint_is_served_in_watts_per_square_metre(
     reference = _clearsky_dhi_reference(timestamp, SiteConfig())
     assert reference > 10.0
     assert served == pytest.approx(index * reference, rel=1e-6)
+
+
+def test_the_image_input_carries_the_geometry_planes_the_model_was_widened_for(
+    sky_image: Path,
+) -> None:
+    """``restore_model`` widens the patch projection for ``geometry_channels``, but
+    the live image branch stacked three RGB planes only, so a ``sunangle`` or
+    ``sunmap`` checkpoint raised on its first forward pass."""
+    cfg = ExperimentConfig.model_validate(
+        {
+            "data": {"input_mode": "image"},
+            "model": {
+                "name": "image_only",
+                "backbone": "fake",
+                "geometry_channels": ["cos_sun_angle"],
+            },
+        }
+    )
+
+    tensor = _image_input(
+        sky_image, 32, cfg, timestamp=pd.Timestamp("2025-03-20 12:00:00"), site=SiteConfig()
+    )
+
+    assert tensor.shape == (4, 32, 32)
+    assert tensor.dtype == np.float32

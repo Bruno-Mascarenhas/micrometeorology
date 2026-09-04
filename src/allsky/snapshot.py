@@ -23,6 +23,7 @@ from allsky.config import (
     SITE_TZ,
     ExperimentConfig,
     SiteConfig,
+    geometry_channels_of,
     image_size_of,
 )
 from allsky.embeddings.backbone import VisualBackbone
@@ -583,6 +584,43 @@ def _shipped_sensor_limits() -> list[SensorRangeLimit]:
     return limits
 
 
+def _image_input(
+    image_path: str | Path,
+    image_size: int,
+    cfg: ExperimentConfig,
+    *,
+    timestamp: pd.Timestamp,
+    site: SiteConfig,
+) -> np.ndarray:
+    """The ``(3 + G, S, S)`` ``float32`` tensor the image branch of *cfg* was trained on.
+
+    The three standardized RGB planes come from :func:`_image_as_chw`; the ``G``
+    solar-geometry planes are the ones the dataset stacks under
+    ``model.geometry_channels`` (:func:`allsky.geometry.solar_geometry_maps`),
+    built for *timestamp* on the site's own clock and the isotropic lens
+    calibration at *image_size*.
+    """
+    chw = _image_as_chw(image_path, image_size, cfg)
+    channels = geometry_channels_of(cfg)
+    if not channels:
+        return chw
+    from allsky.geometry import solar_geometry_maps
+    from allsky.lens import isotropic_calibration
+    from labmim_core.solar import solar_azimuth_deg, solar_elevation_deg
+
+    local = pd.DatetimeIndex([timestamp])
+    zenith_deg = 90.0 - float(solar_elevation_deg(local, site, site.utc_offset_hours)[0])
+    azimuth_deg = float(solar_azimuth_deg(local, site, site.utc_offset_hours)[0])
+    maps = solar_geometry_maps(
+        isotropic_calibration(image_size),
+        (image_size, image_size),
+        sun_zenith_rad=float(np.radians(zenith_deg)),
+        sun_azimuth_rad=float(np.radians(azimuth_deg)),
+        channels=channels,
+    )
+    return np.concatenate([chw, maps], axis=0).astype(np.float32, copy=False)
+
+
 def _clearsky_dhi_reference(timestamp: pd.Timestamp, site: SiteConfig) -> float:
     """Clear-sky diffuse irradiance (W m-2) at *timestamp* on the site's clock.
 
@@ -707,9 +745,8 @@ def predict_snapshot(
     batch: dict[str, Any] = {"features": torch.from_numpy(standardized).to(device)}
     embedding_dim = None
     if cfg.data.input_mode == "image":
-        batch["image"] = (
-            torch.from_numpy(_image_as_chw(image_path, image_size, cfg)).unsqueeze(0).to(device)
-        )
+        image = _image_input(image_path, image_size, cfg, timestamp=timestamp, site=resolved_site)
+        batch["image"] = torch.from_numpy(image).unsqueeze(0).to(device)
     else:
         from allsky.embeddings.storage import META_FILENAME
 
