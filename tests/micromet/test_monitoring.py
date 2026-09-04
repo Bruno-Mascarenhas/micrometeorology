@@ -186,6 +186,32 @@ class TestExporter:
         assert "precip_mm" in candidates
         assert "RAINNC" not in candidates, "an accumulated field is not a per-interval layer"
 
+    def test_a_column_present_but_empty_this_window_is_reported_as_pending(
+        self, archive: Path, tmp_path: Path
+    ) -> None:
+        """An extraction that stops writing a variable empties one column rather
+        than shifting every column after it — the designed signal. Resolved on
+        presence alone, that column produced neither the model line (``_layer``
+        drops an all-null series) nor the pending note, which is the one case
+        the note exists for."""
+        index = pd.date_range("2022-07-01", periods=169, freq="h")
+        dat = tmp_path / "series_operacional.dat"
+        pd.DataFrame(
+            {
+                "year": index.year,
+                "month": index.month,
+                "day": index.day,
+                "hour": index.hour,
+                "T": np.full(len(index), np.nan),
+            }
+        ).to_csv(dat, index=False)
+
+        payload = self._payload(archive, tmp_path, "-w", str(dat))
+
+        charts = {chart["id"]: chart for chart in payload["charts"]}
+        assert charts["temperatura"]["layers"]["wrf"] is None
+        assert "t" in charts["temperatura"]["wrf_pending"]
+
     def test_gaps_serialise_as_null(self, archive: Path, tmp_path: Path) -> None:
         frame = pd.read_parquet(archive / "station_hourly.parquet")
         frame.loc[frame.index[5], "T"] = np.nan

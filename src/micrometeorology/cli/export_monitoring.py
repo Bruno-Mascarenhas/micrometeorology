@@ -265,7 +265,13 @@ def run(
         missing: list[str] = []
         for series in chart.series:
             column = resolve_wrf_column(series, model.columns) if not model.empty else None
-            if column:
+            # A column PRESENT in the header but empty over this window is the
+            # designed signal that the extraction stopped writing the variable
+            # (export_operational_series empties one column rather than shifting
+            # every column after it). Read as "resolved", it produced neither the
+            # line — `_layer` drops an all-null series — nor the pending note,
+            # which is the one case the note exists for.
+            if column and model[column].notna().any():
                 wrf_columns[series.id] = column
             # Only when a model was actually loaded: `wrf_pending` claims to the
             # reader that "the extraction does not write this variable yet", so a
