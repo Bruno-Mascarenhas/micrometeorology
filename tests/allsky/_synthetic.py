@@ -132,8 +132,28 @@ def write_frame_images(root: Path, manifest: pd.DataFrame, *, image_px: int = 8)
         iio.imwrite(full, rng.integers(0, 256, (image_px, image_px, 3), dtype=np.uint8), quality=90)
 
 
+#: The repository experiment a tmp config inherits from (``extends`` resolves it,
+#: and its own chain reaches ``_base.yaml`` + ``models/sensor_only.yaml``).
+REPO_V1 = (
+    Path(__file__).resolve().parents[2]
+    / "configs"
+    / "allsky"
+    / "experiments"
+    / "v1_sensor_only.yaml"
+)
+
+
 def make_embeddings_store(
-    root: Path, manifest: pd.DataFrame, *, dim: int = 8, shard_size: int = 16, subdir: str = "emb"
+    root: Path,
+    manifest: pd.DataFrame,
+    *,
+    dim: int = 8,
+    shard_size: int = 16,
+    subdir: str = "emb",
+    revision: str = "fake-v1",
+    pooling: str = "fake",
+    dtype: str = "fp16",
+    transform: str = "identity",
 ) -> Path:
     """Write a real safetensors embedding store (shards + index + meta) under ``root/subdir``.
 
@@ -159,13 +179,13 @@ def make_embeddings_store(
         out,
         {
             "backbone": "fake",
-            "revision": "fake-v1",
-            "pooling": "fake",
+            "revision": revision,
+            "pooling": pooling,
             "dim": dim,
-            "transform": "identity",
+            "transform": transform,
             "config_sha256": None,
             "count": len(ids),
-            "dtype": "fp16",
+            "dtype": dtype,
         },
     )
     return out

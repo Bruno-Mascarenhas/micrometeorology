@@ -29,6 +29,7 @@ from typer.testing import CliRunner
 from allsky.cli import app
 from allsky.config import SITE_UTC_OFFSET_HOURS, ExperimentConfig, PrepareConfig
 from allsky.embeddings import backbone as backbone_module
+from allsky.embeddings.backbone import build_backbone
 from allsky.embeddings.storage import META_FILENAME, read_meta, write_meta
 from allsky.snapshot import (
     DEFAULT_SENSOR_TOLERANCE,
@@ -44,7 +45,6 @@ from allsky.training.checkpointing import load_checkpoint
 from labmim_core.site import SiteConfig
 from labmim_core.solar import solar_elevation_deg
 from tests.allsky import _synthetic as synthetic
-from tests.allsky.test_e2e_experiment import _REPO_V1, _write_embeddings
 
 runner = CliRunner()
 
@@ -75,13 +75,20 @@ train:
 def embedding_checkpoint(tmp_path: Path) -> Path:
     """Train one epoch of an embedding-mode model on the fake backbone's width."""
     root, manifest, _ = synthetic.make_dataset(tmp_path)
-    _write_embeddings(root, manifest, dim=32)
+    synthetic.make_embeddings_store(
+        root,
+        manifest,
+        dim=32,
+        # The live FakeBackbone describes its own transform; recording anything
+        # else makes the snapshot refuse the store it was trained on.
+        transform=str(getattr(build_backbone("fake", fake_dim=32), "transform_description", "")),
+    )
     store = root / "emb"
     write_meta(store, {**read_meta(store), "revision": "fake-v1", "dtype": "fp32"})
     run_dir = tmp_path / "run"
     config = tmp_path / "probe.yaml"
     config.write_text(
-        _EMBEDDING_EXPERIMENT.format(repo_v1=_REPO_V1, out=run_dir, root=root),
+        _EMBEDDING_EXPERIMENT.format(repo_v1=synthetic.REPO_V1, out=run_dir, root=root),
         encoding="utf-8",
     )
     result = runner.invoke(
@@ -95,13 +102,21 @@ def embedding_checkpoint(tmp_path: Path) -> Path:
 def _train_probe(tmp_path: Path, extra_yaml: str = "") -> Path:
     """Train one epoch of the embedding-mode probe, with *extra_yaml* appended to its config."""
     root, manifest, _ = synthetic.make_dataset(tmp_path)
-    _write_embeddings(root, manifest, dim=32)
+    synthetic.make_embeddings_store(
+        root,
+        manifest,
+        dim=32,
+        # The live FakeBackbone describes its own transform; recording anything
+        # else makes the snapshot refuse the store it was trained on.
+        transform=str(getattr(build_backbone("fake", fake_dim=32), "transform_description", "")),
+    )
     store = root / "emb"
     write_meta(store, {**read_meta(store), "revision": "fake-v1", "dtype": "fp32"})
     run_dir = tmp_path / "run"
     config = tmp_path / "probe.yaml"
     config.write_text(
-        _EMBEDDING_EXPERIMENT.format(repo_v1=_REPO_V1, out=run_dir, root=root) + extra_yaml,
+        _EMBEDDING_EXPERIMENT.format(repo_v1=synthetic.REPO_V1, out=run_dir, root=root)
+        + extra_yaml,
         encoding="utf-8",
     )
     result = runner.invoke(

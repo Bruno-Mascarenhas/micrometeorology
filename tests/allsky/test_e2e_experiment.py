@@ -18,30 +18,13 @@ still reads them). Kept well under a minute: 3 days x 20 rows, a tiny MLP.
 
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from typer.testing import CliRunner
 
 from allsky.cli import app
-from allsky.embeddings.storage import (
-    save_shard,
-    shard_path,
-    write_index,
-    write_meta,
-)
 from tests.allsky import _synthetic as synthetic
 
 runner = CliRunner()
-
-#: The repository experiment the tmp config inherits from (extends resolves it,
-#: and its own extends chain -> _base.yaml + models/sensor_only.yaml).
-_REPO_V1 = (
-    Path(__file__).resolve().parents[2]
-    / "configs"
-    / "allsky"
-    / "experiments"
-    / "v1_sensor_only.yaml"
-)
 
 _TMP_CONFIG = """\
 extends: ["{repo_v1}"]
@@ -62,33 +45,11 @@ train:
 """
 
 
-def _write_embeddings(root: Path, manifest: pd.DataFrame, dim: int = 8) -> None:
-    """Write real on-disk safetensors embeddings covering every sample_id."""
-    sample_ids = [str(s) for s in manifest["sample_id"]]
-    emb_dir = root / "emb"
-    emb_dir.mkdir(parents=True, exist_ok=True)
-    embeddings = np.random.default_rng(1).standard_normal((len(sample_ids), dim)).astype(np.float32)
-    save_shard(shard_path(emb_dir, 0), embeddings)
-    write_index(
-        emb_dir, pd.DataFrame({"sample_id": sample_ids, "shard": 0, "row": range(len(sample_ids))})
-    )
-    write_meta(
-        emb_dir,
-        {
-            "backbone": "fake",
-            "revision": "r0",
-            "pooling": "cls",
-            "dim": dim,
-            "count": len(sample_ids),
-        },
-    )
-
-
 def _make_config(tmp_path: Path, root: Path, run_dir: Path) -> Path:
     """Write the tmp experiment YAML extending the repo's v1_sensor_only.yaml."""
     config_path = tmp_path / "e2e.yaml"
     config_path.write_text(
-        _TMP_CONFIG.format(repo_v1=_REPO_V1, out=run_dir, root=root),
+        _TMP_CONFIG.format(repo_v1=synthetic.REPO_V1, out=run_dir, root=root),
         encoding="utf-8",
     )
     return config_path
@@ -96,7 +57,7 @@ def _make_config(tmp_path: Path, root: Path, run_dir: Path) -> Path:
 
 def test_train_resume_evaluate_end_to_end(tmp_path: Path) -> None:
     root, manifest, _ = synthetic.make_dataset(tmp_path)
-    _write_embeddings(root, manifest)
+    synthetic.make_embeddings_store(root, manifest, revision="r0", pooling="cls")
     run_dir = tmp_path / "run"
     config_path = _make_config(tmp_path, root, run_dir)
 

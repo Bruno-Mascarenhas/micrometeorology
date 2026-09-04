@@ -8,17 +8,11 @@ exit 0), a missing checkpoint (non-zero exit) and cross-model comparison.
 
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
 from typer.testing import CliRunner
 
 from allsky.cli import app
 from allsky.embeddings.storage import (
     SafetensorsEmbeddingReader,
-    save_shard,
-    shard_path,
-    write_index,
-    write_meta,
 )
 from allsky.evaluation.reports import compare_experiments
 from allsky.training.engine import run_experiment
@@ -27,33 +21,10 @@ from tests.allsky import _synthetic as synthetic
 runner = CliRunner()
 
 
-def _write_embeddings(root: Path, manifest: pd.DataFrame, dim: int = 8) -> Path:
-    """Write real on-disk safetensors embeddings covering every sample_id."""
-    sample_ids = [str(s) for s in manifest["sample_id"]]
-    emb_dir = root / "emb"
-    emb_dir.mkdir(parents=True, exist_ok=True)
-    embeddings = np.random.default_rng(1).standard_normal((len(sample_ids), dim)).astype(np.float32)
-    save_shard(shard_path(emb_dir, 0), embeddings)
-    write_index(
-        emb_dir, pd.DataFrame({"sample_id": sample_ids, "shard": 0, "row": range(len(sample_ids))})
-    )
-    write_meta(
-        emb_dir,
-        {
-            "backbone": "fake",
-            "revision": "r0",
-            "pooling": "cls",
-            "dim": dim,
-            "count": len(sample_ids),
-        },
-    )
-    return emb_dir
-
-
 def _train(tmp_path: Path) -> tuple[Path, Path]:
     """Build data + on-disk embeddings, train a checkpoint; return (root, run_dir)."""
     root, manifest, _ = synthetic.make_dataset(tmp_path)
-    emb_dir = _write_embeddings(root, manifest)
+    emb_dir = synthetic.make_embeddings_store(root, manifest, revision="r0", pooling="cls")
     reader = SafetensorsEmbeddingReader(emb_dir)
     cfg = synthetic.make_config(root, epochs=2)
     run_dir = tmp_path / "run"
