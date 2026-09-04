@@ -493,3 +493,44 @@ class TestBackboneTablesAgree:
 
     def test_the_vit_poolings_are_the_extraction_path_s_own(self):
         assert set(VIT_POOLINGS) == set(POOLINGS)
+
+
+class TestGeometryPlanesNeedIsotropicFrames:
+    """`isotropic_calibration` describes ONE geometry: the disc centred and
+    inscribed by the prepare crop and pad, then resized square. Applied to a
+    frame that went through the plain 1920x1080 resize it puts the horizon where
+    the frame has none — silently, because the shapes agree."""
+
+    @staticmethod
+    def _dataset(tmp_path, frame_geometry):
+        from allsky.data.datasets import MultimodalImageDataset
+        from allsky.features.policy import resolve_feature_set
+
+        manifest, root = _manifest(tmp_path)
+        return MultimodalImageDataset(
+            manifest,
+            resolve_feature_set("safe"),
+            data_root=root,
+            image_size=FRAME_PX,
+            train=True,
+            geometry_channels=("cos_sun_angle",),
+            frame_geometry=frame_geometry,
+        )
+
+    def test_frames_written_without_crop_or_pad_are_refused(self, tmp_path):
+        plain = {"crop": {"enabled": False}, "pad": {"enabled": False}, "resize": 512}
+
+        with pytest.raises(ValueError, match="isotropic crop/pad"):
+            self._dataset(tmp_path, plain)
+
+    def test_frames_written_through_the_isotropic_crop_are_accepted(self, tmp_path):
+        isotropic = {"crop": {"enabled": True}, "pad": {"enabled": True}, "resize": 512}
+
+        assert self._dataset(tmp_path, isotropic) is not None
+
+    def test_a_manifest_predating_the_record_warns_instead_of_refusing(self, tmp_path, caplog):
+        """Every dataset of that vintage would otherwise stop loading."""
+        with caplog.at_level("WARNING"):
+            self._dataset(tmp_path, None)
+
+        assert "records no frame_geometry" in caplog.text

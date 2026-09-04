@@ -23,8 +23,9 @@ importing ``allsky.data.datasets`` never pulls torch.
 """
 
 import itertools
+import logging
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, get_args, runtime_checkable
 
@@ -43,6 +44,8 @@ if TYPE_CHECKING:
     # it at runtime would close a cycle through this package's __init__.
     from allsky.augmentation import AugmentationPipeline
     from allsky.preprocessing import PreprocessingPipeline
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "EmbeddingReader",
@@ -338,6 +341,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         preprocess: PreprocessingPipeline | None = None,
         seed: int = 0,
         geometry_channels: Sequence[str] = (),
+        frame_geometry: Mapping[str, Any] | None = None,
         dhi_parameterization: DHIParameterization = "raw",
         utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
         window: WindowMode = "center_frame",
@@ -380,6 +384,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
             else []
         )
         self._geometry_channels = tuple(geometry_channels)
+        self.frame_geometry = frame_geometry
         self._geometry = (
             self._geometry_source(manifest, augment if train else None)
             if self._geometry_channels
@@ -405,7 +410,45 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
             raise ValueError(
                 "geometry channels need finite solar_zenith / solar_azimuth on every row"
             )
+        self._refuse_geometry_over_unknown_frames()
         return isotropic_calibration(self.image_size), zenith_deg, azimuth_deg
+
+    def _refuse_geometry_over_unknown_frames(self) -> None:
+        """Refuse the geometry planes for frames not written isotropically.
+
+        :func:`~allsky.lens.isotropic_calibration` describes ONE geometry: the
+        disc centred and inscribed by the prepare crop and pad, then resized
+        square. Applied to a frame that went through the plain 1920x1080 resize
+        it puts the horizon where the frame does not have one, and the planes
+        describe a lens the pixels were never taken through — silently, because
+        the shapes agree.
+
+        The manifest's ``frame_geometry`` is what says which of the two a
+        dataset holds. A manifest built before it was recorded says nothing, so
+        that case warns rather than refusing: every dataset of that vintage would
+        otherwise stop loading.
+
+        Raises
+        ------
+        ValueError
+            When the recorded geometry enables neither the crop nor the pad, so
+            the frames are not the inscribed disc the calibration describes.
+        """
+        if self.frame_geometry is None:
+            logger.warning(
+                "geometry channels are built on the isotropic lens calibration, and this "
+                "manifest records no frame_geometry to confirm its frames were written that "
+                "way; re-run prepare-local to record it"
+            )
+            return
+        crop = self.frame_geometry.get("crop") or {}
+        pad = self.frame_geometry.get("pad") or {}
+        if not crop.get("enabled") and not pad.get("enabled"):
+            raise ValueError(
+                "geometry channels need frames written through the isotropic crop/pad, but "
+                "this manifest's frame_geometry enables neither; the planes would describe a "
+                "lens these pixels were never taken through"
+            )
 
     def _load_image(self, image_path: Path, idx: int = 0) -> np.ndarray:
         """Load a JPEG as a standardized float32 CHW array, resized to ``image_size``.

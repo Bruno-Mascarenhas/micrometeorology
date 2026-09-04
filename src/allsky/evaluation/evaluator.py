@@ -256,6 +256,7 @@ def evaluate_checkpoint(
         image_backbone_builder=image_backbone_builder,
         kindex_kind=manifest_kind,
         utc_offset_hours=site_utc_offset_hours(meta),
+        frame_geometry=meta.get("frame_geometry"),
     )
 
     global_metrics = _global_metrics(predictions, enabled_targets)
@@ -431,6 +432,7 @@ def _run_inference(
     image_backbone_builder: Any | None,
     kindex_kind: str | None,
     utc_offset_hours: float,
+    frame_geometry: Mapping[str, Any] | None = None,
 ) -> pd.DataFrame:
     """Rebuild the model, run a no-grad pass and assemble the predictions frame."""
     import torch
@@ -446,6 +448,7 @@ def _run_inference(
         root=root,
         embedding_reader=embedding_reader,
         utc_offset_hours=utc_offset_hours,
+        frame_geometry=frame_geometry,
     )
 
     model = restore_model(
@@ -520,6 +523,7 @@ def _build_split_dataset(
     root: Path,
     embedding_reader: EmbeddingReader | None,
     utc_offset_hours: float,
+    frame_geometry: Mapping[str, Any] | None = None,
 ) -> tuple[Any, int | None]:
     """Build the (train=False) dataset for the split, reusing the stored normalizer."""
     from allsky.data.datasets import MultimodalEmbeddingDataset, MultimodalImageDataset
@@ -560,6 +564,7 @@ def _build_split_dataset(
         stats=feature_normalizer,
         preprocess=PreprocessingPipeline.from_config(cfg),
         geometry_channels=geometry_channels_of(cfg),
+        frame_geometry=frame_geometry,
         dhi_parameterization=cfg.targets.dhi.parameterization,
         utc_offset_hours=utc_offset_hours,
         window=cfg.data.alignment.strategy,

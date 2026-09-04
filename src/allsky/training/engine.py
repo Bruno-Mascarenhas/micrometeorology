@@ -235,6 +235,7 @@ def run_experiment(
         root=root,
         embedding_reader=embedding_reader,
         utc_offset_hours=site_utc_offset_hours(meta),
+        frame_geometry=meta.get("frame_geometry"),
     )
     # Fitted from the dataset, not the manifest: the normalizer has to describe
     # the quantity the head actually receives, which the DHI parameterization
@@ -581,6 +582,7 @@ def _build_datasets(
     root: Path,
     embedding_reader: EmbeddingReader | None,
     utc_offset_hours: float,
+    frame_geometry: Mapping[str, Any] | None = None,
 ) -> tuple[Any, Any, int | None]:
     """Build the train/val datasets for the configured input mode.
 
@@ -650,6 +652,7 @@ def _build_datasets(
         preprocess=preprocess,
         seed=cfg.seed,
         geometry_channels=geometry_channels_of(cfg),
+        frame_geometry=frame_geometry,
         dhi_parameterization=cfg.targets.dhi.parameterization,
         utc_offset_hours=utc_offset_hours,
         window=cfg.data.alignment.strategy,
@@ -665,6 +668,7 @@ def _build_datasets(
         stats=image_train.stats,
         preprocess=preprocess,
         geometry_channels=geometry_channels_of(cfg),
+        frame_geometry=frame_geometry,
         dhi_parameterization=cfg.targets.dhi.parameterization,
         utc_offset_hours=utc_offset_hours,
         window=cfg.data.alignment.strategy,
