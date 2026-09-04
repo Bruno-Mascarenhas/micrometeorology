@@ -62,18 +62,20 @@ MAX_CAPTURE_INTERVAL = dt.timedelta(minutes=10)
 MAX_UNREADABLE_FRACTION = 0.2
 AMBIGUOUS_SCORE_MARGIN = 32
 MAX_ALTERNATIVE_COMBINATIONS = 64
-MIN_CELL_INK_PIXELS = 20
-#: Fewest of a cell's pixels that must agree with its winning exemplar.
-#: :data:`AMBIGUOUS_SCORE_MARGIN` is purely RELATIVE, so a cell scoring 210 of
-#: 280 was accepted as confidently as one scoring 280. Measured against the
-#: shipped bank (20x14 = 280-pixel cells): a real exemplar with up to 40 of its
-#: pixels flipped still scores 240-243 and still reads as the right digit in
-#: 300/300 trials, while a cell of uniformly scattered ink — 20 to 80 pixels,
-#: 200 trials each — never exceeds 225 and reads as ``1`` almost every time.
-#: The floor sits inside that gap, so a cell far from any real glyph is refused
-#: outright instead of parsing into a plausible, wrong minute. A blank cell
-#: scores 229 (280 minus the sparsest '1'), which this also refuses.
-MIN_CELL_MATCH_PIXELS = 240
+#: Fewest text pixels a digit cell must hold to be read at all. Measured over
+#: 4.326 cells of 14 archive days: a real cell carries 44 to 176 ink pixels
+#: (median 112), and the shipped bank's sparsest exemplar, a '1', carries 51.
+#: At the previous floor of 20 a cell of scattered ink well below any real glyph
+#: read as '1' in 200 of 200 trials — a parseable, wrong minute rather than the
+#: honest failure the gate exists for. 40 refuses none of those 4.326 real
+#: cells and refuses every cell too sparse to be a glyph.
+#:
+#: This bounds the reading from below; it does not separate a cell whose ink is
+#: real but DAMAGED. Measured against the same bank, a rectangular smear — what
+#: glare actually leaves — matches its best exemplar at up to 257 of 280 pixels,
+#: above the 235 a real archive cell can fall to, so no absolute score floor
+#: divides the two. That residual is open.
+MIN_CELL_INK_PIXELS = 40
 
 GLYPH_EXEMPLAR_COUNTS = (38, 3, 22, 4, 8, 9, 16, 7, 16, 2)
 PACKED_GLYPH_BANK = (
@@ -229,8 +231,6 @@ def _read_frame(frame: np.ndarray) -> tuple[OverlayReading, tuple[tuple[str, ...
     if not _cells_carry_ink(mask):
         return OverlayReading(index=-1, timestamp=None, text=""), ()
     per_cell = [_cell_scores(mask, left) for left in DIGIT_CELL_LEFT_EDGES]
-    if any(not scores or scores[0][1] < MIN_CELL_MATCH_PIXELS for scores in per_cell):
-        return OverlayReading(index=-1, timestamp=None, text=""), ()
     text = "".join(scores[0][0] if scores else "" for scores in per_cell)
     alternatives = tuple(_cell_alternatives(scores) for scores in per_cell)
     return OverlayReading(index=-1, timestamp=parse_overlay_stamp(text), text=text), alternatives
@@ -241,7 +241,8 @@ def _cells_carry_ink(mask: np.ndarray) -> bool:
 
     Without this an overlay-free frame matches whichever exemplars are closest
     to blank and yields ``11111111111111`` — a *parseable* date in the year 1111
-    — instead of an honest failure.
+    — instead of an honest failure.  The floor is
+    :data:`MIN_CELL_INK_PIXELS`, measured against the archive's own cells.
     """
     return all(
         int(mask[:, left : left + DIGIT_CELL_WIDTH].sum()) >= MIN_CELL_INK_PIXELS

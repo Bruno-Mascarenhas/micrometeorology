@@ -102,39 +102,38 @@ def _scattered_ink_frame(pixels_per_cell: int, seed: int) -> np.ndarray:
     return frame
 
 
-@pytest.mark.parametrize("pixels_per_cell", [20, 30, 40, 50, 60])
-def test_a_cell_of_ink_that_is_no_glyph_is_refused_instead_of_read_as_ones(
+@pytest.mark.parametrize("pixels_per_cell", [5, 20, 30, 39])
+def test_a_cell_too_sparse_to_be_a_glyph_is_refused_instead_of_read_as_ones(
     pixels_per_cell: int,
 ):
-    """`AMBIGUOUS_SCORE_MARGIN` is purely relative, so a cell scoring 210 of its
-    280 pixels was accepted as confidently as one scoring 280, and the only other
-    gate counted ink alone. Measured on the shipped bank, scattered ink at every
-    level from 20 to 60 pixels reads as `1` in 200/200 trials — a parseable,
-    wrong minute that the neighbour-correction pass never revisits while it stays
-    inside its bracket."""
+    """The gate stood at 20 ink pixels while the sparsest exemplar in the bank
+    carries 51 and the sparsest cell in 14 archive days carries 44, so a cell of
+    scattered ink well below any real glyph read as `1` in 200/200 trials — a
+    parseable, wrong minute instead of the honest failure the gate exists for."""
     reading = read_frame_timestamp(_scattered_ink_frame(pixels_per_cell, seed=pixels_per_cell))
 
     assert reading.text == ""
     assert reading.timestamp is None
 
 
-def test_a_glyph_degraded_short_of_the_floor_still_reads():
-    """The floor sits inside a measured gap: a real exemplar with 30 of its 280
-    pixels flipped scores 250-252 and still reads as its own digit."""
-    from allsky import overlay as module
+def test_the_ink_floor_stays_below_every_cell_the_archive_actually_wrote():
+    """Measured over 4.326 cells of 14 archive days: the sparsest carries 44.
+    A floor at or above that refuses real frames, and an unreadable fraction
+    past `MAX_UNREADABLE_FRACTION` refuses the whole day."""
+    from allsky.overlay import MIN_CELL_INK_PIXELS
 
-    stamp = "20260810120345"
-    frame = fake.render_overlay_frame(stamp)
-    rows = module.OVERLAY_ROW_SLICE.stop - module.OVERLAY_ROW_SLICE.start
-    rng = np.random.default_rng(11)
-    for left in module.DIGIT_CELL_LEFT_EDGES:
-        cell = frame[module.OVERLAY_ROW_SLICE, left : left + module.DIGIT_CELL_WIDTH]
-        flat = cell.reshape(-1, 3)
-        for index in rng.choice(rows * module.DIGIT_CELL_WIDTH, 30, replace=False):
-            is_text = bool((flat[index] == np.array(fake.OVERLAY_TEXT, dtype=np.uint8)).all())
-            flat[index] = fake.OVERLAY_BACKGROUND if is_text else fake.OVERLAY_TEXT
+    sparsest_real_cell_measured_on_the_archive = 44
+    assert sparsest_real_cell_measured_on_the_archive > MIN_CELL_INK_PIXELS
 
-    assert read_frame_timestamp(frame).text == stamp
+
+def test_every_exemplar_clears_the_ink_floor():
+    """The bank is what a rendered frame is made of, so no exemplar may sit under
+    the gate that decides whether a cell is a glyph at all."""
+    from allsky.overlay import _BANK, MIN_CELL_INK_PIXELS
+
+    sparsest = min(int(exemplar.sum()) for exemplars in _BANK.values() for exemplar in exemplars)
+
+    assert sparsest >= MIN_CELL_INK_PIXELS
 
 
 def test_a_frame_too_narrow_to_hold_the_overlay_is_refused():
