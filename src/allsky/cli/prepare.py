@@ -717,19 +717,35 @@ def _extract_replacing_frames(video: str, video_dir: Path, cfg: PrepareConfig) -
 
     The replacement is produced whole before anything is removed and the previous
     directory is moved aside rather than deleted, so a failure at any point
-    leaves the earlier extraction intact.
+    leaves the earlier extraction intact.  A video that decodes to no frame at
+    all is refused before the swap: an empty manifest still carries the
+    ``qc_frame_flags`` column, so writing it would satisfy the resume gate
+    forever and the day would leave the dataset in silence.
 
     Returns
     -------
     pandas.DataFrame
         The frame manifest of :func:`_extract_and_qc`, with ``frame_path``
         rewritten from the staging directory onto the final *video_dir*.
+
+    Raises
+    ------
+    allsky.overlay.OverlayTimestampError
+        When the video decodes to no frame; *video_dir* is left as it was and
+        the caller reports the day as unusable.
     """
+    from allsky.overlay import OverlayTimestampError
+
     staging = video_dir.with_name(f"{video_dir.name}.incoming")
     superseded = video_dir.with_name(f"{video_dir.name}.superseded")
     shutil.rmtree(staging, ignore_errors=True)
     try:
         frame_manifest = _extract_and_qc(video, staging, cfg)
+        if len(frame_manifest) == 0:
+            raise OverlayTimestampError(
+                f"{Path(video).name} decoded to no frame — keeping the frames already in "
+                f"{video_dir}"
+            )
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise

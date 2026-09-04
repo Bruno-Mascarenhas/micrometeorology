@@ -263,6 +263,35 @@ class TestPrepareLocal:
         assert (dataset_dir / "frames" / "allsky-20260101" / "manifest.parquet").exists()
         assert not (dataset_dir / "frames" / "allsky-20260102" / "manifest.parquet").exists()
 
+    def test_a_video_that_decodes_to_no_frame_is_skipped_not_resumed_forever(
+        self, tmp_path: Path, synthetic_video: Path, synthetic_dat: Path, monkeypatch
+    ):
+        """An empty extraction still carried the ``qc_frame_flags`` column, so the
+        resume gate read the 0-row manifest as complete and skipped the day on every
+        later run — the day left the dataset with no warning after the first line."""
+        import imageio.v3 as iio
+
+        def decode_nothing(*_args, **_kwargs):
+            return iter(())
+
+        monkeypatch.setattr(iio, "imiter", decode_nothing)
+        dataset_dir = tmp_path / "dataset"
+        config = _write_config(
+            tmp_path / "c.yaml",
+            dataset_dir=dataset_dir,
+            video_pattern=f"{synthetic_video.parent}/allsky-*.mp4",
+            dat_path=synthetic_dat,
+        )
+
+        result = runner.invoke(
+            app, ["prepare-local", "--config", str(config), "--steps", "extract-frames"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "decoded to no frame" in result.output
+        assert "1 video(s) could not be timestamped" in result.output
+        assert not (dataset_dir / "frames" / synthetic_video.stem / "manifest.parquet").exists()
+
     def test_full_run_builds_manifest(
         self, tmp_path: Path, synthetic_video: Path, synthetic_dat: Path
     ):
