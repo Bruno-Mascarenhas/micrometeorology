@@ -11,6 +11,7 @@ reported, and the present case must be picked up.
 """
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -497,7 +498,7 @@ class TestTheSerialisedNumbersCarryTheirUnitsPrecision:
         monkeypatch.setattr(
             export_monitoring,
             "MONITORING_CHARTS",
-            [type(charts[0])(**{**charts[0].__dict__, "unit": "furlongs"})],
+            [replace(charts[0], unit="furlongs")],
         )
 
         result = runner.invoke(

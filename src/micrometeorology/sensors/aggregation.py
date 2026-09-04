@@ -44,7 +44,11 @@ def aggregate_to_hourly(
         Windows with fewer samples produce NaN. This is a completeness gate, not
         a physical one: it decides whether an hour is representable at all, so a
         partly-clouded hour reported from four samples is withheld rather than
-        published as if it summarised twelve.
+        published as if it summarised twelve. It counts SAMPLES, not a fraction
+        of the window, so it has to be chosen together with *freq* and the
+        cadence of *df*: the default 6 assumes the twelve five-minute samples of
+        an hour, and 15-minute input under that default empties every column
+        without reporting anything.
     sum_columns:
         Column names that should be *summed* (e.g. precipitation).
     wind_dir_columns:
@@ -71,14 +75,9 @@ def aggregate_to_hourly(
     dir_cols = set(wind_dir_columns or [])
     speed_column_map = wind_speed_column_map or {}
 
-    # Non-numeric columns are excluded rather than attempted: the datalogger's
-    # per-row quality flag is text ("OK" / "Unknown Fault"), and pandas 3 raises
-    # on a mean over a string dtype instead of quietly producing NaN. Convert
-    # such a flag to a number before calling this (e.g. the fraction of samples
-    # reading OK) if you want it in the hourly frame.
     numeric_columns = set(df.select_dtypes(include="number").columns)
     all_cols = set(df.columns)
-    mean_columns = (all_cols & numeric_columns) - sum_cols - dir_cols
+    mean_columns = numeric_columns - sum_cols - dir_cols
     skipped = all_cols - numeric_columns - sum_cols - dir_cols
     if skipped:
         logger.debug("skipping %d non-numeric column(s): %s", len(skipped), sorted(skipped))
@@ -103,9 +102,6 @@ def aggregate_to_hourly(
         sums[counts < min_samples] = np.nan
         results[col] = sums
 
-    # Direction is averaged through its U/V components: the arithmetic mean of
-    # bearings straddling north lands due south. Weighting by speed makes it the
-    # true vector mean; unit speed gives the unweighted directional mean.
     for dir_col in sorted(dir_cols):
         if dir_col not in df.columns:
             continue
@@ -117,12 +113,7 @@ def aggregate_to_hourly(
 
         if speed_col is not None and speed_col in df.columns:
             speed = df[speed_col].to_numpy(dtype=float)
-            # A sample whose speed alone is missing contributes NaN u/v that the
-            # resampled mean silently drops, while `dir_counts` below -- the only
-            # completeness gate on the published direction -- counts the direction
-            # channel alone and calls the hour whole. Unit weight for exactly
-            # those samples keeps them in the vector mean, the same trade the
-            # sparse-hour fallback below already makes for a whole hour.
+            # Pinned by test_a_sample_whose_speed_alone_is_missing_still_bears_on_the_direction.
             uv_means = directional_mean(np.where(np.isfinite(speed), speed, 1.0))
             # Where the speed is too sparse to weight with, fall back to the
             # unit-weight directional mean: losing the weight beats losing the hour.
@@ -132,10 +123,18 @@ def aggregate_to_hourly(
             if sparse.any():
                 uv_means = uv_means.mask(sparse, directional_mean(np.ones(len(df))))
         else:
+            if speed_col is not None:
+                logger.warning(
+                    "%r is mapped to speed column %r, absent from the frame: its %s "
+                    "direction is an UNWEIGHTED vector mean, not the speed-weighted "
+                    "one the mapping declares",
+                    dir_col,
+                    speed_col,
+                    freq,
+                )
             uv_means = directional_mean(np.ones(len(df)))
 
-        # Completeness is judged on the DIRECTION channel, not on the u component,
-        # which is NaN whenever the paired speed is.
+        # Pinned by test_a_complete_direction_hour_survives_a_dead_anemometer.
         dir_counts = resampler[dir_col].count()
 
         dirs = wind_direction_from_components(uv_means["u"].to_numpy(), uv_means["v"].to_numpy())

@@ -1,21 +1,25 @@
 """Date-precise instrument calibration corrections.
 
-Calibration records are loaded from ``configs/calibrations.yaml``.
+Calibration records are loaded from ``configs/micromet/calibrations.yaml``.
 Each record specifies a column, a date range, and a multiplicative factor.
 Records are **immutable historical facts** — new calibrations must be
 appended, never overwriting existing entries.
+
+Timestamps are naive station-local throughout, as they arrive from the
+datalogger's own clock (see :mod:`micrometeorology.sensors.ingestion`); the dates
+a record declares are read on that same clock and never converted.
 """
 
 import itertools
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class DatedColumnRecord(BaseModel):
@@ -33,6 +37,14 @@ class DatedColumnRecord(BaseModel):
     start_date: str | None = None
     end_date: str | None = None
     description: str = ""
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def _date_parses(cls, value: str | None) -> str | None:
+        """Reject an unparseable date here, naming the field, not deep in the frame walk."""
+        if value:
+            pd.Timestamp(value)
+        return value
 
 
 class CalibrationRecord(DatedColumnRecord):
@@ -86,7 +98,7 @@ def load_calibrations(config_path: str | Path) -> list[CalibrationRecord]:
     return [CalibrationRecord.model_validate(record) for record in data.get("calibrations", [])]
 
 
-def _resolve_inclusive_end(value: Any, fallback: pd.Timestamp) -> pd.Timestamp:
+def _resolve_inclusive_end(value: str | None, fallback: pd.Timestamp) -> pd.Timestamp:
     """Resolve an ``end_date`` config value to an *inclusive* upper bound.
 
     ``end_date`` is the *last day* the record applies, but a date-only value such
@@ -103,9 +115,21 @@ def _resolve_inclusive_end(value: Any, fallback: pd.Timestamp) -> pd.Timestamp:
     return end
 
 
-# A resolved date range for one record, tagged with a human-readable label used
-# only in overlap-error messages: ``(label, inclusive_start, inclusive_end)``.
-_ResolvedRange = tuple[str, pd.Timestamp, pd.Timestamp]
+@dataclass(frozen=True, slots=True)
+class _ResolvedRange:
+    """One record's inclusive date range, tagged for the overlap-error message.
+
+    Attributes
+    ----------
+    label:
+        Human-readable record identity, used only in error messages.
+    start, end:
+        Inclusive naive station-local bounds.
+    """
+
+    label: str
+    start: pd.Timestamp
+    end: pd.Timestamp
 
 
 def _describe_record(record: DatedColumnRecord) -> str:
@@ -165,13 +189,13 @@ def _find_overlapping_pair(
     declared ``end_date`` precedes its declared ``start_date`` covers nothing,
     and counting it would make every later record "overlap" it.
     """
-    ordered = sorted((item for item in ranges if item[1] <= item[2]), key=lambda item: item[1])
+    ordered = sorted(
+        (item for item in ranges if item.start <= item.end), key=lambda item: item.start
+    )
     for earlier, later in itertools.pairwise(ordered):
-        # Sorted by start, so the pair overlaps iff later's start falls on or
-        # before earlier's inclusive end.
-        if later[1] <= earlier[2]:
-            overlap_start = later[1]
-            overlap_end = min(earlier[2], later[2])
+        if later.start <= earlier.end:
+            overlap_start = later.start
+            overlap_end = min(earlier.end, later.end)
             return earlier, later, overlap_start, overlap_end
     return None
 
@@ -189,8 +213,8 @@ def _overlap_error(
     day_hi = overlap_end.date()
     day = str(day_lo) if day_lo == day_hi else f"{day_lo}..{day_hi}"
     return ValueError(
-        f"Overlapping {kind} for {group!r} on {day}: [{earlier[0]}] and "
-        f"[{later[0]}] both cover {day}. Date ranges are inclusive of the whole "
+        f"Overlapping {kind} for {group!r} on {day}: [{earlier.label}] and "
+        f"[{later.label}] both cover {day}. Date ranges are inclusive of the whole "
         f"end day, so consecutive records must abut on the NEXT day "
         f"(e.g. end_date 2018-12-31 then start_date 2019-01-01), not the same day."
     )
@@ -238,7 +262,7 @@ def apply_calibrations(
             continue
         start, end = _declared_record_range(record)
         ranges_by_column.setdefault(record.column, []).append(
-            (_describe_record(record), start, end)
+            _ResolvedRange(_describe_record(record), start, end)
         )
     for column, ranges in ranges_by_column.items():
         overlap = _find_overlapping_pair(ranges)
@@ -257,10 +281,7 @@ def apply_calibrations(
 
         mask = (df.index >= start) & (df.index <= end)
 
-        # "Declared" and "applied" must stay distinguishable: a record selecting
-        # no populated row corrects nothing yet looks like one that worked. Live
-        # case — the Eppley PSP's post-2019 sensitivity correction named only the
-        # pre-rename column spelling, publishing the diffuse sensor ~8.5% low.
+        # Pinned by test_a_record_that_matches_nothing_is_reported.
         if not bool((mask & df[column].notna()).any()):
             logger.warning(
                 "calibration for %r [%s -> %s] matched no populated sample (%s)",
@@ -415,7 +436,7 @@ def uncalibrated_mapping_windows(
             if start > end:
                 continue
             cursor = start
-            for cal_start, cal_end in sorted(covered.get(column, [])):
+            for cal_start, cal_end in sorted(covered[column]):
                 if cal_end < cursor:
                     continue
                 if cal_start > cursor:
@@ -471,7 +492,7 @@ def unify_sensor_columns(
     for switch in switches:
         unified_name = switch.unified_name
         mapping_ranges = [
-            (_describe_record(mapping), *_declared_record_range(mapping))
+            _ResolvedRange(_describe_record(mapping), *_declared_record_range(mapping))
             for mapping in switch.mappings
             if mapping.column in df.columns
         ]
@@ -511,11 +532,11 @@ SHADE_RING_FACTOR_FILE = "teorica_2016-2030.csv"
 #: Derived form of the table above, in the shape the rest of the archive is
 #: written in: one ``DatetimeIndex`` in naive station-local time, ``float64``
 #: columns, zstd. Preferred when present and read column-wise, which is what
-#: makes it worth having — the CSV costs 1.42 s and 203 MB on disk to yield six
-#: of its twenty columns, the parquet 0.02 s and 29 MB for the same answer.
+#: makes it worth having, the pipeline needing six of its twenty columns;
+#: docs/micrometeorology.md carries the measured cost of each form.
 #: ``float64`` and not ``float32`` deliberately: ``fc`` multiplies the measured
-#: diffuse, and the 5.4e-08 relative error of single precision would move every
-#: corrected value in the published archive.
+#: diffuse, so single precision would move every corrected value in the
+#: published archive.
 SHADE_RING_FACTOR_PARQUET = "teorica_2016-2030.parquet"
 
 _SHADE_RING_TIME_COLUMNS = ("ano_i", "mes_i", "dia_i", "hor_i", "min_i")
@@ -525,13 +546,40 @@ class MissingShadeRingFactorError(LookupError):
     """Uma amostra de difusa não encontrou fator de correção do anel."""
 
 
+def _shade_ring_stamps(frame: pd.DataFrame) -> pd.DatetimeIndex:
+    """Assemble the lab's five integer time columns into one index.
+
+    Parameters
+    ----------
+    frame:
+        Solar-geometry table carrying ``ano_i``, ``mes_i``, ``dia_i``, ``hor_i``
+        and ``min_i`` as integer columns.
+
+    Returns
+    -------
+    pandas.DatetimeIndex
+        ``(N,)`` naive station-local stamps, in the row order of *frame*.
+    """
+    return pd.DatetimeIndex(
+        pd.to_datetime(
+            {
+                "year": frame["ano_i"],
+                "month": frame["mes_i"],
+                "day": frame["dia_i"],
+                "hour": frame["hor_i"],
+                "minute": frame["min_i"],
+            }
+        )
+    )
+
+
 def solar_geometry_to_parquet(csv_path: Path | str, parquet_path: Path | str) -> Path:
     """Rewrite the solar-geometry table in the archive's own on-disk shape.
 
-    The lab publishes it as a 203 MB CSV whose five leading integer columns spell
-    out a timestamp. Reindexed on that timestamp and stored column-wise it is 29 MB
-    and answers a single-column query in 0.02 s against 1.42 s, which is what the
-    hourly window job pays every run.
+    The lab publishes it as a CSV whose five leading integer columns spell out a
+    timestamp. Reindexed on that timestamp and stored column-wise it is smaller and
+    answers a single-column query far faster, which is what the hourly window job
+    pays every run; docs/micrometeorology.md records the measurement.
 
     The CSV is left untouched: this writes a derived artifact beside it.
 
@@ -548,18 +596,9 @@ def solar_geometry_to_parquet(csv_path: Path | str, parquet_path: Path | str) ->
         The path written.
     """
     frame = pd.read_csv(csv_path, engine="pyarrow")
-    stamps = pd.to_datetime(
-        {
-            "year": frame["ano_i"],
-            "month": frame["mes_i"],
-            "day": frame["dia_i"],
-            "hour": frame["hor_i"],
-            "minute": frame["min_i"],
-        }
-    )
     derived = (
         frame.drop(columns=list(_SHADE_RING_TIME_COLUMNS))
-        .set_index(pd.DatetimeIndex(stamps).as_unit("us"))
+        .set_index(_shade_ring_stamps(frame).as_unit("us"))
         .sort_index()
     )
     derived.index.name = None
@@ -602,19 +641,7 @@ def load_shade_ring_factors(path: Path | str) -> pd.Series:
             "0.81 under an overcast sky where the physics requires 1."
         )
     frame = pd.read_csv(path, usecols=[*_SHADE_RING_TIME_COLUMNS, "fc"])
-    faltando = {*_SHADE_RING_TIME_COLUMNS, "fc"} - set(frame.columns)
-    if faltando:
-        raise ValueError(f"{path}: faltam as colunas {sorted(faltando)}")
-    instantes = pd.to_datetime(
-        {
-            "year": frame["ano_i"],
-            "month": frame["mes_i"],
-            "day": frame["dia_i"],
-            "hour": frame["hor_i"],
-            "minute": frame["min_i"],
-        }
-    )
-    fatores = pd.Series(frame["fc"].to_numpy(dtype=float), index=pd.DatetimeIndex(instantes))
+    fatores = pd.Series(frame["fc"].to_numpy(dtype=float), index=_shade_ring_stamps(frame))
     return fatores.sort_index()
 
 

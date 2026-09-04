@@ -8,6 +8,11 @@ into U/V components, average those, then recompose.
 import numpy as np
 from numpy.typing import NDArray
 
+#: Origin of the meteorological bearing, in radians. With ``u = -speed*sin(dir)``
+#: and ``v = -speed*cos(dir)`` as :func:`wind_components` defines them, the
+#: mathematical angle ``arctan2(v, u)`` maps back as ``3*pi/2 - angle``.
+MET_BEARING_ORIGIN_RAD = 3.0 * (np.pi / 2.0)
+
 
 def wind_components(
     speed: NDArray | float,
@@ -40,7 +45,7 @@ def wind_components(
     return u, v
 
 
-def wind_direction_from_components(u: NDArray | float, v: NDArray | float) -> NDArray | float:
+def wind_direction_from_components(u: NDArray | float, v: NDArray | float) -> NDArray:
     """Compute wind direction element-wise from U/V components.
 
     Inverse of :func:`wind_components`, and the recomposition step of the vector
@@ -55,7 +60,7 @@ def wind_direction_from_components(u: NDArray | float, v: NDArray | float) -> ND
 
     Returns
     -------
-    ndarray or float
+    ndarray
         Direction the wind blows FROM, degrees clockwise from true north in
         ``[0, 360)``, shape ``(N,)`` float, or ``NaN`` where the resultant
         vector has zero length. A zero-length resultant carries no directional
@@ -64,8 +69,8 @@ def wind_direction_from_components(u: NDArray | float, v: NDArray | float) -> ND
         window or a stalled anemometer.
     """
     mathematical_angle_rad = np.arctan2(v, u)
-    direction_deg = np.fmod(3.0 * (np.pi / 2.0) - mathematical_angle_rad, 2.0 * np.pi) * (
-        180.0 / np.pi
+    direction_deg = np.rad2deg(
+        np.fmod(MET_BEARING_ORIGIN_RAD - mathematical_angle_rad, 2.0 * np.pi)
     )
     resultant_magnitude = np.hypot(u, v)
     return np.where(resultant_magnitude == 0.0, np.nan, direction_deg % 360.0)
