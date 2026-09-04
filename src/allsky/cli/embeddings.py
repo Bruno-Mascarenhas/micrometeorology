@@ -22,6 +22,7 @@ from typing import Annotated
 import typer
 
 from allsky.cli.runtime import configure_cli_logging
+from allsky.cli.train import DeviceChoice  # typer resolves this annotation at runtime
 from allsky.config import FRAME_PIXEL_SECTIONS, VIDEO_TIME_FIELDS, PrepareConfig
 
 logger = logging.getLogger("allsky.embeddings")
@@ -114,7 +115,7 @@ def precompute_embeddings(
         ),
     ] = None,
     device: Annotated[
-        str | None,
+        DeviceChoice | None,
         typer.Option("--device", help="Device override (auto|cpu|cuda|mps)."),
     ] = None,
     resume: Annotated[
@@ -150,7 +151,7 @@ def precompute_embeddings(
     dataset_dir = Path(cfg.output.dataset_dir)
     manifest_path = manifest if manifest is not None else dataset_dir / "manifest.parquet"
     out_dir = out if out is not None else dataset_dir / "embeddings"
-    device_pref = device if device is not None else cfg.embeddings.device
+    device_pref = str(device) if device is not None else cfg.embeddings.device
     data_root = manifest_path.parent
 
     if not manifest_path.exists():

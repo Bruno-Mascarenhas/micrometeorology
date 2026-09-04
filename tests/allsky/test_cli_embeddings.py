@@ -287,3 +287,18 @@ def test_a_store_stamped_with_an_unrelated_digest_still_refuses_to_resume(tmp_pa
 
     assert result.exit_code == 1
     assert "cannot resume" in result.output
+
+
+def test_an_unknown_device_is_a_usage_error_like_in_train_and_evaluate(tmp_path: Path):
+    """``--device gpu`` was accepted as free text here and only failed inside torch,
+    after the backbone was built and the manifest read; train and evaluate refuse it
+    at the command line."""
+    dataset_dir = tmp_path / "dataset"
+    _build_dataset(dataset_dir, n=4)
+    config = _write_config(tmp_path, dataset_dir)
+
+    result = runner.invoke(
+        app, ["precompute-embeddings", "--config", str(config), "--device", "gpu", "--dry-run"]
+    )
+
+    assert result.exit_code == 2
