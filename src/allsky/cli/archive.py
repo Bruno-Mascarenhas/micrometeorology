@@ -604,7 +604,13 @@ def _process_day(
     if plan.upload_frames:
         recorded = ledger.frames(entry.key) or {}
         source = ledger.frames_dir(entry.key, root=root) or frames_dir
-        destination = uploader.upload_dir(source, REMOTE_FRAMES, entry.key, pattern=FRAME_PATTERN)
+        # Mirrored, not copied: _discard_previous_frames removes the earlier
+        # extraction's JPEGs locally, and a plain copy would leave them on Drive
+        # beside the new ones — the two-clocks state that function exists to
+        # prevent, with the ledger recording a single clean upload over it.
+        destination = uploader.upload_dir(
+            source, REMOTE_FRAMES, entry.key, pattern=FRAME_PATTERN, mirror=True
+        )
         ledger.record_upload(
             entry.key, destination, kind="frames", count=recorded.get("count"), step=step
         )

@@ -113,21 +113,41 @@ class RcloneUploader:
         logger.info("uploaded %s -> %s", source.name, destination)
         return destination
 
-    def upload_dir(self, local_dir: str | Path, *remote_parts: str, pattern: str = "*") -> str:
+    def upload_dir(
+        self,
+        local_dir: str | Path,
+        *remote_parts: str,
+        pattern: str = "*",
+        mirror: bool = False,
+    ) -> str:
         """Copy a whole directory in one invocation, not one process per file.
 
         *pattern* narrows the copy to matching names via ``--include``.
 
+        *mirror* runs ``sync`` instead of ``copy``, so a destination file with no
+        local counterpart is DELETED.  ``copy`` only ever adds and overwrites,
+        which is wrong for a directory whose local content was replaced rather
+        than extended: a re-extraction under a different clock writes new frame
+        names and discards the old ones locally, and copy leaves the previous
+        run's files sitting beside the new ones remotely, two clocks in one day
+        folder.  Verified against rclone 1.75: under ``--include`` the deletion
+        is scoped to matching names, so anything else in the destination is left
+        alone.  It therefore requires a *pattern* — mirroring a whole remote
+        directory from here would be a much larger promise than any caller makes.
+
         Raises
         ------
         RcloneError
-            If *local_dir* is not a directory, or rclone exits non-zero.
+            If *local_dir* is not a directory, if *mirror* is asked without a
+            *pattern*, or if rclone exits non-zero.
         """
         source = Path(local_dir)
         if not source.is_dir():
             raise RcloneError(f"nothing to upload: {source} is not a directory")
+        if mirror and pattern == "*":
+            raise RcloneError("mirroring needs a pattern: it deletes what the pattern matches")
         destination = self.target.path(*remote_parts)
-        args = ["copy", str(source), destination, "--checksum"]
+        args = ["sync" if mirror else "copy", str(source), destination, "--checksum"]
         if pattern != "*":
             args += ["--include", pattern]
         self._run(args)

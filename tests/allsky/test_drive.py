@@ -100,6 +100,40 @@ def test_uploading_a_whole_directory_costs_a_single_rclone_process(
     ]
 
 
+def test_a_mirrored_directory_syncs_so_a_replaced_extraction_leaves_no_orphan(
+    target: DriveTarget, rclone_log: Path, tmp_path: Path
+):
+    """`copy` only adds and overwrites, so the JPEGs a re-extraction discarded
+    locally stayed on Drive beside the new ones — the two-clocks state
+    `_discard_previous_frames` exists to prevent, with the ledger recording a
+    single clean upload over it. Under `--include`, sync's deletion is scoped to
+    the pattern, so nothing else in the day folder is touched."""
+    frames = tmp_path / "frames" / "20260810"
+    frames.mkdir(parents=True)
+    (frames / "allsky-20260810-1200.jpg").write_bytes(b"jpeg")
+
+    RcloneUploader(target=target).upload_dir(
+        frames, "frames", "20260810", pattern="*.jpg", mirror=True
+    )
+
+    invocation = fake.rclone_invocations(rclone_log)[0].split()
+    assert invocation[0] == "sync"
+    assert invocation[-2:] == ["--include", "*.jpg"]
+
+
+def test_mirroring_without_a_pattern_is_refused(
+    target: DriveTarget, rclone_log: Path, tmp_path: Path
+):
+    """Unfiltered, sync would delete every remote file the source lacks."""
+    frames = tmp_path / "frames"
+    frames.mkdir()
+
+    with pytest.raises(RcloneError, match="needs a pattern"):
+        RcloneUploader(target=target).upload_dir(frames, "frames", mirror=True)
+
+    assert fake.rclone_invocations(rclone_log) == []
+
+
 def test_uploading_a_directory_without_a_pattern_passes_no_include_filter(
     target: DriveTarget, rclone_log: Path, tmp_path: Path
 ):

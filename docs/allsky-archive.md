@@ -192,10 +192,14 @@ Two rules matter:
   absent from its record. So an upload that failed yesterday retries today without
   re-downloading the video, and adding `--upload` after a plain backfill uploads
   the days you already hold.
-- **A re-extraction always re-uploads.** The frames destination is keyed by the
-  day alone, so the record of the set being replaced names the same remote folder
-  as its replacement; reading it as "already there" would leave Drive holding
-  frames that no longer exist locally, with nothing to reconcile them.
+- **A re-extraction always re-uploads, and the upload mirrors.** The frames
+  destination is keyed by the day alone, so the record of the set being replaced
+  names the same remote folder as its replacement; reading it as "already there"
+  would leave Drive holding frames that no longer exist locally. The upload runs
+  `rclone sync --include "*.jpg"` rather than `copy`, so the previous clock's
+  JPEGs are removed from the day's remote folder instead of landing beside the
+  new ones. The `--include` filter scopes the deletion: anything in that folder
+  that is not a JPEG is left alone.
 - **A day the overlay reader refuses is skipped, not fatal.** `sync-archive`
   follows the same rule `prepare-local` does below: the refusal is filed in the
   ledger against the extraction parameters and the video's digest, so the daily
