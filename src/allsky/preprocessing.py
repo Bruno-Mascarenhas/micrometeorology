@@ -412,18 +412,20 @@ def model_input_frame(
         ``(3, size, size)`` float32 in ``[0, 1]``, C-contiguous and freshly
         allocated — so the caller may standardize it in place.
     """
-    if geometry is not None:
-        arr = process_frame(decode_rgb(source), geometry)
+    processing = preprocess is not None and preprocess.enabled
+    if geometry is None and not processing:
+        # PIL decodes and resizes in one pass here, which is why this case is
+        # not folded into the branch below: routing it through decode_rgb would
+        # pay the two full-frame numpy<->PIL copies for nothing.
+        arr = decode_rgb_resized(source, size)
+    else:
+        arr = decode_rgb(source)
+        if geometry is not None:
+            arr = process_frame(arr, geometry)
         if preprocess is not None and preprocess.enabled:
             arr = preprocess.apply_uint8_hwc(arr)
         if arr.shape[0] != size or arr.shape[1] != size:
             arr = resize_bilinear(arr, size)
-    elif preprocess is not None and preprocess.enabled:
-        arr = preprocess.apply_uint8_hwc(decode_rgb(source))
-        if arr.shape[0] != size or arr.shape[1] != size:
-            arr = resize_bilinear(arr, size)
-    else:
-        arr = decode_rgb_resized(source, size)
     chw = np.ascontiguousarray(np.asarray(arr, dtype=np.uint8).transpose(2, 0, 1))
     scaled = chw.astype(np.float32)
     scaled /= 255.0

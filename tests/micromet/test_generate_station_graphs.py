@@ -15,6 +15,7 @@ from matplotlib import pyplot as plt
 from typer.testing import CliRunner
 
 from micrometeorology.cli.generate_station_graphs import app
+from micrometeorology.wrf.columns import SWDDIF_W_M2, SWDOWN_W_M2, T2_C
 from tests.micromet.test_ingestion import _write_toa5
 
 runner = CliRunner()
@@ -230,9 +231,7 @@ def test_the_diffuse_graph_draws_the_models_diffuse_and_not_only_its_global():
     measured = pd.DataFrame(
         {"CM3Up_Wm2_Avg": [900.0, 950.0], "PSP_Wm2_Avg": [130.0, 150.0]}, index=index
     )
-    model = pd.DataFrame(
-        {"swdown_w_m2": [800.0, 900.0], "swddif_w_m2": [120.0, 140.0]}, index=index
-    )
+    model = pd.DataFrame({SWDOWN_W_M2: [800.0, 900.0], SWDDIF_W_M2: [120.0, 140.0]}, index=index)
 
     figure, axes = plt.subplots()
     try:
@@ -261,7 +260,6 @@ def test_the_two_shipped_producers_agree_on_which_column_the_diffuse_is():
     """
     from micrometeorology.cli.generate_station_graphs import WRF_COLUMNS
     from micrometeorology.cli.plot_station_graphs import DEFAULT_WRF_COLUMNS
-    from micrometeorology.wrf.columns import SWDDIF_W_M2, SWDOWN_W_M2
 
     assert WRF_COLUMNS["radiacao_difusa"] == SWDDIF_W_M2
     assert WRF_COLUMNS["radiacao_global"] == SWDOWN_W_M2
@@ -286,7 +284,7 @@ def test_the_model_overlay_never_backtracks_in_time(tmp_path):
             "month": [7] * len(hours),
             "day": [21] * len(hours),
             "hour": hours,
-            "t2_c": np.arange(len(hours), dtype=float),
+            T2_C: np.arange(len(hours), dtype=float),
         }
     ).to_csv(source, index=False)
 
@@ -375,9 +373,9 @@ def test_the_wrf_overlay_reaches_the_graphs_end_to_end(full_station, tmp_path):
             "month": index.month,
             "day": index.day,
             "hour": index.hour,
-            "t2_c": np.linspace(20.0, 30.0, len(index)),
-            "swdown_w_m2": np.linspace(0.0, 900.0, len(index)),
-            "swddif_w_m2": np.linspace(0.0, 300.0, len(index)),
+            T2_C: np.linspace(20.0, 30.0, len(index)),
+            SWDOWN_W_M2: np.linspace(0.0, 900.0, len(index)),
+            SWDDIF_W_M2: np.linspace(0.0, 300.0, len(index)),
         }
     ).to_csv(wrf_dat, index=False)
 

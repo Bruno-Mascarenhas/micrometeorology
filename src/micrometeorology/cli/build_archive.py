@@ -32,7 +32,6 @@ smaller for this frame)::
     labmim-archive -d data -o output/archive --format csv
 """
 
-import json
 import logging
 from enum import StrEnum
 from pathlib import Path
@@ -41,7 +40,7 @@ from typing import Annotated
 import pandas as pd
 import typer
 
-from labmim_core.atomic import atomic_write
+from labmim_core.atomic import atomic_write, atomic_write_strict_json
 from micrometeorology.common.config import get_settings
 from micrometeorology.common.logging import setup_logging
 from micrometeorology.common.paths import ensure_dir
@@ -605,12 +604,7 @@ def run(
         },
     }
     report_path = out / "archive_report.json"
-    atomic_write(
-        report_path,
-        lambda tmp: tmp.write_text(
-            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-        ),
-    )
+    atomic_write_strict_json(report_path, manifest)
     typer.echo(f"  [ok] {report_path.name}")
 
     if blocking:

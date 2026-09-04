@@ -37,6 +37,7 @@ import pandas as pd
 from allsky.data.contracts import (
     DATASET_VERSION,
     DEGRADABLE_TARGET_COLUMNS,
+    LABELABLE_MIN_ELEVATION_DEG,
     META_COLUMNS,
     SPLIT_COLUMN,
     TARGET_COLUMNS,
@@ -53,11 +54,9 @@ __all__ = [
     "validate_manifest",
 ]
 
-#: Elevation floor, in degrees, that ``strict=True`` flags rows below. Mirrors
-#: the ``min_elevation_deg`` default of
-#: :func:`allsky.data.manifest.build_manifest`, the floor that governs
-#: :attr:`~allsky.data.contracts.QCFlag.LOW_SUN`.
-STRICT_LOW_SUN_ELEVATION_DEG = 10.0
+#: The floor ``strict=True`` flags rows below, read from the one name the build
+#: and the config also read.
+STRICT_LOW_SUN_ELEVATION_DEG = LABELABLE_MIN_ELEVATION_DEG
 
 
 class ManifestValidationError(ValueError):

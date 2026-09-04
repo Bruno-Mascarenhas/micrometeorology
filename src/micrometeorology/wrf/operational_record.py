@@ -1275,6 +1275,18 @@ def read_wrf_series(path: str | Path, *, consumes: Collection[str] = ()) -> pd.D
         # serve a wrong value from it, and a caller that publishes none of the
         # six is unaffected by the schema.
         unrepaired = sorted(V1_UNREPAIRED_COLUMNS & set(consumes) & set(frame.columns))
+        if not unrepaired:
+            # The docstring promises this path warns, and a caller that forgot
+            # `consumes=` looks exactly like one that publishes none of the six.
+            # Saying so is what keeps the silence from being mistaken for a
+            # verdict: a fifth CLI has to fail loudly in review, not at the site.
+            logger.warning(
+                "%s is still a v1 operational file; this run declared it publishes "
+                "none of %s, so it is read as-is. Run `labmim-wrf-series migrate` "
+                "on the record.",
+                path,
+                ", ".join(sorted(V1_UNREPAIRED_COLUMNS)),
+            )
         if unrepaired:
             raise ValueError(
                 f"{path} is still a v1 operational file and this run publishes "

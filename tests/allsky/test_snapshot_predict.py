@@ -73,30 +73,8 @@ train:
 
 @pytest.fixture
 def embedding_checkpoint(tmp_path: Path) -> Path:
-    """Train one epoch of an embedding-mode model on the fake backbone's width."""
-    root, manifest, _ = synthetic.make_dataset(tmp_path)
-    synthetic.make_embeddings_store(
-        root,
-        manifest,
-        dim=32,
-        # The live FakeBackbone describes its own transform; recording anything
-        # else makes the snapshot refuse the store it was trained on.
-        transform=str(getattr(build_backbone("fake", fake_dim=32), "transform_description", "")),
-    )
-    store = root / "emb"
-    write_meta(store, {**read_meta(store), "revision": "fake-v1", "dtype": "fp32"})
-    run_dir = tmp_path / "run"
-    config = tmp_path / "probe.yaml"
-    config.write_text(
-        _EMBEDDING_EXPERIMENT.format(repo_v1=synthetic.REPO_V1, out=run_dir, root=root),
-        encoding="utf-8",
-    )
-    result = runner.invoke(
-        app,
-        ["train", "--config", str(config), "--data-root", str(root), "--out-dir", str(run_dir)],
-    )
-    assert result.exit_code == 0, result.output
-    return run_dir / "best.ckpt"
+    """The probe checkpoint with no config override — the common case."""
+    return _train_probe(tmp_path)
 
 
 def _train_probe(tmp_path: Path, extra_yaml: str = "") -> Path:

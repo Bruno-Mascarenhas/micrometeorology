@@ -46,6 +46,7 @@ from allsky.data.alignment import CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
     GEOMETRY_COLUMNS,
+    LABELABLE_MIN_ELEVATION_DEG,
     SPLIT_COLUMN,
     QCFlag,
     manifest_column_dtypes,
@@ -127,7 +128,7 @@ def build_manifest(
     diffuse_column: str | None = "PSP_Wm2_Avg",
     kindex_kind: str = "kstar",
     alignment: CenterFrame | None = None,
-    min_elevation_deg: float = 10.0,
+    min_elevation_deg: float = LABELABLE_MIN_ELEVATION_DEG,
     night_min_elevation_deg: float | None = 5.0,
     max_kindex: float | None = None,
     far_distance_minutes: float | None = None,

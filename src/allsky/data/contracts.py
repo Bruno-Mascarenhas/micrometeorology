@@ -28,6 +28,7 @@ __all__ = [
     "DEGRADABLE_TARGET_COLUMNS",
     "FEATURE_DTYPE",
     "GEOMETRY_COLUMNS",
+    "LABELABLE_MIN_ELEVATION_DEG",
     "META_COLUMNS",
     "NS_PER_MINUTE",
     "PROVENANCE_COLUMNS",
@@ -96,6 +97,15 @@ DEGRADABLE_TARGET_COLUMNS: tuple[str, ...] = (
 #: work on int64 nanosecond stamps, and two copies of this factor are two places
 #: a window could silently stop meaning minutes.
 NS_PER_MINUTE = 60_000_000_000
+
+#: Solar elevation floor, degrees, below which the k-index carries too little
+#: signal to label a frame on. One name because three stages read it and each
+#: has to read the SAME one: the manifest builder sets ``LOW_SUN`` under it,
+#: ``NightFilterConfig`` defaults to it, and ``validate_manifest(strict=True)``
+#: reports the rows that survived the build's own floor but sit under this. Three
+#: independent literals would let a config change the build and leave the
+#: validator checking a band the build no longer produces.
+LABELABLE_MIN_ELEVATION_DEG = 10.0
 
 #: Name of the (nullable) split-label column: empty at build, filled in place by
 #: :func:`allsky.data.manifest.attach_split_column` from a day-level split.

@@ -21,6 +21,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from allsky.data.contracts import LABELABLE_MIN_ELEVATION_DEG
 from labmim_core.site import SiteConfig
 
 #: Fixed UTC offset of the LabMiM camera and datalogger clocks. Pinned rather
@@ -626,7 +627,7 @@ class NightFilterConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     min_solar_elevation_deg: float = 5.0
-    labelable_min_elevation_deg: float = 10.0
+    labelable_min_elevation_deg: float = LABELABLE_MIN_ELEVATION_DEG
 
     @model_validator(mode="after")
     def _night_floor_is_below_the_labelable_one(self) -> NightFilterConfig:
