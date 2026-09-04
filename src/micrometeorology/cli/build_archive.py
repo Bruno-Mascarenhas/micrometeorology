@@ -388,6 +388,16 @@ def run(
                 f"\nSaldo recomposto dos quatro componentes: +{net_gained:,} amostras "
                 f"(componentes sem saldo do registrador), -{net_dropped:,} (componente ausente)"
             )
+        # A window where one component is dead leaves Net_CNR1 entirely absent,
+        # and export_monitoring OMITS an all-null series by design: the balance
+        # chart then disappears from the published page with no error anywhere.
+        # The gate is emptiness, not a share: the historical build legitimately
+        # drops the pre-net-channel era, and no fraction of it is a magic number.
+        if net_dropped and "Net_CNR1" in qc.columns and not qc["Net_CNR1"].notna().any():
+            blocking.append(
+                f"saldo recomposto ficou inteiramente ausente ({net_dropped:,} amostra(s) "
+                "descartadas): um componente do balanco esta morto nesta janela"
+            )
 
         # Reported, never fatal: the sensitivity is a laboratory decision, and
         # failing the build would trade a scaling error for no record.

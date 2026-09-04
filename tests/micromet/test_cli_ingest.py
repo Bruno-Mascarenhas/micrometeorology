@@ -271,6 +271,46 @@ def test_the_window_mode_fails_strict_on_a_window_that_merged_to_nothing(tmp_pat
     assert "merged to no row at all" in resultado.output
 
 
+def test_a_dead_balance_component_fails_strict_instead_of_blanking_the_chart(tmp_path) -> None:
+    """``close_net_radiation`` drops every sample whose component is missing, and
+    ``net_dropped`` was only ever printed. Chained onto export_monitoring, which
+    OMITS an all-null series by design, one dead component made the balance chart
+    disappear from the published page with zero error anywhere in the pipeline."""
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    fatores = tmp_path / "teorica_2016-2030.csv"
+    fatores.write_text(
+        "ano_i,mes_i,dia_i,hor_i,min_i,fc\n"
+        + "".join(f"2026,8,15,12,{minute},1.18\n" for minute in range(0, 60, 5)),
+        encoding="utf-8",
+    )
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(
+        lenta,
+        [
+            "CM3Up_Wm2_Avg",
+            "CM3Dn_Wm2_Avg",
+            "CG3Up_Wm2Cr_Avg",
+            "CG3Dn_Wm2Cr_Avg",
+            "Net_Wm2_Avg",
+        ],
+        [
+            (f"2026-08-15 12:{minute:02d}:00", [500.0, "NAN", 400.0, 450.0, 100.0])
+            for minute in range(0, 60, 5)
+        ],
+    )
+    saida = tmp_path / "out"
+
+    resultado = CliRunner().invoke(
+        app, ["-d", str(tmp_path), "-o", str(saida), "--source", str(lenta), "--strict"]
+    )
+
+    assert resultado.exit_code == 1, resultado.output
+    assert "saldo recomposto ficou inteiramente ausente" in resultado.output
+
+
 def test_without_sources_the_manifest_still_refuses_a_missing_entry(tmp_path) -> None:
     """The historical build must keep failing loud: a dropped entry shortens the record."""
     from typer.testing import CliRunner
