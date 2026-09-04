@@ -19,7 +19,6 @@ from allsky.modeling.geometry_adapter import GeometryPatchProjection
 from allsky.modeling.transfer import TransferMismatchError, load_transferable_weights
 
 PATCH = 8
-FRAME = 32
 
 
 class _HubBackboneStub(nn.Module):

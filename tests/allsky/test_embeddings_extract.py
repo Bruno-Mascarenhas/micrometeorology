@@ -271,8 +271,12 @@ class TestIncrementalIndex:
         assert set(index["sample_id"].astype(str)) == set(manifest["sample_id"].astype(str))
         assert sorted(out.glob("index.part-*.parquet")) == []
 
-    def test_reader_serves_all_ids_after_resume(self, tmp_path: Path):
-        """The consolidated store round-trips through the reader (values intact)."""
+    def test_the_reader_serves_every_id_when_a_shard_is_smaller_than_the_batch(
+        self, tmp_path: Path
+    ):
+        """Six samples in batches of three over shards of two, so a batch spans two
+        shards and a shard spans two batches, and every value still round-trips.
+        """
         manifest = _make_dataset(tmp_path, n=6)
         out = tmp_path / "emb"
         extract_embeddings(

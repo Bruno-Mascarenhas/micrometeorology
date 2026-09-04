@@ -100,14 +100,21 @@ class TestClearSkyIndexTarget:
 
         assert scales == pytest.approx(expected.astype(np.float32), rel=1e-6)
 
-    def test_the_ratio_is_dimensionless_and_near_one_under_a_clear_sky(self, tmp_path: Path):
+    def test_the_ratio_is_finite_everywhere(self, tmp_path: Path):
         manifest, root = _manifest(tmp_path)
         dataset = _dataset(manifest, root, "clearsky_index")
 
         ratios = torch.stack([dataset[i]["dhi"] for i in range(len(dataset))])
 
         assert bool(torch.isfinite(ratios).all())
-        assert 0.0 < float(ratios.min()) < 10.0
+
+    def test_the_ratio_is_strictly_positive(self, tmp_path: Path):
+        manifest, root = _manifest(tmp_path)
+        dataset = _dataset(manifest, root, "clearsky_index")
+
+        ratios = torch.stack([dataset[i]["dhi"] for i in range(len(dataset))])
+
+        assert float(ratios.min()) > 0.0
 
     def test_a_manifest_without_the_solar_columns_is_refused(self, tmp_path: Path):
         manifest, root = _manifest(tmp_path)

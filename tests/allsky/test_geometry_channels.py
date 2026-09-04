@@ -512,13 +512,18 @@ class TestBackboneTablesAgree:
     fine-tune.
     """
 
-    def test_every_advertised_backbone_resolves_to_a_family(self):
-        for name in AVAILABLE_BACKBONES:
-            if name == "fake":
-                continue
-            pooling = "mean" if name.startswith(("resnet", "efficientnet")) else "cls"
+    @pytest.mark.parametrize("name", [n for n in AVAILABLE_BACKBONES if n != "fake"])
+    def test_every_advertised_backbone_resolves_to_a_family(self, name: str):
+        pooling = "mean" if name.startswith(("resnet", "efficientnet")) else "cls"
 
-            assert family_for(name, pooling) is not None, name
+        family = family_for(name, pooling)
+
+        assert family.name == name
+        # `pooling` is per-family state and not part of the BackboneFamily
+        # interface; what the interface promises is that an unacceptable pooling
+        # is refused rather than silently accepted.
+        with pytest.raises(BackboneCapabilityError):
+            family_for(name, "cls+max")
 
     def test_the_vit_poolings_are_the_extraction_path_s_own(self):
         assert set(VIT_POOLINGS) == set(POOLINGS)

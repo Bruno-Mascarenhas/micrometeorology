@@ -170,7 +170,7 @@ def test_reading_a_video_returns_one_reading_per_frame_in_capture_order(tmp_path
     assert not any(item.interpolated for item in readings)
 
 
-def test_a_step_keeps_only_every_nth_frame_and_still_validates_the_interval(tmp_path: Path):
+def test_a_step_keeps_only_every_nth_frame(tmp_path: Path):
     readings = read_video_timestamps(_video(tmp_path, SIX_MINUTES), step=2)
     assert [item.index for item in readings] == [0, 2, 4]
     assert [item.timestamp for item in readings] == [

@@ -15,10 +15,6 @@ from allsky.config import (
     load_prepare_config,
 )
 
-# ---------------------------------------------------------------------------
-# _deep_merge unit semantics
-# ---------------------------------------------------------------------------
-
 
 def test_deep_merge_does_not_mutate_inputs():
     base = {"nested": {"x": 1}}
@@ -26,11 +22,6 @@ def test_deep_merge_does_not_mutate_inputs():
     _deep_merge(base, override)
     assert base == {"nested": {"x": 1}}
     assert override == {"nested": {"y": 2}}
-
-
-# ---------------------------------------------------------------------------
-# Defaults
-# ---------------------------------------------------------------------------
 
 
 def test_experiment_defaults_sane():
@@ -64,11 +55,6 @@ def test_features_set_alias_accepts_yaml_key(tmp_path):
     path.write_text("experiment: true\nfeatures:\n  set: extended\n", encoding="utf-8")
     cfg = load_experiment_config(path)
     assert cfg.features.feature_set == "extended"
-
-
-# ---------------------------------------------------------------------------
-# extends composition
-# ---------------------------------------------------------------------------
 
 
 def test_extends_two_level_chain(tmp_path):
@@ -118,11 +104,6 @@ def test_extends_cycle_raises(tmp_path):
         load_experiment_config(tmp_path / "a.yaml")
 
 
-# ---------------------------------------------------------------------------
-# extra="forbid" strictness
-# ---------------------------------------------------------------------------
-
-
 def test_extra_forbid_rejects_top_level_typo(tmp_path):
     path = tmp_path / "exp.yaml"
     path.write_text("experiment: true\nnamee: oops\n", encoding="utf-8")
@@ -149,11 +130,6 @@ def test_prepare_extra_forbid_rejects_typo(tmp_path):
     path.write_text("embeddings:\n  poolng: cls\n", encoding="utf-8")
     with pytest.raises(ValidationError, match="poolng"):
         load_prepare_config(path)
-
-
-# ---------------------------------------------------------------------------
-# is_experiment_config dispatch helper
-# ---------------------------------------------------------------------------
 
 
 def test_is_experiment_config_true_from_dict():

@@ -526,6 +526,44 @@ def test_has_video_reports_the_record_alone_when_no_local_root_is_given(tmp_path
     assert ledger.has_video("20200101") is False
 
 
+def test_a_recorded_extraction_fault_comes_back_under_the_same_parameters(tmp_path: Path):
+    ledger = Ledger(tmp_path / "ledger.json")
+    fake.record_downloaded_day(ledger, tmp_path, DAY_NEW)
+    ledger.record_extraction_fault(
+        DAY_NEW, reason="no overlay timestamps", step=3, resize=224, timestamps="overlay"
+    )
+
+    reason = ledger.extraction_faulted(DAY_NEW, step=3, resize=224, timestamps="overlay")
+
+    assert reason == "no overlay timestamps"
+
+
+def test_a_changed_step_reopens_a_day_a_recorded_fault_had_closed(tmp_path: Path):
+    ledger = Ledger(tmp_path / "ledger.json")
+    fake.record_downloaded_day(ledger, tmp_path, DAY_NEW)
+    ledger.record_extraction_fault(
+        DAY_NEW, reason="no overlay timestamps", step=3, resize=224, timestamps="overlay"
+    )
+
+    assert ledger.extraction_faulted(DAY_NEW, step=2, resize=224, timestamps="overlay") is None
+
+
+def test_a_redownload_carrying_other_bytes_reopens_a_day_a_recorded_fault_had_closed(
+    tmp_path: Path,
+):
+    """The fault is a statement about the bytes that were on disk; a mirror that
+    republished the day is a different question, not a settled one."""
+    ledger = Ledger(tmp_path / "ledger.json")
+    fake.record_downloaded_day(ledger, tmp_path, DAY_NEW)
+    ledger.record_extraction_fault(
+        DAY_NEW, reason="no overlay timestamps", step=3, resize=224, timestamps="overlay"
+    )
+
+    fake.record_downloaded_day(ledger, tmp_path, DAY_NEW, payload=b"a different timelapse")
+
+    assert ledger.extraction_faulted(DAY_NEW, step=3, resize=224, timestamps="overlay") is None
+
+
 @pytest.mark.parametrize(("step", "resize"), [(2, 224), (3, None), (3, 448)])
 def test_frames_match_is_false_whenever_step_or_resize_differ_from_the_record(
     tmp_path: Path, step: int, resize: int | None

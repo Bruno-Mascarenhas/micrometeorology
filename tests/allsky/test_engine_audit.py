@@ -30,14 +30,9 @@ def test_a_diverged_epoch_is_never_the_first_best(mode: str):
     assert _improved(math.nan, None, mode, 0.0) is False
 
 
-@pytest.mark.parametrize(
-    ("mode", "current"),
-    [("min", 0.87), ("max", 0.87)],
-)
-def test_a_finite_epoch_improves_on_a_best_poisoned_by_an_earlier_divergence(
-    mode: str, current: float
-):
-    assert _improved(current, math.nan, mode, 0.0) is True
+@pytest.mark.parametrize("mode", ["min", "max"])
+def test_a_finite_epoch_improves_on_a_best_poisoned_by_an_earlier_divergence(mode: str):
+    assert _improved(0.87, math.nan, mode, 0.0) is True
 
 
 def test_resume_warns_that_an_edited_learning_rate_loses_to_the_checkpoint(

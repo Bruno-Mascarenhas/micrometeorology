@@ -204,10 +204,7 @@ class TestLeakageSelfCheck:
         with pytest.raises(ValueError, match="leakage"):
             check_split_leakage(["a", "b"], ["b", "c"], ["d"])
 
-    def test_from_dict_runs_leakage_check(self):
-        # Hand-built assignment cannot leak (day -> one split); a malformed
-        # split_id-free payload with duplicate-day intent is caught by the
-        # disjoint check via days_for.
+    def test_from_dict_round_trips_the_assignment_it_was_given(self):
         split = DaySplit(
             assignment={"2025-01-01": "train", "2025-01-02": "val"},
             seed=0,

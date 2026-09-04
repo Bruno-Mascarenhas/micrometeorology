@@ -3,7 +3,7 @@
 The sensor side is built as a plain time-indexed DataFrame carrying the raw
 logger columns the feature policy and targets consume (met channels + GHI +
 optional diffuse) — the same "build the contract, don't parse a file" approach
-as tests/allsky/test_dataset.py.
+as tests/allsky/test_data_datasets.py.
 """
 
 import json

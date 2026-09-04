@@ -340,6 +340,20 @@ def test_solar_geometry_is_built_on_the_declared_site_offset_the_manifest_trains
     assert abs(float(values[0]) - float(salvador_clock[0])) > 10.0
 
 
+@pytest.fixture
+def recorded_backbone_build(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """The name and keyword arguments the live backbone was actually built with."""
+    seen: dict[str, Any] = {}
+    real_build_backbone = backbone_module.build_backbone
+
+    def recording_build_backbone(name: str, **kwargs: Any) -> Any:
+        seen.update({"name": name, **kwargs})
+        return real_build_backbone(name, **kwargs)
+
+    monkeypatch.setattr(backbone_module, "build_backbone", recording_build_backbone)
+    return seen
+
+
 def _forget_the_recorded_recipe(checkpoint_path: Path) -> None:
     """Rewrite the checkpoint as a release predating the portable encoding recipe wrote it."""
     import torch
@@ -357,18 +371,11 @@ def _embedding_store_of(checkpoint_path: Path) -> Path:
 
 
 def test_the_live_frame_is_embedded_with_the_pooling_its_training_store_recorded(
-    embedding_checkpoint: Path, sky_image: Path, monkeypatch: pytest.MonkeyPatch
+    embedding_checkpoint: Path, sky_image: Path, recorded_backbone_build: dict[str, Any]
 ) -> None:
     store = _embedding_store_of(embedding_checkpoint)
     write_meta(store, {**read_meta(store), "pooling": "mean"})
-    seen: dict[str, Any] = {}
-    real_build_backbone = backbone_module.build_backbone
 
-    def recording_build_backbone(name: str, **kwargs: Any) -> Any:
-        seen.update({"name": name, **kwargs})
-        return real_build_backbone(name, **kwargs)
-
-    monkeypatch.setattr(backbone_module, "build_backbone", recording_build_backbone)
     predict_snapshot(
         sky_image,
         embedding_checkpoint,
@@ -376,7 +383,7 @@ def test_the_live_frame_is_embedded_with_the_pooling_its_training_store_recorded
         trust_checkpoint=True,
     )
 
-    assert seen["pooling"] == "mean"
+    assert recorded_backbone_build["pooling"] == "mean"
 
 
 def test_a_checkpoint_recording_no_recipe_refuses_to_guess_when_its_store_is_unreachable(
@@ -395,19 +402,12 @@ def test_a_checkpoint_recording_no_recipe_refuses_to_guess_when_its_store_is_unr
 
 
 def test_a_checkpoint_carrying_its_own_recipe_predicts_with_the_store_gone(
-    embedding_checkpoint: Path, sky_image: Path, monkeypatch: pytest.MonkeyPatch
+    embedding_checkpoint: Path, sky_image: Path, recorded_backbone_build: dict[str, Any]
 ) -> None:
     store = _embedding_store_of(embedding_checkpoint)
     recorded = read_meta(store)
     shutil.rmtree(store)
-    seen: dict[str, Any] = {}
-    real_build_backbone = backbone_module.build_backbone
 
-    def recording_build_backbone(name: str, **kwargs: Any) -> Any:
-        seen.update({"name": name, **kwargs})
-        return real_build_backbone(name, **kwargs)
-
-    monkeypatch.setattr(backbone_module, "build_backbone", recording_build_backbone)
     prediction = predict_snapshot(
         sky_image,
         embedding_checkpoint,
@@ -416,7 +416,11 @@ def test_a_checkpoint_carrying_its_own_recipe_predicts_with_the_store_gone(
     )
 
     assert prediction["predictions"]
-    assert (seen["name"], seen["pooling"], seen["dtype"]) == (
+    assert (
+        recorded_backbone_build["name"],
+        recorded_backbone_build["pooling"],
+        recorded_backbone_build["dtype"],
+    ) == (
         recorded["backbone"],
         recorded["pooling"],
         recorded["dtype"],
@@ -424,18 +428,11 @@ def test_a_checkpoint_carrying_its_own_recipe_predicts_with_the_store_gone(
 
 
 def test_the_live_frame_is_embedded_at_the_precision_its_training_store_recorded(
-    embedding_checkpoint: Path, sky_image: Path, monkeypatch: pytest.MonkeyPatch
+    embedding_checkpoint: Path, sky_image: Path, recorded_backbone_build: dict[str, Any]
 ) -> None:
     store = _embedding_store_of(embedding_checkpoint)
     write_meta(store, {**read_meta(store), "dtype": "fp32"})
-    seen: dict[str, Any] = {}
-    real_build_backbone = backbone_module.build_backbone
 
-    def recording_build_backbone(name: str, **kwargs: Any) -> Any:
-        seen.update({"name": name, **kwargs})
-        return real_build_backbone(name, **kwargs)
-
-    monkeypatch.setattr(backbone_module, "build_backbone", recording_build_backbone)
     predict_snapshot(
         sky_image,
         embedding_checkpoint,
@@ -443,7 +440,7 @@ def test_the_live_frame_is_embedded_at_the_precision_its_training_store_recorded
         trust_checkpoint=True,
     )
 
-    assert seen.get("dtype") == "fp32"
+    assert recorded_backbone_build.get("dtype") == "fp32"
 
 
 def test_a_store_encoded_under_a_superseded_backbone_revision_refuses_to_predict(

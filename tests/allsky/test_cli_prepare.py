@@ -6,6 +6,7 @@ good and a broken manifest; ``export-colab-bundle`` produces a bundle that
 :func:`allsky.bundle.validate_bundle` accepts. CliRunner only, tmp_path only.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -211,7 +212,9 @@ class TestValidateDataset:
         )
         result = runner.invoke(app, ["validate-dataset", "--config", str(config)])
         assert result.exit_code == 1
-        assert "ERROR" in result.output
+        assert "1 image file(s) missing under" in result.output
+        assert "frames/allsky-20250321-1200.jpg" in result.output
+        assert "1 error(s)" in result.output
 
     def test_skip_image_check_accepts_a_frameless_dataset(self, tmp_path: Path):
         # The shape of an embedding-mode Colab bundle: manifest + meta, no JPEGs.
@@ -523,12 +526,11 @@ class TestPrepareLocal:
         assert manifest_path.exists()
         assert (manifest_path.with_name("manifest.parquet.meta.json")).exists()
         manifest = pd.read_parquet(manifest_path)
-        assert len(manifest) > 0
         assert "sample_id" in manifest.columns
         assert manifest["sample_id"].iloc[0].startswith("allsky-20260101-")
-        # frames were extracted as JPEGs under a per-video directory.
         jpegs = list((dataset_dir / "frames" / "allsky-20260101").glob("*.jpg"))
         assert len(jpegs) == 8
+        assert len(manifest) == len(jpegs)
 
     def test_a_file_with_no_parseable_date_is_named_instead_of_a_traceback(
         self, tmp_path: Path, synthetic_dat: Path
@@ -691,6 +693,10 @@ def test_importing_the_prepare_command_module_pulls_no_array_stack(package: str)
     """The module docstring promises an ``allsky --help`` that stays light and
     torch-free; numpy came in through the one top-level ``decode_rgb`` import and
     the pandas-only probe could not see it."""
+    # pytest puts src/ on the path through `pythonpath` in pyproject, which the
+    # child does not inherit: without this the probe reports on whatever `allsky`
+    # the interpreter happens to find installed, not on the tree under test.
+    source_root = str(Path(__file__).resolve().parents[2] / "src")
     probe = subprocess.run(
         [
             sys.executable,
@@ -703,6 +709,7 @@ def test_importing_the_prepare_command_module_pulls_no_array_stack(package: str)
         capture_output=True,
         text=True,
         check=True,
+        env={**os.environ, "PYTHONPATH": source_root},
     )
 
     assert probe.stdout.strip() == "[]"

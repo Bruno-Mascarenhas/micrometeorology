@@ -183,8 +183,6 @@ class TestTrustCheckpointFlag:
     """
 
     def test_the_flag_reaches_load_checkpoint(self, tmp_path: Path, monkeypatch) -> None:
-        from allsky.evaluation import evaluator
-
         seen: list[dict[str, object]] = []
 
         def record_trust(_path, *, map_location="cpu", trust_pickle=False):
@@ -210,7 +208,6 @@ class TestTrustCheckpointFlag:
             )
             assert result.exit_code == 1, result.output
             assert [call["trust_pickle"] for call in seen] == [expected]
-        assert evaluator is not None  # the patched symbol is imported inside the function
 
 
 class TestCompareExperiments:

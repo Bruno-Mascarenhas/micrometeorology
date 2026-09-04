@@ -15,11 +15,6 @@ def site() -> SiteConfig:
     return SiteConfig()
 
 
-# ---------------------------------------------------------------------------
-# solar.py
-# ---------------------------------------------------------------------------
-
-
 class TestSolarPosition:
     def test_zenith_smaller_at_noon_than_morning(self, site: SiteConfig):
         times = pd.DatetimeIndex(["2025-06-25 08:00:00", "2025-06-25 12:00:00"])
@@ -29,9 +24,9 @@ class TestSolarPosition:
         elevation = solar.solar_elevation_deg(times, site)
         assert (elevation > 0).all()
 
-    def test_solar_noon_near_1130_local(self, site: SiteConfig):
-        # Salvador (lon -38.51) sits east of the UTC-3 meridian (-45 deg):
-        # true solar noon falls ~26 min before clock noon.
+    def test_solar_noon_falls_before_clock_noon_east_of_the_utc_minus_3_meridian(
+        self, site: SiteConfig
+    ):
         day = pd.date_range("2025-06-25 05:00", "2025-06-25 19:00", freq="1min")
         elevation = solar.solar_elevation_deg(day, site)
         peak = day[int(np.argmax(elevation))]
@@ -41,7 +36,6 @@ class TestSolarPosition:
         days = pd.date_range("2025-01-01 12:00", "2025-12-31 12:00", freq="1D")
         decl_deg = np.rad2deg(solar.solar_declination_rad(days))
         assert np.abs(decl_deg).max() <= 24.0
-        # June solstice: northern declination; December: southern.
         assert decl_deg[days.get_loc(pd.Timestamp("2025-06-21 12:00"))] > 20.0
         assert decl_deg[days.get_loc(pd.Timestamp("2025-12-21 12:00"))] < -20.0
 
@@ -78,21 +72,25 @@ class TestExtraterrestrialGhi:
 
 
 class TestClearnessIndex:
-    def test_kt_recovers_fraction_and_nan_at_night(self, site: SiteConfig):
+    def test_kt_is_the_ratio_of_ghi_to_the_extraterrestrial_reference(self, site: SiteConfig):
         day = pd.date_range("2025-06-25 00:00", "2025-06-25 23:55", freq="5min")
         e0h = solar.extraterrestrial_ghi(day, site)
-        ghi = 0.75 * e0h
-        kt = solar.clearness_index(ghi, day, site)
-
         sun_up = e0h > 0
         assert sun_up.any()
-        assert (~sun_up).any()
+
+        kt = solar.clearness_index(0.75 * e0h, day, site)
+
         np.testing.assert_allclose(kt[sun_up], 0.75, rtol=1e-9)
-        assert np.isnan(kt[~sun_up]).all()
-        # Physically plausible range for finite values.
-        finite = kt[np.isfinite(kt)]
-        assert (finite >= 0.0).all()
-        assert (finite <= 1.2).all()
+
+    def test_kt_is_nan_wherever_the_sun_is_down(self, site: SiteConfig):
+        day = pd.date_range("2025-06-25 00:00", "2025-06-25 23:55", freq="5min")
+        e0h = solar.extraterrestrial_ghi(day, site)
+        sun_down = e0h <= 0
+        assert sun_down.any()
+
+        kt = solar.clearness_index(0.75 * e0h, day, site)
+
+        assert np.isnan(kt[sun_down]).all()
 
     def test_nan_ghi_propagates(self, site: SiteConfig):
         times = pd.DatetimeIndex(["2025-06-25 12:00:00"])
@@ -112,24 +110,22 @@ class TestSolarAzimuth:
         assert (az >= 0.0).all()
         assert (az < 360.0).all()
 
-    def test_morning_east_afternoon_west(self, site: SiteConfig):
-        # Equinox: sunrise ~due east, sunset ~due west (declination ~0).
+    def test_equinox_azimuth_is_east_in_the_morning_and_west_in_the_afternoon(
+        self, site: SiteConfig
+    ):
         times = pd.DatetimeIndex(["2025-03-21 08:00:00", "2025-03-21 16:00:00"])
         az = solar.solar_azimuth_deg(times, site)
         assert (solar.solar_elevation_deg(times, site) > 0).all()
-        assert 45.0 < az[0] < 135.0  # morning: eastern sky (~90)
-        assert 225.0 < az[1] < 315.0  # afternoon: western sky (~270)
+        assert 45.0 < az[0] < 135.0
+        assert 225.0 < az[1] < 315.0
 
     def test_southern_summer_noon_points_south(self, site: SiteConfig):
-        # December (southern summer): the sun transits to the south of zenith,
-        # so solar-noon azimuth is ~180 deg.
         day = pd.date_range("2025-12-21 05:00", "2025-12-21 19:00", freq="1min")
         peak = day[int(np.argmax(solar.solar_elevation_deg(day, site)))]
         az = solar.solar_azimuth_deg(pd.DatetimeIndex([peak]), site)[0]
         assert 170.0 < az < 190.0
 
     def test_southern_winter_noon_points_north(self, site: SiteConfig):
-        # June (southern winter): the sun transits to the north, azimuth ~0/360.
         day = pd.date_range("2025-06-25 05:00", "2025-06-25 19:00", freq="1min")
         peak = day[int(np.argmax(solar.solar_elevation_deg(day, site)))]
         az = solar.solar_azimuth_deg(pd.DatetimeIndex([peak]), site)[0]
@@ -163,11 +159,6 @@ def test_azimuth_after_lower_transit_stays_on_the_eastern_side_of_the_meridian(
     assert 0.0 <= azimuth < 180.0
 
 
-# ---------------------------------------------------------------------------
-# erbs.py
-# ---------------------------------------------------------------------------
-
-
 class TestErbsDiffuseFraction:
     def test_bounds_on_dense_grid(self):
         kt = np.linspace(0.0, 1.5, 151)
@@ -185,8 +176,6 @@ class TestErbsDiffuseFraction:
         assert kd[4] == pytest.approx(0.165)
 
     def test_monotonic_nonincreasing(self):
-        # Overcast (low kt) skies are diffuse-dominated; clear (high kt)
-        # skies have a small diffuse fraction.
         kt = np.linspace(0.0, 1.2, 121)
         kd = erbs.erbs_diffuse_fraction(kt)
         # Strictly non-increasing until the quartic's small dip below the

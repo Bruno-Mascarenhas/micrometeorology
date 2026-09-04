@@ -36,8 +36,7 @@ class TestResizeImage:
         assert out.shape == (16, 16, 3)
         assert out.dtype == np.uint8
 
-    def test_tuple_size_is_width_height(self):
-        # PIL resize takes (width, height); the array is (height, width, 3).
+    def test_tuple_size_is_pil_width_height_not_array_shape(self):
         out = resize_image(_rgb(32, 48), (40, 20))
         assert out.shape == (20, 40, 3)
         assert out.dtype == np.uint8
@@ -67,9 +66,11 @@ class TestCenterCrop:
 
         moved = center_crop(frame, CropConfig(enabled=True, height=16, width=16, top=4, left=-4))
 
-        # Centred, the box starts at row (32-16)//2 = 8 and column (48-16)//2 = 16.
-        assert moved[0, 0, 0] == 8 + 4
-        assert moved[0, 0, 1] == 16 - 4
+        centred_top = (32 - 16) // 2
+        centred_left = (48 - 16) // 2
+
+        assert moved[0, 0, 0] == centred_top + 4
+        assert moved[0, 0, 1] == centred_left - 4
         assert moved.shape == (16, 16, 3)
 
     def test_an_offset_past_the_edge_is_clipped_to_the_last_whole_box(self):
@@ -95,8 +96,8 @@ class TestEstimateCircularMask:
         mask = estimate_circular_mask((32, 32))
         assert mask.shape == (32, 32)
         assert mask.dtype == np.bool_
-        assert mask[16, 16]  # centre kept
-        assert not mask[0, 0]  # corner outside the inscribed disc
+        assert mask[16, 16]
+        assert not mask[0, 0]
 
     def test_radius_fraction_shrinks_disc(self):
         big = estimate_circular_mask((40, 40), radius_fraction=1.0)
@@ -110,8 +111,8 @@ class TestApplyStaticMask:
         out = apply_static_mask(image, None)
         assert out.shape == image.shape
         assert out.dtype == np.uint8
-        assert (out[0, 0] == 0).all()  # corner masked out
-        assert (out[16, 16] == 200).all()  # centre preserved
+        assert (out[0, 0] == 0).all()
+        assert (out[16, 16] == 200).all()
 
     def test_boolean_array_mask(self):
         image = _rgb(4, 4, fill=255)
@@ -163,9 +164,9 @@ class TestVisualQC:
     def test_normal_frame_has_no_flags(self):
         assert visual_qc(_rgb(16, 16, fill=128)) == set()
 
-    def test_partial_saturation_below_threshold(self):
+    def test_ten_percent_saturated_stays_below_the_twenty_percent_default_threshold(self):
         image = _rgb(10, 10, fill=128)
-        image[0, :] = 255  # 10% of pixels saturated < 20% default threshold
+        image[0, :] = 255
         assert QCFlag.FRAME_SATURATED not in visual_qc(image)
 
     @pytest.mark.parametrize("shape", [(0, 0, 3), (0, 4, 3), (4, 0, 3)])
@@ -178,9 +179,6 @@ class TestVisualQC:
     def test_saturated_fraction_matches_the_channel_axis_reduction(
         self, saturated_level: int, saturated_rows: int
     ):
-        # The counted form must agree with the (arr >= level).all(axis=2).mean()
-        # reduction it replaced, exactly, at every threshold — including rows
-        # straddling the 0.2 default fraction.
         image = _rgb(10, 10, fill=128)
         image[:saturated_rows] = 255
         expected = float((image >= saturated_level).all(axis=2).mean())
@@ -265,7 +263,6 @@ class TestResolveMask:
     def test_resolved_mask_is_read_only(self, tmp_path: Path):
         keep = resolve_mask(self._mask_config(tmp_path))
         assert keep is not None
-        # The same buffer is shared by every frame of the run.
         with pytest.raises(ValueError, match="read-only"):
             keep[0, 0] = True
 
@@ -277,7 +274,6 @@ class TestResolveMask:
         )
 
     def test_mask_none_never_falls_back_to_the_circular_estimate(self):
-        # process_frame must not silently zero pixels when no mask is configured.
         image = _rgb(24, 24, fill=77)
         assert np.array_equal(process_frame(image, PrepareConfig(), mask=None), image)
 

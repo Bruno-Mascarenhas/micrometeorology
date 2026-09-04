@@ -11,35 +11,41 @@ from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from allsky.evaluation.evaluator import EvaluationResult
 from allsky.evaluation.reports import _fmt, _render_markdown, write_evaluation_report
 
 
 class TestFmt:
-    def test_integral_floats_render_exactly(self):
-        # ``regression_metrics`` stores n as a float, so a realistic split size
-        # must not degrade to scientific notation in the markdown table.
-        assert _fmt(61344.0) == "61344"
-        assert _fmt(12000.0) == "12000"
-        assert _fmt(17.0) == "17"
-        assert _fmt(0.0) == "0"
-        assert _fmt(-3.0) == "-3"
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(61344.0, "61344"), (12000.0, "12000"), (17.0, "17"), (0.0, "0"), (-3.0, "-3")],
+    )
+    def test_integral_floats_render_exactly(self, value: float, expected: str):
+        """``regression_metrics`` stores n as a float, so a realistic split size must
+        not degrade to scientific notation in the markdown table.
+        """
+        assert _fmt(value) == expected
 
-    def test_non_integral_floats_keep_four_significant_figures(self):
-        assert _fmt(0.123456) == "0.1235"
-        assert _fmt(1234.5678) == "1235"
-        assert _fmt(1.2345e-07) == "1.235e-07"
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(0.123456, "0.1235"), (1234.5678, "1235"), (1.2345e-07, "1.235e-07")],
+    )
+    def test_non_integral_floats_keep_four_significant_figures(self, value: float, expected: str):
+        assert _fmt(value) == expected
 
-    def test_nan_and_infinities_do_not_raise(self):
-        assert _fmt(float("nan")) == "nan"
-        assert _fmt(math.inf) == "inf"
-        assert _fmt(-math.inf) == "-inf"
+    @pytest.mark.parametrize(
+        ("value", "expected"), [(float("nan"), "nan"), (math.inf, "inf"), (-math.inf, "-inf")]
+    )
+    def test_nan_and_infinities_do_not_raise(self, value: float, expected: str):
+        assert _fmt(value) == expected
 
-    def test_non_floats_pass_through(self):
-        assert _fmt(61344) == "61344"
-        assert _fmt("kstar") == "kstar"
-        assert _fmt(None) == "None"
+    @pytest.mark.parametrize(
+        ("value", "expected"), [(61344, "61344"), ("kstar", "kstar"), (None, "None")]
+    )
+    def test_non_floats_pass_through(self, value: object, expected: str):
+        assert _fmt(value) == expected
 
 
 def _result(n: float) -> EvaluationResult:

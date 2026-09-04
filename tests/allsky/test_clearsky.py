@@ -29,8 +29,9 @@ class TestHaurwitzGhi:
         assert (ghi >= 0.0).all()
         assert np.isfinite(ghi).all()
 
-    def test_plausible_clear_noon_magnitude(self, site: SiteConfig):
-        # Near a zenith-crossing day the clear-sky peak sits ~1000-1050 W/m2.
+    def test_the_clear_noon_peak_near_a_zenith_crossing_sits_between_1000_and_1100_w_m2(
+        self, site: SiteConfig
+    ):
         day = pd.date_range("2025-02-15 05:00", "2025-02-15 19:00", freq="1min")
         ghi = clearsky.haurwitz_ghi(day, site)
         assert 1000.0 < ghi.max() < 1100.0
@@ -66,10 +67,10 @@ class TestHaurwitzGhi:
 
 class TestClearSkyIndex:
     def test_k_star_is_the_ratio_to_the_reference_where_it_is_defined(self, site: SiteConfig):
-        # Feeding the Haurwitz reference back in must yield k* == 1 wherever the
-        # index is defined (sun high enough). This pins the division and the
-        # elevation mask; the model itself is pinned by the tests above, because
-        # f/f == 1 holds for any positive f in Haurwitz's place.
+        """Feeding the reference back in pins the division and the elevation mask,
+        not the model: ``f / f == 1`` holds for any positive ``f`` in Haurwitz's
+        place, and the coefficients themselves are pinned by the tests above.
+        """
         day = pd.date_range("2025-06-25 05:00", "2025-06-25 19:00", freq="5min")
         ghi_cs = clearsky.haurwitz_ghi(day, site)
         kstar = clearsky.clear_sky_index(ghi_cs, day, site)
@@ -85,8 +86,9 @@ class TestClearSkyIndex:
         assert np.isnan(kstar[elevation < 10.0]).all()
         assert np.isfinite(kstar[elevation >= 10.0]).all()
 
-    def test_overcast_and_enhancement_range(self, site: SiteConfig):
-        # k* is unclipped: overcast < 1, cloud enhancement > 1 both survive.
+    def test_kstar_is_unclipped_so_overcast_and_cloud_enhancement_both_survive(
+        self, site: SiteConfig
+    ):
         day = pd.date_range("2025-06-25 12:00", periods=4, freq="1min")
         ghi_cs = clearsky.haurwitz_ghi(day, site)
         kstar = clearsky.clear_sky_index(np.array([0.2, 0.6, 1.0, 1.25]) * ghi_cs, day, site)

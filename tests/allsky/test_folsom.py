@@ -2,9 +2,10 @@
 
 Everything asserted here is a defect the dataset's own users measured and
 published, encoded so this project cannot walk into it: the frame time is the
-file's modification time and not its name (25 W/m2 of RMSE apart), frames whose
-two timestamps disagree are dropped rather than mispaired, and the irradiance is
-interpolated onto the frame's own instant instead of rounded to the minute.
+file's modification time and not its name (25 W/m2 of RMSE apart), an extraction
+that lost those modification times is refused whole rather than silently retimed
+while a drifting clock keeps every frame, and the irradiance is interpolated onto
+the frame's own instant instead of rounded to the minute.
 """
 
 import os

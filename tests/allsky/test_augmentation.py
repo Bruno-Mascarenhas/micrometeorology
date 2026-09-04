@@ -28,13 +28,15 @@ class TestExposureJitter:
     def test_the_red_blue_ratio_is_invariant(self, frame: np.ndarray):
         """The R/B ratio is the classical cloud discriminator, so a gain that
         changed it would delete signal rather than add invariance. A
-        channel-common gain in linear space leaves it untouched by construction."""
+        channel-common gain in linear space leaves it untouched by construction.
+
+        Equality is exact in real arithmetic; float32's gamma round trip costs
+        ~3e-3, and clipping breaks it wherever the gain saturates a channel.
+        """
         jittered = exposure_jitter(frame, np.random.default_rng(1))
 
         before = frame[0] / np.maximum(frame[2], 1e-6)
         after = jittered[0] / np.maximum(jittered[2], 1e-6)
-        # Exact in real arithmetic; float32's gamma round trip costs ~3e-3, and
-        # clipping breaks it wherever the gain saturates a channel.
         np.testing.assert_allclose(after, before, rtol=0.05, atol=5e-3)
 
     def test_it_actually_changes_the_brightness(self, frame: np.ndarray):
@@ -55,10 +57,17 @@ class TestExposureJitter:
 
 
 class TestSensorNoise:
-    def test_noise_is_zero_mean_and_bounded(self, frame: np.ndarray):
+    def test_the_added_noise_has_zero_mean(self, frame: np.ndarray):
+        sigma = 0.02
+        four_standard_errors = 4.0 * sigma / np.sqrt(frame.size)
+
+        noisy = sensor_noise(frame, np.random.default_rng(2), sigma=sigma)
+
+        assert abs(float((noisy - frame).mean())) < four_standard_errors
+
+    def test_the_noised_frame_stays_in_the_unit_range(self, frame: np.ndarray):
         noisy = sensor_noise(frame, np.random.default_rng(2), sigma=0.02)
 
-        assert abs(float((noisy - frame).mean())) < 0.005
         assert noisy.min() >= 0.0
         assert noisy.max() <= 1.0
 
@@ -123,9 +132,8 @@ class TestPolarUnwrap:
         assert unwrapped.shape == (3, 32, 16)
         assert unwrapped.dtype == np.float32
 
-    def test_a_rotation_about_the_sun_becomes_a_vertical_roll(self):
-        """The whole point of SPIN: rotational invariance around the sun turns
-        into a translation the network already handles."""
+    def test_the_angular_coordinate_advances_along_the_output_rows(self):
+        """Modulo the single wrap of the seam, which is why two steps may not."""
         size = 64
         centre = size // 2
         rows, cols = np.mgrid[0:size, 0:size]
@@ -136,10 +144,26 @@ class TestPolarUnwrap:
         unwrapped = polar_unwrap(chw, sun_row=centre, sun_col=centre, out_shape=(64, 32))
         column = unwrapped[0, :, 10]
 
-        # The angular coordinate advances monotonically along the output rows,
-        # modulo the single wrap of the seam.
         steps = np.diff(column)
         assert (steps > 0).sum() >= len(steps) - 2
+
+    def test_a_quarter_turn_about_the_sun_becomes_a_quarter_roll_of_the_output_rows(self):
+        """The whole point of SPIN: rotational invariance around the sun turns
+        into a translation the network already handles. An odd frame size puts
+        the sun on a pixel, so a 90-degree turn is an exact lattice symmetry and
+        the two unwraps must agree pixel for pixel, not merely closely."""
+        size = 65
+        centre = float(size // 2)
+        n_theta = 64
+        scene = np.random.default_rng(0).random((3, size, size), dtype=np.float32)
+        turned = np.ascontiguousarray(np.rot90(scene, k=1, axes=(1, 2)))
+
+        unwrapped = polar_unwrap(scene, sun_row=centre, sun_col=centre, out_shape=(n_theta, 32))
+        turned_unwrapped = polar_unwrap(
+            turned, sun_row=centre, sun_col=centre, out_shape=(n_theta, 32)
+        )
+
+        np.testing.assert_array_equal(turned_unwrapped, np.roll(unwrapped, n_theta // 4, axis=1))
 
 
 class TestAugmentationPipeline:

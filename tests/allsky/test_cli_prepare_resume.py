@@ -90,7 +90,6 @@ class TestResumeCompleteness:
         config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
         assert _prepare(config).exit_code == 0
 
-        # Exactly what extract_frames leaves behind when the QC pass is killed.
         vman = dataset_dir / "frames" / "allsky-20260101" / "manifest.parquet"
         frames = pd.read_parquet(vman).drop(columns=["qc_frame_flags"])
         frames.to_parquet(vman, index=False)
@@ -149,8 +148,6 @@ class TestBuildManifestWithoutExtract:
         dark_video: Path,
         synthetic_dat: Path,
     ):
-        # The documented `allsky extract-frames` -> `prepare-local --steps
-        # build-manifest` flow: no qc_frame_flags anywhere, must stay exit 0.
         config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
         assert _prepare(config).exit_code == 0
 
@@ -208,8 +205,6 @@ class TestApplyFrameQC:
         assert "no qc_frame_flags" in capsys.readouterr().out
 
     def test_mixed_concat_warns_instead_of_raising(self, capsys: pytest.CaptureFixture[str]):
-        # pd.concat of a QC'd manifest with a QC-less one yields float64 + NaN,
-        # which used to die in .astype("int64") with a bare IntCastingNaNError.
         mixed = pd.concat(
             [
                 self._frames(qc_bits=[int(QCFlag.FRAME_SATURATED), 0]).iloc[[0]],

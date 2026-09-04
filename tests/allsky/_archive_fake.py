@@ -163,7 +163,9 @@ class ArchiveMirror:
             ("127.0.0.1", 0),
             _handler_factory(self.root, self.requests, self.truncate, self.fail_with),
         )
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        )
         self._thread.start()
 
     @property

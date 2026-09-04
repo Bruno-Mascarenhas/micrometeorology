@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -307,6 +308,7 @@ def test_importing_the_embeddings_command_module_does_not_pull_pandas():
         capture_output=True,
         text=True,
         check=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")},
     )
 
     assert probe.stdout.strip() == "[]"

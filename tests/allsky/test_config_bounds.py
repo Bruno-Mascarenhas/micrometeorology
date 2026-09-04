@@ -20,8 +20,7 @@ def _config(train: dict) -> ExperimentConfig:
 
 
 class TestTrainBounds:
-    def test_zero_epochs_rejected(self):
-        # epochs: 0 used to exit 0 while advertising checkpoints never written.
+    def test_zero_epochs_is_rejected_because_no_checkpoint_would_ever_be_written(self):
         with pytest.raises(ValidationError, match="epochs"):
             _config({"epochs": 0})
 
@@ -32,15 +31,13 @@ class TestTrainBounds:
     def test_one_epoch_accepted(self):
         assert _config({"epochs": 1}).train.epochs == 1
 
-    def test_zero_grad_accum_steps_rejected(self):
-        # grad_accum_steps: 0 used to train with 1 while reporting the config as honoured.
+    def test_zero_grad_accum_steps_is_rejected_rather_than_silently_trained_as_one(self):
         with pytest.raises(ValidationError, match="grad_accum_steps"):
             _config({"grad_accum_steps": 0})
 
 
 class TestEarlyStoppingBounds:
-    def test_zero_patience_rejected(self):
-        # patience: 0 stopped after a single epoch even when it improved.
+    def test_zero_patience_is_rejected_because_it_stops_after_one_improving_epoch(self):
         with pytest.raises(ValidationError, match="patience"):
             _config({"early_stopping": {"patience": 0}})
 

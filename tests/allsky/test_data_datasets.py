@@ -1,5 +1,6 @@
 """Tests for allsky.data.datasets: batch contract, train-only stats, torch-free import."""
 
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -92,13 +93,18 @@ def _reference_windows(manifest: pd.DataFrame, window_minutes: float) -> list[li
 
 
 class FakeEmbeddingReader:
-    """Deterministic hash-based embedding reader (no torch, no I/O)."""
+    """Embedding reader seeded from the sample id (no torch, no I/O).
+
+    The digest, not ``hash``, is what makes it deterministic: ``hash`` of a str is
+    salted per interpreter, so a pinned expected value would flake between runs.
+    """
 
     def __init__(self, dim: int = 8) -> None:
         self.dim = dim
 
     def __call__(self, sample_id: str) -> np.ndarray:
-        rng = np.random.default_rng(abs(hash(sample_id)) % (2**32))
+        digest = hashlib.blake2b(sample_id.encode("utf-8"), digest_size=8).digest()
+        rng = np.random.default_rng(int.from_bytes(digest, "big"))
         return rng.standard_normal(self.dim).astype(np.float32)
 
 

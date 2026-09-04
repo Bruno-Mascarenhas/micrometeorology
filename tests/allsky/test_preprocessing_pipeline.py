@@ -77,6 +77,24 @@ class TestRemoveTimestampBand:
         with pytest.raises(ValueError, match="covers no row"):
             remove_timestamp_band(frame, policy="fill", band_fraction=0.0)
 
+    def test_a_band_deeper_than_half_the_frame_repeats_the_row_just_below_it(
+        self, frame: np.ndarray
+    ):
+        """With fewer rows below the band than the band is tall there is nothing
+        left to mirror, so the first row below it is repeated instead."""
+        band_fraction = 0.6
+        band = round(band_fraction * frame.shape[1])
+
+        painted = remove_timestamp_band(frame, policy="inpaint", band_fraction=band_fraction)
+
+        np.testing.assert_array_equal(
+            painted[:, :band], np.repeat(frame[:, band : band + 1, :], band, axis=1)
+        )
+
+    def test_a_band_that_covers_the_whole_frame_is_refused(self, frame: np.ndarray):
+        with pytest.raises(ValueError, match="covers the whole frame"):
+            remove_timestamp_band(frame, policy="fill", band_fraction=1.0)
+
     def test_an_unknown_policy_is_rejected(self, frame: np.ndarray):
         with pytest.raises(ValueError, match="unknown overlay policy"):
             remove_timestamp_band(frame, policy="blur")  # type: ignore[arg-type]
@@ -115,13 +133,16 @@ class TestUint8Route:
 
     @pytest.mark.parametrize("overlay", ["keep", "fill", "inpaint", "crop"])
     @pytest.mark.parametrize("roi", [None, 0.5, 0.98])
+    @pytest.mark.parametrize("band_fraction", [0.05, 0.16, 0.6])
     def test_it_produces_the_same_pixels_as_the_float_route(
-        self, overlay: OverlayPolicy, roi: float | None
+        self, overlay: OverlayPolicy, roi: float | None, band_fraction: float
     ) -> None:
         """Every stage is a constant write, a data move, or a multiply by exactly
         0 or 1, so the two routes agree on pixels rather than merely on looks."""
         hwc = np.random.default_rng(5).integers(0, 256, (96, 64, 3), dtype=np.uint8)
-        pipeline = PreprocessingPipeline(overlay=overlay, roi_radius_fraction=roi)
+        pipeline = PreprocessingPipeline(
+            overlay=overlay, roi_radius_fraction=roi, band_fraction=band_fraction
+        )
 
         native = hwc.astype(np.float32) / 255.0
         through_float = (

@@ -188,6 +188,24 @@ def test_uploading_a_directory_that_does_not_exist_never_reaches_rclone(
     assert fake.rclone_invocations(rclone_log) == []
 
 
+def test_an_rclone_that_hangs_past_the_timeout_is_reported_as_a_failure_to_run(
+    target: DriveTarget, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The stalled-upload path the ``timeout`` field exists for: without it the
+    daily sync would block on a transfer that never finishes."""
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    hung = binaries / "rclone"
+    hung.write_text("#!/bin/sh\nexec sleep 5\n", encoding="utf-8")
+    hung.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{binaries}{os.pathsep}{os.environ['PATH']}")
+    video = tmp_path / "allsky-20260810.mp4"
+    video.write_bytes(b"timelapse")
+
+    with pytest.raises(RcloneError, match="rclone copyto failed to run"):
+        RcloneUploader(target=target, timeout=0.1).upload_file(video, "videos", video.name)
+
+
 @pytest.mark.usefixtures("rclone_log")
 def test_a_non_zero_exit_becomes_an_rclone_error_carrying_the_binarys_complaint(
     target: DriveTarget, tmp_path: Path

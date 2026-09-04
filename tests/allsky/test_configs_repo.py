@@ -19,6 +19,7 @@ CPU-only otherwise; no dataset, embeddings or network are touched.
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,8 @@ _ALL_EXPERIMENTS = sorted(
 #: The prepare configs the experiments train on, keyed by the dataset they build.
 _PREPARE_CONFIGS = sorted((_CONFIGS / "data").glob("local_prepare*.yaml"))
 _FRAGMENTS = sorted((_CONFIGS / "models").glob("*.yaml"))
+#: The per-family arms, whose filenames carry the seed they must be configured with.
+_FAMILY_ARMS = sorted((_CONFIGS / "experiments").glob("*/*.yaml"))
 
 #: Embedding width used for the embedding-mode forward probes.
 _EMBED_DIM = 32
@@ -239,6 +242,18 @@ def test_experiment_loads_and_names_a_real_model(experiment: Path) -> None:
     assert cfg.data.input_mode == expected_mode
 
 
+@pytest.mark.parametrize("arm", _FAMILY_ARMS, ids=lambda p: p.name)
+def test_a_family_arm_carries_the_seed_its_filename_advertises(arm: Path) -> None:
+    """Each arm is a copy of its sibling with one field changed, so a copy that kept
+    the source's ``seed`` publishes two runs of one seed as two repetitions and
+    collapses the between-seed spread into rounding noise.
+    """
+    advertised = re.search(r"_s(\d+)$", arm.stem)
+
+    assert advertised is not None, arm.name
+    assert load_experiment_config(arm).seed == int(advertised.group(1))
+
+
 def test_no_two_experiments_write_into_one_run_directory() -> None:
     """Two seeds sharing an output_dir overwrite each other's checkpoints and
     metrics, and the second run reads as the first having diverged.
@@ -324,7 +339,9 @@ def test_experiment_builds_and_forwards(experiment: Path) -> None:
 class TestTransferDirection:
     @staticmethod
     def _arms(family: str) -> list[Path]:
-        return sorted((_CONFIGS / "experiments" / family).glob("*.yaml"))
+        paths = sorted((_CONFIGS / "experiments" / family).glob("*.yaml"))
+        assert paths, f"the {family} family has no configs"
+        return paths
 
     def test_the_source_never_initialises_from_anywhere(self):
         for path in self._arms("folsom"):
@@ -356,7 +373,10 @@ class TestTransferDirection:
             assert cfg.data.data_root.endswith("dataset-iso"), path.name
 
     def test_no_station_arm_outside_the_transfer_family_initialises_from_anything(self):
-        for path in sorted((_CONFIGS / "experiments").glob("*/*.yaml")):
+        arms = sorted((_CONFIGS / "experiments").glob("*/*.yaml"))
+
+        assert arms, "the experiment tree has no family arms"
+        for path in arms:
             if path.parent.name in {"transfer", "folsom"}:
                 continue
             cfg = load_experiment_config(path)

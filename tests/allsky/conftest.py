@@ -16,6 +16,10 @@ now enforced: ``test_torch_gate.py`` reads every module in this directory and
 requires each one importing torch at module scope to be listed. The other
 direction stays a judgement call -- the CLI-driving modules import torch only
 through the run they launch, so they are here without saying ``import torch``.
+
+The synthetic ``prepare-local`` inputs below keep their mp4/TOA5 writers inside
+the fixture bodies, so a dev install without the ``allsky`` extra still imports
+this file.
 """
 
 import importlib.util
@@ -48,16 +52,6 @@ _TORCH_BACKED = (
 
 collect_ignore = [] if importlib.util.find_spec("torch") is not None else list(_TORCH_BACKED)
 
-
-# ---------------------------------------------------------------------------
-# Synthetic inputs shared by the modules that drive ``prepare-local``
-#
-# A conftest fixture is injected by name, so a module needing these no longer
-# imports another test module's fixture and then shadows the import with a
-# same-named parameter (an unused-import + redefinition pair). The mp4/TOA5
-# writers stay inside the fixture bodies, so a dev install without the allsky
-# extra still imports this conftest.
-# ---------------------------------------------------------------------------
 
 _SAFE_COLUMNS = ("AirT1_C_Avg", "DP1_C_Avg", "RH1", "BP1_mbar_Avg", "WS_ms", "WindDir")
 

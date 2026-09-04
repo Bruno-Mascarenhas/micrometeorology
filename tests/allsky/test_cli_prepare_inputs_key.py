@@ -115,7 +115,6 @@ class TestNewVideoDayIsPickedUp:
         assert first.exit_code == 0, first.output
         assert _days(dataset_dir) == ["2026-01-01"]
 
-        # Day 2's timelapse lands, exactly as the daily cron would see it.
         shutil.copy(two_day_videos / "allsky-20260101.mp4", two_day_videos / "allsky-20260102.mp4")
         second = _prepare(config)
         assert second.exit_code == 0, second.output
@@ -167,7 +166,6 @@ class TestIrrelevantConfigEditsDoNotRebuild:
         assert _prepare(config).exit_code == 0
         mtime = (dataset_dir / "manifest.parquet").stat().st_mtime_ns
 
-        # An OOM-driven embeddings knob: zero influence on any manifest row.
         config.write_text(base + "embeddings:\n  batch_size: 8\n", encoding="utf-8")
         second = _prepare(config)
         assert second.exit_code == 0, second.output
@@ -217,8 +215,6 @@ class TestLegacySidecarFallback:
         two_day_videos: Path,
         multi_day_dat: Path,
     ):
-        # Every dataset prepared before this change: the upgrade must not rebuild
-        # (and re-split) it behind the operator's back.
         dataset_dir = tmp_path / "dataset"
         config = _write_config(
             tmp_path / "c.yaml",
@@ -278,8 +274,6 @@ class TestSplitLabelsSurviveARebuild:
         two_day_videos: Path,
         multi_day_dat: Path,
     ):
-        # Four days so create_day_splits is feasible, then a fifth arrives: the
-        # splits step must abort loudly, but never leave the manifest label-less.
         for day in ("20260102", "20260103", "20260104"):
             shutil.copy(
                 two_day_videos / "allsky-20260101.mp4", two_day_videos / f"allsky-{day}.mp4"
@@ -302,7 +296,6 @@ class TestSplitLabelsSurviveARebuild:
         assert "different split already exists" in second.output
         assert "--force" in second.output
 
-        # The manifest grew AND kept every label the old artifact assigned.
         after = pd.read_parquet(dataset_dir / "manifest.parquet")
         assert max(after["day_id"].astype(str).unique()) == "2026-01-05"
         assert after["split"].notna().sum() >= labelled_before
@@ -316,8 +309,6 @@ def test_the_splits_step_alone_ignores_the_frame_provenance(
     two_day_videos: Path,
     multi_day_dat: Path,
 ):
-    # `--steps splits` reads manifest.parquet and cfg.splits and nothing else,
-    # so a frame-shaping edit it never consults must not stop it.
     for day in ("20260102", "20260103", "20260104"):
         shutil.copy(two_day_videos / "allsky-20260101.mp4", two_day_videos / f"allsky-{day}.mp4")
     dataset_dir = tmp_path / "dataset"
@@ -381,42 +372,50 @@ class TestInputsHashContents:
             _manifest_inputs_sha256(cfg, [self._frames(["b.jpg", "a.jpg"])])
         )
 
-    def test_sensor_content_is_part_of_the_key_but_mtime_is_not(self, tmp_path: Path):
+    def test_a_touch_that_changes_only_mtime_leaves_the_key_where_it_was(self, tmp_path: Path):
         dat = tmp_path / "s.dat"
         dat.write_text("one", encoding="utf-8")
         cfg = PrepareConfig.model_validate({"sensor": {"paths": [str(dat)]}})
         frames = [self._frames(["a.jpg"])]
         before = _manifest_inputs_sha256(cfg, frames)
 
-        # A copy that bumps mtime without changing content must not force a rebuild.
         dat.touch()
+
         assert _manifest_inputs_sha256(cfg, frames) == before
 
-        # A same-length in-place edit must.
+    def test_a_same_length_in_place_sensor_edit_moves_the_key(self, tmp_path: Path):
+        dat = tmp_path / "s.dat"
+        dat.write_text("one", encoding="utf-8")
+        cfg = PrepareConfig.model_validate({"sensor": {"paths": [str(dat)]}})
+        frames = [self._frames(["a.jpg"])]
+        before = _manifest_inputs_sha256(cfg, frames)
+
         dat.write_text("two", encoding="utf-8")
+
         assert _manifest_inputs_sha256(cfg, frames) != before
 
-    def test_embeddings_and_splits_sections_are_excluded(self):
+    @pytest.mark.parametrize("patch", [{"embeddings": {"batch_size": 8}}, {"splits": {"seed": 7}}])
+    def test_embeddings_and_splits_sections_are_excluded(self, patch: dict[str, object]):
         frames = [self._frames(["a.jpg"])]
         base = _manifest_inputs_sha256(PrepareConfig(), frames)
-        for section, patch in (
-            ("embeddings", {"embeddings": {"batch_size": 8}}),
-            ("splits", {"splits": {"seed": 7}}),
-        ):
-            other = PrepareConfig.model_validate(patch)
-            assert _manifest_inputs_sha256(other, frames) == base, section
 
-    def test_manifest_relevant_sections_are_included(self):
-        frames = [self._frames(["a.jpg"])]
-        base = _manifest_inputs_sha256(PrepareConfig(), frames)
-        for patch in (
+        other = PrepareConfig.model_validate(patch)
+
+        assert _manifest_inputs_sha256(other, frames) == base
+
+    @pytest.mark.parametrize(
+        "patch",
+        [
             {"night_filter": {"min_solar_elevation_deg": 10.0}},
             {"targets": {"kindex_kind": "kt"}},
             {"site": {"latitude": 0.0}},
             {"features": {"set": "extended"}},
             {"alignment": {"window_minutes": 20.0}},
             {"resize": 224},
-        ):
-            assert _manifest_inputs_sha256(PrepareConfig.model_validate(patch), frames) != base, (
-                patch
-            )
+        ],
+    )
+    def test_manifest_relevant_sections_are_included(self, patch: dict[str, object]):
+        frames = [self._frames(["a.jpg"])]
+        base = _manifest_inputs_sha256(PrepareConfig(), frames)
+
+        assert _manifest_inputs_sha256(PrepareConfig.model_validate(patch), frames) != base

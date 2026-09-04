@@ -8,6 +8,7 @@ the command; that torch-free behaviour is covered in ``test_cli.py``.
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from allsky.cli import app
@@ -153,11 +154,17 @@ class TestExperimentDispatch:
                 str(tmp_path / "nope" / "last.ckpt"),
             ],
         )
-        assert result.exit_code != 0
+        assert result.exit_code == 2, result.output
+        assert "resume checkpoint does not exist" in result.output
 
 
 class TestTrustCheckpointFlag:
-    def test_the_flag_reaches_the_resume_load(self, tmp_path: Path, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        ("extra_flags", "expected"), [([], False), (["--trust-checkpoint"], True)]
+    )
+    def test_the_flag_reaches_the_resume_load(
+        self, tmp_path: Path, monkeypatch, extra_flags: list[str], expected: bool
+    ) -> None:
         """The restricted-unpickler default must be overridable from the CLI.
 
         Without a flag, a checkpoint the allowlist refuses could only be resumed
@@ -172,14 +179,13 @@ class TestTrustCheckpointFlag:
         monkeypatch.setattr("allsky.training.run_experiment", record_trust)
         root, config_path = _build_experiment(tmp_path)
 
-        for extra_flags, expected in (([], False), (["--trust-checkpoint"], True)):
-            trust_values.clear()
-            result = runner.invoke(
-                app,
-                ["train", "--config", str(config_path), "--data-root", str(root), *extra_flags],
-            )
-            assert result.exit_code == 0, result.output
-            assert trust_values == [expected]
+        result = runner.invoke(
+            app,
+            ["train", "--config", str(config_path), "--data-root", str(root), *extra_flags],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert trust_values == [expected]
 
     def test_a_resumed_checkpoint_is_read_under_the_restricted_reader_by_default(
         self, tmp_path: Path, monkeypatch
