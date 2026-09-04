@@ -7,6 +7,7 @@ consumer of ``get_settings()`` fails on its first call.
 """
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -78,3 +79,17 @@ def test_a_limit_missing_a_field_the_gate_reads_fails_at_load_not_mid_run() -> N
     """A ``min_run`` left out used to surface as a KeyError deep inside the mask."""
     with pytest.raises(ValidationError):
         Settings.model_validate({"sensor_persistence_limits": [{"column": "Temp1_Avg"}]})
+
+
+def test_a_named_override_whose_top_level_is_not_a_mapping_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A list at the top of ``LABMIM_CONFIG_PATH`` used to load as ``{}``: the whole
+    override layer vanished with exit code 0, exactly what naming the file is
+    meant to prevent."""
+    override = tmp_path / "override.yaml"
+    override.write_text("- sensor_limits: []\n", encoding="utf-8")
+    monkeypatch.setenv("LABMIM_CONFIG_PATH", str(override))
+
+    with pytest.raises(TypeError, match="not a YAML mapping"):
+        get_settings()

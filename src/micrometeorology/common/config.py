@@ -55,11 +55,21 @@ def _load_named_yaml(path: Path, variable: str) -> dict[str, Any]:
 
     A missing *shipped* default is optional, so :func:`_load_yaml` returning
     ``{}`` is right for layer 1. A path the operator typed is not: a wrong one
-    would make the whole override layer vanish with no exception and exit code 0.
+    would make the whole override layer vanish with no exception and exit code 0,
+    and so would a file whose top level is a list or a scalar.
     """
     if not path.is_file():
         raise FileNotFoundError(f"{variable} points to {path}, which is not a file")
-    return _load_yaml(path)
+    with open(path, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise TypeError(
+            f"{variable} points to {path}, whose top level is a "
+            f"{type(data).__name__}, not a YAML mapping of settings"
+        )
+    return data
 
 
 class SensorRangeLimit(BaseModel):
