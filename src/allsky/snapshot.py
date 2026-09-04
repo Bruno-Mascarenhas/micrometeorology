@@ -21,7 +21,6 @@ import pandas as pd
 
 from allsky.config import (
     SITE_TZ,
-    SITE_UTC_OFFSET_HOURS,
     ExperimentConfig,
     SiteConfig,
     image_size_of,
@@ -373,7 +372,7 @@ def _feature_vector(
         [timestamp],
         site,
         feature_set,
-        utc_offset_hours=float(SITE_UTC_OFFSET_HOURS),
+        utc_offset_hours=float(site.utc_offset_hours),
     )
     unknown = [name for name in feature_columns if name not in engineered.columns]
     if unknown:
@@ -623,8 +622,8 @@ def predict_snapshot(
         accepted; beyond it the row is discarded and the columns imputed.
     site:
         Observation site for the solar geometry; defaults to
-        :class:`~allsky.config.SiteConfig`. The geometry is built at the pinned
-        :data:`~allsky.config.SITE_UTC_OFFSET_HOURS` the manifest builder trains
+        :class:`~allsky.config.SiteConfig`. The geometry is built at the site's
+        declared ``utc_offset_hours``, the clock the manifest builder trains
         on, never at an offset inferred from the site longitude.
     device:
         Torch device the backbone and model run on.

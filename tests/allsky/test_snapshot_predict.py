@@ -264,8 +264,11 @@ def test_an_offset_carrying_sensor_export_is_matched_on_site_local_wall_clock(
     assert float(row["AirT1_C_Avg"].iloc[0]) == pytest.approx(29.0)
 
 
-def test_solar_geometry_is_built_on_the_pinned_site_offset_the_manifest_trains_with() -> None:
-    site = SiteConfig(latitude=-13.0, longitude=-60.0)
+def test_solar_geometry_is_built_on_the_declared_site_offset_the_manifest_trains_with() -> None:
+    """A checkpoint trained on another station and served with that station's
+    ``site`` computed its geometry on the module's pinned Salvador offset: five
+    hours of hour angle for a UTC-8 site."""
+    site = SiteConfig(latitude=38.6, longitude=-121.1, utc_offset_hours=-8.0)
     timestamp = pd.Timestamp("2026-01-15 09:00:00")
 
     values, _ = _feature_vector(
@@ -279,10 +282,12 @@ def test_solar_geometry_is_built_on_the_pinned_site_offset_the_manifest_trains_w
         training_means=np.zeros(1, dtype=np.float32),
     )
 
-    trained_on = solar_elevation_deg(
+    trained_on = solar_elevation_deg(pd.DatetimeIndex([timestamp]), site, -8.0)
+    salvador_clock = solar_elevation_deg(
         pd.DatetimeIndex([timestamp]), site, float(SITE_UTC_OFFSET_HOURS)
     )
     assert float(values[0]) == pytest.approx(float(trained_on[0]), abs=1e-3)
+    assert abs(float(values[0]) - float(salvador_clock[0])) > 10.0
 
 
 def _forget_the_recorded_recipe(checkpoint_path: Path) -> None:
