@@ -153,12 +153,10 @@ class TestImageDatasetContract:
             ],
             dtype=np.float32,
         )
-        # The second half of an `A or B` here was true for every input: with the
-        # frame in [0, 1] the standardized minimum cannot fall below bounds.min().
         assert float(item["image"].min()) >= float(bounds.min()) - 1e-5
         assert float(item["image"].max()) <= float(bounds.max()) + 1e-5
-        # And the standardization did happen: a [0, 1] frame straddles zero after
-        # it, which an identity or a missed division would not.
+        # A [0, 1] frame straddles zero once standardized, which an identity
+        # pipeline or a missed division would not.
         assert float(item["image"].min()) < 0.0
         assert float(item["image"].max()) > 0.0
         assert item["dhi"].dtype == torch.float32

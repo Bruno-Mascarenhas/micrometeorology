@@ -177,6 +177,17 @@ def test_experiment_loads_and_names_a_real_model(experiment: Path) -> None:
     assert cfg.data.input_mode == expected_mode
 
 
+def test_no_two_experiments_write_into_one_run_directory() -> None:
+    """Two seeds sharing an output_dir overwrite each other's checkpoints and
+    metrics, and the second run reads as the first having diverged.
+    """
+    outputs = [load_experiment_config(path).output_dir for path in _ALL_EXPERIMENTS]
+
+    assert len(set(outputs)) == len(outputs), sorted(
+        name for name in outputs if outputs.count(name) > 1
+    )
+
+
 @pytest.mark.parametrize("experiment", _ALL_EXPERIMENTS, ids=lambda p: p.name)
 def test_data_paths_resolve_without_doubling_data_root(experiment: Path) -> None:
     """manifest/split/embeddings are BARE names: resolving contains data_root once.

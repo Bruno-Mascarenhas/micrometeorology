@@ -137,11 +137,9 @@ def test_train_resume_evaluate_end_to_end(tmp_path: Path) -> None:
             "--no-amp",
         ],
     )
-    # Both of the old assertions here were already true at the end of step 1: if
-    # --epochs 3 stopped being applied, `range(start_epoch, cfg.train.epochs)`
-    # would be empty, the run would exit 0 with nothing done and the step would
-    # still pass. metrics.csv is appended one row per epoch, so it is the
-    # artifact that changes.
+    # metrics.csv is appended one row per epoch, so it is what tells a resume
+    # that ran an epoch from one whose `range(start_epoch, cfg.train.epochs)`
+    # was empty — which also exits 0 and also leaves last.ckpt in place.
     assert resumed.exit_code == 0, resumed.output
     assert len(pd.read_csv(run_dir / "metrics.csv")) == 3
 
