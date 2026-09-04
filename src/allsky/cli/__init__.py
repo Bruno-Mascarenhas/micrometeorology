@@ -2,6 +2,10 @@
 
 Examples
 --------
+Mirror the public archive, then capture the camera's current frame:
+    allsky sync-archive --data-dir data/all-sky --extract
+    allsky snapshot --out output/allsky-mm/snapshots
+
 Extract every 60th frame from a one-day timelapse:
     allsky extract-frames data/all-sky/allsky-20260625.mp4 --out scratch/frames --step 60
 
@@ -20,8 +24,9 @@ Evaluate a trained checkpoint:
         --split test --data-root output/allsky-mm/dataset
 
 The CLI is a package: each command group lives in its own module
-(:mod:`allsky.cli.frames`, :mod:`allsky.cli.train`, :mod:`allsky.cli.prepare`,
-:mod:`allsky.cli.embeddings`, :mod:`allsky.cli.evaluate`) and exposes a
+(:mod:`allsky.cli.archive`, :mod:`allsky.cli.frames`, :mod:`allsky.cli.train`,
+:mod:`allsky.cli.prepare`, :mod:`allsky.cli.embeddings`,
+:mod:`allsky.cli.evaluate`) and exposes a
 ``register(app)`` function called once here, so ``__init__`` never needs editing
 to add a command. Heavy dependencies (torch, imageio-ffmpeg) are imported
 lazily inside each command so ``allsky --help`` works in a minimal environment.
@@ -33,6 +38,7 @@ from allsky.cli import archive, embeddings, evaluate, frames, prepare, train
 
 app = typer.Typer(
     name="allsky",
+    rich_markup_mode="markdown",
     no_args_is_help=True,
     help="All-sky camera + radiation-sensor fusion pipeline (LabMiM/UFBA).",
 )

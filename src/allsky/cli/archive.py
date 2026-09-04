@@ -23,6 +23,7 @@ from allsky.archive import (
     ledger_lock,
 )
 from allsky.cli.runtime import configure_cli_logging
+from allsky.config import VIDEO_TIME_FIELDS, PrepareConfig, VideoConfig, load_prepare_config
 from allsky.drive import DriveTarget, RcloneError, RcloneUploader
 
 logger = logging.getLogger(__name__)
@@ -243,10 +244,9 @@ def _warn_about_ambiguously_clocked_days(
     ambiguous = [
         entry.key
         for entry in selected
-        if (record := ledger.frames(entry.key)) is not None
-        and record.get("timestamps") == TimestampSource.config.value
-        and record.get("step") == step
-        and record.get("resize") == resize
+        if ledger.frames_match(
+            entry.key, step=step, resize=resize, timestamps=TimestampSource.config.value
+        )
     ]
     if not ambiguous:
         return
@@ -503,7 +503,7 @@ def sync_archive(
         raise typer.Exit(code=1)
 
 
-def _video_config(timestamps: TimestampSource, config: Path | None) -> Any:
+def _video_config(timestamps: TimestampSource, config: Path | None) -> VideoConfig:
     """Resolve the video section that drives frame timestamps into a ``VideoConfig``.
 
     ``--timestamps overlay`` is the built-in default section, so ``--config``
@@ -513,17 +513,15 @@ def _video_config(timestamps: TimestampSource, config: Path | None) -> Any:
     cadence earns — is :func:`allsky.overlay.extract_frames_for`'s to state, so
     this returns a section rather than a verdict.
     """
-    from allsky.config import PrepareConfig, VideoConfig, load_prepare_config
-
     if timestamps is TimestampSource.overlay:
         if config is not None:
-            logger.warning("--config is ignored with --timestamps overlay")
+            pass
         return VideoConfig()
     cfg = PrepareConfig() if config is None else load_prepare_config(config)
     return cfg.video
 
 
-def _clock(video_config: Any) -> TimestampSource:
+def _clock(video_config: VideoConfig) -> TimestampSource:
     """The timestamp source *video_config* selects, in the ledger's vocabulary.
 
     The ledger and the resume gate speak the flag's names, the config speaks
@@ -536,7 +534,7 @@ def _clock(video_config: Any) -> TimestampSource:
     )
 
 
-def _clock_record(video_config: Any) -> str:
+def _clock_record(video_config: VideoConfig) -> str:
     """What the ledger files as the clock a day's frames were extracted under.
 
     ``overlay`` reads the burned-in stamp and has nothing else to record. The
@@ -546,7 +544,6 @@ def _clock_record(video_config: Any) -> str:
     the resume gate answer "already extracted" for a day whose frames carry the
     other cadence.
     """
-    from allsky.config import VIDEO_TIME_FIELDS
     from allsky.provenance import canonical_config_json
 
     clock = _clock(video_config)
@@ -566,7 +563,7 @@ def _process_day(
     root: Path,
     videos_dir: Path,
     frames_root: Path,
-    video_config: Any,
+    video_config: VideoConfig,
     step: int,
     resize: int | None,
     uploader: RcloneUploader | None,
@@ -665,7 +662,7 @@ def _discard_previous_frames(frames_dir: Path) -> None:
 
 
 def _extract_replacing_previous_frames(
-    video_path: Path, frames_dir: Path, video_config: Any, *, step: int, resize: int | None
+    video_path: Path, frames_dir: Path, video_config: VideoConfig, *, step: int, resize: int | None
 ) -> Any:
     """Extract *video_path* into a staging sibling, then swap it over *frames_dir*.
 
@@ -918,8 +915,8 @@ def _predict_snapshot(
     return path
 
 
-def _existing(*paths: Any) -> tuple[Path, ...]:
-    return tuple(Path(path) for path in paths if path is not None and Path(path).is_file())
+def _existing(*paths: Path | None) -> tuple[Path, ...]:
+    return tuple(path for path in paths if path is not None and path.is_file())
 
 
 def register(app: typer.Typer) -> None:

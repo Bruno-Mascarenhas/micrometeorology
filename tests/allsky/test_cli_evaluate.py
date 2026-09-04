@@ -114,6 +114,59 @@ class TestEvaluateCommand:
         assert (report_dir / "eval_metrics.json").exists()
         assert not (report_dir / "predictions.parquet").exists()
 
+    def test_the_config_supplies_the_data_root_when_no_flag_does(self, tmp_path: Path):
+        """The checkpoint's own baked root is valid here, so a --config that was
+        ignored would exit 0; only a --config that is read reaches the empty
+        directory and fails."""
+        _, run_dir = _train(tmp_path)
+        empty_root = tmp_path / "no-dataset"
+        empty_root.mkdir()
+        config_path = synthetic.write_config_yaml(
+            tmp_path / "from-config.yaml", synthetic.make_config(empty_root)
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "evaluate",
+                "--checkpoint",
+                str(run_dir / "best.ckpt"),
+                "--config",
+                str(config_path),
+            ],
+        )
+
+        assert result.exit_code == 1, result.output
+
+    def test_the_data_root_flag_wins_over_the_config(self, tmp_path: Path):
+        """Inverted, the command would score the checkpoint against another dataset
+        and write a plausible eval_metrics.json with no error at all."""
+        root, run_dir = _train(tmp_path)
+        empty_root = tmp_path / "no-dataset"
+        empty_root.mkdir()
+        config_path = synthetic.write_config_yaml(
+            tmp_path / "from-config.yaml", synthetic.make_config(empty_root)
+        )
+        report_dir = tmp_path / "eval-out"
+
+        result = runner.invoke(
+            app,
+            [
+                "evaluate",
+                "--checkpoint",
+                str(run_dir / "best.ckpt"),
+                "--config",
+                str(config_path),
+                "--data-root",
+                str(root),
+                "--report-dir",
+                str(report_dir),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (report_dir / "eval_metrics.json").exists()
+
     def test_missing_checkpoint_exits_nonzero(self, tmp_path: Path):
         result = runner.invoke(
             app,

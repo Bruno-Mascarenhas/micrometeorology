@@ -104,6 +104,39 @@ class TestExperimentDispatch:
         assert result.exit_code == 0, result.output
         assert (run_dir / "last.ckpt").exists()
 
+    def test_the_batch_size_and_device_overrides_reach_the_engine(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Both flags mutate the loaded config in place and ExperimentTrainConfig has
+        no validate_assignment, so the assignment skips every pydantic check and
+        nothing else states that the two values arrive at the engine."""
+        seen: list[tuple[int, str]] = []
+
+        def record_the_config(cfg, **_kwargs):
+            seen.append((cfg.train.batch_size, cfg.train.device))
+            return {"ok": True}
+
+        monkeypatch.setattr("allsky.training.run_experiment", record_the_config)
+        root, config_path = _build_experiment(tmp_path)
+
+        result = runner.invoke(
+            app,
+            [
+                "train",
+                "--config",
+                str(config_path),
+                "--data-root",
+                str(root),
+                "--batch-size",
+                "3",
+                "--device",
+                "mps",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert seen == [(3, "mps")]
+
     def test_bad_resume_path_errors(self, tmp_path: Path):
         root, config_path = _build_experiment(tmp_path)
         result = runner.invoke(

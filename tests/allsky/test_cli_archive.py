@@ -710,6 +710,30 @@ def test_days_a_previous_release_clocked_ambiguously_are_named_before_any_work_s
     )
 
 
+def test_a_config_given_with_the_overlay_clock_is_announced_as_ignored(
+    mirror: fake.ArchiveMirror, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """`-c` carries nothing on the overlay path: the frames are named from the stamp
+    burned into each frame, not from the modelled 06:00 start the YAML asks for."""
+    data = tmp_path / "data"
+    modelled = _prepare_config(tmp_path / "configs" / "modelled.yaml", "modelled")
+
+    with caplog.at_level(logging.WARNING, logger="allsky.cli.archive"):
+        result = _sync(data, mirror, "--extract", "-c", str(modelled), "--since", "2026-08-10")
+
+    assert result.exit_code == 0, result.output
+    assert any(
+        "--config is ignored with --timestamps overlay" in record.getMessage()
+        for record in caplog.records
+    )
+    frames_dir = data / FRAMES_SUBDIR / DAY_NEW
+    assert sorted(path.name for path in frames_dir.glob("*.jpg")) == [
+        f"allsky-{DAY_NEW}-1200.jpg",
+        f"allsky-{DAY_NEW}-1201.jpg",
+        f"allsky-{DAY_NEW}-1202.jpg",
+    ]
+
+
 def test_recording_a_new_frame_set_forgets_the_upload_of_the_one_it_replaced(
     entry: ArchiveEntry, ledger: Ledger, tmp_path: Path
 ):
@@ -975,6 +999,43 @@ def _snapshot_recording_prediction_kwargs(
         ],
     )
     return result, recorded
+
+
+def test_features_imputed_at_the_training_mean_are_named_in_the_output(
+    mirror: fake.ArchiveMirror, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A prediction standing on training means where the live sensor had no row is
+    not a fully informed prediction, and this line is the only place the operator
+    is told which features it stood on."""
+
+    def predict_on_imputed_features(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "predictions": {"dhi": 137.0},
+            "features": {"imputed": ["wind_speed_ms", "air_temp_c"]},
+        }
+
+    monkeypatch.setattr("allsky.snapshot.predict_snapshot", predict_on_imputed_features)
+    checkpoint = tmp_path / "moved.ckpt"
+    checkpoint.write_bytes(b"checkpoint-bytes")
+
+    result = runner.invoke(
+        app,
+        [
+            "snapshot",
+            "--out",
+            str(tmp_path / "snapshots"),
+            "--base-url",
+            mirror.base_url,
+            "--insecure",
+            "--checkpoint",
+            str(checkpoint),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "2 feature(s) imputed" in result.output
+    assert "wind_speed_ms" in result.output
+    assert "air_temp_c" in result.output
 
 
 def test_the_embeddings_dir_flag_overrides_the_store_baked_into_the_checkpoint(

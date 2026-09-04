@@ -23,9 +23,14 @@ import typer
 
 from allsky.cli.runtime import configure_cli_logging
 from allsky.cli.train import DeviceChoice  # typer resolves this annotation at runtime
-from allsky.config import FRAME_PIXEL_SECTIONS, VIDEO_TIME_FIELDS, PrepareConfig
+from allsky.config import (
+    DATASET_MANIFEST_FILENAME,
+    FRAME_PIXEL_SECTIONS,
+    VIDEO_TIME_FIELDS,
+    PrepareConfig,
+)
 
-logger = logging.getLogger("allsky.embeddings")
+logger = logging.getLogger(__name__)
 
 
 #: Sections a stored vector depends on whole: the encoder itself and the
@@ -152,7 +157,7 @@ def precompute_embeddings(
 
     cfg = load_prepare_config(config)
     dataset_dir = Path(cfg.output.dataset_dir)
-    manifest_path = manifest if manifest is not None else dataset_dir / "manifest.parquet"
+    manifest_path = manifest if manifest is not None else dataset_dir / DATASET_MANIFEST_FILENAME
     out_dir = out if out is not None else dataset_dir / "embeddings"
     device_pref = str(device) if device is not None else cfg.embeddings.device
     data_root = manifest_path.parent

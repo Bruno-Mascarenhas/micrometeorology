@@ -175,6 +175,41 @@ class TestIrrelevantConfigEditsDoNotRebuild:
         assert (dataset_dir / "manifest.parquet").stat().st_mtime_ns == mtime
 
 
+class TestBuildManifestDropsUnreadableDays:
+    def test_an_unreadable_per_video_manifest_drops_only_its_own_day(
+        self,
+        tmp_path: Path,
+        two_day_videos: Path,
+        multi_day_dat: Path,
+    ):
+        """`--steps build-manifest` can re-extract nothing, so a truncated per-video
+        parquet drops that day from the manifest about to be published: the warning
+        is the only trace, and a build that quietly loses a whole day is what the
+        inputs hash exists to end."""
+        shutil.copy(two_day_videos / "allsky-20260101.mp4", two_day_videos / "allsky-20260102.mp4")
+        dataset_dir = tmp_path / "dataset"
+        config = _write_config(
+            tmp_path / "c.yaml",
+            dataset_dir=dataset_dir,
+            video_pattern=f"{two_day_videos}/allsky-*.mp4",
+            dat_path=multi_day_dat,
+        )
+        assert _prepare(config).exit_code == 0
+        assert _days(dataset_dir) == ["2026-01-01", "2026-01-02"]
+
+        vman = dataset_dir / "frames" / "allsky-20260102" / "manifest.parquet"
+        vman.write_bytes(vman.read_bytes()[: len(vman.read_bytes()) // 2])
+
+        result = runner.invoke(
+            app, ["prepare-local", "--config", str(config), "--steps", "build-manifest"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "allsky-20260102" in result.output
+        assert "is unreadable" in result.output
+        assert _days(dataset_dir) == ["2026-01-01"]
+
+
 class TestLegacySidecarFallback:
     def test_sidecar_without_inputs_sha256_uses_the_config_key(
         self,
@@ -207,6 +242,36 @@ class TestLegacySidecarFallback:
 
 
 class TestSplitLabelsSurviveARebuild:
+    def test_a_split_artifact_that_cannot_be_read_rebuilds_without_labels(
+        self,
+        tmp_path: Path,
+        two_day_videos: Path,
+        multi_day_dat: Path,
+    ):
+        """A hand-edited or truncated splits.json must degrade to an unlabelled
+        rebuild plus a warning: a build that dies here leaves no manifest at all,
+        and the exception tuple was never checked against what the loader raises."""
+        for day in ("20260102", "20260103", "20260104"):
+            shutil.copy(
+                two_day_videos / "allsky-20260101.mp4", two_day_videos / f"allsky-{day}.mp4"
+            )
+        dataset_dir = tmp_path / "dataset"
+        config = _write_config(
+            tmp_path / "c.yaml",
+            dataset_dir=dataset_dir,
+            video_pattern=f"{two_day_videos}/allsky-*.mp4",
+            dat_path=multi_day_dat,
+        )
+        assert runner.invoke(app, ["prepare-local", "--config", str(config)]).exit_code == 0
+        (dataset_dir / "splits.json").write_text("{ not json", encoding="utf-8")
+
+        shutil.copy(two_day_videos / "allsky-20260101.mp4", two_day_videos / "allsky-20260105.mp4")
+        result = _prepare(config)
+
+        assert result.exit_code == 0, result.output
+        assert "cannot reuse split labels" in result.output
+        assert pd.read_parquet(dataset_dir / "manifest.parquet")["split"].isna().all()
+
     def test_rebuild_carries_existing_split_labels_forward(
         self,
         tmp_path: Path,

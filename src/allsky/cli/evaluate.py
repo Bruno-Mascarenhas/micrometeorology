@@ -17,6 +17,7 @@ from allsky.cli.runtime import configure_cli_logging
 from allsky.cli.train import (
     DeviceChoice,  # typer resolves this annotation at runtime
 )
+from allsky.config import load_experiment_config
 from allsky.training.errors import TrainingError
 
 logger = logging.getLogger(__name__)
@@ -129,8 +130,6 @@ def _resolve_data_root(data_root: Path | None, config: Path | None) -> Path | No
     if data_root is not None:
         return data_root
     if config is not None:
-        from allsky.config import load_experiment_config
-
         return Path(load_experiment_config(config).data.data_root)
     return None
 

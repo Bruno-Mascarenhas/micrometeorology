@@ -419,6 +419,51 @@ class TestPrepareLocal:
         assert "1 video(s) could not be timestamped" in result.output
         assert not (dataset_dir / "frames" / synthetic_video.stem / "manifest.parquet").exists()
 
+    def test_build_manifest_without_extracted_frames_exits_one(self, tmp_path: Path):
+        config = _write_config(
+            tmp_path / "c.yaml",
+            dataset_dir=tmp_path / "dataset",
+            video_pattern="none-*.mp4",
+            dat_path=tmp_path / "x.dat",
+        )
+
+        result = runner.invoke(
+            app, ["prepare-local", "--config", str(config), "--steps", "build-manifest"]
+        )
+
+        assert result.exit_code == 1
+        assert "needs extracted frames" in result.output
+
+    def test_the_splits_step_without_a_manifest_exits_one(self, tmp_path: Path):
+        config = _write_config(
+            tmp_path / "c.yaml",
+            dataset_dir=tmp_path / "dataset",
+            video_pattern="none-*.mp4",
+            dat_path=tmp_path / "x.dat",
+        )
+
+        result = runner.invoke(app, ["prepare-local", "--config", str(config), "--steps", "splits"])
+
+        assert result.exit_code == 1
+        assert "splits step needs a manifest" in result.output
+
+    def test_split_fractions_that_leave_no_train_day_exit_one(self, tmp_path: Path):
+        dataset_dir = tmp_path / "dataset"
+        _write_manifest(dataset_dir, ["2025-03-21 12:00", "2025-03-22 12:00"], create_files=True)
+        config = _write_config(
+            tmp_path / "c.yaml",
+            dataset_dir=dataset_dir,
+            video_pattern="none-*.mp4",
+            dat_path=tmp_path / "x.dat",
+            val_fraction=0.9,
+            test_fraction=0.9,
+        )
+
+        result = runner.invoke(app, ["prepare-local", "--config", str(config), "--steps", "splits"])
+
+        assert result.exit_code == 1
+        assert "cannot create splits" in result.output
+
     def test_a_day_whose_video_was_pruned_stays_in_the_dataset(
         self, tmp_path: Path, synthetic_video: Path, synthetic_dat: Path
     ):
@@ -484,6 +529,30 @@ class TestPrepareLocal:
         jpegs = list((dataset_dir / "frames" / "allsky-20260101").glob("*.jpg"))
         assert len(jpegs) == 8
 
+    def test_a_file_with_no_parseable_date_is_named_instead_of_a_traceback(
+        self, tmp_path: Path, synthetic_dat: Path
+    ):
+        """One stray file matching video.pattern ended the run with a raw ValueError
+        out of video_date; every other failure of this command names the cause and
+        exits 1."""
+        videos = tmp_path / "videos"
+        videos.mkdir()
+        (videos / "allsky-20260101.mp4").write_bytes(b"")
+        (videos / "allsky-test.mp4").write_bytes(b"")
+        config = _write_config(
+            tmp_path / "c.yaml",
+            dataset_dir=tmp_path / "dataset",
+            video_pattern=f"{videos}/allsky-*.mp4",
+            dat_path=synthetic_dat,
+        )
+
+        result = runner.invoke(
+            app, ["prepare-local", "--config", str(config), "--steps", "build-manifest"]
+        )
+
+        assert result.exit_code == 1
+        assert "allsky-test.mp4" in result.output
+
     def test_unknown_step_exits_one(self, tmp_path: Path):
         config = _write_config(
             tmp_path / "c.yaml",
@@ -497,6 +566,31 @@ class TestPrepareLocal:
 
 
 class TestSplitsGuard:
+    def test_an_unchanged_split_is_not_re_attached_to_the_manifest(self, tmp_path: Path):
+        """`save_split_artifact` writes nothing when the split_id is unchanged, so the
+        artifact a checkpoint trained against survives; the manifest was re-written
+        anyway on every run, moving the manifest_sha256 that names those very bytes."""
+        dataset_dir = tmp_path / "dataset"
+        _write_manifest(
+            dataset_dir,
+            [f"2025-03-{day} 12:00" for day in range(21, 27)],
+            create_files=True,
+        )
+        config = _write_config(
+            tmp_path / "c.yaml",
+            dataset_dir=dataset_dir,
+            video_pattern="none-*.mp4",
+            dat_path=tmp_path / "x.dat",
+        )
+        first = runner.invoke(app, ["prepare-local", "--config", str(config), "--steps", "splits"])
+        assert first.exit_code == 0, first.output
+        mtime = (dataset_dir / "manifest.parquet").stat().st_mtime_ns
+
+        second = runner.invoke(app, ["prepare-local", "--config", str(config), "--steps", "splits"])
+
+        assert second.exit_code == 0, second.output
+        assert (dataset_dir / "manifest.parquet").stat().st_mtime_ns == mtime
+
     def test_splits_guard_and_force(self, tmp_path: Path):
         dataset_dir = tmp_path / "dataset"
         # Multi-day manifest so a day split is feasible.
@@ -591,15 +685,18 @@ class TestExportColabBundle:
         assert "allsky_bundle/frames/allsky-20250321-1200.jpg" in members
 
 
-def test_importing_the_prepare_command_module_does_not_pull_pandas():
-    """The module docstring promises a torch-free, pandas-free ``allsky --help``."""
+@pytest.mark.parametrize("package", ["pandas", "numpy"])
+def test_importing_the_prepare_command_module_pulls_no_array_stack(package: str):
+    """The module docstring promises an ``allsky --help`` that stays light and
+    torch-free; numpy came in through the one top-level ``decode_rgb`` import and
+    the pandas-only probe could not see it."""
     probe = subprocess.run(
         [
             sys.executable,
             "-c",
             (
                 "import sys, allsky.cli.prepare;"
-                "print(sorted(m for m in sys.modules if m.split('.')[0] == 'pandas'))"
+                f"print(sorted(m for m in sys.modules if m.split('.')[0] == {package!r}))"
             ),
         ],
         capture_output=True,

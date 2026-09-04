@@ -141,6 +141,32 @@ def test_unknown_backbone_errors(tmp_path: Path):
     assert "fake" in result.output
 
 
+def test_the_manifest_override_re_roots_the_frames_it_resolves(tmp_path: Path):
+    """The data root follows --manifest, not output.dataset_dir: a manifest read from
+    another directory has its relative image_path values resolved against THAT
+    directory, and nothing in the output says the root moved."""
+    pytest.importorskip("torch")
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    _build_dataset(elsewhere, n=2)
+    config = _write_config(tmp_path, dataset_dir)
+
+    result = runner.invoke(
+        app,
+        [
+            "precompute-embeddings",
+            "--config",
+            str(config),
+            "--manifest",
+            str(elsewhere / "manifest.parquet"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _summary(result.output)["encoded"] == 2
+
+
 def test_missing_manifest_errors(tmp_path: Path):
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir(parents=True, exist_ok=True)  # no manifest.parquet

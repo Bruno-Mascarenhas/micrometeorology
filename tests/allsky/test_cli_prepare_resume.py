@@ -103,6 +103,28 @@ class TestResumeCompleteness:
         manifest = pd.read_parquet(dataset_dir / "manifest.parquet")
         assert (manifest["qc_flags"] & int(QCFlag.FRAME_DARK)).all()
 
+    def test_frames_deleted_from_disk_are_re_extracted_not_resumed_onto(
+        self,
+        tmp_path: Path,
+        dark_video: Path,
+        synthetic_dat: Path,
+    ):
+        """The gate read the parquet and the sidecar and never the disk, so a day
+        whose JPEGs were cleaned away still printed "frames already present" and the
+        manifest was rebuilt with image_path values naming files that were gone."""
+        config, dataset_dir = _config_for(tmp_path, dark_video, synthetic_dat)
+        assert _prepare(config).exit_code == 0
+        jpeg_dir = dataset_dir / "frames" / "allsky-20260101"
+        removed = sorted(path.name for path in jpeg_dir.glob("*.jpg"))
+        for jpeg in jpeg_dir.glob("*.jpg"):
+            jpeg.unlink()
+
+        result = _prepare(config)
+
+        assert result.exit_code == 0, result.output
+        assert "re-extracting" in result.output
+        assert sorted(path.name for path in jpeg_dir.glob("*.jpg")) == removed
+
     def test_complete_frame_manifest_still_resumes(
         self,
         tmp_path: Path,

@@ -214,6 +214,7 @@ convention = "numpy"
 # Spawn this package's own CLIs via `sys.executable`, which S603 cannot accept by
 # construction: it is silent only when every argv element is a string literal.
 "tests/allsky/test_cli.py" = ["S603"]
+"tests/allsky/test_cli_prepare.py" = ["S603"]
 "tests/allsky/test_data_datasets.py" = ["S603"]
 "tests/allsky/test_data_loading.py" = ["S603"]
 "tests/allsky/test_modeling_contract.py" = ["S603"]
