@@ -225,3 +225,19 @@ def test_a_gap_in_the_global_record_leaves_the_daily_clearness_untouched():
     kt = ktkd.daily_clearness_index(global_flux, extraterrestrial)
 
     assert kt.iloc[0] == pytest.approx(0.6)
+
+
+def test_ridley_brl_matches_the_published_logistic_by_hand():
+    """Ridley, Boland & Lauret (2010): d = 1 / (1 + exp(-5.38 + 6.63 kt + 0.006 AST
+    - 0.007 alpha + 1.75 Kt + 1.31 psi)). The AST coefficient had been transcribed
+    with its sign flipped."""
+    kt, ast, alpha, daily_kt, psi = 0.5, 15.0, 40.0, 0.55, 0.5
+    expected = 1.0 / (
+        1.0 + np.exp(-5.38 + 6.63 * kt + 0.006 * ast - 0.007 * alpha + 1.75 * daily_kt + 1.31 * psi)
+    )
+
+    modelled = ktkd.ridley_brl_2010(
+        np.array([kt]), np.array([ast]), np.array([alpha]), np.array([daily_kt]), np.array([psi])
+    )
+
+    assert modelled[0] == pytest.approx(expected, rel=1e-12)

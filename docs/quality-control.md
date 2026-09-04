@@ -209,8 +209,12 @@ diffuse. With the correction the same bin reads 0.97.
 diffuse-fraction models lose most of the positive bias previously attributed to
 them. Marques Filho et al. (2016) goes from MBE +0.071 to +0.004, Lemos et al.
 (2017) crosses to -0.018 and the BRL model of Ridley et al. (2010) from +0.130 to
-+0.069. The "systematic overestimation by all three models" reported before this
-correction was in large part the missing shade-ring factor, not the models.
++0.069. Both BRL figures were measured with the apparent-solar-time coefficient
+transcribed as -0.006; with the published +0.006 (corrected on 2026-09-02) the
+corrected archive gives an MBE of +0.044 and an RMSE of 0.118 over the same
+23,795 hours. The "systematic overestimation by all three models" reported
+before this correction was in large part the missing shade-ring factor, not the
+models.
 
 A missing factor raises `MissingShadeRingFactorError` rather than becoming NaN or
 1.0: the first would erase a measurement in silence and the second would publish
