@@ -69,6 +69,7 @@ from micrometeorology.sensors.archive import (
     unquantised_rain_samples,
     unshaded_diffuse_days,
     verify_frame,
+    verify_window,
 )
 from micrometeorology.sensors.calibration import (
     SHADE_RING_FACTOR_FILE,
@@ -167,6 +168,12 @@ def run(
     repair that stops matching its file, or a reader change that eats a header
     row all shorten the record, and none of them raise on their own. Pass
     `--strict` in any automated run.
+
+    ``--source`` cannot be checked against the audited row counts — it is a few
+    days of what the logger is writing now, not the history — so it is checked
+    against the invariants that hold for any window instead
+    (:func:`~micrometeorology.sensors.archive.verify_window`). Without that,
+    the operational mode was the one mode where `--strict` verified nothing.
     """
     setup_logging(log_level)
     settings = get_settings()
@@ -203,7 +210,12 @@ def run(
             f"Janela a partir de {len(lenta_paths)} arquivo(s) lenta e {len(rain_paths)} "
             f"rain do registrador (sem manifesto, sem verificacao contra a auditoria do acervo)"
         )
-        reports = []
+        typer.echo("\nVerificacao de forma da janela:")
+        reports = [verify_window(lenta, "lenta")]
+        if rain_paths:
+            reports.append(verify_window(rain, "rain"))
+        for report in reports:
+            _echo_report(report)
     else:
         lenta = build_five_minute_frame(LENTA_MANIFEST, data_dir, Path(staging) / "lenta")
         rain = build_five_minute_frame(RAIN_MANIFEST, data_dir, Path(staging) / "rain")
@@ -224,7 +236,9 @@ def run(
         typer.echo(f"\n! {len(failed)} divergencia(s) em relacao a auditoria do acervo")
         if strict:
             raise typer.Exit(code=1)
-    elif reports:
+    elif source_files:
+        typer.echo("\n>> Janela bem formada: indice crescente, sem carimbo repetido")
+    else:
         typer.echo("\n>> Merge confere com a auditoria: nenhuma linha perdida ou duplicada")
 
     # --strict sai UMA vez, no fim, depois de todos os artefatos e do manifesto.

@@ -91,6 +91,7 @@ __all__ = [
     "unquantised_rain_samples",
     "unshaded_diffuse_days",
     "verify_frame",
+    "verify_window",
 ]
 
 # Measured over the manifests below. A merge that does not reproduce these has
@@ -410,6 +411,57 @@ def build_five_minute_frame(
         paths,
         sentinel_value=sentinel_value,
         text_columns=list(STATUS_COLUMNS),
+    )
+
+
+def verify_window(frame: pd.DataFrame, kind: str) -> ArchiveReport:
+    """Check a rolling window against the invariants that hold for any window.
+
+    :func:`verify_frame` is anchored to the audited historical record — its row
+    count, its first stamp, its last — so it cannot judge the operational
+    ``--source`` window, which is a handful of days of whatever the logger is
+    writing now.  That is why ``--source`` verified nothing at all and
+    ``--strict`` could not fail on it.  What still holds regardless of the
+    window is the frame's own shape: an index that never goes backwards, no
+    stamp appearing twice, and at least one row.
+
+    Parameters
+    ----------
+    frame:
+        The merged 5-minute window.
+    kind:
+        ``"lenta"`` or ``"rain"``, named in every problem sentence.
+
+    Returns
+    -------
+    ArchiveReport
+        ``expected_rows`` is zero: no audited count applies to a window.
+        ``problems`` is empty when the window is well formed.
+    """
+    index = frame.index
+    first = pd.Timestamp(index.min()) if len(index) else None
+    last = pd.Timestamp(index.max()) if len(index) else None
+    duplicated = int(index.duplicated().sum())
+    monotonic = bool(index.is_monotonic_increasing)
+
+    problems: list[str] = []
+    if len(frame) == 0:
+        problems.append(f"{kind}: the window merged to no row at all")
+    if duplicated:
+        problems.append(f"{kind}: {duplicated} duplicated timestamps")
+    if not monotonic:
+        problems.append(f"{kind}: index is not monotonically increasing")
+
+    return ArchiveReport(
+        kind=kind,
+        rows=len(frame),
+        expected_rows=0,
+        columns=len(frame.columns),
+        first=first,
+        last=last,
+        duplicated=duplicated,
+        monotonic=monotonic,
+        problems=tuple(problems),
     )
 
 

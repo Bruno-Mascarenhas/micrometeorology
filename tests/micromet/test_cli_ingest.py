@@ -249,6 +249,28 @@ def test_the_window_mode_reads_the_live_tables_instead_of_the_manifest(tmp_path)
     assert (saida / "station_hourly.parquet").exists()
 
 
+def test_the_window_mode_fails_strict_on_a_window_that_merged_to_nothing(tmp_path) -> None:
+    """``--source`` built ``reports = []``, so ``--strict``'s only gate was always
+    empty and the operational mode — the one that runs hourly — verified nothing
+    at all. The audited row counts cannot judge a window, but its own shape can."""
+    from typer.testing import CliRunner
+
+    from micrometeorology.cli.build_archive import app
+
+    fatores = tmp_path / "teorica_2016-2030.csv"
+    fatores.write_text("ano_i,mes_i,dia_i,hor_i,min_i,fc\n", encoding="utf-8")
+    lenta = tmp_path / "LBM_lenta_2025.dat"
+    _write_toa5(lenta, ["CM3Up_Wm2_Avg"], [])
+    saida = tmp_path / "out"
+
+    resultado = CliRunner().invoke(
+        app, ["-d", str(tmp_path), "-o", str(saida), "--source", str(lenta), "--strict"]
+    )
+
+    assert resultado.exit_code == 1, resultado.output
+    assert "merged to no row at all" in resultado.output
+
+
 def test_without_sources_the_manifest_still_refuses_a_missing_entry(tmp_path) -> None:
     """The historical build must keep failing loud: a dropped entry shortens the record."""
     from typer.testing import CliRunner
