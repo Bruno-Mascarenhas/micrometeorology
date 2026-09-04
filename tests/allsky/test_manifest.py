@@ -24,6 +24,7 @@ from allsky.data.contracts import (
 from allsky.data.manifest import (
     TARGET_SOURCE_ERBS,
     TARGET_SOURCE_MEASURED,
+    _split_assignment_and_id,
     attach_split_column,
     build_manifest,
     write_manifest_parquet,
@@ -525,3 +526,16 @@ class TestProvenanceColumns:
         # Artifact assigns a different day: this day stays unlabeled (pd.NA).
         attach_split_column(path, {"assignment": {"2099-01-01": "train"}, "split_id": "x"})
         assert pd.read_parquet(path)["split"].isna().all()
+
+
+def test_a_split_dict_with_the_wrong_key_is_refused_before_the_manifest_is_rewritten() -> None:
+    """``.get("assignment", {})`` turned a misspelt key into an empty map: every split
+    label went null, the sidecar's split_id was overwritten with None and the parquet
+    was re-hashed, all reported as a success."""
+    with pytest.raises(KeyError, match="assignment"):
+        _split_assignment_and_id({"assignments": {"2025-01-01": "train"}, "split_id": "abc"})
+
+
+def test_an_empty_split_assignment_is_refused() -> None:
+    with pytest.raises(ValueError, match="no day assignment"):
+        _split_assignment_and_id({"assignment": {}, "split_id": "abc"})

@@ -577,7 +577,11 @@ def _split_assignment_and_id(
         split_id = getattr(split_artifact, "split_id", None)
         return {str(k): str(v) for k, v in assignment.items()}, split_id
     if isinstance(split_artifact, dict):
-        raw = split_artifact.get("assignment", {})
+        raw = split_artifact["assignment"]
+        if not raw:
+            raise ValueError(
+                "split artifact carries no day assignment; refusing to blank every split label"
+            )
         return {str(k): str(v) for k, v in raw.items()}, split_artifact.get("split_id")
     raise TypeError(
         f"split_artifact must be a DaySplit or dict, got {type(split_artifact).__name__}"
