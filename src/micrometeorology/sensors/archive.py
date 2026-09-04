@@ -435,8 +435,7 @@ def verify_window(frame: pd.DataFrame, kind: ArchiveKind) -> ArchiveReport:
     :func:`verify_frame` is anchored to the audited historical record — its row
     count, its first stamp, its last — so it cannot judge the operational
     ``--source`` window, which is a handful of days of whatever the logger is
-    writing now.  That is why ``--source`` verified nothing at all and
-    ``--strict`` could not fail on it.  What still holds regardless of the
+    writing now.  What still holds regardless of the
     window is the frame's own shape: an index that never goes backwards, no
     stamp appearing twice, and at least one row.
 
@@ -530,11 +529,8 @@ def verify_frame(frame: pd.DataFrame, kind: ArchiveKind) -> ArchiveReport:
         problems.append(f"{kind}: {duplicated} duplicated timestamps")
     if not monotonic:
         problems.append(f"{kind}: index is not monotonically increasing")
-    # The surplus rule above already assumes the grid — it converts a span into a
-    # row count by dividing by SAMPLING_INTERVAL — but nothing checked that the
-    # rows sit ON it. A staging repair that shifts part of a file, or a merge
-    # that lands rows off the 5-minute grid, keeps the count and the span intact
-    # and only shows up here.
+    # The surplus rule above assumes the grid — it converts a span into a row
+    # count by dividing by SAMPLING_INTERVAL — so the rows have to sit ON it.
     stamps = pd.DatetimeIndex(index)
     # Through the offset from midnight, not through `asi8`: this index carries
     # microsecond resolution, so the integer view is in microseconds while

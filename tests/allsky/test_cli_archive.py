@@ -291,8 +291,7 @@ def test_describe_names_every_step_the_plan_still_owes(entry: ArchiveEntry):
 
 def test_a_plan_that_owes_nothing_reports_no_work(entry: ArchiveEntry):
     """The only case of the disjunction worth a test: every planner test above
-    already covers a plan that owes something, and enumerating the other four
-    combinations pinned an `or` no realistic edit gets wrong.
+    already covers a plan that owes something.
     """
     plan = DayPlan(
         entry=entry, download=False, extract=False, upload_video=False, upload_frames=False
@@ -419,6 +418,9 @@ def _prepare_config(path: Path, clock: str) -> Path:
 def test_the_config_timestamp_model_names_frames_from_a_fixed_start_time_instead(
     mirror: fake.ArchiveMirror, tmp_path: Path
 ):
+    """The modelled clock is filed with a digest of its own cadence fields: two
+    configs that both say "modelled" describe different frames whenever
+    start_time or minutes_per_frame differs."""
     data = tmp_path / "data"
     modelled = _prepare_config(tmp_path / "configs" / "modelled.yaml", "modelled")
     result = _sync(
@@ -442,9 +444,6 @@ def test_the_config_timestamp_model_names_frames_from_a_fixed_start_time_instead
     ]
     recorded = _reload(data).frames(DAY_NEW)
     assert recorded is not None
-    # The modelled clock is filed with a digest of its own cadence fields: two
-    # configs that both say "modelled" describe different frames whenever
-    # start_time or minutes_per_frame differs.
     assert recorded["timestamps"].startswith("config:")
 
 
@@ -1183,9 +1182,9 @@ def test_the_same_modelled_cadence_is_the_same_clock():
 
 class TestTheCaptureClockFallbackChain:
     """Three sources in order — the burned-in overlay, the server's
-    Last-Modified, then the host clock — and only the first was ever exercised.
-    The last is the exact regression the docs warn about: a container in UTC
-    names the snapshot three hours off and nothing fails."""
+    Last-Modified, then the host clock. The last is the exact regression the
+    docs warn about: a container in UTC names the snapshot three hours off and
+    nothing fails."""
 
     @staticmethod
     def _capture(tmp_path: Path, payload: bytes, headers: dict[str, str]):
@@ -1235,9 +1234,8 @@ class TestTheCaptureClockFallbackChain:
 def test_uploading_both_mirrors_the_frames_and_records_the_destination(
     mirror: fake.ArchiveMirror, tmp_path: Path, rclone_log: Path
 ):
-    """`--upload both` is the cron recipe's own invocation and no test drove it:
-    the frames branch could have stopped mirroring, or stopped recording what it
-    mirrored, with every assertion in this file still green."""
+    """`--upload both` is the cron recipe's own invocation: the frames branch
+    both mirrors and records what it mirrored."""
     data = tmp_path / "data"
 
     result = _sync(data, mirror, "--extract", "--upload", "both", "--drive-remote", "labmim")
@@ -1270,9 +1268,9 @@ def test_a_second_upload_both_run_leaves_the_frames_alone(
 def test_a_snapshot_publishes_its_frame_and_sidecar_to_drive(
     mirror: fake.ArchiveMirror, tmp_path: Path, rclone_log: Path
 ):
-    """The whole Drive publish path of `snapshot` — the branch the hourly cron
-    runs — was never executed: it could have stopped uploading, or uploaded to
-    the wrong day folder, with every snapshot test still green."""
+    """The whole Drive publish path of `snapshot` is the branch the hourly cron
+    runs: the JPEG and its provenance sidecar are uploaded, and with no
+    checkpoint configured there is no prediction file to go with them."""
     out_dir = tmp_path / "snapshots"
 
     result = runner.invoke(
@@ -1291,7 +1289,6 @@ def test_a_snapshot_publishes_its_frame_and_sidecar_to_drive(
 
     assert result.exit_code == 0, result.output
     copied = [line for line in fake.rclone_invocations(rclone_log) if line.startswith("copyto")]
-    # The JPEG and its provenance sidecar; no checkpoint, so no prediction.
     assert len(copied) == 2
     day = f"{next(out_dir.glob('*.jpg')).stem.split('-')[1]}"
     assert all(f"{REMOTE_SNAPSHOTS}/{day}/" in line for line in copied), copied

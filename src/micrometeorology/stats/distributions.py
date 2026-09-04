@@ -1246,8 +1246,7 @@ def fit_distribution(family: str, values: NDArray, **options: object) -> Distrib
     sample = _within_support(_clean(values), specification.support)
     params = specification.fit(sample, **options)
     # Through the family's own ceiling where it declares one: hollands_huget
-    # discards every sample above ``kt_max`` INSIDE the estimator, so counting
-    # the pre-ceiling sample published an ``n`` larger than the fit was made on.
+    # discards every sample above ``kt_max`` INSIDE the estimator.
     kt_max = options.get("kt_max")
     if kt_max is not None:
         sample = sample[sample <= float(kt_max)]  # type: ignore[arg-type]

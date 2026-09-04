@@ -71,9 +71,9 @@ def test_a_limit_missing_a_field_the_gate_reads_fails_at_load_not_mid_run() -> N
 def test_a_named_override_whose_top_level_is_not_a_mapping_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A list at the top of ``LABMIM_CONFIG_PATH`` used to load as ``{}``: the whole
-    override layer vanished with exit code 0, exactly what naming the file is
-    meant to prevent."""
+    """Silently loading ``LABMIM_CONFIG_PATH`` as ``{}`` would vanish the whole
+    override layer with exit code 0, exactly what naming the file is meant to
+    prevent."""
     override = tmp_path / "override.yaml"
     override.write_text("- sensor_limits: []\n", encoding="utf-8")
     monkeypatch.setenv("LABMIM_CONFIG_PATH", str(override))

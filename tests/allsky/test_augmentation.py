@@ -212,7 +212,7 @@ class TestAbsentPixelsAreNotSkySignal:
     def _frame_and_mask() -> tuple[np.ndarray, np.ndarray]:
         chw = np.full((3, 16, 16), 0.6, dtype=np.float32)
         valid = np.ones((16, 16), dtype=bool)
-        valid[:, :8] = False  # the absent half
+        valid[:, :8] = False
         chw[:, :, :8] = 0.0
         return chw, valid
 
@@ -233,12 +233,12 @@ class TestAbsentPixelsAreNotSkySignal:
         assert not np.array_equal(noisy[:, :, :8], np.zeros_like(noisy[:, :, :8]))
 
     def test_the_erasing_fill_averages_only_the_imaged_pixels(self):
+        """The imaged half is a flat 0.6, so the fill must be 0.6 — not the 0.3
+        the whole-frame mean would give."""
         chw, valid = self._frame_and_mask()
 
         erased = random_erasing(chw, np.random.default_rng(3), area_range=(0.5, 0.6), valid=valid)
 
-        # The imaged half is a flat 0.6, so the fill must be 0.6 — not the 0.3
-        # the whole-frame mean would give.
         written = erased[:, :, 8:][erased[:, :, 8:] != 0.6]
         assert written.size > 0, "the patch must land inside the imaged half"
         assert float(written.max()) == pytest.approx(0.6, abs=1e-6)

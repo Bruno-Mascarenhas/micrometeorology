@@ -309,7 +309,7 @@ class ImageEncoder(nn.Module):
         mode, so a "frozen" ConvNet backbone still drifts with the batches it
         sees and the frozen and fine-tuned arms of an ablation stop being the
         same encoder. The transformer backbones use LayerNorm, which holds no
-        running statistics, which is why this went unnoticed.
+        running statistics.
         """
         from torch.nn.modules.batchnorm import _BatchNorm
 

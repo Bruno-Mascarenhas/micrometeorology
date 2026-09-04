@@ -841,9 +841,7 @@ def _v1_number(row: Mapping[str, str], name: str) -> float:
     Raises
     ------
     ValueError
-        When the cell holds text that is not a number. No-valuing it instead
-        would skip the row's repair silently and pass the corrupted string into
-        the v2 file as a cell the migration reports as untouched.
+        When the cell holds text that is not a number.
     """
     raw = row.get(name, "").strip()
     if not raw:
@@ -1007,9 +1005,8 @@ def migrate_to_v2(path: Path) -> MigrationReport:
             )
 
         row = dict(zip(V1_COLUMNS, named, strict=True))
-        # The cold-start blanking runs SECOND and overwrites cells the repair
-        # just wrote, so counting the repair before it reported work the file
-        # does not carry: the two tallies are taken over disjoint cells.
+        # The two tallies are taken over disjoint cells: the cold-start blanking
+        # runs second and overwrites cells the repair wrote.
         repaired_here: Counter[str] = Counter()
         _repair_v1_row(row, number, repaired_here)
         blanked_here: Counter[str] = Counter()
@@ -1276,10 +1273,6 @@ def read_wrf_series(path: str | Path, *, consumes: Collection[str] = ()) -> pd.D
         # six is unaffected by the schema.
         unrepaired = sorted(V1_UNREPAIRED_COLUMNS & set(consumes) & set(frame.columns))
         if not unrepaired:
-            # The docstring promises this path warns, and a caller that forgot
-            # `consumes=` looks exactly like one that publishes none of the six.
-            # Saying so is what keeps the silence from being mistaken for a
-            # verdict: a fifth CLI has to fail loudly in review, not at the site.
             logger.warning(
                 "%s is still a v1 operational file; this run declared it publishes "
                 "none of %s, so it is read as-is. Run `labmim-wrf-series migrate` "
@@ -1297,9 +1290,6 @@ def read_wrf_series(path: str | Path, *, consumes: Collection[str] = ()) -> pd.D
     stamps = pd.to_datetime(frame[["year", "month", "day", "hour"]], errors="coerce")
     unstamped = int(stamps.isna().sum())
     if unstamped:
-        # NaT reaches the index, survives sort_index, and only surfaces two
-        # commands later inside export_monitoring's cadence guard, as a pandas
-        # error naming neither the file nor the row.
         raise ValueError(
             f"{path}: {unstamped} row(s) carry no readable year/month/day/hour and "
             "cannot be placed on the timeline"

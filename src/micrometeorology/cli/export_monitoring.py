@@ -111,11 +111,6 @@ def _regular(
     """
     if frame.empty:
         return frame, index
-    # Before `reindex`, which raises a raw pandas ValueError on a duplicated
-    # label — "cannot reindex on an axis with duplicate labels" — that reaches
-    # the operator as a traceback with no mention of the file or the cadence.
-    # The axis guard below cannot see it either: it reads the deltas, and a
-    # repeated stamp is a delta of zero among many, not a second cadence.
     duplicated = index[index.duplicated()]
     if len(duplicated):
         raise ValueError(
@@ -272,9 +267,6 @@ def run(
     for chart in MONITORING_CHARTS:
         station_columns = {series.id: series.station for series in chart.series}
         if chart.unit not in _DECIMALS:
-            # A unit with no entry would silently take two decimals, so a new
-            # chart publishes a precision nobody chose — and for W/m2 that is
-            # three characters per sample across the whole payload.
             raise typer.BadParameter(
                 f"chart {chart.id!r} declares unit {chart.unit!r}, which has no entry in "
                 "_DECIMALS; add the precision this unit publishes at"
@@ -288,9 +280,7 @@ def run(
             # A column PRESENT in the header but empty over this window is the
             # designed signal that the extraction stopped writing the variable
             # (export_operational_series empties one column rather than shifting
-            # every column after it). Read as "resolved", it produced neither the
-            # line — `_layer` drops an all-null series — nor the pending note,
-            # which is the one case the note exists for.
+            # every column after it).
             if column and model[column].notna().any():
                 wrf_columns[series.id] = column
             # Only when a model was actually loaded: `wrf_pending` claims to the

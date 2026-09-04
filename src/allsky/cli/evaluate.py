@@ -109,13 +109,9 @@ def evaluate_cmd(
             trust_checkpoint=trust_checkpoint,
         )
         written = write_evaluation_report(result, out_dir, predictions=predictions)
-    # ManifestValidationError subclasses ValueError and TrainingError subclasses
-    # RuntimeError, so both are caught by the pair below.
+    # The domain failures evaluation raises, named rather than `except Exception`,
+    # which would swallow a typo in this module as a scoring failure.
     except (TrainingError, FileNotFoundError, OSError, ValueError, KeyError, RuntimeError) as exc:
-        # The domain failures evaluation actually raises, named: a bare
-        # `except Exception` turned a typo in this module into "evaluation
-        # failed: name 'x' is not defined" with exit 1 and no traceback,
-        # indistinguishable from a checkpoint that genuinely cannot be scored.
         logger.error("evaluation failed: %s", exc)
         raise typer.Exit(code=1) from exc
 

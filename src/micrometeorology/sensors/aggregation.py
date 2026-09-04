@@ -113,7 +113,6 @@ def aggregate_to_hourly(
 
         if speed_col is not None and speed_col in df.columns:
             speed = df[speed_col].to_numpy(dtype=float)
-            # Pinned by test_a_sample_whose_speed_alone_is_missing_still_bears_on_the_direction.
             uv_means = directional_mean(np.where(np.isfinite(speed), speed, 1.0))
             # Where the speed is too sparse to weight with, fall back to the
             # unit-weight directional mean: losing the weight beats losing the hour.
@@ -134,7 +133,6 @@ def aggregate_to_hourly(
                 )
             uv_means = directional_mean(np.ones(len(df)))
 
-        # Pinned by test_a_complete_direction_hour_survives_a_dead_anemometer.
         dir_counts = resampler[dir_col].count()
 
         dirs = wind_direction_from_components(uv_means["u"].to_numpy(), uv_means["v"].to_numpy())

@@ -354,9 +354,8 @@ def test_a_contested_cell_is_re_decided_from_the_pixels_of_a_real_frame(tmp_path
 
 
 def test_the_corrected_bit_reaches_the_manifest_the_extraction_writes(tmp_path: Path):
-    """``qc_frame_flags`` is a persisted column, and ``TIMESTAMP_CORRECTED``
-    appeared in no test in the repo: the bit could have been lost in the staging
-    rename without anything failing.
+    """``qc_frame_flags`` is a persisted column; losing ``TIMESTAMP_CORRECTED``
+    in the staging rename would not otherwise make anything fail.
     """
     manifest = extract_frames_with_overlay_timestamps(
         _ambiguous_video(tmp_path), tmp_path / "frames"
@@ -383,7 +382,6 @@ def test_an_unreadable_stamp_at_either_end_of_a_video_leaves_no_manifest_row(
     """
     stamps = [f"2026081012{minute:02d}00" for minute in range(10)]
     frames = [fake.render_overlay_frame(stamp) for stamp in stamps]
-    # An impossible month: read digit for digit, refused as a date.
     frames[position] = fake.render_overlay_frame("20261310120000")
     video = fake.write_frames_video(tmp_path / "allsky-20260810.mp4", np.stack(frames))
 
@@ -561,8 +559,7 @@ def test_an_unreadable_first_frame_is_reported_as_dropped_not_as_interpolated(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ):
     """The repair interpolates only between two readable neighbours, so an edge
-    frame stays unstamped and leaves the manifest; the warning used to count it
-    among the interpolated ones and nothing said a frame was gone."""
+    frame stays unstamped and is reported as dropped."""
     stamps = (
         "20261310120000",
         "20260810120100",

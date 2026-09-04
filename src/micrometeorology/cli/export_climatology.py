@@ -678,13 +678,9 @@ def _check_caveats_quote_the_published_scalar(
     The induced curves carry one estimated scalar — the era's PAR fraction, the
     albedo — and the caveats quote it through a ``{param:...}`` marker resolved
     against the fitted value, so a caveat that USES the marker cannot drift.
-    Which is why the old form of this check could never fire: it compared the
-    fitted number against the sentences that had already been interpolated from
-    it.
 
     What does drift is a literal typed in by hand — the transcription of a
-    sibling era's fit, which is how ``par_late``'s prose came to cite
-    ``par_early``'s number. Those are what this looks for: a decimal written to
+    sibling era's fit. Those are what this looks for: a decimal written to
     exactly the marker's precision, in a caveat that resolved no marker of its
     own.
 

@@ -22,9 +22,7 @@ runner = CliRunner()
 def _build_experiment(tmp_path: Path, dim: int = 8) -> tuple[Path, Path]:
     """Build a manifest + split + on-disk embeddings; return (root, config_path).
 
-    The dataset, the store and the config all come from ``_synthetic``: this
-    module used to restate all three, so a change to the shared fixture left the
-    dispatch tests running against a dataset nothing else in the suite used.
+    The dataset, the store and the config all come from ``_synthetic``.
     """
     root, manifest, _split = synthetic.make_dataset(tmp_path)
     synthetic.make_embeddings_store(root, manifest, dim=dim)
@@ -109,8 +107,7 @@ class TestExperimentDispatch:
         self, tmp_path: Path, monkeypatch
     ):
         """Both flags mutate the loaded config in place and ExperimentTrainConfig has
-        no validate_assignment, so the assignment skips every pydantic check and
-        nothing else states that the two values arrive at the engine."""
+        no validate_assignment, so the assignment skips every pydantic check."""
         seen: list[tuple[int, str]] = []
 
         def record_the_config(cfg, **_kwargs):

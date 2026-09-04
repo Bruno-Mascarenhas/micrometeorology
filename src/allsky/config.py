@@ -211,7 +211,7 @@ class FeaturesConfig(BaseModel):
     # Spelled out rather than imported from allsky.features.policy, which owns
     # the tiers: allsky.features.__init__ eagerly imports engineering, which
     # imports this module, so the import that would remove the copy closes a
-    # cycle. Pinned equal by tests/allsky/test_config_experiment.py::test_the_feature_set_literal_lists_exactly_the_tiers_policy_declares.
+    # cycle.
     feature_set: Literal["bare", "minimal", "safe", "extended"] = Field(default="safe", alias="set")
 
     #: Feature names appended verbatim to the resolved set, for ablations over a
@@ -347,9 +347,7 @@ class PreprocessingConfig(BaseModel):
 
     overlay: OverlayPolicy = "keep"
     #: Both are fractions OF THE FRAME, so a value at or above 1 asks for a band
-    #: taller than the image or an ROI larger than it — accepted unbounded, the
-    #: first blanked every row and the second kept every pixel, either way with
-    #: no error and a model trained on pixels nobody chose.
+    #: taller than the image or an ROI larger than it.
     band_fraction: float = Field(default=TIMESTAMP_BAND_FRACTION, gt=0.0, lt=1.0)
     roi_radius_fraction: float | None = Field(default=None, gt=0.0, le=1.0)
 
@@ -486,8 +484,7 @@ class ExperimentConfig(BaseModel):
         """Refuse ``model.geometry_channels`` in embedding mode, where no pixel is read.
 
         The registry widens the patch projection for the planes, but the
-        embedding branch of the visual encoder never receives them, so the
-        knob was accepted and silently dropped.
+        embedding branch of the visual encoder never receives them.
         """
         if self.data.input_mode == "embedding" and geometry_channels_of(self):
             raise ValueError(
@@ -619,9 +616,7 @@ class NightFilterConfig(BaseModel):
     decides which rows EXIST in the manifest at all;
     ``labelable_min_elevation_deg`` decides which of the surviving rows get a
     finite ``target_kindex`` and a sky class rather than the ``LOW_SUN`` flag —
-    the band between the two is kept, labelled, and marked. The second was a
-    Python default no config could reach, so the band the dataset publishes was
-    not a property of the config that built it.
+    the band between the two is kept, labelled, and marked.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -789,9 +784,7 @@ def frame_geometry_of(cfg: PrepareConfig) -> dict[str, Any]:
     :meth:`PrepareConfig.model_validate` accepts back, so a checkpoint can carry
     the geometry its dataset was built with.  ``ExperimentConfig`` — the config a
     checkpoint stores — has only ``preprocessing`` (overlay/ROI); mask, crop, pad
-    and resize live on ``PrepareConfig`` alone and never travelled, so a live
-    frame was scored as decoded while the model was fitted on a cropped, padded,
-    isotropically resized one, with nothing detecting the difference.
+    and resize live on ``PrepareConfig`` alone.
 
     Returns
     -------

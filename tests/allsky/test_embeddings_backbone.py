@@ -45,6 +45,25 @@ class TestEmbeddingDim:
             embedding_dim("dinov2_vits14", "cls+max")
 
 
+def _torchvision_import_error() -> str | None:
+    """Why ``import torchvision`` fails here, or None when it works.
+
+    Not :func:`pytest.importorskip`: the failure this guards against is not an
+    ImportError. A torchvision wheel whose compiled ops were built against a
+    different torch raises ``RuntimeError: operator torchvision::nms does not
+    exist`` at import, which importorskip would let through — and which is the
+    environment speaking, not this package.
+    """
+    try:
+        import torchvision  # noqa: F401
+    except Exception as exc:  # noqa: BLE001 — any import failure is a skip reason
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+_TORCHVISION_IMPORT_ERROR = _torchvision_import_error()
+
+
 class TestBackboneSelection:
     @pytest.mark.parametrize(
         ("model", "image_size", "message"),
@@ -72,14 +91,15 @@ class TestBackboneSelection:
 
     @pytest.mark.parametrize("model", [n for n in AVAILABLE_BACKBONES if n != "fake"])
     def test_every_advertised_backbone_builds_with_the_pooling_its_family_offers(self, model: str):
-        """Only the four DINOv2 names were ever constructed, while
-        ``configs/allsky/experiments/resnet50/`` and ``effnet/`` are shipped
+        """``configs/allsky/experiments/resnet50/`` and ``effnet/`` are shipped
         arms. ``weights='none'`` builds the architecture without fetching
         anything, so the whole advertised list is reachable here.
         """
         # A convolutional trunk emits no tokens, so it offers 'mean' alone; the
         # ViTs default to 'cls'.
         pooling: Pooling = "mean" if model in TorchvisionBackbone.HEADS else "cls"
+        if model in TorchvisionBackbone.HEADS and _TORCHVISION_IMPORT_ERROR is not None:
+            pytest.skip(f"torchvision does not load here: {_TORCHVISION_IMPORT_ERROR}")
 
         backbone = build_backbone(model, pooling=pooling, weights="none")
 

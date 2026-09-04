@@ -419,8 +419,7 @@ class TestResumeProvenance:
     def test_resume_into_another_dhi_parameterization_is_refused(self, tmp_path: Path):
         """The head has the same shape under ``raw`` and ``clearsky_index``, and
         run_experiment refits the target normalizer on the dataset before the
-        checkpoint is read, so a resume used to carry on in the other unit with
-        ``best.ckpt`` compared across the two."""
+        checkpoint is read."""
         root, manifest, _ = _make_dataset(tmp_path, n_days=3)
         run_dir = tmp_path / "run"
         run_experiment(

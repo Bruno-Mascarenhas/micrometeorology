@@ -385,9 +385,9 @@ def model_input_frame(
     *geometry* is the ``PrepareConfig`` stage that ran once, at extraction time,
     to write the JPEGs the dataset reads; the dataset itself never sees it.
     Serving therefore has to re-apply it, and that is exactly what
-    :class:`~allsky.config.ExperimentConfig` could not describe: a checkpoint
-    trained on the isotropic dataset was fed a 1.78x horizontally squeezed
-    full frame, with nothing detecting the mismatch.
+    :class:`~allsky.config.ExperimentConfig` cannot describe: without it a
+    checkpoint trained on the isotropic dataset scores a 1.78x horizontally
+    squeezed full frame.
 
     The preprocessing runs before the final resize on purpose: the overlay band
     is a fixed fraction of the frame, and a bilinear resize would smear its edge

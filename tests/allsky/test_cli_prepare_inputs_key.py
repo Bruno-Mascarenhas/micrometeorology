@@ -245,8 +245,7 @@ class TestSplitLabelsSurviveARebuild:
         multi_day_dat: Path,
     ):
         """A hand-edited or truncated splits.json must degrade to an unlabelled
-        rebuild plus a warning: a build that dies here leaves no manifest at all,
-        and the exception tuple was never checked against what the loader raises."""
+        rebuild plus a warning: a build that dies here leaves no manifest at all."""
         for day in ("20260102", "20260103", "20260104"):
             shutil.copy(
                 two_day_videos / "allsky-20260101.mp4", two_day_videos / f"allsky-{day}.mp4"
@@ -350,8 +349,8 @@ class TestInputsHashContents:
 
     def test_the_frame_qc_flags_are_part_of_the_key(self):
         """Re-extracting to populate ``qc_frame_flags`` changes no frame path, so the
-        rebuild the missing-flags warning asks for resumed on the flagless manifest
-        and FRAME_DARK never reached it."""
+        rebuild the missing-flags warning asks for would resume on the flagless
+        manifest and FRAME_DARK would never reach it."""
         cfg = PrepareConfig()
         bare = _manifest_inputs_sha256(cfg, [self._frames(["a.jpg"])])
         flagged = _manifest_inputs_sha256(

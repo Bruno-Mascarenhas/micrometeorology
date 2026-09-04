@@ -161,12 +161,8 @@ def _declared_record_range(record: DatedColumnRecord) -> tuple[pd.Timestamp, pd.
 
     This is the range the overlap check reads.  Resolving an open end against
     the frame instead — what :func:`_resolve_record_range` does, correctly, for
-    APPLYING a record — scoped the guarantee to whatever data happened to be
-    loaded: against a one-row 2026 frame, a record closing in 2020 inherited
-    that row's stamp as its start, inverted, and was dropped as empty, so a
-    genuinely overlapping pair applied uncontested and the published factor
-    went back to depending on record order.  The rolling ``--source`` window is
-    exactly that narrow frame.
+    APPLYING a record — scopes the guarantee to whatever data happens to be
+    loaded, and the rolling ``--source`` window is too narrow to trust for this.
     """
     start = pd.Timestamp(record.start_date) if record.start_date else pd.Timestamp.min
     end = (
@@ -281,7 +277,6 @@ def apply_calibrations(
 
         mask = (df.index >= start) & (df.index <= end)
 
-        # Pinned by test_a_record_that_matches_nothing_is_reported.
         if not bool((mask & df[column].notna()).any()):
             logger.warning(
                 "calibration for %r [%s -> %s] matched no populated sample (%s)",

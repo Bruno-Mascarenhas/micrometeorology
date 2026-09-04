@@ -146,9 +146,7 @@ def extract_point_series(
     df = df[df.index.notna()]
     df = df.sort_index()
     # Two files of one run overlap by design (each wrfout repeats the previous
-    # one's last steps), so the concatenation carries duplicated labels. Left in,
-    # every consumer that reindexes or joins on this frame raises "cannot reindex
-    # on an axis with duplicate labels" instead of reading a series. The LAST
+    # one's last steps), so the concatenation carries duplicated labels. The LAST
     # file's value wins, matching read_wrf_series's own rule for the same overlap.
     duplicated = int(df.index.duplicated().sum())
     if duplicated:

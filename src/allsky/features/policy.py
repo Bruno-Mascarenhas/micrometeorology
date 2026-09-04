@@ -243,9 +243,6 @@ def active_feature_groups(
 
     *extra* names that a declared group already lists join that group; the rest,
     which belong to no group, are gathered into a synthetic ``"extra"`` group.
-    Without it an ablation column added through ``features.extra`` reached the
-    sensor encoder's input width but never became a cross-attention token, so
-    the arm measured the same thing regardless of the input meant to vary it.
 
     Returns
     -------

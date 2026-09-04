@@ -209,8 +209,7 @@ def run(
             json_var_list,
             # Against the JSON producer's OWN default, not this pipeline's: the
             # two lists differ (this one omits the nine derived-radiation and
-            # overlay ids), so measuring coverage against the shorter one made
-            # the manifest vouch for products the run never wrote.
+            # overlay ids).
             covers_every_variable=set(json_var_list) >= set(export_wrf_geojson.DEFAULT_VARS),
         )
         if manifest_path:

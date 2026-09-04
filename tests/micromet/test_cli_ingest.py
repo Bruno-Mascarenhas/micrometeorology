@@ -313,7 +313,6 @@ def test_a_dead_balance_component_fails_strict_instead_of_blanking_the_chart(
 
 
 def test_the_window_build_writes_csv_artifacts_when_the_format_asks_for_them(tmp_path) -> None:
-    """``--format csv`` e o caminho da planilha e nenhum teste o percorria."""
     from typer.testing import CliRunner
 
     from micrometeorology.cli.build_archive import app
@@ -542,13 +541,11 @@ def test_files_are_merged_in_chronological_order_not_lexicographic(tmp_path: Pat
     while covering 2019 itself, so the later file's value won the conflict."""
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
-    # Sorts SECOND by name, starts FIRST in time, and carries the shared stamp.
     _write_toa5(
         raw_dir / "z_starts_earlier.dat",
         ["Temp1"],
         [("2025-06-25 11:00:00", [20.0]), ("2025-06-25 12:00:00", [21.0])],
     )
-    # Sorts FIRST by name, starts SECOND in time, same shared stamp.
     _write_toa5(raw_dir / "a_starts_later.dat", ["Temp1"], [("2025-06-25 12:00:00", [99.0])])
     output_path = tmp_path / "out.csv"
 

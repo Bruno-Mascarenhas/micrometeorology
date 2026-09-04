@@ -114,9 +114,7 @@ WRF_COLUMNS = {
 }
 
 #: Fixed y-frames, read from the SIBLING producer of these same nine filenames so
-#: the two cannot frame one PNG differently. This module used to carry the
-#: tighter pair — 18..32 degC and 50..100 %RH against 10..40 and 0..105 — and a
-#: sample outside them left the figure with nothing on the axes saying so.
+#: the two cannot frame one PNG differently.
 SHARED_Y_LIMITS: dict[str, tuple[float, float]] = {
     spec.key: spec.ylim for spec in GRAPH_SPECS if spec.ylim is not None
 }
@@ -525,9 +523,7 @@ def _plot_pressao(
 
     _plot_wrf_overlay(ax, wrf, WRF_COLUMNS["pressao"])
 
-    # No fixed frame: the sibling producer of pressao.png declares none, and a
-    # 30 hPa window clips a real synoptic passage off the top of the figure with
-    # nothing on the axes saying so.
+    # No fixed frame: a 30 hPa window clips a real synoptic passage off the top.
     setup_date_axis(ax)
     plt.ylabel(
         "Pressao Atmosferica (hPa)",
@@ -820,11 +816,9 @@ def run(
         wind_speed_column_map=wind_speed_map,
     )
     # Rain is a SEPARATE logger table on its own stamps, so it is aggregated from
-    # its own frame and joined on the hourly grid. Riding it along in the lenta
-    # frame meant reindexing onto lenta's stamps -- a left join that dropped
-    # every rain sample at a stamp lenta lacks, while the 5-minute trace, drawn
-    # from the rain table itself, still showed it: measured over 2026-05-27 + 7 d,
-    # 126.24 mm of trace against 67.31 mm of hourly bars on one axes.
+    # its own frame and joined on the hourly grid: reindexing it onto lenta's
+    # stamps drops every rain sample at a stamp lenta lacks — measured over
+    # 2026-05-27 + 7 d, 126.24 mm against 67.31 mm on one axes.
     # build_archive joins the two tables `how="outer"` for the same reason.
     if RAIN_COLUMN in raw_rain.columns:
         hourly_rain = aggregate_to_hourly(raw_rain, min_samples=6, sum_columns=[RAIN_COLUMN])

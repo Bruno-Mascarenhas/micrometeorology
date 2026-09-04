@@ -111,9 +111,6 @@ def build_payloads(hourly: pd.DataFrame, *, version: str) -> dict[str, Any]:
     """
     # The clearness record is gated on the global channel alone: conditioning it
     # on the diffuse sensor's availability would publish a different population.
-    # It is also built FIRST: prepare_ktkd needs the diffuse sensor and
-    # kt_cumulative.json does not, so refusing on its emptiness first took the
-    # clearness document down with every PSP outage.
     clearness = ktkd_stats.prepare_clearness(
         hourly, site=STATION_SITE, utc_offset_hours=STATION_UTC_OFFSET_HOURS
     )

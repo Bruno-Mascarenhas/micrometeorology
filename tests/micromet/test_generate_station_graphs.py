@@ -216,14 +216,10 @@ def test_an_empty_window_exits_zero_without_strict(full_station, tmp_path):
 
 
 def test_the_diffuse_graph_draws_the_models_diffuse_and_not_only_its_global():
-    """The figure named radiacao_difusa carried one model curve, the GLOBAL flux.
-
-    Its legend said ``SW_dw-wrf``, but it was the only model line on an axes
-    whose other curves are the measured diffuse, so the site read the model's
-    global irradiance as its diffuse. Read off the axes the producer actually
-    draws, not off the constants it is configured with: the strokes the two
-    curves get are decided at the call site, and asserting on literals the test
-    itself passed to ``_plot_wrf_overlay`` never reached that decision.
+    """Read off the axes the producer actually draws, not off the constants it
+    is configured with: the strokes the two curves get are decided at the call
+    site, and asserting on literals the test itself passed to
+    ``_plot_wrf_overlay`` never reaches that decision.
     """
     from micrometeorology.cli.generate_station_graphs import _draw_radiacao_difusa
 
@@ -245,7 +241,6 @@ def test_the_diffuse_graph_draws_the_models_diffuse_and_not_only_its_global():
         np.testing.assert_allclose(
             np.asarray(drawn["SW_df-wrf 1h"].get_ydata(), dtype=float), [120.0, 140.0]
         )
-        # Two dashed black lines are how the global came to be read as the diffuse.
         assert (drawn["SW_dw-wrf 1h"].get_linestyle(), drawn["SW_dw-wrf 1h"].get_color()) != (
             drawn["SW_df-wrf 1h"].get_linestyle(),
             drawn["SW_df-wrf 1h"].get_color(),
@@ -362,8 +357,8 @@ def test_rain_at_a_stamp_the_lenta_table_lacks_still_enters_the_hourly_sum(tmp_p
 
 
 def test_the_wrf_overlay_reaches_the_graphs_end_to_end(full_station, tmp_path):
-    """`--wrf` is the whole model half of this command and no test drove it: the
-    overlay could have stopped reaching the figures with every assertion green."""
+    """`--wrf` is the whole model half of this command: the overlay has to reach
+    the figures."""
     lenta, rain = full_station
     index = pd.date_range(START_DATE, periods=48, freq="h")
     wrf_dat = tmp_path / "series_operacional.dat"

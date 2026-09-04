@@ -489,9 +489,7 @@ def build_manifest_from_prepare_config(
     )
     # The pixels the frames on disk actually hold. Only this builder knows the
     # PrepareConfig, and a checkpoint stores an ExperimentConfig, which carries
-    # no mask/crop/pad/resize at all: without recording it here, serving a live
-    # frame reproduced the encoder's transforms but not the geometry the dataset
-    # was built with.
+    # no mask/crop/pad/resize at all.
     meta["frame_geometry"] = frame_geometry_of(cfg)
     return manifest, meta
 
@@ -711,9 +709,7 @@ def _qc_flags(
     *measured_dhi* is the raw diffuse channel when one is configured, and
     ``None`` for the Erbs pseudo-target, which is derived from *ghi* and carries
     no gap of its own.  Its gaps set ``SENSOR_GAP`` alongside the global
-    channel's: a partially-NaN diffuse column otherwise produced rows with a
-    missing label and ``qc_flags == 0``, indistinguishable from a clean row in
-    the evaluator's QC stratification.
+    channel's.
     """
     n = len(elevation)
     flags = np.zeros(n, dtype=np.int64)

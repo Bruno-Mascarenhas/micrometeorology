@@ -168,8 +168,7 @@ def extract_embeddings(
     pooling = backbone.pooling
     # Two different dtypes, recorded apart because they are read for different
     # things: the shards are always fp16 on disk, while the backbone may have
-    # computed in fp32. Writing only one made the snapshot rebuild the encoder at
-    # the STORAGE precision, which is not the computation the vectors came from.
+    # computed in fp32.
     storage_dtype = "fp16"
     compute_dtype = str(getattr(backbone, "dtype", storage_dtype))
     dtype = storage_dtype
@@ -245,12 +244,8 @@ def extract_embeddings(
 
     out.mkdir(parents=True, exist_ok=True)
     if not resume:
-        # Dropped before the first flush, never after: pinned by
-        # test_crashed_no_resume_then_resume_serves_each_id_its_own_vector.
         _remove_index_parts(out)
         (out / INDEX_FILENAME).unlink(missing_ok=True)
-    # Written before the first shard, not only at completion: pinned by
-    # test_crashed_run_leaves_provenance_so_a_backbone_change_is_refused.
     _write_meta(
         out,
         backbone,
@@ -280,8 +275,6 @@ def extract_embeddings(
                 for row, sid in enumerate(shard_ids)
             ]
             index_rows.extend(part_rows)
-            # Written after the shard lands, never before: pinned by
-            # test_resume_after_crash_reextracts_only_missing.
             _write_index_part(out, next_shard, part_rows)
             logger.info("extract_embeddings: wrote shard %s (%d embeddings)", path.name, take)
             shards_written += 1
@@ -290,9 +283,8 @@ def extract_embeddings(
             buffer = remainder if len(remainder) > 0 else None
             buffer_ids = buffer_ids[take:]
 
-    # Threaded JPEG decode with ``Executor.map``, which returns in submission order:
-    # the store is the single-threaded one, pinned by
-    # test_thread_count_does_not_change_the_store.
+    # Threaded JPEG decode with ``Executor.map``, which returns in submission
+    # order: the store is the single-threaded one.
     from PIL import Image
 
     Image.preinit()  # register the JPEG plugin here, not in N threads at once

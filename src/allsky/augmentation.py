@@ -223,7 +223,6 @@ def random_erasing(
         left = int(rng.integers(0, width - w))
         if keep_solar_disc is not None:
             sr, sc = keep_solar_disc
-            # pinned by tests/allsky/test_augmentation.py::TestRandomErasing::test_the_solar_disc_is_never_erased
             if not (
                 top > sr + disc_radius
                 or top + h - 1 < sr - disc_radius

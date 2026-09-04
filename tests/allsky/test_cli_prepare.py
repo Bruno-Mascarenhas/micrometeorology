@@ -105,8 +105,6 @@ class TestTheMergedSensorExport:
         merged = _load_sensor_df(self._config(two_dat_files))
 
         assert pd.isna(merged.loc[pd.Timestamp("2026-01-01 06:01:00"), "RH1"])
-        # 1000 degC is finite, so the reader's own -900 floor passes it through
-        # and only mask_sentinels stands between it and the normaliser.
         assert pd.isna(merged.loc[pd.Timestamp("2026-01-01 06:02:00"), "AirT1_C_Avg"])
 
     def test_a_rail_below_the_readers_floor_is_a_gap_the_later_file_may_fill(
@@ -256,8 +254,8 @@ class TestValidateDataset:
     def test_a_manifest_whose_sidecar_is_gone_warns_and_fails_only_under_strict(
         self, tmp_path: Path, strict: bool, expected_exit: int
     ):
-        """The warning half of validate-dataset — the echo, the sidecar warning and
-        `--strict`'s promotion — was never executed by any test."""
+        """The warning half of validate-dataset covers the echo, the sidecar
+        warning and `--strict`'s promotion."""
         dataset_dir = tmp_path / "no-sidecar"
         manifest_path = _write_manifest(dataset_dir, ["2025-03-21 12:00"], create_files=True)
         manifest_path.with_name("manifest.parquet.meta.json").unlink()
@@ -457,12 +455,9 @@ class TestPrepareLocal:
         self, tmp_path: Path, synthetic_video: Path, synthetic_dat: Path
     ):
         """`sync-archive --prune-uploaded` deletes the mp4 once Drive holds it, and
-        the production configs point `video.pattern` at that same directory. The
-        video list came from the glob alone, so the day silently left the manifest
-        even though its extracted frames were still on disk."""
+        the production configs point `video.pattern` at that same directory."""
         import shutil
 
-        # The fixture video is module-scoped; this test prunes its own copy.
         videos = tmp_path / "videos"
         videos.mkdir()
         video = videos / synthetic_video.name
@@ -674,8 +669,7 @@ def test_importing_the_prepare_command_module_pulls_no_array_stack(package: str)
     torch-free; numpy came in through the one top-level ``decode_rgb`` import and
     the pandas-only probe could not see it."""
     # pytest puts src/ on the path through `pythonpath` in pyproject, which the
-    # child does not inherit: without this the probe reports on whatever `allsky`
-    # the interpreter happens to find installed, not on the tree under test.
+    # child does not inherit.
     source_root = str(Path(__file__).resolve().parents[2] / "src")
     probe = subprocess.run(
         [

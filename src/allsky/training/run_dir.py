@@ -172,9 +172,6 @@ def truncate_metrics(run_dir: Path, fields: list[str], resumed_epoch: int) -> li
     is returned for the loop to keep appending to.  ``metrics.json`` is the source
     of truth (it is always present once a checkpoint exists); when it is absent
     the history is rebuilt from ``metrics.csv``, which carries the same rows.
-    Returning an empty history there instead left the loop appending only the
-    resumed run's epochs, so the rewritten JSON silently lost every epoch the
-    interrupted run had already recorded.
     """
     metrics_json = run_dir / "metrics.json"
     metrics_csv = run_dir / "metrics.csv"

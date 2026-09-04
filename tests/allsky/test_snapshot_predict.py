@@ -144,9 +144,8 @@ def test_the_backbone_is_fed_the_layout_its_transform_documents(sky_image: Path)
 
 
 #: A default config leaves the preprocessing pipeline an identity (overlay='keep',
-#: no ROI) and a size equal to the fixture's own side leaves the resize one too,
-#: so the parity check ran with two of its three stages switched off. Each case
-#: turns one on.
+#: no ROI) and a size equal to the fixture's own side leaves the resize one too.
+#: Each case turns one on.
 @pytest.mark.parametrize(
     ("overrides", "size"),
     [
@@ -545,11 +544,10 @@ def test_the_image_input_carries_the_geometry_planes_the_model_was_widened_for(
 def test_the_live_pairing_uses_the_window_and_offset_the_checkpoint_trained_with(
     embedding_checkpoint: Path, sky_image: Path, tmp_path: Path
 ) -> None:
-    """`ExperimentConfig` carries no `sensor` section, so a live prediction had no
-    way to know either number: a free-standing 15-minute window against training's
-    5, and none of the `timestamp_offset_minutes` that moves the CR5000's
-    end-stamp onto the centre of the interval it averages. Both are in the
-    manifest sidecar, and the checkpoint now carries them."""
+    """`ExperimentConfig` carries no `sensor` section, so a live prediction reads
+    the window and the `timestamp_offset_minutes` — the one that moves the
+    CR5000's end-stamp onto the centre of the interval it averages — from the
+    checkpoint's manifest sidecar."""
     import torch
 
     payload = load_checkpoint(embedding_checkpoint, map_location="cpu", trust_pickle=True)

@@ -344,8 +344,7 @@ def test_the_cli_refuses_a_pairing_in_which_no_model_row_fell_inside_the_toleran
     tmp_path: Path,
 ) -> None:
     """``pair_dataframes`` merges LEFT, so the paired frame is never empty while
-    there are observations: the old ``paired.empty`` gate let two disjoint years
-    write a metrics table of NaN with exit code 0."""
+    there are observations, even when no model row falls inside the tolerance."""
     values = [20.0, 21.0, 22.0]
     obs = tmp_path / "obs.csv"
     model = tmp_path / "model.csv"

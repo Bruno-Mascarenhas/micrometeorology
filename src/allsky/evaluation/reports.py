@@ -103,10 +103,8 @@ def write_evaluation_report(
         "meta": result.meta,
         "global": result.global_metrics,
     }
-    # Named apart from the engine's own metrics.json: an evaluation written into
-    # a run directory would otherwise overwrite the per-epoch history with a
-    # single-split summary of a different schema, and the resume that rebuilds
-    # its history from that file would read the wrong shape.
+    # Named apart from the engine's own metrics.json, which an evaluation written
+    # into a run directory would otherwise overwrite with a different schema.
     written["metrics"] = str(
         atomic_write_strict_json(
             report_root / EVALUATION_METRICS_FILENAME, _json_safe(metrics_payload)

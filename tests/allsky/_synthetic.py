@@ -44,9 +44,8 @@ class DictEmbeddingReader:
 
 
 #: Clearness the synthetic day sweeps through, from overcast to nearly clear.
-#: A constant value made every stratified assertion run on one sky class and let
-#: a scale error in the target divide out; the sweep runs WITHIN each day so a
-#: single-day split still spans several classes and several k-index bands.
+#: The sweep runs WITHIN each day so a single-day split still spans several
+#: classes and several k-index bands.
 _CLEARNESS_SWEEP = (0.22, 0.75)
 
 #: One deliberately impossible hour, above the k* ceiling of 1.5, so the fixture
@@ -63,7 +62,6 @@ def _sensor(site: SiteConfig, first: pd.Timestamp, last: pd.Timestamp) -> pd.Dat
     day_offset = (index.normalize() - first.normalize()).days
     through_the_day = (index.hour - 8 + index.minute / 60.0) / 11.0
     low, high = _CLEARNESS_SWEEP
-    # A quarter-day phase per day, so consecutive days are not the same curve.
     phase = (through_the_day + 0.25 * day_offset) % 1.0
     clearness = np.asarray(low + (high - low) * phase, dtype=float)
 

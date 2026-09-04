@@ -634,11 +634,7 @@ def _already_extracted_days(
     ``sync-archive --prune-uploaded`` deletes a day's mp4 once Drive has it, and
     the production configs point ``video.pattern`` at the very directory it
     prunes from — the cron recipe in ``docs/allsky-archive.md`` runs both.  The
-    day's frames stay on disk, but building the video list from the glob alone
-    dropped it from the dataset the next time ``prepare-local`` ran: fewer
-    manifest rows, a changed inputs hash, a rebuilt manifest, and a
-    ``SplitExistsError`` whose message asks for ``--force`` without naming the
-    day that went missing.
+    day's frames stay on disk even though its video does not.
 
     A directory is only adopted when its manifest is complete (it carries
     ``qc_frame_flags``) and its recorded config matches this run's, the same gate
@@ -819,11 +815,9 @@ def _extract_replacing_frames(video: str, video_dir: Path, cfg: PrepareConfig) -
     """Extract *video* into a staging directory, then swap it in for *video_dir*.
 
     Frames are named after their own timestamp, so a re-extraction under a
-    changed clock writes a different file set: on the 2026-06-25 archive video an
-    overlay run wrote 1366 JPEGs and the modelled re-run added 1434 beside them,
-    leaving 68 orphans that the frame manifest does not list and nothing removes.
-    Consumers that read the directory rather than the manifest — the archive
-    uploader does — then see two clocks at once.
+    changed clock writes a different file set, and consumers that read the
+    directory rather than the manifest — the archive uploader does — then see two
+    clocks at once.
 
     The replacement is produced whole before anything is removed and the previous
     directory is moved aside rather than deleted, so a failure at any point
@@ -1030,9 +1024,7 @@ def _split_is_already_attached(
 
     :func:`allsky.data.splits.save_split_artifact` writes nothing when the
     split_id is unchanged, so that a re-run never rewrites the artifact a
-    checkpoint was trained against; attaching the identical column anyway
-    rewrote the parquet and moved the ``manifest_sha256`` that names those very
-    bytes, on every daily run.
+    checkpoint was trained against.
     """
     meta_path = manifest_meta_path(manifest_path)
     if not meta_path.exists() or "split" not in manifest_df.columns:

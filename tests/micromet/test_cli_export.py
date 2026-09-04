@@ -376,8 +376,8 @@ def test_cli_strict_aborts_on_a_missing_requested_domain_before_writing(tmp_path
 
 
 def test_a_variables_option_naming_nothing_is_a_usage_error(tmp_path):
-    """``-v ,`` used to select zero variables and still publish a manifest with a
-    new version stamp, which the site reads as a complete new run."""
+    """``-v ,`` selects zero variables; a manifest with a new version stamp is
+    what the site reads as a complete new run."""
     result = runner.invoke(
         app, ["-o", str(tmp_path / "json"), "-g", str(tmp_path / "geo"), "-v", ","]
     )

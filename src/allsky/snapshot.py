@@ -292,8 +292,7 @@ def _sensor_row_near(
     *timestamp_offset_minutes* is the shift the manifest builder applied to the
     station index before pairing — ``-2.5`` in production, because the CR5000
     end-stamps its five-minute averages. Applied here with the same sign, so a
-    live prediction pairs against the same instant training did; without it every
-    live row was matched on the logger's raw closing edge.
+    live prediction pairs against the same instant training did.
 
     The export is read on the same two contracts the training path holds it to.
     Its clock is the logger's, i.e. naive site-local, so an export that does
@@ -390,12 +389,9 @@ class _SensorPairing:
 def _pairing_of(checkpoint: dict[str, Any], override: pd.Timedelta | None) -> _SensorPairing:
     """Resolve the pairing rule for one prediction.
 
-    ``ExperimentConfig`` carries no ``sensor`` section, so before
-    ``sensor_pairing`` was written into the checkpoint a live prediction had no
-    way to know either number: it used a free-standing 15-minute tolerance
-    against training's 5, and applied none of the offset that moves the
-    CR5000's end-stamp onto the centre of the interval it averages. An explicit
-    *override* still wins — it is the operator's own instruction.
+    ``ExperimentConfig`` carries no ``sensor`` section, so both numbers come from
+    the checkpoint's own ``sensor_pairing``. An explicit *override* still wins —
+    it is the operator's own instruction.
     """
     recorded = checkpoint.get("sensor_pairing") or {}
     raw_tolerance = recorded.get("tolerance_minutes")
@@ -516,8 +512,7 @@ def _image_as_chw(
     geometry:
         The mask/crop/pad/resize the dataset's own frames were written through,
         from the checkpoint's ``frame_geometry``. ``ExperimentConfig`` cannot
-        express it, so without this the live frame kept its native aspect ratio
-        while the model was fitted on the cropped, padded one.
+        express it.
 
     Returns
     -------
@@ -765,9 +760,10 @@ def _refuse_a_windowed_checkpoint(cfg: ExperimentConfig) -> None:
     A snapshot is one capture, so the batch carries one ``image``/``embedding``
     and never the ``image_seq``/``embedding_seq`` a pooled window is served as.
     The encoders fall back to their single-frame branch when the sequence key is
-    absent, so a ``mean_embedding`` or ``attention_pooling`` checkpoint scored
-    one frame where it was fitted on up to ``alignment.max_frames`` — no error,
-    no warning, and a plausible number. Silence is the one option ruled out;
+    absent, so a ``mean_embedding`` or ``attention_pooling`` checkpoint would
+    score one frame where it was fitted on up to ``alignment.max_frames`` — no
+    error, no warning, and a plausible number. Silence is the one option ruled
+    out;
     building the window here needs the frames around the capture, which a live
     snapshot does not have.
 
@@ -978,9 +974,7 @@ def predict_snapshot(
             "values": [float(value) for value in raw_values],
             "imputed": imputed,
             "sensor_csv": str(sensor_csv) if sensor_csv is not None else None,
-            # The realized distance, not just accept/reject: a row paired at
-            # 14 minutes and one paired at 30 seconds were indistinguishable in
-            # the payload, and only a log line said which had happened.
+            # The realized distance, not just accept/reject.
             "sensor_pairing": {
                 "tolerance_minutes": pairing.tolerance.total_seconds() / 60.0,
                 "timestamp_offset_minutes": pairing.timestamp_offset_minutes,

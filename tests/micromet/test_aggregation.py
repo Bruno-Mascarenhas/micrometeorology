@@ -285,9 +285,9 @@ def test_speed_weighting_still_applies_when_the_anemometer_is_present() -> None:
 def test_a_sample_whose_speed_alone_is_missing_still_bears_on_the_direction() -> None:
     """Between the two extremes the tests already pin — no speed at all, and speed
     throughout — sits the common case: speed present for part of the hour. Those
-    samples contributed NaN u/v that the resampled mean silently dropped, while
-    ``dir_counts`` counted all twelve directions and called the hour whole, so the
-    published bearing came from half the record the count claimed.
+    samples contribute NaN u/v that the resampled mean drops, while
+    ``dir_counts`` counts all twelve directions and calls the hour whole — so the
+    published bearing would come from half the record the count claims.
     """
     stamps = pd.date_range("2024-06-15 00:00", periods=12, freq="5min")
     frame = pd.DataFrame(

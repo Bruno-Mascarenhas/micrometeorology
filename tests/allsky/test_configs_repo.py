@@ -38,9 +38,7 @@ from labmim_core.sky import SKY_CLASS_COUNT
 
 _CONFIGS = Path(__file__).resolve().parents[2] / "configs" / "allsky"
 _EXPERIMENTS = sorted((_CONFIGS / "experiments").glob("v*.yaml"))
-#: Every experiment the repo ships, the nineteen subfamily trees included. The
-#: v* glob alone left them out of the load, the path and the forward checks —
-#: which is where the shipped arms live, not in v0..v7.
+#: Every experiment the repo ships, the nineteen subfamily trees included.
 _ALL_EXPERIMENTS = sorted(
     path for path in (_CONFIGS / "experiments").rglob("*.yaml") if not path.name.startswith("_")
 )

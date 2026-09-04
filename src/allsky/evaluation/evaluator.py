@@ -277,9 +277,7 @@ def evaluate_checkpoint(
         "dataset_version": str(meta.get("dataset_version", checkpoint.get("dataset_version"))),
         # Which CR5000 join the dataset was built with. It decides whether a
         # frame was paired against the logger's raw end-stamp or against the
-        # centre of the interval it averages, and nothing downstream of the
-        # manifest carried it — so two evaluations of the same checkpoint under
-        # the two joins were indistinguishable in their reports.
+        # centre of the interval it averages.
         "sensor_timestamp_offset_minutes": (meta.get("thresholds") or {}).get(
             "sensor_timestamp_offset_minutes"
         ),
@@ -942,9 +940,7 @@ def _row_count(metric: str, metrics: Mapping[str, Any]) -> int | None:
     ``None`` below :data:`_MIN_PAIRS_FOR_A_METRIC`, which marks the metric as
     absent rather than measured. The floor is TWO, not one: ``regression_metrics``
     needs a second pair for every dispersion it reports — R2, d and IOA all
-    divide by a variance a single pair cannot have — so a stratum with exactly
-    one pair published NaN under a positive ``n``, reading as a measured value
-    the reader cannot distinguish from a real one.
+    divide by a variance a single pair cannot have.
     """
     counted = metrics.get("n", 0)
     for label in REFERENCE_LABELS:

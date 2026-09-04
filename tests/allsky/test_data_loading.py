@@ -79,13 +79,13 @@ class TestLoadManifestVerifiesTheSidecarAgainstTheParquet:
         assert loaded_meta["manifest_sha256"] == meta["manifest_sha256"]
 
     def test_a_parquet_that_does_not_match_its_sidecar_is_refused(self, tmp_path: Path):
+        """The sidecar stays as written; only the parquet is replaced, which is
+        what a crash between the two atomic writes leaves behind."""
         import pandas as pd
 
         from allsky.data.loading import load_manifest
 
         _manifest, path, _meta = self._written(tmp_path)
-        # The sidecar stays as written; only the parquet is replaced, which is
-        # what a crash between the two atomic writes leaves behind.
         pd.DataFrame({"sample_id": ["a"], "target_dhi": [9.0]}).to_parquet(path, index=False)
 
         with pytest.raises(ValueError, match="manifest_sha256"):

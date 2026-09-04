@@ -30,9 +30,7 @@ def test_import_allsky_modeling_is_torch_free():
         "assert 'torch' not in sys.modules, 'torch was imported eagerly'\n"
     )
     # pytest puts src/ on the path through `pythonpath` in pyproject, which a
-    # subprocess does not inherit: without this the import resolved to whatever
-    # `allsky` the interpreter finds installed, so the contract was verified
-    # against a different tree than the one under test.
+    # subprocess does not inherit.
     source_root = str(Path(allsky.__file__).resolve().parents[1])
     result = subprocess.run(
         [sys.executable, "-c", code],

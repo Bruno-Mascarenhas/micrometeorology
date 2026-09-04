@@ -124,9 +124,7 @@ def test_nearest_join_with_no_pair_inside_the_tolerance_is_an_error_not_a_table_
 
 
 def test_nearest_join_pairs_rows_offset_by_less_than_the_tolerance(tmp_path: Path) -> None:
-    """The successful half of `--join nearest` — and `--tolerance` itself — had no
-    test: only the two refusals were pinned, so the pairing the flag exists for
-    was never executed."""
+    """The successful half of `--join nearest` — and `--tolerance` itself."""
     index_a = pd.date_range("2024-01-01 00:00", periods=6, freq="1h", name="TIMESTAMP")
     index_b = index_a + pd.Timedelta(minutes=10)
     dataset_a = tmp_path / "a.csv"

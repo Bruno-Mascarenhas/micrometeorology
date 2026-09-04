@@ -90,10 +90,9 @@ def _write_toa5(path: Path, columns: list[str], rows: list[tuple[str, dict[str, 
 def two_dat_files(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
     """Two .dat files whose windows OVERLAP and whose column sets differ.
 
-    The shared fixtures write one file, one day and constant values, so
-    ``sensor.paths`` was never a list of more than one and the per-column merge
-    ran in no test that drives the CLI. Here the later file adds a column the
-    earlier one never carried and disagrees with it on a shared timestamp: the
+    ``sensor.paths`` is a list because the logger's tables change over time.
+    Here the later file adds a column the earlier one does not carry and
+    disagrees with it on a shared timestamp: the
     documented resolution keeps the earlier value where both have one and takes
     the later file's column where only it does. The earlier file also carries a
     bare ``NAN`` and both kinds of rail — one below the reader's own floor and
@@ -112,16 +111,11 @@ def two_dat_files(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]
                 "2026-01-01 06:00:00",
                 {"AirT1_C_Avg": "25.0", "RH1": "70.0", "CM3Up_Wm2_Avg": "120.0"},
             ),
-            # A missing sample, written as the logger writes it.
             ("2026-01-01 06:01:00", {"AirT1_C_Avg": "25.1", "CM3Up_Wm2_Avg": "121.0"}),
-            # The 1000 degC rail: finite, so read_campbell_dat's own -900 floor
-            # lets it through and only the archive's sentinel table catches it.
             (
                 "2026-01-01 06:02:00",
                 {"AirT1_C_Avg": "1000", "RH1": "70.2", "CM3Up_Wm2_Avg": "122.0"},
             ),
-            # -7999 sits below the reader's own floor, so it arrives as a gap
-            # and the later file's reading fills it.
             (
                 "2026-01-01 06:03:00",
                 {"AirT1_C_Avg": "-7999", "RH1": "70.9", "CM3Up_Wm2_Avg": "124.0"},

@@ -1123,7 +1123,7 @@ def test_the_sign_rule_does_not_reach_the_night() -> None:
 
 
 def test_the_pipeline_calls_its_radiation_stages_in_the_load_bearing_order() -> None:
-    """The order of run() is asserted nowhere else, and four comments depend on it.
+    """Four comments in the source depend on the order of run().
 
     Read off the source rather than executed, because executing run() needs the
     whole ``data/`` tree; what has to be pinned is the SEQUENCE, and reordering
@@ -1150,8 +1150,7 @@ def test_the_pipeline_calls_its_radiation_stages_in_the_load_bearing_order() -> 
         # Ahead of the four: it recomposes the net FROM the four components, so
         # running it after any of their masks would close the balance over
         # values those masks had already removed. It is also the stage whose
-        # misplacement the bullets below describe, and it was the one absent
-        # from this pin.
+        # misplacement the bullets below describe.
         "close_net_radiation",
         "night_corrupted_days",
         "nocturnal_offset_statistics",
@@ -1322,8 +1321,8 @@ def test_a_dry_run_split_by_absent_rows_is_not_one_long_blocked_stretch() -> Non
 
 def test_a_month_stepping_away_from_its_baseline_raises_the_drift_alarm() -> None:
     """The alarm is the only pyranometer health check available without a
-    calibration lab, and nothing exercised it: a ventilator failure or a
-    degrading dome shows up here months before it distorts a daytime statistic."""
+    calibration lab: a ventilator failure or a degrading dome shows up here
+    months before it distorts a daytime statistic."""
     step = pd.Timedelta(minutes=5)
     stamps = pd.date_range("2024-01-01 02:00", "2025-03-31 03:00", freq=step)
     deep_night = stamps[(stamps.hour >= 2) & (stamps.hour < 3)]

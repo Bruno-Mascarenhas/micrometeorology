@@ -127,11 +127,9 @@ class TestIrradianceInterpolation:
         assert bool(np.isfinite(aligned["ghi"]).all())
 
     def test_a_gap_in_the_irradiance_is_bridged_however_long_it_is(self, tmp_path: Path):
-        """Both existing tests run on a continuous 240-minute ramp, so nothing
-        asked what happens over a hole. It is filled: ``limit_area='inside'``
-        bounds the fill to the measured span but carries no ``limit``, so a
-        two-hour outage comes back as a straight line and reaches the manifest
-        as measurement. Pinned as it stands — bounding the bridge is a decision
+        """It is filled: ``limit_area='inside'`` bounds the fill to the measured
+        span but carries no ``limit``, so a two-hour outage comes back as a
+        straight line and reaches the manifest as measurement. Pinned as it stands — bounding the bridge is a decision
         about the data, not about this code.
         """
         path = tmp_path / "irr.csv"
@@ -204,8 +202,7 @@ class TestFolsomSite:
 
 
 class TestTheWeatherJoin:
-    """The met half of the Folsom adapter was never exercised: the irradiance
-    file alone leaves `bare` short of its anemometer, so the join is what makes
+    """The irradiance file alone leaves `bare` short of its anemometer, so the join is what makes
     the transfer dataset buildable at all."""
 
     @staticmethod

@@ -868,8 +868,7 @@ def _predict_snapshot(
     imputed at its training mean, and those names are echoed as a warning so a
     prediction is never read as fully informed when it is not.  Left None the
     checkpoint's own pairing window applies, which is the one its manifest was
-    built with; a free-standing default here paired live rows three times wider
-    than training accepted.  The payload is
+    built with.  The payload is
     written through the strict JSON writer, so a non-finite prediction fails the
     command instead of landing on disk as a bare ``NaN`` token that every strict
     reader of the file rejects wholesale.

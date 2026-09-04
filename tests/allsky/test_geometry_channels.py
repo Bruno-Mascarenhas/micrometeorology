@@ -134,8 +134,7 @@ class TestChannelSelection:
 
     def test_a_bare_string_is_refused_instead_of_being_read_letter_by_letter(self):
         """`geometry_channels: solar_disc` in a YAML arrives as a str, which is a
-        Sequence[str]: it used to be read one character at a time and the refusal
-        named ten channels nobody wrote."""
+        Sequence[str]."""
         with pytest.raises(ValueError, match="must be a list of names"):
             resolve_geometry_channels("solar_disc")
 

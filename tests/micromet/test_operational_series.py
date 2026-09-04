@@ -729,7 +729,7 @@ def _v1_row_without_surface_constants() -> str:
 
     The 2,424 rows the real record carries from that era are the only ones the
     fallback emissivity and the albedo-free ``Swup_calc`` repair were written
-    for, and no test reached either branch.
+    for.
     """
     row = _v1_row().split(",")
     for name in ("ALBD", "EMISS"):
@@ -1119,9 +1119,9 @@ def test_a_partial_last_row_left_by_an_interrupted_append_is_cut_and_written_aga
 
 def test_reading_an_unmigrated_v1_file_refuses_the_columns_the_migration_repairs(tmp_path):
     """`rename_v1_columns` renames and nothing else, so a v1 file serves an albedo
-    near -273 and an `ur` derived from it. It warned and handed the frame back
-    anyway, and `export_climatology`/`generate_station_graphs` publish `rh_pct` —
-    a member of that set — as the humidity histogram and the humidity overlay."""
+    near -273 and an `ur` derived from it, and `export_climatology`/
+    `generate_station_graphs` publish `rh_pct` — a member of that set — as the
+    humidity histogram and the humidity overlay."""
     from micrometeorology.wrf.operational_record import RH_PCT, T2_C, read_wrf_series
 
     path = tmp_path / "serie.dat"

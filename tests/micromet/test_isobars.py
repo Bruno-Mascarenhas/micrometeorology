@@ -177,8 +177,8 @@ def test_the_spacing_is_the_coarsest_that_still_fills_a_typical_step(
 ):
     """The rungs are the published legend, so both sides of each are pinned.
 
-    1.14 hPa is the innermost domain's median range and takes the 1 hPa floor,
-    which it used to undercut at 0.2; a 12 hPa run takes 2 hPa lines, and only
+    1.14 hPa is the innermost domain's median range and takes the 1 hPa floor;
+    a 12 hPa run takes 2 hPa lines, and only
     from 20 hPa on is 4 coarse enough to still fill the map.
     """
     assert isobars.choose_interval_hpa(typical_range_hpa) == interval_hpa
@@ -522,9 +522,7 @@ def test_a_step_with_no_contour_publishes_an_empty_overlay(tmp_path):
 
 def test_a_humid_column_reduces_lower_than_the_same_column_dry():
     """`vapor_mixing_ratio` reaches the reduction only through the virtual
-    temperature, and every existing test passed it zeros — so the 0.608
-    coefficient and the whole moisture path were exercised by nothing but the
-    absence of moisture. Moist air is lighter, so a warmer virtual column needs
+    temperature. Moist air is lighter, so a warmer virtual column needs
     less pressure below it: the reduced value must come out lower."""
     pressure, height, temperature, dry = _standard_atmosphere_column(1200.0)
     humid = np.full_like(dry, 0.018)  # 18 g/kg, a moist tropical column

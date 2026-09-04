@@ -56,6 +56,9 @@ def _make_config(tmp_path: Path, root: Path, run_dir: Path) -> Path:
 
 
 def test_train_resume_evaluate_end_to_end(tmp_path: Path) -> None:
+    """metrics.csv is appended one row per epoch, so it is what tells a resume
+    that ran an epoch from one whose ``range(start_epoch, cfg.train.epochs)``
+    was empty — which also exits 0 and also leaves last.ckpt in place."""
     root, manifest, _ = synthetic.make_dataset(tmp_path)
     synthetic.make_embeddings_store(root, manifest, revision="r0", pooling="cls")
     run_dir = tmp_path / "run"
@@ -98,9 +101,6 @@ def test_train_resume_evaluate_end_to_end(tmp_path: Path) -> None:
             "--no-amp",
         ],
     )
-    # metrics.csv is appended one row per epoch, so it is what tells a resume
-    # that ran an epoch from one whose `range(start_epoch, cfg.train.epochs)`
-    # was empty — which also exits 0 and also leaves last.ckpt in place.
     assert resumed.exit_code == 0, resumed.output
     assert len(pd.read_csv(run_dir / "metrics.csv")) == 3
 

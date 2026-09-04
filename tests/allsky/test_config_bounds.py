@@ -120,8 +120,7 @@ class TestOnlyTheLearnedPoolerNeedsEmbeddingMode:
     ],
 )
 def test_a_split_that_cannot_partition_the_days_is_refused_at_load_time(payload: dict):
-    """create_day_splits refuses every one of these, but only at split time: a
-    val_fraction of 1.2 used to cost the whole extraction and the manifest first."""
+    """create_day_splits refuses every one of these, but only at split time."""
     with pytest.raises(ValidationError):
         PrepareConfig.model_validate({"splits": payload})
 

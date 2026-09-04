@@ -30,8 +30,8 @@ def _assert_every_column_is_a_token(
     """Refuse a cross-attention build whose groups do not cover every column.
 
     :func:`allsky.modeling.contracts.group_slices` drops a column no group
-    claims without erroring or logging, so a column that reached the sensor
-    encoder but no attention token was invisible everywhere.
+    claims without erroring or logging, so a column that reaches the sensor
+    encoder but no attention token claims is invisible everywhere.
 
     Raises
     ------

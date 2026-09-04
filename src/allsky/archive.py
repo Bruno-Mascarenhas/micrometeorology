@@ -449,7 +449,6 @@ class ArchiveClient:
                         digest.update(chunk)
                         written += len(chunk)
                 if declared is not None and written != declared:
-                    # pinned by tests/allsky/test_archive.py::test_a_body_that_ends_early_without_raising_is_retried_rather_than_failing_the_download
                     raise _TransportError(
                         f"{entry.filename} truncated: got {written} bytes, "
                         f"server announced {declared}"

@@ -187,8 +187,7 @@ class MultitaskLoss(nn.Module):
         mask = torch.isfinite(target)
         normalized = (_sanitised(target, mask) - self._dhi_mean) / self._dhi_std
         residual = pred - normalized
-        # Gaussian NLL dropping the constant 0.5*log(2*pi); the monotonicity in
-        # log-variance is pinned by test_higher_log_var_lowers_loss_for_large_errors.
+        # Gaussian NLL dropping the constant 0.5*log(2*pi).
         nll = 0.5 * (torch.exp(-log_var) * residual.pow(2) + log_var)
         return _masked_mean(nll, mask)
 

@@ -588,10 +588,6 @@ def render_site_graphs(
             # A column that EXISTS but holds no finite value over the window is
             # skipped like an absent one: it draws nothing yet still registers a
             # legend entry, which reads as a line off the scale.
-            # `balance` is the one multi-series kind: its four component streams
-            # are independent of the aggregate net column, so deciding the whole
-            # chart on the net series alone dropped four fully-populated
-            # channels whenever the logger's own Rn was the missing one.
             present = (
                 {
                     channel: df[resolved_component]

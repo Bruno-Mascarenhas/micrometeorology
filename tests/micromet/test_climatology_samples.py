@@ -194,7 +194,7 @@ class TestCoverageMeansSensorAvailability:
         marked_n_eff, marked_r1 = effective_sample_size(sample)
         spliced_n_eff, spliced_r1 = effective_sample_size(sample[np.isfinite(sample)])
         # The splice pairs an evening hour with the next morning's, which drags
-        # r1 down and n_effective up: the published number was the optimistic one.
+        # r1 down and n_effective up.
         assert marked_r1 > spliced_r1
         assert marked_n_eff < spliced_n_eff
 
@@ -203,7 +203,7 @@ class TestCoverageMeansSensorAvailability:
 
 
 class TestTheDirectionEraCutIsPublished:
-    """46,5% of the record leaves, and it used to leave in silence.
+    """46,5% of the record leaves.
 
     Every number on the rose is then a share of what is left, which is why its
     calm fraction (7,4%) disagreed with the wind-speed panel's (5,2%) for the
@@ -274,9 +274,9 @@ def test_no_unpaired_atom_is_published_when_every_hour_has_its_speed():
 
 
 class TestTheEraSplitPartitionsThePublishedPopulations:
-    """`ERA_SPLIT` decides which hours reach which published variable, and the
-    boundary itself — the hour ON the split — was pinned nowhere: an off-by-one
-    moves a day of PAR from one era's density to the other's."""
+    """`ERA_SPLIT` decides which hours reach which published variable: an
+    off-by-one on the boundary hour — the hour ON the split — moves a day of
+    PAR from one era's density to the other's."""
 
     @staticmethod
     def _daytime_around_the_split(column: str) -> pd.DataFrame:

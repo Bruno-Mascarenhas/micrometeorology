@@ -464,7 +464,7 @@ def _read_operational(domain: str) -> dict:
 #: from ``wrfout_d02_2013-07-01_01_00_00-004_`` (99x99 grid, seed 2026) because
 #: that file is 8 GB of gitignored bulk data: without this sample the only test
 #: that ever compares the derivation against a ground-truth flux is skipped in
-#: CI and in every clean checkout, which is where it was for its whole life.
+#: CI and in every clean checkout.
 _LWUPB_SAMPLE = Path(__file__).parent / "fixtures" / "rrtmg_lwupb_d02_2013-07-01.npz"
 
 
