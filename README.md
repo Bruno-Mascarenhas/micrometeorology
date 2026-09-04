@@ -146,9 +146,13 @@ complains, the code gets fixed, not suppressed:
   `[tool.ruff.lint.per-file-ignores]` with the reason attached.
 - **No `from __future__ import annotations`** — Python 3.14 evaluates
   annotations lazily under PEP 649, so the import is a no-op here.
-- **No `if TYPE_CHECKING:` blocks.** Modules that must stay import-light (e.g.
-  `allsky.modeling.contracts` is torch-free at runtime) use PEP 695 type
-  aliases instead.
+- **`if TYPE_CHECKING:` only where an import cannot happen at runtime.** Modules
+  that must stay import-light (e.g. `allsky.modeling.contracts` is torch-free at
+  runtime) use PEP 695 type aliases instead. Three guards survive, each for a
+  reason that an alias cannot cover: `allsky/frame_pixels.py` (a PIL type used
+  in a signature and nowhere else), `allsky/data/datasets.py` (importing
+  `allsky.preprocessing` at runtime would close a cycle through the package's
+  `__init__`) and `allsky/snapshot.py` (the micrometeorology limit type).
 
 `pre-commit` is the lint source of truth and is what CI runs — `ruff check`
 alone is not equivalent, since the hooks also cover formatting, Markdown code
@@ -274,8 +278,8 @@ labmim-wrf-figures --dataset /path/to/wrfout_d03_2024-01-01_00:00:00 \
 
 ### 2. All-Sky Diffuse Radiation (multimodal DNN)
 
-The `allsky` package pairs all-sky camera timelapses (`data/all-sky/allsky-YYYYMMDD.mp4`,
-one frame per minute) with the radiation sensors into a portable **v2 dataset** and
+The `allsky` package pairs all-sky camera timelapses (`data/all-sky/videos/allsky-YYYYMMDD.mp4`,
+where `labmim-allsky sync-archive` puts them; one frame per minute) with the radiation sensors into a portable **v2 dataset** and
 trains a ladder of multimodal models (V0–V7) that predict diffuse horizontal
 irradiance — and optionally a clear-sky index and one of the four Escobedo sky
 conditions — from the sky image plus non-radiometric sensor context. The

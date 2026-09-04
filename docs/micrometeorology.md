@@ -570,17 +570,21 @@ tables. Three clock defects are repaired into a scratch directory; nothing under
 labmim-archive -d data -o output/archive --strict
 ```
 
-`--strict` exits non-zero when the merge does not reproduce the audited counts
-(lenta 987,969 rows, rain 988,249, span 2016-09-29 13:40 to 2026-04-24 13:00,
-zero duplicates, monotonic). Treat it as the archive's regression test.
+`--strict` exits non-zero when the merge loses rows, duplicates a timestamp or
+comes out non-monotonic. The floors it checks against are named constants in
+`micrometeorology.sensors.archive` — `EXPECTED_LENTA_ROWS`, `EXPECTED_RAIN_ROWS`,
+`ARCHIVE_START`, `ARCHIVE_END` — rather than numbers transcribed here, because
+the archive grows with every export and a figure written into prose goes stale
+the following week. Treat it as the archive's regression test.
 
-Three artifacts plus a report:
+Three artifacts plus a report. The shapes below are one run's, on the archive as
+of 2026-09-03; `archive_report.json` carries the current ones:
 
 | file | what it is |
 |------|------------|
-| `station_5min_raw.parquet` | 988,289 x 93 — values as the logger wrote them, sentinels included |
-| `station_5min_qc.parquet` | 988,289 x 111 — after sentinel masking, physical gates, calibrations and era unification |
-| `station_hourly.parquet` | 83,857 x 111 — hourly means, sum for the tipping bucket, speed-weighted vector mean for direction, and the fraction of each hour's samples whose logger status read `OK` |
+| `station_5min_raw.parquet` | 1,022,917 x 93 — values as the logger wrote them, sentinels included |
+| `station_5min_qc.parquet` | 1,022,917 x 111 — after sentinel masking, physical gates, calibrations and era unification |
+| `station_hourly.parquet` | 86,866 x 93 — hourly means, sum for the tipping bucket, speed-weighted vector mean for direction, and the fraction of each hour's samples whose logger status read `OK` |
 | `archive_report.json` | the verification, plus samples masked per column |
 
 The run prints how many physical limits actually **fired**. That number matters:
@@ -1200,7 +1204,19 @@ labmim-site-graphs site \
 
 ### What is the sentinel value (-900)?
 
-The Campbell Scientific datalogger uses -900 (or similar) to indicate missing or invalid data. The ingestion module automatically converts all values ≤ sentinel to NaN.
+It is a default that matches **nothing** in this archive, and leaving it on only
+creates the impression that missing data has been handled. `read_campbell_dat`
+turns values ≤ `sensor_sentinel_value` into NaN, but this station's loggers rail
+at 1000 °C, 999 %RH, −46.8, −273.1, −7999, −6673 and a windowed 0 — all of them
+above −900, all of them finite, and every one of them a plausible-looking number
+to a filter that only checks `np.isfinite`.
+
+The rails that are actually caught are per column and per era, in
+`SENTINEL_RANGES` / `mask_sentinels`
+(`micrometeorology.sensors.archive`), which `labmim-archive` and
+`allsky prepare-local` both apply after reading. Setting
+`sensor_sentinel_value: null` turns off a guard that only looks like one; it
+changes nothing about what reaches the archive.
 
 ### Why does configuration have 4 layers?
 

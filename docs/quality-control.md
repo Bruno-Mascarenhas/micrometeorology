@@ -467,8 +467,12 @@ habit alone.
   range gate and no statistical test, while every sibling T and RH channel of the
   same instrument has both.
 - **`WindDir_SD1_WVT`**, 267,252 samples of σ-θ, has only a range gate.
-- **Nine wind channels** have no persistence rule, including `WindDir` with
-  212,681 samples.
+- **Five wind channels** have no persistence rule: `Ws_Mean`,
+  `Wd_MeanUnitVector`, `Wd_StdDev`, `WindDir_SD` and `WindDir_SD1_WVT`.
+  `WindDir`, `WindDir_GMX` and `WS_ms_GMX` left this list when
+  `sensor_persistence_limits` gained them (see the comment there for the
+  measurement); the two σ-θ channels are a dispersion statistic, for which a
+  streak rule may be the wrong shape rather than a missing one.
 
 ### Sources consulted that produced a deliberate negative
 
@@ -484,7 +488,10 @@ Recording these so the same ground is not covered twice.
   values rather than reject them.
 - **Jiménez, P. A. et al. (2010)**, J. Appl. Meteor. Climatol. 49, 308–325 — the
   wind-direction step test, declined for the reason Shafer et al. give.
-- **Long & Shi (2008)** minimum of −4 W/m² — measured here as 100 % false
+- **Long & Shi (2008)** minimum of −4 W/m² — adopted, but only after the offset
+  it would have hidden was measured first. Applied blind it reads as 100 % false
   positive: 21,256 samples of uncorrected thermal offset from IR loss, exactly
-  the effect the same paper describes. Masking would bias the night mean upward
-  and destroy the diagnostic.
+  the effect the same paper describes, and masking them would bias the night mean
+  upward and destroy the diagnostic. It is in production as
+  `BSRN_PPL_FLOOR_WM2 = -4.0` alongside the nocturnal offset monitor that keeps
+  that measurement visible; see *Nocturnal shortwave: a deliberate deviation*.

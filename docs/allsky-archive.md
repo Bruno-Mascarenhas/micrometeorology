@@ -163,11 +163,18 @@ embedded bank of 125 glyph exemplars, allowing a ±3 px shift because narrow
 glyphs are positioned slightly differently between frames. Accuracy on the 15
 hand-labelled frames used to build the bank is 15/15 under leave-one-out.
 
-Reads are then *validated*, which is what makes them trustworthy: the date must
-be the video's day or the next, stamps must increase, and the implied interval
-must be between 20 s and 10 min. A frame failing any check is interpolated from
-its neighbours and flagged `interpolated`; a video where more than 20 % of frames
-fail is refused outright rather than timestamped from a guess.
+Reads are then *validated*, which is what makes them trustworthy. Two checks are
+fatal: the date must be the video's day or the next, and stamps must increase —
+a frame whose digits do not form a real date in that window has no timestamp, and
+is interpolated from its neighbours and flagged `interpolated`. A video where
+more than 20 % of frames fail is refused outright rather than timestamped from a
+guess, and a frame at either END of the video is not interpolated at all (there
+is no bracket) — it is dropped, so it carries no manifest row.
+
+The capture interval is a third check of a different kind: an implied interval
+outside 20 s–10 min is **counted and logged, not corrected**. Real captures run
+61–92 s apart and a paused camera is a fact about the day, not a misread digit
+(see `test_an_unusual_capture_interval_is_reported_but_kept`).
 
 Frame filenames keep the repo's minute-resolution convention
 (`allsky-YYYYMMDD-HHMM.jpg`) so they continue to match the manifest's
@@ -270,9 +277,16 @@ Live frame, with a prediction:
   --sensor-csv data/processed/station-latest.csv
 ```
 
-The `--sensor-csv` file is the **processed** station export, in the published
-physical units and with a time column the reader recognises; what it must look
-like, and what happens to a reading it cannot screen, is in *The snapshot
+The `--sensor-csv` file must carry a NAMED time column. `labmim-sensor-process`
+does not write one today: its default export puts the timestamp in the DataFrame
+index with no header, so the file the line above names is not readable by the
+snapshot as it stands — pass an export written with the datetime columns
+included, or add the header yourself. The open defect is recorded in
+[allsky-label-join.md](allsky-label-join.md); giving the export an
+`index_label` would change its byte layout, which is a contract with the
+consumers already reading it. What the file must look like otherwise, in the
+published physical units, and what happens to a reading the screen rejects, is in
+*The snapshot
 prediction caveat* below.
 
 An **embedding-mode** checkpoint carries no backbone of its own: the live frame is

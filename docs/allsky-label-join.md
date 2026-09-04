@@ -348,20 +348,21 @@ and standardizing multiplies the input scale by 4–8×. The experiment that dec
 is re-tuning `backbone_lr` under standardization; until then, "correct" and
 "better" do not coincide here.
 
-**A second gap, created by the 2026-08-28 standardization:**
-`allsky.snapshot._image_as_chw` returns the frame as raw `[0, 1]` and hands it
-straight to the model when `data.input_mode == "image"`. Training in image mode
-began standardizing by DINOv2's channel statistics; snapshot inference did not.
-It is the same ~1.3σ divergence in the red channel that the fix exists to
-eliminate, reintroduced at serving time.
+**A second gap, created by the 2026-08-28 standardization — half closed.**
+Serving no longer diverges from training: `allsky.snapshot._image_as_chw` runs
+the same chain the dataset does and ends in `imagenet_standardize`, and
+`test_the_live_frame_is_prepared_the_way_the_training_frames_are` pins the two
+together over the preprocessing pipeline and the resize.
 
-It was not fixed alongside because the right value **depends on the checkpoint's
-vintage**: every image-mode checkpoint produced up to 2026-08-28 was trained on
-raw input, and serving it standardized would be wrong. Worse, there is no way to
-dispatch on vintage — `training/checkpointing.py` records `backbone_info` with
-name, revision, pooling, dim and frozen, and none of that distinguishes the two
-input recipes. The correct order is: first record the input recipe in
-`backbone_info`, then standardize the snapshot path.
+What remains open is dispatch by **checkpoint vintage**. Every image-mode
+checkpoint produced up to 2026-08-28 was trained on raw `[0, 1]` input, and the
+snapshot now standardizes for all of them — so serving one of those older
+checkpoints applies a recipe it was never fitted on, which is the same ~1.3σ
+divergence in the red channel, now pointing the other way.
+`training/checkpointing.py` records `backbone_info` with name, revision,
+pooling, dim and frozen, and none of that distinguishes the two input recipes,
+so there is still nothing to dispatch on. Recording the input recipe in
+`backbone_info` is what closes it.
 
 **A known gap, older than that change:** `allsky.snapshot._sensor_row_near` pairs
 the sensor row on the raw stamp and does not know about

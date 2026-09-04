@@ -105,13 +105,28 @@ Swap `--device cuda --amp` for `--device cpu --no-amp` for a CPU smoke run (the 
 allsky extract-frames data/all-sky/allsky-20260625.mp4 -o output/allsky/frames --step 60
 ```
 
-It writes JPEGs named `allsky-YYYYMMDD-HHMM.jpg` (quality 92) plus a `manifest.parquet` with columns `frame_path`, `timestamp`, `video`, `index`, using the `video` section of the PrepareConfig (`--config`, or built-in defaults) for the frame→time mapping. Use `--resize 224` to downscale at extraction time. The manifest is overwritten on every call — use one directory per video or per extraction run.
+It writes JPEGs named `allsky-YYYYMMDD-HHMM.jpg` (quality 92) plus a `manifest.parquet` with columns `frame_path`, `timestamp`, `video`, `index`, using the `video` section of the PrepareConfig (`--config`, or built-in defaults) for the frame→time mapping. By default that mapping is the timestamp the camera burns into each frame; see [Video → Time Mapping](#video--time-mapping). Use `--resize 224` to downscale at extraction time. The manifest is overwritten on every call — use one directory per video or per extraction run.
 
 ---
 
 ## Video → Time Mapping
 
-Videos are **one-day timelapse files** named by date (`data/all-sky/allsky-YYYYMMDD.mp4`) where **one frame covers one minute** of real time by default. Frame 0 is captured at `video.start_time` local time (default `06:00`), and frame *i* maps to:
+Videos are **one-day timelapse files** named by date. `labmim-allsky sync-archive`
+writes them to `data/all-sky/videos/allsky-YYYYMMDD.mp4`, which is what the shipped
+`configs/allsky/data/local_prepare*.yaml` point at; the `VideoConfig.pattern` default
+(`data/all-sky/allsky-*.mp4`) is for videos placed there by hand.
+
+Two mappings exist, and `video.timestamps` selects between them.
+
+**`overlay` (the default).** The capture time is read from the stamp the camera
+burns into every frame, so it survives a dropped frame, a paused capture and a
+timelapse that does not start at 06:00. It is the only mapping the archive
+pipeline uses; see [allsky-archive.md](allsky-archive.md) for how a contested or
+unreadable stamp is settled.
+
+**`modelled`.** Kept for footage from another camera, which carries no overlay.
+Frame 0 is taken to be captured at `video.start_time` local time (default
+`06:00`), and frame *i* maps to:
 
 ```
 timestamp(i) = date + start_time + i * minutes_per_frame
@@ -119,7 +134,8 @@ timestamp(i) = date + start_time + i * minutes_per_frame
 
 Both `start_time` and `minutes_per_frame` are configurable — adjust them to the camera schedule. Videos are always decoded as a stream (`imageio.v3.imiter`); a full one-day 1080p file is never loaded into memory at once.
 
-Limitations to keep in mind:
+Both limitations below are limitations of `modelled` alone; the overlay reads each
+frame's own stamp and neither applies to it:
 
 - The mapping assumes the camera never skips frames — a dropped frame in the timelapse shifts every subsequent timestamp.
 - Extracted JPEG filenames carry minute resolution, so with `minutes_per_frame < 1` two frames can map to the same name and overwrite each other.

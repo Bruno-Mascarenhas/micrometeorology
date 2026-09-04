@@ -79,7 +79,7 @@ One row per paired sample. Columns (see `data/contracts.py`):
 - **Feature columns** per the active policy set (13 `safe`, 10 `minimal`,
   9 `bare`, +4 `extended`).
 - **Targets**: `target_dhi`, `target_source` (`measured`/`erbs_pseudo`),
-  `target_kindex`, `kindex_kind` (`kstar`/`kt`), `sky_class` (`0/1/2`, `-1` =
+  `target_kindex`, `kindex_kind` (`kstar`/`kt`), `sky_class` (the four `labmim_core.sky.SKY_CLASS_VALUES`, `0/1/2/3`; `-1` =
   missing), `cloud_fraction` (nullable, all-NaN today), `qc_flags` (`int64`
   `QCFlag` bitmask: `LOW_SUN`, `SENSOR_GAP`, `ALIGNMENT_FAR`, `KT_ARTIFACT`,
   `FRAME_DARK`, `FRAME_SATURATED`). `build_manifest` sets the first four; the
@@ -132,11 +132,14 @@ pooling, dim, transform, `config_sha256`, `pixel_config_sha256`, count, dtype).
 
 Extraction is resumable — the index is the source of truth, and a shard lands
 atomically with its index rows. It **refuses to resume** into a store recording
-a different backbone / revision / pooling / dim / config rather than mixing two
-encoders' vectors. One legacy mismatch is migrated in place: a `config_sha256`
-from the superseded digest formula, and only if the store's
-`pixel_config_sha256` also equals this run's — otherwise the pixel provenance
-has moved and the store is refused.
+a different backbone / revision / pooling / dim / `config_sha256` rather than
+mixing two encoders' vectors, and no mismatch is negotiable — a store stamped by
+a superseded digest formula is refused like any other, and re-extracting it means
+`--no-resume`. An indexed store carrying no provenance at all is refused too:
+there is nothing to check the incoming backbone against. `pixel_config_sha256` is
+recorded beside the resume digest as provenance a reader can consult, never as a
+migration key: it lets someone tell "the formula widened" from "the pixels
+changed", and nothing reads it to carry a store across either.
 
 ### Checkpoint payload (`last.ckpt` / `best.ckpt`)
 
