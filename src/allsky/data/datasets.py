@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Protocol, get_args, runtime_checkable
 import numpy as np
 import pandas as pd
 
-from allsky.config import DEFAULT_IMAGE_SIZE, AlignmentStrategyName
+from allsky.config import DEFAULT_IMAGE_SIZE, AlignmentStrategyName, DHIParameterization
 from allsky.data.contracts import NS_PER_MINUTE, resolve
 from allsky.features.normalization import FeatureNormalizer
 from allsky.geometry import solar_geometry_maps
@@ -144,7 +144,7 @@ class _BaseMultimodalDataset:
         *,
         train: bool = True,
         stats: FeatureNormalizer | None = None,
-        dhi_parameterization: str = "raw",
+        dhi_parameterization: DHIParameterization = "raw",
         utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
     ) -> None:
         self.manifest = manifest.reset_index(drop=True)
@@ -197,10 +197,17 @@ class _BaseMultimodalDataset:
         """
         self.epoch = epoch
 
-    def _dhi_scale_column(self, parameterization: str, utc_offset_hours: float) -> np.ndarray:
+    def _dhi_scale_column(
+        self, parameterization: DHIParameterization, utc_offset_hours: float
+    ) -> np.ndarray:
         ones = np.ones(len(self.manifest), dtype=np.float32)
-        if parameterization != "clearsky_index":
+        if parameterization == "raw":
             return ones
+        if parameterization != "clearsky_index":
+            raise ValueError(
+                f"unknown dhi_parameterization {parameterization!r}; expected 'raw' or "
+                "'clearsky_index'"
+            )
         missing = [c for c in ("solar_zenith", "timestamp_utc") if c not in self.manifest.columns]
         if missing:
             raise ValueError(f"the clear-sky-index DHI target needs the manifest columns {missing}")
@@ -331,7 +338,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         preprocess: PreprocessingPipeline | None = None,
         seed: int = 0,
         geometry_channels: Sequence[str] = (),
-        dhi_parameterization: str = "raw",
+        dhi_parameterization: DHIParameterization = "raw",
         utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
         window: WindowMode = "center_frame",
         window_minutes: float = 10.0,
@@ -539,7 +546,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         stats: FeatureNormalizer | None = None,
         window: WindowMode = "center_frame",
         window_minutes: float = 10.0,
-        dhi_parameterization: str = "raw",
+        dhi_parameterization: DHIParameterization = "raw",
         utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
     ) -> None:
         super().__init__(
