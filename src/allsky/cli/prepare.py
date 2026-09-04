@@ -187,6 +187,10 @@ def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]
     - only the config sections that reach the manifest
       (:data:`_MANIFEST_CONFIG_SECTIONS`).
 
+    The per-frame ``qc_frame_flags`` are part of the key: re-extracting a video
+    to populate them leaves every ``frame_path`` in place, and the rebuild the
+    missing-flags warning asks for would otherwise resume on the flagless manifest.
+
     Note that the live, appended sensor archive changes content on essentially
     every logger write, so a rebuild on every run is the expected steady state —
     the manifest's targets are re-derived from the newest sensor data, which is
@@ -204,8 +208,14 @@ def _manifest_inputs_sha256(cfg: PrepareConfig, per_video: list[PandasDataFrame]
 
     digest = hashlib.sha256()
     for frame in per_video:
-        for frame_path in sorted(str(value) for value in frame["frame_path"]):
-            digest.update(frame_path.encode("utf-8"))
+        flags = (
+            [str(int(value)) for value in frame["qc_frame_flags"]]
+            if "qc_frame_flags" in frame.columns
+            else ["absent"] * len(frame)
+        )
+        paths = [str(value) for value in frame["frame_path"]]
+        for frame_path, flag in sorted(zip(paths, flags, strict=True)):
+            digest.update(f"{frame_path}\0{flag}".encode())
             digest.update(b"\0")
     for sensor_path in cfg.sensor.paths:
         digest.update(file_content_sha256(Path(sensor_path)).encode("utf-8"))

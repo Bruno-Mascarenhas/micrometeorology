@@ -292,6 +292,18 @@ class TestInputsHashContents:
             PrepareConfig(), frames
         )
 
+    def test_the_frame_qc_flags_are_part_of_the_key(self):
+        """Re-extracting to populate ``qc_frame_flags`` changes no frame path, so the
+        rebuild the missing-flags warning asks for resumed on the flagless manifest
+        and FRAME_DARK never reached it."""
+        cfg = PrepareConfig()
+        bare = _manifest_inputs_sha256(cfg, [self._frames(["a.jpg"])])
+        flagged = _manifest_inputs_sha256(
+            cfg, [pd.DataFrame({"frame_path": ["a.jpg"], "qc_frame_flags": [16]})]
+        )
+
+        assert bare != flagged
+
     def test_frame_set_is_part_of_the_key(self):
         cfg = PrepareConfig()
         one = _manifest_inputs_sha256(cfg, [self._frames(["a.jpg"])])
