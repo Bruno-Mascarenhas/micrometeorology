@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Protocol, get_args, runtime_checkable
 import numpy as np
 import pandas as pd
 
+from allsky.clearsky import clearsky_diffuse
 from allsky.config import DEFAULT_IMAGE_SIZE, AlignmentStrategyName, DHIParameterization
 from allsky.data.contracts import NS_PER_MINUTE, resolve
 from allsky.features.normalization import FeatureNormalizer
@@ -64,7 +65,6 @@ type SampleTensors = dict[str, Any]
 #: never disagree about which modes exist.
 type WindowMode = AlignmentStrategyName
 _WINDOW_MODES: tuple[WindowMode, ...] = get_args(AlignmentStrategyName)
-#: Window bounds are computed on int64 nanosecond timestamps.
 
 
 @runtime_checkable
@@ -175,7 +175,7 @@ class _BaseMultimodalDataset:
             )
         self.stats = stats
 
-        self._features = stats.transform(self.manifest).astype(np.float32)
+        self._features = stats.transform(self.manifest)
         self._dhi_scale = self._dhi_scale_column(dhi_parameterization, utc_offset_hours)
         self._dhi = self._raw_target("target_dhi") / self._dhi_scale
         self._kindex = self._raw_target("target_kindex")
@@ -203,9 +203,8 @@ class _BaseMultimodalDataset:
     def _dhi_scale_column(
         self, parameterization: DHIParameterization, utc_offset_hours: float
     ) -> np.ndarray:
-        ones = np.ones(len(self.manifest), dtype=np.float32)
         if parameterization == "raw":
-            return ones
+            return np.ones(len(self.manifest), dtype=np.float32)
         if parameterization != "clearsky_index":
             raise ValueError(
                 f"unknown dhi_parameterization {parameterization!r}; expected 'raw' or "
@@ -214,8 +213,6 @@ class _BaseMultimodalDataset:
         missing = [c for c in ("solar_zenith", "timestamp_utc") if c not in self.manifest.columns]
         if missing:
             raise ValueError(f"the clear-sky-index DHI target needs the manifest columns {missing}")
-        from allsky.clearsky import clearsky_diffuse
-
         times = pd.to_datetime(self.manifest["timestamp_utc"], utc=True)
         scale = clearsky_diffuse(self.manifest["solar_zenith"], times, utc_offset_hours)
         if not np.all(np.isfinite(scale)) or float(np.min(scale)) <= 0.0:

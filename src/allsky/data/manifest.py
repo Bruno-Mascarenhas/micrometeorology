@@ -46,6 +46,7 @@ from allsky.data.alignment import CenterFrame
 from allsky.data.contracts import (
     DATASET_VERSION,
     GEOMETRY_COLUMNS,
+    SPLIT_COLUMN,
     QCFlag,
     manifest_column_dtypes,
     to_relative,
@@ -270,7 +271,7 @@ def build_manifest(
     matched_pos = pairing.sensor_pos[keep]
     distance_minutes = pairing.distance_minutes[keep]
 
-    paired_sensor = sensors.iloc[matched_pos].copy()
+    paired_sensor = sensors.iloc[matched_pos]
     paired_sensor.index = frame_times
 
     features = build_feature_frame(
@@ -390,7 +391,7 @@ def build_manifest(
             "qc_flags": qc_flags,
             "dataset_version": [DATASET_VERSION] * n_rows,
             "alignment_id": [strategy.id] * n_rows,
-            "split": [None] * n_rows,
+            SPLIT_COLUMN: [None] * n_rows,
         }
     )
     manifest = pd.DataFrame(data, columns=list(dtypes)).astype(dtypes)
@@ -433,14 +434,19 @@ def build_manifest_from_prepare_config(
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Build a manifest from a :class:`~allsky.config.PrepareConfig`.
 
-    Every build parameter is read from *cfg*: the feature set from
-    ``cfg.features.feature_set`` (the ``features.set`` YAML key) **and the
-    ``features.extra`` names beside it**, the GHI column from
-    ``cfg.sensor.ghi_column``, plus the site, alignment window, diffuse column,
-    k-index kind, sky-class thresholds and the night drop threshold
-    (``cfg.night_filter.min_solar_elevation_deg`` -> ``night_min_elevation_deg``).
-    ``extra`` was the one section the docstring promised and the call dropped, so
-    a column an ablation declared never reached the manifest it was declared in.
+    Forwarded from *cfg*: the feature set (``cfg.features.feature_set``, the
+    ``features.set`` YAML key) and the ``features.extra`` names beside it, the
+    GHI column (``cfg.sensor.ghi_column``), the site, the alignment window, the
+    diffuse column, the k-index kind, the sensor clock offset and both elevation
+    floors (``cfg.night_filter.min_solar_elevation_deg`` ->
+    ``night_min_elevation_deg``; ``cfg.night_filter.labelable_min_elevation_deg``
+    -> ``min_elevation_deg``). ``max_kindex``, ``far_distance_minutes`` and
+    ``sample_id_format`` keep their :func:`build_manifest` defaults — no config
+    key carries them. The sky-condition bins are not a build parameter at all:
+    they are the published bounds of
+    :data:`labmim_core.sky.SKY_CLASS_KT_UPPER_BOUNDS`, and
+    :class:`~allsky.config.PrepareTargetsConfig` forbids a config that tries to
+    set them.
 
     Parameters
     ----------
@@ -575,13 +581,13 @@ def attach_split_column(
     assignment, split_id = _split_assignment_and_id(split_artifact)
     day_ids = manifest["day_id"].astype("string")
     manifest = manifest.copy()
-    manifest["split"] = day_ids.map(assignment).astype("string")
+    manifest[SPLIT_COLUMN] = day_ids.map(assignment).astype("string")
 
     meta = {**meta, "split_id": split_id}
     written = write_manifest_parquet(manifest, meta, out)
     logger.info(
         "attach_split_column: filled %d split label(s) (split_id=%s); manifest_sha256 changed",
-        int(manifest["split"].notna().sum()),
+        int(manifest[SPLIT_COLUMN].notna().sum()),
         str(split_id)[:12],
     )
     return written
@@ -592,13 +598,13 @@ def _split_assignment_and_id(
 ) -> tuple[Mapping[str, str], str | None]:
     """Extract the ``day_id -> split`` map and ``split_id`` from either form.
 
-    A :class:`~allsky.data.splits.DaySplit` is recognised by its ``assignment``
-    attribute; the dict form carries the same two keys.
+    A :class:`~allsky.data.splits.DaySplit` is recognised by its type; the dict
+    form carries the same two keys.
     """
-    assignment = getattr(split_artifact, "assignment", None)
-    if assignment is not None:
-        split_id = getattr(split_artifact, "split_id", None)
-        return {str(k): str(v) for k, v in assignment.items()}, split_id
+    if isinstance(split_artifact, DaySplit):
+        return {
+            str(k): str(v) for k, v in split_artifact.assignment.items()
+        }, split_artifact.split_id
     if isinstance(split_artifact, dict):
         raw = split_artifact["assignment"]
         if not raw:

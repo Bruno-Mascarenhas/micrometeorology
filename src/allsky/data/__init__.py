@@ -2,8 +2,9 @@
 
 Public surface:
 
-- :mod:`~allsky.data.contracts` — the manifest column registry, :class:`QCFlag`,
-  sky-class constants and portable-path helpers.
+- :mod:`~allsky.data.contracts` — the manifest column registry, :class:`QCFlag`
+  and portable-path helpers; the sky-class constants live in
+  :mod:`labmim_core.sky`.
 - :mod:`~allsky.data.alignment` — image<->sensor alignment strategies
   (:class:`CenterFrame` at build time; windowed poolers at dataset level).
 - :mod:`~allsky.data.manifest` — :func:`build_manifest` +

@@ -15,17 +15,18 @@ Pure stdlib/numpy; importing this module never pulls torch.
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 
 import numpy as np
 
 from allsky.data.contracts import DATASET_VERSION
 from allsky.provenance import canonical_config_json
-from labmim_core.atomic import atomic_write
+from labmim_core.atomic import atomic_write_json
 
 __all__ = [
     "SPLIT_NAMES",
@@ -55,14 +56,15 @@ class SplitExistsError(FileExistsError):
     """Raised when saving a *different* split over an existing artifact without force."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DaySplit:
     """A deterministic day-level partition into train/val/test.
 
     Attributes
     ----------
     assignment:
-        ``day_id -> split`` map (each day in exactly one split).
+        Read-only ``day_id -> split`` map (each day in exactly one split),
+        wrapped at construction so it cannot change under :attr:`split_id`.
     seed, val_fraction, test_fraction:
         The parameters that produced the partition (recorded for reproducibility
         and folded into :attr:`split_id`).
@@ -75,13 +77,17 @@ class DaySplit:
         partition, which has no boundary to guard.
     """
 
-    assignment: dict[str, str]
+    assignment: Mapping[str, str]
     seed: int
     val_fraction: float
     test_fraction: float
     created_at: str
     strategy: SplitStrategy = "chronological"
     gap_days: int = DEFAULT_GAP_DAYS
+
+    def __post_init__(self) -> None:
+        """Freeze the assignment so it cannot drift out from under :attr:`split_id`."""
+        object.__setattr__(self, "assignment", MappingProxyType(dict(self.assignment)))
 
     @property
     def split_id(self) -> str:
@@ -313,11 +319,7 @@ def save_split_artifact(split: DaySplit, path: str | Path, *, force: bool = Fals
             "pass force=True to overwrite"
         )
 
-    def write_payload(tmp: Path) -> None:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(split.to_dict(), handle, indent=2, ensure_ascii=False)
-
-    return atomic_write(out, write_payload)
+    return atomic_write_json(out, split.to_dict())
 
 
 def load_split_artifact(path: str | Path) -> DaySplit:
@@ -380,7 +382,8 @@ def _chronological_blocks(
     training day and the first validation day from being consecutive, which for
     a sky record makes them near-duplicates of each other.
     """
-    needed = n_val + n_test + (2 * gap_days if n_val and n_test else gap_days)
+    boundaries = bool(n_val) + bool(n_test)
+    needed = n_val + n_test + boundaries * gap_days
     if needed >= len(days):
         raise ValueError(
             f"{len(days)} day(s) cannot carry val={n_val}, test={n_test} and "
@@ -394,7 +397,7 @@ def _chronological_blocks(
 
 
 def _split_id(
-    assignment: dict[str, str],
+    assignment: Mapping[str, str],
     seed: int,
     val_fraction: float,
     test_fraction: float,
