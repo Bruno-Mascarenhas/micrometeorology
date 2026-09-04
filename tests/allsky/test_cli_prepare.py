@@ -11,10 +11,14 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
+import typer
 from typer.testing import CliRunner
 
 from allsky.bundle import validate_bundle
 from allsky.cli import app
+from allsky.cli.prepare import _check_sensor_coverage, _load_sensor_df
+from allsky.config import PrepareConfig
 from allsky.data.manifest import build_manifest, write_manifest_parquet
 from labmim_core import solar
 from labmim_core.site import SiteConfig
@@ -156,6 +160,61 @@ class TestValidateDataset:
         )
         assert result.exit_code == 0, result.output
         assert "OK" in result.output
+
+    def test_a_split_artifact_beside_the_manifest_is_read_and_named(self, tmp_path: Path):
+        """The leakage cross-check only runs when an artifact is found, and no test
+        ever put one there — the whole wiring was unexercised."""
+        from allsky.data.splits import create_day_splits, save_split_artifact
+
+        days = ["2025-03-21 12:00", "2025-03-22 12:00", "2025-03-23 12:00"]
+        dataset_dir = tmp_path / "with-split"
+        _write_manifest(dataset_dir, days, create_files=True)
+        save_split_artifact(
+            create_day_splits(
+                [day[:10] for day in days],
+                seed=1,
+                val_fraction=0.34,
+                test_fraction=0.0,
+                gap_days=0,
+            ),
+            dataset_dir / "splits.json",
+        )
+        config = _write_config(
+            tmp_path / "c.yaml",
+            dataset_dir=dataset_dir,
+            video_pattern="none-*.mp4",
+            dat_path=tmp_path / "x.dat",
+        )
+
+        result = runner.invoke(app, ["validate-dataset", "--config", str(config)])
+
+        assert result.exit_code == 0, result.output
+        assert "Split artifact:" in result.output
+
+    @pytest.mark.parametrize(("strict", "expected_exit"), [(False, 0), (True, 1)])
+    def test_a_manifest_whose_sidecar_is_gone_warns_and_fails_only_under_strict(
+        self, tmp_path: Path, strict: bool, expected_exit: int
+    ):
+        """The warning half of validate-dataset — the echo, the sidecar warning and
+        `--strict`'s promotion — was never executed by any test."""
+        dataset_dir = tmp_path / "no-sidecar"
+        manifest_path = _write_manifest(dataset_dir, ["2025-03-21 12:00"], create_files=True)
+        manifest_path.with_name("manifest.parquet.meta.json").unlink()
+        config = _write_config(
+            tmp_path / "c.yaml",
+            dataset_dir=dataset_dir,
+            video_pattern="none-*.mp4",
+            dat_path=tmp_path / "x.dat",
+        )
+
+        result = runner.invoke(
+            app,
+            ["validate-dataset", "--config", str(config), *(["--strict"] if strict else [])],
+        )
+
+        assert result.exit_code == expected_exit, result.output
+        assert "WARNING:" in result.output
+        assert "dataset_version" in result.output
 
     def test_missing_manifest_exit_one(self, tmp_path: Path):
         config = _write_config(
@@ -481,3 +540,143 @@ def test_importing_the_prepare_command_module_does_not_pull_pandas():
     )
 
     assert probe.stdout.strip() == "[]"
+
+
+class TestSensorCoverageGate:
+    """The gate runs before extraction because extraction costs minutes per video
+    and the pairing step then discards every frame; a coverage gap has to surface
+    here, not as an empty manifest an hour later.
+    """
+
+    @staticmethod
+    def _dat(path: Path, index: pd.DatetimeIndex) -> Path:
+        frame = _sensor_frame(SiteConfig(), index)
+        columns = ["TIMESTAMP", *frame.columns]
+        lines = [
+            '"TOA5","CR5000","CR5000","2754","CR5000.Std.06","TEST","1","LBM"',
+            ",".join(f'"{name}"' for name in columns),
+            ",".join('"unit"' for _ in columns),
+            ",".join('"Avg"' for _ in columns),
+        ]
+        for stamp, row in frame.iterrows():
+            values = ",".join(f"{value:.4f}" for value in row)
+            lines.append(f'"{stamp:%Y-%m-%d %H:%M:%S}",{values}')
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def _cfg(self, tmp_path: Path, index: pd.DatetimeIndex) -> PrepareConfig:
+        dat = self._dat(tmp_path / "sensor.dat", index)
+        return PrepareConfig.model_validate({"sensor": {"paths": [str(dat)]}})
+
+    def test_a_video_day_entirely_before_the_logger_is_not_covered(self, tmp_path: Path):
+        """`day + 1 day >= sensor_start` counted the day before the logger's first
+        record as covered, so a whole video day outside the record passed the gate
+        and contributed nothing to the manifest."""
+        cfg = self._cfg(tmp_path, pd.date_range("2026-01-10 00:00", periods=48, freq="h"))
+
+        with pytest.raises(typer.Exit) as raised:
+            _check_sensor_coverage(cfg, [str(tmp_path / "allsky-20260109.mp4")])
+
+        assert raised.value.exit_code == 1
+
+    def test_a_day_inside_the_record_is_covered(self, tmp_path: Path):
+        cfg = self._cfg(tmp_path, pd.date_range("2026-01-10 00:00", periods=48, freq="h"))
+
+        _check_sensor_coverage(cfg, [str(tmp_path / "allsky-20260110.mp4")])
+
+    def test_a_day_after_the_record_is_reported_as_partial_coverage(self, tmp_path: Path, capsys):
+        cfg = self._cfg(tmp_path, pd.date_range("2026-01-10 00:00", periods=48, freq="h"))
+
+        _check_sensor_coverage(
+            cfg,
+            [str(tmp_path / "allsky-20260110.mp4"), str(tmp_path / "allsky-20260201.mp4")],
+        )
+
+        assert "only 1 of 2 video days" in capsys.readouterr().out
+
+    def test_a_sensor_export_that_is_not_there_is_named_not_a_traceback(self, tmp_path: Path):
+        cfg = PrepareConfig.model_validate({"sensor": {"paths": [str(tmp_path / "gone.dat")]}})
+
+        with pytest.raises(typer.Exit) as raised:
+            _check_sensor_coverage(cfg, [str(tmp_path / "allsky-20260110.mp4")])
+
+        assert raised.value.exit_code == 1
+
+
+def test_two_sensor_files_merge_per_column_not_by_dropping_the_whole_row(tmp_path: Path):
+    """`concat().sort_index()` then `duplicated(keep="first")` sorted BEFORE
+    deduplicating, so "first" was whichever row the sort left first rather than
+    the first file's, and it dropped the whole row — losing a column the later
+    file adds at a stamp the earlier one also carries."""
+    header = '"TOA5","CR5000","CR5000","2754","CR5000.Std.06","TEST","1","LBM"'
+
+    def write(path: Path, columns: list[str], values: list[float]) -> Path:
+        names = ["TIMESTAMP", *columns]
+        path.write_text(
+            "\n".join(
+                [
+                    header,
+                    ",".join(f'"{n}"' for n in names),
+                    ",".join('"unit"' for _ in names),
+                    ",".join('"Avg"' for _ in names),
+                    '"2026-01-10 00:00:00",' + ",".join(f"{v}" for v in values),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    earlier = write(tmp_path / "a.dat", ["AirT1_C_Avg"], [21.0])
+    later = write(tmp_path / "b.dat", ["AirT1_C_Avg", "RH1"], [99.0, 70.0])
+    cfg = PrepareConfig.model_validate({"sensor": {"paths": [str(earlier), str(later)]}})
+
+    merged = _load_sensor_df(cfg)
+
+    assert len(merged) == 1
+    assert float(merged["AirT1_C_Avg"].iloc[0]) == pytest.approx(21.0), "earlier file wins"
+    assert float(merged["RH1"].iloc[0]) == pytest.approx(70.0), "later file's column survives"
+
+
+def test_a_failed_swap_puts_the_previous_extraction_back(
+    tmp_path: Path, synthetic_video: Path, synthetic_dat: Path, monkeypatch
+):
+    """Between the two renames the day has no directory at all: failing there
+    without restoring would strand the previous extraction under `.superseded`,
+    which nothing reads, and the day would leave the dataset in silence."""
+    import shutil
+
+    from allsky.cli.prepare import _extract_replacing_frames
+
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    video = videos / synthetic_video.name
+    shutil.copy(synthetic_video, video)
+    cfg = PrepareConfig.model_validate(
+        {
+            "video": {"pattern": f"{videos}/allsky-*.mp4", "timestamps": "modelled"},
+            "sensor": {"paths": [str(synthetic_dat)]},
+            "output": {"dataset_dir": str(tmp_path / "dataset")},
+        }
+    )
+    video_dir = tmp_path / "dataset" / "frames" / video.stem
+    _extract_replacing_frames(str(video), video_dir, cfg)
+    before = sorted(p.name for p in video_dir.iterdir())
+
+    real_rename = Path.rename
+    calls = {"n": 0}
+
+    def fail_on_the_swap(self: Path, target):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("no space left on device")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_on_the_swap)
+
+    with pytest.raises(OSError, match="no space left"):
+        _extract_replacing_frames(str(video), video_dir, cfg)
+
+    monkeypatch.undo()
+    assert video_dir.is_dir(), "the day must still have a directory"
+    assert sorted(p.name for p in video_dir.iterdir()) == before

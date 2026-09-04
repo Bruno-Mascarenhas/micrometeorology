@@ -675,11 +675,14 @@ def _check_sensor_coverage(cfg: PrepareConfig, videos: list[str]) -> None:
     discarded by the pairing step, so a coverage gap has to surface here rather
     than as an empty manifest an hour later.
     """
-    import datetime as dt
 
     import pandas as pd
 
-    sensor_df = _load_sensor_df(cfg)
+    try:
+        sensor_df = _load_sensor_df(cfg)
+    except (OSError, ValueError) as exc:
+        typer.echo(f"ERROR: cannot read the sensor export named in sensor.paths: {exc}")
+        raise typer.Exit(code=1) from exc
     if sensor_df.empty:
         typer.echo(f"ERROR: no sensor records read from {cfg.sensor.paths}")
         raise typer.Exit(code=1)
@@ -687,11 +690,7 @@ def _check_sensor_coverage(cfg: PrepareConfig, videos: list[str]) -> None:
     index = pd.DatetimeIndex(sensor_df.index)
     sensor_start, sensor_end = index.min(), index.max()
     days = sorted({_video_day(video, cfg) for video in videos})
-    covered = [
-        day
-        for day in days
-        if sensor_start.date() <= day + dt.timedelta(days=1) and day <= sensor_end.date()
-    ]
+    covered = [day for day in days if sensor_start.date() <= day <= sensor_end.date()]
 
     typer.echo(
         f"sensor coverage: {sensor_start:%Y-%m-%d %H:%M} .. {sensor_end:%Y-%m-%d %H:%M} "
@@ -772,7 +771,8 @@ def _extract_replacing_frames(video: str, video_dir: Path, cfg: PrepareConfig) -
 
     The replacement is produced whole before anything is removed and the previous
     directory is moved aside rather than deleted, so a failure at any point
-    leaves the earlier extraction intact.  A video that decodes to no frame at
+    leaves the earlier extraction intact — including a failure of the swap
+    itself, which puts the previous directory back before propagating.  A video that decodes to no frame at
     all is refused before the swap: an empty manifest still carries the
     ``qc_frame_flags`` column, so writing it would satisfy the resume gate
     forever and the day would leave the dataset in silence.
@@ -805,10 +805,19 @@ def _extract_replacing_frames(video: str, video_dir: Path, cfg: PrepareConfig) -
         shutil.rmtree(staging, ignore_errors=True)
         raise
     shutil.rmtree(superseded, ignore_errors=True)
-    if video_dir.exists():
+    moved_aside = video_dir.exists()
+    if moved_aside:
         video_dir.rename(superseded)
-    staging.rename(video_dir)
-    shutil.rmtree(superseded, ignore_errors=True)
+    try:
+        staging.rename(video_dir)
+    except OSError:
+        # Between the two renames the day has NO directory at all. Failing here
+        # without putting the previous extraction back would strand it under
+        # `.superseded`, which nothing else reads, so the day would silently
+        # leave the dataset — the outcome the whole swap exists to prevent.
+        if moved_aside:
+            superseded.rename(video_dir)
+        raise
     replaced = frame_manifest.copy()
     replaced["frame_path"] = [
         str(video_dir / Path(str(frame_path)).name) for frame_path in frame_manifest["frame_path"]
@@ -956,20 +965,28 @@ def _run_splits_step(
 
 
 def _load_sensor_df(cfg: PrepareConfig) -> PandasDataFrame:
-    """Read all configured TOA5 files into one deduplicated time-indexed frame.
+    """Read all configured TOA5 files into one merged time-indexed frame.
 
     Raw logger columns are kept as-is (the manifest builder selects and validates
     the policy columns it needs); ``cfg.sensor.column_map`` optionally renames
     logger columns to the policy source names before building.
+
+    Raises
+    ------
+    OSError, ValueError
+        From the reader when a configured path is unreadable or is not a TOA5
+        table; the callers turn both into a named CLI error.
     """
-    import pandas as pd
-
     from micrometeorology.sensors.archive import mask_sentinels
-    from micrometeorology.sensors.ingestion import read_campbell_dat
+    from micrometeorology.sensors.ingestion import merge_dat_files
 
-    frames = [read_campbell_dat(path) for path in cfg.sensor.paths]
-    sensor_df = pd.concat(frames).sort_index()
-    sensor_df = sensor_df.loc[~sensor_df.index.duplicated(keep="first")]
+    # Through the archive's own merge, not concat + sort + drop_duplicates: that
+    # sequence sorts BEFORE deduplicating, so `keep="first"` keeps whichever row
+    # the sort happened to leave first rather than the first file's, and it drops
+    # the whole row — losing a column a later file adds at a stamp an earlier one
+    # also carries. merge_dat_files resolves the overlap per COLUMN, first
+    # non-null in chronological file order, which is the rule the archive states.
+    sensor_df = merge_dat_files(cfg.sensor.paths)
     # read_campbell_dat's own -900 default catches nothing in the LabMiM
     # archive: the real sentinels are 1000 degC, 999 %RH, -273.1 degC and a
     # windowed 0, all of them finite. The manifest builder filters on
