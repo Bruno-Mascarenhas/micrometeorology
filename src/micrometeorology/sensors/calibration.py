@@ -43,7 +43,7 @@ class CalibrationRecord(DatedColumnRecord):
     blanks it, which is a decision about the window rather than an omission.
     """
 
-    factor: float | None = None
+    factor: float | None
 
 
 class SensorSwitch(BaseModel):

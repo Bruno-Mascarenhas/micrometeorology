@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from pydantic import ValidationError
 
 from micrometeorology.sensors import calibration
 from micrometeorology.sensors.calibration import (
@@ -552,3 +553,18 @@ class TestSolarGeometryParquet:
         fatores = calibration.load_shade_ring_factors(origem)
 
         assert fatores.tolist() == [1.1802, 1.1803]
+
+
+def test_a_record_without_a_factor_is_refused_instead_of_blanking_the_window() -> None:
+    """``factor`` defaulted to ``None``, and ``None`` is the value that declares a
+    window invalid and blanks it: an appended record that merely forgot the key
+    erased its whole window with exit code 0."""
+    with pytest.raises(ValidationError, match="factor"):
+        CalibrationRecord.model_validate(
+            {
+                "column": "CM3Up_Wm2_Avg",
+                "start_date": "2018-06-01",
+                "end_date": "2018-12-31",
+                "description": "sem factor",
+            }
+        )
