@@ -462,12 +462,22 @@ def _settle_readings(
         )
     repaired = _repair(readings)
     _check_monotonic(repaired, name)
-    if unreadable:
+    dropped = [item.index for item in repaired if item.timestamp is None]
+    interpolated = unreadable - len(dropped)
+    if interpolated:
         logger.warning(
             "%s: %d of %d overlay reads failed and were interpolated",
             name,
-            unreadable,
+            interpolated,
             len(readings),
+        )
+    if dropped:
+        logger.warning(
+            "%s: %d frame(s) at the edges could not be timestamped and are left out "
+            "of the manifest: indices %s",
+            name,
+            len(dropped),
+            dropped,
         )
     return repaired
 

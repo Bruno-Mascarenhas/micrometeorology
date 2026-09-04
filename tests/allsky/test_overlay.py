@@ -394,3 +394,26 @@ def test_a_read_timestamp_carries_no_provenance_flag(tmp_path: Path):
         _video(tmp_path, MINUTE_APART), tmp_path / "frames"
     )
     assert (manifest["qc_frame_flags"] == 0).all()
+
+
+def test_an_unreadable_first_frame_is_reported_as_dropped_not_as_interpolated(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """The repair interpolates only between two readable neighbours, so an edge
+    frame stays unstamped and leaves the manifest; the warning used to count it
+    among the interpolated ones and nothing said a frame was gone."""
+    stamps = (
+        "20261310120000",
+        "20260810120100",
+        "20260810120200",
+        "20260810120300",
+        "20260810120400",
+        "20260810120500",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="allsky.overlay"):
+        readings = read_video_timestamps(_video(tmp_path, stamps))
+
+    assert readings[0].timestamp is None
+    assert "1 frame(s) at the edges" in caplog.text
+    assert "were interpolated" not in caplog.text
