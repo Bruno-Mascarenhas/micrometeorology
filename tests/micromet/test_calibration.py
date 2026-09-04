@@ -216,14 +216,13 @@ class TestOverlapGuard:
 
 
 class TestARecordThatClosesBeforeTheDataBegins:
-    """An open-ended record inherits the DATASET's first timestamp.
+    """An open-ended record inherits the DATASET's first timestamp when APPLIED.
 
-    A record that closes before the data starts therefore resolves to
-    ``[dataset-start, its own end]`` with the two inverted: it covers nothing,
-    so it must not count as an interval for the overlap guard.
-
-    This is the ordinary case for a recent logger table — the shipped CMP21
-    record ends 2019-10-12 and ``data/LBM_lenta_2025.dat`` begins 2025-05-14.
+    A record that closes before the data starts therefore masks nothing, which
+    is the ordinary case for a recent logger table — the shipped CMP21 record
+    ends 2019-10-12 and ``data/LBM_lenta_2025.dat`` begins 2025-05-14. The
+    overlap guard reads the DECLARED range instead, so how much data happens to
+    be loaded cannot decide whether ``calibrations.yaml`` is validated.
     """
 
     @staticmethod
@@ -276,6 +275,26 @@ class TestARecordThatClosesBeforeTheDataBegins:
 
         with pytest.raises(ValueError, match="Overlapping"):
             apply_calibrations(self._frame().copy(), calibrations)
+
+    def test_a_declared_overlap_is_refused_against_a_frame_narrower_than_it(self) -> None:
+        """The guard resolved open ends against the frame, so on the rolling
+        ``--source`` window the earlier record inverted, was dropped as empty,
+        and the later record's factor applied uncontested — the exact
+        record-order dependence the ValueError exists to prevent."""
+        one_row = pd.DataFrame(
+            {"CMP21_Wm2_Avg": [100.0]}, index=pd.DatetimeIndex(["2026-06-01 12:00"])
+        )
+        calibrations: list[CalibrationRecord] = [
+            CalibrationRecord(
+                column="CMP21_Wm2_Avg", end_date="2020-12-31", factor=1.0, description="a"
+            ),
+            CalibrationRecord(
+                column="CMP21_Wm2_Avg", start_date="2020-01-01", factor=2.0, description="b"
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="Overlapping"):
+            apply_calibrations(one_row.copy(), calibrations)
 
     def test_the_shipped_calibrations_load_against_a_recent_file(self) -> None:
         """The shipped config must apply end to end against a 2025 frame."""

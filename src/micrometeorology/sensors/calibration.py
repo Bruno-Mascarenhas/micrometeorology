@@ -132,6 +132,27 @@ def _resolve_record_range(
     return start, end
 
 
+def _declared_record_range(record: DatedColumnRecord) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Resolve a record's bounds as DECLARED, with open ends unbounded.
+
+    This is the range the overlap check reads.  Resolving an open end against
+    the frame instead — what :func:`_resolve_record_range` does, correctly, for
+    APPLYING a record — scoped the guarantee to whatever data happened to be
+    loaded: against a one-row 2026 frame, a record closing in 2020 inherited
+    that row's stamp as its start, inverted, and was dropped as empty, so a
+    genuinely overlapping pair applied uncontested and the published factor
+    went back to depending on record order.  The rolling ``--source`` window is
+    exactly that narrow frame.
+    """
+    start = pd.Timestamp(record.start_date) if record.start_date else pd.Timestamp.min
+    end = (
+        _resolve_inclusive_end(record.end_date, pd.Timestamp.max)
+        if record.end_date
+        else pd.Timestamp.max
+    )
+    return start, end
+
+
 def _find_overlapping_pair(
     ranges: list[_ResolvedRange],
 ) -> tuple[_ResolvedRange, _ResolvedRange, pd.Timestamp, pd.Timestamp] | None:
@@ -140,10 +161,9 @@ def _find_overlapping_pair(
     Sorting by ``start`` makes a single adjacent-pair scan sufficient: if any two
     ranges overlap, two consecutive ones do.
 
-    Ranges with ``start > end`` are EMPTY and dropped first. An open-ended record
-    inherits the dataset's own first timestamp, so one that closes before the data
-    begins inverts and simply does not apply here (the application path agrees —
-    its mask is empty); counting it would make every later record "overlap" it.
+    Ranges with ``start > end`` are EMPTY and dropped first: a record whose
+    declared ``end_date`` precedes its declared ``start_date`` covers nothing,
+    and counting it would make every later record "overlap" it.
     """
     ordered = sorted((item for item in ranges if item[1] <= item[2]), key=lambda item: item[1])
     for earlier, later in itertools.pairwise(ordered):
@@ -216,7 +236,7 @@ def apply_calibrations(
     for record in calibrations:
         if record.column not in df.columns:
             continue
-        start, end = _resolve_record_range(record, df)
+        start, end = _declared_record_range(record)
         ranges_by_column.setdefault(record.column, []).append(
             (_describe_record(record), start, end)
         )
@@ -451,7 +471,7 @@ def unify_sensor_columns(
     for switch in switches:
         unified_name = switch.unified_name
         mapping_ranges = [
-            (_describe_record(mapping), *_resolve_record_range(mapping, df))
+            (_describe_record(mapping), *_declared_record_range(mapping))
             for mapping in switch.mappings
             if mapping.column in df.columns
         ]
