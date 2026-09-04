@@ -579,7 +579,62 @@ def _run_extract_step(
             f"WARNING: {len(unusable)} video(s) could not be timestamped and contribute no "
             f"rows: {', '.join(unusable)}"
         )
+    per_video += _already_extracted_days(
+        frames_root,
+        extracted={Path(video).stem for video in videos},
+        frames_key=frames_key,
+        force=force,
+    )
     return per_video
+
+
+def _already_extracted_days(
+    frames_root: Path, *, extracted: set[str], frames_key: str, force: bool
+) -> list[PandasDataFrame]:
+    """Frame manifests on disk for days the video glob no longer matches.
+
+    ``sync-archive --prune-uploaded`` deletes a day's mp4 once Drive has it, and
+    the production configs point ``video.pattern`` at the very directory it
+    prunes from — the cron recipe in ``docs/allsky-archive.md`` runs both.  The
+    day's frames stay on disk, but building the video list from the glob alone
+    dropped it from the dataset the next time ``prepare-local`` ran: fewer
+    manifest rows, a changed inputs hash, a rebuilt manifest, and a
+    ``SplitExistsError`` whose message asks for ``--force`` without naming the
+    day that went missing.
+
+    A directory is only adopted when its manifest is complete (it carries
+    ``qc_frame_flags``) and its recorded config matches this run's, the same gate
+    a resumed extraction passes; there is no mp4 left to re-extract from, so a
+    mismatch stops the run rather than quietly mixing two configs.
+
+    Returns
+    -------
+    list[pandas.DataFrame]
+        One frame manifest per adopted day, in stem order.
+    """
+    if not frames_root.is_dir():
+        return []
+    adopted: list[PandasDataFrame] = []
+    kept: list[str] = []
+    for video_dir in sorted(frames_root.iterdir()):
+        stem = video_dir.name
+        if not video_dir.is_dir() or stem in extracted or stem.startswith("."):
+            continue
+        # Staging leftovers of an interrupted swap, not days.
+        if video_dir.suffix in (".incoming", ".superseded"):
+            continue
+        existing = _read_frame_manifest(video_dir / DATASET_MANIFEST_FILENAME)
+        if existing is None or "qc_frame_flags" not in existing.columns:
+            continue
+        _require_frames_key(video_dir, stem, frames_key=frames_key, force=force)
+        adopted.append(existing)
+        kept.append(stem)
+    if kept:
+        typer.echo(
+            f"resume: keeping {len(kept)} already-extracted day(s) whose video the glob no "
+            f"longer matches: {', '.join(kept)}"
+        )
+    return adopted
 
 
 def _read_frame_manifest(video_manifest: Path) -> PandasDataFrame | None:

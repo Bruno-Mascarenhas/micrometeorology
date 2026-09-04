@@ -292,6 +292,44 @@ class TestPrepareLocal:
         assert "1 video(s) could not be timestamped" in result.output
         assert not (dataset_dir / "frames" / synthetic_video.stem / "manifest.parquet").exists()
 
+    def test_a_day_whose_video_was_pruned_stays_in_the_dataset(
+        self, tmp_path: Path, synthetic_video: Path, synthetic_dat: Path
+    ):
+        """`sync-archive --prune-uploaded` deletes the mp4 once Drive holds it, and
+        the production configs point `video.pattern` at that same directory. The
+        video list came from the glob alone, so the day silently left the manifest
+        even though its extracted frames were still on disk."""
+        import shutil
+
+        # The fixture video is module-scoped; this test prunes its own copy.
+        videos = tmp_path / "videos"
+        videos.mkdir()
+        video = videos / synthetic_video.name
+        shutil.copy(synthetic_video, video)
+        dataset_dir = tmp_path / "dataset"
+        config = _write_config(
+            tmp_path / "c.yaml",
+            dataset_dir=dataset_dir,
+            video_pattern=f"{videos}/allsky-*.mp4",
+            dat_path=synthetic_dat,
+        )
+        steps = [
+            "prepare-local",
+            "--config",
+            str(config),
+            "--steps",
+            "extract-frames,build-manifest",
+        ]
+        assert runner.invoke(app, steps).exit_code == 0
+        before = len(pd.read_parquet(dataset_dir / "manifest.parquet"))
+
+        video.unlink()
+        result = runner.invoke(app, steps)
+
+        assert result.exit_code == 0, result.output
+        assert "already-extracted day(s)" in result.output
+        assert len(pd.read_parquet(dataset_dir / "manifest.parquet")) == before
+
     def test_full_run_builds_manifest(
         self, tmp_path: Path, synthetic_video: Path, synthetic_dat: Path
     ):
