@@ -97,8 +97,9 @@ class ClimatologyModel(nn.Module):
         Parameters
         ----------
         dhi:
-            ``(N,)`` raw train-split diffuse horizontal irradiance in W m-2;
-            NaN marks a missing target.
+            ``(N,)`` train-split diffuse target as the head receives it: W m-2,
+            or the ratio to the clear-sky reference under the ``clearsky_index``
+            parameterization; NaN marks a missing target.
         kindex:
             ``(N,)`` raw train-split clear-sky index (dimensionless ratio);
             NaN marks a missing target.

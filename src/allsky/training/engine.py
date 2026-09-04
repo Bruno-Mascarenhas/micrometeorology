@@ -48,6 +48,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
+import numpy as np
 import pandas as pd
 import torch
 from torch import Tensor, nn
@@ -274,7 +275,7 @@ def run_experiment(
     climatology = model if isinstance(model, ClimatologyModel) else None
     is_climatology = climatology is not None
     if climatology is not None:
-        _fit_climatology(climatology, cfg, train_df, target_normalizers)
+        _fit_climatology(climatology, cfg, train_df, train_ds.served_targets, target_normalizers)
 
     optimizer, lr_labels = _build_optimizer(model, cfg)
     monitor_key = _monitor_key(cfg.train.early_stopping.monitor)
@@ -755,12 +756,18 @@ def _fit_climatology(
     model: ClimatologyModel,
     cfg: ExperimentConfig,
     train_df: pd.DataFrame,
+    served_targets: Mapping[str, np.ndarray],
     target_normalizers: Mapping[str, TargetNormalizer],
 ) -> None:
-    """Fit the constant-prediction climatology model from raw train targets."""
+    """Fit the constant-prediction climatology model on the targets the heads receive.
+
+    The regression targets come from the dataset (*served_targets*), the same
+    arrays the normalizers were fitted on, so a ``clearsky_index`` run fits the
+    ratio and not the W/m2 column the normalizer no longer describes.
+    """
     model.fit_from_targets(
-        dhi=train_df["target_dhi"].to_numpy() if cfg.targets.dhi.enabled else None,
-        kindex=train_df["target_kindex"].to_numpy() if cfg.targets.kindex.enabled else None,
+        dhi=served_targets["dhi"] if cfg.targets.dhi.enabled else None,
+        kindex=served_targets["kindex"] if cfg.targets.kindex.enabled else None,
         cloud_fraction=(
             train_df["cloud_fraction"].to_numpy() if cfg.targets.cloud_fraction.enabled else None
         ),

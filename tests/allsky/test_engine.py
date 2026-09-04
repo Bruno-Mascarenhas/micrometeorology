@@ -447,6 +447,29 @@ class TestResumeCosineHorizon:
 
 
 class TestEarlyStopping:
+    def test_climatology_under_clearsky_index_is_fitted_on_the_ratio_the_head_sees(
+        self, tmp_path: Path
+    ):
+        """The baseline was fitted on the W/m2 column while its normalizer described
+        the ratio to clear sky, so it predicted a constant about a hundred times the
+        physical diffuse and every skill score against it was meaningless."""
+        root, manifest, _ = _make_dataset(tmp_path)
+        cfg = _cfg(
+            root,
+            model="climatology",
+            epochs=1,
+            targets={
+                "dhi": {"enabled": True, "loss": "huber", "parameterization": "clearsky_index"},
+                "sky": {"enabled": True},
+            },
+        )
+
+        summary = run_experiment(
+            cfg, data_root=root, output_dir=tmp_path / "run", embedding_reader=_reader(manifest)
+        )
+
+        assert summary["final_val_metrics"]["dhi_mae"] < 500.0
+
     def test_climatology_plateau_triggers_early_stop(self, tmp_path: Path):
         root, manifest, _ = _make_dataset(tmp_path)
         cfg = _cfg(
