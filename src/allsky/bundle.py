@@ -219,7 +219,14 @@ def validate_bundle(path: str | Path) -> dict[str, Any]:
         If a member name is unsafe, or the manifest / meta member is missing.
     """
     with tarfile.open(path, "r:gz") as tar:
-        names = [member.name for member in tar.getmembers()]
+        members = tar.getmembers()
+        for member in members:
+            if not member.isfile():
+                raise ValueError(
+                    f"bundle member {member.name!r} is not a regular file; a link or "
+                    "device member could write outside the extraction directory"
+                )
+        names = [member.name for member in members]
         for name in names:
             _safe_arcname(name)
 
@@ -345,7 +352,7 @@ def _write_tar_atomic(
     """Write the gzip tar to a temp file then :func:`os.replace` it into place."""
 
     def _write(tmp: Path) -> None:
-        with tarfile.open(tmp, "w:gz") as tar:
+        with tarfile.open(tmp, "w:gz", dereference=True) as tar:
             for arc in order:
                 if arc in file_members:
                     tar.add(file_members[arc], arcname=arc, filter=_normalize_member)

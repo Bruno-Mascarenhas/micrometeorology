@@ -261,3 +261,17 @@ class TestTarHygiene:
                 assert (member.uid, member.gid) == (0, 0), member.name
                 assert (member.uname, member.gname) == ("", ""), member.name
                 assert member.mtime == 0, member.name
+
+
+def test_a_bundle_carrying_a_link_member_is_refused(tmp_path: Path) -> None:
+    """Only member names were checked; a symlink member with a ``../`` linkname
+    passed both gates while the README told the reader plain ``tar -xzf`` was safe."""
+    bundle = tmp_path / "bundle.tar.gz"
+    with tarfile.open(bundle, "w:gz") as tar:
+        link = tarfile.TarInfo(name="dataset/frames/escape.jpg")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../outside/secret.txt"
+        tar.addfile(link)
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        validate_bundle(bundle)
