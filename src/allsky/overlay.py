@@ -63,6 +63,17 @@ MAX_UNREADABLE_FRACTION = 0.2
 AMBIGUOUS_SCORE_MARGIN = 32
 MAX_ALTERNATIVE_COMBINATIONS = 64
 MIN_CELL_INK_PIXELS = 20
+#: Fewest of a cell's pixels that must agree with its winning exemplar.
+#: :data:`AMBIGUOUS_SCORE_MARGIN` is purely RELATIVE, so a cell scoring 210 of
+#: 280 was accepted as confidently as one scoring 280. Measured against the
+#: shipped bank (20x14 = 280-pixel cells): a real exemplar with up to 40 of its
+#: pixels flipped still scores 240-243 and still reads as the right digit in
+#: 300/300 trials, while a cell of uniformly scattered ink — 20 to 80 pixels,
+#: 200 trials each — never exceeds 225 and reads as ``1`` almost every time.
+#: The floor sits inside that gap, so a cell far from any real glyph is refused
+#: outright instead of parsing into a plausible, wrong minute. A blank cell
+#: scores 229 (280 minus the sparsest '1'), which this also refuses.
+MIN_CELL_MATCH_PIXELS = 240
 
 GLYPH_EXEMPLAR_COUNTS = (38, 3, 22, 4, 8, 9, 16, 7, 16, 2)
 PACKED_GLYPH_BANK = (
@@ -218,6 +229,8 @@ def _read_frame(frame: np.ndarray) -> tuple[OverlayReading, tuple[tuple[str, ...
     if not _cells_carry_ink(mask):
         return OverlayReading(index=-1, timestamp=None, text=""), ()
     per_cell = [_cell_scores(mask, left) for left in DIGIT_CELL_LEFT_EDGES]
+    if any(not scores or scores[0][1] < MIN_CELL_MATCH_PIXELS for scores in per_cell):
+        return OverlayReading(index=-1, timestamp=None, text=""), ()
     text = "".join(scores[0][0] if scores else "" for scores in per_cell)
     alternatives = tuple(_cell_alternatives(scores) for scores in per_cell)
     return OverlayReading(index=-1, timestamp=parse_overlay_stamp(text), text=text), alternatives

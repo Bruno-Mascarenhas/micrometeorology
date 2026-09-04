@@ -85,6 +85,58 @@ def test_an_impossible_reading_yields_no_timestamp_rather_than_an_exception(impo
     assert reading.timestamp is None
 
 
+def _scattered_ink_frame(pixels_per_cell: int, seed: int) -> np.ndarray:
+    """A frame whose digit cells hold ink but no glyph."""
+    from allsky import overlay as module
+
+    frame = np.empty((fake.FRAME_HEIGHT, fake.FRAME_WIDTH, 3), dtype=np.uint8)
+    frame[:, :] = fake.OVERLAY_BACKGROUND
+    rows = module.OVERLAY_ROW_SLICE.stop - module.OVERLAY_ROW_SLICE.start
+    rng = np.random.default_rng(seed)
+    for left in module.DIGIT_CELL_LEFT_EDGES:
+        cell = frame[module.OVERLAY_ROW_SLICE, left : left + module.DIGIT_CELL_WIDTH]
+        chosen = rng.choice(rows * module.DIGIT_CELL_WIDTH, pixels_per_cell, replace=False)
+        lit = np.zeros(rows * module.DIGIT_CELL_WIDTH, dtype=bool)
+        lit[chosen] = True
+        cell[lit.reshape(rows, module.DIGIT_CELL_WIDTH)] = fake.OVERLAY_TEXT
+    return frame
+
+
+@pytest.mark.parametrize("pixels_per_cell", [20, 30, 40, 50, 60])
+def test_a_cell_of_ink_that_is_no_glyph_is_refused_instead_of_read_as_ones(
+    pixels_per_cell: int,
+):
+    """`AMBIGUOUS_SCORE_MARGIN` is purely relative, so a cell scoring 210 of its
+    280 pixels was accepted as confidently as one scoring 280, and the only other
+    gate counted ink alone. Measured on the shipped bank, scattered ink at every
+    level from 20 to 60 pixels reads as `1` in 200/200 trials — a parseable,
+    wrong minute that the neighbour-correction pass never revisits while it stays
+    inside its bracket."""
+    reading = read_frame_timestamp(_scattered_ink_frame(pixels_per_cell, seed=pixels_per_cell))
+
+    assert reading.text == ""
+    assert reading.timestamp is None
+
+
+def test_a_glyph_degraded_short_of_the_floor_still_reads():
+    """The floor sits inside a measured gap: a real exemplar with 30 of its 280
+    pixels flipped scores 250-252 and still reads as its own digit."""
+    from allsky import overlay as module
+
+    stamp = "20260810120345"
+    frame = fake.render_overlay_frame(stamp)
+    rows = module.OVERLAY_ROW_SLICE.stop - module.OVERLAY_ROW_SLICE.start
+    rng = np.random.default_rng(11)
+    for left in module.DIGIT_CELL_LEFT_EDGES:
+        cell = frame[module.OVERLAY_ROW_SLICE, left : left + module.DIGIT_CELL_WIDTH]
+        flat = cell.reshape(-1, 3)
+        for index in rng.choice(rows * module.DIGIT_CELL_WIDTH, 30, replace=False):
+            is_text = bool((flat[index] == np.array(fake.OVERLAY_TEXT, dtype=np.uint8)).all())
+            flat[index] = fake.OVERLAY_BACKGROUND if is_text else fake.OVERLAY_TEXT
+
+    assert read_frame_timestamp(frame).text == stamp
+
+
 def test_a_frame_too_narrow_to_hold_the_overlay_is_refused():
     narrow = fake.render_overlay_frame(
         "20260810120000", width=DIGIT_CELL_LEFT_EDGES[-1] + DIGIT_CELL_WIDTH
