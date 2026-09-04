@@ -9,6 +9,7 @@ import re
 
 import numpy as np
 import pytest
+from scipy import stats
 
 from micrometeorology.stats.climatology_export import (
     CLIMATOLOGY_VARIABLES,
@@ -89,6 +90,29 @@ class TestVariablePayload:
         # A 40 % atom must NOT scale the curve down: it would sit at 0.6 here and
         # be drawn flat against the axis under bars that integrate to 1.
         assert curve == pytest.approx(1.0, abs=0.02)
+
+    def test_a_percent_variable_is_fitted_on_its_familys_own_support(self):
+        """Relative humidity is binned in %, but Beta only lives on [0, 1], so
+        the spec carries a fit_scale of 100. Four places multiply or divide by
+        it, and a dropped one publishes a curve a hundred times too tall or a
+        quantile gap a hundred times too small — both of which still look like
+        numbers. Pinned against a Beta fitted independently on sample / 100.
+        """
+        spec = next(s for s in CLIMATOLOGY_VARIABLES if s.id == "relative_humidity")
+        generator = np.random.default_rng(11)
+        fraction = generator.beta(6.0, 2.0, 20_000)
+        samples = {"observed_all": fraction * 100.0}
+
+        payload = build_variable_payload(spec, samples, version="v1")
+        subset = payload["subsets"]["observed_all"]
+
+        expected = stats.beta.fit(fraction, floc=0.0, fscale=1.0)
+        assert subset["fit"]["params"]["alpha"] == pytest.approx(expected[0], rel=1e-3)
+        assert subset["fit"]["params"]["beta"] == pytest.approx(expected[1], rel=1e-3)
+
+        widths = np.diff(payload["edges"])
+        assert float(np.sum(np.array(subset["curve"]) * widths)) == pytest.approx(1.0, abs=0.01)
+        assert subset["quality"]["quantile_gap"] > 0.01
 
     def test_atoms_are_reported_verbatim(self, wind_spec, wind_samples):
         atoms = {"observed_all": [Atom("calm", "Calmarias", 0.037, 740)]}

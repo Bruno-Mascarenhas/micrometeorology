@@ -7,8 +7,6 @@ maximum-likelihood fit rather than against a recorded constant: what is pinned
 is that the published parameters are right, not that they are unchanged.
 """
 
-import inspect
-
 import numpy as np
 import pytest
 from scipy import stats
@@ -28,6 +26,7 @@ from micrometeorology.stats.distributions import (
     sector_frequencies,
     von_mises_mixture_pdf,
 )
+from tests.micromet.conftest import required_fit_options
 
 
 def _flatten(values):
@@ -39,22 +38,11 @@ def _flatten(values):
             yield float(value)
 
 
-def _required_options(family):
-    """Keyword-only parameters of a family's estimator that carry no default."""
-    signature = inspect.signature(FAMILIES[family].fit)
-    return {
-        name
-        for name, parameter in signature.parameters.items()
-        if parameter.kind is inspect.Parameter.KEYWORD_ONLY
-        and parameter.default is inspect.Parameter.empty
-    }
-
-
 # Families estimable from a sample alone, and families that need a covariate the
 # sample does not carry. Derived from the signatures rather than listed by hand,
 # so a new family lands in the right group without anyone remembering to say so.
-SAMPLE_ONLY_FAMILIES = sorted(family for family in FAMILIES if not _required_options(family))
-COVARIATE_FAMILIES = sorted(family for family in FAMILIES if _required_options(family))
+SAMPLE_ONLY_FAMILIES = sorted(family for family in FAMILIES if not required_fit_options(family))
+COVARIATE_FAMILIES = sorted(family for family in FAMILIES if required_fit_options(family))
 
 
 # Large enough that a maximum-likelihood estimate lands within a few parts in

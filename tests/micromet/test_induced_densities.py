@@ -7,6 +7,8 @@ inverts the CDF. A missing Jacobian breaks the first two and nothing else, which
 is exactly why it is such an easy mistake to ship.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 from scipy import integrate
@@ -17,6 +19,7 @@ from micrometeorology.stats.climatology_export import (
     CLIMATOLOGY_VARIABLES,
     REFERENCES,
 )
+from tests.micromet.conftest import required_fit_options
 
 # A realistic extraterrestrial-irradiance mixture: sixty equal-weight bins over
 # the range a tropical site actually sees at solar elevations above 10 degrees.
@@ -36,8 +39,26 @@ def _compound(**extra):
     )
 
 
-def _integrates_to_one(fit, low, high, tolerance=1e-5):
-    mass, _error = integrate.quad(lambda v: dist.pdf(fit, np.array([v]))[0], low, high, limit=500)
+def _integrates_to_one(fit, low, high, tolerance=1e-5, *, kinks=()):
+    """Integrate the density over its support and demand unit mass.
+
+    The compound densities are piecewise — one kink per component, at
+    ``kt_max * scale`` — and ``quad`` cannot find them on its own: left to
+    itself it reports 'roundoff error is detected, which prevents the requested
+    tolerance from being achieved' and its answer is no longer an oracle at the
+    precision asserted here. The kinks are handed over in *points*, and the
+    warning is promoted to an error so a future family cannot slip back into a
+    result the integrator has disowned.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", integrate.IntegrationWarning)
+        mass, _error = integrate.quad(
+            lambda v: dist.pdf(fit, np.array([v]))[0],
+            low,
+            high,
+            limit=500,
+            points=sorted(point for point in kinks if low < point < high) or None,
+        )
     assert mass == pytest.approx(1.0, abs=tolerance)
 
 
@@ -56,7 +77,7 @@ class TestCompoundHollandsHuget:
     def test_is_a_proper_density(self):
         fit = _compound()
         ceiling = PARENT["kt_max"] * SCALES.max()
-        _integrates_to_one(fit, 0.0, ceiling)
+        _integrates_to_one(fit, 0.0, ceiling, kinks=PARENT["kt_max"] * SCALES)
         _derivative_matches_density(fit, 1.0, ceiling * 0.999, 1e-4 * ceiling)
         _quantiles_invert(fit)
 
@@ -82,7 +103,7 @@ class TestCompoundHollandsHuget:
         np.testing.assert_allclose(
             dist.ppf(scaled, probabilities), 0.25 * dist.ppf(plain, probabilities), rtol=1e-6
         )
-        _integrates_to_one(scaled, 0.0, 0.25 * ceiling)
+        _integrates_to_one(scaled, 0.0, 0.25 * ceiling, kinks=0.25 * PARENT["kt_max"] * SCALES)
 
     def test_binning_the_covariate_is_not_a_material_approximation(self):
         """Sixty bins against one component per observed hour."""
@@ -197,9 +218,18 @@ class TestPublishedBibliography:
             assert _REFERENCE_MARKER.search(spec.family_label), spec.id
 
     def test_induced_specs_declare_the_options_their_family_needs(self):
-        """A spec that forgets one would fit a curve on the wrong covariate."""
+        """A spec that forgets one would fit a curve on the wrong covariate, and
+        the omission surfaces as a bare ``TypeError`` out of the estimator rather
+        than as a named failure. Skipping the spec with no options at all would
+        skip exactly that case, so the check runs on every spec whose family
+        needs a covariate.
+        """
         for spec in CLIMATOLOGY_VARIABLES:
-            if not spec.fit_options or spec.family is None:
+            # The rose is fitted by `fit_von_mises_mixture` directly and never
+            # enters the FAMILIES registry, so it declares no options by design.
+            if spec.family is None or spec.family not in dist.FAMILIES:
                 continue
+            required = required_fit_options(spec.family)
             declared = set(dist.FAMILIES[spec.family].options)
+            assert required <= set(spec.fit_options), spec.id
             assert set(spec.fit_options) <= declared, spec.id
