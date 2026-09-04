@@ -650,11 +650,22 @@ def _backbone_matching_recipe(source: str, meta: dict[str, Any], device: str) ->
     """
     from allsky.embeddings.backbone import build_backbone
 
+    # The COMPUTE dtype, falling back to the single `dtype` a store written
+    # before the two were told apart records — which is the storage one, so an
+    # fp32 run of that vintage still rebuilds at fp16 and says so.
+    compute_dtype = meta.get("compute_dtype") or meta["dtype"]
+    if meta.get("compute_dtype") is None:
+        logger.warning(
+            "%s records one dtype for both storage and computation; building the backbone "
+            "at %s, which is the STORAGE precision",
+            source,
+            compute_dtype,
+        )
     backbone = build_backbone(
         meta["backbone"],
         device=device,
         pooling=meta["pooling"],
-        dtype=meta["dtype"],
+        dtype=compute_dtype,
         fake_dim=int(meta["dim"]),
     )
     recorded_transform = meta.get("transform")
@@ -921,6 +932,13 @@ def predict_snapshot(
         # Handing it the (3, S, S) float array the image branch uses would embed
         # an image prepared differently from the vectors the model was fitted on.
         vector = np.asarray(backbone.encode(backbone.transform([_image_as_hwc(image_path)])))
+        # Through the store's storage precision: every vector the model was
+        # fitted on went to disk as fp16 and came back rounded, and a live vector
+        # that skipped that round trip carries mantissa bits no training sample
+        # had.
+        storage_dtype = store_meta.get("storage_dtype") or store_meta["dtype"]
+        if storage_dtype == "fp16":
+            vector = vector.astype(np.float16)
         embedding = np.reshape(vector, (1, -1)).astype(np.float32)
         embedding_dim = int(embedding.shape[1])
         batch["embedding"] = torch.from_numpy(embedding).to(device)

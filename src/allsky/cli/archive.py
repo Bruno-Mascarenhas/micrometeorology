@@ -1,6 +1,7 @@
 """Archive-mirroring CLI commands: ``sync-archive`` and ``snapshot``."""
 
 import datetime as dt
+import hashlib
 import http.client
 import logging
 import shutil
@@ -172,7 +173,7 @@ def _plan_day(
     extract: bool,
     step: int,
     resize: int | None,
-    timestamps: TimestampSource,
+    timestamps: str,
     upload: UploadChoice,
 ) -> DayPlan:
     """Decide what *entry* still needs by asking the ledger what it already holds.
@@ -195,9 +196,7 @@ def _plan_day(
     re-reading it nightly costs the whole decode to reach the same refusal.
     """
     frames_done = ledger.frames_match(entry.key, step=step, resize=resize, timestamps=timestamps)
-    faulted = ledger.extraction_faulted(
-        entry.key, step=step, resize=resize, timestamps=timestamps.value
-    )
+    faulted = ledger.extraction_faulted(entry.key, step=step, resize=resize, timestamps=timestamps)
     wants_extract = extract and not frames_done and faulted is None
     wants_video_upload = upload.wants_videos and not ledger.uploaded(
         entry.key, _video_destination(target, entry)
@@ -405,6 +404,7 @@ def sync_archive(
     selected = _select(published, since=since_date, until=until_date)
     video_config = _video_config(timestamps, config)
     clock = _clock(video_config)
+    clock_record = _clock_record(video_config)
     failures = 0
     with ledger_lock(state_dir / LEDGER_FILENAME):
         ledger = Ledger.load(state_dir / LEDGER_FILENAME)
@@ -419,7 +419,7 @@ def sync_archive(
                     extract=extract,
                     step=step,
                     resize=resize,
-                    timestamps=clock,
+                    timestamps=clock_record,
                     upload=upload,
                 )
                 for entry in selected
@@ -481,7 +481,7 @@ def sync_archive(
                     reason=str(exc),
                     step=step,
                     resize=resize,
-                    timestamps=clock.value,
+                    timestamps=clock_record,
                 )
                 logger.warning("%s cannot be timestamped, skipping: %s", plan.entry.filename, exc)
             except (
@@ -536,6 +536,28 @@ def _clock(video_config: Any) -> TimestampSource:
     )
 
 
+def _clock_record(video_config: Any) -> str:
+    """What the ledger files as the clock a day's frames were extracted under.
+
+    ``overlay`` reads the burned-in stamp and has nothing else to record. The
+    modelled clock places frame N at ``start_time + N x minutes_per_frame``, so
+    two configs that both say ``modelled`` describe DIFFERENT frames whenever
+    either field differs — and filing both as the bare string ``"config"`` made
+    the resume gate answer "already extracted" for a day whose frames carry the
+    other cadence.
+    """
+    from allsky.config import VIDEO_TIME_FIELDS
+    from allsky.provenance import canonical_config_json
+
+    clock = _clock(video_config)
+    if clock is TimestampSource.overlay:
+        return clock.value
+    dumped = video_config.model_dump(mode="json")
+    cadence = {field: dumped[field] for field in VIDEO_TIME_FIELDS if field != "timestamps"}
+    digest = hashlib.sha256(canonical_config_json(cadence).encode("utf-8")).hexdigest()
+    return f"{clock.value}:{digest[:12]}"
+
+
 def _process_day(
     plan: DayPlan,
     *,
@@ -582,7 +604,7 @@ def _process_day(
             count=len(manifest),
             step=step,
             resize=resize,
-            timestamps=_clock(video_config).value,
+            timestamps=_clock_record(video_config),
         )
         ledger.save()
 

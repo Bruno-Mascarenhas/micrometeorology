@@ -1,7 +1,7 @@
 """Evaluation CLI: the ``allsky evaluate`` command.
 
 Runs a trained checkpoint over a split and writes a report directory
-(``metrics.json`` / ``stratified.csv`` / ``report.md`` and, unless
+(``eval_metrics.json`` / ``stratified.csv`` / ``report.md`` and, unless
 ``--no-predictions``, ``predictions.parquet``).  :mod:`allsky.evaluation` pulls
 torch, so it is imported inside the command body to keep importing
 :mod:`allsky.cli` torch-free.
@@ -17,6 +17,7 @@ from allsky.cli.runtime import configure_cli_logging
 from allsky.cli.train import (
     DeviceChoice,  # typer resolves this annotation at runtime
 )
+from allsky.training.errors import TrainingError
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,13 @@ def evaluate_cmd(
             trust_checkpoint=trust_checkpoint,
         )
         written = write_evaluation_report(result, out_dir, predictions=predictions)
-    except Exception as exc:
+    # ManifestValidationError subclasses ValueError and TrainingError subclasses
+    # RuntimeError, so both are caught by the pair below.
+    except (TrainingError, FileNotFoundError, OSError, ValueError, KeyError, RuntimeError) as exc:
+        # The domain failures evaluation actually raises, named: a bare
+        # `except Exception` turned a typo in this module into "evaluation
+        # failed: name 'x' is not defined" with exit 1 and no traceback,
+        # indistinguishable from a checkpoint that genuinely cannot be scored.
         logger.error("evaluation failed: %s", exc)
         raise typer.Exit(code=1) from exc
 

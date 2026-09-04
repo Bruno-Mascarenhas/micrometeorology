@@ -166,7 +166,13 @@ def extract_embeddings(
 
     out = Path(out_dir)
     pooling = getattr(backbone, "pooling", "n/a")
-    dtype = "fp16"  # storage dtype (safetensors shards are always fp16)
+    # Two different dtypes, recorded apart because they are read for different
+    # things: the shards are always fp16 on disk, while the backbone may have
+    # computed in fp32. Writing only one made the snapshot rebuild the encoder at
+    # the STORAGE precision, which is not the computation the vectors came from.
+    storage_dtype = "fp16"
+    compute_dtype = str(getattr(backbone, "dtype", storage_dtype))
+    dtype = storage_dtype
     decode_threads = min(decode_workers, os.cpu_count() or 1)
 
     # Resume must not silently mix incompatible embeddings into one store: if a
@@ -208,6 +214,8 @@ def extract_embeddings(
         "pooling": pooling,
         "dim": int(backbone.dim),
         "dtype": dtype,
+        "storage_dtype": storage_dtype,
+        "compute_dtype": compute_dtype,
         "device": device,
         "total": total,
         "skipped": skipped,
@@ -491,6 +499,11 @@ def _write_meta(
         "config_sha256": config_sha256,
         "pixel_config_sha256": pixel_config_sha256,
         "count": count,
+        # `dtype` is the STORAGE precision, kept under its original name for the
+        # stores already on disk; `compute_dtype` is what the backbone ran at,
+        # which a live prediction has to rebuild the encoder with.
         "dtype": dtype,
+        "storage_dtype": dtype,
+        "compute_dtype": str(getattr(backbone, "dtype", dtype)),
     }
     write_meta(out, meta)

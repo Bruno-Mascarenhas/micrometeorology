@@ -29,7 +29,11 @@ GEOMETRY_CHANNEL_NAMES: tuple[str, ...] = (
 #: the 14 px patch the backbone tokenises with. The channel therefore marks the
 #: sun at the scale the tokeniser can represent — one patch is ~11 degrees — and
 #: 5 degrees is that choice, not a property of the sun.
-SOLAR_DISC_SIGMA_RAD: float = np.radians(5.0)
+#: Plain Python float, not the numpy.float64 `np.radians` returns: that dtype
+#: promotes the float32 Gaussian it multiplies, and with it the whole per-sample
+#: channel stack, to float64 — which is most of the cost of building the planes
+#: and none of the precision the model reads.
+SOLAR_DISC_SIGMA_RAD: float = float(np.radians(5.0))
 
 
 @lru_cache(maxsize=8)

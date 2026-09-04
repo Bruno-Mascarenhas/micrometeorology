@@ -80,7 +80,7 @@ class TestEvaluateCommand:
             ],
         )
         assert result.exit_code == 0, result.output
-        assert (report_dir / "metrics.json").exists()
+        assert (report_dir / "eval_metrics.json").exists()
         assert (report_dir / "report.md").exists()
         assert (report_dir / "stratified.csv").exists()
         assert (report_dir / "predictions.parquet").exists()
@@ -92,7 +92,7 @@ class TestEvaluateCommand:
             ["evaluate", "--checkpoint", str(run_dir / "best.ckpt"), "--data-root", str(root)],
         )
         assert result.exit_code == 0, result.output
-        assert (run_dir / "eval-val" / "metrics.json").exists()
+        assert (run_dir / "eval-val" / "eval_metrics.json").exists()
 
     def test_no_predictions_flag(self, tmp_path: Path):
         root, run_dir = _train(tmp_path)
@@ -111,7 +111,7 @@ class TestEvaluateCommand:
             ],
         )
         assert result.exit_code == 0, result.output
-        assert (report_dir / "metrics.json").exists()
+        assert (report_dir / "eval_metrics.json").exists()
         assert not (report_dir / "predictions.parquet").exists()
 
     def test_missing_checkpoint_exits_nonzero(self, tmp_path: Path):

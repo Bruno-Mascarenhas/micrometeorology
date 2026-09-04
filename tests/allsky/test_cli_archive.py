@@ -459,7 +459,10 @@ def test_the_config_timestamp_model_names_frames_from_a_fixed_start_time_instead
     ]
     recorded = _reload(data).frames(DAY_NEW)
     assert recorded is not None
-    assert recorded["timestamps"] == "config"
+    # The modelled clock is filed with a digest of its own cadence fields: two
+    # configs that both say "modelled" describe different frames whenever
+    # start_time or minutes_per_frame differs.
+    assert recorded["timestamps"].startswith("config:")
 
 
 def test_a_config_that_names_the_overlay_clock_extracts_under_the_overlay_clock(
@@ -640,7 +643,8 @@ def test_a_re_extraction_that_fails_keeps_the_record_of_the_frames_it_could_not_
 
     recorded = _reload(data).frames(DAY_LATER)
     assert recorded is not None
-    assert (recorded["timestamps"], recorded["count"]) == ("config", 3)
+    assert recorded["timestamps"].startswith("config:")
+    assert recorded["count"] == 3
 
 
 def test_a_re_extraction_that_fails_leaves_no_half_written_frame_set_behind(
@@ -1089,3 +1093,33 @@ def test_the_capture_clock_is_the_sites_not_the_hosts(
     metadata = json.loads(snapshot.metadata_path.read_text(encoding="utf-8"))
     assert metadata["captured_at_source"] == "overlay"
     assert metadata["server_last_modified_as_local"] == naive_site_now.isoformat()
+
+
+def test_two_modelled_cadences_are_different_clocks_in_the_ledger():
+    """`_clock` collapsed every `modelled` config to the bare string "config", so
+    the resume gate answered "already extracted" for a day whose frames carry the
+    other cadence — and the frames on disk are named after their own timestamps,
+    so the two sets would have survived side by side."""
+    from allsky.cli.archive import _clock_record
+    from allsky.config import VideoConfig
+
+    one_per_minute = _clock_record(VideoConfig(timestamps="modelled", minutes_per_frame=1.0))
+    two_per_minute = _clock_record(VideoConfig(timestamps="modelled", minutes_per_frame=0.5))
+    later_start = _clock_record(
+        VideoConfig(timestamps="modelled", minutes_per_frame=1.0, start_time="07:00")
+    )
+
+    assert one_per_minute != two_per_minute
+    assert one_per_minute != later_start
+    assert _clock_record(VideoConfig(timestamps="overlay")) == "overlay"
+
+
+def test_the_same_modelled_cadence_is_the_same_clock():
+    """Otherwise every run would re-extract every day."""
+    from allsky.cli.archive import _clock_record
+    from allsky.config import VideoConfig
+
+    first = _clock_record(VideoConfig(timestamps="modelled", minutes_per_frame=1.0))
+    second = _clock_record(VideoConfig(timestamps="modelled", minutes_per_frame=1.0))
+
+    assert first == second

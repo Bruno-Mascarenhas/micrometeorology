@@ -282,7 +282,14 @@ class PreprocessingPipeline:
         return self.overlay != "keep" or self.roi_radius_fraction is not None
 
     def __call__(self, chw: np.ndarray) -> np.ndarray:
-        """Apply the pipeline to one ``(3, H, W)`` float32 frame in ``[0, 1]``."""
+        """Apply the pipeline to one ``(3, H, W)`` float32 frame in ``[0, 1]``.
+
+        No production path calls this: every frame that reaches a model goes
+        through :meth:`apply_uint8_hwc`, which runs before the ``[0, 1]`` scaling
+        and is the cheaper of the two. This route exists as the equality oracle
+        the tests hold that one against — same pixels, different arithmetic — so
+        deleting it would remove the only independent check on it.
+        """
         out = remove_timestamp_band(chw, policy=self.overlay, band_fraction=self.band_fraction)
         if self.roi_radius_fraction is not None:
             out = out * _roi_keep(out.shape[1], out.shape[2], self.roi_radius_fraction)

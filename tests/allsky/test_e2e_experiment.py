@@ -158,4 +158,4 @@ def test_train_resume_evaluate_end_to_end(tmp_path: Path) -> None:
     )
     assert evaluated.exit_code == 0, evaluated.output
     assert (report_dir / "report.md").exists()
-    assert (report_dir / "metrics.json").exists()
+    assert (report_dir / "eval_metrics.json").exists()
