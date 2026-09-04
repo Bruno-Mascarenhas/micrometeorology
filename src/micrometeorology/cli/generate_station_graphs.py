@@ -729,10 +729,6 @@ def run(
         wrf = read_wrf_series(wrf_path)
         typer.echo(f"  wrf:   {len(wrf)} rows")
 
-    # Rain rides along in the lenta frame so one aggregation pass covers both.
-    if RAIN_COLUMN in df_rain.columns:
-        df_lenta[RAIN_COLUMN] = df_rain[RAIN_COLUMN].reindex(df_lenta.index)
-
     if start_date is not None:
         # Naive for the same reason as `now` above: this bound is compared
         # against the datalogger's naive station-local index. Parsed strictly —
@@ -776,19 +772,29 @@ def run(
 
     wind_dir_cols = ["WD_WXT_Avg", "WindDir1_GMX", "WindDir"]
     wind_speed_map = {"WD_WXT_Avg": "WS_WXT_Avg", "WindDir1_GMX": "WS1_ms_GMX", "WindDir": "WS_ms"}
-    sum_cols = [RAIN_COLUMN]
 
     wind_dir_cols = [c for c in wind_dir_cols if c in raw.columns]
-    sum_cols = [c for c in sum_cols if c in raw.columns]
     wind_speed_map = {k: v for k, v in wind_speed_map.items() if k in raw.columns}
 
     hourly = aggregate_to_hourly(
         raw,
         min_samples=6,
-        sum_columns=sum_cols,
         wind_dir_columns=wind_dir_cols,
         wind_speed_column_map=wind_speed_map,
     )
+    # Rain is a SEPARATE logger table on its own stamps, so it is aggregated from
+    # its own frame and joined on the hourly grid. Riding it along in the lenta
+    # frame meant reindexing onto lenta's stamps -- a left join that dropped
+    # every rain sample at a stamp lenta lacks, while the 5-minute trace, drawn
+    # from the rain table itself, still showed it: measured over 2026-05-27 + 7 d,
+    # 126.24 mm of trace against 67.31 mm of hourly bars on one axes.
+    # build_archive joins the two tables `how="outer"` for the same reason.
+    if RAIN_COLUMN in raw_rain.columns:
+        hourly_rain = aggregate_to_hourly(raw_rain, min_samples=6, sum_columns=[RAIN_COLUMN])
+        hourly = hourly.join(hourly_rain[[RAIN_COLUMN]], how="outer")
+        dropped = len(raw_rain.index.difference(raw.index))
+        if dropped:
+            typer.echo(f"  rain: {dropped} carimbo(s) fora do índice da lenta, preservados")
     typer.echo(f"  -> {len(hourly)} hourly rows")
 
     # Stamp the newest sample actually drawn, not the wall clock: without

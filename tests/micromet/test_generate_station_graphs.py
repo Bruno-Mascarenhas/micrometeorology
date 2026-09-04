@@ -289,3 +289,42 @@ def test_a_diffuse_channel_that_is_a_hard_zero_is_not_drawn_as_the_diffuse():
     assert "5 min (PSP)" in labels
     assert not any("CMP21" in label for label in labels)
     assert "SW_df 1h" not in labels
+
+
+def _write_rows(path: Path, column: str, rows: list[tuple[str, float]]) -> Path:
+    """A TOA5 table with explicit stamps and values, for the join tests below."""
+    lines = [
+        '"TOA5","CR5000","CR5000","2754","CR5000.Std.06","CPU:PRG_LABMIM.CR5","49836","LBM"',
+        f'"TIMESTAMP","RECORD","{column}"',
+        '"TS","RN","mm"',
+        '"","","Tot"',
+    ]
+    lines += [f'"{stamp}",{row},{value:.3f}' for row, (stamp, value) in enumerate(rows)]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_rain_at_a_stamp_the_lenta_table_lacks_still_enters_the_hourly_sum(tmp_path, monkeypatch):
+    """The rain table rode along in the lenta frame, reindexed onto lenta's own
+    stamps: every rain sample at a stamp lenta lacks vanished from the hourly
+    bars while the 5-minute trace, drawn from the rain table itself, still showed
+    it. Measured on the archive: 2022 lost 601.2 of 874.5 mm."""
+    from micrometeorology.cli import generate_station_graphs as module
+
+    stamps = [f"2026-07-21 00:{minute:02d}:00" for minute in range(0, 60, 5)]
+    lenta = _write_rows(tmp_path / "lenta.dat", "Temp1_Avg", [(s, 25.0) for s in stamps[:6]])
+    rain = _write_rows(tmp_path / "rain.dat", "PL01_mm_Tot", [(s, 1.0) for s in stamps])
+
+    seen: dict[str, pd.DataFrame] = {}
+    original = module._plot_precipitacao
+
+    def capture(raw_rain, hourly, out, graph_dt, **kwargs):
+        seen["hourly"] = hourly
+        return original(raw_rain, hourly, out, graph_dt, **kwargs)
+
+    monkeypatch.setattr(module, "_plot_precipitacao", capture)
+
+    result = _invoke(lenta, rain, tmp_path / "out")
+
+    assert result.exit_code == 0, result.output
+    assert seen["hourly"]["PL01_mm_Tot"].sum() == pytest.approx(12.0)
