@@ -32,6 +32,11 @@ class TestTrainBounds:
     def test_one_epoch_accepted(self):
         assert _config({"epochs": 1}).train.epochs == 1
 
+    def test_zero_grad_accum_steps_rejected(self):
+        # grad_accum_steps: 0 used to train with 1 while reporting the config as honoured.
+        with pytest.raises(ValidationError, match="grad_accum_steps"):
+            _config({"grad_accum_steps": 0})
+
 
 class TestEarlyStoppingBounds:
     def test_zero_patience_rejected(self):

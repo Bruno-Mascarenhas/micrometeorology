@@ -395,7 +395,7 @@ def run_experiment(
                     autocast_device=autocast_device,
                     autocast_dtype=autocast_dtype,
                     scaler=scaler,
-                    grad_accum_steps=max(1, int(cfg.train.grad_accum_steps)),
+                    grad_accum_steps=int(cfg.train.grad_accum_steps),
                     grad_clip_norm=cfg.train.grad_clip_norm,
                     skip_optimization=is_climatology,
                     global_step=global_step,

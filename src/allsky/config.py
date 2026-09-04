@@ -430,7 +430,7 @@ class ExperimentTrainConfig(BaseModel):
     optimizer: Literal["adamw"] = "adamw"
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     amp: AMPConfig = Field(default_factory=AMPConfig)
-    grad_accum_steps: int = 1
+    grad_accum_steps: int = Field(default=1, ge=1)
     grad_clip_norm: float | None = None
     early_stopping: EarlyStoppingConfig = Field(default_factory=EarlyStoppingConfig)
     num_workers: int = 2
@@ -458,6 +458,7 @@ class ExperimentConfig(BaseModel):
     model: ExperimentModelConfig = Field(default_factory=ExperimentModelConfig)
     train: ExperimentTrainConfig = Field(default_factory=ExperimentTrainConfig)
     augmentation: AugmentationConfig = Field(default_factory=AugmentationConfig)
+
     preprocessing: PreprocessingConfig = Field(default_factory=PreprocessingConfig)
 
 
