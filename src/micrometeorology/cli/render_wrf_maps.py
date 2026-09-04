@@ -36,6 +36,7 @@ from micrometeorology.wrf.batch import (
     default_workers,
     run_figure_tasks,
 )
+from micrometeorology.wrf.reader import assert_one_file_per_domain
 
 app = typer.Typer(rich_markup_mode="markdown", no_args_is_help=True)
 
@@ -73,6 +74,19 @@ def resolve_selection(
     Delegates to :func:`micrometeorology.wrf.reader.resolve_wrfout_paths`
     for robust glob-based matching of any wrfout filename convention, which
     also rejects a mistyped ``--date`` rather than matching nothing.
+
+    A day carrying two forecast cycles resolves two files for one domain, and a
+    figure name is ``{VAR}_{D}_{nnn}.png`` — domain and step index, no token of
+    the source file — so the second cycle overwrites the first cycle's PNGs and
+    ``--also-video`` mixes both into one WebM.  The guard the JSON path already
+    applies in :func:`micrometeorology.wrf.jobs.build_units` is applied here,
+    where both the figure and the JSON path read their selection.
+
+    Raises
+    ------
+    typer.BadParameter
+        When two resolved files map to the same domain, so both CLIs report it
+        as the usage error it is instead of a traceback.
     """
     if dataset:
         return [Path(dataset)]
@@ -83,6 +97,10 @@ def resolve_selection(
     paths = glob_wrfout_day(wrf_dir, date, domains)
     if not paths:
         typer.echo(f"  ⚠ No wrfout files found for date {date} in {wrf_dir}")
+    try:
+        assert_one_file_per_domain(paths)
+    except ValueError as invalid_selection:
+        raise typer.BadParameter(str(invalid_selection)) from invalid_selection
     return paths
 
 

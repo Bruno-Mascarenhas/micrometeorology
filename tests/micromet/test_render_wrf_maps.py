@@ -10,6 +10,7 @@ from typing import NamedTuple
 
 import numpy as np
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from micrometeorology.cli import render_wrf_maps
@@ -430,3 +431,15 @@ def _write_partial_wrf_file(path: Path) -> None:
         ds.createVariable("PSFC", "f4", ("Time", "south_north", "west_east"))[:] = np.full(
             (1, 3, 4), 101325.0, dtype="f4"
         )
+
+
+def test_two_cycles_of_one_day_are_refused_before_the_figures_overwrite_each_other(tmp_path):
+    """A figure name carries domain and step index, no token of the source file,
+    so a day with a 00Z and a 12Z cycle rendered both onto the same PNGs and
+    ``--also-video`` mixed the two runs into one WebM. The JSON path already
+    refused this; the figure path resolved its selection without the guard."""
+    _write_full_wrf_file(tmp_path / "wrfout_d01_2026-05-03_00_00_00")
+    _write_full_wrf_file(tmp_path / "wrfout_d01_2026-05-03_12_00_00")
+
+    with pytest.raises(typer.BadParameter, match="would overwrite each other"):
+        render_wrf_maps.resolve_selection(tmp_path, "20260503", (1,), None)
