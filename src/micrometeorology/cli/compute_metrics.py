@@ -112,7 +112,14 @@ def run(
             "rows are aligned by position, not by time"
         )
 
-    if join == JoinMethod.nearest and isinstance(df_a.index, pd.DatetimeIndex):
+    if join == JoinMethod.nearest:
+        if not (
+            isinstance(df_a.index, pd.DatetimeIndex) and isinstance(df_b.index, pd.DatetimeIndex)
+        ):
+            raise typer.BadParameter(
+                "--join nearest pairs rows by time and needs a time index in both files",
+                param_hint="--join",
+            )
         aligned = pd.merge_asof(
             df_a[cols].sort_index(),
             df_b[cols].sort_index(),
@@ -122,19 +129,10 @@ def run(
             suffixes=("_a", "_b"),
             direction="nearest",
         )
-    elif join == JoinMethod.nearest:
-        # ``reset_index()`` materialises the index under its own name, or under
-        # "index" when it is unnamed (``read_dataset`` always clears the name).
-        key_a = str(df_a.index.name or "index")
-        key_b = str(df_b.index.name or "index")
-        aligned = pd.merge_asof(
-            df_a[cols].reset_index().sort_values(key_a),
-            df_b[cols].reset_index().sort_values(key_b),
-            on=key_a,
-            tolerance=pd.Timedelta(tolerance),
-            suffixes=("_a", "_b"),
-            direction="nearest",
-        )
+        # ``merge_asof`` is a LEFT join: every row of A survives whether or not
+        # a B row fell inside the tolerance, so emptiness is measured on B.
+        paired = aligned[[f"{c}_b" for c in cols]].notna().any(axis=1)
+        aligned = aligned.loc[paired]
     else:
         aligned = df_a[cols].join(df_b[cols], lsuffix="_a", rsuffix="_b", how="inner")
 
