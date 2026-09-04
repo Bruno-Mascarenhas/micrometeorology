@@ -738,8 +738,21 @@ def _make_loader(
     No ``worker_init_fn`` is set: the datasets do no worker-side random
     augmentation (they read fixed features/embeddings), so worker RNG never
     influences a batch; add one here if augmentation is introduced.
+
+    ``persistent_workers`` is turned OFF for a dataset whose augmentation is
+    enabled.  Persistent workers pickle the dataset on the FIRST iteration and
+    never again, so ``set_epoch`` on the main-process object never reaches them
+    and every epoch replays the epoch-0 per-sample draw — measured in this
+    environment as epochs seen ``[[0], [0], [0]]`` with two persistent workers
+    against ``[[0], [1], [2]]`` without.  That also breaks the resume
+    equivalence stated above in image mode, since workers would snapshot the
+    epoch they were first started at.  Respawning costs a worker start per
+    epoch, against epochs of minutes; nothing else here reads the epoch, so
+    every other loader keeps its persistent workers.
     """
     num_workers = int(cfg.train.num_workers)
+    augment = getattr(dataset, "augment", None)
+    epoch_reaches_the_sample = augment is not None and bool(augment.enabled)
     loader_generator = torch.Generator()
     loader_generator.manual_seed(int(cfg.seed))
     sampler: RandomSampler | None = None
@@ -754,7 +767,7 @@ def _make_loader(
         shuffle=shuffle if sampler is None else False,
         num_workers=num_workers,
         pin_memory=device == "cuda",
-        persistent_workers=num_workers > 0,
+        persistent_workers=num_workers > 0 and not epoch_reaches_the_sample,
         drop_last=False,
         generator=loader_generator,
     )

@@ -727,3 +727,71 @@ class TestDeviceErrors:
                 device="cuda",
                 embedding_reader=_reader(manifest),
             )
+
+
+class _EpochProbeDataset:
+    """The `set_epoch` contract, reduced to what a worker actually returns.
+
+    `_make_loader` decides persistence from the dataset's `augment`, so the probe
+    carries one; each item is the epoch the process serving it holds, which is
+    exactly what the augmentation RNG seeds on.
+    """
+
+    class _Augment:
+        enabled = True
+
+    def __init__(self, *, augmenting: bool) -> None:
+        self.epoch = 0
+        self.augment = self._Augment() if augmenting else None
+
+    def __len__(self) -> int:
+        return 2
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        return {"epoch": torch.tensor(self.epoch)}
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+
+def _epochs_seen_by_workers(dataset: _EpochProbeDataset, cfg: ExperimentConfig) -> list[set[int]]:
+    from allsky.training.engine import _make_loader
+
+    loader = _make_loader(dataset, cfg, "cpu", batch_size=2, shuffle=False)
+    seen = []
+    for epoch in range(3):
+        dataset.set_epoch(epoch)
+        seen.append({int(value) for batch in loader for value in batch["epoch"]})
+    return seen
+
+
+class TestSetEpochReachesTheWorkers:
+    """Persistent workers pickle the dataset on the FIRST iteration and never
+    again, so every `set_epoch` after it was invisible to them: the augmentation
+    draw the engine's own comment says must vary per epoch replayed epoch 0 for
+    the whole run, and a resumed run froze at its start epoch instead."""
+
+    def test_an_augmenting_dataset_advances_the_epoch_in_its_workers(self, tmp_path: Path):
+        cfg = _cfg(tmp_path, num_workers=2)
+
+        assert _epochs_seen_by_workers(_EpochProbeDataset(augmenting=True), cfg) == [
+            {0},
+            {1},
+            {2},
+        ]
+
+    def test_a_dataset_that_does_not_read_the_epoch_keeps_its_persistent_workers(
+        self, tmp_path: Path
+    ):
+        """Nothing else reads the epoch, so nothing else pays the respawn."""
+        from allsky.training.engine import _make_loader
+
+        loader = _make_loader(
+            _EpochProbeDataset(augmenting=False),
+            _cfg(tmp_path, num_workers=2),
+            "cpu",
+            batch_size=2,
+            shuffle=False,
+        )
+
+        assert loader.persistent_workers is True
