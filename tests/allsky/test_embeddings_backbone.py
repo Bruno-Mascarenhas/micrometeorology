@@ -9,6 +9,8 @@ import pytest
 from allsky.embeddings.backbone import (
     AVAILABLE_BACKBONES,
     DinoV2Backbone,
+    Pooling,
+    TorchvisionBackbone,
     build_backbone,
     embedding_dim,
 )
@@ -54,6 +56,28 @@ class TestBackboneSelection:
 
         assert backbone.name == model
         assert backbone.dim == embedding_dim(model, "cls")
+
+    @pytest.mark.parametrize("model", [n for n in AVAILABLE_BACKBONES if n != "fake"])
+    def test_every_advertised_backbone_builds_with_the_pooling_its_family_offers(self, model: str):
+        """Only the four DINOv2 names were ever constructed, while
+        ``configs/allsky/experiments/resnet50/`` and ``effnet/`` are shipped
+        arms. ``weights='none'`` builds the architecture without fetching
+        anything, so the whole advertised list is reachable here.
+        """
+        # A convolutional trunk emits no tokens, so it offers 'mean' alone; the
+        # ViTs default to 'cls'.
+        pooling: Pooling = "mean" if model in TorchvisionBackbone.HEADS else "cls"
+
+        backbone = build_backbone(model, pooling=pooling, weights="none")
+
+        assert backbone.name == model
+        assert isinstance(backbone.dim, int)
+        assert backbone.dim > 0
+
+    @pytest.mark.parametrize("model", sorted(TorchvisionBackbone.HEADS))
+    def test_a_convolutional_trunk_refuses_the_token_pooling_it_has_no_tokens_for(self, model: str):
+        with pytest.raises(ValueError, match="emits no tokens"):
+            build_backbone(model, pooling="cls", weights="none")
 
     def test_the_identity_is_per_instance_not_shared_by_the_class(self):
         """``extract.py`` records ``backbone.name`` into the store meta, so a

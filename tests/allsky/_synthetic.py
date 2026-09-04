@@ -185,6 +185,19 @@ def make_config(
     )
 
 
+def write_config_yaml(path: Path, config: ExperimentConfig) -> Path:
+    """Serialise an experiment config to YAML for the CLI to load.
+
+    The dispatch tests drive ``allsky train`` by path, which is the only reason
+    they need a file; everything about the config itself comes from
+    :func:`make_config`, so the two do not drift apart.
+    """
+    import yaml
+
+    path.write_text(yaml.safe_dump(config.model_dump(mode="json")), encoding="utf-8")
+    return path
+
+
 def reader_for(manifest: pd.DataFrame, dim: int = 8) -> DictEmbeddingReader:
     """Dict-backed embedding reader covering every manifest sample_id."""
     return DictEmbeddingReader([str(s) for s in manifest["sample_id"]], dim=dim)
