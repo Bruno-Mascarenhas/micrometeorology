@@ -17,6 +17,8 @@ from micrometeorology.wrf.operational_record import (
     DEFAULT_STATION,
     OPERATIONAL_CATALOG,
     V1_COLUMNS,
+    V1_EMISSIVITY_TOLERANCE,
+    V1_SURFACE_EMISSIVITY,
     V1_TO_V2,
     Station,
     append_block,
@@ -685,6 +687,58 @@ def test_migration_repairs_the_two_fluxes_the_broken_constants_propagated_into(t
     assert frame["swup_w_m2"].iloc[0] == pytest.approx(_V1_ALBEDO * _V1_SHORTWAVE, abs=1e-3)
     expected = _V1_EMISSIVITY * STEFAN_BOLTZMANN * (_V1_TEMPERATURE_C + _KELVIN) ** 4
     assert frame["lwup_air_w_m2"].iloc[0] == pytest.approx(expected, abs=1e-3)
+
+
+def _v1_row_without_surface_constants() -> str:
+    """The pre-2022-10-07 layout: the extraction wrote no ALBD and no EMISS.
+
+    The 2,424 rows the real record carries from that era are the only ones the
+    fallback emissivity and the albedo-free ``Swup_calc`` repair were written
+    for, and no test reached either branch.
+    """
+    row = _v1_row().split(",")
+    for name in ("ALBD", "EMISS"):
+        row[V1_COLUMNS.index(name)] = "nan"
+    # Written by the v1 code with the fallback emissivity, in CELSIUS.
+    row[V1_COLUMNS.index("Lwup_calc")] = (
+        f"{(V1_SURFACE_EMISSIVITY - _KELVIN) * STEFAN_BOLTZMANN * _V1_TEMPERATURE_C**4:.4f}"
+    )
+    return ",".join(row)
+
+
+def test_migration_repairs_the_2022_rows_that_carry_no_albedo_and_no_emissivity(tmp_path):
+    """``Swup_calc`` is restored without the albedo it never had, and the
+    emission is rebuilt from the fallback emissivity — with both surface columns
+    left as the missing values they are, not filled in from the fallback.
+    """
+    path = tmp_path / "serie.dat"
+    _v1_file(path, [_v1_row_without_surface_constants()])
+
+    migrate_to_v2(path)
+
+    frame = pd.read_csv(path)
+    assert frame["swup_w_m2"].iloc[0] == pytest.approx(_V1_ALBEDO * _V1_SHORTWAVE, abs=1e-3)
+    expected = V1_SURFACE_EMISSIVITY * STEFAN_BOLTZMANN * (_V1_TEMPERATURE_C + _KELVIN) ** 4
+    assert frame["lwup_air_w_m2"].iloc[0] == pytest.approx(expected, abs=1e-3)
+    assert np.isnan(frame["albedo"].iloc[0])
+    assert np.isnan(frame["emissivity"].iloc[0])
+
+
+def test_migration_refuses_a_2022_row_whose_emission_misses_the_fallback_emissivity(tmp_path):
+    """The fallback is a claim about the surface, not a licence: a row whose own
+    emission implies an emissivity outside the tolerance is refused rather than
+    rewritten from a constant that does not describe it.
+    """
+    path = tmp_path / "serie.dat"
+    row = _v1_row_without_surface_constants().split(",")
+    off_by = V1_SURFACE_EMISSIVITY - 2.0 * V1_EMISSIVITY_TOLERANCE
+    row[V1_COLUMNS.index("Lwup_calc")] = (
+        f"{(off_by - _KELVIN) * STEFAN_BOLTZMANN * _V1_TEMPERATURE_C**4:.4f}"
+    )
+    _v1_file(path, [",".join(row)])
+
+    with pytest.raises(ValueError, match="implies an emissivity"):
+        migrate_to_v2(path)
 
 
 def test_migration_repairs_the_vapour_pressure_and_the_humidity_that_followed_it(tmp_path):
