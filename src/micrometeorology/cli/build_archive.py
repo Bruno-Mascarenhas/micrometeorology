@@ -102,7 +102,7 @@ def _write(frame: pd.DataFrame, base: Path, output_format: str) -> Path:
     """
     if output_format == "csv":
         path = base.with_suffix(".csv")
-        frame.to_csv(path, float_format="%.6g")
+        frame.to_csv(path)
     else:
         path = base.with_suffix(".parquet")
         frame.to_parquet(path)

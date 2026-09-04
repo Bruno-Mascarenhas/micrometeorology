@@ -276,6 +276,24 @@ def test_a_directory_with_no_matching_file_exits_non_zero_instead_of_reporting_s
     assert not output_path.exists()
 
 
+def test_the_csv_export_keeps_every_digit_the_parquet_keeps(tmp_path: Path) -> None:
+    """``float_format="%.6g"`` wrote the logger's RECORD counter as 1.01786e+06 and
+    rounded pressure to six significant digits, diverging from the Parquet of
+    the same build."""
+    from micrometeorology.cli.build_archive import _write
+
+    frame = pd.DataFrame(
+        {"RECORD": [1017857.0], "Pmb_WXT": [1013.2571]},
+        index=pd.DatetimeIndex(["2026-08-15 12:00"], name="TIMESTAMP"),
+    )
+
+    path = _write(frame, tmp_path / "station_5min_raw", "csv")
+
+    text = path.read_text(encoding="utf-8")
+    assert "1017857.0" in text
+    assert "1013.2571" in text
+
+
 def test_a_source_file_matching_neither_table_is_refused_instead_of_dropped(
     tmp_path: Path,
 ) -> None:
