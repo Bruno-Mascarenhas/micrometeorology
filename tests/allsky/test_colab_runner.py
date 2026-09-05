@@ -34,6 +34,7 @@ def _member(
     frame = pd.DataFrame(
         {
             "sample_id": ["a", "b", "c"],
+            "day_id": ["2026-08-20"] * 3,
             "timestamp_utc": list(_TIMES),
             "solar_zenith": list(_ZENITH),
             "obs_dhi": [100.0, 200.0, 300.0],
@@ -136,3 +137,49 @@ def test_members_over_different_samples_are_refused(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="different sample set"):
         runner.ensemble_predictions([first, tmp_path / "s43.parquet"], tmp_path / "ens")
+
+
+def test_frames_sharing_a_datalogger_row_get_one_block_key() -> None:
+    runner = _load_runner()
+    frame = pd.DataFrame(
+        {
+            "day_id": ["d"] * 3,
+            "timestamp_utc": [
+                "2026-08-20T09:35:32+00:00",
+                "2026-08-20T09:39:58+00:00",
+                "2026-08-20T09:40:30+00:00",
+            ],
+        }
+    )
+
+    keys = runner.sensor_block_key(frame).tolist()
+
+    assert keys[0] == keys[1] == "d@06:40"
+    assert keys[2] == "d@06:45"
+
+
+def test_block_scores_average_the_frames_of_one_row_and_vote_their_class() -> None:
+    runner = _load_runner()
+    frame = pd.DataFrame(
+        {
+            "day_id": ["d"] * 4,
+            "timestamp_utc": [
+                "2026-08-20T09:36:00+00:00",
+                "2026-08-20T09:38:00+00:00",
+                "2026-08-20T09:41:00+00:00",
+                "2026-08-20T09:43:00+00:00",
+            ],
+            "obs_dhi": [100.0, 100.0, 200.0, 200.0],
+            "pred_dhi": [90.0, 110.0, 190.0, 230.0],
+            "obs_sky": [1, 1, 3, 3],
+            "pred_sky": [1, 2, 3, 3],
+        }
+    )
+
+    report = runner.score_by_sensor_block(frame, n_bootstrap=20)
+
+    assert report["n_blocks"] == 2
+    assert report["dhi"]["rmse"] == pytest.approx(np.sqrt((0.0**2 + 10.0**2) / 2))
+    assert report["sky"]["accuracy"] == pytest.approx(1.0)
+    assert report["sky_persistence_previous_block"]["n"] == 1
+    assert len(report["ci95"]["sky_macro_f1"]) == 2

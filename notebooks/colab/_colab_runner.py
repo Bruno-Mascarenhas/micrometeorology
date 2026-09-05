@@ -416,8 +416,140 @@ def ensemble_predictions(
             "rmse_delta": float(report["dhi"]["rmse"] - control["rmse"]),
         }
 
+    ensemble["day_id"] = first["day_id"].to_numpy()
+    ensemble["timestamp_utc"] = first["timestamp_utc"].to_numpy()
+    report["by_sensor_block"] = score_by_sensor_block(
+        ensemble.reset_index(),
+        dhi=("obs_dhi", "ens_dhi"),
+        sky=("obs_sky", "ens_sky_vote") if "ens_sky_vote" in ensemble.columns else None,
+    )
+
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     atomic_write(out / "predictions.parquet", lambda tmp: ensemble.reset_index().to_parquet(tmp))
     atomic_write_strict_json(out / "metrics.json", report)
+    return report
+
+
+def sensor_block_key(frame: Any, block_minutes: float = 5.0) -> Any:
+    """The datalogger row each frame was paired with, as ``day_id@HH:MM`` of the block end.
+
+    The CR5000 end-stamps a ``block_minutes`` average, so every frame whose local
+    stamp falls in ``(t - block, t]`` shares the row stamped ``t`` — the ceiling of
+    the local time to the block. Measured on ``dataset-iso``: the key reproduces
+    the label support exactly (``target_dhi`` constant in all 9,538 blocks).
+    """
+    import pandas as pd
+
+    from labmim_core.site import STATION_UTC_OFFSET_HOURS
+
+    local = pd.to_datetime(frame["timestamp_utc"], utc=True) + pd.Timedelta(
+        hours=STATION_UTC_OFFSET_HOURS
+    )
+    block_end = local.dt.tz_localize(None).dt.ceil(f"{block_minutes:g}min")
+    return frame["day_id"].astype(str) + "@" + block_end.dt.strftime("%H:%M")
+
+
+def _ordinal_mode(values: Any) -> int:
+    """Most frequent class; a tie goes to the tied class nearest the mean index."""
+    import numpy as np
+
+    labelled = np.asarray(values, dtype=np.int64)
+    labelled = labelled[labelled >= 0]
+    if labelled.size == 0:
+        return -1
+    counts = np.bincount(labelled)
+    tied = np.flatnonzero(counts == counts.max())
+    return int(tied[np.abs(tied - float(np.mean(labelled))).argmin()])
+
+
+def score_by_sensor_block(
+    frame: Any,
+    *,
+    dhi: tuple[str, str] = ("obs_dhi", "pred_dhi"),
+    sky: tuple[str, str] | None = ("obs_sky", "pred_sky"),
+    block_minutes: float = 5.0,
+    n_bootstrap: int = 1000,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Score predictions on the label's own support: one row per datalogger block.
+
+    Per-frame metrics treat the 4-5 frames that share one sensor row as
+    independent samples of a label that is one number; scoring per block
+    removes that, and is the unit the bootstrap confidence intervals resample.
+    The previous block's observed class is reported as the persistence baseline
+    (the previous *minute* shares the label by construction and is no baseline).
+
+    Parameters
+    ----------
+    frame:
+        Per-frame predictions with ``day_id`` and ``timestamp_utc`` plus the
+        observed/predicted columns named by *dhi* and *sky*.
+    dhi, sky:
+        ``(observed, predicted)`` column pairs; *sky* may be ``None``.
+    block_minutes:
+        Datalogger averaging interval.
+    n_bootstrap, seed:
+        Block resamples behind the 95 % intervals.
+
+    Returns
+    -------
+    dict
+        ``n_blocks``; ``dhi`` (regression metrics of the block means);
+        ``sky`` (classification metrics of the block modes, plus ``ordinal_mae``)
+        and ``sky_persistence_previous_block`` when *sky* is given; ``ci95`` with
+        ``dhi_rmse`` and ``sky_macro_f1`` percentile intervals over blocks.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from allsky.evaluation.metrics import classification_metrics, regression_metrics
+    from labmim_core.sky import SKY_CLASS_COUNT
+
+    keyed = frame.assign(_block=sensor_block_key(frame, block_minutes))
+    groups = keyed.groupby("_block", sort=True)
+    obs_dhi, pred_dhi = dhi
+    blocks = pd.DataFrame({"obs_dhi": groups[obs_dhi].mean(), "pred_dhi": groups[pred_dhi].mean()})
+    blocks["day_id"] = groups["day_id"].first()
+    report: dict[str, Any] = {
+        "n_blocks": len(blocks),
+        "dhi": regression_metrics(blocks["obs_dhi"], blocks["pred_dhi"]),
+    }
+    if sky is not None:
+        obs_sky, pred_sky = sky
+        blocks["obs_sky"] = groups[obs_sky].agg(_ordinal_mode)
+        blocks["pred_sky"] = groups[pred_sky].agg(_ordinal_mode)
+        valid = blocks["obs_sky"].to_numpy() >= 0
+        report["sky"] = {
+            **classification_metrics(blocks["obs_sky"], blocks["pred_sky"], SKY_CLASS_COUNT),
+            "ordinal_mae": float(np.abs(blocks["pred_sky"] - blocks["obs_sky"])[valid].mean()),
+        }
+        previous = blocks.groupby("day_id")["obs_sky"].shift(1)
+        has_previous = previous.notna().to_numpy()
+        report["sky_persistence_previous_block"] = classification_metrics(
+            blocks["obs_sky"].to_numpy()[has_previous],
+            previous.to_numpy()[has_previous].astype(np.int64),
+            SKY_CLASS_COUNT,
+        )
+
+    rng = np.random.default_rng(seed)
+    n = len(blocks)
+    rmse_draws = np.empty(n_bootstrap)
+    f1_draws = np.empty(n_bootstrap) if sky is not None else None
+    obs_d, pred_d = blocks["obs_dhi"].to_numpy(), blocks["pred_dhi"].to_numpy()
+    for i in range(n_bootstrap):
+        pick = rng.integers(0, n, n)
+        rmse_draws[i] = float(np.sqrt(np.mean((pred_d[pick] - obs_d[pick]) ** 2)))
+        if f1_draws is not None:
+            f1_draws[i] = classification_metrics(
+                blocks["obs_sky"].to_numpy()[pick],
+                blocks["pred_sky"].to_numpy()[pick],
+                SKY_CLASS_COUNT,
+            )["macro_f1"]
+    ci: dict[str, list[float]] = {
+        "dhi_rmse": [float(x) for x in np.percentile(rmse_draws, [2.5, 97.5])]
+    }
+    if f1_draws is not None:
+        ci["sky_macro_f1"] = [float(x) for x in np.percentile(f1_draws, [2.5, 97.5])]
+    report["ci95"] = ci
     return report
