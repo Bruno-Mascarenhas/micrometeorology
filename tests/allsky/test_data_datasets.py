@@ -600,3 +600,76 @@ def test_a_row_whose_whole_window_is_unreadable_falls_back_to_its_own(tmp_path: 
     )
 
     np.testing.assert_array_equal(windowed[1]["embedding"].numpy(), reader(own))
+
+
+def _one_day_manifest(times_utc: list[str]) -> pd.DataFrame:
+    n = len(times_utc)
+    return pd.DataFrame(
+        {
+            "sample_id": [f"s{i}" for i in range(n)],
+            "timestamp_utc": pd.to_datetime(times_utc, utc=True),
+            "day_id": ["2026-08-20"] * n,
+            "f": np.zeros(n),
+            "target_dhi": np.zeros(n),
+            "target_kindex": np.zeros(n),
+            "cloud_fraction": np.full(n, np.nan),
+            "sky_class": np.zeros(n, dtype=np.int64),
+        }
+    )
+
+
+_BLOCK_TIMES = [
+    "2026-08-20T09:35:32Z",
+    "2026-08-20T09:36:33Z",
+    "2026-08-20T09:38:00Z",
+    "2026-08-20T09:39:58Z",
+    "2026-08-20T09:40:30Z",
+    "2026-08-20T09:44:00Z",
+]
+
+
+def test_sensor_block_windows_group_the_frames_that_share_a_datalogger_row() -> None:
+    from allsky.data.datasets import resolve_sensor_block_windows
+
+    windows = resolve_sensor_block_windows(_one_day_manifest(_BLOCK_TIMES), 5.0, -3.0)
+
+    assert windows[0] == windows[3] == [0, 1, 2, 3]
+    assert windows[4] == windows[5] == [4, 5]
+
+
+def test_sensor_block_windows_never_cross_a_day() -> None:
+    from allsky.data.datasets import resolve_sensor_block_windows
+
+    manifest = _one_day_manifest(_BLOCK_TIMES[:2])
+    manifest.loc[1, "day_id"] = "2026-08-21"
+
+    windows = resolve_sensor_block_windows(manifest, 5.0, -3.0)
+
+    assert windows == [[0], [1]]
+
+
+def test_representative_rows_keep_the_frame_nearest_the_block_centroid() -> None:
+    from allsky.data.datasets import representative_rows_per_block
+
+    keep = representative_rows_per_block(_one_day_manifest(_BLOCK_TIMES), 5.0, -3.0)
+
+    assert keep.tolist() == [False, False, True, False, False, True]
+
+
+@pytest.mark.usefixtures("torch")
+def test_the_embedding_dataset_under_sensor_block_serves_the_block_mean() -> None:
+    reader = FakeEmbeddingReader(dim=4)
+    manifest = _one_day_manifest(_BLOCK_TIMES)
+    dataset = MultimodalEmbeddingDataset(
+        manifest,
+        ["f"],
+        embedding_reader=reader,
+        train=True,
+        window="sensor_block",
+        window_minutes=5.0,
+    )
+
+    served = dataset[1]["embedding"].numpy()
+
+    expected = np.mean([reader(f"s{i}") for i in range(4)], axis=0)
+    np.testing.assert_allclose(served, expected, rtol=1e-6)

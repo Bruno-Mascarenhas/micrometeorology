@@ -130,6 +130,122 @@ def resolve_time_windows(
     return windows
 
 
+def _local_block_ends_ns(
+    manifest: pd.DataFrame, block_minutes: float, utc_offset_hours: float
+) -> np.ndarray:
+    """End of the datalogger block each row falls in, as naive-local ns since epoch."""
+    index = pd.DatetimeIndex(manifest["timestamp_utc"]).tz_convert("UTC").tz_localize(None)
+    local = index + pd.Timedelta(hours=utc_offset_hours)
+    return local.ceil(f"{block_minutes:g}min").as_unit("ns").to_numpy().astype("int64")
+
+
+def resolve_sensor_block_windows(
+    manifest: pd.DataFrame,
+    block_minutes: float,
+    utc_offset_hours: float,
+    *,
+    max_frames: int | None = None,
+) -> list[list[int]]:
+    """Per-row positional window members: the frames that share the row's datalogger block.
+
+    The logger end-stamps a ``block_minutes`` average, so two same-day frames
+    belong to one row of it exactly when their local stamps round up to the same
+    block end. Members are returned in time order and always include the row.
+
+    Parameters
+    ----------
+    manifest:
+        Frame carrying ``day_id`` and ``timestamp_utc``.
+    block_minutes:
+        The logger's averaging interval, in minutes.
+    utc_offset_hours:
+        The site's fixed clock offset; the block boundaries are local.
+    max_frames:
+        Cap on members per row, evenly subsampled keeping the ends.
+
+    Returns
+    -------
+    list of list of int
+        One list of manifest positions per row, in time order.
+    """
+    ends = _local_block_ends_ns(manifest, block_minutes, utc_offset_hours)
+    times_ns = (
+        pd.DatetimeIndex(manifest["timestamp_utc"])
+        .tz_convert("UTC")
+        .tz_localize(None)
+        .as_unit("ns")
+        .to_numpy()
+        .astype("int64")
+    )
+    day_codes = pd.factorize(manifest["day_id"].astype(str), sort=False)[0]
+    n_rows = len(manifest)
+    order = np.lexsort((np.arange(n_rows), times_ns, ends, day_codes))
+    keys = np.stack([day_codes[order], ends[order]], axis=1)
+    starts = np.concatenate(
+        ([0], np.flatnonzero(np.any(keys[1:] != keys[:-1], axis=1)) + 1, [n_rows])
+    )
+    windows: list[list[int]] = [[] for _ in range(n_rows)]
+    for start, stop in itertools.pairwise(starts):
+        members = order[start:stop].tolist()
+        picked = _subsample_window(members, max_frames)
+        for row in members:
+            windows[int(row)] = picked
+    return windows
+
+
+def representative_rows_per_block(
+    manifest: pd.DataFrame, block_minutes: float, utc_offset_hours: float
+) -> np.ndarray:
+    """Mask keeping one row per datalogger block: the frame nearest the block centroid.
+
+    The centroid — ``block_minutes / 2`` before the block end — is where the
+    average the row carries is centred, and the frame closest to it is the one
+    whose instantaneous sky best represents that average.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(N,)`` bool, aligned to *manifest*'s rows.
+    """
+    ends = _local_block_ends_ns(manifest, block_minutes, utc_offset_hours)
+    local_ns = (
+        (
+            pd.DatetimeIndex(manifest["timestamp_utc"]).tz_convert("UTC").tz_localize(None)
+            + pd.Timedelta(hours=utc_offset_hours)
+        )
+        .as_unit("ns")
+        .to_numpy()
+        .astype("int64")
+    )
+    centroid = ends - round(block_minutes / 2.0 * NS_PER_MINUTE)
+    distance = np.abs(local_ns - centroid)
+    table = pd.DataFrame(
+        {"day": manifest["day_id"].astype(str).to_numpy(), "end": ends, "distance": distance}
+    )
+    nearest = table.groupby(["day", "end"], sort=False)["distance"].idxmin().to_numpy()
+    keep = np.zeros(len(manifest), dtype=bool)
+    keep[nearest] = True
+    return keep
+
+
+def _windows_for(
+    window: WindowMode,
+    manifest: pd.DataFrame,
+    window_minutes: float,
+    utc_offset_hours: float,
+    *,
+    max_frames: int | None,
+) -> list[list[int]]:
+    """The per-row members a windowed *window* mode implies; empty under ``center_frame``."""
+    if window == "center_frame":
+        return []
+    if window == "sensor_block":
+        return resolve_sensor_block_windows(
+            manifest, window_minutes, utc_offset_hours, max_frames=max_frames
+        )
+    return resolve_time_windows(manifest, window_minutes, max_frames=max_frames)
+
+
 def _subsample_window(members: list[int], max_frames: int | None) -> list[int]:
     if max_frames is None or len(members) <= max_frames:
         return members
@@ -176,6 +292,7 @@ class _BaseMultimodalDataset:
         self.stats = stats
 
         self._features = stats.transform(self.manifest)
+        self._utc_offset_hours = float(utc_offset_hours)
         self._dhi_scale = self._dhi_scale_column(dhi_parameterization, utc_offset_hours)
         self._dhi = self._raw_target("target_dhi") / self._dhi_scale
         self._kindex = self._raw_target("target_kindex")
@@ -375,10 +492,8 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         self.window = window
         self.window_minutes = float(window_minutes)
         self.seq_len = int(window_max_frames)
-        self._windows: list[list[int]] = (
-            resolve_time_windows(manifest, self.window_minutes, max_frames=self.seq_len)
-            if window != "center_frame"
-            else []
+        self._windows: list[list[int]] = _windows_for(
+            window, manifest, self.window_minutes, utc_offset_hours, max_frames=self.seq_len
         )
         self._geometry_channels = tuple(geometry_channels)
         self.frame_geometry = frame_geometry
@@ -642,7 +757,9 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         return self._embedding_dim
 
     def _resolve_windows(self) -> list[list[int]]:
-        return resolve_time_windows(self.manifest, self.window_minutes)
+        return _windows_for(
+            self.window, self.manifest, self.window_minutes, self._utc_offset_hours, max_frames=None
+        )
 
     def _read(self, sample_id: str) -> np.ndarray:
         """Read + validate the ``(D,)`` float32 embedding for *sample_id*.
@@ -701,7 +818,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         if not vectors:
             vectors = [self._read(self._sample_ids[idx])]
 
-        if self.window == "mean_embedding":
+        if self.window in ("mean_embedding", "sensor_block"):
             pooled = np.mean(np.stack(vectors, axis=0), axis=0).astype(np.float32)
             item["embedding"] = torch.from_numpy(np.array(pooled, copy=True))
             return item

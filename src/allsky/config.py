@@ -114,7 +114,9 @@ DATASET_SPLIT_FILENAME = "splits.json"
 #: and :mod:`allsky.data.datasets` can read it without an import cycle, and a
 #: typo such as ``centre_frame`` fails at ``load_experiment_config`` time rather
 #: than deep inside dataset construction — or, in image mode, not at all.
-AlignmentStrategyName = Literal["center_frame", "mean_embedding", "attention_pooling"]
+AlignmentStrategyName = Literal[
+    "center_frame", "mean_embedding", "attention_pooling", "sensor_block"
+]
 
 
 class AlignmentConfig(BaseModel):
@@ -127,18 +129,38 @@ class AlignmentConfig(BaseModel):
     learned pooler that only the embedding source has (see
     :class:`DataSourceConfig`). ``window_minutes`` is the full width of the
     alignment window.
+
+    ``sensor_block`` pools the frames that share one datalogger row: the CR5000
+    end-stamps a ``window_minutes`` average, so the members of a row's window are
+    every same-day frame whose local stamp rounds up to the same block end. That
+    is the label's own support — measured on ``dataset-iso`` the key reproduces
+    it exactly (``target_dhi`` constant in all 9,538 blocks) — and an oracle that
+    knows the instantaneous Kt scores macro-F1 0.73 against the 5-min label per
+    frame but 0.84-0.99 per block. ``one_sample_per_block`` then keeps, for
+    training and validation, only the frame nearest each block's centroid, so an
+    epoch costs the same backbone forwards as the single-frame recipe.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     strategy: AlignmentStrategyName = "center_frame"
     window_minutes: float = Field(default=10.0, gt=0.0)
+    one_sample_per_block: bool = False
     #: Cap on frames per window in IMAGE mode, evenly subsampled keeping the
     #: ends. The embedding path ignores it: an embedding is a 384-float read,
     #: while a frame is a JPEG decode plus a backbone forward, so a ten-minute
     #: window at this camera's one-frame-per-minute cadence would be eleven
     #: forwards per sample.
     max_frames: int = Field(default=5, ge=1)
+
+    @model_validator(mode="after")
+    def _one_sample_needs_the_block_strategy(self) -> AlignmentConfig:
+        if self.one_sample_per_block and self.strategy != "sensor_block":
+            raise ValueError(
+                "alignment.one_sample_per_block only applies to strategy 'sensor_block', "
+                f"got {self.strategy!r}"
+            )
+        return self
 
 
 class DataSourceConfig(BaseModel):
