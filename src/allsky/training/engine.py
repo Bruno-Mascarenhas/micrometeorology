@@ -68,7 +68,6 @@ from allsky.data.datasets import (
     EmbeddingReader,
     MultimodalEmbeddingDataset,
     MultimodalImageDataset,
-    representative_rows_per_block,
 )
 from allsky.data.loading import (
     default_embedding_reader,
@@ -237,19 +236,6 @@ def run_experiment(
     logger.info("split %s: %d train / %d val rows", split.split_id[:12], len(train_df), len(val_df))
 
     feature_columns = resolve_feature_set(cfg.features.feature_set, cfg.features.extra)
-    if cfg.data.alignment.one_sample_per_block:
-        block_minutes = float(cfg.data.alignment.window_minutes)
-        block_offset = site_utc_offset_hours(meta)
-        train_df = train_df.loc[
-            representative_rows_per_block(train_df, block_minutes, block_offset)
-        ]
-        val_df = val_df.loc[representative_rows_per_block(val_df, block_minutes, block_offset)]
-        logger.info(
-            "sensor_block: one frame per %g-min datalogger block -> %d train / %d val rows",
-            block_minutes,
-            len(train_df),
-            len(val_df),
-        )
     train_ds, val_ds, embedding_dim = _build_datasets(
         cfg,
         train_df,
@@ -635,6 +621,7 @@ def _build_datasets(
             train=True,
             window=window,
             window_minutes=window_minutes,
+            one_sample_per_block=cfg.data.alignment.one_sample_per_block,
             dhi_parameterization=cfg.targets.dhi.parameterization,
             utc_offset_hours=utc_offset_hours,
         )
@@ -646,6 +633,7 @@ def _build_datasets(
             stats=train_ds.stats,
             window=window,
             window_minutes=window_minutes,
+            one_sample_per_block=cfg.data.alignment.one_sample_per_block,
             dhi_parameterization=cfg.targets.dhi.parameterization,
             utc_offset_hours=utc_offset_hours,
         )
@@ -677,6 +665,7 @@ def _build_datasets(
         window=cfg.data.alignment.strategy,
         window_minutes=cfg.data.alignment.window_minutes,
         window_max_frames=cfg.data.alignment.max_frames,
+        one_sample_per_block=cfg.data.alignment.one_sample_per_block,
     )
     image_val = MultimodalImageDataset(
         val_df,
@@ -693,6 +682,7 @@ def _build_datasets(
         window=cfg.data.alignment.strategy,
         window_minutes=cfg.data.alignment.window_minutes,
         window_max_frames=cfg.data.alignment.max_frames,
+        one_sample_per_block=cfg.data.alignment.one_sample_per_block,
     )
     return image_train, image_val, None
 

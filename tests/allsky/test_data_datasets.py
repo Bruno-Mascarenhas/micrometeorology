@@ -673,3 +673,56 @@ def test_the_embedding_dataset_under_sensor_block_serves_the_block_mean() -> Non
 
     expected = np.mean([reader(f"s{i}") for i in range(4)], axis=0)
     np.testing.assert_allclose(served, expected, rtol=1e-6)
+
+
+@pytest.mark.usefixtures("torch")
+def test_one_sample_per_block_serves_the_centroid_frame_with_its_whole_block() -> None:
+    reader = FakeEmbeddingReader(dim=4)
+    manifest = _one_day_manifest(_BLOCK_TIMES)
+    dataset = MultimodalEmbeddingDataset(
+        manifest,
+        ["f"],
+        embedding_reader=reader,
+        train=True,
+        window="sensor_block",
+        window_minutes=5.0,
+        one_sample_per_block=True,
+    )
+
+    served = dataset.served_manifest
+
+    assert len(dataset) == 2
+    assert served["sample_id"].tolist() == ["s2", "s5"]
+    first_block = np.mean([reader(f"s{i}") for i in range(4)], axis=0)
+    np.testing.assert_allclose(dataset[0]["embedding"].numpy(), first_block, rtol=1e-6)
+
+
+@pytest.mark.usefixtures("torch")
+def test_one_sample_per_block_keeps_the_served_targets_in_item_order() -> None:
+    manifest = _one_day_manifest(_BLOCK_TIMES)
+    manifest["target_dhi"] = [10.0, 10.0, 10.0, 10.0, 20.0, 20.0]
+    dataset = MultimodalEmbeddingDataset(
+        manifest,
+        ["f"],
+        embedding_reader=FakeEmbeddingReader(dim=2),
+        train=True,
+        window="sensor_block",
+        window_minutes=5.0,
+        one_sample_per_block=True,
+    )
+
+    assert dataset.served_targets["dhi"].tolist() == [10.0, 20.0]
+    assert float(dataset[1]["dhi"]) == 20.0
+
+
+@pytest.mark.usefixtures("torch")
+def test_one_sample_per_block_without_the_block_strategy_is_refused() -> None:
+    with pytest.raises(ValueError, match="sensor_block"):
+        MultimodalEmbeddingDataset(
+            _one_day_manifest(_BLOCK_TIMES),
+            ["f"],
+            embedding_reader=FakeEmbeddingReader(dim=2),
+            window="mean_embedding",
+            window_minutes=5.0,
+            one_sample_per_block=True,
+        )

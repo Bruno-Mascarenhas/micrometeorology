@@ -299,12 +299,38 @@ class _BaseMultimodalDataset:
         self._cloud_fraction = self._raw_target("cloud_fraction")
         self._sky_class = self.manifest["sky_class"].to_numpy(dtype=np.int64, copy=True)
         self._sample_ids = [str(s) for s in self.manifest["sample_id"]]
+        self._served: np.ndarray = np.arange(len(self.manifest))
         self._columns: SampleTensors | None = None
 
     @property
     def served_targets(self) -> dict[str, np.ndarray]:
         """The regression target arrays this dataset actually serves."""
-        return {"dhi": self._dhi, "kindex": self._kindex}
+        return {"dhi": self._dhi[self._served], "kindex": self._kindex[self._served]}
+
+    @property
+    def served_manifest(self) -> pd.DataFrame:
+        """The manifest rows this dataset serves, in item order.
+
+        Every row under ``center_frame`` and the frame-anchored windows; one row
+        per datalogger block — the frame nearest its centroid — under
+        ``sensor_block`` with ``one_sample_per_block``. The evaluator builds the
+        per-item predictions frame from this, so ``len(served_manifest)`` is
+        ``len(dataset)`` by construction.
+        """
+        return self.manifest.iloc[self._served].reset_index(drop=True)
+
+    def _serve_one_row_per_sensor_block(self, block_minutes: float) -> None:
+        """Serve one item per datalogger block: the frame nearest the block centroid.
+
+        The windows stay resolved over the whole manifest, so the served item
+        still carries every frame of its block; only the anchor — and with it
+        the targets — is one row per block. The centroid frame's targets ARE the
+        block's: the diffuse is one logger value for the whole block, and its
+        clear-sky index / Kt at the block centre is the label the logger's
+        end-stamped average describes.
+        """
+        keep = representative_rows_per_block(self.manifest, block_minutes, self._utc_offset_hours)
+        self._served = np.flatnonzero(keep)
 
     def set_epoch(self, epoch: int) -> None:
         """Tell the dataset which pass over the data it is on.
@@ -352,7 +378,7 @@ class _BaseMultimodalDataset:
         return np.full(len(self.manifest), np.nan, dtype=np.float32)
 
     def __len__(self) -> int:
-        return len(self.manifest)
+        return len(self._served)
 
     def _column_tensors(self) -> SampleTensors:
         """Whole-column tensors over the resident numpy columns, built once.
@@ -385,7 +411,8 @@ class _BaseMultimodalDataset:
         batches are unaffected, but a caller that mutates an item in place would
         be mutating the dataset.
         """
-        return {name: column[idx] for name, column in self._column_tensors().items()}
+        position = int(self._served[idx])
+        return {name: column[position] for name, column in self._column_tensors().items()}
 
 
 class MultimodalImageDataset(_BaseMultimodalDataset):
@@ -461,6 +488,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         window: WindowMode = "center_frame",
         window_minutes: float = 10.0,
         window_max_frames: int = 5,
+        one_sample_per_block: bool = False,
     ) -> None:
         super().__init__(
             manifest,
@@ -495,6 +523,10 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         self._windows: list[list[int]] = _windows_for(
             window, manifest, self.window_minutes, utc_offset_hours, max_frames=self.seq_len
         )
+        if one_sample_per_block:
+            if window != "sensor_block":
+                raise ValueError("one_sample_per_block needs window='sensor_block'")
+            self._serve_one_row_per_sensor_block(self.window_minutes)
         self._geometry_channels = tuple(geometry_channels)
         self.frame_geometry = frame_geometry
         self._geometry = (
@@ -651,10 +683,11 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         import torch
 
         item = self._target_item(idx)
+        anchor = int(self._served[idx])
         if self.window == "center_frame":
-            item["image"] = torch.from_numpy(self._load_image(self._paths[idx], idx))
+            item["image"] = torch.from_numpy(self._load_image(self._paths[anchor], anchor))
             return item
-        members = self._windows[idx]
+        members = self._windows[anchor]
         frames = np.zeros((self.seq_len, *self._frame_shape()), dtype=np.float32)
         mask = np.zeros(self.seq_len, dtype=bool)
         for slot, position in enumerate(members):
@@ -662,7 +695,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
             # per-frame draw gives each frame of one window an independent
             # exposure and noise realisation, which is scintillation the sky did
             # not produce — and the window exists precisely to average the sky.
-            frames[slot] = self._load_image(self._paths[position], idx)
+            frames[slot] = self._load_image(self._paths[position], anchor)
             mask[slot] = True
         item["image_seq"] = torch.from_numpy(frames)
         item["frame_mask"] = torch.from_numpy(mask)
@@ -723,6 +756,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         stats: FeatureNormalizer | None = None,
         window: WindowMode = "center_frame",
         window_minutes: float = 10.0,
+        one_sample_per_block: bool = False,
         dhi_parameterization: DHIParameterization = "raw",
         utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
     ) -> None:
@@ -746,6 +780,10 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         #: Fixed padded window length ``T`` for ``attention_pooling``.
         self.seq_len = math.ceil(self.window_minutes) + 1
         self._windows: list[list[int]] = self._resolve_windows() if window != "center_frame" else []
+        if one_sample_per_block:
+            if window != "sensor_block":
+                raise ValueError("one_sample_per_block needs window='sensor_block'")
+            self._serve_one_row_per_sensor_block(self.window_minutes)
 
     @property
     def embedding_dim(self) -> int:
@@ -809,14 +847,15 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         import torch
 
         item = self._target_item(idx)
+        anchor = int(self._served[idx])
         if self.window == "center_frame":
-            embedding = self._read(self._sample_ids[idx])
+            embedding = self._read(self._sample_ids[anchor])
             item["embedding"] = torch.from_numpy(np.array(embedding, copy=True))
             return item
 
-        vectors = self._window_embeddings(idx)
+        vectors = self._window_embeddings(anchor)
         if not vectors:
-            vectors = [self._read(self._sample_ids[idx])]
+            vectors = [self._read(self._sample_ids[anchor])]
 
         if self.window in ("mean_embedding", "sensor_block"):
             pooled = np.mean(np.stack(vectors, axis=0), axis=0).astype(np.float32)

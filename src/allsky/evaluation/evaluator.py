@@ -443,6 +443,10 @@ def _run_inference(
         frame_geometry=frame_geometry,
     )
 
+    # Under sensor_block + one_sample_per_block the dataset serves one item per
+    # datalogger block; the predictions frame must describe those items, not
+    # every frame of the split.
+    split_df = dataset.served_manifest
     model = restore_model(
         cfg,
         checkpoint,
@@ -538,6 +542,7 @@ def _build_split_dataset(
             stats=feature_normalizer,
             window=window,
             window_minutes=float(cfg.data.alignment.window_minutes),
+            one_sample_per_block=cfg.data.alignment.one_sample_per_block,
             dhi_parameterization=cfg.targets.dhi.parameterization,
             utc_offset_hours=utc_offset_hours,
         )
@@ -562,6 +567,7 @@ def _build_split_dataset(
         window=cfg.data.alignment.strategy,
         window_minutes=cfg.data.alignment.window_minutes,
         window_max_frames=cfg.data.alignment.max_frames,
+        one_sample_per_block=cfg.data.alignment.one_sample_per_block,
     )
     return dataset, None
 
