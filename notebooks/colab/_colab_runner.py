@@ -188,7 +188,7 @@ def run_experiment(config: Path, *, python: str, split: str = "test") -> dict[st
         row["error"] = evaluate.stderr[-2000:]
         return row
 
-    metrics = json.loads((run_dir / f"eval-{split}" / "metrics.json").read_text())
+    metrics = json.loads((run_dir / f"eval-{split}" / "eval_metrics.json").read_text())
     dhi = metrics["global"]["dhi"]
     row.update(
         status="ok",
