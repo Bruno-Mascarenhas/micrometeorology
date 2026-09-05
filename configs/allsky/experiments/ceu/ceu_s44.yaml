@@ -1,0 +1,96 @@
+# Condicao do ceu como alvo primario, com a difusa e o k* ao lado — o primeiro
+# braco com FINE-TUNING que liga a cabeca de ceu.
+#
+# Todo run fine-tuned ate aqui (iso, anneal, sunangle, loss, finetune) treinou so
+# a difusa. A unica medida de classe de ceu vem da fatorial sobre embeddings
+# CONGELADOS: f_cen_clsmean_mt, acuracia balanceada 0,65 e macro-F1 0,65 sobre as
+# mesmas 7.138 linhas de teste. Descongelar o DINOv2 levou a difusa de ~31 para
+# ~20 W/m2 no mesmo dataset; a hipotese e que a classe de ceu ganhe na mesma
+# proporcao. Este braco mede isso.
+#
+# Cinco escolhas, cada uma com a evidencia que a sustenta:
+#
+# 1. Multitarefa: sky (entropia cruzada sobre as quatro condicoes de Escobedo),
+#    kindex (k*, MAE) e dhi (MAE), pesos 1/1/1 como na fatorial. A perda composta
+#    e o monitor de parada, e a CE (~1 nat) pesa mais que as duas MAE
+#    normalizadas (~0,4): a selecao do best.ckpt PENDE PARA O CEU, de proposito.
+#    O custo para a difusa e desconhecido em fine-tuning — na fatorial congelada
+#    a multitarefa custou 0,86 W/m2 — e este braco e o que o mede.
+# 2. targets.dhi.parameterization: clearsky_index. Varaschin & Silva (2025,
+#    arXiv:2503.21966) trocam o alvo bruto pelo indice de ceu-claro e ganham mais
+#    do que qualquer arquitetura (65,8 -> 37,2 W/m2 no Folsom); a sec. 5.2.6
+#    explica o mecanismo — o alvo bruto obriga a rede a codificar a posicao do
+#    sol com precisao. Aqui o vies de -8 W/m2 e mais negativo em sol alto e a
+#    inclinacao DHI-vs-elevacao deriva 20 % entre os splits: e o sintoma
+#    previsto. O braco kdindex existe para isso e nunca rodou.
+# 3. backbone_pooling: cls+mean. A difusa e uma integral hemisferica da radiancia
+#    do ceu; a media dos patch tokens e a operacao mais proxima disso que o ViT
+#    oferece, e o CLS descarta sinal de area pequena e baixo contraste (Muthyala
+#    et al. 2026, arXiv:2606.11606) — a nuvem fina e a regiao circumsolar. Na
+#    fatorial congelada cls+mean bateu cls nos quatro pares, inclusive em ceu
+#    (0,65 vs 0,63 de acuracia balanceada).
+# 4. Receita do anneal: paciencia igual ao teto, para o cosseno anelar de fato
+#    (Li et al. 2020, arXiv:1905.04753 — as sementes do iso pararam nas epocas
+#    5, 20 e 10); weight_decay 0,05 da receita de fine-tune de ViT (He et al.
+#    2021, arXiv:2111.06377, Tab. 9); jitter de exposicao, porque a camera varia
+#    1340x a exposicao no dia (a memoria do projeto mede r(DHI, logL) = +0,90);
+#    ruido e erase (Zhong et al. 2017). Flip e rotacao continuam proibidos (Nie
+#    et al. 2021). p_erase fica em 0,25 como no anneal por comparabilidade —
+#    a docstring de augmentation.py avisa que o retangulo pode cair no disco
+#    solar; e uma ressalva conhecida, nao um defeito novo.
+# 5. Tres sementes e ensemble por media (Lakshminarayanan et al. 2017). Medido
+#    sobre os parquets existentes: o ensemble leva iso 19,94 -> 19,28, anneal
+#    19,47 -> 18,75 e sunangle 21,01 -> 19,14 (MAE 12,45, o melhor de todos).
+#    A correlacao do erro entre sementes e ~0,88; e a alavanca mais barata.
+#    Para a classe de ceu o ensemble e voto de maioria E, em paralelo, o Kt
+#    reconstruido do k* medio binado nos limites de Escobedo — dois estimadores,
+#    e qual ganha e um achado por si.
+#
+# Sem canais de geometria de proposito: a sec. 5.2.6 preve que canal de sol e
+# alvo normalizado sao substitutos, e o kdsun e o braco que testa o cruzamento.
+#
+# Controle: iso (19,94 +/- 0,35 W/m2, MAE 13,94, MBE -8,30; sem cabeca de ceu),
+# mesmas 7.138 linhas, pareado por sample_id. Para ceu, a referencia e a fatorial
+# congelada acima. Este braco muda cinco coisas de uma vez e NAO e uma ablacao:
+# e o candidato a melhor modelo, e a decomposicao vem depois.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: ceu_s44
+output_dir: output/allsky-mm/experiments/ceu/ceu_s44
+seed: 44
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 1.0
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  weight_decay: 0.05
+  num_workers: 8
+  early_stopping:
+    patience: 40
+    monitor: val/loss
+augmentation:
+  p_exposure: 0.5
+  exposure_log2: 0.6
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25

@@ -348,7 +348,9 @@ Beyond the ladder, `configs/allsky/experiments/` carries one directory per arm,
 each a seed sweep over a single question: `iso` (isotropic re-extraction, the
 control), `sunmap`/`sunangle` (geometry channels), `kdindex`/`kdsun` (clear-sky
 index target), `janela` (temporal window), `resnet50`/`effnet`/`dinov3s`
-(backbone family), `folsom`/`transfer` (pre-train and transfer), plus the
+(backbone family), `folsom`/`transfer` (pre-train and transfer), `ceu` (the sky
+condition as the primary target: sky + k* + clear-sky-index DHI heads, fine-tuned,
+`cls+mean` pooling, the annealed recipe, three seeds for an ensemble), plus the
 earlier `control`/`exposure`/`shuffled`/`finetune`/`anneal`/`loss`/`normlr`/`res`
 sweeps. Every arm pins its seed and every run records the commit hash.
 
