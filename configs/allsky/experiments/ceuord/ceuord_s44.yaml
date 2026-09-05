@@ -1,0 +1,77 @@
+# ceu + cabeca de classe ordinal e balanceada: o segundo braco da condicao do ceu.
+#
+# O que o braco ceu (mesma rede, mesma receita) mediu na semente 42 e que este
+# braco ataca, item a item:
+#
+# 1. A confusao e ADJACENTE. Das 7.138 linhas de teste, os erros de "parcialmente
+#    nublado com dominancia do difuso" vao para "nublado" (202) e para "claro"
+#    (169); os de "parcialmente nublado com dominancia do claro" vao para "claro"
+#    (328) e para o outro parcial (136). As condicoes sao ordenadas em Kt
+#    (Teramoto & Escobedo 2012) e a entropia cruzada trata cada erro como igual.
+#    targets.sky.ordinal_tau: 0.4 troca o alvo duro pelo alvo suave de Diaz &
+#    Marathe (2019, CVPR): softmax(-|k - y| / tau), que aqui poe 85 % na classe
+#    certa, 7 % em cada vizinha e 0,6 % a dois passos. Com tau -> 0 e a CE.
+#
+# 2. As duas classes parciais sao minoria e mal lembradas: 19 % e 11 % das linhas
+#    de treino (contra 30 % nublado e 41 % claro), recall de 56 % e 35 % no teste.
+#    A metrica que importa e a acuracia balanceada (o teste e 57 % claro).
+#    class_weights e o inverso da frequencia no treino, normalizado a media 1:
+#    nublado 0,648 | parcial-difuso 1,028 | parcial-claro 1,845 | claro 0,478.
+#
+# 3. A CE de validacao SOBE desde a epoca 2 (0,61 -> 1,90 na epoca 40) enquanto a
+#    acuracia se mantem (0,776 -> 0,752) e a difusa continua melhorando ate a
+#    epoca 24: sobreconfianca, nao perda de habilidade (Muller et al. 2019,
+#    arXiv:1906.02629). O alvo suave e o remedio que preserva a vizinhanca entre
+#    classes — o label smoothing uniforme (Szegedy et al. 2016) a apagaria, e por
+#    isso os dois sao alternativas no config.
+#
+# Tudo o mais e identico ao ceu: multitarefa sky + k* + difusa em clearsky_index,
+# pesos 1/1/1, cls+mean, cosseno completo de 40 epocas, wd 0,05, jitter de
+# exposicao, ruido e erase, dataset-iso. Diferem SO a cabeca de ceu (pesos e
+# alvo). best e last vao os dois ao teste: no ceu o val/loss composto travou o
+# best na epoca 2 e so o last carrega a difusa anelada.
+#
+# Controle: ceu (mesmas 7.138 linhas, pareado por sample_id); para a difusa, iso.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: ceuord_s44
+output_dir: output/allsky-mm/experiments/ceuord/ceuord_s44
+seed: 44
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 1.0
+    class_weights: [0.648, 1.028, 1.845, 0.478]
+    ordinal_tau: 0.4
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  weight_decay: 0.05
+  num_workers: 8
+  early_stopping:
+    patience: 40
+    monitor: val/loss
+augmentation:
+  p_exposure: 0.5
+  exposure_log2: 0.6
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25
