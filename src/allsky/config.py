@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from allsky.data.contracts import LABELABLE_MIN_ELEVATION_DEG
 from labmim_core.site import SiteConfig
+from labmim_core.sky import SKY_CLASS_COUNT
 
 #: Fixed UTC offset of the LabMiM camera and datalogger clocks. Pinned rather
 #: than read from the host TZ: a UTC-configured container would otherwise shift
@@ -268,12 +269,50 @@ class KIndexTargetConfig(BaseModel):
 
 
 class SkyClassTargetConfig(BaseModel):
-    """Sky-condition classification head over the four published Kt conditions."""
+    """Sky-condition classification head over the four published Kt conditions.
+
+    ``class_weights`` scales each row's cross-entropy by its class (one factor per
+    condition, in class order), the plain remedy for the two partly-cloudy
+    conditions that hold 19 % and 11 % of the training rows against 30 % and 41 %.
+    ``label_smoothing`` is the uniform mix of Szegedy et al. (2016,
+    arXiv:1512.00567, sec. 7); Müller et al. (2019, arXiv:1906.02629) show it
+    calibrates the head instead of letting its validation cross-entropy climb
+    while its accuracy holds — the trajectory the ``ceu`` arm measured.
+    ``ordinal_tau`` replaces the hard target by the soft distribution of Díaz &
+    Marathe (2019, CVPR): ``softmax(-|k - y| / tau)`` over the classes, so a
+    partly-cloudy frame labelled next to its true condition costs less than one
+    labelled at the far end — the conditions are ordered in Kt and the errors
+    the ``ceu`` arm makes are between neighbours. The two smoothings are
+    alternatives, never combined.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     weight: float = 1.0
+    class_weights: tuple[float, ...] | None = None
+    label_smoothing: float = 0.0
+    ordinal_tau: float | None = None
+
+    @model_validator(mode="after")
+    def _one_smoothing_and_positive_weights(self) -> SkyClassTargetConfig:
+        if not 0.0 <= self.label_smoothing < 1.0:
+            raise ValueError(f"sky.label_smoothing must be in [0, 1), got {self.label_smoothing}")
+        if self.ordinal_tau is not None and self.ordinal_tau <= 0.0:
+            raise ValueError(f"sky.ordinal_tau must be positive, got {self.ordinal_tau}")
+        if self.ordinal_tau is not None and self.label_smoothing > 0.0:
+            raise ValueError("sky.label_smoothing and sky.ordinal_tau are alternatives; set one")
+        if self.class_weights is not None:
+            if len(self.class_weights) != SKY_CLASS_COUNT:
+                raise ValueError(
+                    f"sky.class_weights needs one factor per condition ({SKY_CLASS_COUNT}), "
+                    f"got {len(self.class_weights)}"
+                )
+            if any(w <= 0.0 for w in self.class_weights):
+                raise ValueError(
+                    f"sky.class_weights must all be positive, got {self.class_weights}"
+                )
+        return self
 
 
 class CloudFractionTargetConfig(BaseModel):

@@ -197,3 +197,78 @@ def _batch(**overrides: Any) -> dict[str, Any]:
     }
     batch.update(overrides)
     return batch
+
+
+def test_ordinal_soft_targets_put_more_mass_on_the_neighbour_than_on_the_far_class() -> None:
+    from allsky.training.losses import ordinal_soft_targets
+
+    soft = ordinal_soft_targets(torch.tensor([1]), 4, tau=1.0)[0]
+
+    assert soft.sum() == pytest.approx(1.0, abs=1e-6)
+    assert soft[1] > soft[0] == pytest.approx(float(soft[2]), abs=1e-6)
+    assert soft[2] > soft[3]
+
+
+def test_ordinal_tau_near_zero_recovers_plain_cross_entropy() -> None:
+    logits = torch.tensor([[2.0, 0.5, -1.0, 0.0], [0.1, 0.2, 1.5, -0.3]])
+    labels = torch.tensor([0, 2])
+    plain = MultitaskLoss(_targets(sky={"enabled": True}), NORMS)
+    ordinal = MultitaskLoss(_targets(sky={"enabled": True, "ordinal_tau": 1e-3}), NORMS)
+
+    expected = plain({"sky_logits": logits}, _batch(sky_class=labels))["loss_sky"]
+    actual = ordinal({"sky_logits": logits}, _batch(sky_class=labels))["loss_sky"]
+
+    assert float(actual) == pytest.approx(float(expected), abs=1e-5)
+
+
+def test_ordinal_soft_targets_charge_a_neighbouring_mistake_less_than_a_far_one() -> None:
+    loss_fn = MultitaskLoss(_targets(sky={"enabled": True, "ordinal_tau": 1.0}), NORMS)
+    confident_neighbour = torch.tensor([[0.0, 0.0, 6.0, 0.0]])
+    confident_far = torch.tensor([[0.0, 0.0, 0.0, 6.0]])
+    truth = _batch(sky_class=torch.tensor([1]))
+
+    near = loss_fn({"sky_logits": confident_neighbour}, truth)["loss_sky"]
+    far = loss_fn({"sky_logits": confident_far}, truth)["loss_sky"]
+
+    assert float(near) < float(far)
+
+
+def test_class_weights_scale_each_row_by_its_class() -> None:
+    logits = torch.zeros(2, 4)
+    labels = torch.tensor([0, 2])
+    weighted = MultitaskLoss(
+        _targets(sky={"enabled": True, "class_weights": (1.0, 1.0, 3.0, 1.0)}), NORMS
+    )
+
+    out = weighted({"sky_logits": logits}, _batch(sky_class=labels))["loss_sky"]
+
+    uniform_row = -torch.log(torch.tensor(0.25))
+    assert float(out) == pytest.approx(float((1.0 + 3.0) / 2 * uniform_row), rel=1e-5)
+
+
+def test_label_smoothing_matches_torch_on_the_valid_rows() -> None:
+    logits = torch.tensor([[1.0, 0.0, -1.0, 0.5], [0.0, 2.0, 0.0, 0.0], [0.3, 0.3, 0.3, 0.3]])
+    labels = torch.tensor([0, -1, 3])
+    loss_fn = MultitaskLoss(_targets(sky={"enabled": True, "label_smoothing": 0.1}), NORMS)
+
+    out = loss_fn({"sky_logits": logits}, _batch(sky_class=labels))["loss_sky"]
+
+    expected = torch.nn.functional.cross_entropy(
+        logits[[0, 2]], labels[[0, 2]], label_smoothing=0.1
+    )
+    assert float(out) == pytest.approx(float(expected), rel=1e-5)
+
+
+@pytest.mark.parametrize(
+    ("sky", "complaint"),
+    [
+        ({"enabled": True, "label_smoothing": 0.1, "ordinal_tau": 1.0}, "alternatives"),
+        ({"enabled": True, "class_weights": (1.0, 1.0, 1.0)}, "one factor per condition"),
+        ({"enabled": True, "class_weights": (1.0, 0.0, 1.0, 1.0)}, "must all be positive"),
+        ({"enabled": True, "ordinal_tau": 0.0}, "must be positive"),
+        ({"enabled": True, "label_smoothing": 1.0}, "in \\[0, 1\\)"),
+    ],
+)
+def test_contradictory_sky_options_are_refused_at_load(sky: dict[str, Any], complaint: str) -> None:
+    with pytest.raises(ValueError, match=complaint):
+        _targets(sky=sky)

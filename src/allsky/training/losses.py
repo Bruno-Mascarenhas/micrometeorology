@@ -86,6 +86,8 @@ class MultitaskLoss(nn.Module):
     so the cloud head is MSE by construction.
     """
 
+    _sky_class_weights: Tensor | None
+
     def __init__(
         self,
         targets: TargetsConfig,
@@ -110,6 +112,14 @@ class MultitaskLoss(nn.Module):
         self._kindex_kind = str(targets.kindex.loss)
         self._sky_enabled = bool(targets.sky.enabled)
         self._sky_weight = float(targets.sky.weight)
+        self._sky_label_smoothing = float(targets.sky.label_smoothing)
+        self._sky_ordinal_tau = targets.sky.ordinal_tau
+        self.register_buffer(
+            "_sky_class_weights",
+            None
+            if targets.sky.class_weights is None
+            else torch.tensor(targets.sky.class_weights, dtype=torch.float32),
+        )
         self._cloud_enabled = bool(targets.cloud_fraction.enabled)
         self._cloud_weight = float(targets.cloud_fraction.weight)
         self._cloud_kind = "mse"
@@ -209,15 +219,63 @@ class MultitaskLoss(nn.Module):
             )
         return _masked_mean(per_row, mask)
 
-    @staticmethod
-    def _sky_loss(logits: Tensor, sky_class: Tensor) -> Tensor:
-        """Masked cross-entropy over rows with a valid (``>= 0``) class label."""
+    def _sky_loss(self, logits: Tensor, sky_class: Tensor) -> Tensor:
+        """Masked cross-entropy over rows with a valid (``>= 0``) class label.
+
+        Hard targets by default; ``label_smoothing`` mixes them with the uniform
+        distribution, and ``ordinal_tau`` replaces them by the soft targets of
+        :func:`ordinal_soft_targets`. ``class_weights`` scales each row by its
+        class under either target; the masked mean is over rows, not over
+        weights, so a re-weighted batch is not re-normalised.
+        """
         mask = sky_class >= 0
         # `clamp(min=0)` only feeds the masked-out rows a valid index; their loss
         # is zeroed below. `ignore_index=-1` with the default reduction would do
         # the masking too, but returns NaN for a batch where every row is masked.
-        per_row = functional.cross_entropy(logits, sky_class.clamp(min=0), reduction="none")
+        safe = sky_class.clamp(min=0)
+        weights = self._sky_class_weights
+        if self._sky_ordinal_tau is None:
+            per_row = functional.cross_entropy(
+                logits,
+                safe,
+                weight=weights,
+                reduction="none",
+                label_smoothing=self._sky_label_smoothing,
+            )
+        else:
+            soft = ordinal_soft_targets(safe, logits.shape[-1], self._sky_ordinal_tau)
+            per_row = -(soft * functional.log_softmax(logits, dim=-1)).sum(dim=-1)
+            if weights is not None:
+                per_row = per_row * weights[safe]
         return _masked_mean(per_row, mask)
+
+
+def ordinal_soft_targets(labels: Tensor, n_classes: int, tau: float) -> Tensor:
+    """Soft target distribution that decays with the rank distance to the label.
+
+    The encoding of Díaz & Marathe (2019, "Soft Labels for Ordinal Regression",
+    CVPR): ``softmax_k(-|k - y| / tau)``, with the absolute rank distance as the
+    metric so the penalty grows one step per class — the same distance the
+    evaluation's ordinal MAE counts. As ``tau`` shrinks the distribution
+    converges to the one-hot target and the loss to plain cross-entropy.
+
+    Parameters
+    ----------
+    labels:
+        ``(B,)`` int64 class indices in ``[0, n_classes)``.
+    n_classes:
+        Number of ordered classes.
+    tau:
+        Temperature of the decay, in class-rank units; positive.
+
+    Returns
+    -------
+    Tensor
+        ``(B, n_classes)`` float32 distributions, each row summing to one.
+    """
+    ranks = torch.arange(n_classes, device=labels.device, dtype=torch.float32)
+    distance = (ranks[None, :] - labels[:, None].to(torch.float32)).abs()
+    return torch.softmax(-distance / float(tau), dim=-1)
 
 
 def _sanitised(target: Tensor, mask: Tensor) -> Tensor:
