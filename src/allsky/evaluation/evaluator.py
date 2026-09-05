@@ -294,7 +294,9 @@ def evaluate_checkpoint(
     return EvaluationResult(
         checkpoint_path=str(ckpt_path),
         split=split,
-        n_samples=len(split_df),
+        # The served items, not the split's rows: under sensor_block the dataset
+        # serves one item per datalogger block and the frame is the truth here.
+        n_samples=len(predictions),
         enabled_targets=enabled_targets,
         global_metrics=global_metrics,
         stratified=stratified,
