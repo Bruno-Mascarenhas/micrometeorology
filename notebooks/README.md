@@ -17,6 +17,7 @@ https://colab.research.google.com/github/Bruno-Mascarenhas/micrometeorology/blob
 | [`allsky_multimodal_colab.ipynb`](allsky_multimodal_colab.ipynb) | Train the **multimodal** all-sky pipeline (V0–V7 DHI / k-index / sky models) from a prepared Colab bundle |
 | [`tcc/02_colab_training.ipynb`](tcc/02_colab_training.ipynb) | Train the **solrad_correction** models (SVM / LSTM / Transformer) via `solrad-colab` |
 | `colab/01_calibracao.ipynb`, `colab/02_backbones_pesados.ipynb`, `colab/03_portfolio_24h.ipynb` | The Colab Pro+ GPU campaign, in that order: 01 reproduces the local reference and **gates** the other two, 02 tests backbone capacity and input resolution, 03 is the 24-hour portfolio. All three drive `colab/_colab_runner.py` |
+| `colab/04_ceu_multitarefa.ipynb` | Sky condition first: the fine-tuned multitask arms (`CEU_TARGETS`) on the `dataset-iso` bundle — a transfer gate against the local `ceu` arm, ViT-B/14, a 5-frame temporal window, 448 px, and a 5-seed ensemble scored by `_colab_runner.ensemble_predictions` |
 | `exploratory/*.ipynb` | Local data exploration (sensor merging, WRF time series) — no GPU needed |
 
 The multimodal notebook is **thin**: it provisions a CPython 3.14 venv with `uv`
