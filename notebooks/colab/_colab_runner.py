@@ -23,9 +23,19 @@ import time
 from pathlib import Path
 from typing import Any
 
-#: Every arm in these notebooks trains the single DHI head; the multitask heads
-#: cost 0.86 W/m2 in the measured factorial.
+#: Notebooks 01-03 train the single DHI head; the multitask heads cost 0.86 W/m2
+#: in the factorial measured over FROZEN embeddings, which is the only such measure.
 DHI_ONLY_TARGETS: dict[str, Any] = {"kindex": {"enabled": False}, "sky": {"enabled": False}}
+
+#: Notebook 04: the sky condition is the primary target, with k* and the
+#: clear-sky-normalised diffuse trained beside it. Weights 1/1/1 as in the
+#: factorial; the composite val loss then leans toward the cross-entropy term,
+#: which is the intended selection bias when the sky class comes first.
+CEU_TARGETS: dict[str, Any] = {
+    "dhi": {"enabled": True, "loss": "mae", "weight": 1.0, "parameterization": "clearsky_index"},
+    "kindex": {"enabled": True, "kind": "kstar", "loss": "mae", "weight": 1.0},
+    "sky": {"enabled": True, "weight": 1.0},
+}
 
 
 def probe_accelerator() -> dict[str, Any]:
@@ -115,13 +125,17 @@ def write_config(
     model: dict[str, Any],
     train: dict[str, Any],
     targets: dict[str, Any] | None = None,
+    alignment: dict[str, Any] | None = None,
+    augmentation: dict[str, Any] | None = None,
     note: str = "",
 ) -> Path:
     """Write one experiment YAML and return its path.
 
     ``seed`` and ``train.num_workers`` have no CLI override, so a per-run file is
     the only way to vary them; the rest is written alongside them so the file is
-    a complete record of what produced the artifacts next to it.
+    a complete record of what produced the artifacts next to it. ``alignment``
+    lands under ``data`` (the temporal-window arms set ``strategy`` and
+    ``window_minutes`` there) and ``augmentation`` at the top level.
     """
     import yaml
 
@@ -134,20 +148,35 @@ def write_config(
         "model": model,
         "train": train,
     }
+    if alignment is not None:
+        body["data"]["alignment"] = alignment
     if targets is not None:
         body["targets"] = targets
+    if augmentation is not None:
+        body["augmentation"] = augmentation
     path.parent.mkdir(parents=True, exist_ok=True)
     header = f"# {note}\n" if note else ""
     path.write_text(header + yaml.safe_dump(body, sort_keys=False), encoding="utf-8")
     return path
 
 
-def run_experiment(config: Path, *, python: str, split: str = "test") -> dict[str, Any]:
-    """Train then evaluate one config; return a flat metrics row.
+def run_experiment(
+    config: Path, *, python: str, split: str = "test", checkpoint: str = "best"
+) -> dict[str, Any]:
+    """Train (unless already trained) then evaluate one config; return a flat metrics row.
 
     *python* is the venv interpreter, as :func:`stage_bundle` takes: the
     ``allsky`` console script sits beside it, so the CLI is resolved by path and
     not by whatever ``PATH`` happens to hold when the cell runs.
+
+    *checkpoint* names which weights to score — ``best`` (the early-stopping
+    monitor's pick, reported under ``eval-<split>``) or ``last`` (the end of the
+    schedule, under ``eval-<split>-last``). Under a multitask loss the two answer
+    different questions: measured on the ``ceu`` arm, the sky cross-entropy on
+    validation rises from the second epoch while the DHI error keeps falling, so
+    the composite monitor freezes ``best`` early and only ``last`` carries the
+    annealed regression heads. Training is skipped when ``last.ckpt`` already
+    exists, so scoring a second checkpoint costs one evaluation, not a retrain.
 
     A failure is recorded and returned rather than raised: one bad arm must not
     end a 24-hour session that still has other arms to run.
@@ -156,28 +185,39 @@ def run_experiment(config: Path, *, python: str, split: str = "test") -> dict[st
 
     cfg = yaml.safe_load(config.read_text())
     run_dir = Path(cfg["output_dir"]) / "run"
-    row: dict[str, Any] = {"name": cfg["name"], "seed": cfg["seed"], "config": str(config)}
+    row: dict[str, Any] = {
+        "name": cfg["name"],
+        "seed": cfg["seed"],
+        "config": str(config),
+        "checkpoint": checkpoint,
+    }
     allsky_cli = str(Path(python).with_name("allsky"))
 
     started = time.time()
-    train = subprocess.run(
-        [allsky_cli, "train", "-c", str(config)], capture_output=True, text=True, check=False
-    )
-    if train.returncode != 0:
-        row["status"] = "train_failed"
-        row["error"] = train.stderr[-2000:]
-        return row
+    if not (run_dir / "last.ckpt").exists():
+        train = subprocess.run(
+            [allsky_cli, "train", "-c", str(config)], capture_output=True, text=True, check=False
+        )
+        if train.returncode != 0:
+            row["status"] = "train_failed"
+            row["error"] = train.stderr[-2000:]
+            return row
 
+    report_dir = run_dir / (
+        f"eval-{split}" if checkpoint == "best" else f"eval-{split}-{checkpoint}"
+    )
     evaluate = subprocess.run(
         [
             allsky_cli,
             "evaluate",
             "-k",
-            str(run_dir / "best.ckpt"),
+            str(run_dir / f"{checkpoint}.ckpt"),
             "--split",
             split,
             "-c",
             str(config),
+            "--report-dir",
+            str(report_dir),
         ],
         capture_output=True,
         text=True,
@@ -188,7 +228,7 @@ def run_experiment(config: Path, *, python: str, split: str = "test") -> dict[st
         row["error"] = evaluate.stderr[-2000:]
         return row
 
-    metrics = json.loads((run_dir / f"eval-{split}" / "eval_metrics.json").read_text())
+    metrics = json.loads((report_dir / "eval_metrics.json").read_text())
     dhi = metrics["global"]["dhi"]
     row.update(
         status="ok",
@@ -199,6 +239,13 @@ def run_experiment(config: Path, *, python: str, split: str = "test") -> dict[st
         split_id_ok=metrics["meta"].get("split_id_ok"),
         manifest_hash_ok=metrics["meta"].get("manifest_hash_ok"),
     )
+    sky = metrics["global"].get("sky")
+    if sky is not None:
+        row.update(
+            sky_accuracy=sky.get("accuracy"),
+            sky_balanced_accuracy=sky.get("balanced_accuracy"),
+            sky_macro_f1=sky.get("macro_f1"),
+        )
     return row
 
 
