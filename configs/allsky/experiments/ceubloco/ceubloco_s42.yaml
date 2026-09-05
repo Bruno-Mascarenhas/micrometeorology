@@ -18,6 +18,13 @@
 # mantem, no treino e na validacao, so o frame mais proximo do centroide do bloco
 # (end - 2,5 min): os forwards por epoca ficam iguais aos do ceu, os passos do
 # otimizador caem 5x, por isso epochs 60 (cosseno completo, paciencia 60). O teste
+# O best.ckpt e escolhido pela ACURACIA BALANCEADA de ceu na validacao
+# (monitor val/sky_balanced_acc, modo max): no ceu e no ceuord o val/loss composto
+# travou o best na epoca 2-3 e o last perdeu 2-4 pontos de recall nas classes
+# parciais — o que melhora no fim do treino sao a difusa e as classes
+# majoritarias, o que degrada e o recall das minoritarias, e a acuracia
+# balanceada e a media dos recalls. Com paciencia = teto ela so escolhe o
+# checkpoint, nao para o treino; o last e avaliado do mesmo jeito. A predicao
 # continua por frame no predictions.parquet; a agregacao por bloco e feita no
 # ensemble (score_by_sensor_block), com IC bootstrap por bloco e a baseline do
 # bloco anterior (0,67 — a persistencia de 1 min, 0,91, e artefato: 79 % dos
@@ -75,7 +82,7 @@ train:
   num_workers: 8
   early_stopping:
     patience: 60
-    monitor: val/loss
+    monitor: val/sky_balanced_acc
 augmentation:
   p_exposure: 0.5
   exposure_log2: 0.6
