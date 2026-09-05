@@ -235,8 +235,9 @@ def run_experiment(
         status="ok",
         wall_seconds=round(time.time() - started, 1),
         n_samples=metrics["n_samples"],
-        **{k: dhi[k] for k in ("rmse", "mae", "mbe", "r2") if k in dhi},
+        **{k: dhi[k] for k in ("rmse", "mae", "mbe", "r2", "d", "nrmse") if k in dhi},
         skill_clearsky=dhi.get("skill_clearsky"),
+        skill_persistence=dhi.get("skill_persistence"),
         split_id_ok=metrics["meta"].get("split_id_ok"),
         manifest_hash_ok=metrics["meta"].get("manifest_hash_ok"),
     )
@@ -246,6 +247,9 @@ def run_experiment(
             sky_accuracy=sky.get("accuracy"),
             sky_balanced_accuracy=sky.get("balanced_accuracy"),
             sky_macro_f1=sky.get("macro_f1"),
+            sky_kappa_quadratic=sky.get("kappa_quadratic"),
+            sky_within_one_class=sky.get("within_one_class"),
+            sky_ece=sky.get("ece"),
         )
     return row
 
@@ -352,7 +356,7 @@ def ensemble_predictions(
     from allsky.evaluation.metrics import classification_metrics, regression_metrics
     from labmim_core.atomic import atomic_write, atomic_write_strict_json
     from labmim_core.site import STATION_UTC_OFFSET_HOURS
-    from labmim_core.sky import SKY_CLASS_COUNT, SKY_CLASS_KT_UPPER_BOUNDS
+    from labmim_core.sky import SKY_CLASS_COUNT, SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES
 
     if len(members) < 2:
         raise ValueError(f"an ensemble needs at least two members, got {len(members)}")
@@ -385,6 +389,16 @@ def ensemble_predictions(
         ensemble["obs_sky"] = observed
         ensemble["ens_sky_vote"] = _vote_with_ordinal_tiebreak(votes, SKY_CLASS_COUNT)
         estimators = {"vote": ensemble["ens_sky_vote"].to_numpy()}
+        probability_columns = [f"prob_sky_{name}" for name in SKY_CLASS_NAMES]
+        mean_probabilities = None
+        if all(all(c in f.columns for c in probability_columns) for f in frames):
+            mean_probabilities = np.mean(
+                [f[probability_columns].to_numpy(dtype=np.float64) for f in frames], axis=0
+            )
+            for position, column in enumerate(probability_columns):
+                ensemble[column] = mean_probabilities[:, position]
+            ensemble["ens_sky_prob"] = mean_probabilities.argmax(axis=1)
+            estimators["prob_mean"] = ensemble["ens_sky_prob"].to_numpy()
         if "ens_kindex" in ensemble.columns:
             times = pd.to_datetime(first["timestamp_utc"], utc=True)
             _, kt_clear = clearsky_ghi_and_kt(
@@ -394,12 +408,13 @@ def ensemble_predictions(
             ensemble["ens_kt"] = kt
             ensemble["ens_sky_kt_bin"] = np.digitize(kt, SKY_CLASS_KT_UPPER_BOUNDS, right=True)
             estimators["kt_bin"] = ensemble["ens_sky_kt_bin"].to_numpy()
-        valid = observed >= 0
         report["sky"] = {
-            name: {
-                **classification_metrics(observed, predicted, SKY_CLASS_COUNT),
-                "ordinal_mae": float(np.abs(predicted[valid] - observed[valid]).mean()),
-            }
+            name: classification_metrics(
+                observed,
+                predicted,
+                SKY_CLASS_COUNT,
+                probabilities=mean_probabilities if name == "prob_mean" else None,
+            )
             for name, predicted in estimators.items()
         }
 
@@ -504,7 +519,7 @@ def score_by_sensor_block(
     import pandas as pd
 
     from allsky.evaluation.metrics import classification_metrics, regression_metrics
-    from labmim_core.sky import SKY_CLASS_COUNT
+    from labmim_core.sky import SKY_CLASS_COUNT, SKY_CLASS_NAMES
 
     keyed = frame.assign(_block=sensor_block_key(frame, block_minutes))
     groups = keyed.groupby("_block", sort=True)
@@ -519,11 +534,18 @@ def score_by_sensor_block(
         obs_sky, pred_sky = sky
         blocks["obs_sky"] = groups[obs_sky].agg(_ordinal_mode)
         blocks["pred_sky"] = groups[pred_sky].agg(_ordinal_mode)
-        valid = blocks["obs_sky"].to_numpy() >= 0
-        report["sky"] = {
-            **classification_metrics(blocks["obs_sky"], blocks["pred_sky"], SKY_CLASS_COUNT),
-            "ordinal_mae": float(np.abs(blocks["pred_sky"] - blocks["obs_sky"])[valid].mean()),
-        }
+        probability_columns = [f"prob_sky_{name}" for name in SKY_CLASS_NAMES]
+        block_probabilities = (
+            groups[probability_columns].mean().to_numpy(dtype=np.float64)
+            if all(column in keyed.columns for column in probability_columns)
+            else None
+        )
+        report["sky"] = classification_metrics(
+            blocks["obs_sky"],
+            blocks["pred_sky"],
+            SKY_CLASS_COUNT,
+            probabilities=block_probabilities,
+        )
         previous = blocks.groupby("day_id")["obs_sky"].shift(1)
         has_previous = previous.notna().to_numpy()
         report["sky_persistence_previous_block"] = classification_metrics(

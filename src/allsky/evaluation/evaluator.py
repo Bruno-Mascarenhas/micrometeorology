@@ -482,6 +482,10 @@ def _run_inference(
             outputs = model(batch)
             for name in enabled_targets:
                 collected[name].append(_extract_prediction(name, outputs))
+            if "sky" in enabled_targets:
+                collected.setdefault("prob_sky", []).append(
+                    torch.softmax(outputs["sky_logits"].detach().float(), dim=-1).cpu().numpy()
+                )
 
     predicted: dict[str, np.ndarray] = {
         name: np.concatenate(chunks) if chunks else np.empty(0)
@@ -611,6 +615,10 @@ def _build_predictions_frame(
         if name == "sky":
             frame["obs_sky"] = split_df["sky_class"].to_numpy(dtype=np.int64)
             frame["pred_sky"] = np.asarray(predicted["sky"], dtype=np.int64)
+            if "prob_sky" in predicted:
+                probabilities = np.asarray(predicted["prob_sky"], dtype=np.float32)
+                for index, class_name in enumerate(SKY_CLASS_NAMES):
+                    frame[f"prob_sky_{class_name}"] = probabilities[:, index]
         else:
             obs_column = _REGRESSION_TARGETS[name]
             observed = (
@@ -769,10 +777,17 @@ def _global_metrics(
 def _target_metrics(frame: pd.DataFrame, name: str) -> dict[str, Any]:
     """Metrics for one target over *frame* (regression or classification)."""
     if name == "sky":
+        probability_columns = [f"prob_sky_{class_name}" for class_name in SKY_CLASS_NAMES]
+        probabilities = (
+            frame[probability_columns].to_numpy(dtype=np.float64)
+            if all(column in frame.columns for column in probability_columns)
+            else None
+        )
         return classification_metrics(
             frame["obs_sky"].to_numpy(),
             frame["pred_sky"].to_numpy(),
             n_classes=len(SKY_CLASS_NAMES),
+            probabilities=probabilities,
         )
     obs_col, pred_col = f"obs_{name}", f"pred_{name}"
     observed = frame[obs_col].to_numpy(dtype=np.float64)
@@ -917,6 +932,8 @@ def _metric_rows(
     rows: list[dict[str, Any]] = []
     for metric, value in metrics.items():
         if metric in skipped:
+            continue
+        if isinstance(value, dict | list):
             continue
         count = _row_count(metric, metrics)
         if count is None:
