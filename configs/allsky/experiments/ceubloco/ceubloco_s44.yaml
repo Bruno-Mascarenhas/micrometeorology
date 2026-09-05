@@ -1,0 +1,75 @@
+# A unidade do treino e a do rotulo: uma amostra = os frames de UMA linha do CR5000.
+#
+# O que o ceu mediu e que este braco ataca — e e o unico que MOVE O TETO:
+#
+# O rotulo sky_class e o Kt da media de 5 min END-stampada de uma linha do
+# datalogger, atribuido aos 4-5 frames de 1 min daquela janela (verificado em
+# dataset-iso: 9.538 blocos, target_dhi constante em 100 % deles). Um frame ve o
+# ceu INSTANTANEO, o rotulo e a MEDIA. Um oraculo com o Kt instantaneo perfeito,
+# medido na tabela de 1 min de 2024 (74.250 minutos) contra esse rotulo, faz
+# macro-F1 0,73 na mistura do teste — e o ceu (0,70) ja esta a 96 % disso. O mesmo
+# oraculo POR BLOCO: 0,84 com janela centrada no frame, 0,84-0,99 com a janela
+# alinhada ao bloco. A classe parcial-claro (0,10 de largura em Kt) tem sigma do
+# Kt instantaneo de 0,14 dentro dela: nao e aprendivel por frame.
+#
+# alignment.strategy: sensor_block agrupa exatamente os frames que compartilham
+# a linha do logger (ceil do carimbo local a 5 min) e faz a media das
+# codificacoes pelo caminho de janela do ImageEncoder. one_sample_per_block
+# mantem, no treino e na validacao, so o frame mais proximo do centroide do bloco
+# (end - 2,5 min): os forwards por epoca ficam iguais aos do ceu, os passos do
+# otimizador caem 5x, por isso epochs 60 (cosseno completo, paciencia 60). O teste
+# continua por frame no predictions.parquet; a agregacao por bloco e feita no
+# ensemble (score_by_sensor_block), com IC bootstrap por bloco e a baseline do
+# bloco anterior (0,67 — a persistencia de 1 min, 0,91, e artefato: 79 % dos
+# minutos consecutivos partilham a linha).
+#
+# Tudo o mais e o ceu: multitarefa sky + k* + difusa em clearsky_index, cls+mean,
+# wd 0,05, jitter/ruido/erase, dataset-iso. Difere so em data.alignment e no
+# horizonte. Controle pareado: ceu (por frame E por bloco); piso de decisao
+# 0,03 de macro-F1 (bootstrap por bloco).
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: ceubloco_s44
+output_dir: output/allsky-mm/experiments/ceubloco/ceubloco_s44
+seed: 44
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso
+  input_mode: image
+  alignment:
+    strategy: sensor_block
+    window_minutes: 5.0
+    max_frames: 5
+    one_sample_per_block: true
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 1.0
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  backbone_lr: 0.00001
+  epochs: 60
+  weight_decay: 0.05
+  num_workers: 8
+  early_stopping:
+    patience: 60
+    monitor: val/loss
+augmentation:
+  p_exposure: 0.5
+  exposure_log2: 0.6
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25
