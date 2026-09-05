@@ -1,3 +1,14 @@
+# ceubloco + a VARIABILIDADE dentro do bloco como sinal: media E desvio-padrao
+# das codificacoes dos 4-5 frames (model.temporal_pooling: mean_std).
+#
+# A media apaga exatamente o que distingue "parcialmente nublado" das outras
+# condicoes: num bloco de 5 min o ceu quebrado se move e as codificacoes dos
+# frames DIFEREM; num bloco claro ou encoberto, nao. O desvio-padrao por
+# dimensao sobre os frames reais do bloco (masked_mean_std_pool) e a assinatura
+# dessa dinamica, e dobra a largura que o tronco recebe (768 -> 1536 com
+# cls+mean). Custo de compute: zero alem do ceubloco — o backbone roda os mesmos
+# frames. Difere do ceubloco SO nesse pooling. Controle pareado: ceubloco.
+#
 # A unidade do treino e a do rotulo: uma amostra = os frames de UMA linha do CR5000.
 #
 # O que o ceu mediu e que este braco ataca — e e o unico que MOVE O TETO:
@@ -35,8 +46,8 @@
 # batch/lr que a memoria impoe e no horizonte. Controle pareado: ceu (por frame
 # E por bloco); piso de decisao 0,03 de macro-F1 (bootstrap por bloco).
 extends: [../_base.yaml, ../../models/image_only.yaml]
-name: ceubloco_s44
-output_dir: output/allsky-mm/experiments/ceubloco/ceubloco_s44
+name: ceublocostd_s44
+output_dir: output/allsky-mm/experiments/ceublocostd/ceublocostd_s44
 seed: 44
 features:
   set: bare
@@ -66,6 +77,7 @@ model:
   backbone_frozen: false
   unfreeze_last_n: 12
   backbone_pooling: cls+mean
+  temporal_pooling: mean_std
 train:
   lr: 0.00015
   backbone_lr: 0.000005

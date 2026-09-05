@@ -23,10 +23,17 @@
 # bloco anterior (0,67 — a persistencia de 1 min, 0,91, e artefato: 79 % dos
 # minutos consecutivos partilham a linha).
 #
+# Um item = 4-5 frames, entao o batch de 64 do ceu viraria 320 imagens por
+# forward e nao cabe nos 8 GiB da RTX 2060 (o ceu usa 3,75 GiB com 64 frames).
+# batch_size 16 = 80 frames por passo, ~5 GiB. O learning rate segue a regra da
+# raiz quadrada para otimizadores adaptativos (Malladi et al. 2022,
+# arXiv:2205.10287): lr x sqrt(16/64) = 0,5 -> 1,5e-4 na cabeca e 5e-6 no
+# backbone. Com 6.364 blocos de treino sao ~400 passos por epoca, 24k em 60.
+#
 # Tudo o mais e o ceu: multitarefa sky + k* + difusa em clearsky_index, cls+mean,
-# wd 0,05, jitter/ruido/erase, dataset-iso. Difere so em data.alignment e no
-# horizonte. Controle pareado: ceu (por frame E por bloco); piso de decisao
-# 0,03 de macro-F1 (bootstrap por bloco).
+# wd 0,05, jitter/ruido/erase, dataset-iso. Difere so em data.alignment, no
+# batch/lr que a memoria impoe e no horizonte. Controle pareado: ceu (por frame
+# E por bloco); piso de decisao 0,03 de macro-F1 (bootstrap por bloco).
 extends: [../_base.yaml, ../../models/image_only.yaml]
 name: ceubloco_s43
 output_dir: output/allsky-mm/experiments/ceubloco/ceubloco_s43
@@ -60,7 +67,9 @@ model:
   unfreeze_last_n: 12
   backbone_pooling: cls+mean
 train:
-  backbone_lr: 0.00001
+  lr: 0.00015
+  backbone_lr: 0.000005
+  batch_size: 16
   epochs: 60
   weight_decay: 0.05
   num_workers: 8
