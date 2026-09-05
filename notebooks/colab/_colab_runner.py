@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -288,3 +289,135 @@ def summarise(rows: list[dict[str, Any]]) -> Any:
     if "rmse" in frame.columns:
         frame = frame.sort_values("rmse", na_position="last")
     return frame.reset_index(drop=True)
+
+
+def _vote_with_ordinal_tiebreak(votes: Any, n_classes: int) -> Any:
+    """Majority class per row; a tie goes to the tied class nearest the mean index."""
+    import numpy as np
+
+    counts = np.stack([(votes == c).sum(axis=0) for c in range(n_classes)], axis=1)
+    top = counts.max(axis=1, keepdims=True)
+    tied = counts == top
+    mean_index = votes.mean(axis=0)[:, None]
+    distance = np.where(tied, np.abs(np.arange(n_classes)[None, :] - mean_index), np.inf)
+    return distance.argmin(axis=1)
+
+
+def ensemble_predictions(
+    members: Sequence[str | Path],
+    out_dir: str | Path,
+    *,
+    reference: Sequence[str | Path] = (),
+) -> dict[str, Any]:
+    """Average the members' per-sample predictions and score the ensemble.
+
+    Parameters
+    ----------
+    members:
+        ``eval-<split>/predictions.parquet`` of each seed, all over the SAME
+        rows: the frames are joined on ``sample_id`` and a member covering a
+        different set of samples is refused, because a mean over rows that only
+        some members predicted is not an ensemble of anything.
+    out_dir:
+        Where ``metrics.json`` and ``predictions.parquet`` are written.
+    reference:
+        Optional predictions of a control arm (one parquet per seed), averaged
+        the same way over the members' rows so the two ensembles are paired
+        sample by sample.
+
+    Returns
+    -------
+    dict
+        ``n_members``; ``dhi`` (regression metrics of the mean prediction, W m-2);
+        ``kindex`` when every member carries ``pred_kindex``; ``sky`` when every
+        member carries ``pred_sky``, with two estimators — ``vote`` (majority of
+        the members' classes, ties resolved to the tied class nearest the mean
+        class index, since the classes are ordered) and ``kt_bin`` (the mean k*
+        turned into Kt through the row's clear-sky Kt and binned on
+        ``SKY_CLASS_KT_UPPER_BOUNDS``) — each with the classification metrics
+        plus ``ordinal_mae``, the mean class-index distance; ``reference`` when
+        given, with the control ensemble's ``dhi`` metrics and the paired
+        ``rmse_delta`` (members minus control).
+
+    Raises
+    ------
+    ValueError
+        If fewer than two members are given, if the members do not cover one
+        identical set of samples, or if a reference does not cover every member row.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from allsky.clearsky import clearsky_ghi_and_kt
+    from allsky.evaluation.metrics import classification_metrics, regression_metrics
+    from labmim_core.atomic import atomic_write, atomic_write_strict_json
+    from labmim_core.site import STATION_UTC_OFFSET_HOURS
+    from labmim_core.sky import SKY_CLASS_COUNT, SKY_CLASS_KT_UPPER_BOUNDS
+
+    if len(members) < 2:
+        raise ValueError(f"an ensemble needs at least two members, got {len(members)}")
+    frames = [pd.read_parquet(path).set_index("sample_id").sort_index() for path in members]
+    index = frames[0].index
+    for path, frame in zip(members, frames, strict=True):
+        if not frame.index.equals(index):
+            raise ValueError(f"{path} covers a different sample set than {members[0]}")
+
+    def mean_of(column: str, source: list[Any]) -> Any:
+        return np.mean([f[column].to_numpy(dtype=np.float64) for f in source], axis=0)
+
+    first = frames[0]
+    ensemble = pd.DataFrame({"obs_dhi": first["obs_dhi"].to_numpy(dtype=np.float64)}, index=index)
+    ensemble["ens_dhi"] = mean_of("pred_dhi", frames)
+    report: dict[str, Any] = {
+        "n_members": len(frames),
+        "members": [str(path) for path in members],
+        "dhi": regression_metrics(ensemble["obs_dhi"], ensemble["ens_dhi"]),
+    }
+
+    if all("pred_kindex" in f.columns for f in frames):
+        ensemble["obs_kindex"] = first["obs_kindex"].to_numpy(dtype=np.float64)
+        ensemble["ens_kindex"] = mean_of("pred_kindex", frames)
+        report["kindex"] = regression_metrics(ensemble["obs_kindex"], ensemble["ens_kindex"])
+
+    if all("pred_sky" in f.columns for f in frames):
+        observed = first["obs_sky"].to_numpy(dtype=np.int64)
+        votes = np.stack([f["pred_sky"].to_numpy(dtype=np.int64) for f in frames])
+        ensemble["obs_sky"] = observed
+        ensemble["ens_sky_vote"] = _vote_with_ordinal_tiebreak(votes, SKY_CLASS_COUNT)
+        estimators = {"vote": ensemble["ens_sky_vote"].to_numpy()}
+        if "ens_kindex" in ensemble.columns:
+            times = pd.to_datetime(first["timestamp_utc"], utc=True)
+            _, kt_clear = clearsky_ghi_and_kt(
+                first["solar_zenith"].to_numpy(dtype=np.float64), times, STATION_UTC_OFFSET_HOURS
+            )
+            kt = ensemble["ens_kindex"].to_numpy() * np.asarray(kt_clear, dtype=np.float64)
+            ensemble["ens_kt"] = kt
+            ensemble["ens_sky_kt_bin"] = np.digitize(kt, SKY_CLASS_KT_UPPER_BOUNDS, right=True)
+            estimators["kt_bin"] = ensemble["ens_sky_kt_bin"].to_numpy()
+        valid = observed >= 0
+        report["sky"] = {
+            name: {
+                **classification_metrics(observed, predicted, SKY_CLASS_COUNT),
+                "ordinal_mae": float(np.abs(predicted[valid] - observed[valid]).mean()),
+            }
+            for name, predicted in estimators.items()
+        }
+
+    if reference:
+        controls = [pd.read_parquet(path).set_index("sample_id") for path in reference]
+        aligned = [c.reindex(index) for c in controls]
+        if any(a["pred_dhi"].isna().any() for a in aligned):
+            raise ValueError("a reference member does not cover every row of the ensemble")
+        ensemble["ref_dhi"] = mean_of("pred_dhi", aligned)
+        control = regression_metrics(ensemble["obs_dhi"], ensemble["ref_dhi"])
+        report["reference"] = {
+            "members": [str(path) for path in reference],
+            "dhi": control,
+            "rmse_delta": float(report["dhi"]["rmse"] - control["rmse"]),
+        }
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    atomic_write(out / "predictions.parquet", lambda tmp: ensemble.reset_index().to_parquet(tmp))
+    atomic_write_strict_json(out / "metrics.json", report)
+    return report
