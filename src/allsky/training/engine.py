@@ -1083,6 +1083,8 @@ class _MetricAccumulator:
         self._component_counts: dict[str, Tensor] = {}
         self._physical_sums: dict[str, Tensor] = {}
         self._physical_counts: dict[str, Tensor] = {}
+        self._sky_hits_per_class: Tensor | None = None
+        self._sky_rows_per_class: Tensor | None = None
 
     def update(
         self, outputs: Mapping[str, Tensor], batch: dict[str, Tensor], losses: Mapping[str, Tensor]
@@ -1140,6 +1142,19 @@ class _MetricAccumulator:
             mask = batch["sky_class"] >= 0
             hits = (predicted == batch["sky_class"]) & mask
             self._fold_physical("sky_acc", hits.sum(), mask.sum())
+            # Per-class tallies through scatter_add_ over a fixed-size vector:
+            # the shapes stay static, so no device sync per batch. The balanced
+            # accuracy — the mean of the per-class recalls, the number the sky
+            # head is selected on — is derived once, in result().
+            n_classes = int(outputs["sky_logits"].shape[-1])
+            labels = batch["sky_class"].clamp(min=0)
+            tally = torch.zeros(n_classes, dtype=torch.float64, device=labels.device)
+            self._sky_hits_per_class = _fold(
+                self._sky_hits_per_class, tally.scatter_add(0, labels, hits.to(torch.float64))
+            )
+            self._sky_rows_per_class = _fold(
+                self._sky_rows_per_class, tally.scatter_add(0, labels, mask.to(torch.float64))
+            )
 
     def _fold_physical(self, key: str, summed: Tensor, count: Tensor) -> None:
         """Fold one batch's ``(sum, row count)`` for the physical-unit metric *key*."""
@@ -1170,6 +1185,11 @@ class _MetricAccumulator:
             count = int(self._physical_counts[key])
             if count:
                 metrics[key] = float(summed) / count
+        if self._sky_rows_per_class is not None and self._sky_hits_per_class is not None:
+            present = self._sky_rows_per_class > 0
+            if bool(present.any()):
+                recalls = self._sky_hits_per_class[present] / self._sky_rows_per_class[present]
+                metrics["sky_balanced_acc"] = float(recalls.mean())
         return metrics
 
 

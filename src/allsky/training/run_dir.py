@@ -134,7 +134,7 @@ def csv_fields(cfg: ExperimentConfig) -> list[str]:
         if cfg.targets.kindex.enabled:
             fields += [f"{split}_loss_kindex", f"{split}_kindex_mae"]
         if cfg.targets.sky.enabled:
-            fields += [f"{split}_loss_sky", f"{split}_sky_acc"]
+            fields += [f"{split}_loss_sky", f"{split}_sky_acc", f"{split}_sky_balanced_acc"]
         if cfg.targets.cloud_fraction.enabled:
             fields.append(f"{split}_loss_cloud_fraction")
     return fields

@@ -425,3 +425,22 @@ def test_a_fresh_run_that_dies_before_its_first_best_leaves_the_previous_one_in_
         )
 
     assert load_checkpoint(run_dir / "best.ckpt")["epoch"] == preserved_epoch
+
+
+def test_the_balanced_sky_accuracy_is_the_mean_of_the_per_class_recalls():
+    accumulator = _MetricAccumulator((0.0, 1.0, 0.0, 1.0), {"loss_sky": 1.0})
+    logits = torch.tensor([[2.0, 0.0], [2.0, 0.0], [0.0, 2.0], [0.0, 2.0], [0.0, 2.0]])
+    batch = {
+        "features": torch.zeros(5, 1),
+        "dhi": torch.full((5,), float("nan")),
+        "kindex": torch.full((5,), float("nan")),
+        "sky_class": torch.tensor([0, 0, 0, 1, -1]),
+        "cloud_fraction": torch.full((5,), float("nan")),
+    }
+    losses = {"loss": torch.tensor(1.0), "loss_sky": _counted(torch.tensor(1.0))}
+
+    accumulator.update({"sky_logits": logits}, batch, losses)
+    metrics = accumulator.result()
+
+    assert metrics["sky_acc"] == pytest.approx(3 / 4)
+    assert metrics["sky_balanced_acc"] == pytest.approx((2 / 3 + 1.0) / 2)
