@@ -45,7 +45,7 @@ from allsky.modeling.geometry_adapter import (
 logger = logging.getLogger(__name__)
 
 #: Temporal pooling modes for a windowed ``embedding_seq``.
-TemporalPooling = Literal["mean", "attention"]
+TemporalPooling = Literal["mean", "attention", "mean_std"]
 
 __all__ = [
     "ImageEncoder",
@@ -53,6 +53,7 @@ __all__ = [
     "build_visual_encoder",
     "coerce_image_backbone",
     "masked_mean_pool",
+    "masked_mean_std_pool",
     "split_backbone_param_groups",
 ]
 
@@ -84,6 +85,42 @@ def masked_mean_pool(sequence: Tensor, mask: Tensor | None) -> Tensor:
     count = weights.sum(dim=1).clamp_min(1.0)
     masked: Tensor = summed / count
     return masked
+
+
+#: Variance floor under the square root of the pooled standard deviation, so a
+#: one-frame window (variance exactly zero) keeps a finite gradient.
+STD_POOL_EPSILON = 1e-6
+
+
+def masked_mean_std_pool(sequence: Tensor, mask: Tensor | None) -> Tensor:
+    """Mean and standard deviation over ``T`` of a ``(B, T, D)`` window, concatenated.
+
+    The mean is what :func:`masked_mean_pool` returns; the standard deviation
+    is the population one over the real steps. A datalogger block of an all-sky
+    camera is 4-5 frames of the same five minutes, and how much those frames
+    DIFFER is the signature the mean erases: a broken-cloud sky moves inside the
+    block, an overcast or clear one does not.
+
+    Parameters
+    ----------
+    sequence:
+        ``(B, T, D)`` float32.
+    mask:
+        ``(B, T)`` bool, True where the step is real; ``None`` pools everything.
+
+    Returns
+    -------
+    Tensor
+        ``(B, 2 * D)`` float32: the mean, then the standard deviation.
+    """
+    mean = masked_mean_pool(sequence, mask)
+    centred = sequence - mean.unsqueeze(1)
+    if mask is None:
+        variance = centred.pow(2).mean(dim=1)
+    else:
+        weights = mask.unsqueeze(-1).to(sequence.dtype)
+        variance = (centred.pow(2) * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+    return torch.cat([mean, torch.sqrt(variance + STD_POOL_EPSILON)], dim=-1)
 
 
 def _projection(in_dim: int, out_dim: int | None, dropout: float) -> tuple[nn.Module, int]:
@@ -282,11 +319,19 @@ class ImageEncoder(nn.Module):
         out_dim: int | None = None,
         dropout: float = 0.0,
         extra_input_channels: int = 0,
+        temporal_pooling: TemporalPooling = "mean",
     ) -> None:
         super().__init__()
         dim = getattr(backbone, "dim", None)
         if dim is None:
             raise AttributeError("image backbone must expose an integer 'dim' attribute")
+        if temporal_pooling not in ("mean", "mean_std"):
+            raise ValueError(
+                f"the image encoder pools a frame window by 'mean' or 'mean_std', got "
+                f"{temporal_pooling!r}; the learned attention pooler exists only for the "
+                "precomputed-embedding source"
+            )
+        self.temporal_pooling = temporal_pooling
         self.backbone = backbone
         partial_finetune = unfreeze_last_n > 0 and getattr(backbone, "blocks", None) is not None
         if frozen or partial_finetune:
@@ -299,7 +344,8 @@ class ImageEncoder(nn.Module):
             if extra_input_channels > 0
             else None
         )
-        self.projection, self._out_dim = _projection(int(dim), out_dim, dropout)
+        pooled_dim = int(dim) * (2 if temporal_pooling == "mean_std" else 1)
+        self.projection, self._out_dim = _projection(pooled_dim, out_dim, dropout)
 
     def train(self, mode: bool = True) -> ImageEncoder:
         """Set training mode, keeping every frozen normalisation layer in eval.
@@ -374,13 +420,17 @@ class ImageEncoder(nn.Module):
         """
         if "image_seq" in batch:
             features = self._encode_window(batch["image_seq"], batch.get("frame_mask"))
+        elif self.temporal_pooling == "mean_std":
+            # A single frame is a one-frame window: its mean is itself and its
+            # spread the floor, so the projection sees the width it was built for.
+            features = self._encode_window(batch["image"].unsqueeze(1), None)
         else:
             features = self.backbone(batch["image"])
         out: Tensor = self.projection(features)
         return out
 
     def _encode_window(self, window: Tensor, mask: Tensor | None) -> Tensor:
-        """Encode a ``(B, T, C, H, W)`` window and mean-pool it to ``(B, dim)``.
+        """Encode a ``(B, T, C, H, W)`` window and pool it over ``T`` to ``(B, out)``.
 
         The window is folded into the batch so the backbone runs ONCE over
         ``B * T`` frames rather than T times over B — the cost is the same
@@ -395,6 +445,8 @@ class ImageEncoder(nn.Module):
         batch_size, steps = window.shape[0], window.shape[1]
         folded = window.reshape(batch_size * steps, *window.shape[2:])
         encoded = self.backbone(folded).reshape(batch_size, steps, -1)
+        if self.temporal_pooling == "mean_std":
+            return masked_mean_std_pool(encoded, mask)
         return masked_mean_pool(encoded, mask)
 
     def param_groups(self, backbone_lr: float) -> list[dict[str, Any]]:
@@ -690,5 +742,6 @@ def build_visual_encoder(
             out_dim=out_dim,
             dropout=dropout,
             extra_input_channels=extra_input_channels,
+            temporal_pooling=temporal_pooling,
         )
     raise ValueError(f"unknown input_mode {input_mode!r}; expected 'image' or 'embedding'")

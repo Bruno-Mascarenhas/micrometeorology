@@ -129,7 +129,7 @@ def _sensor_hidden(params: dict[str, Any]) -> tuple[int, ...]:
     return tuple(params.get("sensor_hidden", (64, 128)))
 
 
-def temporal_pooling_for_strategy(strategy: str) -> Literal["mean", "attention"]:
+def temporal_pooling_for_strategy(strategy: str) -> Literal["mean", "attention"] | None:
     """Visual temporal pooler implied by an alignment *strategy*.
 
     Only ``"attention_pooling"`` — whose dataset emits a padded ``embedding_seq``
@@ -149,15 +149,22 @@ def temporal_pooling_for_strategy(strategy: str) -> Literal["mean", "attention"]
 
     Returns
     -------
-    Literal["mean", "attention"]
-        The pooler name to hand :func:`build_model`.
+    Literal["mean", "attention"] | None
+        The pooler name to hand :func:`build_model`; ``None`` under
+        ``sensor_block``, whose image window may be pooled by ``mean`` or by
+        ``mean_std`` as ``model.temporal_pooling`` says — the one strategy where
+        that knob is read rather than overridden.
     """
-    return "attention" if strategy == "attention_pooling" else "mean"
+    if strategy == "attention_pooling":
+        return "attention"
+    if strategy == "sensor_block":
+        return None
+    return "mean"
 
 
 def _temporal_pooling(
     params: dict[str, Any], override: Literal["mean", "attention"] | None = None
-) -> Literal["mean", "attention"]:
+) -> Literal["mean", "attention", "mean_std"]:
     """Temporal pooling: *override* (engine/evaluator) wins, else the model param.
 
     The default is ``"mean"``; the value is validated downstream by
@@ -165,7 +172,9 @@ def _temporal_pooling(
     """
     if override is not None:
         return override
-    return cast('Literal["mean", "attention"]', str(params.get("temporal_pooling", "mean")))
+    return cast(
+        'Literal["mean", "attention", "mean_std"]', str(params.get("temporal_pooling", "mean"))
+    )
 
 
 def _build_climatology(

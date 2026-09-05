@@ -541,6 +541,19 @@ class ExperimentConfig(BaseModel):
     augmentation: AugmentationConfig = Field(default_factory=AugmentationConfig)
 
     @model_validator(mode="after")
+    def _std_pooling_needs_an_image_window(self) -> ExperimentConfig:
+        pooling = self.model.model_dump().get("temporal_pooling")
+        if pooling == "mean_std" and (
+            self.data.input_mode != "image" or self.data.alignment.strategy == "center_frame"
+        ):
+            raise ValueError(
+                "model.temporal_pooling 'mean_std' pools a WINDOW of frames in image mode; the "
+                f"embedding source has already averaged its window and strategy "
+                f"{self.data.alignment.strategy!r} serves one frame"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _geometry_channels_need_image_mode(self) -> ExperimentConfig:
         """Refuse ``model.geometry_channels`` in embedding mode, where no pixel is read.
 

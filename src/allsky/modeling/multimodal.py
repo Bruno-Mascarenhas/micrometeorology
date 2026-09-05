@@ -19,7 +19,11 @@ from allsky.modeling.contracts import ModelOutputs
 from allsky.modeling.fusion import build_fusion
 from allsky.modeling.heads import Heads, Trunk
 from allsky.modeling.sensor_encoder import SensorEncoder
-from allsky.modeling.visual_encoder import build_visual_encoder, split_backbone_param_groups
+from allsky.modeling.visual_encoder import (
+    TemporalPooling,
+    build_visual_encoder,
+    split_backbone_param_groups,
+)
 
 __all__ = ["MultimodalNet"]
 
@@ -106,7 +110,7 @@ class MultimodalNet(nn.Module):
         dropout: float = 0.1,
         num_heads: int = 4,
         token_dim: int | None = None,
-        temporal_pooling: Literal["mean", "attention"] = "mean",
+        temporal_pooling: TemporalPooling = "mean",
         backbone_frozen: bool = False,
         unfreeze_last_n: int = 0,
         extra_input_channels: int = 0,
