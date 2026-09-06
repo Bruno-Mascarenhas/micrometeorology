@@ -348,3 +348,25 @@ def test_an_arm_already_archived_on_drive_is_harvested_instead_of_retrained(
     assert row["rmse"] == pytest.approx(14.2)
     assert row["sky_macro_f1"] == pytest.approx(0.72)
     assert row["checkpoint"] == "last"
+
+
+def test_the_mirror_rsyncs_every_pair_in_order_and_names_the_ones_that_failed() -> None:
+    import subprocess
+
+    runner = _load_runner()
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        code = 1 if command[-1].endswith("/fila") else 0
+        return subprocess.CompletedProcess(command, code, "", "")
+
+    failed = runner.mirror_once(
+        [("/vm/runs", "gs://b/runs"), ("gs://b/fila", "/vm/fila")], run=fake_run
+    )
+
+    assert commands == [
+        ["gcloud", "storage", "rsync", "-r", "/vm/runs", "gs://b/runs"],
+        ["gcloud", "storage", "rsync", "-r", "gs://b/fila", "/vm/fila"],
+    ]
+    assert failed == ["gs://b/fila -> /vm/fila"]

@@ -529,6 +529,51 @@ def start_live_sync(out_dir: Path, target_dir: Path, *, period_seconds: float = 
     return thread
 
 
+def _run_quiet(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, capture_output=True, text=True, check=False)
+
+
+def mirror_once(
+    pairs: Sequence[tuple[str, str]],
+    *,
+    run: Callable[[list[str]], subprocess.CompletedProcess[str]] = _run_quiet,
+) -> list[str]:
+    """``gcloud storage rsync -r`` each ``(source, destination)`` pair; return the ones that failed.
+
+    Colab Enterprise mounts no Drive: what leaves the VM leaves through a bucket,
+    and this is what carries the archive, the live mirror and the queue state
+    there — and brings the queue's job files back. The sync is additive on both
+    sides, so a job file removed from the bucket stays on the VM until the
+    session ends.
+
+    Returns
+    -------
+    list of str
+        ``"source -> destination"`` for every pair whose rsync exited non-zero.
+    """
+    failed: list[str] = []
+    for source, destination in pairs:
+        result = run(["gcloud", "storage", "rsync", "-r", source, destination])
+        if result.returncode != 0:
+            failed.append(f"{source} -> {destination}")
+    return failed
+
+
+def start_mirror(pairs: Sequence[tuple[str, str]], *, period_seconds: float = 300.0) -> Any:
+    """Run :func:`mirror_once` every *period_seconds* on a daemon thread; return it."""
+    import threading
+
+    def loop() -> None:
+        while True:
+            for failure in mirror_once(pairs):
+                print(f"espelho: {failure}")
+            time.sleep(period_seconds)
+
+    thread = threading.Thread(target=loop, name="mirror", daemon=True)
+    thread.start()
+    return thread
+
+
 def summarise(rows: list[dict[str, Any]]) -> Any:
     """Tidy DataFrame of the harvested rows, best RMSE first."""
     import pandas as pd
