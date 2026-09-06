@@ -332,7 +332,10 @@ def test_an_arm_already_archived_on_drive_is_harvested_instead_of_retrained(
             {
                 "n_samples": 3,
                 "meta": {"split_id_ok": True},
-                "global": {"dhi": {"rmse": 14.2, "mae": 9.1}, "sky": {"macro_f1": 0.72}},
+                "global": {
+                    "dhi": {"rmse": 14.2, "mae": 9.1},
+                    "sky": {"macro_f1": 0.72, "per_class": {"clear": {"f1": 0.9, "recall": 0.88}}},
+                },
             }
         )
     )
@@ -347,6 +350,7 @@ def test_an_arm_already_archived_on_drive_is_harvested_instead_of_retrained(
     assert row["status"] == "archived"
     assert row["rmse"] == pytest.approx(14.2)
     assert row["sky_macro_f1"] == pytest.approx(0.72)
+    assert row["sky_f1_clear"] == pytest.approx(0.9)
     assert row["checkpoint"] == "last"
 
 

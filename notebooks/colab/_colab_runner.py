@@ -275,6 +275,7 @@ def _harvest(
             sky_kappa_quadratic=sky.get("kappa_quadratic"),
             sky_within_one_class=sky.get("within_one_class"),
             sky_ece=sky.get("ece"),
+            **{f"sky_f1_{name}": scores["f1"] for name, scores in sky.get("per_class", {}).items()},
         )
     return row
 
