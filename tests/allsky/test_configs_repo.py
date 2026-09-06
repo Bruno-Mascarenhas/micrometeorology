@@ -164,7 +164,7 @@ def test_every_experiment_trains_on_a_dataset_some_prepare_config_builds(
 #: ``_EXPOSURE_SOURCE_ROOT`` — no prepare config builds it, its producer is the
 #: CLI command, so the test asserts the chain instead of the prepare set.
 _EXPOSURE_ARMS = frozenset({"ceuexp", "ceuexpshuf"})
-_EXPOSURE_DATA_ROOT = "output/allsky-mm/dataset-iso-exp"
+_EXPOSURE_DATA_ROOT = "output/allsky-mm/dataset-iso-20260906-exp"
 _EXPOSURE_SOURCE_ROOT = "output/allsky-mm/dataset-iso"
 
 
