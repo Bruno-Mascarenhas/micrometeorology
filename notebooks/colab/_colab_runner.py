@@ -20,7 +20,8 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -162,7 +163,12 @@ def write_config(
 
 
 def run_experiment(
-    config: Path, *, python: str, split: str = "test", checkpoint: str = "best"
+    config: Path,
+    *,
+    python: str,
+    split: str = "test",
+    checkpoint: str = "best",
+    archive_dir: str | None = None,
 ) -> dict[str, Any]:
     """Train (unless already trained) then evaluate one config; return a flat metrics row.
 
@@ -181,6 +187,11 @@ def run_experiment(
 
     A failure is recorded and returned rather than raised: one bad arm must not
     end a 24-hour session that still has other arms to run.
+
+    *archive_dir* is where :func:`archive` put earlier runs: a report already
+    there, with nothing trained on this VM, is harvested as ``archived`` instead
+    of retrained — what lets a session reclaimed at hour 20 be rerun without
+    paying the first 20 hours again.
     """
     import yaml
 
@@ -193,8 +204,13 @@ def run_experiment(
         "checkpoint": checkpoint,
     }
     allsky_cli = str(Path(python).with_name("allsky"))
+    report_name = f"eval-{split}" if checkpoint == "best" else f"eval-{split}-{checkpoint}"
 
     started = time.time()
+    if archive_dir is not None and not (run_dir / "last.ckpt").exists():
+        archived = Path(archive_dir) / cfg["name"] / report_name / "eval_metrics.json"
+        if archived.exists():
+            return _harvest(row, archived, status="archived", wall_seconds=0.0)
     if not (run_dir / "last.ckpt").exists():
         train = subprocess.run(
             [allsky_cli, "train", "-c", str(config)], capture_output=True, text=True, check=False
@@ -204,9 +220,7 @@ def run_experiment(
             row["error"] = train.stderr[-2000:]
             return row
 
-    report_dir = run_dir / (
-        f"eval-{split}" if checkpoint == "best" else f"eval-{split}-{checkpoint}"
-    )
+    report_dir = run_dir / report_name
     evaluate = subprocess.run(
         [
             allsky_cli,
@@ -229,11 +243,22 @@ def run_experiment(
         row["error"] = evaluate.stderr[-2000:]
         return row
 
-    metrics = json.loads((report_dir / "eval_metrics.json").read_text())
-    dhi = metrics["global"]["dhi"]
-    row.update(
+    return _harvest(
+        row,
+        report_dir / "eval_metrics.json",
         status="ok",
         wall_seconds=round(time.time() - started, 1),
+    )
+
+
+def _harvest(
+    row: dict[str, Any], metrics_path: Path, *, status: str, wall_seconds: float
+) -> dict[str, Any]:
+    metrics = json.loads(metrics_path.read_text())
+    dhi = metrics["global"]["dhi"]
+    row.update(
+        status=status,
+        wall_seconds=wall_seconds,
         n_samples=metrics["n_samples"],
         **{k: dhi[k] for k in ("rmse", "mae", "mbe", "r2", "d", "nrmse") if k in dhi},
         skill_clearsky=dhi.get("skill_clearsky"),
@@ -277,12 +302,231 @@ def archive(
     change fixed the high-sun bias or just moved the average.
     """
     source = Path(run_output_dir) / "run"
+    if not source.exists():
+        return f"{source}: nada a arquivar — o treino nao chegou a criar o diretorio"
     target = Path(drive_dir) / Path(run_output_dir).name
     ignore = None if keep_checkpoint else shutil.ignore_patterns("*.ckpt")
     shutil.copytree(source, target, dirs_exist_ok=True, ignore=ignore)
     if config is not None and Path(config).exists():
         shutil.copy2(config, target / Path(config).name)
     return f"{target}: {sum(1 for _ in target.rglob('*') if _.is_file())} arquivo(s)"
+
+
+#: A queue job carries the ``write_config`` keywords a notebook cannot know in
+#: advance — and nothing the VM decides for itself (paths, workers, AMP dtype).
+JOB_KEYS = frozenset(
+    {"name", "seed", "note", "model", "train", "alignment", "targets", "augmentation"}
+)
+JOB_REQUIRED_KEYS = frozenset({"name", "seed"})
+JOB_SUFFIXES = (".yaml", ".yml")
+QUEUE_STOP_FILE = "PARE"
+QUEUE_STATE_DIR = "fila"
+LIVE_DIR = "_live"
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+
+def _iso(seconds: float) -> str:
+    return datetime.fromtimestamp(seconds, tz=UTC).isoformat(timespec="seconds")
+
+
+def load_job(path: Path) -> dict[str, Any]:
+    """Read one queue job and refuse anything that is not a ``write_config`` keyword.
+
+    Raises
+    ------
+    ValueError
+        When the file is not a mapping, names a key the notebook would silently
+        ignore, or lacks ``name``/``seed``.
+    """
+    import yaml
+
+    body = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(body, dict):
+        raise ValueError(f"{path.name}: a job must be a YAML mapping")  # noqa: TRY004
+    unknown = sorted(set(body) - JOB_KEYS)
+    missing = sorted(JOB_REQUIRED_KEYS - set(body))
+    if unknown or missing:
+        raise ValueError(f"{path.name}: unknown keys {unknown}, missing keys {missing}")
+    return body
+
+
+def _job_status(artifacts: Path, job_file: Path) -> str | None:
+    status = artifacts / QUEUE_STATE_DIR / f"{job_file.stem}.status.json"
+    if not status.exists():
+        return None
+    return str(json.loads(status.read_text(encoding="utf-8")).get("status"))
+
+
+def pending_jobs(queue_dir: Path, artifacts_dir: Path) -> list[Path]:
+    """Job files not yet settled, in file-name order.
+
+    A job is settled once its status file under ``<artifacts>/fila/`` says
+    anything but ``running``: ``running`` is what a reclaimed VM leaves behind,
+    so it is the one state that gets picked up again.
+    """
+    artifacts = Path(artifacts_dir)
+    files = sorted(p for p in Path(queue_dir).iterdir() if p.suffix in JOB_SUFFIXES)
+    return [p for p in files if _job_status(artifacts, p) in (None, "running")]
+
+
+def run_queue(
+    queue_dir: Path,
+    artifacts_dir: Path,
+    run_job: Callable[[dict[str, Any]], dict[str, Any]],
+    *,
+    poll_seconds: float = 180.0,
+    idle_limit_seconds: float = 1800.0,
+    deadline_seconds: float = 20.0 * 3600.0,
+    clock: Callable[[], float] = time.time,
+    sleep: Callable[[float], None] = time.sleep,
+) -> list[dict[str, Any]]:
+    """Run every job dropped in *queue_dir*, in file-name order, until told to stop.
+
+    The queue is a Drive folder written from outside the VM, so the loop owns no
+    state of its own: what it knows is on Drive, under ``<artifacts>/fila/`` — one
+    ``<job>.status.json`` per job (``running``, then the row's status or
+    ``failed`` with the traceback) and a ``heartbeat.json`` rewritten on every
+    pass. Three things end it: a file named ``PARE`` in the queue, *deadline_seconds*
+    since the call, or *idle_limit_seconds* without a job to run — an idle GPU
+    keeps billing, so waiting is bounded.
+
+    A job that raises is recorded and skipped, never retried: the traceback on
+    Drive is the signal to fix the job file and drop it again under a new name.
+
+    Returns
+    -------
+    list of dict
+        One harvested row per job attempted, in the order they ran.
+    """
+    import traceback
+
+    queue = Path(queue_dir)
+    artifacts = Path(artifacts_dir)
+    state = artifacts / QUEUE_STATE_DIR
+    state.mkdir(parents=True, exist_ok=True)
+    started = clock()
+    last_work = started
+    rows: list[dict[str, Any]] = []
+    while True:
+        now = clock()
+        pending = pending_jobs(queue, artifacts)
+        if (queue / QUEUE_STOP_FILE).exists():
+            reason: str | None = "stop_file"
+        elif now - started >= deadline_seconds:
+            reason = "deadline"
+        elif now - last_work >= idle_limit_seconds:
+            reason = "idle"
+        else:
+            reason = None
+        _write_json(
+            state / "heartbeat.json",
+            {
+                "time": _iso(now),
+                "pending": [p.name for p in pending],
+                "ran": len(rows),
+                "stopped": reason,
+            },
+        )
+        if reason is not None:
+            return rows
+        if not pending:
+            sleep(poll_seconds)
+            continue
+        job_file = pending[0]
+        status = state / f"{job_file.stem}.status.json"
+        try:
+            job = load_job(job_file)
+            _write_json(status, {"status": "running", "job": job_file.name, "started": _iso(now)})
+            row = run_job(job)
+        except Exception as exc:  # noqa: BLE001 - one bad job must not end a 24-hour session; the traceback is archived instead
+            row = {"name": job_file.stem, "status": "failed", "error": str(exc)}
+            _write_json(
+                status,
+                {"status": "failed", "job": job_file.name, "error": traceback.format_exc()},
+            )
+        else:
+            _write_json(
+                status,
+                {"status": row.get("status", "ok"), "job": job_file.name, "row": row},
+            )
+        rows.append(row)
+        last_work = clock()
+
+
+def _nvidia_smi() -> str | None:
+    """``utilization.gpu, memory.used`` as nvidia-smi prints them; None without a GPU."""
+    try:
+        probe = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except FileNotFoundError:
+        return None
+    return probe.stdout.strip() or None
+
+
+def sync_live(
+    out_dir: Path,
+    target_dir: Path,
+    *,
+    gpu_probe: Callable[[], str | None] = _nvidia_smi,
+    clock: Callable[[], float] = time.time,
+) -> dict[str, Any]:
+    """Mirror every run's epoch history to *target_dir* and write a heartbeat there.
+
+    ``run_experiment`` keeps the training output in memory, so during the hours a
+    run takes the only evidence it is computing is ``<run>/metrics.csv`` growing
+    by one row per epoch. Copying it to Drive beside the GPU utilisation is what
+    lets someone outside the VM tell a training from a hung process.
+
+    Returns
+    -------
+    dict
+        The heartbeat written: ``time``, ``gpu`` and the run names whose history
+        changed since the previous call.
+    """
+    target = Path(target_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    updated: list[str] = []
+    for history in sorted(Path(out_dir).glob("*/run/metrics.csv")):
+        name = history.parents[1].name
+        mirror = target / name / "metrics.csv"
+        if mirror.exists() and mirror.stat().st_size == history.stat().st_size:
+            continue
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(history, mirror)
+        updated.append(name)
+    beat = {"time": _iso(clock()), "gpu": gpu_probe(), "updated": updated}
+    _write_json(target / "heartbeat.json", beat)
+    return beat
+
+
+def start_live_sync(out_dir: Path, target_dir: Path, *, period_seconds: float = 300.0) -> Any:
+    """Run :func:`sync_live` every *period_seconds* on a daemon thread; return it.
+
+    A Drive FUSE hiccup raises ``OSError`` on the copy; the pass is dropped and
+    the next one runs, because a mirror that dies silently is worse than a late one.
+    """
+    import threading
+
+    def loop() -> None:
+        while True:
+            try:
+                sync_live(out_dir, target_dir)
+            except OSError as exc:
+                print(f"espelho ao vivo: {exc}")
+            time.sleep(period_seconds)
+
+    thread = threading.Thread(target=loop, name="live-sync", daemon=True)
+    thread.start()
+    return thread
 
 
 def summarise(rows: list[dict[str, Any]]) -> Any:
