@@ -2,10 +2,10 @@
 
 Captures are scripted through the real :func:`allsky.snapshot.capture_snapshot`
 with the ``timestamp=`` bypass, so the sidecars the resume path reads are the
-ones production writes. Block checkpoints are real files carrying a config,
-so the start-up inspection is the real one; predictions are stubbed at the two
-entry points ``run_watch`` calls, except in the end-to-end test that scores a
-block through a trained probe.
+ones production writes. Checkpoints of both kinds are real files carrying a
+config, so the start-up inspection is the real one; predictions are stubbed at
+the two entry points ``run_watch`` calls, except in the end-to-end test that
+scores a block through a trained probe.
 """
 
 import io
@@ -27,7 +27,9 @@ from allsky.snapshot import Snapshot, SolarElevationBelowFloorError, block_end_o
 from allsky.watch import (
     BLOCKS_SUBDIR,
     FRAMES_SUBDIR,
+    checkpoint_role,
     ensemble_prediction,
+    frame_aggregate,
     frames_on_disk,
     run_watch,
 )
@@ -133,16 +135,31 @@ def _stub_block_predictions(
     return calls
 
 
-def _stub_frame_predictions(monkeypatch: pytest.MonkeyPatch) -> list[pd.Timestamp]:
+def _stub_frame_predictions(
+    monkeypatch: pytest.MonkeyPatch, per_checkpoint: dict[str, dict[str, Any]] | None = None
+) -> list[pd.Timestamp]:
     import allsky.watch as watch_module
 
     calls: list[pd.Timestamp] = []
 
     def fake_predict_snapshot(
-        _image: Path, _checkpoint: Path, *, timestamp: pd.Timestamp, **_: Any
+        image: Path, checkpoint: Path, *, timestamp: pd.Timestamp, **_: Any
     ) -> dict[str, Any]:
         calls.append(timestamp)
-        return {"predictions": {"dhi": 42.0}, "features": {"imputed": []}}
+        predictions = (per_checkpoint or {}).get(
+            checkpoint.name,
+            {
+                "dhi": float(timestamp.minute),
+                "sky_class": "clear",
+                "sky_probabilities": {"clear": 0.6, "cloudy": 0.4},
+            },
+        )
+        return {
+            "predictions": predictions,
+            "features": {"imputed": []},
+            "model": {"checkpoint": str(checkpoint)},
+            "image": str(image),
+        }
 
     monkeypatch.setattr(watch_module, "predict_snapshot", fake_predict_snapshot)
     return calls
@@ -191,6 +208,10 @@ def _checkpoint(
     return path
 
 
+def _frame_checkpoint(tmp_path: Path, name: str = "frame.ckpt") -> Path:
+    return _checkpoint(tmp_path, name, strategy="center_frame")
+
+
 def _watch(
     tmp_path: Path,
     script: list[str | Exception],
@@ -198,7 +219,7 @@ def _watch(
     now: str,
     clocks: list[str] | None = None,
     checkpoints: tuple[Path, ...] = (),
-    checkpoint_frame: Path | None = None,
+    checkpoint_frames: tuple[Path, ...] = (),
     min_frames: int = 3,
     block_minutes: float = 5.0,
     min_solar_elevation_deg: float | None = NOON_FLOOR_DEG,
@@ -210,7 +231,7 @@ def _watch(
     return run_watch(
         feed,
         out_dir,
-        checkpoint_frame=checkpoint_frame,
+        checkpoint_frames=checkpoint_frames,
         checkpoint_blocks=checkpoints,
         block_minutes=block_minutes,
         min_frames=min_frames,
@@ -425,7 +446,7 @@ def test_a_repeated_stamp_is_scored_once(tmp_path: Path, monkeypatch: pytest.Mon
         tmp_path,
         ["12:01:00", "12:01:00", "12:02:00"],
         now="12:02:00",
-        checkpoint_frame=_checkpoint(tmp_path, "frame.ckpt"),
+        checkpoint_frames=(_frame_checkpoint(tmp_path),),
     )
 
     assert scored == [_at("12:01:00"), _at("12:02:00")]
@@ -435,14 +456,14 @@ def test_a_new_frame_is_scored_into_its_own_prediction_sidecar(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _stub_frame_predictions(monkeypatch)
-    _watch(tmp_path, ["12:01:00"], now="12:01:00", checkpoint_frame=_checkpoint(tmp_path))
+    _watch(tmp_path, ["12:01:00"], now="12:01:00", checkpoint_frames=(_frame_checkpoint(tmp_path),))
     frames_dir = tmp_path / "watch" / FRAMES_SUBDIR
     (prediction,) = list(frames_dir.glob("*.prediction.json"))
 
     with caplog.at_level(logging.WARNING, logger="allsky.watch"):
         resumed = frames_on_disk(frames_dir)
 
-    assert json.loads(prediction.read_text(encoding="utf-8"))["predictions"]["dhi"] == 42.0
+    assert json.loads(prediction.read_text(encoding="utf-8"))["predictions"]["dhi"] == 1.0
     assert [record.captured_at for record in resumed] == [_at("12:01:00")]
     assert "unreadable frame sidecar" not in caplog.text
 
@@ -458,7 +479,10 @@ def test_a_frame_whose_prediction_raises_is_kept_and_the_watch_goes_on(
     monkeypatch.setattr(watch_module, "predict_snapshot", refusing_predict_snapshot)
 
     polls = _watch(
-        tmp_path, ["12:01:00", "12:02:00"], now="12:02:00", checkpoint_frame=_checkpoint(tmp_path)
+        tmp_path,
+        ["12:01:00", "12:02:00"],
+        now="12:02:00",
+        checkpoint_frames=(_frame_checkpoint(tmp_path),),
     )
 
     frames_dir = tmp_path / "watch" / FRAMES_SUBDIR
@@ -502,17 +526,21 @@ def test_two_block_checkpoints_are_averaged_and_the_class_is_the_argmax(
         {"clear": 0.45, "cloudy": 0.55}
     )
     assert record["predictions"]["sky_class"] == "cloudy"
-    assert [model["checkpoint"] for model in record["models"]] == [
+    assert [model["checkpoint"] for model in record["block_model"]["models"]] == [
         str(tmp_path / "a.ckpt"),
         str(tmp_path / "b.ckpt"),
     ]
 
 
+def _of(stem: str) -> dict[str, str]:
+    return {"checkpoint": f"/run/{stem}.ckpt"}
+
+
 def test_an_ensemble_averages_a_head_over_the_members_that_carry_it() -> None:
     merged = ensemble_prediction(
         [
-            {"predictions": {"dhi": 10.0, "kindex": 0.2}, "block": {"end": "x"}, "model": {}},
-            {"predictions": {"dhi": 30.0}, "block": {"end": "x"}, "model": {}},
+            {"predictions": {"dhi": 10.0, "kindex": 0.2}, "block": {"end": "x"}, "model": _of("a")},
+            {"predictions": {"dhi": 30.0}, "block": {"end": "x"}, "model": _of("b")},
         ]
     )
 
@@ -522,6 +550,384 @@ def test_an_ensemble_averages_a_head_over_the_members_that_carry_it() -> None:
 def test_an_ensemble_needs_at_least_one_member() -> None:
     with pytest.raises(ValueError, match="at least one member"):
         ensemble_prediction([])
+
+
+@pytest.mark.parametrize(
+    ("checkpoint", "role"),
+    [
+        ("best.ckpt", "best"),
+        ("/some/run/last.ckpt", "last"),
+        ("epoch-003.ckpt", "other"),
+        ("best_of_run.ckpt", "other"),
+    ],
+)
+def test_a_checkpoint_role_is_read_off_its_stem(checkpoint: str, role: str) -> None:
+    assert checkpoint_role(checkpoint) == role
+
+
+def test_the_sky_heads_come_from_best_and_the_regression_heads_from_last() -> None:
+    merged = ensemble_prediction(
+        [
+            {
+                "predictions": {"dhi": 100.0, "sky_probabilities": {"clear": 0.6, "cloudy": 0.4}},
+                "model": _of("best"),
+            },
+            {
+                "predictions": {"dhi": 200.0, "sky_probabilities": {"clear": 0.3, "cloudy": 0.7}},
+                "model": _of("last"),
+            },
+        ],
+        sky_roles="best",
+        dhi_roles="last",
+    )
+
+    assert merged["predictions"] == {
+        "dhi": pytest.approx(200.0),
+        "sky_probabilities": pytest.approx({"clear": 0.6, "cloudy": 0.4}),
+        "sky_class": "clear",
+    }
+    assert [(m["role"], m["heads"]) for m in merged["members"]] == [
+        ("best", ["sky"]),
+        ("last", ["dhi"]),
+    ]
+
+
+def test_an_other_checkpoint_joins_only_the_all_selector() -> None:
+    results = [
+        {"predictions": {"dhi": 100.0}, "model": _of("best")},
+        {"predictions": {"dhi": 400.0}, "model": _of("epoch-003")},
+    ]
+
+    assert ensemble_prediction(results, dhi_roles="all")["predictions"]["dhi"] == pytest.approx(
+        250.0
+    )
+    assert ensemble_prediction(results, dhi_roles="best")["predictions"]["dhi"] == pytest.approx(
+        100.0
+    )
+
+
+def test_a_head_no_selected_member_carries_is_absent_rather_than_an_error() -> None:
+    merged = ensemble_prediction(
+        [
+            {"predictions": {"sky_probabilities": {"clear": 1.0}}, "model": _of("best")},
+            {"predictions": {"dhi": 5.0}, "model": _of("last")},
+        ],
+        sky_roles="last",
+        dhi_roles="last",
+    )
+
+    assert merged["predictions"] == {"dhi": pytest.approx(5.0)}
+
+
+def test_a_role_no_member_plays_is_refused_by_the_ensemble() -> None:
+    with pytest.raises(ValueError, match="no member checkpoint plays the 'last' role"):
+        ensemble_prediction([{"predictions": {"dhi": 1.0}, "model": _of("best")}], dhi_roles="last")
+
+
+def test_an_unknown_role_selector_is_refused() -> None:
+    with pytest.raises(ValueError, match="unknown role selector 'latest'"):
+        ensemble_prediction(
+            [{"predictions": {"dhi": 1.0}, "model": _of("best")}], dhi_roles="latest"
+        )
+
+
+def test_a_frame_aggregate_takes_the_class_from_the_mean_probabilities() -> None:
+    merged = frame_aggregate(
+        [
+            {"dhi": 10.0, "sky_class": "clear", "sky_probabilities": {"clear": 0.9, "cloudy": 0.1}},
+            {
+                "dhi": 20.0,
+                "sky_class": "cloudy",
+                "sky_probabilities": {"clear": 0.4, "cloudy": 0.6},
+            },
+            {
+                "dhi": 30.0,
+                "sky_class": "cloudy",
+                "sky_probabilities": {"clear": 0.4, "cloudy": 0.6},
+            },
+        ]
+    )
+
+    assert merged["dhi"] == pytest.approx(20.0)
+    assert merged["sky_probabilities"] == pytest.approx(
+        {"clear": 0.5667, "cloudy": 0.4333}, abs=1e-3
+    )
+    assert merged["sky_class"] == "clear"
+
+
+def test_a_frame_aggregate_needs_at_least_one_frame() -> None:
+    with pytest.raises(ValueError, match="at least one scored frame"):
+        frame_aggregate([])
+
+
+def test_two_frame_checkpoints_are_averaged_into_one_frame_prediction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_frame_predictions(
+        monkeypatch,
+        {
+            "best.ckpt": {"dhi": 100.0, "sky_probabilities": {"clear": 0.6, "cloudy": 0.4}},
+            "last.ckpt": {"dhi": 200.0, "sky_probabilities": {"clear": 0.3, "cloudy": 0.7}},
+        },
+    )
+
+    _watch(
+        tmp_path,
+        ["12:01:00"],
+        now="12:01:00",
+        checkpoint_frames=(
+            _frame_checkpoint(tmp_path, "best.ckpt"),
+            _frame_checkpoint(tmp_path, "last.ckpt"),
+        ),
+    )
+
+    (prediction,) = list((tmp_path / "watch" / FRAMES_SUBDIR).glob("*.prediction.json"))
+    record = json.loads(prediction.read_text(encoding="utf-8"))
+    assert record["predictions"]["dhi"] == pytest.approx(150.0)
+    assert record["predictions"]["sky_class"] == "cloudy"
+    assert [m["checkpoint"] for m in record["members"]] == [
+        str(tmp_path / "best.ckpt"),
+        str(tmp_path / "last.ckpt"),
+    ]
+    assert record["image"].endswith("allsky-20260906-120100.jpg")
+
+
+def test_frame_roles_pick_the_sky_from_best_and_the_diffuse_from_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_frame_predictions(
+        monkeypatch,
+        {
+            "best.ckpt": {"dhi": 100.0, "sky_probabilities": {"clear": 0.6, "cloudy": 0.4}},
+            "last.ckpt": {"dhi": 200.0, "sky_probabilities": {"clear": 0.3, "cloudy": 0.7}},
+        },
+    )
+
+    _watch(
+        tmp_path,
+        ["12:01:00"],
+        now="12:01:00",
+        checkpoint_frames=(
+            _frame_checkpoint(tmp_path, "best.ckpt"),
+            _frame_checkpoint(tmp_path, "last.ckpt"),
+        ),
+        frame_sky_role="best",
+        frame_dhi_role="last",
+    )
+
+    (prediction,) = list((tmp_path / "watch" / FRAMES_SUBDIR).glob("*.prediction.json"))
+    record = json.loads(prediction.read_text(encoding="utf-8"))
+    assert record["predictions"]["dhi"] == pytest.approx(200.0)
+    assert record["predictions"]["sky_class"] == "clear"
+    assert [(m["role"], m["heads"]) for m in record["members"]] == [
+        ("best", ["sky"]),
+        ("last", ["dhi"]),
+    ]
+
+
+def test_block_roles_pick_the_sky_from_best_and_the_diffuse_from_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_block_predictions(
+        monkeypatch,
+        {
+            "best.ckpt": {"dhi": 100.0, "sky_probabilities": {"clear": 0.6, "cloudy": 0.4}},
+            "last.ckpt": {"dhi": 200.0, "sky_probabilities": {"clear": 0.3, "cloudy": 0.7}},
+        },
+    )
+
+    _watch(
+        tmp_path,
+        ["12:01:00", "12:02:00", "12:03:00", "12:06:00"],
+        now="12:06:00",
+        checkpoints=(_checkpoint(tmp_path, "best.ckpt"), _checkpoint(tmp_path, "last.ckpt")),
+        block_sky_role="best",
+        block_dhi_role="last",
+    )
+
+    record = _block_record(tmp_path, f"{NOON_BLOCK}.prediction.json")
+    assert record["predictions"]["dhi"] == pytest.approx(200.0)
+    assert record["predictions"]["sky_class"] == "clear"
+
+
+@pytest.mark.parametrize(
+    ("sky_role", "dhi_role", "message"),
+    [
+        ("all", "last", "no frame checkpoint plays the 'last' role the dhi heads"),
+        ("last", "all", "no frame checkpoint plays the 'last' role the sky heads"),
+    ],
+)
+def test_a_frame_role_no_checkpoint_plays_is_refused_at_start_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sky_role: str, dhi_role: str, message: str
+) -> None:
+    scored = _stub_frame_predictions(monkeypatch)
+
+    with pytest.raises(ValueError, match=message):
+        _watch(
+            tmp_path,
+            ["12:01:00"],
+            now="12:01:00",
+            checkpoint_frames=(_frame_checkpoint(tmp_path, "best.ckpt"),),
+            frame_sky_role=sky_role,
+            frame_dhi_role=dhi_role,
+        )
+
+    assert scored == []
+    assert not (tmp_path / "watch" / FRAMES_SUBDIR).exists()
+
+
+def test_a_block_role_no_checkpoint_plays_is_refused_at_start_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_block_predictions(monkeypatch)
+
+    with pytest.raises(ValueError, match="no block checkpoint plays the 'best' role"):
+        _watch(
+            tmp_path,
+            ["12:01:00"],
+            now="12:01:00",
+            checkpoints=(_checkpoint(tmp_path, "epoch-003.ckpt"),),
+            block_sky_role="best",
+        )
+
+    assert calls == []
+    assert not (tmp_path / "watch" / FRAMES_SUBDIR).exists()
+
+
+def test_a_block_is_recorded_from_its_frame_predictions_without_a_block_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_frame_predictions(monkeypatch)
+
+    _watch(
+        tmp_path,
+        ["12:01:00", "12:02:00", "12:03:00", "12:06:00"],
+        now="12:06:00",
+        checkpoint_frames=(_frame_checkpoint(tmp_path),),
+    )
+
+    record = _block_record(tmp_path, f"{NOON_BLOCK}.prediction.json")
+    assert record["source"] == "frame_aggregate"
+    assert record["predictions"]["dhi"] == pytest.approx(2.0)
+    assert record["predictions"]["sky_class"] == "clear"
+    assert record["frame_aggregate"]["n_frames"] == 3
+    assert [frame["captured_at"] for frame in record["frame_aggregate"]["frames"]] == [
+        "2026-09-06T12:01:00",
+        "2026-09-06T12:02:00",
+        "2026-09-06T12:03:00",
+    ]
+    assert record["n_frames"] == 3
+    assert record["closed_by"] == "later_frame"
+    assert "block_model" not in record
+
+
+def test_a_block_carries_both_the_block_model_and_the_frame_aggregate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_frame_predictions(monkeypatch)
+    _stub_block_predictions(monkeypatch)
+
+    _watch(
+        tmp_path,
+        ["12:01:00", "12:02:00", "12:03:00", "12:06:00"],
+        now="12:06:00",
+        checkpoints=(_checkpoint(tmp_path, "block.ckpt"),),
+        checkpoint_frames=(_frame_checkpoint(tmp_path),),
+    )
+
+    record = _block_record(tmp_path, f"{NOON_BLOCK}.prediction.json")
+    assert record["source"] == "block_model"
+    assert record["predictions"]["dhi"] == pytest.approx(100.0)
+    assert record["block_model"]["predictions"]["dhi"] == pytest.approx(100.0)
+    assert record["block_model"]["block"]["n_frames"] == 3
+    assert record["frame_aggregate"]["predictions"]["dhi"] == pytest.approx(2.0)
+
+
+def test_a_frame_with_the_sun_below_the_floor_is_not_scored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    scored = _stub_frame_predictions(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="allsky.watch"):
+        _watch(
+            tmp_path,
+            ["22:01:00"],
+            now="22:01:00",
+            checkpoint_frames=(_frame_checkpoint(tmp_path),),
+        )
+
+    frames_dir = tmp_path / "watch" / FRAMES_SUBDIR
+    assert scored == []
+    assert list(frames_dir.glob("*.prediction.json")) == []
+    assert "not scored: the sun is" in caplog.text
+    assert [record.captured_at for record in frames_on_disk(frames_dir)] == [_at("22:01:00")]
+
+
+def test_a_night_block_with_no_scored_frame_is_skipped_without_a_block_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_frame_predictions(monkeypatch)
+
+    _watch(
+        tmp_path,
+        ["22:01:00", "22:02:00", "22:03:00", "22:06:00"],
+        now="22:06:00",
+        checkpoint_frames=(_frame_checkpoint(tmp_path),),
+    )
+
+    skipped = _block_record(tmp_path, "20260906-2205.skipped.json")
+    assert skipped["reason"] == "no_frame_predictions"
+    assert skipped["n_frames"] == 3
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"dhi": None},
+        {"dhi": True},
+        {"dhi": "12"},
+        {"dhi": 5.0, "sky_probabilities": {"clear": 1.0}},
+    ],
+)
+def test_a_malformed_frame_prediction_is_left_out_of_the_block_aggregate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, malformed: dict[str, Any]
+) -> None:
+    _stub_frame_predictions(monkeypatch)
+    checkpoint = _frame_checkpoint(tmp_path)
+    _watch(
+        tmp_path,
+        ["12:01:00", "12:02:00", "12:03:00"],
+        now="12:03:00",
+        checkpoint_frames=(checkpoint,),
+    )
+    corrupted = tmp_path / "watch" / FRAMES_SUBDIR / "allsky-20260906-120100.prediction.json"
+    corrupted.write_text(json.dumps({"predictions": malformed}), encoding="utf-8")
+
+    _watch(tmp_path, ["12:06:00"], now="12:06:00", checkpoint_frames=(checkpoint,))
+
+    record = _block_record(tmp_path, f"{NOON_BLOCK}.prediction.json")
+    assert record["frame_aggregate"]["n_frames"] == 2
+    assert record["predictions"]["dhi"] == pytest.approx(2.5)
+    assert record["predictions"]["sky_probabilities"] == pytest.approx(
+        {"clear": 0.6, "cloudy": 0.4}
+    )
+
+
+def test_a_frame_checkpoint_needs_the_elevation_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scored = _stub_frame_predictions(monkeypatch)
+
+    with pytest.raises(ValueError, match="min_solar_elevation_deg"):
+        _watch(
+            tmp_path,
+            ["12:01:00"],
+            now="12:01:00",
+            checkpoint_frames=(_frame_checkpoint(tmp_path),),
+            min_solar_elevation_deg=None,
+        )
+
+    assert scored == []
 
 
 def test_a_recorded_block_is_never_rewritten(
@@ -668,6 +1074,19 @@ def test_a_center_frame_checkpoint_is_refused_at_start_up(tmp_path: Path) -> Non
     assert not (tmp_path / "watch" / FRAMES_SUBDIR).exists()
 
 
+def test_a_block_checkpoint_under_checkpoint_frames_is_refused_at_start_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scored = _stub_frame_predictions(monkeypatch)
+    windowed = _checkpoint(tmp_path, "block.ckpt")
+
+    with pytest.raises(ValueError, match="sensor_block"):
+        _watch(tmp_path, ["12:01:00"], now="12:01:00", checkpoint_frames=(windowed,))
+
+    assert scored == []
+    assert not (tmp_path / "watch" / FRAMES_SUBDIR).exists()
+
+
 def test_a_block_checkpoint_needs_the_elevation_floor(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="min_solar_elevation_deg"):
         _watch(
@@ -692,11 +1111,12 @@ def test_a_block_is_scored_end_to_end_through_a_trained_probe(tmp_path: Path) ->
     )
 
     record = _block_record(tmp_path, f"{NOON_BLOCK}.prediction.json")
+    assert record["source"] == "block_model"
     assert np.isfinite(record["predictions"]["dhi"])
     assert record["predictions"]["sky_class"] in record["predictions"]["sky_probabilities"]
-    assert record["block"]["n_frames"] == 3
-    assert record["block"]["representative"] == "2026-09-06T12:02:00"
-    assert record["block"]["solar_elevation_deg"] > NOON_FLOOR_DEG
+    assert record["block_model"]["block"]["n_frames"] == 3
+    assert record["block_model"]["block"]["representative"] == "2026-09-06T12:02:00"
+    assert record["block_model"]["block"]["solar_elevation_deg"] > NOON_FLOOR_DEG
     assert record["closed_by"] == "later_frame"
 
 
@@ -742,7 +1162,8 @@ def test_a_frame_stamped_by_the_server_clock_stays_on_disk_but_is_not_filed(
         run_watch(
             lambda: capture_snapshot(camera, frames_dir),
             out_dir,
-            checkpoint_frame=_checkpoint(tmp_path, "frame.ckpt"),
+            checkpoint_frames=(_frame_checkpoint(tmp_path),),
+            min_solar_elevation_deg=NOON_FLOOR_DEG,
             clock=lambda: _at("12:01:00"),
             sleep=lambda _seconds: None,
             max_polls=1,
@@ -847,6 +1268,109 @@ def test_watch_exits_with_code_one_when_a_block_checkpoint_lacks_its_floor(
 
     assert result.exit_code == 1
     assert isinstance(result.exception, SystemExit)
+
+
+def test_watch_exits_with_code_one_when_a_frame_checkpoint_lacks_its_floor(
+    tmp_path: Path,
+) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "watch",
+            "--out",
+            str(tmp_path / "watch"),
+            "--base-url",
+            "http://127.0.0.1:9/",
+            "--insecure",
+            "--checkpoint-frame",
+            str(_frame_checkpoint(tmp_path)),
+            "--max-polls",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+
+
+def test_watch_exits_with_code_one_when_a_role_selects_no_checkpoint(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "watch",
+            "--out",
+            str(tmp_path / "watch"),
+            "--base-url",
+            "http://127.0.0.1:9/",
+            "--insecure",
+            "--checkpoint-frame",
+            str(_frame_checkpoint(tmp_path, "best.ckpt")),
+            "--frame-dhi-role",
+            "last",
+            "--min-elevation-deg",
+            "10",
+            "--max-polls",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+
+
+def test_watch_scores_two_frame_checkpoints_by_role_from_the_command_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import allsky.snapshot as snapshot_module
+
+    _stub_frame_predictions(
+        monkeypatch,
+        {
+            "best.ckpt": {"dhi": 100.0, "sky_probabilities": {"clear": 0.6, "cloudy": 0.4}},
+            "last.ckpt": {"dhi": 200.0, "sky_probabilities": {"clear": 0.3, "cloudy": 0.7}},
+        },
+    )
+    monkeypatch.setattr(
+        snapshot_module,
+        "capture_snapshot",
+        lambda _client, frames_dir: capture_snapshot(
+            _Camera(), frames_dir, timestamp=_at("12:01:00")
+        ),
+    )
+    out_dir = tmp_path / "watch"
+
+    result = runner.invoke(
+        app,
+        [
+            "watch",
+            "--out",
+            str(out_dir),
+            "--base-url",
+            "http://127.0.0.1:9/",
+            "--insecure",
+            "--checkpoint-frame",
+            str(_frame_checkpoint(tmp_path, "best.ckpt")),
+            "--checkpoint-frame",
+            str(_frame_checkpoint(tmp_path, "last.ckpt")),
+            "--frame-sky-role",
+            "best",
+            "--frame-dhi-role",
+            "last",
+            "--min-elevation-deg",
+            "10",
+            "--max-polls",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    (prediction,) = list((out_dir / FRAMES_SUBDIR).glob("*.prediction.json"))
+    record = json.loads(prediction.read_text(encoding="utf-8"))
+    assert record["predictions"] == {
+        "dhi": pytest.approx(200.0),
+        "sky_probabilities": pytest.approx({"clear": 0.6, "cloudy": 0.4}),
+        "sky_class": "clear",
+    }
 
 
 def test_watch_stops_cleanly_on_ctrl_c(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

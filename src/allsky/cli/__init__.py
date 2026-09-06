@@ -6,7 +6,14 @@ Mirror the public archive, then capture the camera's current frame:
     allsky sync-archive --data-dir data/all-sky --extract
     allsky snapshot --out output/allsky-mm/snapshots
 
-Keep polling the live frame and score each 5-minute datalogger block:
+Keep polling the live frame, score every frame with two checkpoints (the
+sky class from best.ckpt, the diffuse from last.ckpt) and record each
+5-minute datalogger block from the mean of its frames:
+    allsky watch --out output/allsky-mm/watch \\
+        --checkpoint-frame run/best.ckpt --checkpoint-frame run/last.ckpt \\
+        --frame-sky-role best --frame-dhi-role last --min-elevation-deg 10
+
+Score each block with a block checkpoint instead:
     allsky watch --out output/allsky-mm/watch --checkpoint-block run/best.ckpt --min-elevation-deg 10
 
 Extract every 60th frame from a one-day timelapse:

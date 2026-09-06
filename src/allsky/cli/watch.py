@@ -2,6 +2,7 @@
 
 import http.client
 import logging
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -14,16 +15,29 @@ from allsky.cli.runtime import configure_cli_logging
 logger = logging.getLogger(__name__)
 
 
+class RoleChoice(StrEnum):
+    """Which members of an ensemble a head group is read from, by checkpoint stem.
+
+    ``best`` reads the ``best.ckpt`` members, ``last`` the ``last.ckpt`` ones
+    and ``all`` every member, whatever its stem.
+    """
+
+    best = "best"
+    last = "last"
+    all = "all"
+
+
 def watch(
     out_dir: Annotated[
         Path, typer.Option("--out", "-o", help="Watch root: frames/ and blocks/ are written here.")
     ],
     base_url: Annotated[str, typer.Option(help="All-sky website root.")] = ARCHIVE_BASE_URL,
     checkpoint_frame: Annotated[
-        Path | None,
+        list[Path] | None,
         typer.Option(
             "--checkpoint-frame",
-            help="Single-frame checkpoint; scores every new frame.",
+            help="Single-frame checkpoint; scores every new frame (repeatable; more than one "
+            "is averaged).",
             exists=True,
             dir_okay=False,
         ),
@@ -37,6 +51,28 @@ def watch(
             dir_okay=False,
         ),
     ] = None,
+    frame_sky_role: Annotated[
+        RoleChoice,
+        typer.Option(help="Frame checkpoints whose sky heads are averaged, by file stem."),
+    ] = RoleChoice.all,
+    frame_dhi_role: Annotated[
+        RoleChoice,
+        typer.Option(
+            help="Frame checkpoints whose dhi/kindex/cloud_fraction heads are averaged, by "
+            "file stem."
+        ),
+    ] = RoleChoice.all,
+    block_sky_role: Annotated[
+        RoleChoice,
+        typer.Option(help="Block checkpoints whose sky heads are averaged, by file stem."),
+    ] = RoleChoice.all,
+    block_dhi_role: Annotated[
+        RoleChoice,
+        typer.Option(
+            help="Block checkpoints whose dhi/kindex/cloud_fraction heads are averaged, by "
+            "file stem."
+        ),
+    ] = RoleChoice.all,
     poll_seconds: Annotated[float, typer.Option(min=0.0, help="Seconds between polls.")] = 20.0,
     block_minutes: Annotated[
         float, typer.Option(min=0.0, help="The logger's averaging interval, in minutes.")
@@ -53,9 +89,9 @@ def watch(
     min_elevation_deg: Annotated[
         float | None,
         typer.Option(
-            help="night_filter.min_solar_elevation_deg the block checkpoints' manifest was "
-            "built with; a block with the sun below it is skipped. Required with "
-            "--checkpoint-block."
+            help="night_filter.min_solar_elevation_deg the checkpoints' manifest was built "
+            "with; a frame or block with the sun below it is not scored. Required with "
+            "--checkpoint-frame and with --checkpoint-block."
         ),
     ] = None,
     device: Annotated[str, typer.Option(help="Torch device for inference.")] = "cpu",
@@ -81,19 +117,26 @@ def watch(
 ) -> None:
     """Poll the camera's live frame and score each datalogger block as it closes.
 
-    Frames land under ``<out>/frames/`` with their sidecars, every new frame is
-    scored by ``--checkpoint-frame`` when given, and each ``--block-minutes``
-    block is scored by the ``--checkpoint-block`` checkpoints into
+    Frames land under ``<out>/frames/`` with their sidecars; every new frame
+    with the sun at or above ``--min-elevation-deg`` is scored by the
+    ``--checkpoint-frame`` checkpoints into ``<image>.prediction.json``. Each
+    ``--block-minutes`` block is recorded under
     ``<out>/blocks/<YYYYMMDD-HHMM>.prediction.json`` once a later frame arrives
-    or ``--grace-seconds`` pass; a block with fewer than ``--min-frames`` frames,
-    or with the sun below ``--min-elevation-deg``, is recorded as skipped.
+    or ``--grace-seconds`` pass: from the ``--checkpoint-block`` checkpoints
+    when given (``source: block_model``), else from the mean of its frames'
+    predictions (``source: frame_aggregate``). A block with fewer than
+    ``--min-frames`` frames, with the sun below the floor, or with no scored
+    frame and no block checkpoint is recorded as skipped. More than one
+    checkpoint of a kind is averaged; the ``--*-role`` options read a head
+    group from the ``best.ckpt`` members, the ``last.ckpt`` ones, or all.
     Restarting resumes from what is on disk. Ctrl-C stops cleanly.
 
     Raises
     ------
     typer.Exit
-        Code 1 when the client cannot be built or a block checkpoint is
-        refused at start-up.
+        Code 1 when the client cannot be built, a role selects no checkpoint,
+        a checkpoint is given without ``--min-elevation-deg``, or a
+        checkpoint of either kind is refused at start-up.
     """
     configure_cli_logging()
     from allsky.snapshot import capture_snapshot
@@ -113,8 +156,12 @@ def watch(
         polls = run_watch(
             lambda: capture_snapshot(client, frames_dir),
             out_dir,
-            checkpoint_frame=checkpoint_frame,
+            checkpoint_frames=tuple(checkpoint_frame or ()),
             checkpoint_blocks=tuple(checkpoint_block or ()),
+            frame_sky_role=frame_sky_role.value,
+            frame_dhi_role=frame_dhi_role.value,
+            block_sky_role=block_sky_role.value,
+            block_dhi_role=block_dhi_role.value,
             poll_seconds=poll_seconds,
             block_minutes=block_minutes,
             min_frames=min_frames,

@@ -47,8 +47,10 @@ __all__ = [
     "block_checkpoint_window_minutes",
     "block_end_of",
     "capture_snapshot",
+    "inspect_frame_checkpoint",
     "predict_block",
     "predict_snapshot",
+    "solar_elevation_at",
 ]
 
 SNAPSHOT_STEM_FORMAT = "allsky-%Y%m%d-%H%M%S"
@@ -1068,6 +1070,31 @@ def block_end_of(timestamp: pd.Timestamp, block_minutes: float) -> pd.Timestamp:
     return pd.Timestamp(timestamp).ceil(f"{block_minutes:g}min")
 
 
+def solar_elevation_at(timestamp: pd.Timestamp, site: SiteConfig) -> float:
+    """Solar elevation at a naive local *timestamp*, degrees above the horizon.
+
+    The one geometry every serving floor is judged against: a block's
+    representative frame in :func:`predict_block` and a single live frame in
+    the watch, both on the site's declared ``utc_offset_hours`` — the clock
+    the manifest's ``night_filter`` dropped frames on.
+
+    Parameters
+    ----------
+    timestamp:
+        Naive local capture time on the camera's clock.
+    site:
+        Observation site whose latitude, longitude and UTC offset fix the sun.
+
+    Returns
+    -------
+    float
+        Elevation in degrees, negative below the horizon.
+    """
+    from labmim_core.solar import solar_elevation_deg
+
+    return float(solar_elevation_deg(pd.DatetimeIndex([timestamp]), site, site.utc_offset_hours)[0])
+
+
 class SolarElevationBelowFloorError(ValueError):
     """The block's representative frame has the sun below the training floor.
 
@@ -1139,6 +1166,39 @@ def block_checkpoint_window_minutes(
             cfg.model.name,
         )
     return float(cfg.data.alignment.window_minutes)
+
+
+def inspect_frame_checkpoint(
+    checkpoint_path: str | Path, *, device: str = "cpu", trust_checkpoint: bool = False
+) -> None:
+    """Refuse at start-up the frame checkpoint :func:`predict_snapshot` would refuse on every frame.
+
+    The mirror of :func:`block_checkpoint_window_minutes` for the single-frame
+    path: a watch calls this once per frame checkpoint before its first
+    capture, so a windowed checkpoint (``sensor_block`` or any other pooled
+    strategy) stops the watch instead of failing one frame at a time under a
+    logged error and an exit code of 0.
+
+    Parameters
+    ----------
+    checkpoint_path:
+        The frame checkpoint.
+    device:
+        Torch device the tensors are mapped onto.
+    trust_checkpoint:
+        Allow unpickling a checkpoint that is not weights-only.
+
+    Raises
+    ------
+    ValueError
+        If the checkpoint was not trained under ``alignment.strategy='center_frame'``.
+    """
+    from allsky.training.checkpointing import load_checkpoint
+
+    checkpoint = load_checkpoint(
+        checkpoint_path, map_location=device, trust_pickle=trust_checkpoint
+    )
+    _refuse_a_windowed_checkpoint(ExperimentConfig.model_validate(checkpoint["config"]))
 
 
 def _refuse_a_single_frame_checkpoint(cfg: ExperimentConfig) -> None:
@@ -1257,7 +1317,6 @@ def predict_block(
     from allsky.data.datasets import _subsample_window
     from allsky.modeling.registry import restore_model
     from allsky.training.checkpointing import load_checkpoint
-    from labmim_core.solar import solar_elevation_deg
 
     if not frames:
         raise ValueError("predict_block needs at least one frame")
@@ -1286,11 +1345,7 @@ def predict_block(
     centroid = end - pd.Timedelta(minutes=window_minutes / 2.0)
     representative_time = min(in_block, key=lambda f: abs(f[1] - centroid))[1]
     resolved_site = site or SiteConfig()
-    elevation_deg = float(
-        solar_elevation_deg(
-            pd.DatetimeIndex([representative_time]), resolved_site, resolved_site.utc_offset_hours
-        )[0]
-    )
+    elevation_deg = solar_elevation_at(representative_time, resolved_site)
     if elevation_deg < min_solar_elevation_deg:
         raise SolarElevationBelowFloorError(
             representative_time, elevation_deg, float(min_solar_elevation_deg)
