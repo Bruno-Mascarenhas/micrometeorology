@@ -152,8 +152,10 @@ unrestricted reader for a file you produced yourself.
 Contains `model_state`, `optimizer_state`, `scheduler_state`, `scaler_state`,
 `epoch`, `global_step`, `epochs_no_improve`, `best_metric`, the full `config`
 dump, `normalizers`, ordered `feature_columns`, `feature_groups`,
-`dataset_version`, `split_id`, `manifest_sha256`, `backbone` info (image mode),
-`code_version`, and `rng_state` for deterministic resume.
+`dataset_version`, `split_id`, `manifest_sha256`, `sensor_pairing` (the
+frame-to-row pairing rule the serving path re-applies), `frame_geometry` (the
+prepare mask/crop/resize the live frame is put through), `backbone` info
+(image mode), `code_version`, and `rng_state` for deterministic resume.
 
 Resume is crash-safe: the train batch order is drawn from a dedicated sampler
 generator re-seeded to `seed * 100003 + epoch` — a pure function of
