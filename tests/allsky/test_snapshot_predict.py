@@ -17,6 +17,7 @@ two array shapes apart — :func:`test_the_backbone_is_fed_the_layout_its_transf
 pins the helper's contract instead.
 """
 
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ from allsky.training.checkpointing import load_checkpoint
 from labmim_core.site import SiteConfig
 from labmim_core.solar import solar_elevation_deg
 from tests.allsky import _synthetic as synthetic
+from tests.allsky._block_probe import stub_image_backbone, train_block_probe
 
 runner = CliRunner()
 
@@ -732,3 +734,274 @@ class TestEmbeddingRecipeOf:
 
         assert recipe is not None
         assert set(STORE_RECIPE_KEYS) <= set(recipe)
+
+
+@pytest.fixture
+def block_checkpoint(tmp_path: Path) -> Path:
+    return train_block_probe(tmp_path)
+
+
+def _block_frames(tmp_path: Path, stamps: list[str]) -> list[tuple[Path, pd.Timestamp]]:
+    """One 8x8 frame per ``HH:MM:SS`` stamp on 2025-03-21, in the order given."""
+    from PIL import Image
+
+    directory = tmp_path / "live"
+    directory.mkdir(exist_ok=True)
+    rng = np.random.default_rng(3)
+    frames = []
+    for index, stamp in enumerate(stamps):
+        path = directory / f"live-{index}.jpg"
+        Image.fromarray(rng.integers(0, 255, (8, 8, 3), dtype=np.uint8)).save(path, quality=92)
+        frames.append((path, pd.Timestamp(f"2025-03-21 {stamp}")))
+    return frames
+
+
+def _block_prediction(
+    frames: list[tuple[Path, pd.Timestamp]], checkpoint: Path, **kwargs: Any
+) -> dict[str, Any]:
+    from allsky.snapshot import predict_block
+
+    return predict_block(
+        frames,
+        checkpoint,
+        min_solar_elevation_deg=kwargs.pop("min_solar_elevation_deg", 5.0),
+        trust_checkpoint=True,
+        image_backbone_builder=stub_image_backbone,
+        **kwargs,
+    )
+
+
+def test_predict_block_feeds_the_half_open_block_in_time_order_and_lists_the_rest(
+    block_checkpoint: Path, tmp_path: Path
+) -> None:
+    frames = _block_frames(
+        tmp_path, ["12:05:01", "12:00:00", "12:05:00", "12:00:30", "12:02:20", "12:03:00"]
+    )
+
+    served = _block_prediction(
+        frames, block_checkpoint, block_end=pd.Timestamp("2025-03-21 12:05:00")
+    )
+
+    block = served["block"]
+    assert block["n_frames"] == 4
+    assert [f["captured_at"] for f in block["frames"]] == [
+        "2025-03-21T12:00:30",
+        "2025-03-21T12:02:20",
+        "2025-03-21T12:03:00",
+        "2025-03-21T12:05:00",
+    ]
+    assert {(f["captured_at"], f["reason"]) for f in block["ignored"]} == {
+        ("2025-03-21T12:00:00", "outside_block"),
+        ("2025-03-21T12:05:01", "outside_block"),
+    }
+
+
+def test_predict_block_derives_the_block_end_by_the_ceil_of_the_latest_frame(
+    block_checkpoint: Path, tmp_path: Path
+) -> None:
+    frames = _block_frames(tmp_path, ["12:00:30", "12:01:30", "12:04:00"])
+
+    served = _block_prediction(frames, block_checkpoint)
+
+    assert served["block"]["end"] == "2025-03-21T12:05:00"
+    assert served["block"]["window_minutes"] == pytest.approx(5.0)
+    assert np.isfinite(served["predictions"]["dhi"])
+
+
+def test_predict_block_takes_the_frame_nearest_the_centroid_as_representative(
+    block_checkpoint: Path, tmp_path: Path
+) -> None:
+    frames = _block_frames(tmp_path, ["12:00:30", "12:02:20", "12:03:00", "12:04:30"])
+
+    served = _block_prediction(frames, block_checkpoint)
+
+    assert served["block"]["representative"] == "2025-03-21T12:02:20"
+    assert served["features"]["timestamp"] == "2025-03-21T12:02:20"
+
+
+def test_predict_block_takes_the_earlier_frame_when_two_tie_for_the_centroid(
+    block_checkpoint: Path, tmp_path: Path
+) -> None:
+    frames = _block_frames(tmp_path, ["12:03:00", "12:02:00", "12:04:30"])
+
+    served = _block_prediction(frames, block_checkpoint)
+
+    assert served["block"]["representative"] == "2025-03-21T12:02:00"
+
+
+def test_predict_block_builds_every_frames_geometry_at_the_representatives_time(
+    block_checkpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``MultimodalImageDataset._load_image`` indexes the solar angles by the
+    served row for every co-frame of the window, so serving must too."""
+    import allsky.snapshot as snapshot_module
+
+    real_image_input = snapshot_module._image_input
+    seen: list[pd.Timestamp] = []
+
+    def recording_image_input(*args: Any, timestamp: pd.Timestamp, **kwargs: Any) -> Any:
+        seen.append(timestamp)
+        return real_image_input(*args, timestamp=timestamp, **kwargs)
+
+    monkeypatch.setattr(snapshot_module, "_image_input", recording_image_input)
+    frames = _block_frames(tmp_path, ["12:00:30", "12:02:20", "12:03:00", "12:04:30"])
+
+    _block_prediction(frames, block_checkpoint)
+
+    assert seen == [pd.Timestamp("2025-03-21 12:02:20")] * 4
+
+
+def test_predict_block_caps_the_window_the_way_the_dataset_subsamples_it(
+    block_checkpoint: Path, tmp_path: Path
+) -> None:
+    from allsky.data.datasets import _subsample_window
+
+    stamps = ["12:00:10", "12:00:50", "12:01:30", "12:02:10", "12:02:50", "12:03:30", "12:04:10"]
+    frames = _block_frames(tmp_path, stamps)
+
+    served = _block_prediction(frames, block_checkpoint)
+
+    kept = [frames[i][1].isoformat() for i in _subsample_window(list(range(7)), 5)]
+    assert [f["captured_at"] for f in served["block"]["frames"]] == kept
+    assert kept[0] == "2025-03-21T12:00:10"
+    assert kept[-1] == "2025-03-21T12:04:10"
+    assert {f["reason"] for f in served["block"]["ignored"]} == {"over_max_frames"}
+
+
+def test_predict_block_sends_the_padded_sequence_and_mask_the_dataset_serves(
+    block_checkpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import torch
+
+    from allsky.modeling import registry
+
+    seen: dict[str, Any] = {}
+
+    def recording_model(batch: dict[str, Any]) -> dict[str, Any]:
+        seen.update(batch)
+        return {"dhi": torch.zeros(1)}
+
+    monkeypatch.setattr(registry, "restore_model", lambda *_a, **_k: recording_model)
+    frames = _block_frames(tmp_path, ["12:01:00", "12:02:00", "12:03:00"])
+
+    _block_prediction(frames, block_checkpoint)
+
+    assert "image" not in seen
+    assert tuple(seen["image_seq"].shape) == (1, 5, 3, 8, 8)
+    assert seen["image_seq"].dtype == torch.float32
+    assert seen["frame_mask"].tolist() == [[True, True, True, False, False]]
+    assert torch.count_nonzero(seen["image_seq"][0, 3:]) == 0
+    assert torch.count_nonzero(seen["image_seq"][0, :3]) > 0
+
+
+def test_predict_block_refuses_a_center_frame_checkpoint(
+    block_checkpoint: Path, tmp_path: Path
+) -> None:
+    import torch
+
+    payload = load_checkpoint(block_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["config"]["data"]["alignment"]["strategy"] = "center_frame"
+    payload["config"]["data"]["alignment"]["one_sample_per_block"] = False
+    torch.save(payload, block_checkpoint)
+    frames = _block_frames(tmp_path, ["12:01:00", "12:02:00", "12:03:00"])
+
+    with pytest.raises(ValueError, match="center_frame"):
+        _block_prediction(frames, block_checkpoint)
+
+
+def test_predict_block_refuses_when_no_frame_falls_in_the_block(
+    block_checkpoint: Path, tmp_path: Path
+) -> None:
+    frames = _block_frames(tmp_path, ["12:05:01", "12:06:00"])
+
+    with pytest.raises(ValueError, match="falls in the block"):
+        _block_prediction(frames, block_checkpoint, block_end=pd.Timestamp("2025-03-21 12:05:00"))
+
+
+def test_predict_block_refuses_an_empty_frame_list(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="at least one frame"):
+        _block_prediction([], tmp_path / "any.ckpt")
+
+
+def test_predict_block_refuses_a_night_block_before_building_the_model(
+    block_checkpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from allsky.modeling import registry
+    from allsky.snapshot import SolarElevationBelowFloorError
+
+    built: list[Any] = []
+    monkeypatch.setattr(registry, "restore_model", lambda *a, **_k: built.append(a))
+    frames = _block_frames(tmp_path, ["22:01:00", "22:02:00", "22:03:00"])
+
+    with pytest.raises(SolarElevationBelowFloorError, match="below the 5 deg floor") as caught:
+        _block_prediction(frames, block_checkpoint)
+
+    assert caught.value.elevation_deg < 0.0
+    assert caught.value.floor_deg == 5.0
+    assert built == []
+
+
+@pytest.mark.parametrize(("floor_deg", "served"), [(5.0, True), (10.0, False)])
+def test_predict_block_measures_the_dusk_against_the_floor_it_is_given(
+    block_checkpoint: Path, tmp_path: Path, floor_deg: float, served: bool
+) -> None:
+    from allsky.snapshot import SolarElevationBelowFloorError
+
+    frames = _block_frames(tmp_path, ["06:16:00", "06:17:30", "06:19:00"])
+    representative = pd.Timestamp("2025-03-21 06:17:30")
+    site = SiteConfig()
+    elevation = float(
+        solar_elevation_deg(pd.DatetimeIndex([representative]), site, site.utc_offset_hours)[0]
+    )
+    assert 5.0 < elevation < 10.0
+
+    if served:
+        result = _block_prediction(frames, block_checkpoint, min_solar_elevation_deg=floor_deg)
+        assert result["block"]["solar_elevation_deg"] == pytest.approx(elevation)
+        assert result["block"]["min_solar_elevation_deg"] == floor_deg
+    else:
+        with pytest.raises(SolarElevationBelowFloorError):
+            _block_prediction(frames, block_checkpoint, min_solar_elevation_deg=floor_deg)
+
+
+def test_block_checkpoint_window_minutes_reads_the_checkpoints_window(
+    block_checkpoint: Path,
+) -> None:
+    from allsky.snapshot import block_checkpoint_window_minutes
+
+    window = block_checkpoint_window_minutes(block_checkpoint, trust_checkpoint=True)
+
+    assert window == pytest.approx(5.0)
+
+
+def test_block_checkpoint_window_minutes_refuses_a_center_frame_checkpoint(
+    block_checkpoint: Path,
+) -> None:
+    import torch
+
+    from allsky.snapshot import block_checkpoint_window_minutes
+
+    payload = load_checkpoint(block_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["config"]["data"]["alignment"]["strategy"] = "center_frame"
+    payload["config"]["data"]["alignment"]["one_sample_per_block"] = False
+    torch.save(payload, block_checkpoint)
+
+    with pytest.raises(ValueError, match="center_frame"):
+        block_checkpoint_window_minutes(block_checkpoint, trust_checkpoint=True)
+
+
+def test_block_checkpoint_window_minutes_warns_that_a_fusion_model_gets_imputed_sensors(
+    block_checkpoint: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import torch
+
+    from allsky.snapshot import block_checkpoint_window_minutes
+
+    payload = load_checkpoint(block_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["config"]["model"]["name"] = "film"
+    torch.save(payload, block_checkpoint)
+
+    with caplog.at_level(logging.WARNING, logger="allsky.snapshot"):
+        block_checkpoint_window_minutes(block_checkpoint, trust_checkpoint=True)
+
+    assert "imputed at its training mean" in caplog.text
