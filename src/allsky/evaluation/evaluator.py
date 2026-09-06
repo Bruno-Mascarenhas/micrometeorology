@@ -253,8 +253,9 @@ def evaluate_checkpoint(
         frame_geometry=meta.get("frame_geometry"),
     )
 
-    global_metrics = _global_metrics(predictions, enabled_targets)
-    stratified = _stratified_metrics(predictions, enabled_targets, global_metrics)
+    scored_targets = _scored_targets(predictions, enabled_targets)
+    global_metrics = _global_metrics(predictions, scored_targets)
+    stratified = _stratified_metrics(predictions, scored_targets, global_metrics)
     confusion = None
     if "sky" in global_metrics and "confusion" in global_metrics["sky"]:
         confusion = {
@@ -630,6 +631,8 @@ def _build_predictions_frame(
             )
             frame[f"obs_{name}"] = observed
             frame[f"pred_{name}"] = np.asarray(predicted[name], dtype=np.float64)
+    if "kindex" in enabled_targets and kindex_kind == "kstar" and "solar_zenith" in frame.columns:
+        _attach_kt_derived_sky(frame, times, utc_offset_hours)
     _attach_reference_columns(
         frame,
         enabled_targets,
@@ -638,6 +641,48 @@ def _build_predictions_frame(
         utc_offset_hours=utc_offset_hours,
     )
     return frame
+
+
+def _attach_kt_derived_sky(frame: pd.DataFrame, times: pd.Series, utc_offset_hours: float) -> None:
+    """Attach ``pred_kt``, ``pred_sky_kt`` and, without a sky head, ``obs_sky_kt``.
+
+    ``pred_kt`` ``(N,)`` float64 is the predicted clearness index, k* times the
+    Haurwitz clear-sky clearness index at each row's zenith; ``pred_sky_kt``
+    ``(N,)`` int64 bins it on :data:`~labmim_core.sky.SKY_CLASS_KT_UPPER_BOUNDS`
+    — the rule that labelled ``sky_class`` in the manifest. ``obs_sky_kt`` rebuilds
+    the label the same way from ``obs_kindex`` only when the split carries no
+    ``obs_sky``, so the derived class is always scored against a label.
+
+    Raises
+    ------
+    ValueError
+        When a predicted clearness index is not finite: ``numpy.digitize`` would
+        file a NaN in the last band and score it as a plausible class.
+    """
+    _, kt_clear = _clearsky_ghi_and_kt(frame, times, utc_offset_hours)
+    pred_kt = frame["pred_kindex"].to_numpy(dtype=np.float64) * kt_clear
+    if not np.isfinite(pred_kt).all():
+        raise ValueError(
+            f"{int((~np.isfinite(pred_kt)).sum())} predicted clearness index value(s) are not "
+            "finite; the k*-derived sky class cannot be scored"
+        )
+    frame["pred_kt"] = pred_kt
+    frame["pred_sky_kt"] = np.digitize(pred_kt, SKY_CLASS_KT_UPPER_BOUNDS, right=True).astype(
+        np.int64
+    )
+    if "obs_sky" not in frame.columns:
+        obs_kt = frame["obs_kindex"].to_numpy(dtype=np.float64) * kt_clear
+        labelable = np.isfinite(obs_kt)
+        observed = np.full(len(frame), -1, dtype=np.int64)
+        observed[labelable] = np.digitize(obs_kt[labelable], SKY_CLASS_KT_UPPER_BOUNDS, right=True)
+        frame["obs_sky_kt"] = observed
+
+
+def _scored_targets(predictions: pd.DataFrame, enabled_targets: Sequence[str]) -> list[str]:
+    """The enabled targets plus the k*-derived sky class when the frame carries it."""
+    if "pred_sky_kt" in predictions.columns:
+        return [*enabled_targets, KT_DERIVED_SKY_TARGET]
+    return list(enabled_targets)
 
 
 def _attach_reference_columns(
@@ -755,6 +800,14 @@ def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame, *, utc_offset_hours
         )
 
 
+#: The sky class read off the k* head, scored beside the enabled targets. The
+#: four sky conditions are bands of the clearness index (Escobedo et al. 2009,
+#: :data:`~labmim_core.sky.SKY_CLASS_KT_UPPER_BOUNDS`), so a k* prediction
+#: times the clear-sky clearness index at the same zenith is a class prediction
+#: by the rule that labelled the manifest, without a classification head.
+KT_DERIVED_SKY_TARGET = "sky_kt"
+
+
 #: Stratification column -> the ``stratum_kind`` label reported in the long table.
 _STRATUM_KINDS: dict[str, str] = {
     "sky_class": "sky_class",
@@ -778,6 +831,15 @@ def _global_metrics(
 
 def _target_metrics(frame: pd.DataFrame, name: str) -> dict[str, Any]:
     """Metrics for one target over *frame* (regression or classification)."""
+    if name == KT_DERIVED_SKY_TARGET:
+        label_column = "obs_sky" if "obs_sky" in frame.columns else "obs_sky_kt"
+        labels = frame[label_column].to_numpy(dtype=np.int64)
+        scored = labels >= 0
+        return classification_metrics(
+            labels[scored],
+            frame["pred_sky_kt"].to_numpy()[scored],
+            n_classes=len(SKY_CLASS_NAMES),
+        )
     if name == "sky":
         probability_columns = [f"prob_sky_{class_name}" for class_name in SKY_CLASS_NAMES]
         probabilities = (

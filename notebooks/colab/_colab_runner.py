@@ -277,6 +277,13 @@ def _harvest(
             sky_ece=sky.get("ece"),
             **{f"sky_f1_{name}": scores["f1"] for name, scores in sky.get("per_class", {}).items()},
         )
+    sky_kt = metrics["global"].get("sky_kt")
+    if sky_kt is not None:
+        row.update(
+            sky_kt_balanced_accuracy=sky_kt.get("balanced_accuracy"),
+            sky_kt_macro_f1=sky_kt.get("macro_f1"),
+            **{f"sky_kt_f1_{name}": v["f1"] for name, v in sky_kt.get("per_class", {}).items()},
+        )
     return row
 
 

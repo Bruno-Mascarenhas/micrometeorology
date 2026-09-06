@@ -246,10 +246,15 @@ def _global_metrics_markdown(result: EvaluationResult) -> list[str]:
             for target in regression
         ]
         lines.extend(_markdown_table(header, table_rows))
-    if "sky" in result.enabled_targets:
-        lines += ["", "**sky (classification)**", ""]
+    for target, title in (
+        ("sky", "sky (classification)"),
+        ("sky_kt", "sky from k* (classification)"),
+    ):
+        if target not in result.global_metrics:
+            continue
+        lines += ["", f"**{title}**", ""]
         header = ["metric", "value"]
-        sky = result.global_metrics["sky"]
+        sky = result.global_metrics[target]
         table_rows = [[m, _fmt(sky.get(m))] for m in _MARKDOWN_CLASSIFICATION_METRICS]
         lines.extend(_markdown_table(header, table_rows))
     return lines
