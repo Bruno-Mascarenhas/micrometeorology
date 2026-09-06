@@ -1,0 +1,72 @@
+# A receita "ceu" (ceu/ceu_s42.yaml: tres cabecas, k* e difusa em indice de
+# ceu-claro, cls+mean, anneal de 40 epocas) com o fotometro da camera ao lado da
+# imagem: log2 do tempo de exposicao lido do overlay e log2 da radiancia relativa
+# do disco (allsky.exposure; auditoria de 2026-08-28, r(logL, DHI) = +0,903 e
+# inclinacao estacionaria entre os splits). Duas mudancas em relacao ao ceu, e
+# so essas:
+#
+# 1. O modelo e o film, nao o image_only: o ImageOnlyModel nunca le
+#    batch["features"], e a rodada "exposure" da auditoria treinou tres sementes
+#    que nunca viram as duas colunas. O film consome os 9 features do conjunto
+#    bare mais estes 2 (11 no total) pelo SensorEncoder e modula o embedding
+#    visual com eles.
+# 2. data_root aponta para o dataset gerado por `allsky exposure-features`, que
+#    e o dataset-iso com as colunas de exposicao e sem as linhas cujo overlay
+#    nao foi lido.
+#
+# Controle pareado: ceuexpshuf (mesmas colunas permutadas dentro de cada split).
+#
+# Terceira mudanca, imposta pelas duas acima: p_exposure = 0. A auditoria
+# (sec. 9) prescreve que, com logL na entrada, o jitter de exposicao ou e
+# acoplado a feature (subtrair log2 do ganho de log2_exposure_s, mantendo
+# log2_relative_radiance fixo) ou e desligado; aplicado so a imagem ele mexe no
+# numerador DN e deixa o denominador t parado, ensinando uma relacao DN-t que a
+# fisica nao tem. O acoplamento exige mexer no dataset ou na augmentation, entao
+# fica o desligamento. Consequencia: ceuexp vs ceu confunde duas mudancas
+# (features novas e jitter removido); o par limpo e ceuexp vs ceuexpshuf, que
+# tambem roda com p_exposure = 0.
+# Quarta mudanca: o alvo primario passa a ser o k* (a classe de ceu e lida do
+# k* previsto x Kt de ceu-claro nas faixas de Escobedo -- global.sky_kt no
+# eval_metrics.json); a cross-entropy fica com peso 0,25 so para fornecer
+# probabilidades, sem mandar na selecao do best (monitor val/loss).
+extends: [../_base.yaml, ../../models/film.yaml]
+name: ceuexp_s42
+output_dir: output/allsky-mm/experiments/ceuexp/ceuexp_s42
+seed: 42
+features:
+  set: bare
+  extra: [log2_exposure_s, log2_relative_radiance]
+data:
+  data_root: output/allsky-mm/dataset-iso-exp
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  weight_decay: 0.05
+  num_workers: 8
+  early_stopping:
+    patience: 40
+    monitor: val/loss
+augmentation:
+  p_exposure: 0.0
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25

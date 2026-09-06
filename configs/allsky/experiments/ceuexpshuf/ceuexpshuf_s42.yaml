@@ -1,0 +1,52 @@
+# Controle do ceuexp: identico em tudo, mas os dois extras sao as colunas
+# *_shuffled que `allsky exposure-features` grava — cada uma permutada DENTRO do
+# seu split com numpy Generator(--seed). As marginais por split sao as mesmas;
+# so a ligacao entre a coluna e o frame ao lado e destruida. Se o ceuexp bater
+# este braco, a rede usa a feature; se empatar, o ganho do ceuexp nao vem dela.
+# p_exposure = 0 como no ceuexp (ver o cabecalho de ceuexp_s42.yaml), para que
+# o par difira so nas colunas.
+# Quarta mudanca: o alvo primario passa a ser o k* (a classe de ceu e lida do
+# k* previsto x Kt de ceu-claro nas faixas de Escobedo -- global.sky_kt no
+# eval_metrics.json); a cross-entropy fica com peso 0,25 so para fornecer
+# probabilidades, sem mandar na selecao do best (monitor val/loss).
+extends: [../_base.yaml, ../../models/film.yaml]
+name: ceuexpshuf_s42
+output_dir: output/allsky-mm/experiments/ceuexpshuf/ceuexpshuf_s42
+seed: 42
+features:
+  set: bare
+  extra: [log2_exposure_s_shuffled, log2_relative_radiance_shuffled]
+data:
+  data_root: output/allsky-mm/dataset-iso-exp
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  weight_decay: 0.05
+  num_workers: 8
+  early_stopping:
+    patience: 40
+    monitor: val/loss
+augmentation:
+  p_exposure: 0.0
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25

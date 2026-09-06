@@ -146,6 +146,10 @@ def test_every_experiment_trains_on_a_dataset_some_prepare_config_builds(
     cfg = load_experiment_config(experiment)
     prepared = {load_prepare_config(path).output.dataset_dir for path in _PREPARE_CONFIGS}
 
+    if experiment.parent.name in _EXPOSURE_ARMS:
+        assert cfg.data.data_root == _EXPOSURE_DATA_ROOT, cfg.data.data_root
+        assert _EXPOSURE_SOURCE_ROOT in prepared
+        return
     if experiment.parent.name == "folsom":
         # Known and open: the UCSD-Folsom adapter ships in allsky.data.folsom but
         # no configs/allsky/data/*.yaml builds `dataset-folsom`, so this arm's
@@ -154,6 +158,14 @@ def test_every_experiment_trains_on_a_dataset_some_prepare_config_builds(
         assert cfg.data.data_root not in prepared
         return
     assert cfg.data.data_root in prepared, cfg.data.data_root
+
+
+#: The arms that train on the dataset ``allsky exposure-features`` derives from
+#: ``_EXPOSURE_SOURCE_ROOT`` — no prepare config builds it, its producer is the
+#: CLI command, so the test asserts the chain instead of the prepare set.
+_EXPOSURE_ARMS = frozenset({"ceuexp", "ceuexpshuf"})
+_EXPOSURE_DATA_ROOT = "output/allsky-mm/dataset-iso-exp"
+_EXPOSURE_SOURCE_ROOT = "output/allsky-mm/dataset-iso"
 
 
 #: Arms known to resolve to the same run and left in place deliberately, as
@@ -298,7 +310,7 @@ def test_experiment_builds_and_forwards(experiment: Path) -> None:
     # Read the width off the config's own policy set rather than pinning it: the
     # engine sizes the sensor branch the same way, so a hardcoded 13 turned a
     # switch to `minimal` into a shape error in the test instead of in the code.
-    n_features = len(resolve_feature_set(cfg.features.feature_set))
+    n_features = len(resolve_feature_set(cfg.features.feature_set, cfg.features.extra))
 
     if cfg.data.input_mode == "image":
         model = build_model(cfg, n_features, image_backbone=_StubBackbone())
