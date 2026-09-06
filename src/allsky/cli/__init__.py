@@ -25,6 +25,10 @@ Prepare a local dataset (frames -> v2 manifest -> day splits):
 Precompute DINOv2 embeddings for the prepared dataset:
     allsky precompute-embeddings --config configs/allsky/data/local_prepare.yaml
 
+Attach the overlay exposure and relative radiance to a prepared dataset:
+    allsky exposure-features --data-root output/allsky-mm/dataset-iso \\
+        --videos data/all-sky/videos --out output/allsky-mm/dataset-iso-exp
+
 Train a multimodal experiment:
     allsky train --config configs/allsky/experiments/v4_film.yaml \\
         --data-root output/allsky-mm/dataset
@@ -36,7 +40,7 @@ Evaluate a trained checkpoint:
 The CLI is a package: each command group lives in its own module
 (:mod:`allsky.cli.archive`, :mod:`allsky.cli.frames`, :mod:`allsky.cli.train`,
 :mod:`allsky.cli.prepare`, :mod:`allsky.cli.embeddings`,
-:mod:`allsky.cli.evaluate`, :mod:`allsky.cli.watch`) and exposes a
+:mod:`allsky.cli.exposure`, :mod:`allsky.cli.evaluate`, :mod:`allsky.cli.watch`) and exposes a
 ``register(app)`` function called once here, so ``__init__`` never needs editing
 to add a command. Heavy dependencies (torch, imageio-ffmpeg) are imported
 lazily inside each command so ``allsky --help`` works in a minimal environment.
@@ -44,7 +48,7 @@ lazily inside each command so ``allsky --help`` works in a minimal environment.
 
 import typer
 
-from allsky.cli import archive, embeddings, evaluate, frames, prepare, train, watch
+from allsky.cli import archive, embeddings, evaluate, exposure, frames, prepare, train, watch
 
 app = typer.Typer(
     name="allsky",
@@ -57,6 +61,7 @@ archive.register(app)
 frames.register(app)
 prepare.register(app)
 embeddings.register(app)
+exposure.register(app)
 train.register(app)
 evaluate.register(app)
 watch.register(app)
