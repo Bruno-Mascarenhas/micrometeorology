@@ -1,0 +1,50 @@
+# ceuaug4: rotacao MODERADA. O ceuaug2 (+-180, p 1) subiu a parcialmente-clara de
+# 0,35 para 0,41 mas subajustou (train loss 0,39, vies +5,5 W/m2 na difusa): sem
+# o prior de posicao do Sol a rede precisa do canal solar e de mais epocas. Aqui
+# +-30 graus com p 0,5, translacao e canal cos_sun_angle mantidos, 40 epocas.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: ceuaug4_s42
+output_dir: output/allsky-mm/experiments/ceuaug/ceuaug4_s42
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso-20260906
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+  geometry_channels: [cos_sun_angle]
+train:
+  backbone_lr: 0.00001
+  epochs: 40
+  weight_decay: 0.05
+  num_workers: 8
+  early_stopping:
+    patience: 40
+    monitor: val/kindex_mae
+augmentation:
+  p_exposure: 0.5
+  exposure_log2: 0.6
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25
+  p_translate: 0.5
+  translate_px: 8
+  p_rotate: 0.5
+  rotate_max_deg: 30

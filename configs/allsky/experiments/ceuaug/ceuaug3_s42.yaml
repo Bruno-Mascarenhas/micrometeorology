@@ -7,6 +7,11 @@
 #   rotularia o resultado com a media; lambda ~ Beta(1, 1), o uniforme do artigo.
 #   Imagem, features e alvos de regressao entram lineares; a classe de ceu vira
 #   rotulo suave lambda * onehot_i + (1 - lambda) * onehot_j.
+# Ajuste apos o ceuaug2 (2026-09-07 17:00): a rotacao +-180 com o canal solar
+# subajustou em 30 epocas (train loss 0,39 vs 0,09; val k* MAE 0,0855 vs 0,080;
+# DHI 22,4 com vies +5,5). Empilhar o C-Mixup sobre ela mediria regularizacao
+# demais sobre regularizacao demais; este degrau passa a ser ceuaug1 + C-Mixup,
+# sem rotacao/translacao e sem canal de geometria, para medir o mixup sozinho.
 extends: [../_base.yaml, ../../models/image_only.yaml]
 name: ceuaug3_s42
 output_dir: output/allsky-mm/experiments/ceuaug/ceuaug3_s42
@@ -34,7 +39,6 @@ model:
   backbone_frozen: false
   unfreeze_last_n: 12
   backbone_pooling: cls+mean
-  geometry_channels: [cos_sun_angle]
 train:
   backbone_lr: 0.00001
   epochs: 30
@@ -54,7 +58,7 @@ augmentation:
   p_noise: 0.3
   noise_sigma: 0.01
   p_erase: 0.25
-  p_translate: 0.5
+  p_translate: 0.0
   translate_px: 8
-  p_rotate: 1.0
+  p_rotate: 0.0
   rotate_max_deg: 180
