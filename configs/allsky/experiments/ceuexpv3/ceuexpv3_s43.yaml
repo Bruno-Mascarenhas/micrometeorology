@@ -5,6 +5,13 @@
 # feature: LR por camada (Bao et al. 2022; e a convencao do proprio DINOv3 em
 # dinov3/train/param_groups.py) protege os blocos rasos, e 256 px e a
 # resolucao de pre-treino do v3 (16 x 16 tokens). Mesmo monitor e EMA do ceuexp2.
+# Ajuste apos a semente 42 (2026-09-07 04:10): o val k* MAE do v3 chegou ao minimo
+# (0,0772) na epoca 8 e subiu ate 0,0828 na 40, enquanto o v2 fica plano em
+# 0,078 — o LR ainda e alto para o v3 mesmo com o decaimento por camada. Nas
+# sementes 43/44: backbone_lr 1e-5 -> 5e-6, cosseno de 40 -> 30 epocas, e a EMA
+# com decay 0,9998 (horizonte ~5 epocas em vez de ~1, para ser uma media de
+# verdade e nao uma copia do last). A semente 42 fica como referencia da
+# primeira receita.
 extends: [../_base.yaml, ../../models/film.yaml]
 name: ceuexpv3_s43
 output_dir: output/allsky-mm/experiments/ceuexpv3/ceuexpv3_s43
@@ -39,14 +46,14 @@ train:
   layer_decay: 0.8
   weight_average:
     enabled: true
-    decay: 0.999
+    decay: 0.9998
     start_epoch: 2
-  backbone_lr: 0.00001
-  epochs: 40
+  backbone_lr: 0.000005
+  epochs: 30
   weight_decay: 0.05
   num_workers: 8
   early_stopping:
-    patience: 40
+    patience: 30
     monitor: val/kindex_mae
 augmentation:
   p_exposure: 0.0

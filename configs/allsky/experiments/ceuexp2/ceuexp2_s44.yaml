@@ -4,6 +4,8 @@
 # e fixava o best nas epocas 3-5, e o last servia melhor tudo. 2. Media
 # exponencial de pesos (Polyak) gravada como ema.ckpt: o checkpoint de uma
 # epoca e ruido do tamanho da diferenca entre sementes.
+# Ajuste apos a semente 42 (2026-09-07 04:10): EMA com decay 0,9998 (horizonte
+# ~5 epocas) nas sementes 43/44; com 0,999 a media coincide com o last.
 extends: [../_base.yaml, ../../models/film.yaml]
 name: ceuexp2_s44
 output_dir: output/allsky-mm/experiments/ceuexp2/ceuexp2_s44
@@ -35,7 +37,7 @@ model:
 train:
   weight_average:
     enabled: true
-    decay: 0.999
+    decay: 0.9998
     start_epoch: 2
   backbone_lr: 0.00001
   epochs: 40
