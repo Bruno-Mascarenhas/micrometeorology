@@ -141,7 +141,10 @@ class MultitaskLoss(nn.Module):
             ``"clearsky_index"``,
             ``kindex`` ``(B,)`` (dimensionless ratio) and ``cloud_fraction``
             ``(B,)`` in ``[0, 1]`` — all ``float``, NaN = missing — plus
-            ``sky_class`` ``(B,)`` ``int64`` with ``-1`` = missing.
+            ``sky_class`` ``(B,)`` ``int64`` with ``-1`` = missing, and
+            optionally ``sky_distribution`` ``(B, SKY_CLASS_COUNT)`` float, a
+            target distribution per row (a mixed batch), which replaces the
+            hard class for the rows ``sky_class`` marks as labelled.
 
         Returns
         -------
@@ -168,7 +171,9 @@ class MultitaskLoss(nn.Module):
             components["loss_kindex"] = component
             total = _accumulate(total, self._kindex_weight, component)
         if self._sky_enabled:
-            component = self._sky_loss(outputs["sky_logits"], batch["sky_class"])
+            component = self._sky_loss(
+                outputs["sky_logits"], batch["sky_class"], batch.get("sky_distribution")
+            )
             components["loss_sky"] = component
             total = _accumulate(total, self._sky_weight, component)
         if self._cloud_enabled:
@@ -219,7 +224,9 @@ class MultitaskLoss(nn.Module):
             )
         return _masked_mean(per_row, mask)
 
-    def _sky_loss(self, logits: Tensor, sky_class: Tensor) -> Tensor:
+    def _sky_loss(
+        self, logits: Tensor, sky_class: Tensor, distribution: Tensor | None = None
+    ) -> Tensor:
         """Masked cross-entropy over rows with a valid (``>= 0``) class label.
 
         Hard targets by default; ``label_smoothing`` mixes them with the uniform
@@ -227,6 +234,14 @@ class MultitaskLoss(nn.Module):
         :func:`ordinal_soft_targets`. ``class_weights`` scales each row by its
         class under either target; the masked mean is over rows, not over
         weights, so a re-weighted batch is not re-normalised.
+
+        A *distribution* ``(B, K)`` replaces the hard target of every row: the
+        ordinal soft targets become its mix of theirs, the label smoothing its
+        mix with the uniform, and the class weight enters as the hard path puts
+        it — inside the class sum on the smoothed target, as a factor on the
+        row under the ordinal targets — each of which reduces to the
+        hard-target rule when the row is one-hot, so an unmixed row costs what
+        it costs without a distribution.
         """
         mask = sky_class >= 0
         # `clamp(min=0)` only feeds the masked-out rows a valid index; their loss
@@ -234,6 +249,8 @@ class MultitaskLoss(nn.Module):
         # the masking too, but returns NaN for a batch where every row is masked.
         safe = sky_class.clamp(min=0)
         weights = self._sky_class_weights
+        if distribution is not None:
+            return _masked_mean(self._distribution_loss(logits, distribution), mask)
         if self._sky_ordinal_tau is None:
             per_row = functional.cross_entropy(
                 logits,
@@ -248,6 +265,33 @@ class MultitaskLoss(nn.Module):
             if weights is not None:
                 per_row = per_row * weights[safe]
         return _masked_mean(per_row, mask)
+
+    def _distribution_loss(self, logits: Tensor, distribution: Tensor) -> Tensor:
+        """Per-row cross-entropy against a target distribution, unmasked.
+
+        The class weight enters where the hard path puts it: inside the sum
+        over classes on the smoothed target, as ``functional.cross_entropy``
+        does with ``weight`` and ``label_smoothing`` together, and as a factor
+        on the row under the ordinal targets, where the hard path scales the row
+        by its label's weight.
+        """
+        n_classes = logits.shape[-1]
+        target = distribution.to(logits.dtype)
+        log_prob = functional.log_softmax(logits, dim=-1)
+        weights = self._sky_class_weights
+        if self._sky_ordinal_tau is not None:
+            ranks = torch.arange(n_classes, device=logits.device)
+            target = target @ ordinal_soft_targets(ranks, n_classes, self._sky_ordinal_tau)
+            per_row = -(target * log_prob).sum(dim=-1)
+            if weights is not None:
+                per_row = per_row * (distribution.to(logits.dtype) * weights).sum(-1)
+            return per_row
+        if self._sky_label_smoothing > 0.0:
+            smoothing = self._sky_label_smoothing
+            target = (1.0 - smoothing) * target + smoothing / n_classes
+        if weights is not None:
+            target = target * weights
+        return -(target * log_prob).sum(dim=-1)
 
 
 def ordinal_soft_targets(labels: Tensor, n_classes: int, tau: float) -> Tensor:

@@ -419,8 +419,12 @@ class AugmentationConfig(BaseModel):
     Every probability defaults to ``0.0``, so an experiment that does not
     mention this section trains on exactly the pixels it trained on before.
     The transforms and the physical argument for each live in
-    :mod:`allsky.augmentation`; flips and frame-centred rotations are absent on
-    purpose, because they move the sun while the geometry features stay put.
+    :mod:`allsky.augmentation`; flips are absent on purpose, because they move
+    the sun while the geometry features stay put. ``p_rotate`` turns the frame
+    about the zenith TOGETHER with the ``model.geometry_channels`` planes, so
+    the sun's pixel and the plane that marks it move as one; the engine warns
+    when it is set on a run without those planes, where the rotation would be
+    the illegal one.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -432,6 +436,8 @@ class AugmentationConfig(BaseModel):
     p_translate: float = Field(default=0.0, ge=0.0, le=1.0)
     translate_px: int = Field(default=4, ge=0)
     p_erase: float = Field(default=0.0, ge=0.0, le=1.0)
+    p_rotate: float = Field(default=0.0, ge=0.0, le=1.0)
+    rotate_max_deg: float = Field(default=180.0, ge=0.0, le=180.0)
 
 
 class ExperimentModelConfig(BaseModel):
@@ -483,6 +489,31 @@ class WeightAverageConfig(BaseModel):
     # Polyak & Juditsky 1992; 0.999 is torch.optim.swa_utils.get_ema_multi_avg_fn's default.
     decay: float = Field(default=0.999, gt=0.0, lt=1.0)
     start_epoch: int = Field(default=1, ge=1)
+
+
+class CMixupConfig(BaseModel):
+    """C-Mixup over the training batches (Yao et al. 2022, NeurIPS, arXiv:2210.05775).
+
+    Each row of a batch is mixed with a partner drawn from the same batch with
+    probability proportional to ``exp(-(k*_i - k*_j)^2 / (2 bandwidth^2))``
+    on the primary regression target, and ``lambda ~ Beta(alpha, alpha)``
+    weights the pair: the frame and the sensor features linearly, the
+    regression targets linearly, the sky class as the soft label
+    ``lambda * onehot_i + (1 - lambda) * onehot_j``. ``p`` is the fraction of
+    batches mixed at all; a row whose own or partner's target is missing is
+    kept as it is. ``bandwidth`` is in the unit of ``target_kindex`` — k* —
+    so ``0.05`` pairs frames whose clear-sky index differs by a few
+    hundredths. Only the single-frame image path can be mixed: the partner's
+    pixels are what gets blended, and a window or a precomputed embedding has
+    none to blend.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    alpha: float = Field(default=1.0, gt=0.0)
+    bandwidth: float = Field(default=0.05, gt=0.0)
+    p: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
 class EarlyStoppingConfig(BaseModel):
@@ -540,6 +571,7 @@ class ExperimentTrainConfig(BaseModel):
     grad_clip_norm: float | None = None
     early_stopping: EarlyStoppingConfig = Field(default_factory=EarlyStoppingConfig)
     weight_average: WeightAverageConfig = Field(default_factory=WeightAverageConfig)
+    cmixup: CMixupConfig = Field(default_factory=CMixupConfig)
     num_workers: int = Field(default=2, ge=0)
     device: str = "auto"
     out_subdir: str = "run"
@@ -625,6 +657,37 @@ class ExperimentConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _cmixup_needs_single_frames_and_the_kindex_head(self) -> ExperimentConfig:
+        """Refuse C-Mixup where there is no frame to blend or no k* to pair on.
+
+        The partner's pixels are blended into the row's own, which needs the
+        single-frame image path: an embedding is already pooled and a window
+        of frames has no one partner frame per row. The pairing kernel reads
+        ``target_kindex``, which is only guaranteed labelled — and only
+        meaningful as the primary target — when the k* head trains on it.
+        """
+        if not self.train.cmixup.enabled:
+            return self
+        if self.data.input_mode != "image":
+            raise ValueError(
+                "train.cmixup blends the partner frame's pixels into each row, but "
+                f"data.input_mode={self.data.input_mode!r} reads precomputed vectors; set "
+                "input_mode: image or disable cmixup"
+            )
+        if self.data.alignment.strategy != "center_frame":
+            raise ValueError(
+                "train.cmixup blends one partner frame per row, but "
+                f"data.alignment.strategy={self.data.alignment.strategy!r} serves a window of "
+                "frames; use strategy: center_frame or disable cmixup"
+            )
+        if not self.targets.kindex.enabled:
+            raise ValueError(
+                "train.cmixup pairs rows by their k* target, and targets.kindex is disabled; "
+                "enable the k* head or disable cmixup"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _pixel_sections_need_image_mode(self) -> ExperimentConfig:
         """Refuse preprocessing/augmentation in embedding mode, where no pixel is read.
 
@@ -644,6 +707,7 @@ class ExperimentConfig(BaseModel):
                 self.augmentation.p_noise,
                 self.augmentation.p_translate,
                 self.augmentation.p_erase,
+                self.augmentation.p_rotate,
             )
             > 0.0
         ):

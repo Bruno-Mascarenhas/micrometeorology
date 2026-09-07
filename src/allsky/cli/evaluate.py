@@ -51,7 +51,12 @@ def evaluate_cmd(
     ] = None,
     report_dir: Annotated[
         Path | None,
-        typer.Option(help="Report output dir (default: <checkpoint dir>/eval-<split>)."),
+        typer.Option(
+            help=(
+                "Report output dir (default: <checkpoint dir>/eval-<split>, or "
+                "eval-<split>-tta<N> under --tta-rotations N)."
+            )
+        ),
     ] = None,
     device: Annotated[
         DeviceChoice | None, typer.Option(help="Inference device (default: cpu).")
@@ -59,6 +64,18 @@ def evaluate_cmd(
     batch_size: Annotated[
         int | None, typer.Option(min=1, help="Inference batch size (default: config batch size).")
     ] = None,
+    tta_rotations: Annotated[
+        int,
+        typer.Option(
+            "--tta-rotations",
+            min=0,
+            help=(
+                "Test-time augmentation: score every frame at N rotations of 360/N degrees "
+                "about the zenith and average the outputs. Needs a checkpoint trained with "
+                "model.geometry_channels; 0 disables it."
+            ),
+        ),
+    ] = 0,
     predictions: Annotated[
         bool,
         typer.Option("--predictions/--no-predictions", help="Write predictions.parquet."),
@@ -83,7 +100,8 @@ def evaluate_cmd(
 
     The data root is resolved as ``--data-root``, else the ``data.data_root`` of
     ``--config``, else the one baked into the checkpoint; the report lands in
-    ``--report-dir`` or ``<checkpoint dir>/eval-<split>``.
+    ``--report-dir`` or :func:`_default_report_dir`'s directory beside the
+    checkpoint.
 
     Raises
     ------
@@ -94,7 +112,11 @@ def evaluate_cmd(
     configure_cli_logging()
 
     resolved_root = _resolve_data_root(data_root, config)
-    out_dir = report_dir if report_dir is not None else checkpoint.parent / f"eval-{split}"
+    out_dir = (
+        report_dir
+        if report_dir is not None
+        else _default_report_dir(checkpoint, split, tta_rotations)
+    )
 
     from allsky.evaluation import evaluate_checkpoint, write_evaluation_report
 
@@ -107,6 +129,7 @@ def evaluate_cmd(
             device=str(device) if device is not None else None,
             strict=strict,
             trust_checkpoint=trust_checkpoint,
+            tta_rotations=tta_rotations,
         )
         written = write_evaluation_report(result, out_dir, predictions=predictions)
     # The domain failures evaluation raises, named rather than `except Exception`,
@@ -119,6 +142,16 @@ def evaluate_cmd(
     typer.echo(f"Report written to {out_dir}")
     for name, path in written.items():
         typer.echo(f"  {name}: {path}")
+
+
+def _default_report_dir(checkpoint: Path, split: str, tta_rotations: int) -> Path:
+    """``<checkpoint dir>/eval-<split>``, suffixed ``-tta<N>`` under N rotations.
+
+    A test-time-augmented evaluation gets a directory of its own so it never
+    overwrites the plain report of the same checkpoint and split.
+    """
+    suffix = f"-tta{tta_rotations}" if tta_rotations > 0 else ""
+    return checkpoint.parent / f"eval-{split}{suffix}"
 
 
 def _resolve_data_root(data_root: Path | None, config: Path | None) -> Path | None:

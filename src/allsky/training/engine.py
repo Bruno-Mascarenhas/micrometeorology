@@ -94,6 +94,7 @@ from allsky.training.checkpointing import (
     restore_rng_state,
     save_checkpoint,
 )
+from allsky.training.cmixup import CMixup
 from allsky.training.device import resolve_device
 from allsky.training.errors import TrainingError
 from allsky.training.run_dir import (
@@ -119,6 +120,11 @@ __all__ = ["resolve_run_device", "run_experiment"]
 #: (``seed * this + epoch``): a prime far above any epoch budget, so the seeds of
 #: two neighbouring runs never land on the same batch permutation.
 _SAMPLER_SEED_STRIDE = 100003
+
+#: Second word of the per-epoch C-Mixup seed ``(seed, this, epoch)``, so its
+#: stream is a pure function of ``(seed, epoch)`` like the sampler's and never
+#: coincides with the dataset's ``(seed, epoch, idx)`` augmentation streams.
+_CMIXUP_SEED_TAG = 0x63_6D_69_78
 
 
 def resolve_run_device(requested: str) -> str:
@@ -310,6 +316,7 @@ def run_experiment(
     from allsky.training.losses import MultitaskLoss
 
     loss_fn = MultitaskLoss(cfg.targets, target_normalizers).to(resolved_device)
+    mixer = _build_cmixup(cfg)
 
     fields = csv_fields(cfg)
     monitored = _monitorable_metrics(fields)
@@ -446,6 +453,8 @@ def run_experiment(
                     target_stats=(dhi_mean, dhi_std, kindex_mean, kindex_std),
                     component_weights=component_weights,
                     weight_average=weight_average,
+                    mixer=mixer,
+                    mix_rng=np.random.default_rng((cfg.seed, _CMIXUP_SEED_TAG, epoch)),
                 )
                 val_metrics = _eval_epoch(
                     model=model,
@@ -675,6 +684,36 @@ def _resume_weight_average(
     return average
 
 
+def _build_cmixup(cfg: ExperimentConfig) -> CMixup | None:
+    """The batch mixer ``train.cmixup`` asks for, ``None`` when it is off.
+
+    The heads it blends are the enabled ones, so the pairing mask reads exactly
+    the targets the loss will read; :class:`~allsky.config.ExperimentConfig`
+    has already refused the modes with no frame to blend.
+    """
+    settings = cfg.train.cmixup
+    if not settings.enabled:
+        return None
+    regression = tuple(
+        name
+        for name, head in (
+            ("dhi", cfg.targets.dhi),
+            ("kindex", cfg.targets.kindex),
+            ("cloud_fraction", cfg.targets.cloud_fraction),
+        )
+        if head.enabled
+    )
+    mixer = CMixup(
+        alpha=float(settings.alpha),
+        bandwidth=float(settings.bandwidth),
+        p=float(settings.p),
+        regression_targets=regression,
+        sky=bool(cfg.targets.sky.enabled),
+    )
+    logger.info("c-mixup: %s", mixer)
+    return mixer
+
+
 def _select_splits(manifest: pd.DataFrame, split: Any) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Slice train/val manifest rows by ``day_id`` (validation split required)."""
     day_ids = manifest["day_id"].astype(str)
@@ -769,6 +808,14 @@ def _build_datasets(
     pipeline = AugmentationPipeline(**cfg.augmentation.model_dump())
     if pipeline.enabled:
         logger.info("augmentation: %s", pipeline)
+    if pipeline.p_rotate > 0.0 and not geometry_channels_of(cfg):
+        logger.warning(
+            "augmentation.p_rotate=%s with no model.geometry_channels: a rotation without a "
+            "solar channel destroys the sun-cloud geometry the label depends on — the sun "
+            "moves in the frame while nothing tells the model where it went; set "
+            "model.geometry_channels (e.g. [cos_sun_angle]) or drop p_rotate",
+            pipeline.p_rotate,
+        )
     preprocess = PreprocessingPipeline.from_config(cfg)
     if preprocess.enabled:
         logger.info("preprocessing: %s", preprocess)
@@ -1084,6 +1131,8 @@ def _train_epoch(
     target_stats: tuple[float, float, float, float],
     component_weights: Mapping[str, float],
     weight_average: ExponentialMovingAverage | None = None,
+    mixer: CMixup | None = None,
+    mix_rng: np.random.Generator | None = None,
 ) -> tuple[dict[str, float], int]:
     """Run one training epoch with grad accumulation/clipping; return metrics + step.
 
@@ -1091,14 +1140,33 @@ def _train_epoch(
     optimizer step — including a step the GradScaler skipped for an inf
     gradient, which averages the unchanged weights once more, as
     ``torch.optim.swa_utils`` would.
+
+    *mixer*, when given, blends each batch by C-Mixup: the pairing is drawn
+    from *mix_rng* on the CPU batch before it moves, so no value is read back
+    from the device, and the blend runs on the device once it has. The rows it
+    mixed are counted on the device and reported once, as
+    ``cmixup_mixed_rows``, so a run whose mixer never found a pair — every
+    batch gated out, or an enabled target missing from the manifest — is told
+    apart from one that mixed.
     """
     model.train()
     accumulator = _MetricAccumulator(target_stats, component_weights)
     n_batches = len(loader)
     pending = 0
+    mixed_rows: Tensor | None = None
     optimizer.zero_grad(set_to_none=True)
     for i, raw in enumerate(loader):
+        plan = None
+        if mixer is not None:
+            if mix_rng is None:
+                raise ValueError("a C-Mixup mixer needs the generator its pairing is drawn from")
+            plan = mixer.plan(raw, mix_rng)
         batch = _move(raw, device)
+        if mixer is not None and plan is not None:
+            placed = plan.to(device)
+            batch = mixer.apply(batch, placed)
+            count = placed.mixed.sum()
+            mixed_rows = count if mixed_rows is None else mixed_rows + count
         with _autocast(autocast_device, autocast_dtype):
             outputs = model(batch)
             losses = loss_fn(outputs, batch)
@@ -1123,7 +1191,17 @@ def _train_epoch(
                 pending = 0
                 global_step += 1
         accumulator.update(outputs, batch, losses)
-    return accumulator.result(), global_step
+    metrics = accumulator.result()
+    if mixer is not None:
+        n_mixed = int(mixed_rows.item()) if mixed_rows is not None else 0
+        metrics["cmixup_mixed_rows"] = float(n_mixed)
+        if n_mixed == 0:
+            logger.warning(
+                "c-mixup: no row was mixed this epoch (p=%s); the batch gate never opened or "
+                "an enabled target is missing on every row",
+                mixer.p,
+            )
+    return metrics, global_step
 
 
 def _eval_epoch(

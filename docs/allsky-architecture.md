@@ -271,6 +271,14 @@ holds the circumsolar region that governs the diffuse split.
 projection, the east-west mirror and the mount rotation. Channels:
 `cos_sun_angle`, `cos_pixel_zenith`, `solar_disc`. The zenith channel is fixed
 for a fixed camera — a spatial prior, carrying no information *between* samples.
+Every plane is zero beyond the horizon, where the frame holds the prepare pad:
+a rotation about the zenith (`augmentation.p_rotate` in training,
+`evaluate --tta-rotations` at test time) fills the corners it uncovers with
+zero, so the rotated plane is the plane of the rotated sun over the whole frame
+and training and evaluation see the same corners. A checkpoint trained before
+the planes were zeroed there was fed the lens model's extrapolation past the
+horizon instead; evaluating it now does not reproduce its recorded metrics
+exactly.
 
 **How the channels attach.** Widening the pretrained convolution would put the
 new weights inside the backbone, where the freeze sweep owns them:

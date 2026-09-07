@@ -465,8 +465,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         If *feature_columns* is empty or names a column *manifest* lacks, if
         *stats* covers different columns, if ``train=False`` is passed without
         the training split's *stats* (the leakage guard), or if
-        *geometry_channels* is asked for without finite solar angles or
-        alongside a translating augmentation.
+        *geometry_channels* is asked for without finite solar angles.
     """
 
     def __init__(
@@ -529,24 +528,15 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
             self._serve_one_row_per_sensor_block(self.window_minutes)
         self._geometry_channels = tuple(geometry_channels)
         self.frame_geometry = frame_geometry
-        self._geometry = (
-            self._geometry_source(manifest, augment if train else None)
-            if self._geometry_channels
-            else None
-        )
+        self._geometry = self._geometry_source(manifest) if self._geometry_channels else None
 
     def _geometry_source(
-        self, manifest: pd.DataFrame, augment: AugmentationPipeline | None
+        self, manifest: pd.DataFrame
     ) -> tuple[LensCalibration, np.ndarray, np.ndarray]:
         missing = [c for c in ("solar_zenith", "solar_azimuth") if c not in manifest.columns]
         if missing:
             raise ValueError(
                 f"geometry channels need the manifest columns {missing}, which it lacks"
-            )
-        if augment is not None and augment.p_translate > 0:
-            raise ValueError(
-                "geometry channels are incompatible with p_translate > 0: the frame would shift "
-                "while the geometry maps, built from the lens, would not follow it"
             )
         zenith_deg = manifest["solar_zenith"].to_numpy(dtype=np.float64)
         azimuth_deg = manifest["solar_azimuth"].to_numpy(dtype=np.float64)
@@ -598,7 +588,8 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         """Load a JPEG as a standardized float32 CHW array, resized to ``image_size``.
 
         The chain is decode -> ``[0, 1]`` -> preprocess -> resize -> augment
-        -> standardize.
+        -> standardize, with the solar-geometry planes built before the
+        augmentation and appended after the standardization.
 
         Preprocessing runs at NATIVE resolution, before the resize: filling the
         timestamp band after downscaling leaves glyph pixels smeared into the
@@ -606,9 +597,12 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         the six rows under the band). Augmentation runs on the ``[0, 1]`` frame
         because every transform in :mod:`allsky.augmentation` is defined there,
         and standardisation stays last so the backbone always receives its
-        pretraining distribution. ``idx`` seeds the augmentation together with the seed and the epoch, and it is
-        the SERVED row's index even when the frame read is a co-frame of that
-        row's window.
+        pretraining distribution. The geometry planes go through the
+        augmentation with the frame so a rotation or a shift moves the sun's
+        pixel and the plane that marks it together; the photometric transforms
+        leave them alone. ``idx`` seeds the augmentation together with the seed
+        and the epoch, and it is the SERVED row's index even when the frame read
+        is a co-frame of that row's window.
 
         PIL decode -> RGB (``convert`` channel-replicates grayscale) -> bilinear
         resize. ``image_path`` is already resolved against ``data_root``. On the
@@ -628,21 +622,30 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
             size=self.image_size,
             preprocess=self.preprocess,
         )
+        maps = self._geometry_maps(idx)
+        stacked = self._augmented(chw, idx, maps)
         # `chw` was allocated there, so standardising in place costs no copy.
-        standardized = imagenet_standardize(self._augmented(chw, idx), copy=False)
-        if self._geometry is None:
+        standardized = imagenet_standardize(stacked[:3], copy=False)
+        if maps is None:
             return standardized
+        if stacked is chw:
+            return np.concatenate([standardized, maps], axis=0)
+        return stacked
+
+    def _geometry_maps(self, idx: int) -> np.ndarray | None:
+        """The ``(G, H, W)`` solar-geometry planes of row *idx*, ``None`` without them."""
+        if self._geometry is None:
+            return None
         calibration, zenith_deg, azimuth_deg = self._geometry
-        maps = solar_geometry_maps(
+        return solar_geometry_maps(
             calibration,
             (self.image_size, self.image_size),
             sun_zenith_rad=float(np.radians(zenith_deg[idx])),
             sun_azimuth_rad=float(np.radians(azimuth_deg[idx])),
             channels=self._geometry_channels,
         )
-        return np.concatenate([standardized, maps], axis=0)
 
-    def _augmented(self, chw: np.ndarray, idx: int) -> np.ndarray:
+    def _augmented(self, chw: np.ndarray, idx: int, geometry: np.ndarray | None) -> np.ndarray:
         """Augment one frame with a per-sample seeded generator.
 
         The generator is derived from ``(seed, epoch, idx)`` rather than drawn
@@ -650,11 +653,17 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         transform a sample gets — the engine's own docstring warns that worker
         RNG would otherwise leak into the batch — while the epoch term keeps the
         draw varying across passes.
+
+        Returns *chw* itself when nothing can fire, and otherwise the augmented
+        ``(3, H, W)`` frame — ``(3 + G, H, W)`` with the moved *geometry* planes
+        appended when they were given — still in ``[0, 1]``.
         """
         if self.augment is None or not self.augment.enabled:
             return chw
         rng = np.random.default_rng((self._seed, self.epoch, idx))
-        augmented: np.ndarray = self.augment(chw, rng, self._imaged_pixels(chw.shape[1:]))
+        augmented: np.ndarray = self.augment(
+            chw, rng, self._imaged_pixels(chw.shape[1:]), geometry=geometry
+        )
         return augmented
 
     def _imaged_pixels(self, shape: tuple[int, int]) -> np.ndarray | None:

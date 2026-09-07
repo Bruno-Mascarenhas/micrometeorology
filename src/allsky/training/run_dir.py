@@ -131,7 +131,8 @@ def csv_fields(cfg: ExperimentConfig) -> list[str]:
 
     ``val_ema_*`` mirrors the ``val_*`` columns for the averaged weights and is
     present only when ``train.weight_average`` is enabled, so a run without it
-    keeps the header it always had.
+    keeps the header it always had. ``train_cmixup_mixed_rows`` likewise
+    appears only under ``train.cmixup``: the count of rows the epoch blended.
     """
     fields = ["epoch", "lr", "lr_backbone"]
     splits = ["train", "val"]
@@ -147,6 +148,8 @@ def csv_fields(cfg: ExperimentConfig) -> list[str]:
             fields += [f"{split}_loss_sky", f"{split}_sky_acc", f"{split}_sky_balanced_acc"]
         if cfg.targets.cloud_fraction.enabled:
             fields.append(f"{split}_loss_cloud_fraction")
+    if cfg.train.cmixup.enabled:
+        fields.append("train_cmixup_mixed_rows")
     return fields
 
 

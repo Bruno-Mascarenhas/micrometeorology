@@ -54,7 +54,7 @@ from allsky.evaluation.metrics import (
     skill_score,
 )
 from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
-from allsky.preprocessing import PreprocessingPipeline
+from allsky.preprocessing import IMAGENET_MEAN, IMAGENET_STD, PreprocessingPipeline
 from allsky.training.checkpointing import normalizers_from_checkpoint
 from labmim_core.sky import SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES, sky_class_name
 
@@ -157,6 +157,7 @@ def evaluate_checkpoint(
     trust_checkpoint: bool = False,
     embedding_reader: EmbeddingReader | None = None,
     image_backbone_builder: Callable[[], Any] | None = None,
+    tta_rotations: int = 0,
 ) -> EvaluationResult:
     """Evaluate *checkpoint_path* on *split* and return an :class:`EvaluationResult`.
 
@@ -197,6 +198,14 @@ def evaluate_checkpoint(
     image_backbone_builder:
         Zero-arg factory for the image backbone (``input_mode="image"`` visual
         models); no backbone is downloaded implicitly.
+    tta_rotations:
+        Test-time augmentation: ``N > 0`` scores every frame at the ``N``
+        rotations ``k * 360 / N`` degrees about the zenith
+        (:func:`allsky.augmentation.rotate_frame` over the whole channel
+        stack) and averages the regression outputs and the sky probabilities;
+        the sky class is the argmax of the mean, and the k*-derived class
+        follows from the mean k*. Recorded as ``meta["tta_rotations"]``. ``0``
+        scores each frame once, as it is.
 
     Returns
     -------
@@ -207,8 +216,11 @@ def evaluate_checkpoint(
     ------
     ValueError
         If *split* has no days in the artifact or none of its days appear in the
-        manifest; and, under ``strict``, on a manifest-hash, split-id or
-        k-index-kind mismatch between the checkpoint and the data on disk.
+        manifest; under ``strict``, on a manifest-hash, split-id or
+        k-index-kind mismatch between the checkpoint and the data on disk; and
+        for *tta_rotations* on a checkpoint trained without
+        ``model.geometry_channels``, where a rotation moves the sun with nothing
+        telling the model where it went.
     """
     from allsky.training.checkpointing import load_checkpoint
     from allsky.training.engine import resolve_run_device
@@ -220,6 +232,15 @@ def evaluate_checkpoint(
     )
 
     cfg = ExperimentConfig.model_validate(checkpoint["config"])
+    if tta_rotations < 0:
+        raise ValueError(f"tta_rotations must be zero or positive, got {tta_rotations}")
+    if tta_rotations and not geometry_channels_of(cfg):
+        raise ValueError(
+            f"tta_rotations={tta_rotations} rotates every frame about the zenith, and this "
+            "checkpoint was trained without model.geometry_channels: the sun would move in the "
+            "frame with no solar channel to move with it, so the rotated frames are skies the "
+            "model was never shown; evaluate without --tta-rotations"
+        )
     root = Path(data_root) if data_root is not None else Path(cfg.data.data_root)
 
     manifest, meta = load_manifest(resolve_against_root(cfg.data.manifest, root))
@@ -251,6 +272,7 @@ def evaluate_checkpoint(
         kindex_kind=manifest_kind,
         utc_offset_hours=site_utc_offset_hours(meta),
         frame_geometry=meta.get("frame_geometry"),
+        tta_rotations=tta_rotations,
     )
 
     scored_targets = _scored_targets(predictions, enabled_targets)
@@ -282,6 +304,7 @@ def evaluate_checkpoint(
         "sensor_timestamp_offset_minutes": (meta.get("thresholds") or {}).get(
             "sensor_timestamp_offset_minutes"
         ),
+        "tta_rotations": int(tta_rotations),
     }
     logger.info(
         "evaluated %s on '%s': %d rows, targets=%s (hash_ok=%s, split_ok=%s)",
@@ -428,8 +451,14 @@ def _run_inference(
     kindex_kind: str | None,
     utc_offset_hours: float,
     frame_geometry: Mapping[str, Any] | None = None,
+    tta_rotations: int = 0,
 ) -> pd.DataFrame:
-    """Rebuild the model, run a no-grad pass and assemble the predictions frame."""
+    """Rebuild the model, run a no-grad pass and assemble the predictions frame.
+
+    With *tta_rotations* the pass over each batch is one forward per rotation
+    of the frames, folded by :func:`_rotation_averaged_outputs`; without it,
+    one forward of the frames as the dataset serves them.
+    """
     import torch
     from torch.utils.data import DataLoader
 
@@ -475,6 +504,7 @@ def _run_inference(
         persistent_workers=False,
         drop_last=False,
     )
+    rotation_fill = _rotation_fill(len(geometry_channels_of(cfg))) if tta_rotations else None
     collected: dict[str, list[np.ndarray]] = {name: [] for name in enabled_targets}
     with torch.no_grad():
         for raw in loader:
@@ -482,7 +512,12 @@ def _run_inference(
                 key: (value.to(device) if isinstance(value, torch.Tensor) else value)
                 for key, value in raw.items()
             }
-            outputs = model(batch)
+            if rotation_fill is None:
+                outputs = model(batch)
+            else:
+                outputs = _rotation_averaged_outputs(
+                    model, batch, raw, rotations=tta_rotations, fill=rotation_fill, device=device
+                )
             for name in enabled_targets:
                 collected[name].append(_extract_prediction(name, outputs))
             if "sky" in enabled_targets:
@@ -515,6 +550,62 @@ def _run_inference(
         kindex_kind=kindex_kind,
         utc_offset_hours=utc_offset_hours,
     )
+
+
+def _rotation_fill(n_geometry_channels: int) -> np.ndarray:
+    """What a rotated frame's uncovered corners hold, per plane, ``(3 + G,)`` float32.
+
+    The dataset serves standardized RGB, so the black the prepare pad writes —
+    and the training rotation fills with, on the ``[0, 1]`` frame — is
+    ``(0 - mean) / std`` per channel here. The geometry planes are filled with
+    zero, which is what :func:`allsky.geometry.solar_geometry_maps` writes on
+    every pixel beyond the horizon, so the corners a rotation uncovers hold
+    what the unrotated plane holds there.
+    """
+    rgb = (np.zeros(3) - np.asarray(IMAGENET_MEAN)) / np.asarray(IMAGENET_STD)
+    return np.concatenate([rgb, np.zeros(n_geometry_channels)]).astype(np.float32)
+
+
+def _rotation_averaged_outputs(
+    model: Any,
+    batch: dict[str, Any],
+    raw: Mapping[str, Any],
+    *,
+    rotations: int,
+    fill: np.ndarray,
+    device: str,
+) -> dict[str, Any]:
+    """The model's outputs averaged over *rotations* uniform turns of the frames.
+
+    Each regression head is the mean of its outputs over the rotations, in the
+    normalized space the head emits — the denormalization is affine, so this is
+    the mean in physical units too. ``sky_logits`` comes back as the log of the
+    mean class probability: the argmax the caller takes is then the argmax of
+    the mean probability, and the softmax it applies recovers that mean.
+
+    *raw* is the batch as the loader emitted it, still on the CPU: the frames
+    are rotated there, whole channel stack at a time so the solar-geometry
+    planes turn with the pixels, and only the rotated copy travels to *device*.
+    """
+    import torch
+
+    from allsky.augmentation import rotate_frame
+
+    key = "image_seq" if "image_seq" in batch else "image"
+    frames = raw[key].numpy()
+    per_plane = fill.reshape((1,) * (frames.ndim - 3) + (-1, 1, 1))
+    summed: dict[str, Any] = {}
+    for step in range(rotations):
+        angle = step * 360.0 / rotations
+        rotated = np.ascontiguousarray(rotate_frame(frames, angle, fill=per_plane))
+        outputs = model({**batch, key: torch.from_numpy(rotated).to(device)})
+        for name, value in outputs.items():
+            term = torch.softmax(value.float(), dim=-1) if name == "sky_logits" else value.float()
+            summed[name] = term if name not in summed else summed[name] + term
+    averaged = {name: value / rotations for name, value in summed.items()}
+    if "sky_logits" in averaged:
+        averaged["sky_logits"] = torch.log(averaged["sky_logits"])
+    return averaged
 
 
 def _build_split_dataset(

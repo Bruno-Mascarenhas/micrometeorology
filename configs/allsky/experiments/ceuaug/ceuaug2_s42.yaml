@@ -1,0 +1,59 @@
+# ceuaug2: o ceuaug1 mais a augmentation geometrica, que so e legal com o canal
+# solar na entrada. Mudancas contra o ceuaug1:
+# - model.geometry_channels [cos_sun_angle]: o mapa do cosseno do angulo pixel-sol
+#   entra como quarto canal, o unico dos tres que o braco sunangle mostrou util
+#   (viés por banda de elevacao 17,5 -> 2,65 W/m2). Nenhum knob a mais: o
+#   patch_embed do DINOv2 fica congelado sob unfreeze_last_n, e por isso o canal
+#   entra por uma conv paralela zero-init fora do backbone, no grupo de
+#   parametros das cabecas — foi assim que o sunangle fez, com unfreeze_last_n 12;
+# - p_rotate 1.0 / rotate_max_deg 180: rotacao uniforme em torno do zenite do
+#   tensor completo, RGB e canal solar juntos, entao o sol gira com o mapa que
+#   diz onde ele esta e a amostra continua fisicamente possivel;
+# - p_translate 0.5 / translate_px 8: o deslocamento de montagem, que agora move
+#   o canal solar junto com o frame em vez de ser recusado.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: ceuaug2_s42
+output_dir: output/allsky-mm/experiments/ceuaug/ceuaug2_s42
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso-20260906
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+model:
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+  geometry_channels: [cos_sun_angle]
+train:
+  backbone_lr: 0.00001
+  epochs: 30
+  weight_decay: 0.05
+  num_workers: 8
+  early_stopping:
+    patience: 30
+    monitor: val/kindex_mae
+augmentation:
+  p_exposure: 0.5
+  exposure_log2: 0.6
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25
+  p_translate: 0.5
+  translate_px: 8
+  p_rotate: 1.0
+  rotate_max_deg: 180

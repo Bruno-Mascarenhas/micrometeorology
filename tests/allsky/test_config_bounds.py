@@ -270,3 +270,82 @@ class TestPixelSectionsNeedImageMode:
             {"data": {"input_mode": "image"}, "augmentation": {"p_noise": 0.3}}
         )
         assert cfg.augmentation.p_noise == pytest.approx(0.3)
+
+    def test_a_rotation_alone_is_refused_in_embedding_mode(self):
+        with pytest.raises(ValidationError, match="decodes none"):
+            ExperimentConfig.model_validate(
+                {"data": {"input_mode": "embedding"}, "augmentation": {"p_rotate": 0.5}}
+            )
+
+
+class TestRotationBounds:
+    @pytest.mark.parametrize(
+        "payload", [{"p_rotate": 1.5}, {"p_rotate": -0.1}, {"rotate_max_deg": 181.0}]
+    )
+    def test_a_rotation_knob_outside_its_range_is_rejected(self, payload: dict):
+        with pytest.raises(ValidationError):
+            ExperimentConfig.model_validate({"augmentation": payload})
+
+    def test_the_default_is_off_over_the_whole_circle(self):
+        augmentation = ExperimentConfig().augmentation
+        assert augmentation.p_rotate == 0.0
+        assert augmentation.rotate_max_deg == pytest.approx(180.0)
+
+
+_REGRESSION_HEADS = {"dhi": {"enabled": True}, "kindex": {"enabled": True}}
+
+
+class TestCMixupNeedsSingleFramesAndTheKindexHead:
+    def test_it_loads_on_the_single_frame_image_path_with_the_kindex_head(self):
+        cfg = ExperimentConfig.model_validate(
+            {
+                "data": {"input_mode": "image"},
+                "targets": _REGRESSION_HEADS,
+                "train": {"cmixup": {"enabled": True, "alpha": 0.4, "bandwidth": 0.1, "p": 0.5}},
+            }
+        )
+        assert cfg.train.cmixup.bandwidth == pytest.approx(0.1)
+
+    def test_embedding_mode_is_refused(self):
+        with pytest.raises(ValidationError, match="input_mode"):
+            ExperimentConfig.model_validate(
+                {
+                    "data": {"input_mode": "embedding"},
+                    "targets": _REGRESSION_HEADS,
+                    "train": {"cmixup": {"enabled": True}},
+                }
+            )
+
+    def test_a_window_of_frames_is_refused(self):
+        with pytest.raises(ValidationError, match="window"):
+            ExperimentConfig.model_validate(
+                {
+                    "data": {"input_mode": "image", "alignment": {"strategy": "mean_embedding"}},
+                    "targets": _REGRESSION_HEADS,
+                    "train": {"cmixup": {"enabled": True}},
+                }
+            )
+
+    def test_a_run_without_the_kindex_head_is_refused(self):
+        with pytest.raises(ValidationError, match="kindex"):
+            ExperimentConfig.model_validate(
+                {
+                    "data": {"input_mode": "image"},
+                    "targets": {"dhi": {"enabled": True}},
+                    "train": {"cmixup": {"enabled": True}},
+                }
+            )
+
+    @pytest.mark.parametrize(
+        "payload", [{"alpha": 0.0}, {"bandwidth": 0.0}, {"p": 1.5}, {"p": -0.1}]
+    )
+    def test_a_knob_outside_its_range_is_rejected(self, payload: dict):
+        with pytest.raises(ValidationError):
+            _config({"cmixup": payload})
+
+    def test_the_documented_defaults_hold_while_off(self):
+        cmixup = ExperimentConfig().train.cmixup
+        assert cmixup.enabled is False
+        assert cmixup.alpha == pytest.approx(1.0)
+        assert cmixup.bandwidth == pytest.approx(0.05)
+        assert cmixup.p == pytest.approx(1.0)
