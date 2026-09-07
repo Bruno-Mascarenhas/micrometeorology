@@ -141,7 +141,7 @@ recorded beside the resume digest as provenance a reader can consult, never as a
 migration key: it lets someone tell "the formula widened" from "the pixels
 changed", and nothing reads it to carry a store across either.
 
-### Checkpoint payload (`last.ckpt` / `best.ckpt`)
+### Checkpoint payload (`last.ckpt` / `best.ckpt` / `ema.ckpt`)
 
 `torch.save`, atomic. Read back under torch's **restricted** unpickler
 (`weights_only=True` plus an allowlist of the payload's own types): a checkpoint
@@ -156,6 +156,9 @@ dump, `normalizers`, ordered `feature_columns`, `feature_groups`,
 frame-to-row pairing rule the serving path re-applies), `frame_geometry` (the
 prepare mask/crop/resize the live frame is put through), `backbone` info
 (image mode), `code_version`, and `rng_state` for deterministic resume.
+`ema.ckpt`, written only under `train.weight_average`, carries the same
+payload with `model_state` holding the exponential moving average of the
+weights at that epoch.
 
 Resume is crash-safe: the train batch order is drawn from a dedicated sampler
 generator re-seeded to `seed * 100003 + epoch` — a pure function of

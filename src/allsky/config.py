@@ -466,6 +466,25 @@ class AMPConfig(BaseModel):
     dtype: Literal["fp16", "bf16"] = "fp16"
 
 
+class WeightAverageConfig(BaseModel):
+    """Exponential moving average of the trainable weights, kept beside the run.
+
+    When ``enabled`` the engine maintains a shadow copy of the model updated after
+    every optimizer step, ``shadow = decay * shadow + (1 - decay) * weights``,
+    and writes it as ``ema.ckpt`` at the end of each epoch from ``start_epoch``
+    (1-based) on, in the same format as ``last.ckpt``. ``decay`` must lie strictly
+    inside ``(0, 1)``: ``0`` would copy the live weights and ``1`` would never move
+    off the weights the average started from.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    # Polyak & Juditsky 1992; 0.999 is torch.optim.swa_utils.get_ema_multi_avg_fn's default.
+    decay: float = Field(default=0.999, gt=0.0, lt=1.0)
+    start_epoch: int = Field(default=1, ge=1)
+
+
 class EarlyStoppingConfig(BaseModel):
     """Early-stopping controller (monitor a validation metric).
 
@@ -488,8 +507,13 @@ class ExperimentTrainConfig(BaseModel):
     """Optimisation / engine settings for an experiment run.
 
     ``backbone_lr`` (when set) drives a separate parameter group for the visual
-    backbone; ``out_subdir`` is the run directory created under
-    ``ExperimentConfig.output_dir``.
+    backbone; ``layer_decay`` (when set) splits that group per backbone stage,
+    scaling ``backbone_lr`` by ``layer_decay ** (stages above it + 1)`` — the
+    last block once, the embedding ``depth + 1`` times — so shallow blocks move
+    less than deep ones (Clark et al. 2020; Bao et al.
+    2022). ``weight_average`` keeps an exponential moving average of the weights
+    as a third evaluable checkpoint. ``out_subdir`` is the run directory created
+    under ``ExperimentConfig.output_dir``.
 
     ``epochs`` must be at least 1: both checkpoint writes live inside the epoch
     loop, so ``epochs: 0`` would exit 0 while advertising ``last.ckpt`` /
@@ -504,6 +528,7 @@ class ExperimentTrainConfig(BaseModel):
     batch_size: int = Field(default=32, ge=1)
     lr: float = Field(default=3e-4, gt=0.0)
     backbone_lr: float | None = None
+    layer_decay: float | None = Field(default=None, gt=0.0, le=1.0)
     weight_decay: float = 1e-4
     # AdamW is the only algorithm allsky.training.engine builds. Declared as the
     # literal so a config naming another one is refused when it is loaded, rather
@@ -514,9 +539,40 @@ class ExperimentTrainConfig(BaseModel):
     grad_accum_steps: int = Field(default=1, ge=1)
     grad_clip_norm: float | None = None
     early_stopping: EarlyStoppingConfig = Field(default_factory=EarlyStoppingConfig)
+    weight_average: WeightAverageConfig = Field(default_factory=WeightAverageConfig)
     num_workers: int = Field(default=2, ge=0)
     device: str = "auto"
     out_subdir: str = "run"
+
+    @model_validator(mode="after")
+    def _layer_decay_needs_a_backbone_rate(self) -> ExperimentTrainConfig:
+        """Refuse ``layer_decay`` without ``backbone_lr``, the rate it scales.
+
+        Without a backbone rate the engine builds a single parameter group, so
+        the decay would have no group to split and the run would train every
+        block at ``lr`` while its config claimed otherwise.
+        """
+        if self.layer_decay is not None and self.backbone_lr is None:
+            raise ValueError(
+                "train.layer_decay scales train.backbone_lr per backbone stage, and "
+                "backbone_lr is unset; set backbone_lr or drop layer_decay"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _weight_average_starts_inside_the_budget(self) -> ExperimentTrainConfig:
+        """Refuse an average that would begin after the last epoch.
+
+        ``ema.ckpt`` is first written at the end of ``start_epoch``, so a start
+        past ``epochs`` is a run that enables the average and never writes it.
+        """
+        average = self.weight_average
+        if average.enabled and average.start_epoch > self.epochs:
+            raise ValueError(
+                f"train.weight_average.start_epoch={average.start_epoch} is past "
+                f"train.epochs={self.epochs}: no ema.ckpt would ever be written"
+            )
+        return self
 
 
 class ExperimentConfig(BaseModel):

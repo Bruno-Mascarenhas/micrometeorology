@@ -52,6 +52,7 @@ type TorchOptimizer = Any
 
 __all__ = [
     "BEST_CHECKPOINT",
+    "EMA_CHECKPOINT",
     "LAST_CHECKPOINT",
     "capture_rng_state",
     "code_version",
@@ -63,6 +64,7 @@ __all__ = [
 #: Canonical checkpoint filenames written under a run directory.
 LAST_CHECKPOINT = "last.ckpt"
 BEST_CHECKPOINT = "best.ckpt"
+EMA_CHECKPOINT = "ema.ckpt"
 
 #: ``torch.compile`` state-dict key prefix stripped on load.
 _COMPILE_PREFIX = "_orig_mod."

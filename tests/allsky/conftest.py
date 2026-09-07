@@ -40,6 +40,8 @@ _TORCH_BACKED = (
     "test_engine.py",
     "test_engine_audit.py",
     "test_engine_findings.py",
+    "test_engine_layer_decay.py",
+    "test_engine_weight_average.py",
     "test_evaluator.py",
     "test_evaluator_findings.py",
     "test_geometry_channels.py",

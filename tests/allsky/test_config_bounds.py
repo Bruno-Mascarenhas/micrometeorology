@@ -51,6 +51,46 @@ class TestEarlyStoppingBounds:
         assert (early.patience, early.min_delta) == (1, 0.0)
 
 
+class TestWeightAverageBounds:
+    @pytest.mark.parametrize("decay", [0.0, 1.0, 1.5, -0.1])
+    def test_a_decay_outside_the_open_unit_interval_is_rejected(self, decay: float):
+        with pytest.raises(ValidationError, match="decay"):
+            _config({"weight_average": {"enabled": True, "decay": decay}})
+
+    def test_a_start_epoch_of_zero_is_rejected(self):
+        with pytest.raises(ValidationError, match="start_epoch"):
+            _config({"weight_average": {"enabled": True, "start_epoch": 0}})
+
+    def test_a_start_past_the_epoch_budget_is_rejected_because_no_ema_would_be_written(self):
+        with pytest.raises(ValidationError, match=r"no ema\.ckpt"):
+            _config({"epochs": 3, "weight_average": {"enabled": True, "start_epoch": 4}})
+
+    def test_a_start_past_the_budget_is_harmless_while_the_average_is_off(self):
+        cfg = _config({"epochs": 3, "weight_average": {"enabled": False, "start_epoch": 4}})
+        assert cfg.train.weight_average.enabled is False
+
+    def test_the_default_is_off_with_the_documented_decay(self):
+        average = _config({}).train.weight_average
+        assert (average.enabled, average.decay, average.start_epoch) == (False, 0.999, 1)
+
+
+class TestLayerDecayBounds:
+    @pytest.mark.parametrize("layer_decay", [0.0, 1.5, -0.5])
+    def test_a_decay_outside_the_half_open_unit_interval_is_rejected(self, layer_decay: float):
+        with pytest.raises(ValidationError, match="layer_decay"):
+            _config({"backbone_lr": 1e-5, "layer_decay": layer_decay})
+
+    def test_a_decay_of_one_is_accepted(self):
+        assert _config({"backbone_lr": 1e-5, "layer_decay": 1.0}).train.layer_decay == 1.0
+
+    def test_a_decay_without_a_backbone_rate_is_rejected_because_it_would_be_inert(self):
+        with pytest.raises(ValidationError, match="backbone_lr is unset"):
+            _config({"layer_decay": 0.75})
+
+    def test_the_default_is_none(self):
+        assert _config({}).train.layer_decay is None
+
+
 class TestAlignmentStrategy:
     def test_every_window_mode_the_dataset_implements_is_accepted(self):
         """One name set, owned here and read by the dataset that implements it."""
