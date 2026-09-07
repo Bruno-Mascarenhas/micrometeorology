@@ -12,6 +12,12 @@
 # com decay 0,9998 (horizonte ~5 epocas em vez de ~1, para ser uma media de
 # verdade e nao uma copia do last). A semente 42 fica como referencia da
 # primeira receita.
+# Ajuste apos a semente 43 (2026-09-07 08:00): LR 5e-6 e 30 epocas nao mudaram a
+# curva (val k* MAE minimo na epoca 14 e subindo depois; teste 21,5 / 0,654, pior
+# que a s42) e a EMA 0,9998 saiu igual ao last. Terceira hipotese: nao e a taxa,
+# e a quantidade de blocos livres — o v3 congelado ja empata o v2 fine-tunado, e
+# destravar os 12 blocos degrada as features. Nesta semente: unfreeze_last_n 4
+# (so os blocos finais), LR e schedule da s42 (1e-5, 40 epocas), EMA 0,9998.
 extends: [../_base.yaml, ../../models/film.yaml]
 name: ceuexpv3_s44
 output_dir: output/allsky-mm/experiments/ceuexpv3/ceuexpv3_s44
@@ -40,7 +46,7 @@ model:
   backbone: dinov3_vits16plus
   image_size: 256
   backbone_frozen: false
-  unfreeze_last_n: 12
+  unfreeze_last_n: 4
   backbone_pooling: cls+mean
 train:
   layer_decay: 0.8
@@ -48,12 +54,12 @@ train:
     enabled: true
     decay: 0.9998
     start_epoch: 2
-  backbone_lr: 0.000005
-  epochs: 30
+  backbone_lr: 0.00001
+  epochs: 40
   weight_decay: 0.05
   num_workers: 8
   early_stopping:
-    patience: 30
+    patience: 40
     monitor: val/kindex_mae
 augmentation:
   p_exposure: 0.0
