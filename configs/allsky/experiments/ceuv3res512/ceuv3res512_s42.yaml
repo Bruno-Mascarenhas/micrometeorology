@@ -1,0 +1,48 @@
+# ceuv3res512: DINOv3 S/16+ a 512 px, a resolucao dos frames em disco (32 x 32 =
+# 1024 tokens, 4x sobre os 256 px do ceuexpv3). Receita do ceuexpv3_s42, a melhor
+# do v3 ate aqui (12 blocos com LR por camada 0,8, 1e-5), image_only e alvo no
+# k*; batch 8 para caber nos 8 GB; cosseno de 30 epocas; sem EMA (inerte).
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: ceuv3res512_s42
+output_dir: output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s42
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso-20260906
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+model:
+  backbone: dinov3_vits16plus
+  image_size: 512
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  layer_decay: 0.8
+  batch_size: 8
+  backbone_lr: 0.00001
+  epochs: 30
+  weight_decay: 0.05
+  num_workers: 8
+  early_stopping:
+    patience: 30
+    monitor: val/kindex_mae
+augmentation:
+  p_exposure: 0.0
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25
