@@ -1,0 +1,66 @@
+# Semente 45 do braco vencedor, na L4 de 24 GB. Identico ao ceuv3res512_s43
+# (DINOv3 ViT-S/16+ a 512 px, image_only, k*-first com sky 0,25, LR por camada
+# 0,8, jitter + C-Mixup, cosseno de 50 epocas, monitor val/kindex_mae) em tudo
+# menos a semente, o batch e o amp: batch 32 (~12 GB; os 16 do ceuv3res512 sao o
+# que coube nos 8 GB da 2060) e bf16 (a L4 e Ada; o fp16 da _base e o da Turing).
+# O lr nao foi reescalado com o batch: as sementes 42/43 a 16 sao o controle
+# pareado e a diferenca a medir e a das sementes, nao a do passo. O batch maior
+# tambem da o dobro de candidatos ao C-Mixup por lote. Com 44 e 45 a familia
+# fecha em quatro sementes o intervalo de confianca do resultado a 512 px.
+# 150 epocas com parada por paciencia (pedido do dono, 2026-09-08 12:15): monitor
+# val/kindex_mae, paciencia 15 — a 512 px o minimo caiu na epoca 20 com oscilacao
+# de +-0,002; o cosseno longo deixa o LR alto quando parar, entao o checkpoint
+# operacional desta fila e o best.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: l4v3res512_s45
+output_dir: output/allsky-mm/experiments/l4/l4v3res512_s45
+seed: 45
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso-20260906
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+model:
+  backbone: dinov3_vits16plus
+  image_size: 512
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  cmixup:
+    enabled: true
+    alpha: 1.0
+    bandwidth: 0.05
+    p: 0.5
+  layer_decay: 0.8
+  batch_size: 32
+  backbone_lr: 0.00001
+  epochs: 150
+  weight_decay: 0.05
+  num_workers: 8
+  amp:
+    enabled: true
+    dtype: bf16
+  early_stopping:
+    patience: 15
+    monitor: val/kindex_mae
+augmentation:
+  p_exposure: 0.5
+  exposure_log2: 0.6
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25
