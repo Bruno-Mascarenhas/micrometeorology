@@ -11,7 +11,7 @@
 # Batch 8 -> 16 (2026-09-07 22:00): a 512 px com batch 8 o treino ocupou 3,2 GB dos
 # 8 GB; 16 usa a memoria disponivel (~6 GB), da o dobro de candidatos ao C-Mixup
 # por batch e reduz os passos por epoca. E o unico treino da fila: a GPU precisa
-# estar livre amanha depois dele.
+# estar livre amanha depois dele. Cosseno de 40 epocas a pedido do dono (22:10).
 extends: [../_base.yaml, ../../models/image_only.yaml]
 name: ceuv3res512_s42
 output_dir: output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s42
@@ -50,11 +50,11 @@ train:
   layer_decay: 0.8
   batch_size: 16
   backbone_lr: 0.00001
-  epochs: 30
+  epochs: 40
   weight_decay: 0.05
   num_workers: 8
   early_stopping:
-    patience: 30
+    patience: 40
     monitor: val/kindex_mae
 augmentation:
   p_exposure: 0.5
