@@ -20,7 +20,7 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -169,6 +169,7 @@ def run_experiment(
     split: str = "test",
     checkpoint: str = "best",
     archive_dir: str | None = None,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Train (unless already trained) then evaluate one config; return a flat metrics row.
 
@@ -192,6 +193,11 @@ def run_experiment(
     there, with nothing trained on this VM, is harvested as ``archived`` instead
     of retrained — what lets a session reclaimed at hour 20 be rerun without
     paying the first 20 hours again.
+
+    *resume* hands an existing ``last.ckpt`` to ``allsky train --resume auto``
+    instead of taking it as a finished run: the engine continues an arm cut
+    short (a :func:`pull_live_run` restore) and trains nothing when the schedule
+    or the early-stopping rule is already satisfied, so the call is idempotent.
     """
     import yaml
 
@@ -211,10 +217,18 @@ def run_experiment(
         archived = Path(archive_dir) / cfg["name"] / report_name / "eval_metrics.json"
         if archived.exists():
             return _harvest(row, archived, status="archived", wall_seconds=0.0)
-    if not (run_dir / "last.ckpt").exists():
-        train = subprocess.run(
-            [allsky_cli, "train", "-c", str(config)], capture_output=True, text=True, check=False
-        )
+    trained = (run_dir / "last.ckpt").exists()
+    if not trained or resume:
+        command = [allsky_cli, "train", "-c", str(config)]
+        if trained:
+            command += ["--resume", "auto"]
+        train = subprocess.run(command, capture_output=True, text=True, check=False)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        # The engine says here, and nowhere else, which epoch a resume restarted
+        # from, whether the cosine horizon was reconciled and whether early
+        # stopping was already satisfied; dropping it on success leaves the
+        # archive unable to answer why an arm trained the epochs it did.
+        (run_dir / "train.log").write_text(train.stdout + train.stderr, encoding="utf-8")
         if train.returncode != 0:
             row["status"] = "train_failed"
             row["error"] = train.stderr[-2000:]
@@ -330,6 +344,109 @@ JOB_SUFFIXES = (".yaml", ".yml")
 QUEUE_STOP_FILE = "PARE"
 QUEUE_STATE_DIR = "fila"
 LIVE_DIR = "_live"
+#: What the live mirror carries per run: the epoch history, and the checkpoints
+#: a resumed session needs.
+LIVE_FILES = ("metrics.csv", "metrics.json", "last.ckpt", "best.ckpt", "ema.ckpt")
+
+
+def _same_file(source: Path, mirror: Path) -> bool:
+    if not mirror.exists():
+        return False
+    ours, theirs = source.stat(), mirror.stat()
+    return ours.st_size == theirs.st_size and ours.st_mtime_ns == theirs.st_mtime_ns
+
+
+def _copy_atomically(source: Path, target: Path) -> None:
+    """Copy *source* onto *target* so a reader never sees a partial file.
+
+    The mirror is read by two things that do not coordinate with the copy: the
+    ``gcloud storage rsync`` thread, and the next session's
+    :func:`pull_live_run`. A plain ``shutil.copy2`` truncates the destination
+    and fills it over seconds — for a 346 MB checkpoint that is a wide window in
+    which the only surviving copy of a training run is a broken file. Writing
+    beside the target and renaming makes the swap one atomic step, which is what
+    the engine already does for the checkpoint this is copying.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(f".{target.name}.parcial")
+    try:
+        shutil.copy2(source, partial)
+        os.replace(partial, target)
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+def pull_live_run(live_dir: Path, out_dir: Path, name: str) -> str | None:
+    """Restore the mirrored run *name* into ``out_dir/<name>/run`` so training resumes.
+
+    Only a mirror that holds ``last.ckpt`` is restored: an epoch history alone is
+    what a run that never checkpointed — or one mirrored before checkpoints were
+    part of :data:`LIVE_FILES` — leaves behind, and copying it under a fresh
+    training would splice a stale history onto a new run.
+
+    Returns
+    -------
+    str or None
+        The files restored, or ``None`` when there was nothing to resume from.
+    """
+    source = Path(live_dir) / name
+    if not (source / "last.ckpt").is_file():
+        return None
+    run_dir = Path(out_dir) / name / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    restored = []
+    for file_name in LIVE_FILES:
+        if (source / file_name).is_file():
+            _copy_atomically(source / file_name, run_dir / file_name)
+            restored.append(file_name)
+    return f"{name}: retomada de {source} ({', '.join(restored)})"
+
+
+def apply_queue_override(override_dir: Path, config: Path) -> str:
+    """Let a file dropped in the bucket skip or replace one queue entry.
+
+    ``<name>.skip`` beside the notebook's override prefix skips the arm;
+    ``<name>.yaml`` replaces the repository config in place before it runs, which
+    is how an adjustment decided after launch — a shorter cosine, another batch
+    size — reaches a running session without a relaunch. The override is a
+    **complete** config, not a patch: it is copied over the repository file, so
+    a partial one would train an arm with no ``name`` or ``seed``. It keeps the
+    repository config's ``extends`` paths valid because it lands in the same
+    place.
+
+    Returns
+    -------
+    str
+        ``"skip"``, ``"override"`` or ``"repo"``.
+
+    Raises
+    ------
+    ValueError
+        When the replacement is not a complete config for this arm. Everything
+        that tracks a run — the archive prefix, the mirrored checkpoints, the
+        row in the table — is keyed by the file name, so an override that
+        renames the arm or omits a required key is refused instead of silently
+        splitting one arm across two identities.
+    """
+    import yaml
+
+    overrides = Path(override_dir)
+    if (overrides / f"{config.stem}.skip").exists():
+        return "skip"
+    replacement = overrides / f"{config.stem}.yaml"
+    if not replacement.is_file():
+        return "repo"
+    proposed = yaml.safe_load(replacement.read_text()) or {}
+    missing = [key for key in ("name", "seed", "output_dir", "extends") if key not in proposed]
+    if missing:
+        raise ValueError(f"{replacement}: override incompleto, faltam {missing}")
+    if proposed["name"] != config.stem or Path(proposed["output_dir"]).name != config.stem:
+        raise ValueError(
+            f"{replacement}: name={proposed['name']!r} e output_dir={proposed['output_dir']!r} "
+            f"nao batem com {config.stem} — o arquivo e o espelho sao indexados pelo nome do braco"
+        )
+    shutil.copy2(replacement, config)
+    return "override"
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -466,7 +583,13 @@ def run_queue(
 
 
 def _nvidia_smi() -> str | None:
-    """``utilization.gpu, memory.used`` as nvidia-smi prints them; None without a GPU."""
+    """``utilization.gpu, memory.used`` as nvidia-smi prints them; None when it does not answer.
+
+    Everything is swallowed on purpose. This runs inside the live-mirror thread,
+    the only thing copying checkpoints off the VM, and a driver under load makes
+    ``nvidia-smi`` sit until the timeout: a heartbeat that cannot be read is a
+    missing field, never a reason to stop mirroring.
+    """
     try:
         probe = subprocess.run(
             ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader"],
@@ -475,7 +598,7 @@ def _nvidia_smi() -> str | None:
             check=False,
             timeout=30,
         )
-    except FileNotFoundError:
+    except Exception:  # noqa: BLE001 — um probe de heartbeat nao pode derrubar quem o chama
         return None
     return probe.stdout.strip() or None
 
@@ -487,12 +610,19 @@ def sync_live(
     gpu_probe: Callable[[], str | None] = _nvidia_smi,
     clock: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
-    """Mirror every run's epoch history to *target_dir* and write a heartbeat there.
+    """Mirror every run's epoch history and checkpoints to *target_dir*, with a heartbeat.
 
     ``run_experiment`` keeps the training output in memory, so during the hours a
     run takes the only evidence it is computing is ``<run>/metrics.csv`` growing
     by one row per epoch. Copying it to Drive beside the GPU utilisation is what
     lets someone outside the VM tell a training from a hung process.
+
+    ``last.ckpt`` and ``best.ckpt`` travel with it (:data:`LIVE_FILES`): they are
+    what :func:`pull_live_run` restores into a fresh VM so ``allsky train
+    --resume auto`` continues an arm the session limit or a crash cut short. The
+    engine writes every checkpoint through a temp file and ``os.replace``, so a
+    copy never sees a half-written file; a file is copied again only when its
+    size or mtime differs from the mirror's.
 
     Returns
     -------
@@ -503,14 +633,18 @@ def sync_live(
     target = Path(target_dir)
     target.mkdir(parents=True, exist_ok=True)
     updated: list[str] = []
-    for history in sorted(Path(out_dir).glob("*/run/metrics.csv")):
-        name = history.parents[1].name
-        mirror = target / name / "metrics.csv"
-        if mirror.exists() and mirror.stat().st_size == history.stat().st_size:
-            continue
-        mirror.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(history, mirror)
-        updated.append(name)
+    for run_dir in sorted(Path(out_dir).glob("*/run")):
+        name = run_dir.parent.name
+        changed = False
+        for file_name in LIVE_FILES:
+            source = run_dir / file_name
+            mirror = target / name / file_name
+            if not source.is_file() or _same_file(source, mirror):
+                continue
+            _copy_atomically(source, mirror)
+            changed = True
+        if changed:
+            updated.append(name)
     beat = {"time": _iso(clock()), "gpu": gpu_probe(), "updated": updated}
     _write_json(target / "heartbeat.json", beat)
     return beat
@@ -519,8 +653,11 @@ def sync_live(
 def start_live_sync(out_dir: Path, target_dir: Path, *, period_seconds: float = 300.0) -> Any:
     """Run :func:`sync_live` every *period_seconds* on a daemon thread; return it.
 
-    A Drive FUSE hiccup raises ``OSError`` on the copy; the pass is dropped and
-    the next one runs, because a mirror that dies silently is worse than a late one.
+    Nothing this thread can raise is allowed to end it: it holds the only copy
+    of the checkpoints outside the VM, and a mirror that dies silently is worse
+    than a late one. A Drive FUSE hiccup raises ``OSError`` on the copy and a
+    driver under load makes ``nvidia-smi`` hit its timeout — the pass is dropped
+    and the next one runs.
     """
     import threading
 
@@ -528,8 +665,8 @@ def start_live_sync(out_dir: Path, target_dir: Path, *, period_seconds: float = 
         while True:
             try:
                 sync_live(out_dir, target_dir)
-            except OSError as exc:
-                print(f"espelho ao vivo: {exc}")
+            except Exception as exc:  # noqa: BLE001 — this thread is the only copy of the checkpoints
+                print(f"espelho ao vivo: {exc!r}")
             time.sleep(period_seconds)
 
     thread = threading.Thread(target=loop, name="live-sync", daemon=True)
@@ -544,6 +681,7 @@ def _run_quiet(command: list[str]) -> subprocess.CompletedProcess[str]:
 def mirror_once(
     pairs: Sequence[tuple[str, str]],
     *,
+    delete_unmatched: bool = False,
     run: Callable[[list[str]], subprocess.CompletedProcess[str]] = _run_quiet,
 ) -> list[str]:
     """``gcloud storage rsync -r`` each ``(source, destination)`` pair; return the ones that failed.
@@ -552,7 +690,9 @@ def mirror_once(
     and this is what carries the archive, the live mirror and the queue state
     there — and brings the queue's job files back. The sync is additive on both
     sides, so a job file removed from the bucket stays on the VM until the
-    session ends.
+    session ends; *delete_unmatched* makes the destination match the source
+    exactly, which is what lets an operator revoke a ``.skip`` marker mid-session
+    and is safe only where the destination holds nothing the VM produced.
 
     Returns
     -------
@@ -560,8 +700,11 @@ def mirror_once(
         ``"source -> destination"`` for every pair whose rsync exited non-zero.
     """
     failed: list[str] = []
+    command = ["gcloud", "storage", "rsync", "-r"]
+    if delete_unmatched:
+        command.append("--delete-unmatched-destination-objects")
     for source, destination in pairs:
-        result = run(["gcloud", "storage", "rsync", "-r", source, destination])
+        result = run([*command, source, destination])
         if result.returncode != 0:
             failed.append(f"{source} -> {destination}")
     return failed
@@ -573,13 +716,256 @@ def start_mirror(pairs: Sequence[tuple[str, str]], *, period_seconds: float = 30
 
     def loop() -> None:
         while True:
-            for failure in mirror_once(pairs):
-                print(f"espelho: {failure}")
+            try:
+                for failure in mirror_once(pairs):
+                    print(f"espelho: {failure}")
+            except Exception as exc:  # noqa: BLE001 — this thread is what carries the run off the VM
+                print(f"espelho: {exc!r}")
             time.sleep(period_seconds)
 
     thread = threading.Thread(target=loop, name="mirror", daemon=True)
     thread.start()
     return thread
+
+
+#: The three evaluations one arm produces, in the order that makes
+#: ``eval-test-last`` on disk mean "this arm is finished": ``(split,
+#: checkpoint, column suffix)``.
+ARM_EVALUATIONS = (("test", "best", ""), ("val", "best", "_val"), ("test", "last", "_last"))
+#: Report directory of each suffix in :data:`ARM_EVALUATIONS`.
+ARM_REPORTS = {"": "eval-test", "_val": "eval-val", "_last": "eval-test-last"}
+#: What a secondary evaluation contributes to the arm's row; the first one
+#: contributes everything :func:`_harvest` produces.
+ARM_KEYS = (
+    "rmse",
+    "mae",
+    "mbe",
+    "sky_kt_balanced_accuracy",
+    "sky_kt_macro_f1",
+    "sky_kt_f1_partly_cloudy_clear",
+    "sky_balanced_accuracy",
+    "sky_macro_f1",
+)
+
+
+def _score_reports(
+    row: dict[str, Any],
+    name: str,
+    *,
+    python: str,
+    out_dir: Path,
+    artifacts: Path,
+    n_bootstrap: int,
+    run: Callable[[list[str]], subprocess.CompletedProcess[str]],
+) -> None:
+    """Add the per-block columns of every report of *name* to *row*."""
+    for tag, report in ARM_REPORTS.items():
+        parquet = Path(out_dir) / name / "run" / report / "predictions.parquet"
+        if not parquet.exists():
+            parquet = Path(artifacts) / name / report / "predictions.parquet"
+        if not parquet.exists():
+            continue
+        block = score_by_sensor_block_in(python, parquet, n_bootstrap=n_bootstrap, run=run)
+        row[f"block_macro_f1{tag}"] = block["sky"]["macro_f1"]
+        row[f"block_persistence_f1{tag}"] = block["sky_persistence_previous_block"]["macro_f1"]
+        row[f"block_rmse{tag}"] = block["dhi"]["rmse"]
+        by_kt = score_by_sensor_block_in(
+            python,
+            parquet,
+            sky=("obs_sky", "pred_sky_kt"),
+            n_bootstrap=n_bootstrap,
+            run=run,
+        )
+        row[f"block_kt_macro_f1{tag}"] = by_kt["sky"]["macro_f1"]
+
+
+def run_arm(
+    config: Path,
+    *,
+    python: str,
+    out_dir: Path,
+    artifacts: Path,
+    mirror: Sequence[tuple[str, str]],
+    overrides: Path | None = None,
+    override_mirror: Sequence[tuple[str, str]] = (),
+    watchers: Sequence[Any] = (),
+    log: Callable[[str], None] = print,
+    n_bootstrap: int = 200,
+    run: Callable[[list[str]], subprocess.CompletedProcess[str]] = _run_quiet,
+) -> dict[str, Any]:
+    """Take one config from override to archived result, and never raise.
+
+    The order is the whole point. A session runs on a VM that is reclaimed
+    without warning and, on Colab Enterprise, dies with the notebook: anything
+    still only on its disk when something raises is gone, and on a training
+    queue that is hours of GPU. So each evaluation is archived and mirrored the
+    moment it exists — before the next one starts and before any scoring — and
+    every step after training is caught: a failure fills a column with nothing,
+    it does not end the arm, and an arm does not end the queue.
+
+    Training is resumed, not repeated: a ``last.ckpt`` mirrored by
+    :func:`sync_live` and restored by :func:`pull_live_run` is handed to
+    ``allsky train --resume auto``, so a relaunch after the session limit
+    continues where the previous one stopped — unless the queue overrode the
+    config, in which case the mirrored weights belong to another recipe and the
+    arm starts over. An arm counts as finished only when all three reports are
+    in the archive, so a session cut off between two of them re-evaluates from
+    the archived checkpoint instead of leaving a column empty forever.
+
+    Parameters
+    ----------
+    config:
+        The experiment YAML, inside the checked-out repository.
+    python:
+        The venv interpreter; every step that needs this project runs there.
+    out_dir:
+        Where the runs are written, the parent of ``<name>/run``.
+    artifacts:
+        The archive on the VM, mirrored by *mirror*.
+    mirror:
+        ``(source, destination)`` pairs for :func:`mirror_once`.
+    overrides:
+        Directory holding ``<name>.skip`` / ``<name>.yaml``, if any.
+    override_mirror:
+        Pulled into *overrides* before the arm reads it, deleting whatever the
+        source no longer has — which is what lets an operator revoke a marker
+        while the queue is running.
+    watchers:
+        The mirroring threads, checked for life at the start of each arm. They
+        are the only thing copying a training in flight off the VM, so one that
+        died has to be visible in the log rather than discovered by an empty
+        bucket hours later.
+    log:
+        Where the step-by-step account goes; the notebook sends it to a file
+        that the mirror carries, so a failed session still explains itself.
+
+    Returns
+    -------
+    dict
+        One row: ``name``, ``status`` (``ok``, ``archived``, ``skipped``,
+        ``train_failed``, ``eval_failed`` or ``failed``), the harvested metrics,
+        the per-block columns, and ``error``/``score_error`` when something
+        went wrong.
+    """
+    name = Path(config).stem
+    row: dict[str, Any] = {"name": name, "config": str(config), "status": "pending"}
+    try:
+        dead = [w for w in watchers if not w.is_alive()]
+        if dead:
+            log(
+                f"{name}: ATENCAO, espelho parado ({len(dead)} de {len(watchers)} threads morreram)"
+            )
+        if override_mirror:
+            mirror_once(override_mirror, delete_unmatched=True, run=run)
+        decision = "repo" if overrides is None else apply_queue_override(overrides, Path(config))
+        row["override"] = decision
+        if decision == "skip":
+            row["status"] = "skipped"
+            log(f"{name}: pulado por {overrides}/{name}.skip")
+            return row
+        if decision == "override":
+            log(f"{name}: config substituido por {overrides}/{name}.yaml")
+
+        resumed = all(
+            (Path(artifacts) / name / report / "eval_metrics.json").exists()
+            for report in ARM_REPORTS.values()
+        )
+        row["status"] = "archived" if resumed else "pending"
+        if resumed:
+            log(f"{name}: os tres relatorios ja estao em {artifacts} — nada a treinar")
+        elif decision == "override":
+            log(f"{name}: config novo, o checkpoint espelhado nao serve — treino do zero")
+        else:
+            log(
+                pull_live_run(Path(artifacts) / LIVE_DIR, out_dir, name)
+                or f"{name}: treino do zero"
+            )
+
+        def guardar() -> None:
+            """Put whatever the VM holds into the archive and the bucket."""
+            log(
+                "  "
+                + archive(
+                    str(Path(out_dir) / name),
+                    str(artifacts),
+                    config=Path(config),
+                    keep_checkpoint=True,
+                )
+            )
+            log("  espelho: " + (", ".join(mirror_once(mirror, run=run)) or "ok"))
+
+        for index, (split, checkpoint, tag) in enumerate(ARM_EVALUATIONS):
+            report = ARM_REPORTS[tag]
+            try:
+                result = run_experiment(
+                    Path(config),
+                    python=python,
+                    split=split,
+                    checkpoint=checkpoint,
+                    archive_dir=str(artifacts) if resumed else None,
+                    resume=index == 0 and not resumed,
+                )
+            finally:
+                if not resumed:
+                    guardar()
+            if result.get("status") not in ("ok", "archived"):
+                row["status"] = result.get("status")
+                row["error"] = str(result.get("error"))[-800:]
+                log(f"  {report}: {row['status']}\n{row['error']}")
+                break
+            log(f"  {report}: {result['status']} em {result.get('wall_seconds', 0)} s")
+            if tag == "":
+                row.update({k: v for k, v in result.items() if k not in ("config", "checkpoint")})
+            else:
+                row.update({f"{key}{tag}": result.get(key) for key in ARM_KEYS})
+
+        try:
+            _score_reports(
+                row,
+                name,
+                python=python,
+                out_dir=Path(out_dir),
+                artifacts=Path(artifacts),
+                n_bootstrap=n_bootstrap,
+                run=run,
+            )
+        except (RuntimeError, OSError, ValueError, KeyError) as exc:
+            row["score_error"] = repr(exc)[-800:]
+            log(f"  pontuacao por bloco falhou, colunas vazias: {row['score_error']}")
+    except Exception as exc:  # noqa: BLE001 — a queue must survive anything one arm does
+        row["status"] = "failed"
+        row["error"] = repr(exc)[-800:]
+        log(f"{name}: FALHOU fora do treino: {row['error']}")
+    log("  espelho final: " + (", ".join(mirror_once(mirror, run=run)) or "ok"))
+    return row
+
+
+def summarise_arm(row: Mapping[str, Any]) -> str:
+    """One readable line per arm: diffuse, sky by reconstructed Kt, and both per-block estimators."""
+
+    def number(value: Any, digits: int = 2, sign: bool = False) -> str:
+        if not isinstance(value, (int, float)):
+            return "—"
+        return f"{value:+.{digits}f}" if sign else f"{value:.{digits}f}"
+
+    return (
+        f"{row['name']:<18} {row.get('status')} {row.get('override', '')}  "
+        f"DHI rmse/mae/mbe {number(row.get('rmse'))}/{number(row.get('mae'))}/"
+        f"{number(row.get('mbe'), sign=True)} "
+        f"(last {number(row.get('rmse_last'))}/{number(row.get('mae_last'))}/"
+        f"{number(row.get('mbe_last'), sign=True)})  "
+        f"sky_kt bal {number(row.get('sky_kt_balanced_accuracy'), 3)} "
+        f"F1 {number(row.get('sky_kt_macro_f1'), 3)} "
+        f"parc-clara {number(row.get('sky_kt_f1_partly_cloudy_clear'), 3)} "
+        f"(last bal {number(row.get('sky_kt_balanced_accuracy_last'), 3)})  "
+        f"por bloco F1 ceu {number(row.get('block_macro_f1'), 3)} "
+        f"(last {number(row.get('block_macro_f1_last'), 3)}, val {number(row.get('block_macro_f1_val'), 3)}) "
+        f"k* {number(row.get('block_kt_macro_f1'), 3)} "
+        f"(last {number(row.get('block_kt_macro_f1_last'), 3)}, "
+        f"val {number(row.get('block_kt_macro_f1_val'), 3)}); "
+        f"persistencia {number(row.get('block_persistence_f1'), 3)}; "
+        f"RMSE {number(row.get('block_rmse'))}"
+    )
 
 
 def summarise(rows: list[dict[str, Any]]) -> Any:
@@ -773,6 +1159,201 @@ def _ordinal_mode(values: Any) -> int:
     counts = np.bincount(labelled)
     tied = np.flatnonzero(counts == counts.max())
     return int(tied[np.abs(tied - float(np.mean(labelled))).argmin()])
+
+
+#: What the notebook is allowed to call from the Colab kernel. The kernel has
+#: pandas and pyyaml and nothing of this project: ``allsky`` and
+#: ``labmim_core`` live in the venv :func:`stage_bundle` builds. A function
+#: listed here that imports either — at module level or inside its body — kills
+#: a session at the first call, which on a training queue means hours of GPU
+#: already spent. ``tests/allsky/test_colab_runner.py`` calls every name here
+#: with both packages unimportable.
+KERNEL_SAFE = (
+    "apply_queue_override",
+    "archive",
+    "load_job",
+    "mirror_once",
+    "preflight",
+    "run_arm",
+    "pull_live_run",
+    "run_experiment",
+    "score_by_sensor_block_in",
+    "start_live_sync",
+    "start_mirror",
+    "stage_bundle",
+    "summarise",
+    "summarise_arm",
+    "sync_live",
+    "write_config",
+)
+
+#: The columns :func:`score_by_sensor_block` reads, and what :func:`preflight`
+#: puts in the synthetic frame it scores.
+_PREFLIGHT_COLUMNS = (
+    "day_id",
+    "timestamp_utc",
+    "obs_dhi",
+    "pred_dhi",
+    "obs_sky",
+    "pred_sky",
+    "pred_sky_kt",
+)
+
+
+def preflight(
+    python: str,
+    *,
+    artifacts: str | Path,
+    mirror: Sequence[tuple[str, str]],
+    work_dir: str | Path,
+    run: Callable[[list[str]], subprocess.CompletedProcess[str]] = _run_quiet,
+) -> list[str]:
+    """Exercise every kernel-side step on synthetic data, before the queue starts.
+
+    A training queue spends its hours inside ``allsky train``; the code around
+    it — scoring, archiving, mirroring — runs for seconds at the end of each
+    arm, and is where a session dies with the GPU time already paid for. This
+    walks that code on a three-row frame and a fake run directory, so a broken
+    interpreter path, a missing package in the kernel, an unwritable archive or
+    a mirror pointing nowhere fails in the first minute instead of the
+    fourteenth hour.
+
+    The last check writes ``preflight.json`` into *artifacts* and mirrors it,
+    which is the only way to prove the real destination accepts writes — a
+    temporary directory proves nothing about a bucket.
+
+    Parameters
+    ----------
+    python:
+        The venv interpreter, as :func:`stage_bundle` returns it.
+    artifacts:
+        The run archive on the VM, the source side of *mirror*.
+    mirror:
+        ``(source, destination)`` pairs for :func:`mirror_once`.
+    work_dir:
+        Scratch directory for the synthetic run; nothing is left behind.
+
+    Returns
+    -------
+    list of str
+        One line per check passed, in order.
+
+    Raises
+    ------
+    RuntimeError
+        On the first check that fails, naming the step and the error.
+    """
+    import pandas as pd
+
+    checks: list[str] = []
+    work = Path(work_dir) / "_preflight"
+    if work.exists():
+        shutil.rmtree(work)
+    (work / "run").mkdir(parents=True)
+
+    allsky_cli = str(Path(python).with_name("allsky"))
+    version = run([allsky_cli, "--help"])
+    if version.returncode != 0:
+        raise RuntimeError(f"preflight: {allsky_cli} nao roda:\n{version.stderr[-1500:]}")
+    checks.append(f"CLI do venv responde: {allsky_cli}")
+
+    frame = pd.DataFrame(
+        {
+            "day_id": ["2026-08-20"] * 3,
+            "timestamp_utc": [
+                "2026-08-20T12:31:00+00:00",
+                "2026-08-20T12:33:00+00:00",
+                "2026-08-20T12:37:00+00:00",
+            ],
+            "obs_dhi": [100.0, 100.0, 200.0],
+            "pred_dhi": [90.0, 110.0, 190.0],
+            "obs_sky": [1, 1, 3],
+            "pred_sky": [1, 2, 3],
+            "pred_sky_kt": [1, 1, 3],
+        }
+    )
+    parquet = work / "predictions.parquet"
+    frame.to_parquet(parquet)
+    for sky in (("obs_sky", "pred_sky"), ("obs_sky", "pred_sky_kt")):
+        scored = score_by_sensor_block_in(python, parquet, sky=sky, n_bootstrap=10, run=run)
+        if scored.get("n_blocks") != 2:
+            raise RuntimeError(f"preflight: pontuacao por bloco devolveu {scored}")
+    checks.append("pontuacao por bloco roda no venv e conta os blocos certos")
+
+    (work / "run" / "metrics.csv").write_text("epoch,val_loss\n1,0.9\n", encoding="utf-8")
+    (work / "run" / "last.ckpt").write_bytes(b"preflight")
+    archived = archive(str(work), str(Path(work).parent / "arquivo"), keep_checkpoint=True)
+    if "nada a arquivar" in archived:
+        raise RuntimeError(f"preflight: {archived}")
+    checks.append(f"arquivo com checkpoint: {archived}")
+
+    live = work / "live"
+    beat = sync_live(work.parent, live)
+    restored = pull_live_run(live, work.parent / "retomada", "_preflight")
+    if "_preflight" not in beat["updated"] or restored is None:
+        raise RuntimeError(f"preflight: espelho ao vivo nao fechou o ciclo: {beat}, {restored}")
+    checks.append(f"espelho ao vivo e retomada: {restored}")
+
+    _write_json(
+        Path(artifacts) / "preflight.json",
+        {"time": _iso(time.time()), "checks": checks, "python": python},
+    )
+    failed = mirror_once(mirror, run=run)
+    if failed:
+        raise RuntimeError(f"preflight: espelho para o destino final falhou: {failed}")
+    checks.append(f"espelho para o destino final: {[destination for _, destination in mirror]}")
+
+    shutil.rmtree(work, ignore_errors=True)
+    shutil.rmtree(work.parent / "arquivo", ignore_errors=True)
+    shutil.rmtree(work.parent / "retomada", ignore_errors=True)
+    return checks
+
+
+def score_by_sensor_block_in(
+    python: str,
+    parquet: Path,
+    *,
+    sky: tuple[str, str] | None = ("obs_sky", "pred_sky"),
+    n_bootstrap: int = 1000,
+    seed: int = 0,
+    run: Callable[[list[str]], subprocess.CompletedProcess[str]] = _run_quiet,
+) -> dict[str, Any]:
+    """:func:`score_by_sensor_block` on *parquet*, run inside the venv at *python*.
+
+    The scorer imports ``allsky`` and ``labmim_core``, which live in the project
+    venv and not in the notebook kernel; calling it from the kernel raised
+    ``ModuleNotFoundError`` after fourteen hours of training, before the run was
+    archived. Here the kernel only launches the interpreter that has them and
+    reads the JSON it prints.
+
+    Raises
+    ------
+    RuntimeError
+        With the interpreter's stderr when scoring fails.
+    """
+    code = (
+        "import json, sys; sys.path.insert(0, sys.argv[1]); import pandas as pd; "
+        "import _colab_runner as r; frame = pd.read_parquet(sys.argv[2]); "
+        "sky = json.loads(sys.argv[3]); "
+        "print(json.dumps(r.score_by_sensor_block(frame, sky=None if sky is None else tuple(sky), "
+        "n_bootstrap=int(sys.argv[4]), seed=int(sys.argv[5])), default=float))"
+    )
+    result = run(
+        [
+            python,
+            "-c",
+            code,
+            str(Path(__file__).resolve().parent),
+            str(parquet),
+            json.dumps(None if sky is None else list(sky)),
+            str(n_bootstrap),
+            str(seed),
+        ]
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"pontuacao por bloco de {parquet} falhou:\n{result.stderr[-2000:]}")
+    scored: dict[str, Any] = json.loads(result.stdout.strip().splitlines()[-1])
+    return scored
 
 
 def score_by_sensor_block(

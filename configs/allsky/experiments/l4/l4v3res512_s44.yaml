@@ -11,6 +11,10 @@
 # val/kindex_mae, paciencia 15 — a 512 px o minimo caiu na epoca 20 com oscilacao
 # de +-0,002; o cosseno longo deixa o LR alto quando parar, entao o checkpoint
 # operacional desta fila e o best.
+# min_delta 0,0002 no k* (2026-09-09 05:00, apos a primeira execucao na L4): o
+# bloco a 512 renovou o minimo por 0,0001 nas epocas 39 e 53 sobre um plato de
+# 0,066-0,068 desde a epoca 29, e a paciencia estendeu o treino ate a 68 com LR
+# alto; so uma melhora acima da oscilacao da 4a casa conta como progresso.
 extends: [../_base.yaml, ../../models/image_only.yaml]
 name: l4v3res512_s44
 output_dir: output/allsky-mm/experiments/l4/l4v3res512_s44
@@ -57,6 +61,7 @@ train:
     dtype: bf16
   early_stopping:
     patience: 15
+    min_delta: 0.0002
     monitor: val/kindex_mae
 augmentation:
   p_exposure: 0.5
