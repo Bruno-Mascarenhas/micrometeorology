@@ -936,7 +936,11 @@ def run_arm(
         row["status"] = "failed"
         row["error"] = repr(exc)[-800:]
         log(f"{name}: FALHOU fora do treino: {row['error']}")
-    log("  espelho final: " + (", ".join(mirror_once(mirror, run=run)) or "ok"))
+    try:
+        log("  espelho final: " + (", ".join(mirror_once(mirror, run=run)) or "ok"))
+    except Exception as exc:  # noqa: BLE001 — the last line of an arm cannot end the queue
+        row.setdefault("error", repr(exc)[-800:])
+        log(f"{name}: espelho final falhou: {exc!r}")
     return row
 
 

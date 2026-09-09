@@ -1143,3 +1143,28 @@ def test_a_dead_mirroring_thread_is_announced_before_the_arm_trains(
     )
 
     assert "ATENCAO, espelho parado" in said[0]
+
+
+def test_a_broken_mirror_command_does_not_end_the_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = _load_runner()
+    config = _arm(tmp_path)
+    _, fake = _evaluating_subprocess()
+    monkeypatch.setattr(runner.subprocess, "run", fake)
+
+    def no_gcloud(_command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("gcloud")
+
+    row = runner.run_arm(
+        config,
+        python="/venv/bin/python",
+        out_dir=tmp_path / "out",
+        artifacts=tmp_path / "artifacts",
+        mirror=[("de", "para")],
+        log=lambda _: None,
+        run=no_gcloud,
+    )
+
+    assert row["status"] == "failed"
+    assert "FileNotFoundError" in row["error"]
