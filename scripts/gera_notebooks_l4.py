@@ -21,6 +21,11 @@ import subprocess
 from pathlib import Path
 
 ARMS = ("l4bloco512_s42", "l4v3res512_s44", "l4v3res512_s45")
+#: Bracos que so fazem sentido no Colab Pro+, por precisarem de uma GPU maior que
+#: a unica que a cota do projeto GCP permite.
+ARMS_DRIVE = (*ARMS, "a100res1024_s42")
+#: Raiz do dataset por braco, quando nao e a de 512 px que os outros compartilham.
+DATASET = {"a100res1024_s42": "dataset-iso-1024-20260910"}
 NOTEBOOK_DIR = Path("notebooks/colab")
 BUCKET = "gs://labmim-allsky-506901"
 BRANCH = "condicao-do-ceu-multitarefa"
@@ -297,9 +302,9 @@ print("espelho inicial:", runner.mirror_once(MIRROR) or "ok")
 ROOT = runner.stage_bundle(BUNDLE, DATA, python=PY)
 for required in ("manifest.parquet", "splits.json", "frames"):
     if not (Path(ROOT) / required).exists():
-        raise RuntimeError(f"{ROOT} sem {required}: o bundle nao e o dataset-iso-20260906 com frames")
+        raise RuntimeError(f"{ROOT} sem {required}: o bundle nao e o __DATASET__ com frames")
 
-DATASET_LINK = Path(WORKDIR) / "output/allsky-mm/dataset-iso-20260906"
+DATASET_LINK = Path(WORKDIR) / "output/allsky-mm/__DATASET__"
 DATASET_LINK.parent.mkdir(parents=True, exist_ok=True)
 if DATASET_LINK.is_symlink():
     DATASET_LINK.unlink()
@@ -313,10 +318,7 @@ print(f"{DATASET_LINK} -> {os.readlink(DATASET_LINK)}; cwd {os.getcwd()}; runs e
 """
 
 _DADOS_DRIVE = r"""
-import os
-from pathlib import Path
-
-BUNDLE = f"{STORE}/allsky-mm/bundle-iso-20260906.tar.gz"
+BUNDLE = f"{STORE}/allsky-mm/bundle-__DATASET__.tar.gz"
 WEIGHTS = f"{STORE}/dinov3/dinov3_vits16plus_pretrain_lvd1689m.pth"
 for caminho in (BUNDLE, WEIGHTS):
     if not os.path.exists(caminho):
@@ -337,9 +339,9 @@ print("ja arquivado:", sorted(p.name for p in Path(ARTIFACTS).iterdir()) or "nad
 ROOT = runner.stage_bundle(BUNDLE, DATA, python=PY)
 for required in ("manifest.parquet", "splits.json", "frames"):
     if not (Path(ROOT) / required).exists():
-        raise RuntimeError(f"{ROOT} sem {required}: o bundle nao e o dataset-iso-20260906 com frames")
+        raise RuntimeError(f"{ROOT} sem {required}: o bundle nao e o __DATASET__ com frames")
 
-DATASET_LINK = Path(WORKDIR) / "output/allsky-mm/dataset-iso-20260906"
+DATASET_LINK = Path(WORKDIR) / "output/allsky-mm/__DATASET__"
 DATASET_LINK.parent.mkdir(parents=True, exist_ok=True)
 if DATASET_LINK.is_symlink():
     DATASET_LINK.unlink()
@@ -456,7 +458,11 @@ def build(arms: tuple[str, ...], *, suffix: str, destino: str = "bucket") -> dic
             "`fila-l4/` e lido do bucket antes de cada braco e **nunca** espelhado de volta, porque o `rsync`\n"
             "nao tem direcao e a copia antiga da VM sobrescreveria o arquivo posto la de fora."
         ),
-        _code((_DADOS_DRIVE if destino == "drive" else _DADOS).replace("__SUFFIX__", suffix)),
+        _code(
+            (_DADOS_DRIVE if destino == "drive" else _DADOS)
+            .replace("__SUFFIX__", suffix)
+            .replace("__DATASET__", DATASET.get(arms[0], "dataset-iso-20260906"))
+        ),
         _markdown(
             "## 5. Voo de teste\n\nPercorre, com dados sinteticos, cada passo que roda fora do treino, e escreve\n"
             "`preflight.json` no destino final. E o que transforma uma quebra de quatorze horas numa de um\n"
@@ -498,7 +504,10 @@ def main() -> None:
     for path, arms, suffix, destino in [
         (NOTEBOOK_DIR / "05_fila_l4.ipynb", ARMS, "", "bucket"),
         *[(NOTEBOOK_DIR / f"06_l4_{arm}.ipynb", (arm,), f"-{arm}", "bucket") for arm in ARMS],
-        *[(NOTEBOOK_DIR / f"07_prop_{arm}.ipynb", (arm,), f"-{arm}", "drive") for arm in ARMS],
+        *[
+            (NOTEBOOK_DIR / f"07_prop_{arm}.ipynb", (arm,), f"-{arm}", "drive")
+            for arm in ARMS_DRIVE
+        ],
     ]:
         path.write_text(
             json.dumps(build(arms, suffix=suffix, destino=destino), ensure_ascii=False, indent=1)
