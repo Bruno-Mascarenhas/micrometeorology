@@ -392,3 +392,34 @@ class TestTransferDirection:
             cfg = load_experiment_config(path)
 
             assert model_param(cfg, "init_from", None) is None, path.name
+
+
+def test_the_drive_notebooks_look_for_the_bundle_the_exporter_writes() -> None:
+    """The bundle name the notebook builds must be the file ``export-colab-bundle`` produces.
+
+    A notebook that names a bundle nobody wrote dies at the data cell, after the
+    eight minutes the environment cell costs. The rule is a prefix swap, so it is
+    derived from the dataset root rather than typed twice.
+    """
+    import importlib.util
+    import sys
+
+    caminho = Path(__file__).resolve().parents[2] / "scripts" / "gera_notebooks_l4.py"
+    spec = importlib.util.spec_from_file_location("gera_notebooks_l4", caminho)
+    assert spec is not None
+    assert spec.loader is not None
+    gerador = importlib.util.module_from_spec(spec)
+    sys.modules["gera_notebooks_l4"] = gerador
+    spec.loader.exec_module(gerador)
+
+    assert gerador.bundle_de("dataset-iso-20260906") == "bundle-iso-20260906.tar.gz"
+    assert gerador.bundle_de("dataset-iso-1024-20260910") == "bundle-iso-1024-20260910.tar.gz"
+
+    for arm in gerador.ARMS_DRIVE:
+        dataset = gerador.DATASET.get(arm, gerador.DATASET_PADRAO)
+        notebook = json.loads(
+            (gerador.NOTEBOOK_DIR / f"07_prop_{arm}.ipynb").read_text(encoding="utf-8")
+        )
+        fonte = "".join("".join(cell["source"]) for cell in notebook["cells"])
+        assert gerador.bundle_de(dataset) in fonte, arm
+        assert "bundle-dataset-" not in fonte, arm

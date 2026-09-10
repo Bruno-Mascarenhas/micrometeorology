@@ -26,6 +26,20 @@ ARMS = ("l4bloco512_s42", "l4v3res512_s44", "l4v3res512_s45")
 ARMS_DRIVE = (*ARMS, "a100res1024_s42")
 #: Raiz do dataset por braco, quando nao e a de 512 px que os outros compartilham.
 DATASET = {"a100res1024_s42": "dataset-iso-1024-20260910"}
+DATASET_PADRAO = "dataset-iso-20260906"
+
+
+def bundle_de(dataset: str) -> str:
+    """Nome do tar.gz que ``allsky export-colab-bundle`` escreve para *dataset*.
+
+    A convencao do acervo e trocar o prefixo: ``dataset-iso-20260906`` viaja como
+    ``bundle-iso-20260906.tar.gz``. Derivar em vez de repetir a mao evita o que
+    aconteceu em 2026-09-10, quando o notebook procurou um
+    ``bundle-dataset-iso-...`` que nunca existiu.
+    """
+    return f"bundle-{dataset.removeprefix('dataset-')}.tar.gz"
+
+
 NOTEBOOK_DIR = Path("notebooks/colab")
 BUCKET = "gs://labmim-allsky-506901"
 BRANCH = "condicao-do-ceu-multitarefa"
@@ -318,7 +332,7 @@ print(f"{DATASET_LINK} -> {os.readlink(DATASET_LINK)}; cwd {os.getcwd()}; runs e
 """
 
 _DADOS_DRIVE = r"""
-BUNDLE = f"{STORE}/allsky-mm/bundle-__DATASET__.tar.gz"
+BUNDLE = f"{STORE}/allsky-mm/__BUNDLE__"
 WEIGHTS = f"{STORE}/dinov3/dinov3_vits16plus_pretrain_lvd1689m.pth"
 for caminho in (BUNDLE, WEIGHTS):
     if not os.path.exists(caminho):
@@ -461,7 +475,8 @@ def build(arms: tuple[str, ...], *, suffix: str, destino: str = "bucket") -> dic
         _code(
             (_DADOS_DRIVE if destino == "drive" else _DADOS)
             .replace("__SUFFIX__", suffix)
-            .replace("__DATASET__", DATASET.get(arms[0], "dataset-iso-20260906"))
+            .replace("__DATASET__", DATASET.get(arms[0], DATASET_PADRAO))
+            .replace("__BUNDLE__", bundle_de(DATASET.get(arms[0], DATASET_PADRAO)))
         ),
         _markdown(
             "## 5. Voo de teste\n\nPercorre, com dados sinteticos, cada passo que roda fora do treino, e escreve\n"
