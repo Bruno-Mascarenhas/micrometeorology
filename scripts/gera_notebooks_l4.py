@@ -44,16 +44,23 @@ def _code(text: str) -> dict[str, object]:
     }
 
 
-def _abertura(arms: tuple[str, ...], artifacts_suffix: str) -> str:
+def _abertura(arms: tuple[str, ...], artifacts_suffix: str, destino: str = "bucket") -> str:
     fila = "\n".join(
         f"{i + 1}. `configs/allsky/experiments/l4/{a}.yaml`" for i, a in enumerate(arms)
     )
-    paralelo = (
-        "Este notebook roda os tres bracos **em sequencia** numa L4 so."
-        if len(arms) > 1
-        else "Este notebook roda **um braco**, para tres execucoes simultaneas em tres L4 —"
-        " cada uma com o seu prefixo no bucket, sem estado compartilhado."
-    )
+    if destino == "drive":
+        paralelo = (
+            "Este notebook roda **um braco no Colab Pro+**, com o Drive como arquivo. E o caminho"
+            " para treinar em paralelo com o Colab Enterprise: a cota de GPU do projeto GCP vale"
+            " para o projeto inteiro (1 GPU), e a L4 da assinatura nao passa por ela."
+        )
+    elif len(arms) > 1:
+        paralelo = "Este notebook roda os tres bracos **em sequencia** numa L4 so."
+    else:
+        paralelo = (
+            "Este notebook roda **um braco**, para tres execucoes simultaneas em tres L4 —"
+            " cada uma com o seu prefixo no bucket, sem estado compartilhado."
+        )
     return f"""
 # {"05 — Fila na L4" if len(arms) > 1 else f"06 — {arms[0]} numa L4"}
 
@@ -88,7 +95,7 @@ hora de GPU. Cinco coisas seguram isso, e todas tem teste em `tests/allsky/test_
 
 ## O que fica arquivado, e onde
 
-Em `{BUCKET}/runs/allsky-l4{artifacts_suffix}/`:
+{"Em `MyDrive/labmim/runs/allsky-l4" + artifacts_suffix + "/` (o Drive e o arquivo: nao ha espelho a fazer, o que se escreve ali ja esta fora da VM):" if destino == "drive" else "Em `" + BUCKET + "/runs/allsky-l4" + artifacts_suffix + "/`:"}
 
 - `<braco>/` — `metrics.csv`/`metrics.json` do treino, os relatorios `eval-test` (best),
   `eval-val` (best) e `eval-test-last` (last) com `predictions.parquet`, `stratified.csv`,
@@ -100,13 +107,24 @@ Em `{BUCKET}/runs/allsky-l4{artifacts_suffix}/`:
 
 ## Antes de rodar
 
-1. O bucket tem `colab/micrometeorology.bundle` (git bundle de `{BRANCH}`),
+{{PRE_REQUISITOS}}
+"""
+
+
+_PRE_BUCKET = """1. O bucket tem `colab/micrometeorology.bundle` (git bundle da branch),
    `allsky-mm/bundle-iso-20260906.tar.gz` e `dinov3/dinov3_vits16plus_pretrain_lvd1689m.pth`.
 2. Template `labmim-l4` (g2-standard-8: 8 vCPU, 1x NVIDIA L4 24 GB), que casa com o
    `num_workers: 8` dos configs.
 3. Para trocar ou pular um braco com a execucao ja rodando: ponha `<braco>.yaml` ou
-   `<braco>.skip` em `{BUCKET}/fila-l4/`.
-"""
+   `<braco>.skip` em `fila-l4/` no bucket."""
+
+_PRE_DRIVE = """1. **Runtime -> Change runtime type -> L4 GPU** (ou A100). Os configs declaram
+   `amp: bf16`, entao uma T4 para na celula de hardware, antes de desempacotar 1,4 GB.
+2. O Drive tem `MyDrive/labmim/allsky-mm/bundle-iso-20260906.tar.gz` e
+   `MyDrive/labmim/dinov3/dinov3_vits16plus_pretrain_lvd1689m.pth`.
+3. Rode as celulas em ordem. A de ambiente leva uns 8 min (venv 3.14 mais torch CUDA) e a
+   fila de 8 a 10 h: deixe a aba aberta, com execucao em segundo plano ligada.
+4. Para pular o braco com a sessao ja rodando: crie `MyDrive/labmim/fila-l4/<braco>.skip`."""
 
 
 _RUNTIME = r"""
@@ -170,6 +188,60 @@ import _colab_runner as runner  # noqa: E402
 lacking = [name for name in ("preflight", "run_arm", "pull_live_run", "score_by_sensor_block_in") if not hasattr(runner, name)]
 if lacking:
     raise RuntimeError(f"o _colab_runner de {BRANCH} nao tem {lacking} — aponte BRANCH para uma branch que os carregue")
+"""
+
+_AMBIENTE_DRIVE = r"""
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from google.colab import drive
+
+drive.mount("/content/drive")
+BRANCH = "__BRANCH__"
+STORE = "/content/drive/MyDrive/labmim"
+BASE = "/content"
+WORKDIR = f"{BASE}/micrometeorology"
+
+# O repositorio vem do git bundle no Drive, nao do GitHub: a branch desta campanha
+# e local e nunca foi publicada.
+BUNDLE_GIT = f"{STORE}/colab/micrometeorology.bundle"
+if not os.path.exists(BUNDLE_GIT):
+    raise RuntimeError(f"{BUNDLE_GIT} nao existe no Drive — suba o git bundle antes de rodar")
+if not os.path.exists(WORKDIR):
+    subprocess.run(["git", "clone", "-b", BRANCH, BUNDLE_GIT, WORKDIR], check=True)
+if not os.path.isdir(f"{WORKDIR}/configs/allsky/experiments/l4"):
+    raise RuntimeError(f"o bundle de {BRANCH} nao carrega configs/allsky/experiments/l4/ — refaca o bundle")
+subprocess.run(["pip", "install", "-q", "uv"], check=True)
+subprocess.run(["uv", "python", "install", "3.14"], cwd=WORKDIR, check=True)
+subprocess.run(["uv", "venv", "--python", "3.14", ".venv"], cwd=WORKDIR, check=True)
+subprocess.run(["uv", "sync", "--locked", "--extra", "allsky"], cwd=WORKDIR, check=True)
+subprocess.run(
+    ["uv", "pip", "install", "--python", ".venv/bin/python", "--reinstall", "--torch-backend", "auto", "torch==2.13.0"],
+    cwd=WORKDIR,
+    check=True,
+)
+
+PY = f"{WORKDIR}/.venv/bin/python"
+os.environ["PATH"] = f"{WORKDIR}/.venv/bin:" + os.environ["PATH"]
+
+DINOV3_REPO_DIR = f"{BASE}/dinov3"
+if not os.path.exists(DINOV3_REPO_DIR):
+    subprocess.run(["git", "clone", "--depth", "1", "https://github.com/facebookresearch/dinov3", DINOV3_REPO_DIR], check=True)
+os.environ["ALLSKY_DINOV3_REPO"] = DINOV3_REPO_DIR
+sys.path.insert(0, f"{WORKDIR}/notebooks/colab")
+
+verify = subprocess.run([PY, "-c", "import torch; print(torch.__version__, torch.cuda.is_available())"], capture_output=True, text=True, check=False)
+print(verify.stdout)
+if "True" not in verify.stdout:
+    raise RuntimeError("torch sem CUDA — Runtime > Change runtime type > GPU, e rode esta celula de novo")
+
+import _colab_runner as runner  # noqa: E402
+
+lacking = [name for name in ("preflight", "run_arm", "pull_live_run", "score_by_sensor_block_in") if not hasattr(runner, name)]
+if lacking:
+    raise RuntimeError(f"o _colab_runner de {BRANCH} nao tem {lacking} — refaca o bundle de uma branch que os carregue")
 """
 
 _HARDWARE = r"""
@@ -240,6 +312,46 @@ OUT.mkdir(parents=True, exist_ok=True)
 print(f"{DATASET_LINK} -> {os.readlink(DATASET_LINK)}; cwd {os.getcwd()}; runs em {OUT}")
 """
 
+_DADOS_DRIVE = r"""
+import os
+from pathlib import Path
+
+BUNDLE = f"{STORE}/allsky-mm/bundle-iso-20260906.tar.gz"
+WEIGHTS = f"{STORE}/dinov3/dinov3_vits16plus_pretrain_lvd1689m.pth"
+for caminho in (BUNDLE, WEIGHTS):
+    if not os.path.exists(caminho):
+        raise RuntimeError(f"{caminho} nao existe no Drive — suba antes de rodar")
+os.environ["ALLSKY_DINOV3_WEIGHTS"] = WEIGHTS
+
+DATA = "/content/allsky-mm"
+ARTIFACTS = f"{STORE}/runs/allsky-l4__SUFFIX__"
+OVERRIDES = f"{STORE}/fila-l4"
+REMOTE_OVERRIDES = None
+os.makedirs(ARTIFACTS, exist_ok=True)
+os.makedirs(OVERRIDES, exist_ok=True)
+# O Drive montado e o proprio arquivo: o que se escreve ali ja esta fora da VM,
+# entao nao ha destino remoto a espelhar.
+MIRROR = []
+print("ja arquivado:", sorted(p.name for p in Path(ARTIFACTS).iterdir()) or "nada")
+
+ROOT = runner.stage_bundle(BUNDLE, DATA, python=PY)
+for required in ("manifest.parquet", "splits.json", "frames"):
+    if not (Path(ROOT) / required).exists():
+        raise RuntimeError(f"{ROOT} sem {required}: o bundle nao e o dataset-iso-20260906 com frames")
+
+DATASET_LINK = Path(WORKDIR) / "output/allsky-mm/dataset-iso-20260906"
+DATASET_LINK.parent.mkdir(parents=True, exist_ok=True)
+if DATASET_LINK.is_symlink():
+    DATASET_LINK.unlink()
+elif DATASET_LINK.exists():
+    raise RuntimeError(f"{DATASET_LINK} existe e nao e um link: nao vou sobrescrever")
+DATASET_LINK.symlink_to(ROOT, target_is_directory=True)
+os.chdir(WORKDIR)
+OUT = Path(WORKDIR) / "output/allsky-mm/experiments/l4"
+OUT.mkdir(parents=True, exist_ok=True)
+print(f"{DATASET_LINK} -> {os.readlink(DATASET_LINK)}; cwd {os.getcwd()}; runs em {OUT}")
+"""
+
 _PREFLIGHT = r"""
 for check in runner.preflight(PY, artifacts=ARTIFACTS, mirror=MIRROR, work_dir=BASE):
     print("  ok:", check)
@@ -277,7 +389,7 @@ for entry in FILA:
         artifacts=Path(ARTIFACTS),
         mirror=MIRROR,
         overrides=Path(OVERRIDES),
-        override_mirror=[(REMOTE_OVERRIDES, OVERRIDES)],
+        override_mirror=[(REMOTE_OVERRIDES, OVERRIDES)] if REMOTE_OVERRIDES else [],
         watchers=WATCHERS,
         log=log,
     )
@@ -301,23 +413,39 @@ with open(f"{ARTIFACTS}/campanha_resumo.json", "w") as handle:
 for row in rows:
     print(runner.summarise_arm(row))
 print(frame.to_string())
-print("espelho final:", runner.mirror_once(MIRROR) or "ok")
-print("artefatos em", ARTIFACTS, "->", REMOTE_ARTIFACTS)
+if MIRROR:
+    print("espelho final:", runner.mirror_once(MIRROR) or "ok")
+print("artefatos em", ARTIFACTS)
 """
 
 
-def build(arms: tuple[str, ...], *, suffix: str) -> dict[str, object]:
-    """One notebook: the shared cells plus the queue this one owns."""
+def build(arms: tuple[str, ...], *, suffix: str, destino: str = "bucket") -> dict[str, object]:
+    """One notebook: the shared cells plus the queue this one owns.
+
+    *destino* picks where the run is archived: ``bucket`` for Colab Enterprise,
+    which mirrors to Cloud Storage, or ``drive`` for Colab Pro+, where the
+    mounted Drive is itself the archive and there is nothing to mirror.
+    """
     fila = [f"configs/allsky/experiments/l4/{arm}.yaml" for arm in arms]
     cells = [
-        _markdown(_abertura(arms, suffix)),
+        _markdown(
+            _abertura(arms, suffix, destino).replace(
+                "{PRE_REQUISITOS}", _PRE_DRIVE if destino == "drive" else _PRE_BUCKET
+            )
+        ),
         _markdown("## 1. Runtime e GPU"),
         _code(_RUNTIME),
         _markdown(
             "## 2. Ambiente\n\nClona o repositorio onde o `_colab_runner` mora, instala o torch CUDA pelo backend que o\n"
-            "driver da VM pede e verifica. No Colab Enterprise o repositorio vem do `git bundle` no bucket."
+            "driver da VM pede e verifica. O repositorio vem de um `git bundle`"
+            + (" no Drive" if destino == "drive" else " no bucket")
+            + ": a branch desta campanha e local e nunca foi publicada."
         ),
-        _code(_AMBIENTE.replace("__BRANCH__", BRANCH).replace("__BUCKET__", BUCKET)),
+        _code(
+            (_AMBIENTE_DRIVE if destino == "drive" else _AMBIENTE)
+            .replace("__BRANCH__", BRANCH)
+            .replace("__BUCKET__", BUCKET)
+        ),
         _markdown(
             "## 3. Hardware\n\nO probe roda no interpretador do venv. Os configs declaram `amp: bf16`, entao uma GPU sem\n"
             "bfloat16 (T4, Turing) para aqui — antes de baixar o bundle de 1,4 GB."
@@ -328,7 +456,7 @@ def build(arms: tuple[str, ...], *, suffix: str) -> dict[str, object]:
             "`fila-l4/` e lido do bucket antes de cada braco e **nunca** espelhado de volta, porque o `rsync`\n"
             "nao tem direcao e a copia antiga da VM sobrescreveria o arquivo posto la de fora."
         ),
-        _code(_DADOS.replace("__SUFFIX__", suffix)),
+        _code((_DADOS_DRIVE if destino == "drive" else _DADOS).replace("__SUFFIX__", suffix)),
         _markdown(
             "## 5. Voo de teste\n\nPercorre, com dados sinteticos, cada passo que roda fora do treino, e escreve\n"
             "`preflight.json` no destino final. E o que transforma uma quebra de quatorze horas numa de um\n"
@@ -346,7 +474,7 @@ def build(arms: tuple[str, ...], *, suffix: str) -> dict[str, object]:
         _code(_FECHAMENTO),
     ]
     for index, cell in enumerate(cells):
-        cell["id"] = f"l4{suffix or '-fila'}-{index:02d}"
+        cell["id"] = f"l4{suffix or '-fila'}{'-drive' if destino == 'drive' else ''}-{index:02d}"
     return {
         "cells": cells,
         "metadata": {
@@ -361,18 +489,20 @@ def build(arms: tuple[str, ...], *, suffix: str) -> dict[str, object]:
 
 
 def main() -> None:
-    """Write the sequential queue notebook and one notebook per arm.
+    """Write the queue notebook, one per arm for the bucket, and one per arm for Drive.
 
     The notebooks are formatted here with the repository's own formatter, so
     regenerating them produces no diff against what pre-commit would write.
     """
     written = []
-    for path, arms, suffix in [
-        (NOTEBOOK_DIR / "05_fila_l4.ipynb", ARMS, ""),
-        *[(NOTEBOOK_DIR / f"06_l4_{arm}.ipynb", (arm,), f"-{arm}") for arm in ARMS],
+    for path, arms, suffix, destino in [
+        (NOTEBOOK_DIR / "05_fila_l4.ipynb", ARMS, "", "bucket"),
+        *[(NOTEBOOK_DIR / f"06_l4_{arm}.ipynb", (arm,), f"-{arm}", "bucket") for arm in ARMS],
+        *[(NOTEBOOK_DIR / f"07_prop_{arm}.ipynb", (arm,), f"-{arm}", "drive") for arm in ARMS],
     ]:
         path.write_text(
-            json.dumps(build(arms, suffix=suffix), ensure_ascii=False, indent=1) + "\n",
+            json.dumps(build(arms, suffix=suffix, destino=destino), ensure_ascii=False, indent=1)
+            + "\n",
             encoding="utf-8",
         )
         written.append(path)
