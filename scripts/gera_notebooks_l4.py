@@ -1,9 +1,9 @@
 """Escreve os notebooks do Colab Enterprise para a L4: a fila sequencial e um por braco.
 
-Os quatro notebooks compartilham cada celula menos a que declara a fila e o
-prefixo do arquivo: `05_fila_l4.ipynb` roda os tres bracos em sequencia numa GPU
+Os notebooks compartilham cada celula menos a que declara a fila e o prefixo do
+arquivo: `05_fila_l4.ipynb` roda os tres bracos de 512 px em sequencia numa L4
 so, e cada `06_l4_<braco>.ipynb` roda um braco sozinho, com prefixo proprio no
-bucket, para tres execucoes simultaneas em tres L4. Toda a logica de fila mora
+bucket, um por execucao. Toda a logica de fila mora
 em `notebooks/colab/_colab_runner.py`, que tem teste; a celula do notebook so a
 chama, porque codigo que so existe dentro de um `.ipynb` nao roda em CI e foi
 assim que uma sessao de quatorze horas morreu com o resultado ainda na VM.
@@ -20,13 +20,34 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from allsky.config import ExperimentConfig, load_experiment_config
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_DIR = REPO_ROOT / "configs/allsky/experiments/l4"
+#: A fila do notebook 05: os tres bracos de 512 px, em sequencia numa L4.
 ARMS = ("l4bloco512_s42", "l4v3res512_s44", "l4v3res512_s45")
-#: Bracos que so fazem sentido no Colab Pro+, por precisarem de uma GPU maior que
-#: a unica que a cota do projeto GCP permite.
-ARMS_DRIVE = (*ARMS, "a100res1024_s42")
-#: Raiz do dataset por braco, quando nao e a de 512 px que os outros compartilham.
-DATASET = {"a100res1024_s42": "dataset-iso-1024-20260910"}
-DATASET_PADRAO = "dataset-iso-20260906"
+#: Um notebook 06 por braco, para a L4 do Colab Enterprise.
+ARMS_L4 = ARMS
+#: Notebooks do Colab Pro+ (rota do Drive), mantidos para os bracos de 512 px.
+ARMS_DRIVE = ARMS
+#: Template de runtime do Colab Enterprise e a maquina que ele pede.
+TEMPLATE = "labmim-l4"
+MAQUINA = "g2-standard-8: 8 vCPU, 1x NVIDIA L4 24 GB"
+
+
+def config_de(arm: str) -> ExperimentConfig:
+    """O ExperimentConfig validado de *arm*, lido de ``configs/allsky/experiments/l4``.
+
+    E dele que saem a raiz do dataset e o ``num_workers`` que o notebook cita: um
+    valor copiado a mao para ca foi o que fez um notebook procurar um bundle que
+    nao existia (2026-09-10).
+    """
+    return load_experiment_config(CONFIG_DIR / f"{arm}.yaml")
+
+
+def dataset_de(arm: str) -> str:
+    """Nome da raiz do dataset que o config de *arm* declara em ``data.data_root``."""
+    return Path(config_de(arm).data.data_root).name
 
 
 def bundle_de(dataset: str) -> str:
@@ -63,7 +84,12 @@ def _code(text: str) -> dict[str, object]:
     }
 
 
-def _abertura(arms: tuple[str, ...], artifacts_suffix: str, destino: str = "bucket") -> str:
+def _abertura(
+    arms: tuple[str, ...],
+    artifacts_suffix: str,
+    destino: str = "bucket",
+    numero: str = "06",
+) -> str:
     fila = "\n".join(
         f"{i + 1}. `configs/allsky/experiments/l4/{a}.yaml`" for i, a in enumerate(arms)
     )
@@ -77,11 +103,11 @@ def _abertura(arms: tuple[str, ...], artifacts_suffix: str, destino: str = "buck
         paralelo = "Este notebook roda os tres bracos **em sequencia** numa L4 so."
     else:
         paralelo = (
-            "Este notebook roda **um braco**, para tres execucoes simultaneas em tres L4 —"
-            " cada uma com o seu prefixo no bucket, sem estado compartilhado."
+            "Este notebook roda **um braco** numa L4 so, com o seu prefixo no bucket, sem"
+            " estado compartilhado com as execucoes dos outros notebooks."
         )
     return f"""
-# {"05 — Fila na L4" if len(arms) > 1 else f"06 — {arms[0]} numa L4"}
+# {"05 — Fila na L4" if len(arms) > 1 else f"{numero} — {arms[0]} numa L4"}
 
 {paralelo}
 
@@ -90,8 +116,8 @@ A fila:
 {fila}
 
 Os configs vivem no repositorio e sao rodados como estao: este notebook nao escreve YAML
-derivado. O `amp` deles e `bf16` (a L4 e Ada); a celula de hardware confere que a GPU
-atribuida tem bfloat16 antes de baixar 1,4 GB de dados.
+derivado. O `amp` deles e `bf16`; a celula de hardware confere que a GPU atribuida tem
+bfloat16 antes de baixar o bundle de dados.
 
 ## O que garante que nada se perde
 
@@ -114,7 +140,7 @@ hora de GPU. Cinco coisas seguram isso, e todas tem teste em `tests/allsky/test_
 
 ## O que fica arquivado, e onde
 
-{"Em `MyDrive/labmim/runs/allsky-l4" + artifacts_suffix + "/` (o Drive e o arquivo: nao ha espelho a fazer, o que se escreve ali ja esta fora da VM):" if destino == "drive" else "Em `" + BUCKET + "/runs/allsky-l4" + artifacts_suffix + "/`:"}
+{"Em `MyDrive/labmim/runs/allsky" + artifacts_suffix + "/` (o Drive e o arquivo: nao ha espelho a fazer, o que se escreve ali ja esta fora da VM):" if destino == "drive" else "Em `" + BUCKET + "/runs/allsky" + artifacts_suffix + "/`:"}
 
 - `<braco>/` — `metrics.csv`/`metrics.json` do treino, os relatorios `eval-test` (best),
   `eval-val` (best) e `eval-test-last` (last) com `predictions.parquet`, `stratified.csv`,
@@ -131,9 +157,9 @@ hora de GPU. Cinco coisas seguram isso, e todas tem teste em `tests/allsky/test_
 
 
 _PRE_BUCKET = """1. O bucket tem `colab/micrometeorology.bundle` (git bundle da branch),
-   `allsky-mm/bundle-iso-20260906.tar.gz` e `dinov3/dinov3_vits16plus_pretrain_lvd1689m.pth`.
-2. Template `labmim-l4` (g2-standard-8: 8 vCPU, 1x NVIDIA L4 24 GB), que casa com o
-   `num_workers: 8` dos configs.
+   `allsky-mm/__BUNDLE__` e `dinov3/dinov3_vits16plus_pretrain_lvd1689m.pth`.
+2. Template `__TEMPLATE__` (__MAQUINA__), que casa com o
+   `num_workers: __WORKERS__` do config.
 3. Para trocar ou pular um braco com a execucao ja rodando: ponha `<braco>.yaml` ou
    `<braco>.skip` em `fila-l4/` no bucket."""
 
@@ -275,9 +301,9 @@ probe = subprocess.run(
 HW = json.loads(probe.stdout.strip().splitlines()[-1])
 print(HW)
 if HW["amp_dtype"] != "bf16":
-    raise RuntimeError(f"{HW['name']} sem bfloat16: os configs de l4/ declaram amp bf16 — peca o template labmim-l4")
-if HW["cpus"] < 8:
-    print(f"ATENCAO: {HW['cpus']} vCPU para num_workers: 8 dos configs — o loader vai disputar CPU")
+    raise RuntimeError(f"{HW['name']} sem bfloat16: os configs de l4/ declaram amp bf16 — peca o template __TEMPLATE__")
+if HW["cpus"] < __WORKERS__:
+    print(f"ATENCAO: {HW['cpus']} vCPU para num_workers: __WORKERS__ do config — o loader vai disputar CPU")
 """
 
 _DADOS = r"""
@@ -288,7 +314,7 @@ if not ON_VERTEX:
     raise RuntimeError("este notebook so roda no Colab Enterprise: dado e arquivo vivem no bucket, nao ha Drive")
 
 STORE = f"{BASE}/labmim"
-BUNDLE_REL = "allsky-mm/bundle-iso-20260906.tar.gz"
+BUNDLE_REL = "allsky-mm/__BUNDLE__"
 WEIGHTS_REL = "dinov3/dinov3_vits16plus_pretrain_lvd1689m.pth"
 for rel in (BUNDLE_REL, WEIGHTS_REL):
     os.makedirs(f"{STORE}/{os.path.dirname(rel)}", exist_ok=True)
@@ -296,8 +322,8 @@ for rel in (BUNDLE_REL, WEIGHTS_REL):
 
 BUNDLE = f"{STORE}/{BUNDLE_REL}"
 DATA = f"{BASE}/allsky-mm"
-ARTIFACTS = f"{STORE}/runs/allsky-l4__SUFFIX__"
-REMOTE_ARTIFACTS = f"{BUCKET}/runs/allsky-l4__SUFFIX__"
+ARTIFACTS = f"{STORE}/runs/allsky__SUFFIX__"
+REMOTE_ARTIFACTS = f"{BUCKET}/runs/allsky__SUFFIX__"
 OVERRIDES = f"{STORE}/fila-l4"
 REMOTE_OVERRIDES = f"{BUCKET}/fila-l4"
 os.environ["ALLSKY_DINOV3_WEIGHTS"] = f"{STORE}/{WEIGHTS_REL}"
@@ -340,7 +366,7 @@ for caminho in (BUNDLE, WEIGHTS):
 os.environ["ALLSKY_DINOV3_WEIGHTS"] = WEIGHTS
 
 DATA = "/content/allsky-mm"
-ARTIFACTS = f"{STORE}/runs/allsky-l4__SUFFIX__"
+ARTIFACTS = f"{STORE}/runs/allsky__SUFFIX__"
 OVERRIDES = f"{STORE}/fila-l4"
 REMOTE_OVERRIDES = None
 os.makedirs(ARTIFACTS, exist_ok=True)
@@ -435,19 +461,38 @@ print("artefatos em", ARTIFACTS)
 """
 
 
-def build(arms: tuple[str, ...], *, suffix: str, destino: str = "bucket") -> dict[str, object]:
+def build(
+    arms: tuple[str, ...],
+    *,
+    suffix: str,
+    slug: str,
+    destino: str = "bucket",
+    numero: str = "06",
+) -> dict[str, object]:
     """One notebook: the shared cells plus the queue this one owns.
 
     *destino* picks where the run is archived: ``bucket`` for Colab Enterprise,
     which mirrors to Cloud Storage, or ``drive`` for Colab Pro+, where the
-    mounted Drive is itself the archive and there is nothing to mirror.
+    mounted Drive is itself the archive and there is nothing to mirror. *suffix*
+    names the archive prefix under ``runs/allsky`` and *slug* the cell ids.
     """
     fila = [f"configs/allsky/experiments/l4/{arm}.yaml" for arm in arms]
+    datasets = {dataset_de(arm) for arm in arms}
+    if len(datasets) != 1:
+        raise ValueError(f"uma fila so pode ter um dataset, e {arms} declaram {sorted(datasets)}")
+    dataset = datasets.pop()
+    workers = str(config_de(arms[0]).train.num_workers)
+    pre_requisitos = (
+        _PRE_DRIVE
+        if destino == "drive"
+        else _PRE_BUCKET.replace("__BUNDLE__", bundle_de(dataset))
+        .replace("__TEMPLATE__", TEMPLATE)
+        .replace("__MAQUINA__", MAQUINA)
+        .replace("__WORKERS__", workers)
+    )
     cells = [
         _markdown(
-            _abertura(arms, suffix, destino).replace(
-                "{PRE_REQUISITOS}", _PRE_DRIVE if destino == "drive" else _PRE_BUCKET
-            )
+            _abertura(arms, suffix, destino, numero).replace("{PRE_REQUISITOS}", pre_requisitos)
         ),
         _markdown("## 1. Runtime e GPU"),
         _code(_RUNTIME),
@@ -464,9 +509,9 @@ def build(arms: tuple[str, ...], *, suffix: str, destino: str = "bucket") -> dic
         ),
         _markdown(
             "## 3. Hardware\n\nO probe roda no interpretador do venv. Os configs declaram `amp: bf16`, entao uma GPU sem\n"
-            "bfloat16 (T4, Turing) para aqui — antes de baixar o bundle de 1,4 GB."
+            "bfloat16 (T4, Turing) para aqui — antes de baixar o bundle de dados."
         ),
-        _code(_HARDWARE),
+        _code(_HARDWARE.replace("__TEMPLATE__", TEMPLATE).replace("__WORKERS__", workers)),
         _markdown(
             "## 4. Dados e artefatos\n\nSo bucket. O que sai da VM sai por `ARTIFACTS`, espelhado para o prefixo deste notebook;\n"
             "`fila-l4/` e lido do bucket antes de cada braco e **nunca** espelhado de volta, porque o `rsync`\n"
@@ -475,8 +520,8 @@ def build(arms: tuple[str, ...], *, suffix: str, destino: str = "bucket") -> dic
         _code(
             (_DADOS_DRIVE if destino == "drive" else _DADOS)
             .replace("__SUFFIX__", suffix)
-            .replace("__DATASET__", DATASET.get(arms[0], DATASET_PADRAO))
-            .replace("__BUNDLE__", bundle_de(DATASET.get(arms[0], DATASET_PADRAO)))
+            .replace("__DATASET__", dataset)
+            .replace("__BUNDLE__", bundle_de(dataset))
         ),
         _markdown(
             "## 5. Voo de teste\n\nPercorre, com dados sinteticos, cada passo que roda fora do treino, e escreve\n"
@@ -495,7 +540,7 @@ def build(arms: tuple[str, ...], *, suffix: str, destino: str = "bucket") -> dic
         _code(_FECHAMENTO),
     ]
     for index, cell in enumerate(cells):
-        cell["id"] = f"l4{suffix or '-fila'}{'-drive' if destino == 'drive' else ''}-{index:02d}"
+        cell["id"] = f"{slug}-{index:02d}"
     return {
         "cells": cells,
         "metadata": {
@@ -510,22 +555,36 @@ def build(arms: tuple[str, ...], *, suffix: str, destino: str = "bucket") -> dic
 
 
 def main() -> None:
-    """Write the queue notebook, one per arm for the bucket, and one per arm for Drive.
+    """Write the queue notebook, one notebook per arm for the bucket, and one per arm for Drive.
 
     The notebooks are formatted here with the repository's own formatter, so
     regenerating them produces no diff against what pre-commit would write.
     """
     written = []
-    for path, arms, suffix, destino in [
-        (NOTEBOOK_DIR / "05_fila_l4.ipynb", ARMS, "", "bucket"),
-        *[(NOTEBOOK_DIR / f"06_l4_{arm}.ipynb", (arm,), f"-{arm}", "bucket") for arm in ARMS],
+    for path, arms, suffix, slug, destino, numero in [
+        (NOTEBOOK_DIR / "05_fila_l4.ipynb", ARMS, "-l4", "l4-fila", "bucket", "05"),
         *[
-            (NOTEBOOK_DIR / f"07_prop_{arm}.ipynb", (arm,), f"-{arm}", "drive")
+            (NOTEBOOK_DIR / f"06_l4_{arm}.ipynb", (arm,), f"-l4-{arm}", f"l4-{arm}", "bucket", "06")
+            for arm in ARMS_L4
+        ],
+        *[
+            (
+                NOTEBOOK_DIR / f"07_prop_{arm}.ipynb",
+                (arm,),
+                f"-l4-{arm}",
+                f"l4-{arm}-drive",
+                "drive",
+                "07",
+            )
             for arm in ARMS_DRIVE
         ],
     ]:
         path.write_text(
-            json.dumps(build(arms, suffix=suffix, destino=destino), ensure_ascii=False, indent=1)
+            json.dumps(
+                build(arms, suffix=suffix, slug=slug, destino=destino, numero=numero),
+                ensure_ascii=False,
+                indent=1,
+            )
             + "\n",
             encoding="utf-8",
         )

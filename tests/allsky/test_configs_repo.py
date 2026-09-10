@@ -21,6 +21,7 @@ CPU-only otherwise; no dataset, embeddings or network are touched.
 import json
 import re
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -394,13 +395,7 @@ class TestTransferDirection:
             assert model_param(cfg, "init_from", None) is None, path.name
 
 
-def test_the_drive_notebooks_look_for_the_bundle_the_exporter_writes() -> None:
-    """The bundle name the notebook builds must be the file ``export-colab-bundle`` produces.
-
-    A notebook that names a bundle nobody wrote dies at the data cell, after the
-    eight minutes the environment cell costs. The rule is a prefix swap, so it is
-    derived from the dataset root rather than typed twice.
-    """
+def _gerador_de_notebooks() -> ModuleType:
     import importlib.util
     import sys
 
@@ -411,15 +406,51 @@ def test_the_drive_notebooks_look_for_the_bundle_the_exporter_writes() -> None:
     gerador = importlib.util.module_from_spec(spec)
     sys.modules["gera_notebooks_l4"] = gerador
     spec.loader.exec_module(gerador)
+    return gerador
+
+
+def _codigo_do_notebook(caminho: Path) -> str:
+    notebook = json.loads(caminho.read_text(encoding="utf-8"))
+    return "".join(
+        "".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"
+    )
+
+
+def test_the_drive_notebooks_look_for_the_bundle_the_exporter_writes() -> None:
+    """The bundle name the notebook builds must be the file ``export-colab-bundle`` produces.
+
+    A notebook that names a bundle nobody wrote dies at the data cell, after the
+    eight minutes the environment cell costs. The rule is a prefix swap, so it is
+    derived from the dataset root rather than typed twice.
+    """
+    gerador = _gerador_de_notebooks()
 
     assert gerador.bundle_de("dataset-iso-20260906") == "bundle-iso-20260906.tar.gz"
     assert gerador.bundle_de("dataset-iso-1024-20260910") == "bundle-iso-1024-20260910.tar.gz"
 
     for arm in gerador.ARMS_DRIVE:
-        dataset = gerador.DATASET.get(arm, gerador.DATASET_PADRAO)
-        notebook = json.loads(
-            (gerador.NOTEBOOK_DIR / f"07_prop_{arm}.ipynb").read_text(encoding="utf-8")
-        )
-        fonte = "".join("".join(cell["source"]) for cell in notebook["cells"])
-        assert gerador.bundle_de(dataset) in fonte, arm
-        assert "bundle-dataset-" not in fonte, arm
+        codigo = _codigo_do_notebook(gerador.NOTEBOOK_DIR / f"07_prop_{arm}.ipynb")
+        assert f'allsky-mm/{gerador.bundle_de(gerador.dataset_de(arm))}"' in codigo, arm
+        assert "bundle-dataset-" not in codigo, arm
+
+
+def test_the_bucket_notebooks_download_the_bundle_of_the_dataset_their_arm_trains_on() -> None:
+    """The data cell copies ``allsky-mm/<bundle>`` from Cloud Storage before staging.
+
+    The Drive cell derived the bundle from the dataset root while the bucket
+    cell still named the 512 px bundle by hand, so the first 1024 px arm on the
+    bucket route would have staged the wrong frames and trained a 1024 px model
+    on 512 px images without any error. Only code cells count: the markdown
+    pre-requisites named the right bundle while the code fetched the wrong one.
+    """
+    gerador = _gerador_de_notebooks()
+
+    notebooks = [
+        (gerador.NOTEBOOK_DIR / "05_fila_l4.ipynb", gerador.ARMS[0]),
+        *[(gerador.NOTEBOOK_DIR / f"06_l4_{arm}.ipynb", arm) for arm in gerador.ARMS_L4],
+    ]
+    for caminho, arm in notebooks:
+        codigo = _codigo_do_notebook(caminho)
+        esperado = f'BUNDLE_REL = "allsky-mm/{gerador.bundle_de(gerador.dataset_de(arm))}"'
+        assert esperado in codigo, (caminho.name, esperado)
+        assert "bundle-dataset-" not in codigo, caminho.name
