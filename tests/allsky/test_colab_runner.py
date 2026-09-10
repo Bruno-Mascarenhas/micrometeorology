@@ -452,6 +452,53 @@ def test_a_resume_hands_the_existing_checkpoint_to_the_engine(
     assert skipped["status"] == "ok"
 
 
+def test_every_evaluation_of_the_queue_runs_on_the_gpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``allsky evaluate`` defaults to the CPU, and the queue must not inherit that.
+
+    Three reports of 7,265 frames each scored on the VM's eight vCPUs cost 2.1 h
+    at 512 px with the GPU idle (l4v3res512_s44, 2026-09-10); at 1024 px they
+    would cost ~14 h and outlive the 24 h execution. The device is pinned to
+    ``cuda`` rather than ``auto`` so a venv without CUDA fails here instead of
+    silently scoring on the CPU again.
+    """
+    import subprocess
+
+    import yaml
+
+    runner = _load_runner()
+    config = tmp_path / "l4res1024_s44.yaml"
+    config.write_text(
+        yaml.safe_dump({"name": "l4res1024_s44", "seed": 44, "output_dir": str(tmp_path / "out")})
+    )
+    run_dir = tmp_path / "out" / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "best.ckpt").write_bytes(b"epoch-20")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if command[1] == "evaluate":
+            report = Path(command[command.index("--report-dir") + 1])
+            report.mkdir(parents=True, exist_ok=True)
+            (report / "eval_metrics.json").write_text(
+                json.dumps(
+                    {"n_samples": 1, "meta": {}, "global": {"dhi": {"rmse": 1.0, "mae": 1.0}}}
+                )
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    runner.run_experiment(config, python="/venv/bin/python", split="val")
+
+    evaluations = [c for c in commands if c[1] == "evaluate"]
+    assert evaluations, commands
+    for command in evaluations:
+        assert command[command.index("--device") + 1] == "cuda", command
+
+
 def test_block_scores_are_asked_of_the_venv_interpreter_with_the_runner_on_its_path(
     tmp_path: Path,
 ) -> None:

@@ -247,6 +247,8 @@ def run_experiment(
             str(config),
             "--report-dir",
             str(report_dir),
+            "--device",
+            "cuda",
         ],
         capture_output=True,
         text=True,
