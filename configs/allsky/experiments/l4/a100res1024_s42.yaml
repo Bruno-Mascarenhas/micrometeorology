@@ -36,15 +36,24 @@
 # a atencao deixa de ser termo menor (N/4d vai de 0,67 para 2,67). Partindo dos
 # 12,5 min/epoca medidos na L4 a 512 px com batch 32, e tomando a A100 como 2,5x
 # a L4, da ~38 min/epoca. O batch nao muda essa conta: a epoca custa o numero de
-# imagens, nao o de passos. Com 24 epocas: ~15 h de treino, mais ~5 h das tres
-# avaliacoes, ~20 h no total. A incerteza e de um fator 1,3 para cima; se passar
-# das 24 h da sessao, a retomada pelo checkpoint espelhado fecha o braco numa
-# segunda sessao sem repetir nada.
+# imagens, nao o de passos. Uma sessao de 24 h cabe ~30 epocas mais as tres
+# avaliacoes (~5 h), entao um teto de 150 significa de duas a tres sessoes se a
+# paciencia nao parar antes. A incerteza do tempo por epoca e de um fator 1,3.
 #
-# Cosseno completo em 24 epocas e SEM parada antecipada (paciencia = teto): a
-# 512 px o minimo caiu na epoca 20 de 40, e um cosseno que anela ate o fim e o que
-# fez best e last concordarem no ceuv3res512_s42. O checkpoint operacional daqui
-# e o last.
+# 150 epocas com paciencia 20 (pedido do dono, 2026-09-09 22:10): a 1024 px entra
+# informacao nova, e o teto de epocas deixa de ser a coisa a economizar. Duas
+# consequencias a registrar, porque contrariam o que 512 px ensinou:
+#   1. O cosseno de 150 NAO anela: se a paciencia parar na casa dos 40, o LR ainda
+#      esta alto, e ai o checkpoint operacional e o BEST, nao o last. Foi
+#      exatamente o que o l4bloco512_s42 mostrou (last 0,624 contra best 0,660 de
+#      F1 por bloco). O ceuv3res512_s42, com cosseno de 40 fechado, teve os dois
+#      concordando.
+#   2. 150 epocas a ~38 min sao ~95 h, muito acima das 24 h de uma sessao do Colab
+#      Pro+. O braco e feito para atravessar sessoes: sync_live espelha last.ckpt e
+#      best.ckpt para o Drive a cada epoca, pull_live_run os restaura e
+#      `allsky train --resume auto` continua da epoca seguinte. Rodar o notebook de
+#      novo e o unico passo manual. Se a paciencia parar antes, o engine reconhece
+#      (epochs_no_improve >= patience) e vai direto para as avaliacoes.
 extends: [../_base.yaml, ../../models/image_only.yaml]
 name: a100res1024_s42
 output_dir: output/allsky-mm/experiments/l4/a100res1024_s42
@@ -79,7 +88,7 @@ train:
   lr: 0.0003
   backbone_lr: 0.00001
   batch_size: 20
-  epochs: 24
+  epochs: 150
   weight_decay: 0.05
   num_workers: 12
   amp:
@@ -91,7 +100,7 @@ train:
     bandwidth: 0.05
     p: 0.5
   early_stopping:
-    patience: 24
+    patience: 20
     min_delta: 0.0002
     monitor: val/kindex_mae
 augmentation:
