@@ -597,7 +597,10 @@ def saturated_fraction(frame: np.ndarray) -> float:
         If *frame* is not a native frame.
     """
     _check_native_frame(frame)
-    pixels = _disc_pixels(frame)
+    return _saturated_share(_disc_pixels(frame))
+
+
+def _saturated_share(pixels: np.ndarray) -> float:
     return float((pixels.max(axis=1) >= SATURATION_DN).mean())
 
 
@@ -626,7 +629,7 @@ def exposure_record(frame: np.ndarray, frame_index: int) -> ExposureRecord:
     """
     _check_native_frame(frame)
     pixels = _disc_pixels(frame)
-    sat_frac = float((pixels.max(axis=1) >= SATURATION_DN).mean())
+    sat_frac = _saturated_share(pixels)
     exposure_s = read_exposure_seconds(frame)
     if exposure_s is None:
         return ExposureRecord(frame_index, None, None, None, sat_frac)

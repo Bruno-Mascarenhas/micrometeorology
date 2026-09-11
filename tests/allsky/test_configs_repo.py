@@ -320,10 +320,13 @@ def test_experiment_builds_and_forwards(experiment: Path) -> None:
         # has to be as wide as the wrapped convolution now expects.
         channels = getattr(getattr(model, "visual_encoder", None), "extra_channel_projection", None)
         n_channels = 3 if channels is None else channels.in_channels
-        batch = {
-            "features": torch.randn(_BATCH, n_features),
-            "image": torch.randn(_BATCH, n_channels, 8, 8),
-        }
+        batch = {"features": torch.randn(_BATCH, n_features)}
+        if cfg.data.alignment.strategy == "center_frame":
+            batch["image"] = torch.randn(_BATCH, n_channels, 8, 8)
+        else:
+            frames = cfg.data.alignment.max_frames
+            batch["image_seq"] = torch.randn(_BATCH, frames, n_channels, 8, 8)
+            batch["frame_mask"] = torch.ones(_BATCH, frames, dtype=torch.bool)
     else:
         model = build_model(cfg, n_features, embedding_dim=_EMBED_DIM)
         batch = {

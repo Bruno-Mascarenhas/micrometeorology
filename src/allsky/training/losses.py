@@ -229,42 +229,22 @@ class MultitaskLoss(nn.Module):
     ) -> Tensor:
         """Masked cross-entropy over rows with a valid (``>= 0``) class label.
 
-        Hard targets by default; ``label_smoothing`` mixes them with the uniform
-        distribution, and ``ordinal_tau`` replaces them by the soft targets of
-        :func:`ordinal_soft_targets`. ``class_weights`` scales each row by its
-        class under either target; the masked mean is over rows, not over
+        The hard target of a row is its one-hot distribution; a *distribution*
+        ``(B, K)`` replaces it for every row. Under either, ``label_smoothing``
+        mixes the target with the uniform, ``ordinal_tau`` replaces it by its
+        mix of the soft targets of :func:`ordinal_soft_targets`, and
+        ``class_weights`` scales each row by its class: inside the class sum on
+        the smoothed target, as ``functional.cross_entropy`` does with
+        ``weight`` and ``label_smoothing`` together, and as a factor on the row
+        under the ordinal targets. The masked mean is over rows, not over
         weights, so a re-weighted batch is not re-normalised.
-
-        A *distribution* ``(B, K)`` replaces the hard target of every row: the
-        ordinal soft targets become its mix of theirs, the label smoothing its
-        mix with the uniform, and the class weight enters as the hard path puts
-        it — inside the class sum on the smoothed target, as a factor on the
-        row under the ordinal targets — each of which reduces to the
-        hard-target rule when the row is one-hot, so an unmixed row costs what
-        it costs without a distribution.
         """
         mask = sky_class >= 0
-        # `clamp(min=0)` only feeds the masked-out rows a valid index; their loss
-        # is zeroed below. `ignore_index=-1` with the default reduction would do
-        # the masking too, but returns NaN for a batch where every row is masked.
-        safe = sky_class.clamp(min=0)
-        weights = self._sky_class_weights
-        if distribution is not None:
-            return _masked_mean(self._distribution_loss(logits, distribution), mask)
-        if self._sky_ordinal_tau is None:
-            per_row = functional.cross_entropy(
-                logits,
-                safe,
-                weight=weights,
-                reduction="none",
-                label_smoothing=self._sky_label_smoothing,
-            )
-        else:
-            soft = ordinal_soft_targets(safe, logits.shape[-1], self._sky_ordinal_tau)
-            per_row = -(soft * functional.log_softmax(logits, dim=-1)).sum(dim=-1)
-            if weights is not None:
-                per_row = per_row * weights[safe]
-        return _masked_mean(per_row, mask)
+        if distribution is None:
+            # `clamp(min=0)` only feeds the masked-out rows a valid index; their
+            # loss is zeroed by the masked mean.
+            distribution = functional.one_hot(sky_class.clamp(min=0), logits.shape[-1])
+        return _masked_mean(self._distribution_loss(logits, distribution), mask)
 
     def _distribution_loss(self, logits: Tensor, distribution: Tensor) -> Tensor:
         """Per-row cross-entropy against a target distribution, unmasked.

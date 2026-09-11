@@ -71,9 +71,12 @@ class ExponentialMovingAverage:
             The module the average was built from, after an optimizer step.
         """
         live = model.state_dict(keep_vars=True)
-        for key in self._averaged_keys:
-            # Polyak & Juditsky 1992, exponential form: decay * shadow + (1 - decay) * w
-            self._shadow[key].lerp_(live[key].detach(), 1.0 - self.decay)
+        # Polyak & Juditsky 1992, exponential form: decay * shadow + (1 - decay) * w
+        torch._foreach_lerp_(
+            [self._shadow[key] for key in self._averaged_keys],
+            [live[key].detach() for key in self._averaged_keys],
+            1.0 - self.decay,
+        )
         for key in self._copied_keys:
             self._shadow[key].copy_(live[key])
 

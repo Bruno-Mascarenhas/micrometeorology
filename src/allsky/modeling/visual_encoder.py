@@ -420,10 +420,6 @@ class ImageEncoder(nn.Module):
         """
         if "image_seq" in batch:
             features = self._encode_window(batch["image_seq"], batch.get("frame_mask"))
-        elif self.temporal_pooling == "mean_std":
-            # A single frame is a one-frame window: its mean is itself and its
-            # spread the floor, so the projection sees the width it was built for.
-            features = self._encode_window(batch["image"].unsqueeze(1), None)
         else:
             features = self.backbone(batch["image"])
         out: Tensor = self.projection(features)
