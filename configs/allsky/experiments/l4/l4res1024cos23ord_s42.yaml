@@ -1,0 +1,104 @@
+# Alavanca nova sobre o l4res1024cos23_s42: o rotulo de ceu entra na perda como
+# ORDINAL e BALANCEADO. Tudo o mais e byte a byte o do cos23 (semente 42, mesmos
+# JPEGs, lote 10 com acumulacao 2, bf16, augmentation, C-Mixup, cosseno de 23
+# fechado, monitor val/kindex_mae com min_delta 0,0002 so para gravar o best).
+#
+# Por que o alvo. No l4res1024_s42 a cabeca de ceu e o que ainda muda de regime
+# com as epocas: val_loss_sky sobe a +0,006/epoca da 10 a 23 (minimo 0,52 na 8,
+# 0,64 na 23) com val_sky_balanced_acc em plato (0,683 +- 0,010), e a ECE no
+# teste vai de 0,078 (best) a 0,110 (last); as curvas de 512 sobem parecido
+# (+0,005/epoca nas epocas 10-40 anelado, +0,006 nas 10-30 do cosseno de 150).
+# A confusao e adjacente (parc-clara: 203 certos de 774, 311 vao para claro e
+# 183 para parc-difusa, recall 0,26; parc-difusa: 533 de 1107, 370 para
+# nublado), que e a geometria que o alvo suave penaliza menos.
+#
+# targets.sky.ordinal_tau 0,4 e o alvo suave de Diaz & Marathe (2019, CVPR),
+# softmax(-|k - y| / tau): nas classes do meio 85% na certa e 7% em cada
+# vizinha; nas da ponta 92 / 7,5 / 0,6 / 0,05%. targets.sky.class_weights e o
+# inverso da frequencia no split de TREINO deste dataset (9.696 / 6.271 / 3.539
+# / 14.102 quadros), normalizado a media 1; os 0,648 / 1,028 / 1,845 / 0,478 do
+# ceuord vieram do dataset antigo. Evidencia: ceuord contra ceu a 224 px, 3/3
+# sementes, bal 0,717 +- 0,003 contra 0,692 +- 0,007, recall da parc-clara
+# 0,35 -> 0,52-0,54, ECE 0,05-0,06, difusa best ~1 W/m2 melhor. E a unica
+# mudanca no uso do rotulo com efeito replicado no projeto e custa zero de GPU.
+# Nunca foi medida a 512 ou 1024 px, com DINOv3, com C-Mixup, nem com a cabeca
+# a peso 0,25.
+#
+# Ressalvas. (1) O ceuord rodou com sky.weight 1,0 e o best por val/loss nas
+# epocas 3-4; aqui o peso e 0,25 e, como o masked mean da perda de ceu nao
+# renormaliza os pesos por linha (media de frequencia x peso = 0,773), o peso
+# efetivo e ~0,19. O efeito sobre k* e difusa deve ser 4-5x menor e pode nao
+# sair do ruido entre execucoes. O last anelado do ceuord, a 4x este peso, deu
+# ECE 0,078-0,084 e recall da parc-clara 0,33-0,37, so +0,01 de bal sobre o
+# ceu: a previsao para last contra last e nula. (2) O alvo suave tem piso de
+# entropia (0,31 nats nas classes da ponta, 0,54 nas do meio): val_loss_sky
+# deste braco nasce mais alta que a do s42 e nao se compara em nivel.
+#
+# Regua pre-registrada, contra o l4res1024cos23_s42 (mesmo horizonte, alvo
+# duro), best contra best e last contra last, pareado por sample_id.
+# Primaria, na cabeca de CE do best: recall da parc-clara 0,26 -> >= 0,40 e ECE
+# 0,078 -> <= 0,06. bal e F1 da CE (+0,02 = faixa entre sementes) nao decidem
+# com uma semente; DHI e sky_kt sao controles com previsao de nulo. A decisao
+# "a CE vira o classificador de registro no lugar do kt_bin" so com n >= 2:
+# uma replica cos23ord_s43 se o best passar em recall E ECE.
+#
+# Orcamento igual ao do cos23: 23 epocas a ~54 min, uma sessao (~US$ 21). Os
+# campos novos nao tocam ativacao, lote nem loader (4 pesos e uma matriz 4x4).
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: l4res1024cos23ord_s42
+output_dir: output/allsky-mm/experiments/l4/l4res1024cos23ord_s42
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso-1024-20260910
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+    class_weights: [0.670, 1.035, 1.835, 0.460]
+    ordinal_tau: 0.4
+model:
+  backbone: dinov3_vits16plus
+  image_size: 1024
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  layer_decay: 0.8
+  lr: 0.0003
+  backbone_lr: 0.00001
+  batch_size: 10
+  grad_accum_steps: 2
+  epochs: 23
+  weight_decay: 0.05
+  num_workers: 8
+  amp:
+    enabled: true
+    dtype: bf16
+  cmixup:
+    enabled: true
+    alpha: 1.0
+    bandwidth: 0.05
+    p: 0.5
+  early_stopping:
+    patience: 23
+    min_delta: 0.0002
+    monitor: val/kindex_mae
+augmentation:
+  p_exposure: 0.5
+  exposure_log2: 0.6
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25

@@ -28,7 +28,15 @@ CONFIG_DIR = REPO_ROOT / "configs/allsky/experiments/l4"
 ARMS = ("l4bloco512_s42", "l4v3res512_s44", "l4v3res512_s45")
 #: Um notebook 06 por braco, para a L4 do Colab Enterprise: os tres de 512 px e a
 #: familia de 1024 px (tres sementes e o controle a 512 px com a mesma receita).
-ARMS_L4 = (*ARMS, "l4res1024_s42", "l4res1024_s43", "l4res1024_s44", "l4ctl512_s42")
+ARMS_L4 = (
+    *ARMS,
+    "l4res1024_s42",
+    "l4res1024_s43",
+    "l4res1024_s44",
+    "l4ctl512_s42",
+    "l4res1024cos23_s42",
+    "l4res1024cos23ord_s42",
+)
 #: Notebooks do Colab Pro+ (rota do Drive), mantidos para os bracos de 512 px.
 ARMS_DRIVE = ARMS
 #: Template de runtime do Colab Enterprise e a maquina que ele pede.

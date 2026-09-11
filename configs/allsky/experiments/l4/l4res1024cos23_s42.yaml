@@ -1,0 +1,93 @@
+# Braco de separacao do horizonte, na L4: o l4res1024_s42 com UMA mudanca, o
+# cosseno fecha dentro de uma sessao. Mesma semente 42, mesmos JPEGs, mesmo
+# lote 10 com acumulacao 2, mesmo bf16, mesma augmentation, mesmo C-Mixup,
+# mesmo monitor e min_delta.
+#
+# O que o s42 mediu. Parou pela paciencia 12 na epoca 23 com o melhor val k* na
+# 11 (0,0760) e o cosseno de 48 a 57% do pico (1,70e-4): o cabecalho dele dizia
+# que o horizonte, nao a paciencia, decide se o last serve, e fixou uma
+# paciencia que nunca deixaria o cosseno fechar (11 + 12 = 23 < 48). O last@23
+# saiu peso de meio de treino: teste DHI 18,63 / MBE +0,83 contra 17,75 / -0,75
+# do best@11, com o vies em nublado indo de +6,1 a +10,9 W/m2 (stratified.csv).
+# A validacao chegou ao piso na epoca 7-11 (k* 0,076, DHI 12,5) e ficou plana
+# enquanto o treino continuou caindo (k* 0,048 na 23); a 512 px o desenho e o
+# mesmo (piso 0,074-0,076, treino 0,041 com o cosseno de 40 anelado ate o fim,
+# minimo 0,0736 @20 -> 0,0762 @40 com a taxa em zero). O piso e o ruido do
+# rotulo: Kt da media de 5 min do CR5000 atribuido a 4-5 quadros de 1 min.
+# Epocas a mais da mesma receita compram lacuna treino-validacao, nao validacao.
+#
+# Alavanca: cosseno de 23 epocas com paciencia 23 (>= epochs: a epoca 1 sempre
+# melhora, entao o contador nunca passa de 22, tambem na retomada). E a receita
+# do ceuv3res512_s42, o unico run em que best e last concordaram (18,12 contra
+# 18,00; F1 0,672 contra 0,665). A 512 o anelamento comprou estabilidade, nao
+# aprendizado: nas epocas 31-40 o sd do val k* caiu de 0,0013 para 0,0004 e o
+# do val DHI de 0,20 para 0,07 W/m2, com o minimo intacto. E o que se espera
+# aqui: um last anelado e operacional, com o vies por condicao travado, em vez
+# de 12 epocas gastas esperando a paciencia com a taxa a 57% do pico. O pico e
+# mais curto (na epoca 11 a taxa esta em 0,60 do pico contra 0,90 no s42) e o
+# minimo pode sair 0,001-0,002 diferente, dentro do sd 0,0020 do monitor.
+#
+# Orcamento: 23 epocas a 54,3 min (train.log do s42, estavel nas 22 transicoes)
+# mais tres relatorios na GPU (12-13 min cada) e o setup = ~21,7 h; a sessao do
+# s42 com exatamente essa carga fechou em 21,5 h. Uma sessao (~US$ 21).
+#
+# Papel: e o nulo do l4res1024cos23ord_s42 (mesmo horizonte, alvo duro) e a
+# receita que as replicas s43/s44 devem herdar. Comparacao primaria: last@23
+# contra o last@23 do s42, pareado por sample_id; previsao: DHI e k* dentro do
+# ruido entre execucoes (1,5 W/m2 / 0,02 de bal), vies por condicao menor.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: l4res1024cos23_s42
+output_dir: output/allsky-mm/experiments/l4/l4res1024cos23_s42
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso-1024-20260910
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+model:
+  backbone: dinov3_vits16plus
+  image_size: 1024
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  layer_decay: 0.8
+  lr: 0.0003
+  backbone_lr: 0.00001
+  batch_size: 10
+  grad_accum_steps: 2
+  epochs: 23
+  weight_decay: 0.05
+  num_workers: 8
+  amp:
+    enabled: true
+    dtype: bf16
+  cmixup:
+    enabled: true
+    alpha: 1.0
+    bandwidth: 0.05
+    p: 0.5
+  early_stopping:
+    patience: 23
+    min_delta: 0.0002
+    monitor: val/kindex_mae
+augmentation:
+  p_exposure: 0.5
+  exposure_log2: 0.6
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25
