@@ -37,10 +37,15 @@ Evaluate a trained checkpoint:
     allsky evaluate --checkpoint output/allsky-mm/experiments/v4_film/run/best.ckpt \\
         --split test --data-root output/allsky-mm/dataset
 
+Publish the sky page's documents from a watch directory (docs/allsky-site.md):
+    allsky publish-site --serving configs/allsky/serving/ceu.yaml \\
+        --watch-dir ~/labmim/allsky-watch/ceuv3res512 --out ../site-labmim/site/Ceu
+
 The CLI is a package: each command group lives in its own module
 (:mod:`allsky.cli.archive`, :mod:`allsky.cli.frames`, :mod:`allsky.cli.train`,
 :mod:`allsky.cli.prepare`, :mod:`allsky.cli.embeddings`,
-:mod:`allsky.cli.exposure`, :mod:`allsky.cli.evaluate`, :mod:`allsky.cli.watch`) and exposes a
+:mod:`allsky.cli.exposure`, :mod:`allsky.cli.evaluate`, :mod:`allsky.cli.watch`,
+:mod:`allsky.cli.publish`) and exposes a
 ``register(app)`` function called once here, so ``__init__`` never needs editing
 to add a command. Heavy dependencies (torch, imageio-ffmpeg) are imported
 lazily inside each command so ``allsky --help`` works in a minimal environment.
@@ -48,7 +53,17 @@ lazily inside each command so ``allsky --help`` works in a minimal environment.
 
 import typer
 
-from allsky.cli import archive, embeddings, evaluate, exposure, frames, prepare, train, watch
+from allsky.cli import (
+    archive,
+    embeddings,
+    evaluate,
+    exposure,
+    frames,
+    prepare,
+    publish,
+    train,
+    watch,
+)
 
 app = typer.Typer(
     name="allsky",
@@ -65,6 +80,7 @@ exposure.register(app)
 train.register(app)
 evaluate.register(app)
 watch.register(app)
+publish.register(app)
 
 
 def main() -> None:
