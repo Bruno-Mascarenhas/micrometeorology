@@ -41,13 +41,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "SCALAR_ONLY_MODELS",
     "LiveFrameSource",
+    "ScalarFeatures",
+    "ServedModel",
     "Snapshot",
     "SolarElevationBelowFloorError",
     "block_checkpoint_window_minutes",
     "block_end_of",
     "capture_snapshot",
+    "clearsky_dhi_at",
     "inspect_frame_checkpoint",
+    "load_served_model",
     "predict_block",
     "predict_snapshot",
     "solar_elevation_at",
@@ -761,6 +766,11 @@ def _clearsky_dhi_reference(timestamp: pd.Timestamp, site: SiteConfig) -> float:
     return float(np.asarray(clearsky_diffuse(zenith_deg, times, site.utc_offset_hours))[0])
 
 
+def clearsky_dhi_at(timestamp: pd.Timestamp, site: SiteConfig) -> float:
+    """Clear-sky diffuse irradiance (W m-2) at a naive local *timestamp*; see :func:`_clearsky_dhi_reference`."""
+    return _clearsky_dhi_reference(timestamp, site)
+
+
 def _refuse_a_windowed_checkpoint(cfg: ExperimentConfig) -> None:
     """Refuse to serve a checkpoint fitted on a window from a single frame.
 
@@ -787,6 +797,334 @@ def _refuse_a_windowed_checkpoint(cfg: ExperimentConfig) -> None:
         f"up to {cfg.data.alignment.max_frames} frames over "
         f"{cfg.data.alignment.window_minutes:g} min; a snapshot is a single capture and "
         "scoring it would silently use the model's single-frame path"
+    )
+
+
+#: Architectures that read the scalar vector alone; the image or embedding a
+#: batch may carry is ignored by them, so serving one never decodes a frame.
+SCALAR_ONLY_MODELS = ("sensor_only", "climatology")
+
+
+@dataclass(frozen=True, slots=True)
+class ScalarFeatures:
+    """The engineered scalar vector one prediction is fed.
+
+    Attributes
+    ----------
+    columns:
+        Feature names, in the checkpoint's order.
+    values:
+        ``(F,)`` float32, raw physical units (degrees, m s-1, ...), the
+        training mean where a source was missing or refused.
+    standardized:
+        ``(1, F)`` float32, through the train-split :class:`FeatureNormalizer`.
+    imputed:
+        Names of the columns that were imputed rather than measured.
+    pairing:
+        The tolerance and timestamp offset the station row was looked up with.
+    gap_minutes:
+        Distance in minutes between the capture and the station row used;
+        ``None`` when no row was read.
+    sensor_csv:
+        The station export the row came from, or ``None`` when every sensor
+        column was imputed.
+    """
+
+    columns: list[str]
+    values: np.ndarray
+    standardized: np.ndarray
+    imputed: list[str]
+    pairing: _SensorPairing
+    gap_minutes: float | None
+    sensor_csv: Path | None
+
+    def record(self, timestamp: pd.Timestamp, feature_set: str) -> dict[str, Any]:
+        """The ``features`` block a prediction record publishes."""
+        return {
+            "timestamp": timestamp.isoformat(),
+            "feature_set": feature_set,
+            "columns": self.columns,
+            "values": [float(value) for value in self.values],
+            "imputed": self.imputed,
+            "sensor_csv": str(self.sensor_csv) if self.sensor_csv is not None else None,
+            "sensor_pairing": {
+                "tolerance_minutes": self.pairing.tolerance.total_seconds() / 60.0,
+                "timestamp_offset_minutes": self.pairing.timestamp_offset_minutes,
+                "from_checkpoint": self.pairing.from_checkpoint,
+                "gap_minutes": self.gap_minutes,
+            },
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ServedModel:
+    """A checkpoint loaded once and ready to score any number of frames.
+
+    Everything :func:`predict_snapshot` used to do per call — read the
+    payload, rebuild the architecture, restore the normalizers, resolve the
+    frame geometry and, in embedding mode, the encoding recipe — happens once
+    in :func:`load_served_model`; the methods here build a batch, run it and
+    turn the outputs back into physical units. Publishing several probes of
+    one frame (the prediction, an occlusion sweep, a counterfactual) costs one
+    load instead of one per forward.
+
+    Attributes
+    ----------
+    checkpoint:
+        The loaded payload, minus nothing: provenance readers take it as is.
+    geometry:
+        The mask/crop/pad/resize the training frames were written through, or
+        ``None`` for a checkpoint that recorded none.
+    embedding_backbone:
+        In embedding mode, the backbone built to the store's recipe; ``None``
+        in image mode and for the scalar-only architectures.
+    """
+
+    checkpoint_path: Path
+    checkpoint: dict[str, Any]
+    cfg: ExperimentConfig
+    model: Any
+    feature_columns: list[str]
+    feature_normalizer: Any
+    target_normalizers: dict[str, Any]
+    geometry: PrepareConfig | None
+    device: str
+    embedding_backbone: VisualBackbone | None
+    embedding_storage_dtype: str | None
+
+    @property
+    def consumes_image(self) -> bool:
+        """Whether a forward pass reads pixels (image mode, not a scalar-only architecture)."""
+        return self.cfg.data.input_mode == "image" and not self.scalar_only
+
+    @property
+    def consumes_embedding(self) -> bool:
+        """Whether a forward pass reads a precomputed visual vector."""
+        return self.cfg.data.input_mode == "embedding" and not self.scalar_only
+
+    @property
+    def scalar_only(self) -> bool:
+        """Whether the architecture ignores every visual input."""
+        return self.cfg.model.name in SCALAR_ONLY_MODELS
+
+    @property
+    def image_size(self) -> int:
+        """Side of the square input, in pixels."""
+        return image_size_of(self.cfg)
+
+    def scalar_features(
+        self,
+        timestamp: pd.Timestamp,
+        *,
+        site: SiteConfig,
+        sensor_csv: str | Path | None = None,
+        tolerance: pd.Timedelta | None = None,
+        sensor_limits: list[SensorRangeLimit] | None = None,
+    ) -> ScalarFeatures:
+        """Engineer and standardize the scalar vector for *timestamp*.
+
+        Columns a live capture cannot supply are imputed at the training mean
+        and named in the result; see ``docs/allsky-archive.md``.
+        """
+        pairing = _pairing_of(self.checkpoint, tolerance)
+        values, imputed, gap_minutes = _feature_vector(
+            timestamp,
+            feature_columns=self.feature_columns,
+            feature_set=self.cfg.features.feature_set,
+            site=site,
+            sensor_csv=sensor_csv,
+            tolerance=pairing.tolerance,
+            training_means=self.feature_normalizer.mean,
+            sensor_limits=(
+                sensor_limits if sensor_limits is not None else _shipped_sensor_limits()
+            ),
+            timestamp_offset_minutes=pairing.timestamp_offset_minutes,
+        )
+        standardized = self.feature_normalizer.transform(
+            pd.DataFrame([values], columns=self.feature_columns)
+        )
+        return ScalarFeatures(
+            columns=list(self.feature_columns),
+            values=values,
+            standardized=np.asarray(standardized, dtype=np.float32),
+            imputed=imputed,
+            pairing=pairing,
+            gap_minutes=gap_minutes,
+            sensor_csv=Path(sensor_csv) if sensor_csv is not None else None,
+        )
+
+    def image_planes(
+        self, image_path: str | Path, timestamp: pd.Timestamp, *, site: SiteConfig
+    ) -> np.ndarray:
+        """The ``(3 + G, S, S)`` float32 standardized planes the image branch reads."""
+        return _image_input(
+            image_path,
+            self.image_size,
+            self.cfg,
+            timestamp=timestamp,
+            site=site,
+            geometry=self.geometry,
+        )
+
+    def embedding_vector(self, image_path: str | Path) -> np.ndarray:
+        """Encode one frame to the ``(1, D)`` float32 vector an embedding-mode model reads.
+
+        Raises
+        ------
+        ValueError
+            For a checkpoint that reads no embedding.
+        """
+        if self.embedding_backbone is None:
+            raise ValueError(f"{self.cfg.name} reads no embedding")
+        backbone = self.embedding_backbone
+        vector = np.asarray(backbone.encode(backbone.transform([_image_as_hwc(image_path)])))
+        if self.embedding_storage_dtype == "fp16":
+            vector = vector.astype(np.float16)
+        return np.reshape(vector, (1, -1)).astype(np.float32)
+
+    def batch(
+        self,
+        features: ScalarFeatures,
+        *,
+        planes: np.ndarray | None = None,
+        embedding: np.ndarray | None = None,
+    ) -> dict[str, Any]:
+        """Assemble the single-row batch the model reads, on the served device."""
+        import torch
+
+        batch: dict[str, Any] = {
+            "features": torch.from_numpy(features.standardized).to(self.device)
+        }
+        if planes is not None:
+            batch["image"] = (
+                torch.from_numpy(np.ascontiguousarray(planes)).unsqueeze(0).to(self.device)
+            )
+        if embedding is not None:
+            batch["embedding"] = torch.from_numpy(embedding).to(self.device)
+        return batch
+
+    def forward(self, batch: dict[str, Any]) -> dict[str, Any]:
+        """Run the model on *batch* without gradients."""
+        import torch
+
+        with torch.no_grad():
+            outputs: dict[str, Any] = self.model(batch)
+        return outputs
+
+    def physical(
+        self, outputs: dict[str, Any], *, timestamp: pd.Timestamp, site: SiteConfig
+    ) -> dict[str, Any]:
+        """Denormalize one row of *outputs* into the physical-unit prediction record."""
+        return _physical_predictions(
+            outputs, self.cfg, self.target_normalizers, reference_time=timestamp, site=site
+        )
+
+    def record(self) -> dict[str, Any]:
+        """The ``model`` block a prediction record publishes."""
+        return _model_record(self.checkpoint, self.checkpoint_path, self.cfg, self.device)
+
+
+def load_served_model(
+    checkpoint_path: str | Path,
+    *,
+    device: str = "cpu",
+    trust_checkpoint: bool = False,
+    embeddings_dir: str | Path | None = None,
+    image_backbone_builder: Callable[[], Any] | None = None,
+) -> ServedModel:
+    """Load a single-frame checkpoint once, ready to score frames.
+
+    Parameters
+    ----------
+    checkpoint_path:
+        ``best.ckpt`` / ``last.ckpt`` written by ``allsky train``.
+    device:
+        Torch device the model and, in embedding mode, the backbone run on.
+    trust_checkpoint:
+        Read with the unrestricted unpickler (own files only).
+    embeddings_dir:
+        Embedding store overriding the absolute ``data.data_root`` baked into
+        an embedding-mode checkpoint; rejected for an image-mode one.
+    image_backbone_builder:
+        Test seam: builds the image backbone instead of the config's.
+
+    Returns
+    -------
+    ServedModel
+        The model in eval mode with its normalizers, geometry and recipe.
+
+    Raises
+    ------
+    ValueError
+        As :func:`predict_snapshot` documents: a windowed checkpoint, an
+        embedding store that cannot be read or reproduced, or *embeddings_dir*
+        for an image-mode checkpoint.
+    """
+    from allsky.modeling.registry import restore_model
+    from allsky.training.checkpointing import load_checkpoint
+
+    checkpoint = load_checkpoint(
+        checkpoint_path, map_location=device, trust_pickle=trust_checkpoint
+    )
+    cfg = ExperimentConfig.model_validate(checkpoint["config"])
+    if embeddings_dir is not None and cfg.data.input_mode != "embedding":
+        raise ValueError(
+            f"embeddings_dir was given for an input_mode={cfg.data.input_mode!r} checkpoint, "
+            "which encodes the live frame with its own backbone and reads no embedding store"
+        )
+    _refuse_a_windowed_checkpoint(cfg)
+    feature_columns: list[str] = list(checkpoint["feature_columns"])
+    feature_normalizer, target_normalizers = normalizers_from_checkpoint(checkpoint)
+    scalar_only = cfg.model.name in SCALAR_ONLY_MODELS
+
+    embedding_backbone: VisualBackbone | None = None
+    storage_dtype: str | None = None
+    embedding_dim: int | None = None
+    if cfg.data.input_mode == "embedding" and not scalar_only:
+        from allsky.embeddings.storage import META_FILENAME
+
+        try:
+            store, store_meta = _embedding_store_meta(cfg, embeddings_dir)
+            source = str(store / META_FILENAME)
+        except _EmbeddingStoreUnreachableError:
+            # The store the run trained against is not on this machine. The
+            # checkpoint's own copy of its recipe is the only other record of how
+            # those vectors were encoded, and a checkpoint written before that
+            # copy existed carries none — which is still a refusal, not a guess.
+            recorded_recipe = checkpoint.get("backbone") if embeddings_dir is None else None
+            if not recorded_recipe:
+                raise
+            source, store_meta = f"{checkpoint_path} (its own provenance)", dict(recorded_recipe)
+            logger.info("embedding store unreachable; encoding to the recipe %s records", source)
+        embedding_backbone = _backbone_matching_recipe(source, store_meta, device)
+        storage_dtype = str(store_meta.get("storage_dtype") or store_meta["dtype"])
+        embedding_dim = int(embedding_backbone.dim)
+    elif cfg.data.input_mode == "embedding":
+        logger.info(
+            "%s reads the scalar vector alone; the live frame is not encoded", cfg.model.name
+        )
+
+    model = restore_model(
+        cfg,
+        checkpoint,
+        len(feature_columns),
+        embedding_dim=embedding_dim,
+        device=device,
+        image_backbone_builder=image_backbone_builder,
+    )
+    model.eval()
+    return ServedModel(
+        checkpoint_path=Path(checkpoint_path),
+        checkpoint=checkpoint,
+        cfg=cfg,
+        model=model,
+        feature_columns=feature_columns,
+        feature_normalizer=feature_normalizer,
+        target_normalizers=target_normalizers,
+        geometry=_frame_geometry(checkpoint) if cfg.data.input_mode == "image" else None,
+        device=device,
+        embedding_backbone=embedding_backbone,
+        embedding_storage_dtype=storage_dtype,
     )
 
 
@@ -866,115 +1204,31 @@ def predict_snapshot(
         against cannot be read for the recipe that encoded it, or the live
         backbone cannot reproduce that recipe.
     """
-    import torch
-
-    from allsky.modeling.registry import restore_model
-    from allsky.training.checkpointing import load_checkpoint
-
-    checkpoint = load_checkpoint(
-        checkpoint_path, map_location=device, trust_pickle=trust_checkpoint
+    served = load_served_model(
+        checkpoint_path,
+        device=device,
+        trust_checkpoint=trust_checkpoint,
+        embeddings_dir=embeddings_dir,
     )
-    cfg = ExperimentConfig.model_validate(checkpoint["config"])
-    if embeddings_dir is not None and cfg.data.input_mode != "embedding":
-        raise ValueError(
-            f"embeddings_dir was given for an input_mode={cfg.data.input_mode!r} checkpoint, "
-            "which encodes the live frame with its own backbone and reads no embedding store"
-        )
-    feature_columns: list[str] = list(checkpoint["feature_columns"])
-    feature_normalizer, target_normalizers = normalizers_from_checkpoint(checkpoint)
     resolved_site = site or SiteConfig()
-
-    pairing = _pairing_of(checkpoint, tolerance)
-    raw_values, imputed, pairing_gap_minutes = _feature_vector(
+    features = served.scalar_features(
         timestamp,
-        feature_columns=feature_columns,
-        feature_set=cfg.features.feature_set,
         site=resolved_site,
         sensor_csv=sensor_csv,
-        tolerance=pairing.tolerance,
-        training_means=feature_normalizer.mean,
-        sensor_limits=sensor_limits if sensor_limits is not None else _shipped_sensor_limits(),
-        timestamp_offset_minutes=pairing.timestamp_offset_minutes,
+        tolerance=tolerance,
+        sensor_limits=sensor_limits,
     )
-    standardized = feature_normalizer.transform(pd.DataFrame([raw_values], columns=feature_columns))
-    _refuse_a_windowed_checkpoint(cfg)
-    image_size = image_size_of(cfg)
-
-    batch: dict[str, Any] = {"features": torch.from_numpy(standardized).to(device)}
-    embedding_dim = None
-    if cfg.data.input_mode == "image":
-        image = _image_input(
-            image_path,
-            image_size,
-            cfg,
-            timestamp=timestamp,
-            site=resolved_site,
-            geometry=_frame_geometry(checkpoint),
-        )
-        batch["image"] = torch.from_numpy(image).unsqueeze(0).to(device)
-    else:
-        from allsky.embeddings.storage import META_FILENAME
-
-        try:
-            store, store_meta = _embedding_store_meta(cfg, embeddings_dir)
-            source = str(store / META_FILENAME)
-        except _EmbeddingStoreUnreachableError:
-            # The store the run trained against is not on this machine. The
-            # checkpoint's own copy of its recipe is the only other record of how
-            # those vectors were encoded, and a checkpoint written before that
-            # copy existed carries none — which is still a refusal, not a guess.
-            recorded_recipe = checkpoint.get("backbone") if embeddings_dir is None else None
-            if not recorded_recipe:
-                raise
-            source, store_meta = f"{checkpoint_path} (its own provenance)", dict(recorded_recipe)
-            logger.info("embedding store unreachable; encoding to the recipe %s records", source)
-        backbone = _backbone_matching_recipe(source, store_meta, device)
-        # Through transform(), never straight into encode(): the backbone's
-        # contract takes a SEQUENCE of (H, W, 3) uint8 HWC frames and does its
-        # own resize, ImageNet normalisation and stacking, and that is the
-        # recipe precompute-embeddings fed the training store. Handing it the
-        # (3, S, S) float array the image branch uses would embed an image
-        # prepared differently from the vectors the model was fitted on.
-        vector = np.asarray(backbone.encode(backbone.transform([_image_as_hwc(image_path)])))
-        # Through the store's storage precision: every vector the model was
-        # fitted on went to disk as fp16 and came back rounded, and a live vector
-        # that skipped that round trip carries mantissa bits no training sample
-        # had.
-        storage_dtype = store_meta.get("storage_dtype") or store_meta["dtype"]
-        if storage_dtype == "fp16":
-            vector = vector.astype(np.float16)
-        embedding = np.reshape(vector, (1, -1)).astype(np.float32)
-        embedding_dim = int(embedding.shape[1])
-        batch["embedding"] = torch.from_numpy(embedding).to(device)
-
-    model = restore_model(
-        cfg, checkpoint, len(feature_columns), embedding_dim=embedding_dim, device=device
+    planes = (
+        served.image_planes(image_path, timestamp, site=resolved_site)
+        if served.consumes_image
+        else None
     )
-    with torch.no_grad():
-        outputs = model(batch)
-
-    predictions = _physical_predictions(
-        outputs, cfg, target_normalizers, reference_time=timestamp, site=resolved_site
-    )
-
+    embedding = served.embedding_vector(image_path) if served.consumes_embedding else None
+    outputs = served.forward(served.batch(features, planes=planes, embedding=embedding))
     return {
-        "predictions": predictions,
-        "features": {
-            "timestamp": timestamp.isoformat(),
-            "feature_set": cfg.features.feature_set,
-            "columns": feature_columns,
-            "values": [float(value) for value in raw_values],
-            "imputed": imputed,
-            "sensor_csv": str(sensor_csv) if sensor_csv is not None else None,
-            # The realized distance, not just accept/reject.
-            "sensor_pairing": {
-                "tolerance_minutes": pairing.tolerance.total_seconds() / 60.0,
-                "timestamp_offset_minutes": pairing.timestamp_offset_minutes,
-                "from_checkpoint": pairing.from_checkpoint,
-                "gap_minutes": pairing_gap_minutes,
-            },
-        },
-        "model": _model_record(checkpoint, checkpoint_path, cfg, device),
+        "predictions": served.physical(outputs, timestamp=timestamp, site=resolved_site),
+        "features": features.record(timestamp, served.cfg.features.feature_set),
+        "model": served.record(),
         "image": str(image_path),
     }
 

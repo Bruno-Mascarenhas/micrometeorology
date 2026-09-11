@@ -11,6 +11,12 @@ import typer
 from allsky.archive import ARCHIVE_BASE_URL, ArchiveError
 from allsky.cli.archive import STATE_SUBDIR, _build_client
 from allsky.cli.runtime import configure_cli_logging
+from allsky.serving import (
+    PinVerificationError,
+    ServingConfigError,
+    load_serving_config,
+    verify_pinned_checkpoints,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +38,17 @@ def watch(
         Path, typer.Option("--out", "-o", help="Watch root: frames/ and blocks/ are written here.")
     ],
     base_url: Annotated[str, typer.Option(help="All-sky website root.")] = ARCHIVE_BASE_URL,
+    serving: Annotated[
+        Path | None,
+        typer.Option(
+            "--serving",
+            help="Serving pin (configs/allsky/serving/<id>.yaml): its frame checkpoints, roles "
+            "and elevation floor replace --checkpoint-frame, --frame-*-role and "
+            "--min-elevation-deg, after their SHA-256 is verified.",
+            exists=True,
+            dir_okay=False,
+        ),
+    ] = None,
     checkpoint_frame: Annotated[
         list[Path] | None,
         typer.Option(
@@ -131,14 +148,47 @@ def watch(
     group from the ``best.ckpt`` members, the ``last.ckpt`` ones, or all.
     Restarting resumes from what is on disk. Ctrl-C stops cleanly.
 
+    With ``--serving`` the frame checkpoints, their roles and the elevation
+    floor come from the pin, which is verified first; naming any of them on
+    the command line as well is refused, so one invocation cannot say two
+    things about which weights it serves.
+
     Raises
     ------
     typer.Exit
         Code 1 when the client cannot be built, a role selects no checkpoint,
-        a checkpoint is given without ``--min-elevation-deg``, or a
-        checkpoint of either kind is refused at start-up.
+        a checkpoint is given without ``--min-elevation-deg``, a pinned
+        checkpoint fails verification or conflicts with an explicit option,
+        or a checkpoint of either kind is refused at start-up.
     """
     configure_cli_logging()
+    if serving is not None:
+        if (
+            checkpoint_frame
+            or frame_sky_role is not RoleChoice.all
+            or frame_dhi_role is not RoleChoice.all
+        ):
+            logger.error("--serving already names the frame checkpoints and their roles")
+            raise typer.Exit(code=1)
+        if min_elevation_deg is not None:
+            logger.error("--serving already names the elevation floor")
+            raise typer.Exit(code=1)
+        try:
+            pin = load_serving_config(serving)
+            verify_pinned_checkpoints(pin, cache_dir=out_dir / STATE_SUBDIR)
+        except (ServingConfigError, PinVerificationError) as exc:
+            logger.error("%s", exc)
+            raise typer.Exit(code=1) from exc
+        checkpoint_frame = [member.path for member in pin.frame_checkpoints]
+        frame_sky_role = RoleChoice(pin.frame_sky_role)
+        frame_dhi_role = RoleChoice(pin.frame_dhi_role)
+        min_elevation_deg = pin.min_elevation_deg
+        _build_every_member_or_exit(checkpoint_frame, device=device, trust=trust_checkpoint)
+        logger.info(
+            "serving pin %s: %d frame checkpoint(s) verified and built",
+            pin.id,
+            len(checkpoint_frame),
+        )
     from allsky.snapshot import capture_snapshot
     from allsky.watch import FRAMES_SUBDIR, run_watch
 
@@ -178,6 +228,24 @@ def watch(
         logger.error("%s", exc)
         raise typer.Exit(code=1) from exc
     typer.echo(f"watch finished after {polls} poll(s)")
+
+
+def _build_every_member_or_exit(checkpoints: list[Path], *, device: str, trust: bool) -> None:
+    """Load and build each pinned checkpoint once, so a member that cannot be served stops the start.
+
+    The watch scores frames one at a time and logs a per-frame failure without
+    stopping, which is right for a bad frame and wrong for a bad member: a
+    missing backbone weight file or a moved checkpoint would otherwise leave the
+    service running all day, scoring nothing, with exit 0.
+    """
+    from allsky.snapshot import load_served_model
+
+    for checkpoint in checkpoints:
+        try:
+            load_served_model(checkpoint, device=device, trust_checkpoint=trust)
+        except (ValueError, RuntimeError, OSError, KeyError) as exc:
+            logger.error("pinned checkpoint %s cannot be served: %s", checkpoint, exc)
+            raise typer.Exit(code=1) from exc
 
 
 def register(app: typer.Typer) -> None:

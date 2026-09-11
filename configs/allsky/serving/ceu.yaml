@@ -1,0 +1,38 @@
+serving: true
+id: ceuv3res512
+label: DINOv3 ViT-S/16+ a 512 px, ajuste fino dos 12 blocos, só imagem
+frame_checkpoints:
+  - path: ~/labmim/serving/ceuv3res512/s42/best.ckpt
+    sha256: 5b45dfc757da89e5aa7becc050dc7f71a09c6378e1e00aaa26f255793a823098
+  - path: ~/labmim/serving/ceuv3res512/s43/best.ckpt
+    sha256: fc6f9daa6b65dfdb24d9e3cbb29871c554a6a3185b7894ee1340bffde64d59bc
+frame_sky_role: all
+frame_dhi_role: all
+attribution_checkpoint: 0
+attribution_target: kindex
+min_elevation_deg: 10.0
+controls:
+  sensor_only:
+    checkpoint:
+      path: ~/labmim/serving/ceucontrol/v1_sensor_only/best.ckpt
+      sha256: 69f3775ec5f011ea5392b0107c0d20f52e4e9b186478be4474d38bd0e30ed3f4
+    report: output/allsky-mm/experiments/ceucontrol/v1_sensor_only/run/eval-test
+  climatology:
+    checkpoint:
+      path: ~/labmim/serving/ceucontrol/v0_climatology/best.ckpt
+      sha256: d6b03cf655544e7b3f7b6d29a29257ee8e284a595769f93dc66726a5829131f8
+    report: output/allsky-mm/experiments/ceucontrol/v0_climatology/run/eval-test
+reports:
+  dataset: output/allsky-mm/dataset-iso-20260906
+  members:
+    - output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s42/run/eval-test
+    - output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s43/run/eval-test
+  training_history: output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s42/run/metrics.csv
+  domain_check: null
+selection:
+  criterion: >-
+    menor MAE do índice de céu claro na validação entre os braços de quadro único
+    treinados sobre o mesmo manifesto e o mesmo split cronológico; as duas sementes
+    são servidas em média
+  selection_split: val
+  decided_on: 2026-09-11
