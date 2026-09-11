@@ -224,7 +224,7 @@ allsky evaluate --checkpoint CHECKPOINT.ckpt [--split val|test|train]
                 [--device ...] [--batch-size N] [--predictions/--no-predictions] [--strict]
                 [--tta-rotations N]
 
-allsky watch    --out DIR (--serving PIN.yaml | --checkpoint-frame CKPT ... --min-elevation-deg D)
+allsky watch    --out DIR (--serving PIN.yaml | --checkpoint-frame CKPT ... [--min-elevation-deg D])
 allsky publish-site --serving PIN.yaml --watch-dir DIR --out SITE/Ceu [--days N]
                 [--sensor-csv FILE] [--device cpu|cuda] [--prune-frames-days N]
                 [--rclone-remote NAME:path]

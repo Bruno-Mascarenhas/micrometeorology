@@ -15,6 +15,7 @@ import typer
 from allsky.archive import (
     ARCHIVE_BASE_URL,
     LEDGER_FILENAME,
+    STATE_SUBDIR,
     ArchiveClient,
     ArchiveEntry,
     ArchiveError,
@@ -31,7 +32,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_DATA_DIR = Path("data/all-sky")
 VIDEOS_SUBDIR = "videos"
 FRAMES_SUBDIR = "frames"
-STATE_SUBDIR = ".state"
 REMOTE_VIDEOS = "videos"
 REMOTE_FRAMES = "frames"
 REMOTE_SNAPSHOTS = "snapshots"

@@ -20,8 +20,6 @@ Torch-free: the document is assembled from the records on disk and the
 station export alone.
 """
 
-import datetime as dt
-import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -31,23 +29,34 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
-from allsky.clearsky import clearsky_diffuse, haurwitz_ghi_from_cos_zenith
+from allsky.clearsky import haurwitz_ghi_from_cos_zenith
 from allsky.publish.encoding import (
     CONDITION_IDS,
+    DAY_STAMP_FORMAT,
     DEFAULT_KINDEX_KIND,
+    ELEVATION_DECIMALS,
+    INDEX_DECIMALS,
+    IRRADIANCE_DECIMALS,
     NAIVE_LOCAL_FORMAT,
     SKIPPED_REASON_LABELS_PT,
     SOURCE_LABELS_PT,
     TIMELINE_SCHEMA,
     PublishStamp,
+    class_share,
     condition_of,
     document_header,
+    kindex_kind_of,
     rounded_or_none,
     sky_conditions_block,
     targets_glossary,
 )
 from allsky.serving import ServingConfig
-from allsky.snapshot import SENSOR_TIME_COLUMNS
+from allsky.snapshot import (
+    StationExport,
+    clearsky_dhi_series,
+    read_station_export,
+    shipped_sensor_limits,
+)
 from allsky.watch import (
     BLOCK_STEM_FORMAT,
     BLOCKS_SUBDIR,
@@ -57,6 +66,7 @@ from allsky.watch import (
     SOURCE_BLOCK_MODEL,
     SOURCE_FRAME_AGGREGATE,
 )
+from labmim_core.atomic import JsonObjectError, read_json_object
 from labmim_core.site import SiteConfig
 from labmim_core.sky import SKY_CLASS_COUNT, SKY_CLASS_NAMES
 from labmim_core.solar import cos_zenith
@@ -80,12 +90,6 @@ MEASURED_INTERVAL_MISMATCH = "interval_mismatch"
 STATUS_SCORED = "scored"
 STATUS_SKIPPED = "skipped"
 KNOWN_SOURCES = (SOURCE_FRAME_AGGREGATE, SOURCE_BLOCK_MODEL)
-
-IRRADIANCE_DECIMALS = 2
-INDEX_DECIMALS = 4
-ELEVATION_DECIMALS = 2
-SHARE_DECIMALS = 3
-DAY_STAMP_FORMAT = "%Y-%m-%dT00:00:00"
 
 
 class TimelineError(ValueError):
@@ -152,19 +156,6 @@ def _finite_or_none(value: object) -> float | None:
     return number if np.isfinite(number) else None
 
 
-def _kindex_kind_of(payload: Mapping[str, Any]) -> str | None:
-    candidates: list[Any] = []
-    for holder in (payload, payload.get("block_model") or {}):
-        models = holder.get("models")
-        if isinstance(models, list) and models:
-            candidates.append(models[0])
-        candidates.append(holder.get("model"))
-    for candidate in candidates:
-        if isinstance(candidate, Mapping) and candidate.get("kindex_kind"):
-            return str(candidate["kindex_kind"])
-    return None
-
-
 def _class_index_of(name: object, path: Path) -> int | None:
     if name is None:
         return None
@@ -217,20 +208,16 @@ def _block_record(payload: Mapping[str, Any], status: str, path: Path) -> BlockR
         kindex=_finite_or_none(predictions.get("kindex")),
         class_index=_class_index_of(predictions.get("sky_class"), path),
         probabilities=_probabilities_of(predictions.get("sky_probabilities")),
-        kindex_kind=_kindex_kind_of(payload),
+        kindex_kind=kindex_kind_of(payload),
     )
 
 
 def _read_payload(path: Path) -> dict[str, Any] | None:
     try:
-        loaded: Any = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        logger.warning("skipping unreadable block record %s: %s", path, exc)
+        return read_json_object(path)
+    except JsonObjectError as exc:
+        logger.warning("skipping block record: %s", exc)
         return None
-    if not isinstance(loaded, dict):
-        logger.warning("skipping block record %s: not a JSON object", path)
-        return None
-    return loaded
 
 
 def _read_block_records(
@@ -267,7 +254,7 @@ def _kindex_kind(records: Mapping[pd.Timestamp, BlockRecord], frames_dir: Path) 
     )
     if newest is not None:
         payload = _read_payload(newest)
-        kind = _kindex_kind_of(payload) if payload is not None else None
+        kind = kindex_kind_of(payload) if payload is not None else None
         if kind is not None:
             return kind
     logger.warning(
@@ -285,43 +272,30 @@ def _axis(now_local: pd.Timestamp, days: int, block_minutes: float) -> pd.Dateti
 
 def _solar_envelope(centroids: pd.DatetimeIndex, site: SiteConfig) -> _SolarEnvelope:
     cos_zenith_values = cos_zenith(centroids, site, site.utc_offset_hours)
-    elevation_deg = np.rad2deg(np.arcsin(cos_zenith_values))
-    zenith_deg = np.degrees(np.arccos(cos_zenith_values))
-    site_clock = dt.timezone(dt.timedelta(hours=site.utc_offset_hours))
-    times_utc = pd.Series(centroids.tz_localize(site_clock).tz_convert("UTC"))
     return _SolarEnvelope(
-        elevation_deg=elevation_deg,
-        clearsky_dhi=clearsky_diffuse(zenith_deg, times_utc, site.utc_offset_hours),
+        elevation_deg=np.rad2deg(np.arcsin(cos_zenith_values)),
+        clearsky_dhi=clearsky_dhi_series(centroids, site),
         clearsky_ghi=haurwitz_ghi_from_cos_zenith(cos_zenith_values),
     )
 
 
-def _shipped_sensor_limits() -> list[SensorRangeLimit]:
-    from micrometeorology.common.config import get_settings
+def _station_export(sensor_csv: str | Path | StationExport | None) -> StationExport | None:
+    if sensor_csv is None or isinstance(sensor_csv, StationExport):
+        return sensor_csv
+    try:
+        return read_station_export(sensor_csv)
+    except (OSError, ValueError) as exc:
+        raise TimelineError(f"cannot read the station export {sensor_csv}: {exc}") from exc
 
-    limits: list[SensorRangeLimit] = get_settings().sensor_limits
-    return limits
 
-
-def _read_export(
-    sensor_csv: Path, limits: list[SensorRangeLimit], site_clock: dt.timezone
-) -> _Export | None:
+def _screened_export(export: StationExport, limits: list[SensorRangeLimit]) -> _Export | None:
     from micrometeorology.sensors.archive import mask_sentinels
     from micrometeorology.sensors.ingestion import apply_physical_limits
 
-    try:
-        frame = pd.read_csv(sensor_csv)
-    except (OSError, ValueError) as exc:
-        raise TimelineError(f"cannot read the station export {sensor_csv}: {exc}") from exc
-    time_column = next((name for name in SENSOR_TIME_COLUMNS if name in frame.columns), None)
-    if time_column is None:
-        raise TimelineError(
-            f"{sensor_csv} has no recognisable time column "
-            f"(expected one of: {', '.join(SENSOR_TIME_COLUMNS)})"
-        )
+    frame = export.rows
     if MEASURED_COLUMN not in frame.columns:
         raise TimelineError(
-            f"{sensor_csv} has no {MEASURED_COLUMN} column; the timeline publishes the shaded "
+            f"{export.path} has no {MEASURED_COLUMN} column; the timeline publishes the shaded "
             "pyranometer's 5-minute mean and nothing else as measured"
         )
     if not any(limit.column == MEASURED_COLUMN for limit in limits):
@@ -331,12 +305,6 @@ def _read_export(
             MEASURED_COLUMN,
         )
         return None
-    frame[time_column] = pd.to_datetime(frame[time_column], errors="coerce")
-    frame = frame.dropna(subset=[time_column]).set_index(time_column).sort_index()
-    index = pd.DatetimeIndex(frame.index)
-    if index.tz is not None:
-        index = index.tz_convert(site_clock).tz_localize(None)
-    frame.index = index
     frame = frame.loc[~frame.index.duplicated(keep="first")]
     screened, _removed = mask_sentinels(frame)
     gated = apply_physical_limits(screened.loc[:, [MEASURED_COLUMN]].copy(), limits)
@@ -373,17 +341,6 @@ def _matched_values(export: _Export, ends: pd.DatetimeIndex, tolerance: pd.Timed
     hit = positions >= 0
     matched[hit] = export.screened.to_numpy(dtype=np.float64)[positions[hit]]
     return matched
-
-
-def _class_share(labels: np.ndarray) -> dict[str, float | None]:
-    valid = labels[(labels >= 0) & (labels < SKY_CLASS_COUNT)]
-    if valid.size == 0:
-        return dict.fromkeys(CONDITION_IDS)
-    counts = np.bincount(valid, minlength=SKY_CLASS_COUNT)
-    return {
-        condition_of(index)["id"]: rounded_or_none(counts[index] / valid.size, SHARE_DECIMALS)
-        for index in range(SKY_CLASS_COUNT)
-    }
 
 
 def _series(
@@ -483,7 +440,7 @@ def _days(
             "blocks_scored": tally.scored,
             "blocks_skipped": tally.skipped,
             "frames": tally.frames,
-            "condition_share": _class_share(np.asarray(tally.classes, dtype=np.int64)),
+            "condition_share": class_share(np.asarray(tally.classes, dtype=np.int64)),
         }
         for day, tally in tallies.items()
     ]
@@ -658,7 +615,7 @@ def build_timeline(
     days: int,
     site: SiteConfig,
     block_minutes: float = 5.0,
-    sensor_csv: str | Path | None = None,
+    sensor_csv: str | Path | StationExport | None = None,
     train_max_elevation_deg: float | None = None,
 ) -> dict[str, Any]:
     """Assemble ``timeline.json`` from the watch's block records.
@@ -684,8 +641,10 @@ def build_timeline(
     block_minutes:
         The logger's averaging interval and the axis step.
     sensor_csv:
-        The operator's station export; ``None`` publishes ``measured`` as
-        ``null`` and the live comparison as pending.
+        The operator's station export, as a path or already read
+        (:func:`allsky.snapshot.read_station_export`, so one publish parses
+        it once); ``None`` publishes ``measured`` as ``null`` and the live
+        comparison as pending.
     train_max_elevation_deg:
         Highest solar elevation the served checkpoints trained on; blocks
         above it are flagged ``extrapolation``. ``None`` publishes the flag
@@ -724,13 +683,9 @@ def build_timeline(
     records = _read_block_records(root / BLOCKS_SUBDIR, since=min(window_start, since))
     envelope = _solar_envelope(axis - step / 2, site)
 
-    site_clock = dt.timezone(dt.timedelta(hours=site.utc_offset_hours))
-    export_path = Path(sensor_csv) if sensor_csv is not None else None
-    export = (
-        _read_export(export_path, _shipped_sensor_limits(), site_clock)
-        if export_path is not None
-        else None
-    )
+    station = _station_export(sensor_csv)
+    export_path = station.path if station is not None else None
+    export = _screened_export(station, shipped_sensor_limits()) if station is not None else None
     measured_status = _measured_status(
         export, sensor_csv=export_path, window_start=window_start, step=step
     )

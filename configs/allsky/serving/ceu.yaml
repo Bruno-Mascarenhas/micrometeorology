@@ -4,8 +4,10 @@ label: DINOv3 ViT-S/16+ a 512 px, ajuste fino dos 12 blocos, só imagem
 frame_checkpoints:
   - path: ~/labmim/serving/ceuv3res512/s42/best.ckpt
     sha256: 5b45dfc757da89e5aa7becc050dc7f71a09c6378e1e00aaa26f255793a823098
+    report: output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s42/run/eval-test
   - path: ~/labmim/serving/ceuv3res512/s43/best.ckpt
     sha256: fc6f9daa6b65dfdb24d9e3cbb29871c554a6a3185b7894ee1340bffde64d59bc
+    report: output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s43/run/eval-test
 frame_sky_role: all
 frame_dhi_role: all
 attribution_checkpoint: 0
@@ -24,9 +26,6 @@ controls:
     report: output/allsky-mm/experiments/ceucontrol/v0_climatology/run/eval-test
 reports:
   dataset: output/allsky-mm/dataset-iso-20260906
-  members:
-    - output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s42/run/eval-test
-    - output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s43/run/eval-test
   training_history: output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s42/run/metrics.csv
   domain_check: null
 selection:

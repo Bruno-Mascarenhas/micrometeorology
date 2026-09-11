@@ -18,13 +18,16 @@ from typing import Annotated, Any
 
 import typer
 
+from allsky.archive import STATE_SUBDIR
 from allsky.cli.runtime import configure_cli_logging
 from allsky.serving import (
     PinVerificationError,
     ServingConfigError,
     load_serving_config,
+    sha256_of_file,
     verify_pinned_checkpoints,
 )
+from labmim_core.atomic import JsonObjectError, atomic_write_strict_json, read_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +37,10 @@ EXIT_WATCH_STALE = 2
 TIMELINE_FILENAME = "timeline.json"
 MODEL_FILENAME = "model.json"
 FRAME_FILENAME = "frame.json"
+MODEL_STATE_FILENAME = "publish-model.json"
 DEFAULT_DAYS = 3
 DEFAULT_BLOCK_MINUTES = 5.0
 DEFAULT_PRUNE_DAYS = 14
-STATE_SUBDIR = ".state"
-FRAMES_SUBDIR = "frames"
-BLOCKS_SUBDIR = "blocks"
 PRUNABLE_SUFFIXES = (".jpg", ".json")
 
 #: Upload order: images before the documents that name them, ``frame.json`` last.
@@ -55,6 +56,8 @@ PUBLISHED_FILES = (
 
 def _prune_frames(watch_dir: Path, *, older_than_days: int, now_host: dt.datetime) -> int:
     """Delete frame files (JPEG, sidecar, prediction record) older than *older_than_days*; never blocks."""
+    from allsky.watch import FRAMES_SUBDIR
+
     frames_dir = watch_dir / FRAMES_SUBDIR
     if not frames_dir.is_dir():
         return 0
@@ -81,6 +84,40 @@ def _write_images(out_dir: Path, images: Mapping[str, bytes]) -> None:
 
         atomic_write(out_dir / name, write)
         logger.info("wrote %s (%d bytes)", out_dir / name, len(payload))
+
+
+def _card_fingerprint(pin_path: Path, digests: list[str], inputs: list[Path]) -> list[Any]:
+    """What the card is a pure function of: the pin's text, the weights, the reports, the code."""
+    from allsky.provenance import code_version
+
+    return [
+        sha256_of_file(pin_path),
+        list(digests),
+        [[str(path), *_file_signature(path)] for path in inputs],
+        code_version(),
+    ]
+
+
+def _file_signature(path: Path) -> list[int | None]:
+    if not path.is_file():
+        return [None, None]
+    stat = path.stat()
+    return [stat.st_size, stat.st_mtime_ns]
+
+
+def _cached_card(state_path: Path, fingerprint: list[Any]) -> dict[str, Any] | None:
+    """The card the last publish wrote for exactly these inputs, or ``None``."""
+    if not state_path.is_file():
+        return None
+    try:
+        state = read_json_object(state_path)
+    except JsonObjectError as exc:
+        logger.warning("ignoring the model card cache: %s", exc)
+        return None
+    card = state.get("card")
+    if state.get("fingerprint") != fingerprint or not isinstance(card, dict):
+        return None
+    return card
 
 
 def _host_now() -> dt.datetime:
@@ -162,11 +199,22 @@ def publish_site(
 
     from allsky.config import SiteConfig
     from allsky.publish.dataset import train_max_solar_elevation_deg
-    from allsky.publish.encoding import publish_stamp, write_document
+    from allsky.publish.encoding import (
+        MODEL_SCHEMA,
+        document_header,
+        publish_stamp,
+        write_document,
+    )
     from allsky.publish.frame import FramePublishError, LoadedControls, build_frame_artifacts
-    from allsky.publish.model_card import ModelCardError, build_model_card, checkpoint_metadata
+    from allsky.publish.model_card import (
+        ModelCardError,
+        build_model_card,
+        card_inputs,
+        checkpoint_metadata,
+    )
     from allsky.publish.timeline import TimelineError, build_timeline
-    from allsky.snapshot import _site_now, load_served_model
+    from allsky.snapshot import _site_now, load_served_model, read_station_export
+    from allsky.watch import BLOCKS_SUBDIR, FRAMES_SUBDIR
 
     if not (watch_dir / FRAMES_SUBDIR).is_dir() and not (watch_dir / BLOCKS_SUBDIR).is_dir():
         logger.error(
@@ -194,10 +242,26 @@ def publish_site(
     if prune_frames_days is not None and prune_frames_days <= days:
         logger.error("--prune-frames-days must exceed --days (%d)", days)
         raise typer.Exit(code=1)
+    try:
+        station = read_station_export(sensor_csv) if sensor_csv is not None else None
+    except (OSError, ValueError) as exc:
+        logger.error("cannot read the station export %s: %s", sensor_csv, exc)
+        raise typer.Exit(code=1) from exc
 
     served = load_served_model(
         pin.attribution_member.path, device=device, trust_checkpoint=trust_checkpoint
     )
+    recorded_floor = served.min_solar_elevation_deg
+    if recorded_floor is not None and abs(recorded_floor - pin.min_elevation_deg) > 1e-9:
+        logger.error(
+            "pin %s declares min_elevation_deg %g but %s records the floor %g its manifest "
+            "was built with",
+            pin.id,
+            pin.min_elevation_deg,
+            pin.attribution_member.path,
+            recorded_floor,
+        )
+        raise typer.Exit(code=1)
     controls = LoadedControls(
         sensor_only=load_served_model(
             pin.controls.sensor_only.checkpoint.path,
@@ -226,7 +290,7 @@ def publish_site(
             out_dir=out_dir,
             block_minutes=block_minutes,
             train_max_elevation_deg=train_max,
-            sensor_csv=sensor_csv,
+            sensor_csv=station,
         )
     except FramePublishError as exc:
         logger.error("frame.json not published: %s", exc)
@@ -242,7 +306,7 @@ def publish_site(
             days=days,
             site=site,
             block_minutes=block_minutes,
-            sensor_csv=sensor_csv,
+            sensor_csv=station,
             train_max_elevation_deg=train_max,
         )
     except TimelineError as exc:
@@ -250,17 +314,29 @@ def publish_site(
         timeline = None
 
     card: dict[str, Any] | None
-    try:
-        members = [
-            checkpoint_metadata(
-                member.path, digest_of[member.path.resolve()], trust_checkpoint=trust_checkpoint
-            )
-            for member in pin.frame_checkpoints
-        ]
-        card = build_model_card(pin, members, stamp=stamp)
-    except (ModelCardError, KeyError, ValueError, OSError) as exc:
-        logger.error("model.json not published (the previous one is kept): %s", exc)
-        card = None
+    card_state = watch_dir / STATE_SUBDIR / MODEL_STATE_FILENAME
+    fingerprint = _card_fingerprint(serving, digests, card_inputs(pin))
+    cached = _cached_card(card_state, fingerprint)
+    if cached is not None:
+        card = {**cached, **document_header(MODEL_SCHEMA, stamp)}
+        logger.info("model.json inputs unchanged; re-stamping the cached card")
+    else:
+        try:
+            members = [
+                checkpoint_metadata(
+                    member.path,
+                    digest_of[member.path.resolve()],
+                    trust_checkpoint=trust_checkpoint,
+                    payload=served.checkpoint if member is pin.attribution_member else None,
+                )
+                for member in pin.frame_checkpoints
+            ]
+            card = build_model_card(pin, members, stamp=stamp)
+        except (ModelCardError, KeyError, ValueError, OSError) as exc:
+            logger.error("model.json not published (the previous one is kept): %s", exc)
+            card = None
+        if card is not None:
+            atomic_write_strict_json(card_state, {"fingerprint": fingerprint, "card": card})
 
     try:
         _write_images(out_dir, frame.images)

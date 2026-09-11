@@ -23,7 +23,37 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-__all__ = ["atomic_write", "atomic_write_json", "atomic_write_strict_json"]
+__all__ = [
+    "JsonObjectError",
+    "atomic_write",
+    "atomic_write_json",
+    "atomic_write_strict_json",
+    "read_json_object",
+]
+
+
+class JsonObjectError(ValueError):
+    """A file that should hold one JSON object cannot be read as one."""
+
+
+def read_json_object(path: str | Path) -> dict[str, Any]:
+    """The JSON object *path* holds.
+
+    Raises
+    ------
+    JsonObjectError
+        When the file cannot be read, is not JSON, or its top level is not an
+        object; the message names the path and which of the three it was.
+    """
+    try:
+        loaded: Any = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise JsonObjectError(f"cannot read {path}: {exc}") from exc
+    except ValueError as exc:
+        raise JsonObjectError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise JsonObjectError(f"{path} is not a JSON object")
+    return loaded
 
 
 def atomic_write(path: str | Path, writer: Callable[[Path], Any]) -> Path:

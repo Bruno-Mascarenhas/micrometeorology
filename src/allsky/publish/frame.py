@@ -1,7 +1,8 @@
 """``frame.json`` and its three images: the latest scored live frame, explained.
 
-The prediction is the watch's own record for the newest frame it scored,
-normalised so a single-member and an ensemble record publish the same shape.
+The prediction is the watch's own record for the newest frame it scored, in
+the ensemble shape (:func:`allsky.watch.envelope_of` wraps a bare record a
+single-member watch wrote before that shape became the only one).
 What the publisher adds is computed here from two :class:`ServedModel`
 instances loaded once per publish: the attribution member (the occlusion map
 and the overlay counterfactual) and the scalars-only control (the "no image"
@@ -28,6 +29,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from allsky.archive import STATE_SUBDIR
 from allsky.attribution import (
     OCCLUSION_STRIDE_PX,
     OCCLUSION_WINDOW_PX,
@@ -43,17 +45,33 @@ from allsky.config import SiteConfig
 from allsky.publish.encoding import (
     DEFAULT_KINDEX_KIND,
     FRAME_SCHEMA,
+    INDEX_DECIMALS,
+    IRRADIANCE_DECIMALS,
+    REFERENCES,
     PublishStamp,
     condition_of,
     document_header,
+    kindex_kind_of,
     rounded_or_none,
     sky_conditions_block,
     targets_glossary,
 )
 from allsky.serving import ServingConfig
-from allsky.snapshot import ServedModel, Snapshot, clearsky_dhi_at, solar_elevation_at
-from allsky.watch import PREDICTION_SUFFIX, checkpoint_role, frames_on_disk
-from labmim_core.atomic import atomic_write_strict_json
+from allsky.snapshot import (
+    ServedModel,
+    Snapshot,
+    StationExport,
+    clearsky_dhi_at,
+    solar_elevation_at,
+)
+from allsky.watch import (
+    FRAMES_SUBDIR,
+    PREDICTION_SUFFIX,
+    checkpoint_role,
+    envelope_of,
+    frames_newest_first,
+)
+from labmim_core.atomic import JsonObjectError, atomic_write_strict_json, read_json_object
 from labmim_core.sky import SKY_CLASS_NAMES
 
 logger = logging.getLogger(__name__)
@@ -76,14 +94,11 @@ IMAGE_FILENAME = "allsky.jpg"
 INPUT_FILENAME = "input.jpg"
 ATTRIBUTION_FILENAME = "attribution.png"
 FRAME_STATE_FILENAME = "publish-frame.json"
-STATE_SUBDIR = ".state"
 
 PUBLISHED_IMAGE_WIDTH = 1280
 IMAGE_JPEG_QUALITY = 85
 INPUT_JPEG_QUALITY = 90
 HASH_PREFIX_LENGTH = 12
-IRRADIANCE_DECIMALS = 2
-INDEX_DECIMALS = 4
 PROBABILITY_DECIMALS = 4
 ANGLE_DECIMALS = 2
 GRID_DECIMALS = 4
@@ -114,18 +129,7 @@ CAVEATS = [
     "As probabilidades de condição são as da cabeça de classificação sobre as faixas de Kt de [[escobedo]] aplicadas à média de 5 minutos do piranômetro, que é o rótulo que a rede aprendeu a reproduzir.",
 ]
 
-REFERENCES: dict[str, dict[str, str]] = {
-    "escobedo": {
-        "short": "Escobedo et al. (2009)",
-        "citation": "Escobedo, J. F.; Gomes, E. N.; Oliveira, A. P.; Soares, J. (2009). Modeling hourly and daily fractions of UV, PAR and NIR to global solar radiation under various sky conditions at Botucatu, Brazil. Applied Energy, 86(3), 299-309.",
-        "url": "https://doi.org/10.1016/j.apenergy.2008.04.013",
-    },
-    "haurwitz": {
-        "short": "Haurwitz (1945)",
-        "citation": "Haurwitz, B. (1945). Insolation in relation to cloudiness and cloud density. Journal of Meteorology, 2(3), 154-166.",
-        "url": "https://doi.org/10.1175/1520-0469(1945)002%3C0154:IIRTCA%3E2.0.CO;2",
-    },
-}
+FRAME_REFERENCES = {key: REFERENCES[key] for key in ("escobedo", "haurwitz")}
 
 
 class FramePublishError(ValueError):
@@ -206,10 +210,10 @@ class FrameArtifacts:
 
 def latest_scored_frame(watch_dir: str | Path) -> ScoredFrame | None:
     """The newest frame under ``<watch_dir>/frames/`` that has a readable prediction record."""
-    frames_dir = Path(watch_dir) / "frames"
+    frames_dir = Path(watch_dir) / FRAMES_SUBDIR
     if not frames_dir.is_dir():
         return None
-    for snapshot in reversed(frames_on_disk(frames_dir)):
+    for snapshot in frames_newest_first(frames_dir):
         record_path = frames_dir / f"{snapshot.image_path.stem}{PREDICTION_SUFFIX}"
         if not record_path.is_file():
             continue
@@ -220,7 +224,9 @@ def latest_scored_frame(watch_dir: str | Path) -> ScoredFrame | None:
             continue
         if isinstance(record, dict) and isinstance(record.get("predictions"), dict):
             written = pd.Timestamp(record_path.stat().st_mtime, unit="s", tz="UTC")
-            return ScoredFrame(snapshot=snapshot, record=record, record_written_at_utc=written)
+            return ScoredFrame(
+                snapshot=snapshot, record=envelope_of(record), record_written_at_utc=written
+            )
     return None
 
 
@@ -299,48 +305,29 @@ def _digest_of(pin: ServingConfig, digests: dict[Path, str], checkpoint: str) ->
 def _members(
     pin: ServingConfig, digests: dict[Path, str], record: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    if "members" in record:
-        models = {str(model.get("checkpoint")): model for model in record.get("models") or []}
-        entries = []
-        for member in record["members"]:
-            checkpoint = str(member["checkpoint"])
-            model = models.get(checkpoint) or {}
-            name = str(model.get("name") or Path(checkpoint).parent.name)
-            entries.append(
-                {
-                    "name": name,
-                    "seed": _seed_of(name),
-                    "role": str(member.get("role") or checkpoint_role(checkpoint)),
-                    "heads": list(member.get("heads") or []),
-                    "checkpoint_sha256": _digest_of(pin, digests, checkpoint),
-                    "code_version": model.get("code_version"),
-                }
-            )
-        return entries
-    model = record.get("model") or {}
-    checkpoint = str(model.get("checkpoint", ""))
-    name = str(model.get("name") or Path(checkpoint).parent.name)
-    heads = [key for key in ("dhi", "kindex", "cloud_fraction") if key in record["predictions"]]
-    if "sky_class" in record["predictions"]:
-        heads.append("sky")
-    return [
-        {
-            "name": name,
-            "seed": _seed_of(name),
-            "role": checkpoint_role(checkpoint),
-            "heads": heads,
-            "checkpoint_sha256": _digest_of(pin, digests, checkpoint),
-            "code_version": model.get("code_version"),
-        }
-    ]
+    models = {str(model.get("checkpoint")): model for model in record.get("models") or []}
+    entries = []
+    for member in record["members"]:
+        checkpoint = str(member["checkpoint"])
+        model = models.get(checkpoint) or {}
+        name = str(model.get("name") or Path(checkpoint).parent.name)
+        entries.append(
+            {
+                "name": name,
+                "seed": _seed_of(name),
+                "role": str(member.get("role") or checkpoint_role(checkpoint)),
+                "heads": list(member.get("heads") or []),
+                "checkpoint_sha256": _digest_of(pin, digests, checkpoint),
+                "code_version": model.get("code_version"),
+            }
+        )
+    return entries
 
 
 def _kindex_kind(record: dict[str, Any]) -> str:
-    models = record.get("models") or ([record["model"]] if "model" in record else [])
-    for model in models:
-        kind = model.get("kindex_kind")
-        if kind:
-            return str(kind)
+    kind = kindex_kind_of(record)
+    if kind is not None:
+        return kind
     logger.warning(
         "the watch record names no kindex_kind; publishing the %s glossary", DEFAULT_KINDEX_KIND
     )
@@ -476,10 +463,9 @@ def _read_state(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {}
     try:
-        loaded: Any = json.loads(path.read_text(encoding="utf-8"))
-    except OSError, ValueError:
+        return read_json_object(path)
+    except JsonObjectError:
         return {}
-    return loaded if isinstance(loaded, dict) else {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -517,11 +503,9 @@ def _probe(
     device_note: str,
     occlusion_window_px: int,
     occlusion_stride_px: int,
-    sensor_csv: Path | None,
+    sensor_csv: Path | StationExport | None,
 ) -> _Probes:
     from PIL import Image
-
-    from allsky.preprocessing import PreprocessingPipeline, model_input_frame
 
     if served.cfg.preprocessing.overlay in UNMODELLED_OVERLAY_POLICIES:
         raise FramePublishError(
@@ -538,7 +522,8 @@ def _probe(
     )
 
     features = served.scalar_features(timestamp, site=site)
-    planes = served.image_planes(scored.snapshot.image_path, timestamp, site=site)
+    input_frame = served.input_frame(scored.snapshot.image_path)
+    planes = served.planes_of(input_frame, timestamp, site=site)
     base = served.physical(
         served.forward(served.batch(features, planes=planes)), timestamp=timestamp, site=site
     )
@@ -586,14 +571,8 @@ def _probe(
 
     published = np.asarray(raw.resize((out_width, out_height), Image.Resampling.LANCZOS))
     image_bytes = _encode_jpeg(published, IMAGE_JPEG_QUALITY)
-    input_planes = model_input_frame(
-        scored.snapshot.image_path,
-        size=served.image_size,
-        preprocess=PreprocessingPipeline.from_config(served.cfg),
-        geometry=served.geometry,
-    )
     input_bytes = _encode_jpeg(
-        np.ascontiguousarray((input_planes.transpose(1, 2, 0) * 255.0).round().astype(np.uint8)),
+        np.ascontiguousarray((input_frame.transpose(1, 2, 0) * 255.0).round().astype(np.uint8)),
         INPUT_JPEG_QUALITY,
     )
     attribution_bytes = _encode_png(
@@ -721,7 +700,7 @@ def build_frame_artifacts(
     stale_after_blocks: int = DEFAULT_STALE_AFTER_BLOCKS,
     occlusion_window_px: int = OCCLUSION_WINDOW_PX,
     occlusion_stride_px: int = OCCLUSION_STRIDE_PX,
-    sensor_csv: Path | None = None,
+    sensor_csv: Path | StationExport | None = None,
 ) -> FrameArtifacts:
     """Assemble ``frame.json`` and, when the scored frame changed, its three images.
 
@@ -744,7 +723,8 @@ def build_frame_artifacts(
         while the three images it names are there with the hashes it recorded.
     sensor_csv:
         Station export fed to the controls' scalar vector, so the live
-        "no image" reference runs on measured scalars when one is supplied.
+        "no image" reference runs on measured scalars when one is supplied;
+        a path, or the export already read so one publish parses it once.
     train_max_elevation_deg:
         Highest solar elevation in the training split, for the
         ``extrapolation`` flag; ``None`` publishes it as unknown.
@@ -788,7 +768,7 @@ def build_frame_artifacts(
         "targets": targets_glossary(kindex_kind),
         "sky_conditions": sky_conditions_block(),
         "caveats": CAVEATS,
-        "references": REFERENCES,
+        "references": FRAME_REFERENCES,
     }
     if latest is None:
         return FrameArtifacts(document=document, images={})

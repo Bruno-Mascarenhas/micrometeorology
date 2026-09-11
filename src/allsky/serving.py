@@ -16,26 +16,27 @@ loading them.
 
 import datetime as dt
 import hashlib
-import json
 import logging
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from labmim_core.atomic import atomic_write_strict_json
+from labmim_core.atomic import JsonObjectError, atomic_write_strict_json, read_json_object
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "ClimatologyControl",
+    "Control",
     "Controls",
+    "HeadRoles",
+    "Member",
     "PinVerificationError",
     "PinnedCheckpoint",
     "RoleSelector",
     "Selection",
-    "SensorOnlyControl",
     "ServingConfig",
     "ServingConfigError",
     "ServingReports",
@@ -44,11 +45,34 @@ __all__ = [
     "verify_pinned_checkpoints",
 ]
 
-RoleSelector = Literal["best", "last", "all"]
+
+class RoleSelector(StrEnum):
+    """Which members of an ensemble a head group is read from, by checkpoint stem.
+
+    ``best`` reads the ``best.ckpt`` members, ``last`` the ``last.ckpt`` ones
+    and ``all`` every member, whatever its stem.
+    """
+
+    best = "best"
+    last = "last"
+    all = "all"
+
+
+class HeadRoles(BaseModel):
+    """Whose sky heads and whose regression heads an ensemble averages."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sky: RoleSelector = RoleSelector.all
+    dhi: RoleSelector = RoleSelector.all
+
+
+#: Every member's heads averaged, the default of both ensembles.
+ALL_ROLES = HeadRoles()
+
 AttributionTarget = Literal["kindex", "dhi"]
 
 SHA256_HEX_PATTERN = r"^[0-9a-f]{64}$"
-HASH_CHUNK_BYTES = 8 * 1024 * 1024
 SHA256_CACHE_FILENAME = "checkpoint-sha256.json"
 
 
@@ -65,55 +89,49 @@ def _expanded(path: Path) -> Path:
     return Path(path).expanduser()
 
 
+ExpandedPath = Annotated[Path, AfterValidator(_expanded)]
+
+
 class PinnedCheckpoint(BaseModel):
     """One served checkpoint and the fingerprint of the file it must be."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    path: Path
+    path: ExpandedPath
     sha256: str = Field(pattern=SHA256_HEX_PATTERN)
 
-    @field_validator("path", mode="after")
-    @classmethod
-    def _expand_home(cls, value: Path) -> Path:
-        return _expanded(value)
+
+class Member(PinnedCheckpoint):
+    """A served frame checkpoint and the ``eval-test`` report the card reads it from."""
+
+    report: ExpandedPath
 
 
-class SensorOnlyControl(BaseModel):
-    """The scalars-only control: its test report and the checkpoint the live counterfactual uses."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    checkpoint: PinnedCheckpoint
-    report: Path
-
-    @field_validator("report", mode="after")
-    @classmethod
-    def _expand_home(cls, value: Path) -> Path:
-        return _expanded(value)
-
-
-class ClimatologyControl(BaseModel):
-    """The train-mean control: its test report and the checkpoint holding the pinned means."""
+class Control(BaseModel):
+    """A control trained on the served split: its test report and the checkpoint served live."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     checkpoint: PinnedCheckpoint
-    report: Path
-
-    @field_validator("report", mode="after")
-    @classmethod
-    def _expand_home(cls, value: Path) -> Path:
-        return _expanded(value)
+    report: ExpandedPath
 
 
 class Controls(BaseModel):
-    """The two controls trained on the served manifest, split and targets."""
+    """The two controls trained on the served manifest, split and targets.
+
+    Attributes
+    ----------
+    sensor_only:
+        The scalars-only network; its checkpoint answers the live "no image"
+        counterfactual.
+    climatology:
+        The train-mean control; its checkpoint holds the pinned means.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    sensor_only: SensorOnlyControl
-    climatology: ClimatologyControl
+    sensor_only: Control
+    climatology: Control
 
 
 class ServingReports(BaseModel):
@@ -125,6 +143,8 @@ class ServingReports(BaseModel):
         The prepared dataset directory (``manifest.parquet``, its sidecar and
         ``splits.json``) the served checkpoints trained on; verified against
         their ``manifest_sha256`` and ``split_id`` before it feeds the card.
+    training_history:
+        The ``metrics.csv`` of the member whose training curve the card draws.
     domain_check:
         The pinned first-day check of ``allsky-operacional.md`` once it has
         been run; ``None`` publishes the field as not measured.
@@ -132,20 +152,9 @@ class ServingReports(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    dataset: Path
-    members: list[Path] = Field(min_length=1)
-    training_history: Path
-    domain_check: Path | None = None
-
-    @field_validator("dataset", "training_history", "domain_check", mode="after")
-    @classmethod
-    def _expand_home(cls, value: Path | None) -> Path | None:
-        return _expanded(value) if value is not None else None
-
-    @field_validator("members", mode="after")
-    @classmethod
-    def _expand_homes(cls, value: list[Path]) -> list[Path]:
-        return [_expanded(path) for path in value]
+    dataset: ExpandedPath
+    training_history: ExpandedPath
+    domain_check: ExpandedPath | None = None
 
 
 SelectionSplit = Literal["train", "val", "test"]
@@ -167,8 +176,8 @@ class ServingConfig(BaseModel):
     Attributes
     ----------
     frame_checkpoints:
-        Single-frame checkpoints served together; more than one is averaged
-        by :func:`allsky.watch.ensemble_prediction`.
+        Single-frame checkpoints served together, each with its test report;
+        more than one is averaged by :func:`allsky.watch.ensemble_prediction`.
     frame_sky_role, frame_dhi_role:
         Which members' heads feed the sky class and the regression outputs,
         by checkpoint stem (``best`` / ``last`` / ``all``).
@@ -183,9 +192,8 @@ class ServingConfig(BaseModel):
         the scalars-only one, the checkpoint the live counterfactual is scored
         with.
     reports:
-        The dataset directory, one ``eval-<split>`` directory per member in
-        the same order, the served member's ``metrics.csv`` and the pinned
-        domain check when there is one.
+        The dataset directory, the served member's ``metrics.csv`` and the
+        pinned domain check when there is one.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -193,9 +201,9 @@ class ServingConfig(BaseModel):
     serving: Literal[True]
     id: str = Field(min_length=1)
     label: str = Field(min_length=1)
-    frame_checkpoints: list[PinnedCheckpoint] = Field(min_length=1)
-    frame_sky_role: RoleSelector = "all"
-    frame_dhi_role: RoleSelector = "all"
+    frame_checkpoints: list[Member] = Field(min_length=1)
+    frame_sky_role: RoleSelector = RoleSelector.all
+    frame_dhi_role: RoleSelector = RoleSelector.all
     attribution_checkpoint: int = Field(default=0, ge=0)
     attribution_target: AttributionTarget = "kindex"
     min_elevation_deg: float = Field(gt=0.0, lt=90.0)
@@ -204,21 +212,21 @@ class ServingConfig(BaseModel):
     selection: Selection
 
     @model_validator(mode="after")
-    def _members_line_up(self) -> ServingConfig:
+    def _attribution_names_a_member(self) -> ServingConfig:
         if self.attribution_checkpoint >= len(self.frame_checkpoints):
             raise ValueError(
                 f"attribution_checkpoint {self.attribution_checkpoint} names no member: the pin "
                 f"lists {len(self.frame_checkpoints)} frame checkpoint(s)"
             )
-        if len(self.reports.members) != len(self.frame_checkpoints):
-            raise ValueError(
-                f"reports.members lists {len(self.reports.members)} report(s) for "
-                f"{len(self.frame_checkpoints)} frame checkpoint(s); one per member, same order"
-            )
         return self
 
     @property
-    def attribution_member(self) -> PinnedCheckpoint:
+    def frame_roles(self) -> HeadRoles:
+        """The role selectors of the frame ensemble, as :func:`allsky.watch.run_watch` takes them."""
+        return HeadRoles(sky=self.frame_sky_role, dhi=self.frame_dhi_role)
+
+    @property
+    def attribution_member(self) -> Member:
         """The member the sensitivity map and the overlay counterfactual are computed from."""
         return self.frame_checkpoints[self.attribution_checkpoint]
 
@@ -266,11 +274,10 @@ def _read_cache(cache_file: Path) -> dict[str, Any]:
     if not cache_file.is_file():
         return {}
     try:
-        loaded: Any = json.loads(cache_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        logger.warning("ignoring unreadable checkpoint hash cache %s: %s", cache_file, exc)
+        return read_json_object(cache_file)
+    except JsonObjectError as exc:
+        logger.warning("ignoring unreadable checkpoint hash cache: %s", exc)
         return {}
-    return loaded if isinstance(loaded, dict) else {}
 
 
 def sha256_of_file(path: str | Path, *, cache_dir: str | Path | None = None) -> str:
@@ -287,11 +294,8 @@ def sha256_of_file(path: str | Path, *, cache_dir: str | Path | None = None) -> 
     cached = cache.get(str(file))
     if isinstance(cached, dict) and cached.get("signature") == signature:
         return str(cached["sha256"])
-    digest = hashlib.sha256()
     with file.open("rb") as handle:
-        while chunk := handle.read(HASH_CHUNK_BYTES):
-            digest.update(chunk)
-    fingerprint = digest.hexdigest()
+        fingerprint = hashlib.file_digest(handle, "sha256").hexdigest()
     if cache_file is not None:
         cache[str(file)] = {"signature": signature, "sha256": fingerprint}
         cache_file.parent.mkdir(parents=True, exist_ok=True)

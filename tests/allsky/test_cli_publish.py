@@ -5,6 +5,8 @@ import json
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import yaml
@@ -12,37 +14,26 @@ from typer.testing import CliRunner
 
 from allsky.cli import app
 from allsky.publish.frame import FrameArtifacts
+from tests.allsky._pins import control, pinned, serving_pin_payload
 
 runner = CliRunner()
 
 
-def _pin(tmp_path: Path) -> Path:
-    def checkpoint(name: str) -> dict:
+def _pin(tmp_path: Path, *, label: str = "the probe") -> Path:
+    def checkpoint(name: str) -> tuple[Path, str]:
         path = tmp_path / name / "best.ckpt"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(name.encode())
-        return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        return path, hashlib.sha256(path.read_bytes()).hexdigest()
 
-    payload = {
-        "serving": True,
-        "id": "probe",
-        "label": "the probe",
-        "frame_checkpoints": [checkpoint("member")],
-        "min_elevation_deg": 10.0,
-        "controls": {
-            "sensor_only": {
-                "checkpoint": checkpoint("sensor"),
-                "report": str(tmp_path / "r" / "s"),
-            },
-            "climatology": {"checkpoint": checkpoint("clim"), "report": str(tmp_path / "r" / "c")},
-        },
-        "reports": {
-            "dataset": str(tmp_path / "dataset"),
-            "members": [str(tmp_path / "r" / "m")],
-            "training_history": str(tmp_path / "r" / "metrics.csv"),
-        },
-        "selection": {"criterion": "the probe", "decided_on": "2026-09-11"},
-    }
+    payload = serving_pin_payload(
+        frame_checkpoints=[pinned(*checkpoint("member"), tmp_path / "r" / "m")],
+        sensor_only=control(*checkpoint("sensor"), tmp_path / "r" / "s"),
+        climatology=control(*checkpoint("clim"), tmp_path / "r" / "c"),
+        dataset=tmp_path / "dataset",
+        training_history=tmp_path / "r" / "metrics.csv",
+        label=label,
+    )
     pin = tmp_path / "pin.yaml"
     pin.write_text(yaml.safe_dump(payload), encoding="utf-8")
     return pin
@@ -69,7 +60,13 @@ def stubbed(monkeypatch):
     import allsky.publish.timeline as timeline_module
     import allsky.snapshot as snapshot_module
 
-    calls: dict[str, object] = {"frame_alive": True, "card_error": None, "timeline_error": None}
+    calls: dict[str, Any] = {
+        "frame_alive": True,
+        "card_error": None,
+        "timeline_error": None,
+        "served_floor": None,
+        "card_builds": 0,
+    }
 
     def build_timeline(*_args, **_kwargs):
         if calls["timeline_error"] is not None:
@@ -79,10 +76,14 @@ def stubbed(monkeypatch):
     def build_model_card(*_a, **_k):
         if calls["card_error"] is not None:
             raise card_module.ModelCardError(str(calls["card_error"]))
-        return {"schema": "labmim-allsky-model-v1"}
+        calls["card_builds"] += 1
+        return {"schema": "labmim-allsky-model-v1", "version": "", "generated_utc": ""}
+
+    def load_served_model(*_a, **_k):
+        return SimpleNamespace(min_solar_elevation_deg=calls["served_floor"], checkpoint={})
 
     monkeypatch.setattr(timeline_module, "build_timeline", build_timeline)
-    monkeypatch.setattr(snapshot_module, "load_served_model", lambda *_a, **_k: object())
+    monkeypatch.setattr(snapshot_module, "load_served_model", load_served_model)
     monkeypatch.setattr(
         frame_module, "build_frame_artifacts", lambda *_a, **_k: _frame(bool(calls["frame_alive"]))
     )
@@ -92,14 +93,14 @@ def stubbed(monkeypatch):
     return calls
 
 
-def _invoke(tmp_path: Path, *extra: str):
+def _invoke(tmp_path: Path, *extra: str, label: str = "the probe"):
     (tmp_path / "watch" / "frames").mkdir(parents=True, exist_ok=True)
     return runner.invoke(
         app,
         [
             "publish-site",
             "--serving",
-            str(_pin(tmp_path)),
+            str(_pin(tmp_path, label=label)),
             "--watch-dir",
             str(tmp_path / "watch"),
             "--out",
@@ -168,6 +169,38 @@ def test_a_timeline_refusal_keeps_the_previous_timeline_and_publishes_the_rest(t
 
 
 @pytest.mark.usefixtures("stubbed")
+def test_the_card_is_rebuilt_only_when_one_of_its_inputs_moves(tmp_path, stubbed):
+    first = _invoke(tmp_path)
+    second = _invoke(tmp_path)
+
+    assert (first.exit_code, second.exit_code) == (0, 0), second.output
+    assert stubbed["card_builds"] == 1
+    card = json.loads((tmp_path / "Ceu" / "model.json").read_text(encoding="utf-8"))
+    assert card["schema"] == "labmim-allsky-model-v1"
+    assert card["version"] == card["generated_utc"] != ""
+
+
+def test_editing_the_pin_invalidates_the_cached_card(tmp_path, stubbed):
+    _invoke(tmp_path)
+
+    result = _invoke(tmp_path, label="the probe, revised")
+
+    assert result.exit_code == 0, result.output
+    assert stubbed["card_builds"] == 2
+
+
+def test_a_served_member_recording_another_floor_than_the_pin_stops_the_publish(
+    tmp_path, stubbed, caplog
+):
+    stubbed["served_floor"] = 7.0
+
+    result = _invoke(tmp_path)
+
+    assert result.exit_code == 1
+    assert "records the floor 7" in caplog.text
+    assert not (tmp_path / "Ceu").exists()
+
+
 def test_a_rewritten_pinned_checkpoint_blocks_the_whole_publish(tmp_path):
     pin = _pin(tmp_path)
     (tmp_path / "member" / "best.ckpt").write_bytes(b"rewritten")

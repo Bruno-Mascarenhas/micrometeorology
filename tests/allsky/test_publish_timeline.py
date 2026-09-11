@@ -15,6 +15,7 @@ from allsky.serving import ServingConfig
 from allsky.snapshot import solar_elevation_at
 from labmim_core.site import SiteConfig
 from labmim_core.sky import SKY_CLASS_NAMES
+from tests.allsky._pins import control, pinned, serving_pin_payload
 
 DAY = "2026-09-10"
 NOW = pd.Timestamp(f"{DAY} 12:17:00")
@@ -36,25 +37,16 @@ CLOUDY_PROBABILITIES = {
 
 
 def _pin(tmp_path: Path, *, decided_on: str = "2026-09-09") -> ServingConfig:
-    checkpoint = {"path": str(tmp_path / "serving" / "best.ckpt"), "sha256": DIGEST}
+    checkpoint = tmp_path / "serving" / "best.ckpt"
     return ServingConfig.model_validate(
-        {
-            "serving": True,
-            "id": "probe",
-            "label": "a probe pin",
-            "frame_checkpoints": [checkpoint],
-            "min_elevation_deg": 10.0,
-            "controls": {
-                "sensor_only": {"checkpoint": checkpoint, "report": str(tmp_path / "so")},
-                "climatology": {"checkpoint": checkpoint, "report": str(tmp_path / "cl")},
-            },
-            "reports": {
-                "dataset": str(tmp_path / "dataset"),
-                "members": [str(tmp_path / "eval-test")],
-                "training_history": str(tmp_path / "metrics.csv"),
-            },
-            "selection": {"criterion": "the probe", "decided_on": decided_on},
-        }
+        serving_pin_payload(
+            frame_checkpoints=[pinned(checkpoint, DIGEST, tmp_path / "eval-test")],
+            sensor_only=control(checkpoint, DIGEST, tmp_path / "so"),
+            climatology=control(checkpoint, DIGEST, tmp_path / "cl"),
+            dataset=tmp_path / "dataset",
+            training_history=tmp_path / "metrics.csv",
+            decided_on=decided_on,
+        )
     )
 
 
@@ -250,7 +242,7 @@ def test_an_export_that_ends_before_the_window_is_reported_stale(tmp_path):
 def test_an_export_column_without_a_declared_limit_is_not_published(tmp_path, monkeypatch):
     watch = _watch_dir(tmp_path)
     export = _export(tmp_path, f"{DAY} 12:00:00,118.2,600.0\n")
-    monkeypatch.setattr(timeline_module, "_shipped_sensor_limits", list)
+    monkeypatch.setattr(timeline_module, "shipped_sensor_limits", list)
 
     document = _build(tmp_path, watch, sensor_csv=export)
 

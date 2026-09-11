@@ -159,9 +159,9 @@ asserts no string value in any document starts with `/` or `output/`.
 ## The pin: `configs/allsky/serving/ceu.yaml`
 
 The best network is **declared**, never discovered: a versioned YAML names the
-checkpoints, their SHA-256, the roles their heads play, the control checkpoint
-the live counterfactual is scored with, the dataset and the evaluation reports
-the card is built from, and the sentence that says why they were chosen.
+checkpoints, their SHA-256 and their test reports, the roles their heads play,
+the control checkpoint the live counterfactual is scored with, the dataset the
+card is built from, and the sentence that says why they were chosen.
 Auto-picking the minimum RMSE across `output/` would silently compare arms
 trained on different manifests and alignments.
 
@@ -182,8 +182,10 @@ label: DINOv3 ViT-S/16+ a 512 px, ajuste fino dos 12 blocos, só imagem
 frame_checkpoints:
   - path: ~/labmim/serving/ceuv3res512/s42/best.ckpt
     sha256: 5b45dfc7…
+    report: output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s42/run/eval-test
   - path: ~/labmim/serving/ceuv3res512/s43/best.ckpt
     sha256: fc6f9daa…
+    report: output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s43/run/eval-test
 frame_sky_role: all
 frame_dhi_role: all
 attribution_checkpoint: 0
@@ -198,9 +200,6 @@ controls:
     report: output/allsky-mm/experiments/ceucontrol/v0_climatology/run/eval-test
 reports:
   dataset: output/allsky-mm/dataset-iso-20260906
-  members:
-    - output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s42/run/eval-test
-    - output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s43/run/eval-test
   training_history: output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s42/run/metrics.csv
   domain_check: null
 selection:
@@ -419,10 +418,9 @@ publish only lands after a full site deploy.
   row instead. The evaluator should follow, with a test that fails on a
   frame-shifted reference; not changed here because it moves every report's
   numbers.
-- The watch reloads each checkpoint on every frame; loading once per member
-  at start-up (the `ServedModel` seam the publisher uses) would cut per-frame
-  latency and is where a digest of the weights that scored a frame would be
-  recorded.
+- The watch loads each member once at start-up and keeps it resident; the
+  digest of the weights that scored a frame is not yet recorded in the frame's
+  record, only verified against the pin when the publisher reads it.
 
 ## What this does not claim
 

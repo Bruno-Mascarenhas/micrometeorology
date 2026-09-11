@@ -34,13 +34,14 @@ from allsky.embeddings.backbone import build_backbone
 from allsky.embeddings.storage import META_FILENAME, read_meta, write_meta
 from allsky.snapshot import (
     DEFAULT_SENSOR_TOLERANCE,
-    _clearsky_dhi_reference,
     _feature_vector,
     _image_as_hwc,
     _image_input,
     _sensor_row_near,
-    _shipped_sensor_limits,
+    clearsky_dhi_at,
     predict_snapshot,
+    read_station_export,
+    shipped_sensor_limits,
 )
 from allsky.training.checkpointing import load_checkpoint
 from labmim_core.site import SiteConfig
@@ -214,8 +215,8 @@ def test_a_railed_logger_channel_is_imputed_instead_of_fed_as_a_measurement(
         feature_columns=[feature],
         feature_set=feature_set,
         site=SiteConfig(),
-        sensor_csv=sensor_csv,
-        sensor_limits=_shipped_sensor_limits(),
+        export=read_station_export(sensor_csv),
+        sensor_limits=shipped_sensor_limits(),
         tolerance=DEFAULT_SENSOR_TOLERANCE,
         training_means=np.array([1014.93], dtype=np.float32),
     )
@@ -248,8 +249,8 @@ def test_an_implausible_exported_value_is_refused_instead_of_served_as_a_measure
         feature_columns=[feature],
         feature_set="safe",
         site=SiteConfig(),
-        sensor_csv=sensor_csv,
-        sensor_limits=_shipped_sensor_limits(),
+        export=read_station_export(sensor_csv),
+        sensor_limits=shipped_sensor_limits(),
         tolerance=DEFAULT_SENSOR_TOLERANCE,
         training_means=np.array([3.7], dtype=np.float32),
     )
@@ -267,8 +268,8 @@ def test_a_plausible_exported_value_is_served_as_measured(tmp_path: Path) -> Non
         feature_columns=["air_temp_c"],
         feature_set="safe",
         site=SiteConfig(),
-        sensor_csv=sensor_csv,
-        sensor_limits=_shipped_sensor_limits(),
+        export=read_station_export(sensor_csv),
+        sensor_limits=shipped_sensor_limits(),
         tolerance=DEFAULT_SENSOR_TOLERANCE,
         training_means=np.array([25.0], dtype=np.float32),
     )
@@ -285,7 +286,10 @@ def test_a_configuration_declaring_no_plausibility_gate_refuses_to_serve_a_senso
 
     with pytest.raises(ValueError, match="sensor_limits"):
         _sensor_row_near(
-            sensor_csv, pd.Timestamp("2026-08-14 12:00:00"), DEFAULT_SENSOR_TOLERANCE, []
+            read_station_export(sensor_csv),
+            pd.Timestamp("2026-08-14 12:00:00"),
+            DEFAULT_SENSOR_TOLERANCE,
+            [],
         )
 
 
@@ -299,10 +303,10 @@ def test_an_offset_carrying_sensor_export_is_matched_on_site_local_wall_clock(
     )
 
     row, _gap = _sensor_row_near(
-        sensor_csv,
+        read_station_export(sensor_csv),
         pd.Timestamp("2026-08-14 12:00:00"),
         DEFAULT_SENSOR_TOLERANCE,
-        _shipped_sensor_limits(),
+        shipped_sensor_limits(),
     )
 
     assert float(row["AirT1_C_Avg"].iloc[0]) == pytest.approx(29.0)
@@ -320,7 +324,7 @@ def test_solar_geometry_is_built_on_the_declared_site_offset_the_manifest_trains
         feature_columns=["solar_elevation"],
         feature_set="minimal",
         site=site,
-        sensor_csv=None,
+        export=None,
         sensor_limits=[],
         tolerance=DEFAULT_SENSOR_TOLERANCE,
         training_means=np.zeros(1, dtype=np.float32),
@@ -513,7 +517,7 @@ def test_a_clearsky_index_checkpoint_is_served_in_watts_per_square_metre(
     )["predictions"]["dhi"]
     monkeypatch.undo()
 
-    reference = _clearsky_dhi_reference(timestamp, SiteConfig())
+    reference = clearsky_dhi_at(timestamp, SiteConfig())
     assert reference > 10.0
     assert served == pytest.approx(index * reference, rel=1e-6)
 
@@ -570,7 +574,7 @@ def test_the_live_pairing_uses_the_window_and_offset_the_checkpoint_trained_with
         embedding_checkpoint,
         timestamp=pd.Timestamp("2026-01-01 12:00:00"),
         sensor_csv=sensor_csv,
-        sensor_limits=_shipped_sensor_limits(),
+        sensor_limits=shipped_sensor_limits(),
         trust_checkpoint=True,
     )
 
@@ -598,7 +602,7 @@ def test_a_checkpoint_recording_no_pairing_keeps_the_documented_default(
         embedding_checkpoint,
         timestamp=pd.Timestamp("2026-01-01 12:00:00"),
         sensor_csv=sensor_csv,
-        sensor_limits=_shipped_sensor_limits(),
+        sensor_limits=shipped_sensor_limits(),
         trust_checkpoint=True,
     )
 
@@ -832,23 +836,25 @@ def test_predict_block_takes_the_earlier_frame_when_two_tie_for_the_centroid(
 def test_predict_block_builds_every_frames_geometry_at_the_representatives_time(
     block_checkpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``MultimodalImageDataset._load_image`` indexes the solar angles by the
-    served row for every co-frame of the window, so serving must too."""
+    """``MultimodalImageDataset`` indexes the solar angles by the served row for
+    every co-frame of the window, so serving builds the planes once, at the
+    representative's time, and every frame of the block carries them."""
     import allsky.snapshot as snapshot_module
 
-    real_image_input = snapshot_module._image_input
+    real_solar_maps = snapshot_module._solar_maps
     seen: list[pd.Timestamp] = []
 
-    def recording_image_input(*args: Any, timestamp: pd.Timestamp, **kwargs: Any) -> Any:
+    def recording_solar_maps(*args: Any, timestamp: pd.Timestamp, **kwargs: Any) -> Any:
         seen.append(timestamp)
-        return real_image_input(*args, timestamp=timestamp, **kwargs)
+        return real_solar_maps(*args, timestamp=timestamp, **kwargs)
 
-    monkeypatch.setattr(snapshot_module, "_image_input", recording_image_input)
+    monkeypatch.setattr(snapshot_module, "_solar_maps", recording_solar_maps)
     frames = _block_frames(tmp_path, ["12:00:30", "12:02:20", "12:03:00", "12:04:30"])
 
-    _block_prediction(frames, block_checkpoint)
+    served = _block_prediction(frames, block_checkpoint)
 
-    assert seen == [pd.Timestamp("2025-03-21 12:02:20")] * 4
+    assert seen == [pd.Timestamp("2025-03-21 12:02:20")]
+    assert served["block"]["n_frames"] == 4
 
 
 def test_predict_block_caps_the_window_the_way_the_dataset_subsamples_it(
@@ -877,11 +883,12 @@ def test_predict_block_sends_the_padded_sequence_and_mask_the_dataset_serves(
 
     seen: dict[str, Any] = {}
 
-    def recording_model(batch: dict[str, Any]) -> dict[str, Any]:
-        seen.update(batch)
-        return {"dhi": torch.zeros(1)}
+    class RecordingModel(torch.nn.Module):
+        def forward(self, batch: dict[str, Any]) -> dict[str, Any]:
+            seen.update(batch)
+            return {"dhi": torch.zeros(1)}
 
-    monkeypatch.setattr(registry, "restore_model", lambda *_a, **_k: recording_model)
+    monkeypatch.setattr(registry, "restore_model", lambda *_a, **_k: RecordingModel())
     frames = _block_frames(tmp_path, ["12:01:00", "12:02:00", "12:03:00"])
 
     _block_prediction(frames, block_checkpoint)
@@ -918,19 +925,19 @@ def test_predict_block_refuses_when_no_frame_falls_in_the_block(
         _block_prediction(frames, block_checkpoint, block_end=pd.Timestamp("2025-03-21 12:05:00"))
 
 
-def test_predict_block_refuses_an_empty_frame_list(tmp_path: Path) -> None:
+def test_predict_block_refuses_an_empty_frame_list(block_checkpoint: Path) -> None:
     with pytest.raises(ValueError, match="at least one frame"):
-        _block_prediction([], tmp_path / "any.ckpt")
+        _block_prediction([], block_checkpoint)
 
 
-def test_predict_block_refuses_a_night_block_before_building_the_model(
+def test_predict_block_refuses_a_night_block_before_reading_a_frame(
     block_checkpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from allsky.modeling import registry
+    import allsky.snapshot as snapshot_module
     from allsky.snapshot import SolarElevationBelowFloorError
 
-    built: list[Any] = []
-    monkeypatch.setattr(registry, "restore_model", lambda *a, **_k: built.append(a))
+    decoded: list[Any] = []
+    monkeypatch.setattr(snapshot_module, "_image_as_chw", lambda *a, **_k: decoded.append(a))
     frames = _block_frames(tmp_path, ["22:01:00", "22:02:00", "22:03:00"])
 
     with pytest.raises(SolarElevationBelowFloorError, match="below the 5 deg floor") as caught:
@@ -938,7 +945,7 @@ def test_predict_block_refuses_a_night_block_before_building_the_model(
 
     assert caught.value.elevation_deg < 0.0
     assert caught.value.floor_deg == 5.0
-    assert built == []
+    assert decoded == []
 
 
 @pytest.mark.parametrize(("floor_deg", "served"), [(5.0, True), (10.0, False)])
@@ -964,22 +971,24 @@ def test_predict_block_measures_the_dusk_against_the_floor_it_is_given(
             _block_prediction(frames, block_checkpoint, min_solar_elevation_deg=floor_deg)
 
 
-def test_block_checkpoint_window_minutes_reads_the_checkpoints_window(
-    block_checkpoint: Path,
-) -> None:
-    from allsky.snapshot import block_checkpoint_window_minutes
+def test_a_block_checkpoint_loaded_for_blocks_reports_its_window(block_checkpoint: Path) -> None:
+    from allsky.snapshot import load_served_model
 
-    window = block_checkpoint_window_minutes(block_checkpoint, trust_checkpoint=True)
+    served = load_served_model(
+        block_checkpoint,
+        trust_checkpoint=True,
+        expect="block",
+        image_backbone_builder=stub_image_backbone,
+    )
 
-    assert window == pytest.approx(5.0)
+    assert served.serves == "block"
+    assert served.window_minutes == pytest.approx(5.0)
 
 
-def test_block_checkpoint_window_minutes_refuses_a_center_frame_checkpoint(
-    block_checkpoint: Path,
-) -> None:
+def test_loading_a_center_frame_checkpoint_for_blocks_is_refused(block_checkpoint: Path) -> None:
     import torch
 
-    from allsky.snapshot import block_checkpoint_window_minutes
+    from allsky.snapshot import load_served_model
 
     payload = load_checkpoint(block_checkpoint, map_location="cpu", trust_pickle=True)
     payload["config"]["data"]["alignment"]["strategy"] = "center_frame"
@@ -987,21 +996,59 @@ def test_block_checkpoint_window_minutes_refuses_a_center_frame_checkpoint(
     torch.save(payload, block_checkpoint)
 
     with pytest.raises(ValueError, match="center_frame"):
-        block_checkpoint_window_minutes(block_checkpoint, trust_checkpoint=True)
+        load_served_model(block_checkpoint, trust_checkpoint=True, expect="block")
 
 
-def test_block_checkpoint_window_minutes_warns_that_a_fusion_model_gets_imputed_sensors(
-    block_checkpoint: Path, caplog: pytest.LogCaptureFixture
+def test_loading_a_block_checkpoint_for_frames_is_refused(block_checkpoint: Path) -> None:
+    from allsky.snapshot import load_served_model
+
+    with pytest.raises(ValueError, match="sensor_block"):
+        load_served_model(block_checkpoint, trust_checkpoint=True)
+
+
+def test_loading_a_fusion_block_checkpoint_warns_that_its_sensors_are_imputed(
+    block_checkpoint: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import torch
 
-    from allsky.snapshot import block_checkpoint_window_minutes
+    from allsky.modeling import registry
+    from allsky.snapshot import load_served_model
 
     payload = load_checkpoint(block_checkpoint, map_location="cpu", trust_pickle=True)
     payload["config"]["model"]["name"] = "film"
     torch.save(payload, block_checkpoint)
+    monkeypatch.setattr(registry, "restore_model", lambda *_a, **_k: torch.nn.Identity())
 
     with caplog.at_level(logging.WARNING, logger="allsky.snapshot"):
-        block_checkpoint_window_minutes(block_checkpoint, trust_checkpoint=True)
+        load_served_model(block_checkpoint, trust_checkpoint=True, expect="block")
 
     assert "imputed at its training mean" in caplog.text
+
+
+def test_a_served_model_reads_the_night_floor_its_checkpoint_records(
+    block_checkpoint: Path,
+) -> None:
+    """The probe trained through the engine, whose manifest dropped frames under 5 deg."""
+    import torch
+
+    from allsky.snapshot import load_served_model
+
+    def load() -> Any:
+        return load_served_model(
+            block_checkpoint,
+            trust_checkpoint=True,
+            expect="block",
+            image_backbone_builder=stub_image_backbone,
+        )
+
+    assert load().min_solar_elevation_deg == pytest.approx(5.0)
+    payload = load_checkpoint(block_checkpoint, map_location="cpu", trust_pickle=True)
+    payload["night_filter"] = None
+    torch.save(payload, block_checkpoint)
+    assert load().min_solar_elevation_deg is None
+    payload["night_filter"] = {"min_solar_elevation_deg": 7.5}
+    torch.save(payload, block_checkpoint)
+
+    served = load()
+
+    assert served.min_solar_elevation_deg == pytest.approx(7.5)

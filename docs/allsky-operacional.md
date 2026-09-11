@@ -99,8 +99,10 @@ allsky watch --out /opt/labmim/allsky-watch \
   --min-elevation-deg 10
 ```
 
+Every checkpoint is loaded once at start-up and stays resident; a member that
+cannot be built stops the watch (exit 1) instead of failing every frame.
 Every `--poll-seconds` (default 20) the watch fetches the live frame, files it
-under `frames/` and, when the sun is at or above `--min-elevation-deg`,
+under `frames/` and, when the sun is at or above the elevation floor,
 scores it with every `--checkpoint-frame` given. With more than one the
 members are averaged: `--frame-sky-role best` reads the sky probabilities
 from the `best` members only, `--frame-dhi-role last` reads `dhi`, `kindex`
@@ -256,12 +258,15 @@ editable checkout, and falls back to the copy force-included in the wheel.
 The three local prepare manifests (`configs/allsky/data/local_prepare.yaml`,
 `local_prepare_raw.yaml`, `local_prepare_iso.yaml`) all set
 `night_filter.min_solar_elevation_deg: 10.0`, so no checkpoint trained on
-them ever saw a frame with the sun under 10°. The checkpoint does not record
-that floor, which is why the watch demands it on the command line whenever a
-checkpoint is given. Below it a frame is logged and left unscored and a block
-is recorded as `below_elevation_floor` (block model) or
-`no_frame_predictions` (frames only). A checkpoint trained under another
-manifest gets that manifest's value, not 10.
+them ever saw a frame with the sun under 10°. A checkpoint written since the
+floor joined its provenance records it (`night_filter` in the payload) and
+the watch takes it from there: `--min-elevation-deg` is then a cross-check,
+refused when it disagrees, and required only for a checkpoint written before
+the floor was recorded. Two members recording different floors are refused
+too. Below the floor a frame is logged and left unscored and a block is
+recorded as `below_elevation_floor` (block model) or `no_frame_predictions`
+(frames only). A checkpoint trained under another manifest carries that
+manifest's value, not 10.
 
 ## First-day check: are the live frames the frames the model saw?
 

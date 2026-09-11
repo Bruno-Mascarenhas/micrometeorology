@@ -37,7 +37,6 @@ __all__ = [
     "OCCLUSION_STRIDE_PX",
     "OCCLUSION_WINDOW_PX",
     "OVERLAY_TEXT_BAND_RAW",
-    "AttributionTarget",
     "Box",
     "FrameGeometry",
     "OcclusionMap",
@@ -48,8 +47,6 @@ __all__ = [
     "region_masks",
     "render_attribution_rgba",
 ]
-
-AttributionTarget = str
 
 #: Side of the occluding square and the step between positions, in input
 #: pixels: 96/32 on a 512 px input gives a 14 x 14 grid whose cells overlap
@@ -352,12 +349,7 @@ def _target_values(
     site: SiteConfig,
 ) -> np.ndarray:
     """Physical values of *target* for every row of a batched forward."""
-    rows = int(next(iter(outputs.values())).shape[0])
-    values = np.empty(rows, dtype=np.float64)
-    for index in range(rows):
-        row_outputs = {name: tensor[index : index + 1] for name, tensor in outputs.items()}
-        values[index] = float(served.physical(row_outputs, timestamp=timestamp, site=site)[target])
-    return values
+    return served.physical_values(outputs, target, timestamp=timestamp, site=site)
 
 
 def occlusion_map(

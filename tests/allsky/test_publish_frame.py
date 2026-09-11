@@ -25,6 +25,7 @@ from allsky.serving import ServingConfig
 from allsky.snapshot import load_served_model, solar_elevation_at
 from tests.allsky._block_probe import stub_image_backbone
 from tests.allsky._frame_probe import train_frame_probes
+from tests.allsky._pins import control, pinned, serving_pin_payload
 
 SITE = SiteConfig()
 NOON = pd.Timestamp("2025-03-20T12:00:00")
@@ -69,38 +70,24 @@ def _latest(watch: Path):
 
 
 def _pin(probes, tmp_path: Path) -> ServingConfig:
+    reports = tmp_path / "reports"
     return ServingConfig.model_validate(
-        {
-            "serving": True,
-            "id": "probe",
-            "label": "the probe",
-            "frame_checkpoints": [
-                {"path": str(probes["probe_s0"]), "sha256": _sha(probes["probe_s0"])}
+        serving_pin_payload(
+            frame_checkpoints=[
+                pinned(probes["probe_s0"], _sha(probes["probe_s0"]), reports / "member")
             ],
-            "min_elevation_deg": FLOOR_DEG,
-            "controls": {
-                "sensor_only": {
-                    "checkpoint": {
-                        "path": str(probes["sensor_only_s0"]),
-                        "sha256": _sha(probes["sensor_only_s0"]),
-                    },
-                    "report": str(tmp_path / "reports" / "sensor_only"),
-                },
-                "climatology": {
-                    "checkpoint": {
-                        "path": str(probes["climatology_s0"]),
-                        "sha256": _sha(probes["climatology_s0"]),
-                    },
-                    "report": str(tmp_path / "reports" / "climatology"),
-                },
-            },
-            "reports": {
-                "dataset": str(probes["dataset"]),
-                "members": [str(tmp_path / "reports" / "member")],
-                "training_history": str(tmp_path / "reports" / "metrics.csv"),
-            },
-            "selection": {"criterion": "the probe", "decided_on": "2025-03-20"},
-        }
+            sensor_only=control(
+                probes["sensor_only_s0"], _sha(probes["sensor_only_s0"]), reports / "sensor_only"
+            ),
+            climatology=control(
+                probes["climatology_s0"], _sha(probes["climatology_s0"]), reports / "climatology"
+            ),
+            dataset=probes["dataset"],
+            training_history=reports / "metrics.csv",
+            min_elevation_deg=FLOOR_DEG,
+            decided_on="2025-03-20",
+            label="the probe",
+        )
     )
 
 

@@ -24,7 +24,6 @@ station's naive local clock only to find the logger row a frame was paired to.
 
 import csv
 import datetime as dt
-import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -35,12 +34,26 @@ import numpy as np
 import pandas as pd
 
 from allsky.attribution import OCCLUSION_STRIDE_PX, OCCLUSION_WINDOW_PX
-from allsky.config import ExperimentConfig, image_size_of
+from allsky.config import (
+    DATASET_MANIFEST_FILENAME,
+    DATASET_SPLIT_FILENAME,
+    SITE_TZ,
+    ExperimentConfig,
+    image_size_of,
+    manifest_meta_path,
+)
+from allsky.data.blocks import block_ends
 from allsky.evaluation.metrics import classification_metrics, regression_metrics, skill_score
+from allsky.evaluation.persistence import previous_logger_row
 from allsky.publish.encoding import (
-    CONDITION_IDS,
+    DAY_STAMP_FORMAT,
+    ELEVATION_DECIMALS,
+    INDEX_DECIMALS,
+    IRRADIANCE_DECIMALS,
     MODEL_SCHEMA,
+    REFERENCES,
     PublishStamp,
+    class_share,
     condition_of,
     document_header,
     rounded_or_none,
@@ -48,7 +61,7 @@ from allsky.publish.encoding import (
     targets_glossary,
 )
 from allsky.serving import ServingConfig
-from labmim_core.site import STATION_UTC_OFFSET_HOURS
+from labmim_core.atomic import JsonObjectError, read_json_object
 from labmim_core.sky import SKY_CLASS_COUNT, SKY_CLASS_NAMES, SKY_CLEAR
 
 logger = logging.getLogger(__name__)
@@ -57,6 +70,7 @@ __all__ = [
     "CheckpointMetadata",
     "ModelCardError",
     "build_model_card",
+    "card_inputs",
     "checkpoint_metadata",
     "paired_row_ends",
 ]
@@ -64,25 +78,17 @@ __all__ = [
 EVALUATION_METRICS_FILENAME = "eval_metrics.json"
 STRATIFIED_FILENAME = "stratified.csv"
 PREDICTIONS_FILENAME = "predictions.parquet"
-MANIFEST_META_FILENAME = "manifest.parquet.meta.json"
-MANIFEST_FILENAME = "manifest.parquet"
-SPLITS_FILENAME = "splits.json"
 MANIFEST_SPLIT_COLUMNS = ("day_id", "solar_elevation", "sky_class")
 SPLIT_NAMES = ("train", "val", "test")
 SPLIT_NAMES_PT = {"train": "treino", "val": "validação", "test": "teste"}
 
-IRRADIANCE_DECIMALS = 2
-INDEX_DECIMALS = 4
 SCORE_DECIMALS = 3
-SHARE_DECIMALS = 3
 CURVE_DECIMALS = 4
-ELEVATION_DECIMALS = 2
 
 # local_prepare_iso_20260906.yaml: sensor_timestamp_offset_minutes -2.5, interval 5 min
 SENSOR_TIMESTAMP_OFFSET_MINUTES = -2.5
 LOGGER_INTERVAL_MINUTES = 5
 PERSISTENCE_HORIZON_MINUTES = LOGGER_INTERVAL_MINUTES
-STATION_CLOCK = dt.timezone(dt.timedelta(hours=STATION_UTC_OFFSET_HOURS))
 
 ATTRIBUTION_METHOD = "occlusion_sensitivity"
 ATTRIBUTION_FILL = "network_mean_level"
@@ -93,7 +99,6 @@ INFERENCE_MODE = "single_pass"
 SCALAR_FREE_ARCHITECTURES = ("image_only",)
 DOMAIN_CHECK_KEYS = ("day", "n", "dhi_mbe", "dhi_rmse", "class_agreement")
 CODE_VERSION_KEYS = ("package_version", "git_commit")
-DAY_STAMP_FORMAT = "%Y-%m-%dT00:00:00"
 BR_DATE_FORMAT = "%d/%m/%Y"
 
 REGRESSION_KEYS = ("rmse", "mae", "mbe", "r2", "n")
@@ -131,39 +136,6 @@ REFERENCE_LABELS = {
 }
 CAMERA_LABEL = "Câmera all-sky do Planetário e Observatório da UFBA"
 FRAMES_FROM_LABEL = "timelapse H.264 diário, um quadro por minuto de captura"
-
-REFERENCES: dict[str, dict[str, str]] = {
-    "escobedo": {
-        "short": "Escobedo et al. (2009)",
-        "citation": "Escobedo, J. F.; Gomes, E. N.; Oliveira, A. P.; Soares, J. (2009). Modeling hourly and daily fractions of UV, PAR and NIR to global solar radiation under various sky conditions at Botucatu, Brazil. Applied Energy, 86(3), 299-309.",
-        "url": "https://doi.org/10.1016/j.apenergy.2008.04.013",
-    },
-    "teramoto": {
-        "short": "Teramoto & Escobedo (2012)",
-        "citation": "Teramoto, É. T.; Escobedo, J. F. (2012). Análise da frequência anual das condições de céu em Botucatu, São Paulo. Revista Brasileira de Engenharia Agrícola e Ambiental, 16(9), 985-992.",
-        "url": "https://doi.org/10.1590/S1415-43662012000900009",
-    },
-    "haurwitz": {
-        "short": "Haurwitz (1945)",
-        "citation": "Haurwitz, B. (1945). Insolation in relation to cloudiness and cloud density. Journal of Meteorology, 2(3), 154-166.",
-        "url": "https://doi.org/10.1175/1520-0469(1945)002%3C0154:IIRTCA%3E2.0.CO;2",
-    },
-    "erbs": {
-        "short": "Erbs et al. (1982)",
-        "citation": "Erbs, D. G.; Klein, S. A.; Duffie, J. A. (1982). Estimation of the diffuse radiation fraction for hourly, daily and monthly-average global radiation. Solar Energy, 28(4), 293-302.",
-        "url": "https://doi.org/10.1016/0038-092X(82)90302-4",
-    },
-    "dinov3": {
-        "short": "Siméoni et al. (2025)",
-        "citation": "Siméoni, O. et al. (2025). DINOv3. arXiv:2508.10104.",
-        "url": "https://arxiv.org/abs/2508.10104",
-    },
-    "cmixup": {
-        "short": "Yao et al. (2022)",
-        "citation": "Yao, H.; Wang, Y.; Zhang, L.; Zou, J.; Finn, C. (2022). C-Mixup: Improving Generalization in Regression. Advances in Neural Information Processing Systems 35.",
-        "url": "https://arxiv.org/abs/2210.05775",
-    },
-}
 
 
 class ModelCardError(ValueError):
@@ -207,7 +179,11 @@ class _ReferenceSkill:
 
 
 def checkpoint_metadata(
-    path: str | Path, sha256: str, *, trust_checkpoint: bool = False
+    path: str | Path,
+    sha256: str,
+    *,
+    trust_checkpoint: bool = False,
+    payload: Mapping[str, Any] | None = None,
 ) -> CheckpointMetadata:
     """Read a checkpoint's provenance without building its model.
 
@@ -219,10 +195,14 @@ def checkpoint_metadata(
         The digest the pin names for it, carried into the card unchanged.
     trust_checkpoint:
         Read with the unrestricted unpickler (own files only).
+    payload:
+        The checkpoint already loaded, when the caller holds it; saves the
+        read of a file the publisher has resident for the served member.
     """
     from allsky.training.checkpointing import load_checkpoint
 
-    payload = load_checkpoint(path, map_location="cpu", trust_pickle=trust_checkpoint)
+    if payload is None:
+        payload = load_checkpoint(path, map_location="cpu", trust_pickle=trust_checkpoint)
     state = payload["model_state"]
     n_parameters = int(sum(int(np.prod(tuple(tensor.shape))) for tensor in state.values()))
     return CheckpointMetadata(
@@ -265,22 +245,37 @@ def paired_row_ends(local_times: pd.Series) -> pd.Series:
     pandas.Series
         ``(N,)`` naive station-local row ends, multiples of 5 minutes.
     """
-    centre_to_end = pd.Timedelta(
-        minutes=SENSOR_TIMESTAMP_OFFSET_MINUTES + LOGGER_INTERVAL_MINUTES / 2
-    )
-    return (local_times - centre_to_end).dt.ceil(f"{LOGGER_INTERVAL_MINUTES}min")
+    ends = block_ends(pd.DatetimeIndex(local_times), LOGGER_INTERVAL_MINUTES)
+    return pd.Series(ends, index=local_times.index)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        loaded: Any = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise ModelCardError(f"cannot read {path}: {exc}") from exc
-    except ValueError as exc:
-        raise ModelCardError(f"{path} is not valid JSON: {exc}") from exc
-    if not isinstance(loaded, dict):
-        raise ModelCardError(f"{path} is not a JSON object")
-    return loaded
+        return read_json_object(path)
+    except JsonObjectError as exc:
+        raise ModelCardError(str(exc)) from exc
+
+
+def card_inputs(pin: ServingConfig) -> list[Path]:
+    """Every file :func:`build_model_card` reads for *pin*, so a publisher can tell when none moved.
+
+    The checkpoints themselves are covered by the pin's digests, not listed.
+    """
+    report_files = (EVALUATION_METRICS_FILENAME, PREDICTIONS_FILENAME, STRATIFIED_FILENAME)
+    dataset_dir = Path(pin.reports.dataset)
+    manifest = dataset_dir / DATASET_MANIFEST_FILENAME
+    inputs = [
+        *(Path(member.report) / name for member in pin.frame_checkpoints for name in report_files),
+        Path(pin.controls.sensor_only.report) / EVALUATION_METRICS_FILENAME,
+        Path(pin.controls.climatology.report) / EVALUATION_METRICS_FILENAME,
+        Path(pin.reports.training_history),
+        manifest,
+        manifest_meta_path(manifest),
+        dataset_dir / DATASET_SPLIT_FILENAME,
+    ]
+    if pin.reports.domain_check is not None:
+        inputs.append(Path(pin.reports.domain_check))
+    return inputs
 
 
 def _read_report(report_dir: Path) -> dict[str, Any]:
@@ -427,24 +422,7 @@ def _column_mean(frames: Sequence[pd.DataFrame], column: str) -> np.ndarray:
 
 def _station_local(timestamp_utc: pd.Series) -> pd.Series:
     aware = pd.to_datetime(timestamp_utc, utc=True)
-    return aware.dt.tz_convert(STATION_CLOCK).dt.tz_localize(None)
-
-
-def _previous_row_observation(
-    rows: pd.DataFrame, column: str, *, one_value_per_row: bool
-) -> np.ndarray:
-    by_row = rows.groupby(["day_id", "row_end"], sort=False)[column].agg(["mean", "nunique"])
-    mixed = int((by_row["nunique"] > 1).sum())
-    if mixed and one_value_per_row:
-        logger.warning(
-            "%d paired logger row(s) hold more than one %s value (a frame paired past a missing "
-            "row); the row mean stands for the row",
-            mixed,
-            column,
-        )
-    previous_ends = rows["row_end"] - pd.Timedelta(minutes=LOGGER_INTERVAL_MINUTES)
-    previous = pd.MultiIndex.from_arrays([rows["day_id"], previous_ends])
-    return by_row["mean"].reindex(previous).to_numpy(dtype=np.float64)
+    return aware.dt.tz_convert(SITE_TZ).dt.tz_localize(None)
 
 
 def _scored_rows(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
@@ -472,15 +450,18 @@ def _scored_rows(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
     )
     for column in PROBABILITY_COLUMNS:
         rows[column] = _column_mean(frames, column)
-    rows["persistence_dhi"] = _previous_row_observation(rows, "obs_dhi", one_value_per_row=True)
-    rows["persistence_kindex"] = _previous_row_observation(
-        rows, "obs_kindex", one_value_per_row=False
+    rows["persistence_dhi"] = previous_logger_row(
+        rows, "obs_dhi", interval_minutes=LOGGER_INTERVAL_MINUTES, one_value_per_row=True
+    )
+    rows["persistence_kindex"] = previous_logger_row(
+        rows, "obs_kindex", interval_minutes=LOGGER_INTERVAL_MINUTES, one_value_per_row=False
     )
     return rows
 
 
 def _rmse(predicted: np.ndarray, observed: np.ndarray) -> float:
-    return float(np.sqrt(np.mean((predicted - observed) ** 2)))
+    """:func:`regression_metrics`' RMSE, so the card and the reports agree to the pair."""
+    return float(regression_metrics(observed, predicted)["rmse"])
 
 
 def _reference_skill(
@@ -507,17 +488,6 @@ def _reference_document(skill: _ReferenceSkill, *, rmse_key: str, decimals: int)
 
 def _n_rows(rows: pd.DataFrame, paired: np.ndarray) -> int:
     return len(rows.loc[paired, ["day_id", "row_end"]].drop_duplicates())
-
-
-def _class_share(labels: np.ndarray) -> dict[str, float | None]:
-    valid = labels[(labels >= 0) & (labels < SKY_CLASS_COUNT)]
-    if valid.size == 0:
-        return dict.fromkeys(CONDITION_IDS)
-    counts = np.bincount(valid, minlength=SKY_CLASS_COUNT)
-    return {
-        condition_of(index)["id"]: rounded_or_none(counts[index] / valid.size, SHARE_DECIMALS)
-        for index in range(SKY_CLASS_COUNT)
-    }
 
 
 def _ensemble_arm(
@@ -635,7 +605,7 @@ def _per_day(rows: pd.DataFrame) -> list[dict[str, Any]]:
                 "date": pd.Timestamp(str(day_id)).strftime(DAY_STAMP_FORMAT),
                 "n": int(paired.sum()),
                 "n_frames": len(day),
-                "class_share": _class_share(day["obs_sky"].to_numpy(dtype=np.int64)),
+                "class_share": class_share(day["obs_sky"].to_numpy(dtype=np.int64)),
                 "rmse_model": _masked_rmse(predicted, observed, paired),
                 "rmse_persistence": _masked_rmse(persistence, observed, paired),
                 "rmse_clearsky": _masked_rmse(clearsky, observed, paired),
@@ -731,7 +701,7 @@ def _split_block(days: Sequence[str], part: pd.DataFrame) -> dict[str, Any]:
             "min": rounded_or_none(finite.min(), ELEVATION_DECIMALS) if finite.size else None,
             "max": rounded_or_none(finite.max(), ELEVATION_DECIMALS) if finite.size else None,
         },
-        "class_share": _class_share(part["sky_class"].to_numpy(dtype=np.int64)),
+        "class_share": class_share(part["sky_class"].to_numpy(dtype=np.int64)),
     }
 
 
@@ -749,13 +719,14 @@ def _frame_geometry(geometry: Mapping[str, Any] | None) -> dict[str, Any] | None
 
 def _dataset_block(pin: ServingConfig, served: CheckpointMetadata) -> dict[str, Any]:
     dataset_dir = Path(pin.reports.dataset)
-    meta = _read_json(dataset_dir / MANIFEST_META_FILENAME)
+    manifest_path = dataset_dir / DATASET_MANIFEST_FILENAME
+    meta = _read_json(manifest_meta_path(manifest_path))
     if meta.get("manifest_sha256") != served.manifest_sha256:
         raise ModelCardError(
             f"{dataset_dir}: manifest {meta.get('manifest_sha256')} is not the one the served "
             f"checkpoints trained on ({served.manifest_sha256})"
         )
-    splits = _read_json(dataset_dir / SPLITS_FILENAME)
+    splits = _read_json(dataset_dir / DATASET_SPLIT_FILENAME)
     if splits.get("split_id") != served.split_id:
         raise ModelCardError(
             f"{dataset_dir}: split {splits.get('split_id')} is not the served checkpoints' "
@@ -764,7 +735,6 @@ def _dataset_block(pin: ServingConfig, served: CheckpointMetadata) -> dict[str, 
     assignment: dict[str, str] = {
         str(day): str(name) for day, name in (splits.get("assignment") or {}).items()
     }
-    manifest_path = dataset_dir / MANIFEST_FILENAME
     if not manifest_path.is_file():
         raise ModelCardError(f"{manifest_path} is missing")
     manifest = pd.read_parquet(manifest_path, columns=list(MANIFEST_SPLIT_COLUMNS))
@@ -1127,10 +1097,9 @@ def build_model_card(
                 f"{member.manifest_sha256}, the attribution member on {served.split_id} / "
                 f"{served.manifest_sha256}; their predictions cannot be averaged"
             )
-    member_reports = [_read_report(Path(path)) for path in pin.reports.members]
-    for member, report, report_dir in zip(
-        members, member_reports, pin.reports.members, strict=True
-    ):
+    report_dirs = [Path(pinned.report) for pinned in pin.frame_checkpoints]
+    member_reports = [_read_report(report_dir) for report_dir in report_dirs]
+    for member, report, report_dir in zip(members, member_reports, report_dirs, strict=True):
         _check_report_is_about(report, member, what=str(report_dir))
         if Path(str(report.get("checkpoint_path", ""))).name != member.path.name:
             logger.warning(
@@ -1141,7 +1110,7 @@ def build_model_card(
             )
     served_report = member_reports[pin.attribution_checkpoint]
 
-    member_frames = _member_predictions([Path(path) for path in pin.reports.members])
+    member_frames = _member_predictions(report_dirs)
     ensemble_rows = _scored_rows(member_frames)
     member_rows = [_scored_rows([frame]) for frame in member_frames]
 
@@ -1193,7 +1162,7 @@ def build_model_card(
             "sky_conditions": sky_conditions_block(),
             "targets": targets_glossary(kindex_kind),
         },
-        "stratified": _stratified(Path(pin.reports.members[pin.attribution_checkpoint])),
+        "stratified": _stratified(Path(pin.attribution_member.report)),
         "seeds": _seed_spread(member_arms, members, member_rows),
         "attribution_summary": _attribution_summary(pin),
         "domain_check": domain_check,

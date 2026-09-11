@@ -10,64 +10,45 @@ from typer.testing import CliRunner
 
 from allsky.cli import app
 from allsky.serving import (
+    HeadRoles,
     PinVerificationError,
+    RoleSelector,
     ServingConfig,
     ServingConfigError,
     load_serving_config,
     sha256_of_file,
     verify_pinned_checkpoints,
 )
+from tests.allsky._pins import control, pinned, serving_pin_payload
 
 runner = CliRunner()
 REPO_PIN = Path(__file__).resolve().parents[2] / "configs" / "allsky" / "serving" / "ceu.yaml"
 
 
+def _written(path: Path, content: bytes) -> tuple[Path, str]:
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content)
+    return path, hashlib.sha256(content).hexdigest()
+
+
 def _pin_dict(tmp_path: Path, *, members: int = 2) -> dict:
     checkpoints = []
-    reports = []
     for index in range(members):
-        ckpt = tmp_path / f"member{index}" / "best.ckpt"
-        ckpt.parent.mkdir(parents=True)
-        ckpt.write_bytes(bytes([index]) * 1024)
-        checkpoints.append(
-            {"path": str(ckpt), "sha256": hashlib.sha256(ckpt.read_bytes()).hexdigest()}
-        )
-        reports.append(str(ckpt.parent / "eval-test"))
-    control = tmp_path / "controls" / "sensor_only" / "best.ckpt"
-    control.parent.mkdir(parents=True)
-    control.write_bytes(b"scalars only")
-    climatology = tmp_path / "controls" / "climatology" / "best.ckpt"
-    climatology.parent.mkdir(parents=True)
-    climatology.write_bytes(b"train means")
-    return {
-        "serving": True,
-        "id": "probe",
-        "label": "a probe pin",
-        "frame_checkpoints": checkpoints,
-        "min_elevation_deg": 10.0,
-        "controls": {
-            "sensor_only": {
-                "checkpoint": {
-                    "path": str(control),
-                    "sha256": hashlib.sha256(control.read_bytes()).hexdigest(),
-                },
-                "report": str(tmp_path / "controls" / "sensor_only" / "eval-test"),
-            },
-            "climatology": {
-                "checkpoint": {
-                    "path": str(climatology),
-                    "sha256": hashlib.sha256(climatology.read_bytes()).hexdigest(),
-                },
-                "report": str(tmp_path / "controls" / "climatology" / "eval-test"),
-            },
-        },
-        "reports": {
-            "dataset": str(tmp_path / "dataset"),
-            "members": reports,
-            "training_history": str(tmp_path / "member0" / "metrics.csv"),
-        },
-        "selection": {"criterion": "the probe", "decided_on": "2026-09-11"},
-    }
+        ckpt, digest = _written(tmp_path / f"member{index}" / "best.ckpt", bytes([index]) * 1024)
+        checkpoints.append(pinned(ckpt, digest, ckpt.parent / "eval-test"))
+    sensor, sensor_digest = _written(
+        tmp_path / "controls" / "sensor_only" / "best.ckpt", b"scalars only"
+    )
+    climatology, climatology_digest = _written(
+        tmp_path / "controls" / "climatology" / "best.ckpt", b"train means"
+    )
+    return serving_pin_payload(
+        frame_checkpoints=checkpoints,
+        sensor_only=control(sensor, sensor_digest, sensor.parent / "eval-test"),
+        climatology=control(climatology, climatology_digest, climatology.parent / "eval-test"),
+        dataset=tmp_path / "dataset",
+        training_history=tmp_path / "member0" / "metrics.csv",
+    )
 
 
 def _write_pin(tmp_path: Path, payload: dict) -> Path:
@@ -79,7 +60,7 @@ def _write_pin(tmp_path: Path, payload: dict) -> Path:
 def test_the_repository_pin_loads_and_names_one_report_per_member():
     pin = load_serving_config(REPO_PIN)
 
-    assert len(pin.reports.members) == len(pin.frame_checkpoints)
+    assert all(member.report.name == "eval-test" for member in pin.frame_checkpoints)
     assert pin.attribution_member is pin.frame_checkpoints[pin.attribution_checkpoint]
 
 
@@ -99,11 +80,11 @@ def test_an_attribution_index_past_the_members_is_refused(tmp_path):
         ServingConfig.model_validate(payload)
 
 
-def test_a_report_count_that_differs_from_the_members_is_refused(tmp_path):
+def test_a_member_without_its_report_is_refused(tmp_path):
     payload = _pin_dict(tmp_path)
-    payload["reports"]["members"] = payload["reports"]["members"][:1]
+    del payload["frame_checkpoints"][1]["report"]
 
-    with pytest.raises(ValueError, match="one per member"):
+    with pytest.raises(ValueError, match=r"frame_checkpoints\.1\.report"):
         ServingConfig.model_validate(payload)
 
 
@@ -286,11 +267,7 @@ def test_watch_takes_checkpoints_roles_and_floor_from_the_pin(tmp_path, monkeypa
     import allsky.snapshot
     import allsky.watch
 
-    built: list[Path] = []
     monkeypatch.setattr(allsky.watch, "run_watch", fake_run_watch)
-    monkeypatch.setattr(
-        allsky.snapshot, "load_served_model", lambda path, **_kwargs: built.append(Path(path))
-    )
     monkeypatch.setattr("allsky.cli.watch._build_client", lambda *_args, **_kwargs: object())
 
     result = runner.invoke(app, ["watch", "--out", str(tmp_path / "watch"), "--serving", str(pin)])
@@ -299,9 +276,8 @@ def test_watch_takes_checkpoints_roles_and_floor_from_the_pin(tmp_path, monkeypa
     assert [Path(p) for p in seen["checkpoint_frames"]] == [
         Path(m["path"]) for m in payload["frame_checkpoints"]
     ]
-    assert (seen["frame_sky_role"], seen["frame_dhi_role"]) == ("best", "all")
+    assert seen["frame_roles"] == HeadRoles(sky=RoleSelector.best, dhi=RoleSelector.all)
     assert seen["min_solar_elevation_deg"] == 12.5
-    assert built == [Path(m["path"]) for m in payload["frame_checkpoints"]]
 
 
 def test_watch_stops_when_a_pinned_member_cannot_be_built(tmp_path, monkeypatch):

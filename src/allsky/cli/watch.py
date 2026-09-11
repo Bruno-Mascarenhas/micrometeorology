@@ -2,35 +2,24 @@
 
 import http.client
 import logging
-from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from allsky.archive import ARCHIVE_BASE_URL, ArchiveError
-from allsky.cli.archive import STATE_SUBDIR, _build_client
+from allsky.archive import ARCHIVE_BASE_URL, STATE_SUBDIR, ArchiveError
+from allsky.cli.archive import _build_client
 from allsky.cli.runtime import configure_cli_logging
 from allsky.serving import (
+    HeadRoles,
     PinVerificationError,
+    RoleSelector,
     ServingConfigError,
     load_serving_config,
     verify_pinned_checkpoints,
 )
 
 logger = logging.getLogger(__name__)
-
-
-class RoleChoice(StrEnum):
-    """Which members of an ensemble a head group is read from, by checkpoint stem.
-
-    ``best`` reads the ``best.ckpt`` members, ``last`` the ``last.ckpt`` ones
-    and ``all`` every member, whatever its stem.
-    """
-
-    best = "best"
-    last = "last"
-    all = "all"
 
 
 def watch(
@@ -69,27 +58,27 @@ def watch(
         ),
     ] = None,
     frame_sky_role: Annotated[
-        RoleChoice,
+        RoleSelector,
         typer.Option(help="Frame checkpoints whose sky heads are averaged, by file stem."),
-    ] = RoleChoice.all,
+    ] = RoleSelector.all,
     frame_dhi_role: Annotated[
-        RoleChoice,
+        RoleSelector,
         typer.Option(
             help="Frame checkpoints whose dhi/kindex/cloud_fraction heads are averaged, by "
             "file stem."
         ),
-    ] = RoleChoice.all,
+    ] = RoleSelector.all,
     block_sky_role: Annotated[
-        RoleChoice,
+        RoleSelector,
         typer.Option(help="Block checkpoints whose sky heads are averaged, by file stem."),
-    ] = RoleChoice.all,
+    ] = RoleSelector.all,
     block_dhi_role: Annotated[
-        RoleChoice,
+        RoleSelector,
         typer.Option(
             help="Block checkpoints whose dhi/kindex/cloud_fraction heads are averaged, by "
             "file stem."
         ),
-    ] = RoleChoice.all,
+    ] = RoleSelector.all,
     poll_seconds: Annotated[float, typer.Option(min=0.0, help="Seconds between polls.")] = 20.0,
     block_minutes: Annotated[
         float, typer.Option(min=0.0, help="The logger's averaging interval, in minutes.")
@@ -107,8 +96,9 @@ def watch(
         float | None,
         typer.Option(
             help="night_filter.min_solar_elevation_deg the checkpoints' manifest was built "
-            "with; a frame or block with the sun below it is not scored. Required with "
-            "--checkpoint-frame and with --checkpoint-block."
+            "with; a frame or block with the sun below it is not scored. A checkpoint that "
+            "records its floor supplies it and refuses a different value; one that records "
+            "none needs it."
         ),
     ] = None,
     device: Annotated[str, typer.Option(help="Torch device for inference.")] = "cpu",
@@ -157,16 +147,16 @@ def watch(
     ------
     typer.Exit
         Code 1 when the client cannot be built, a role selects no checkpoint,
-        a checkpoint is given without ``--min-elevation-deg``, a pinned
-        checkpoint fails verification or conflicts with an explicit option,
-        or a checkpoint of either kind is refused at start-up.
+        the elevation floor is unsettled, a pinned checkpoint fails
+        verification or conflicts with an explicit option, or a checkpoint of
+        either kind is refused or cannot be built at start-up.
     """
     configure_cli_logging()
     if serving is not None:
         if (
             checkpoint_frame
-            or frame_sky_role is not RoleChoice.all
-            or frame_dhi_role is not RoleChoice.all
+            or frame_sky_role is not RoleSelector.all
+            or frame_dhi_role is not RoleSelector.all
         ):
             logger.error("--serving already names the frame checkpoints and their roles")
             raise typer.Exit(code=1)
@@ -180,14 +170,11 @@ def watch(
             logger.error("%s", exc)
             raise typer.Exit(code=1) from exc
         checkpoint_frame = [member.path for member in pin.frame_checkpoints]
-        frame_sky_role = RoleChoice(pin.frame_sky_role)
-        frame_dhi_role = RoleChoice(pin.frame_dhi_role)
+        frame_sky_role = pin.frame_sky_role
+        frame_dhi_role = pin.frame_dhi_role
         min_elevation_deg = pin.min_elevation_deg
-        _build_every_member_or_exit(checkpoint_frame, device=device, trust=trust_checkpoint)
         logger.info(
-            "serving pin %s: %d frame checkpoint(s) verified and built",
-            pin.id,
-            len(checkpoint_frame),
+            "serving pin %s: %d frame checkpoint(s) verified", pin.id, len(checkpoint_frame)
         )
     from allsky.snapshot import capture_snapshot
     from allsky.watch import FRAMES_SUBDIR, run_watch
@@ -208,10 +195,8 @@ def watch(
             out_dir,
             checkpoint_frames=tuple(checkpoint_frame or ()),
             checkpoint_blocks=tuple(checkpoint_block or ()),
-            frame_sky_role=frame_sky_role.value,
-            frame_dhi_role=frame_dhi_role.value,
-            block_sky_role=block_sky_role.value,
-            block_dhi_role=block_dhi_role.value,
+            frame_roles=HeadRoles(sky=frame_sky_role, dhi=frame_dhi_role),
+            block_roles=HeadRoles(sky=block_sky_role, dhi=block_dhi_role),
             poll_seconds=poll_seconds,
             block_minutes=block_minutes,
             min_frames=min_frames,
@@ -224,28 +209,17 @@ def watch(
     except KeyboardInterrupt:
         typer.echo("watch stopped")
         return
-    except (ArchiveError, ValueError, OSError, http.client.HTTPException) as exc:
+    except (
+        ArchiveError,
+        ValueError,
+        KeyError,
+        RuntimeError,
+        OSError,
+        http.client.HTTPException,
+    ) as exc:
         logger.error("%s", exc)
         raise typer.Exit(code=1) from exc
     typer.echo(f"watch finished after {polls} poll(s)")
-
-
-def _build_every_member_or_exit(checkpoints: list[Path], *, device: str, trust: bool) -> None:
-    """Load and build each pinned checkpoint once, so a member that cannot be served stops the start.
-
-    The watch scores frames one at a time and logs a per-frame failure without
-    stopping, which is right for a bad frame and wrong for a bad member: a
-    missing backbone weight file or a moved checkpoint would otherwise leave the
-    service running all day, scoring nothing, with exit 0.
-    """
-    from allsky.snapshot import load_served_model
-
-    for checkpoint in checkpoints:
-        try:
-            load_served_model(checkpoint, device=device, trust_checkpoint=trust)
-        except (ValueError, RuntimeError, OSError, KeyError) as exc:
-            logger.error("pinned checkpoint %s cannot be served: %s", checkpoint, exc)
-            raise typer.Exit(code=1) from exc
 
 
 def register(app: typer.Typer) -> None:

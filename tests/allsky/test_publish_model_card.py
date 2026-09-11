@@ -18,6 +18,7 @@ from allsky.publish.model_card import (
 )
 from allsky.serving import ServingConfig
 from labmim_core.sky import SKY_CLASS_NAMES
+from tests.allsky._pins import control, pinned, serving_pin_payload
 
 SPLIT_ID = "a" * 64
 MANIFEST_SHA = "b" * 64
@@ -275,42 +276,31 @@ def _write_history(path: Path) -> None:
 
 def _write_inputs(tmp_path: Path) -> dict[str, Any]:
     n = len(TEST_DAYS) * ROWS_PER_DAY * FRAMES_PER_ROW
-    member_reports = []
     checkpoints = []
     for name, seed in MEMBERS:
         report_dir = tmp_path / name / "eval-test"
         _write_report(report_dir, _eval_metrics(name, "image_only", n), _predictions(seed))
-        member_reports.append(str(report_dir))
-        checkpoints.append({"path": str(tmp_path / name / "best.ckpt"), "sha256": DIGEST})
+        checkpoints.append(pinned(tmp_path / name / "best.ckpt", DIGEST, report_dir))
     controls = {}
-    for control, rmse, mae in (("sensor_only", 87.6, 0.21), ("climatology", 73.6, 0.27)):
-        report_dir = tmp_path / "controls" / control / "eval-test"
+    for control_id, rmse, mae in (("sensor_only", 87.6, 0.21), ("climatology", 73.6, 0.27)):
+        report_dir = tmp_path / "controls" / control_id / "eval-test"
         _write_report(
-            report_dir, _eval_metrics(control, control, n, dhi_rmse=rmse, kindex_mae=mae), None
+            report_dir,
+            _eval_metrics(control_id, control_id, n, dhi_rmse=rmse, kindex_mae=mae),
+            None,
         )
-        controls[control] = {
-            "checkpoint": {
-                "path": str(tmp_path / "controls" / control / "best.ckpt"),
-                "sha256": DIGEST,
-            },
-            "report": str(report_dir),
-        }
+        controls[control_id] = control(
+            tmp_path / "controls" / control_id / "best.ckpt", DIGEST, report_dir
+        )
     _write_dataset(tmp_path / "dataset")
     _write_history(tmp_path / MEMBERS[0][0] / "metrics.csv")
-    return {
-        "serving": True,
-        "id": "probe",
-        "label": "a probe pin",
-        "frame_checkpoints": checkpoints,
-        "min_elevation_deg": 10.0,
-        "controls": controls,
-        "reports": {
-            "dataset": str(tmp_path / "dataset"),
-            "members": member_reports,
-            "training_history": str(tmp_path / MEMBERS[0][0] / "metrics.csv"),
-        },
-        "selection": {"criterion": "the probe", "decided_on": "2026-09-11"},
-    }
+    return serving_pin_payload(
+        frame_checkpoints=checkpoints,
+        sensor_only=controls["sensor_only"],
+        climatology=controls["climatology"],
+        dataset=tmp_path / "dataset",
+        training_history=tmp_path / MEMBERS[0][0] / "metrics.csv",
+    )
 
 
 def _members(tmp_path: Path) -> list[CheckpointMetadata]:
@@ -425,7 +415,7 @@ def test_a_control_evaluated_on_other_rows_is_refused(tmp_path):
 
 def test_a_report_written_with_test_time_rotations_is_refused(tmp_path):
     payload = _write_inputs(tmp_path)
-    _rewrite_metrics(payload["reports"]["members"][1], meta__tta_rotations=4)
+    _rewrite_metrics(payload["frame_checkpoints"][1]["report"], meta__tta_rotations=4)
 
     with pytest.raises(ModelCardError, match="rotation"):
         _build(tmp_path, payload)
@@ -601,7 +591,9 @@ def test_a_control_trained_on_other_targets_is_refused(tmp_path):
 
 def test_a_report_paired_with_another_sensor_offset_is_refused(tmp_path):
     payload = _write_inputs(tmp_path)
-    _rewrite_metrics(payload["reports"]["members"][0], meta__sensor_timestamp_offset_minutes=0.0)
+    _rewrite_metrics(
+        payload["frame_checkpoints"][0]["report"], meta__sensor_timestamp_offset_minutes=0.0
+    )
 
     with pytest.raises(ModelCardError, match="offset"):
         _build(tmp_path, payload)
@@ -609,7 +601,7 @@ def test_a_report_paired_with_another_sensor_offset_is_refused(tmp_path):
 
 def test_a_missing_member_report_is_refused(tmp_path):
     payload = _write_inputs(tmp_path)
-    (Path(payload["reports"]["members"][0]) / "eval_metrics.json").unlink()
+    (Path(payload["frame_checkpoints"][0]["report"]) / "eval_metrics.json").unlink()
 
     with pytest.raises(ModelCardError, match="cannot read"):
         _build(tmp_path, payload)
@@ -617,7 +609,7 @@ def test_a_missing_member_report_is_refused(tmp_path):
 
 def test_a_member_without_predictions_is_refused(tmp_path):
     payload = _write_inputs(tmp_path)
-    (Path(payload["reports"]["members"][1]) / "predictions.parquet").unlink()
+    (Path(payload["frame_checkpoints"][1]["report"]) / "predictions.parquet").unlink()
 
     with pytest.raises(ModelCardError, match="predictions"):
         _build(tmp_path, payload)

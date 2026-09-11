@@ -9,37 +9,47 @@ directory under ``site/`` with one strict ``response.json()``.
 """
 
 import datetime as dt
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from allsky.config import SITE_TZ_NAME
 from labmim_core.site import STATION_UTC_OFFSET_HOURS
 from labmim_core.sky import (
     SKY_CLASS_COUNT,
     SKY_CLASS_KT_UPPER_BOUNDS,
     SKY_CLASS_NAMES,
     SKY_CLASS_NAMES_PT,
+    SKY_CLASS_REFERENCE,
 )
 from micrometeorology.common.site_json import finite, rounded, write_json
 
 __all__ = [
     "CONDITION_IDS",
+    "DAY_STAMP_FORMAT",
     "DEFAULT_KINDEX_KIND",
+    "ELEVATION_DECIMALS",
     "FRAME_SCHEMA",
+    "INDEX_DECIMALS",
+    "IRRADIANCE_DECIMALS",
     "MODEL_SCHEMA",
+    "REFERENCES",
+    "SHARE_DECIMALS",
     "SKIPPED_REASON_LABELS_PT",
     "SOURCE_LABELS_PT",
-    "STATION_TIMEZONE_NAME",
     "TIMELINE_SCHEMA",
     "PublishStamp",
+    "class_share",
     "condition_of",
     "document_header",
     "finite",
+    "kindex_kind_of",
     "publish_stamp",
     "rounded",
     "rounded_or_none",
-    "rounded_rows",
     "sky_conditions_block",
     "targets_glossary",
     "timezone_block",
@@ -50,11 +60,13 @@ FRAME_SCHEMA = "labmim-allsky-frame-v2"
 TIMELINE_SCHEMA = "labmim-allsky-timeline-v1"
 MODEL_SCHEMA = "labmim-allsky-model-v1"
 
-#: The camera and the datalogger stamp on this zone's fixed offset; the page
-#: labels every naive timestamp with it.
-STATION_TIMEZONE_NAME = "America/Bahia"
 VERSION_STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 NAIVE_LOCAL_FORMAT = "%Y-%m-%dT%H:%M:%S"
+DAY_STAMP_FORMAT = "%Y-%m-%dT00:00:00"
+IRRADIANCE_DECIMALS = 2
+INDEX_DECIMALS = 4
+ELEVATION_DECIMALS = 2
+SHARE_DECIMALS = 3
 #: What a watch record that names no ``kindex_kind`` is taken to serve; every
 #: checkpoint of the served family fits k*, and the fallback is logged wherever
 #: it is applied.
@@ -63,10 +75,39 @@ DEFAULT_KINDEX_KIND = "kstar"
 #: The page reads a condition by ``id`` (``i``..``iv``) or by ``condition``
 #: (1..4), never by the exporter's 0-based class index.
 CONDITION_IDS = ("i", "ii", "iii", "iv")
-SKY_CONDITIONS_REFERENCE = (
-    "Escobedo, Gomes, Oliveira & Soares (2009), Applied Energy 86(3):299-309, sec. 3.1; "
-    "Portuguese nomenclature after Teramoto & Escobedo (2012), RBEAA 16(9):985-992"
-)
+
+REFERENCES: dict[str, dict[str, str]] = {
+    "escobedo": {
+        "short": "Escobedo et al. (2009)",
+        "citation": "Escobedo, J. F.; Gomes, E. N.; Oliveira, A. P.; Soares, J. (2009). Modeling hourly and daily fractions of UV, PAR and NIR to global solar radiation under various sky conditions at Botucatu, Brazil. Applied Energy, 86(3), 299-309.",
+        "url": "https://doi.org/10.1016/j.apenergy.2008.04.013",
+    },
+    "teramoto": {
+        "short": "Teramoto & Escobedo (2012)",
+        "citation": "Teramoto, É. T.; Escobedo, J. F. (2012). Análise da frequência anual das condições de céu em Botucatu, São Paulo. Revista Brasileira de Engenharia Agrícola e Ambiental, 16(9), 985-992.",
+        "url": "https://doi.org/10.1590/S1415-43662012000900009",
+    },
+    "haurwitz": {
+        "short": "Haurwitz (1945)",
+        "citation": "Haurwitz, B. (1945). Insolation in relation to cloudiness and cloud density. Journal of Meteorology, 2(3), 154-166.",
+        "url": "https://doi.org/10.1175/1520-0469(1945)002%3C0154:IIRTCA%3E2.0.CO;2",
+    },
+    "erbs": {
+        "short": "Erbs et al. (1982)",
+        "citation": "Erbs, D. G.; Klein, S. A.; Duffie, J. A. (1982). Estimation of the diffuse radiation fraction for hourly, daily and monthly-average global radiation. Solar Energy, 28(4), 293-302.",
+        "url": "https://doi.org/10.1016/0038-092X(82)90302-4",
+    },
+    "dinov3": {
+        "short": "Siméoni et al. (2025)",
+        "citation": "Siméoni, O. et al. (2025). DINOv3. arXiv:2508.10104.",
+        "url": "https://arxiv.org/abs/2508.10104",
+    },
+    "cmixup": {
+        "short": "Yao et al. (2022)",
+        "citation": "Yao, H.; Wang, Y.; Zhang, L.; Zou, J.; Finn, C. (2022). C-Mixup: Improving Generalization in Regression. Advances in Neural Information Processing Systems 35.",
+        "url": "https://arxiv.org/abs/2210.05775",
+    },
+}
 
 SKIPPED_REASON_LABELS_PT: dict[str, str] = {
     "insufficient_frames": "quadros de menos no bloco (ou lacuna de captura)",
@@ -84,22 +125,28 @@ SOURCE_LABELS_PT: dict[str, str] = {
 class PublishStamp:
     """The ``version`` and ``generated_utc`` one publish writes into every document.
 
-    Both derive from one aware UTC instant through :meth:`at`, so no document
-    can carry a version from one publish and a generation time from another.
+    Both derive from one aware UTC instant, so no document can carry a version
+    from one publish and a generation time from another.
     """
 
-    version: str
-    generated_utc: str
+    at_utc: dt.datetime
 
     @classmethod
     def at(cls, now_utc: dt.datetime) -> PublishStamp:
         """The stamp of a publish happening at the aware UTC instant *now_utc*."""
         if now_utc.tzinfo is None or now_utc.utcoffset() != dt.timedelta(0):
             raise ValueError("the publish stamp is taken in UTC; pass an aware UTC datetime")
-        return cls(
-            version=now_utc.strftime(VERSION_STAMP_FORMAT),
-            generated_utc=now_utc.strftime(VERSION_STAMP_FORMAT),
-        )
+        return cls(at_utc=now_utc)
+
+    @property
+    def version(self) -> str:
+        """The publish instant as the ``version`` string."""
+        return self.at_utc.strftime(VERSION_STAMP_FORMAT)
+
+    @property
+    def generated_utc(self) -> str:
+        """The publish instant as the ``generated_utc`` string; the same text as ``version``."""
+        return self.version
 
 
 def publish_stamp(now_utc: dt.datetime | None = None) -> PublishStamp:
@@ -109,7 +156,7 @@ def publish_stamp(now_utc: dt.datetime | None = None) -> PublishStamp:
 
 def timezone_block() -> dict[str, Any]:
     """The ``timezone`` block every document repeats for its naive local stamps."""
-    return {"name": STATION_TIMEZONE_NAME, "utc_offset_hours": STATION_UTC_OFFSET_HOURS}
+    return {"name": SITE_TZ_NAME, "utc_offset_hours": STATION_UTC_OFFSET_HOURS}
 
 
 def document_header(schema: str, stamp: PublishStamp) -> dict[str, Any]:
@@ -138,7 +185,7 @@ def sky_conditions_block() -> dict[str, Any]:
     upper: list[float | None] = [*SKY_CLASS_KT_UPPER_BOUNDS, None]
     return {
         "kt_upper_bounds": list(SKY_CLASS_KT_UPPER_BOUNDS),
-        "reference": SKY_CONDITIONS_REFERENCE,
+        "reference": SKY_CLASS_REFERENCE,
         "ground_truth": "kt_bands_of_ghi",
         "conditions": [
             {**condition_of(index), "kt_range": [lower[index], upper[index]]}
@@ -191,17 +238,36 @@ def rounded_or_none(value: object, decimals: int) -> float | None:
         return None
 
 
-def rounded_rows(
-    rows: Sequence[Sequence[object]], decimals: Sequence[int | None]
-) -> list[list[Any]]:
-    """Round positional rows column by column; ``None`` in *decimals* leaves a column as is."""
-    return [
-        [
-            value if digits is None else rounded_or_none(value, digits)
-            for value, digits in zip(row, decimals, strict=True)
-        ]
-        for row in rows
-    ]
+def class_share(labels: np.ndarray) -> dict[str, float | None]:
+    """Share of each published condition among the valid labels of *labels* ``(N,)`` int64."""
+    valid = labels[(labels >= 0) & (labels < SKY_CLASS_COUNT)]
+    if valid.size == 0:
+        return dict.fromkeys(CONDITION_IDS)
+    counts = np.bincount(valid, minlength=SKY_CLASS_COUNT)
+    return {
+        condition_of(index)["id"]: rounded_or_none(counts[index] / valid.size, SHARE_DECIMALS)
+        for index in range(SKY_CLASS_COUNT)
+    }
+
+
+def kindex_kind_of(payload: Mapping[str, Any]) -> str | None:
+    """The ``kindex_kind`` a watch record's model block names, or ``None`` when none does.
+
+    Read from the entries of ``models`` and then from ``model``, on the record
+    itself and then on its ``block_model``, so a single-member record, an
+    ensemble record and a block record closed by a block model all answer the
+    same way.
+    """
+    candidates: list[Any] = []
+    for holder in (payload, payload.get("block_model") or {}):
+        models = holder.get("models")
+        if isinstance(models, list):
+            candidates.extend(models)
+        candidates.append(holder.get("model"))
+    for candidate in candidates:
+        if isinstance(candidate, Mapping) and candidate.get("kindex_kind"):
+            return str(candidate["kindex_kind"])
+    return None
 
 
 def write_document(path: str | Path, payload: Mapping[str, Any]) -> Path:

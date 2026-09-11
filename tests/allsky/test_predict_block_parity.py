@@ -24,7 +24,7 @@ from allsky.data.splits import create_day_splits, save_split_artifact
 from allsky.features.policy import SAFE_FEATURES
 from allsky.geometry import resolve_geometry_channels
 from allsky.preprocessing import PreprocessingPipeline
-from allsky.snapshot import _clearsky_dhi_reference, _image_input, block_end_of, predict_block
+from allsky.snapshot import _image_input, block_end_of, clearsky_dhi_at, predict_block
 from allsky.training.checkpointing import load_checkpoint, normalizers_from_checkpoint
 from labmim_core.site import SiteConfig
 from tests.allsky import _synthetic as synthetic
@@ -168,11 +168,12 @@ def _recorded_block_batch(
 
     seen: dict[str, Any] = {}
 
-    def recording_model(batch: dict[str, Any]) -> dict[str, Any]:
-        seen.update(batch)
-        return {"dhi": torch.zeros(1)}
+    class RecordingModel(torch.nn.Module):
+        def forward(self, batch: dict[str, Any]) -> dict[str, Any]:
+            seen.update(batch)
+            return {"dhi": torch.zeros(1)}
 
-    monkeypatch.setattr(registry, "restore_model", lambda *_a, **_k: recording_model)
+    monkeypatch.setattr(registry, "restore_model", lambda *_a, **_k: RecordingModel())
     result = predict_block(
         frames,
         checkpoint_path,
@@ -236,7 +237,7 @@ def test_predict_block_scales_dhi_by_the_served_rows_clear_sky_reference(
     dataset = _served_dataset(root, manifest, checkpoint)
     served = dataset.served_manifest.iloc[3]
 
-    reference = _clearsky_dhi_reference(_local(served["timestamp_utc"]), SiteConfig())
+    reference = clearsky_dhi_at(_local(served["timestamp_utc"]), SiteConfig())
 
     assert reference == pytest.approx(float(dataset[3]["dhi_scale"]), rel=1e-5)
 

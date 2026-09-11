@@ -34,15 +34,15 @@ import pandas as pd
 
 from allsky.archive import ArchiveError
 from allsky.config import SiteConfig
+from allsky.serving import ALL_ROLES, HeadRoles, RoleSelector
 from allsky.snapshot import (
+    ServedInput,
+    ServedModel,
     Snapshot,
     SolarElevationBelowFloorError,
     _site_now,
-    block_checkpoint_window_minutes,
     block_end_of,
-    inspect_frame_checkpoint,
-    predict_block,
-    predict_snapshot,
+    load_served_model,
     solar_elevation_at,
 )
 from labmim_core.atomic import atomic_write_strict_json
@@ -56,7 +56,9 @@ __all__ = [
     "ROLE_SELECTORS",
     "checkpoint_role",
     "ensemble_prediction",
+    "envelope_of",
     "frame_aggregate",
+    "frames_newest_first",
     "frames_on_disk",
     "run_watch",
 ]
@@ -67,7 +69,7 @@ BLOCK_STEM_FORMAT = "%Y%m%d-%H%M"
 PREDICTION_SUFFIX = ".prediction.json"
 SKIPPED_SUFFIX = ".skipped.json"
 CHECKPOINT_ROLES = ("best", "last", "other")
-ROLE_SELECTORS = ("best", "last", "all")
+ROLE_SELECTORS = tuple(selector.value for selector in RoleSelector)
 REGRESSION_HEADS = ("dhi", "kindex", "cloud_fraction")
 SKY_HEAD = "sky"
 SOURCE_BLOCK_MODEL = "block_model"
@@ -101,10 +103,31 @@ def frames_on_disk(frames_dir: str | Path) -> list[Snapshot]:
         One per readable sidecar, sorted by naive local ``captured_at``.
     """
     directory = Path(frames_dir)
-    records: list[Snapshot] = []
-    for sidecar in sorted(directory.glob("*.json")):
-        if sidecar.name.endswith(PREDICTION_SUFFIX):
-            continue
+    records = _snapshots_of(directory, sorted(_frame_sidecars(directory)))
+    return sorted(records, key=lambda record: record.captured_at)
+
+
+def frames_newest_first(frames_dir: str | Path) -> Iterator[Snapshot]:
+    """The frames of :func:`frames_on_disk`, newest name first, each read only when reached.
+
+    The capture files are named by their overlay stamp, so the name order is
+    the capture order; a reader after the newest usable frame stops after one
+    or two sidecars instead of parsing the whole day.
+    """
+    directory = Path(frames_dir)
+    return _snapshots_of(directory, sorted(_frame_sidecars(directory), reverse=True))
+
+
+def _frame_sidecars(directory: Path) -> Iterator[Path]:
+    return (
+        sidecar
+        for sidecar in directory.glob("*.json")
+        if not sidecar.name.endswith(PREDICTION_SUFFIX)
+    )
+
+
+def _snapshots_of(directory: Path, sidecars: Sequence[Path]) -> Iterator[Snapshot]:
+    for sidecar in sidecars:
         try:
             meta = json.loads(sidecar.read_text(encoding="utf-8"))
             image = directory / str(meta["image"])
@@ -119,8 +142,7 @@ def frames_on_disk(frames_dir: str | Path) -> list[Snapshot]:
         if not image.is_file():
             logger.warning("skipping %s: its image %s is gone", sidecar.name, image.name)
             continue
-        records.append(Snapshot(image_path=image, metadata_path=sidecar, captured_at=captured))
-    return sorted(records, key=lambda record: record.captured_at)
+        yield Snapshot(image_path=image, metadata_path=sidecar, captured_at=captured)
 
 
 def _capture_source(snapshot: Snapshot) -> str:
@@ -148,33 +170,43 @@ def checkpoint_role(checkpoint: str | Path) -> str:
     return stem if stem in ("best", "last") else "other"
 
 
-def _plays(role: str, selector: str) -> bool:
-    if selector not in ROLE_SELECTORS:
+def _selector(selector: str) -> RoleSelector:
+    try:
+        return RoleSelector(selector)
+    except ValueError:
         raise ValueError(
             f"unknown role selector {selector!r}; expected one of {', '.join(ROLE_SELECTORS)}"
-        )
-    return selector == "all" or role == selector
+        ) from None
+
+
+def _plays(role: str, selector: str) -> bool:
+    chosen = _selector(selector)
+    return chosen is RoleSelector.all or role == chosen.value
 
 
 @dataclass(frozen=True, slots=True)
 class _Ensemble:
-    """The checkpoints of one kind and which of them each head group is read from."""
+    """The served checkpoints of one kind and which of them each head group is read from."""
 
-    kind: str
-    checkpoints: tuple[Path, ...]
-    sky_roles: str
-    dhi_roles: str
+    kind: ServedInput
+    members: tuple[ServedModel, ...]
+    roles: HeadRoles
 
-    def refuse_an_empty_role(self) -> None:
-        for head, selector in ((SKY_HEAD, self.sky_roles), ("dhi", self.dhi_roles)):
-            if not any(_plays(checkpoint_role(path), selector) for path in self.checkpoints):
-                stems = ", ".join(
-                    f"{path.stem} ({checkpoint_role(path)})" for path in self.checkpoints
-                )
-                raise ValueError(
-                    f"no {self.kind} checkpoint plays the {selector!r} role the {head} heads "
-                    f"are read from; given: {stems}"
-                )
+    @property
+    def checkpoints(self) -> tuple[Path, ...]:
+        return tuple(member.checkpoint_path for member in self.members)
+
+
+def _refuse_an_empty_role(
+    kind: str, checkpoints: Sequence[Path], *, sky_roles: str, dhi_roles: str
+) -> None:
+    for head, selector in ((SKY_HEAD, sky_roles), ("dhi", dhi_roles)):
+        if not any(_plays(checkpoint_role(path), selector) for path in checkpoints):
+            stems = ", ".join(f"{path.stem} ({checkpoint_role(path)})" for path in checkpoints)
+            raise ValueError(
+                f"no {kind} checkpoint plays the {selector!r} role the {head} heads "
+                f"are read from; given: {stems}"
+            )
 
 
 def _mean_predictions(
@@ -250,9 +282,12 @@ def ensemble_prediction(
         members.append(
             {"checkpoint": checkpoint, "role": role, "heads": heads, "predictions": predictions}
         )
-    _Ensemble(
-        "member", tuple(Path(m["checkpoint"]) for m in members), sky_roles, dhi_roles
-    ).refuse_an_empty_role()
+    _refuse_an_empty_role(
+        "member",
+        [Path(m["checkpoint"]) for m in members],
+        sky_roles=sky_roles,
+        dhi_roles=dhi_roles,
+    )
     record: dict[str, Any] = {
         "predictions": _mean_predictions(regression_sources, sky_sources),
         "members": members,
@@ -262,6 +297,19 @@ def ensemble_prediction(
         if shared in results[0]:
             record[shared] = results[0][shared]
     return record
+
+
+def envelope_of(record: dict[str, Any]) -> dict[str, Any]:
+    """*record* in the ensemble shape, whether the watch that wrote it had one member or several.
+
+    The watch writes every record through :func:`ensemble_prediction` since
+    the ensemble shape became the only one; a bare :meth:`ServedModel.predict_frame`
+    record on disk predates that and is wrapped here, so every reader handles
+    one shape.
+    """
+    if "members" in record:
+        return record
+    return ensemble_prediction([record])
 
 
 def frame_aggregate(predictions: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -314,29 +362,89 @@ def _malformed_head(predictions: dict[str, Any]) -> str | None:
     return None
 
 
-def _readable_frame_predictions(
-    members: Sequence[Snapshot],
-) -> list[tuple[Snapshot, dict[str, Any]]]:
-    readable: list[tuple[Snapshot, dict[str, Any]]] = []
-    for snapshot in members:
+def _validated_predictions(payload: Any, path: Path) -> dict[str, Any] | None:
+    try:
+        predictions = dict(payload["predictions"])
+    except (KeyError, TypeError) as exc:
+        logger.warning("ignoring unreadable frame prediction %s: %s", path.name, exc)
+        return None
+    fault = _malformed_head(predictions)
+    if fault is not None:
+        logger.warning("ignoring malformed frame prediction %s: %s", path.name, fault)
+        return None
+    return predictions
+
+
+class _FrameIndex:
+    """The frames the watch knows, bucketed by block, with the predictions it wrote for them.
+
+    The disk is the state (:mod:`allsky.watch`); this is its index, built
+    once from the sidecars at start-up and extended by each capture, so a
+    poll never re-reads or re-sorts the day's history. A frame's prediction
+    is kept from the write that produced it and read back from disk only for
+    frames scored before this process started.
+    """
+
+    def __init__(self, snapshots: Sequence[Snapshot], block_minutes: float) -> None:
+        self.block_minutes = block_minutes
+        self.known: dict[pd.Timestamp, Snapshot] = {}
+        self.by_block: dict[pd.Timestamp, list[Snapshot]] = {}
+        self._predictions: dict[pd.Timestamp, dict[str, Any]] = {}
+        self.earliest: pd.Timestamp | None = None
+        self.latest: pd.Timestamp | None = None
+        for snapshot in snapshots:
+            self.add(snapshot)
+
+    def __len__(self) -> int:
+        return len(self.known)
+
+    def __contains__(self, captured_at: pd.Timestamp) -> bool:
+        return captured_at in self.known
+
+    def add(self, snapshot: Snapshot) -> None:
+        when = snapshot.captured_at
+        self.known[when] = snapshot
+        bucket = self.by_block.setdefault(block_end_of(when, self.block_minutes), [])
+        bucket.append(snapshot)
+        bucket.sort(key=lambda member: member.captured_at)
+        self.earliest = when if self.earliest is None else min(self.earliest, when)
+        self.latest = when if self.latest is None else max(self.latest, when)
+
+    def remember(self, snapshot: Snapshot, predictions: dict[str, Any]) -> None:
+        self._predictions[snapshot.captured_at] = predictions
+
+    def predictions_of(self, snapshot: Snapshot) -> dict[str, Any] | None:
+        remembered = self._predictions.get(snapshot.captured_at)
+        if remembered is not None:
+            return remembered
         path = _frame_prediction_path(snapshot)
         if not path.is_file():
-            continue
+            return None
         try:
-            predictions = dict(json.loads(path.read_text(encoding="utf-8"))["predictions"])
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
             logger.warning("ignoring unreadable frame prediction %s: %s", path.name, exc)
-            continue
-        fault = _malformed_head(predictions)
-        if fault is not None:
-            logger.warning("ignoring malformed frame prediction %s: %s", path.name, fault)
-            continue
-        readable.append((snapshot, predictions))
-    return readable
+            return None
+        predictions = _validated_predictions(payload, path)
+        if predictions is not None:
+            self._predictions[snapshot.captured_at] = predictions
+        return predictions
 
 
-def _aggregate_of_scored_frames(members: Sequence[Snapshot]) -> dict[str, Any] | None:
-    readable = _readable_frame_predictions(members)
+def _readable_frame_predictions(
+    members: Sequence[Snapshot], index: _FrameIndex
+) -> list[tuple[Snapshot, dict[str, Any]]]:
+    return [
+        (snapshot, predictions)
+        for snapshot in members
+        if (predictions := index.predictions_of(snapshot)) is not None
+    ]
+
+
+def _aggregate_of_scored_frames(
+    members: Sequence[Snapshot], index: _FrameIndex
+) -> dict[str, Any] | None:
+    readable = _readable_frame_predictions(members, index)
     class_names = frozenset[str]().union(
         *(frozenset(p["sky_probabilities"]) for _, p in readable if "sky_probabilities" in p)
     )
@@ -365,37 +473,26 @@ def _aggregate_of_scored_frames(members: Sequence[Snapshot]) -> dict[str, Any] |
     }
 
 
+def _averaged(results: Sequence[dict[str, Any]], ensemble: _Ensemble) -> dict[str, Any]:
+    return ensemble_prediction(
+        results, sky_roles=ensemble.roles.sky.value, dhi_roles=ensemble.roles.dhi.value
+    )
+
+
 def _score_frame(
-    snapshot: Snapshot,
-    ensemble: _Ensemble,
-    *,
-    site: SiteConfig,
-    device: str,
-    trust_checkpoint: bool,
+    snapshot: Snapshot, ensemble: _Ensemble, index: _FrameIndex, *, site: SiteConfig
 ) -> None:
     try:
         results = [
-            predict_snapshot(
-                snapshot.image_path,
-                checkpoint,
-                timestamp=snapshot.captured_at,
-                site=site,
-                device=device,
-                trust_checkpoint=trust_checkpoint,
-            )
-            for checkpoint in ensemble.checkpoints
+            member.predict_frame(snapshot.image_path, timestamp=snapshot.captured_at, site=site)
+            for member in ensemble.members
         ]
-        payload = (
-            results[0]
-            if len(results) == 1
-            else ensemble_prediction(
-                results, sky_roles=ensemble.sky_roles, dhi_roles=ensemble.dhi_roles
-            )
-        )
+        payload = _averaged(results, ensemble)
         path = atomic_write_strict_json(_frame_prediction_path(snapshot), payload)
     except PREDICTION_ERRORS as exc:
         logger.error("frame prediction failed for %s: %s", snapshot.image_path.name, exc)
         return
+    index.remember(snapshot, payload["predictions"])
     logger.info("frame prediction %s: %s", path.name, payload["predictions"])
 
 
@@ -406,27 +503,15 @@ def _score_block(
     *,
     min_solar_elevation_deg: float,
     site: SiteConfig,
-    device: str,
-    trust_checkpoint: bool,
-    image_backbone_builder: Callable[[], Any] | None,
 ) -> dict[str, Any]:
     frames = [(snapshot.image_path, snapshot.captured_at) for snapshot in members]
     results = [
-        predict_block(
-            frames,
-            checkpoint,
-            min_solar_elevation_deg=min_solar_elevation_deg,
-            block_end=end,
-            site=site,
-            device=device,
-            trust_checkpoint=trust_checkpoint,
-            image_backbone_builder=image_backbone_builder,
+        member.predict_block(
+            frames, min_solar_elevation_deg=min_solar_elevation_deg, block_end=end, site=site
         )
-        for checkpoint in ensemble.checkpoints
+        for member in ensemble.members
     ]
-    if len(results) == 1:
-        return results[0]
-    return ensemble_prediction(results, sky_roles=ensemble.sky_roles, dhi_roles=ensemble.dhi_roles)
+    return _averaged(results, ensemble)
 
 
 def _block_record_paths(blocks_dir: Path, end: pd.Timestamp) -> tuple[Path, Path]:
@@ -463,7 +548,7 @@ def _ready_block_ends(
 
 
 def _close_ready_blocks(
-    known: dict[pd.Timestamp, Snapshot],
+    index: _FrameIndex,
     blocks_dir: Path,
     ensemble: _Ensemble | None,
     *,
@@ -473,9 +558,6 @@ def _close_ready_blocks(
     grace_seconds: float,
     min_solar_elevation_deg: float,
     site: SiteConfig,
-    device: str,
-    trust_checkpoint: bool,
-    image_backbone_builder: Callable[[], Any] | None,
     closed_through: pd.Timestamp | None,
 ) -> pd.Timestamp | None:
     """Close every ready block from the earliest frame's or after *closed_through*.
@@ -487,13 +569,9 @@ def _close_ready_blocks(
     block *ensemble* a block is recorded from the predictions already written
     beside its frames, and skipped when none of them was scored.
     """
-    if not known:
+    if index.earliest is None or index.latest is None:
         return closed_through
-    ordered = sorted(known.values(), key=lambda snapshot: snapshot.captured_at)
-    by_block: dict[pd.Timestamp, list[Snapshot]] = {}
-    for snapshot in ordered:
-        by_block.setdefault(block_end_of(snapshot.captured_at, block_minutes), []).append(snapshot)
-    earliest = block_end_of(ordered[0].captured_at, block_minutes)
+    earliest = block_end_of(index.earliest, block_minutes)
     first = (
         min(closed_through + pd.Timedelta(minutes=block_minutes), earliest)
         if closed_through is not None
@@ -501,14 +579,14 @@ def _close_ready_blocks(
     )
     ready = _ready_block_ends(
         first,
-        latest=ordered[-1].captured_at,
+        latest=index.latest,
         now=now,
         block_minutes=block_minutes,
         grace_seconds=grace_seconds,
     )
     for end, closed_by in ready:
         closed_through = end
-        members = by_block.get(end, [])
+        members = index.by_block.get(end, [])
         prediction_path, skipped_path = _block_record_paths(blocks_dir, end)
         stem = prediction_path.name.removesuffix(PREDICTION_SUFFIX)
         if prediction_path.exists() or skipped_path.exists():
@@ -527,7 +605,7 @@ def _close_ready_blocks(
                 "block %s skipped: %d frame(s), fewer than %d", stem, len(members), min_frames
             )
             continue
-        aggregate = _aggregate_of_scored_frames(members)
+        aggregate = _aggregate_of_scored_frames(members, index)
         if ensemble is None and aggregate is None:
             atomic_write_strict_json(skipped_path, record | {"reason": "no_frame_predictions"})
             logger.info("block %s skipped: none of its %d frame(s) was scored", stem, len(members))
@@ -541,9 +619,6 @@ def _close_ready_blocks(
                     ensemble,
                     min_solar_elevation_deg=min_solar_elevation_deg,
                     site=site,
-                    device=device,
-                    trust_checkpoint=trust_checkpoint,
-                    image_backbone_builder=image_backbone_builder,
                 )
                 if ensemble is not None
                 else record | {"source": SOURCE_FRAME_AGGREGATE}
@@ -588,19 +663,9 @@ def _block_model_payload(
     *,
     min_solar_elevation_deg: float,
     site: SiteConfig,
-    device: str,
-    trust_checkpoint: bool,
-    image_backbone_builder: Callable[[], Any] | None,
 ) -> dict[str, Any]:
     block_model = _score_block(
-        members,
-        end,
-        ensemble,
-        min_solar_elevation_deg=min_solar_elevation_deg,
-        site=site,
-        device=device,
-        trust_checkpoint=trust_checkpoint,
-        image_backbone_builder=image_backbone_builder,
+        members, end, ensemble, min_solar_elevation_deg=min_solar_elevation_deg, site=site
     )
     return record | {
         "source": SOURCE_BLOCK_MODEL,
@@ -609,30 +674,50 @@ def _block_model_payload(
     }
 
 
-def _elevation_floor(min_solar_elevation_deg: float | None) -> float:
-    if min_solar_elevation_deg is None:
+def _elevation_floor(given: float | None, members: Sequence[ServedModel]) -> float:
+    """The solar-elevation floor the watch scores nothing under.
+
+    Every member that records the ``night_filter.min_solar_elevation_deg``
+    its manifest was built with must agree with *given* when the operator
+    supplied one, and with each other when not; a member recording none
+    leaves the operator's value to stand and, absent that, is refused.
+    """
+    recorded = {
+        member.checkpoint_path: member.min_solar_elevation_deg
+        for member in members
+        if member.min_solar_elevation_deg is not None
+    }
+    if given is not None:
+        disagreeing = {path: floor for path, floor in recorded.items() if abs(floor - given) > 1e-9}
+        if disagreeing:
+            listed = ", ".join(f"{path} ({floor:g} deg)" for path, floor in disagreeing.items())
+            raise ValueError(
+                f"min_solar_elevation_deg {given:g} is not the floor these checkpoints' "
+                f"manifests were built with: {listed}"
+            )
+        return given
+    floors = set(recorded.values())
+    if len(floors) == 1:
+        return floors.pop()
+    if not floors:
         raise ValueError(
-            "a checkpoint needs min_solar_elevation_deg: the checkpoint does not record the "
+            "a checkpoint needs min_solar_elevation_deg: none of these checkpoints records the "
             "night_filter.min_solar_elevation_deg its manifest was built with"
         )
-    return min_solar_elevation_deg
+    listed = ", ".join(f"{path} ({floor:g} deg)" for path, floor in recorded.items())
+    raise ValueError(
+        f"the checkpoints record different elevation floors, pass min_solar_elevation_deg "
+        f"to choose: {listed}"
+    )
 
 
-def _inspect_block_checkpoints(
-    checkpoints: Sequence[Path],
-    *,
-    block_minutes: float,
-    device: str,
-    trust_checkpoint: bool,
-) -> None:
-    for checkpoint in checkpoints:
-        window = block_checkpoint_window_minutes(
-            checkpoint, device=device, trust_checkpoint=trust_checkpoint
-        )
-        if abs(window - block_minutes) > 1e-9:
+def _refuse_another_window(ensemble: _Ensemble, block_minutes: float) -> None:
+    for member in ensemble.members:
+        if abs(member.window_minutes - block_minutes) > 1e-9:
             raise ValueError(
-                f"{checkpoint} pools a {window:g} min window but the watch closes "
-                f"{block_minutes:g} min blocks; a block must be the checkpoint's own window"
+                f"{member.checkpoint_path} pools a {member.window_minutes:g} min window but the "
+                f"watch closes {block_minutes:g} min blocks; a block must be the checkpoint's "
+                "own window"
             )
 
 
@@ -652,10 +737,8 @@ def run_watch(
     *,
     checkpoint_frames: Sequence[Path] = (),
     checkpoint_blocks: Sequence[Path] = (),
-    frame_sky_role: str = "all",
-    frame_dhi_role: str = "all",
-    block_sky_role: str = "all",
-    block_dhi_role: str = "all",
+    frame_roles: HeadRoles = ALL_ROLES,
+    block_roles: HeadRoles = ALL_ROLES,
     poll_seconds: float = 20.0,
     block_minutes: float = 5.0,
     min_frames: int = 3,
@@ -682,11 +765,13 @@ def run_watch(
     again, since a poll every *poll_seconds* would otherwise fill the
     directory with copies of one image. A frame stamped from the server's
     ``Last-Modified`` stays on disk but is not filed under a block (see
-    :func:`frames_on_disk`). With *checkpoint_frames* every new frame that is
-    filed and has the sun at or above *min_solar_elevation_deg* is scored by
-    :func:`~allsky.snapshot.predict_snapshot` into ``<image>.prediction.json``
-    — through every frame checkpoint, averaged by :func:`ensemble_prediction`
-    under *frame_sky_role* and *frame_dhi_role* when there is more than one;
+    :func:`frames_on_disk`). Every checkpoint is loaded once, at start-up
+    (:func:`~allsky.snapshot.load_served_model`), and stays resident. With
+    *checkpoint_frames* every new frame that is filed and has the sun at or
+    above the elevation floor is scored by each member's
+    :meth:`~allsky.snapshot.ServedModel.predict_frame` into
+    ``<image>.prediction.json``, always in the shape of
+    :func:`ensemble_prediction` under *frame_roles*, one member or several;
     a frame below the floor is logged and left unscored.
 
     Block ``t`` (a multiple of *block_minutes* on the camera's clock, covering
@@ -696,10 +781,9 @@ def run_watch(
     so a capture gap leaves ``insufficient_frames`` records with ``n_frames``
     0 rather than no file. A ready block with no record under
     ``<out_dir>/blocks/`` and at least *min_frames* frames is scored by every
-    checkpoint in *checkpoint_blocks* through
-    :func:`~allsky.snapshot.predict_block` — averaged by
-    :func:`ensemble_prediction` under *block_sky_role* and *block_dhi_role*
-    when there is more than one — and its record carries that prediction
+    member of *checkpoint_blocks* through
+    :meth:`~allsky.snapshot.ServedModel.predict_block` — averaged by
+    :func:`ensemble_prediction` under *block_roles* — and its record carries that prediction
     under ``block_model`` and, when its frames were scored, their mean under
     ``frame_aggregate``; with no block checkpoint the record is the frame
     aggregate alone, and a block none of whose frames was scored is recorded
@@ -721,11 +805,11 @@ def run_watch(
     and not fed. With no checkpoint at all the watch only archives frames.
 
     Start-up refuses, before any capture, a role selector no checkpoint of
-    its kind plays, a checkpoint without *min_solar_elevation_deg*, a frame
-    checkpoint :func:`~allsky.snapshot.predict_snapshot` would refuse (one
-    trained under a windowed strategy), and a block checkpoint
-    :func:`~allsky.snapshot.predict_block` would refuse or whose window is
-    not *block_minutes* wide.
+    its kind plays, an elevation floor the checkpoints do not settle (see
+    *min_solar_elevation_deg*), a member that cannot be loaded or built, a
+    windowed checkpoint under *checkpoint_frames*, a ``center_frame`` or
+    embedding-mode one under *checkpoint_blocks*, and a block checkpoint
+    whose window is not *block_minutes* wide.
 
     Capture failures (network, TLS, an empty payload — everything the archive
     client raises through :func:`~allsky.snapshot.capture_snapshot`) are
@@ -742,10 +826,10 @@ def run_watch(
         no frames.
     checkpoint_blocks:
         Block checkpoints; empty scores no block model.
-    frame_sky_role, frame_dhi_role, block_sky_role, block_dhi_role:
-        One of :data:`ROLE_SELECTORS`: which members of the frame and block
-        ensembles, by :func:`checkpoint_role`, the sky heads and the
-        regression heads are read from.
+    frame_roles, block_roles:
+        Which members of the frame and block ensembles, by
+        :func:`checkpoint_role`, the sky heads and the regression heads are
+        read from.
     poll_seconds:
         Handed to *sleep* between polls.
     block_minutes:
@@ -757,8 +841,10 @@ def run_watch(
         How long past its end a block waits for a later frame before closing.
     min_solar_elevation_deg:
         The ``night_filter.min_solar_elevation_deg`` the checkpoints'
-        manifest was built with; required with any checkpoint, since the
-        checkpoint does not record it.
+        manifests were built with. A checkpoint written since that floor
+        joined its provenance records it, and every recorded floor must
+        agree with this value when it is given and with each other when it
+        is not; with no checkpoint recording one, it is required.
     site:
         Observation site for the solar geometry; None is the module default.
     device:
@@ -767,7 +853,7 @@ def run_watch(
         Allow unpickling checkpoints that are not weights-only.
     image_backbone_builder:
         Injection hook for the block checkpoints' visual backbone, as
-        :func:`~allsky.snapshot.predict_block` takes it.
+        :func:`~allsky.snapshot.load_served_model` takes it.
     clock:
         Current naive local time on the camera's clock; injected for tests.
     sleep:
@@ -783,35 +869,32 @@ def run_watch(
     Raises
     ------
     ValueError
-        At start-up, for a role selector no checkpoint plays, a checkpoint
-        without *min_solar_elevation_deg*, a frame checkpoint
-        :func:`~allsky.snapshot.predict_snapshot` refuses, a block checkpoint
-        :func:`~allsky.snapshot.predict_block` refuses, or one whose window
-        is not *block_minutes* wide.
+        At start-up, for any of the refusals listed above.
     """
     root = Path(out_dir)
     frames_dir = root / FRAMES_SUBDIR
     blocks_dir = root / BLOCKS_SUBDIR
     resolved_site = site or SiteConfig()
-    frame_ensemble = _ensemble_or_none("frame", checkpoint_frames, frame_sky_role, frame_dhi_role)
-    block_ensemble = _ensemble_or_none("block", checkpoint_blocks, block_sky_role, block_dhi_role)
-    elevation_floor = (
-        _elevation_floor(min_solar_elevation_deg)
-        if frame_ensemble is not None or block_ensemble is not None
-        else None
+    frame_ensemble = _ensemble_or_none(
+        "frame", checkpoint_frames, frame_roles, device=device, trust_checkpoint=trust_checkpoint
     )
-    if frame_ensemble is not None:
-        for checkpoint in frame_ensemble.checkpoints:
-            inspect_frame_checkpoint(checkpoint, device=device, trust_checkpoint=trust_checkpoint)
+    block_ensemble = _ensemble_or_none(
+        "block",
+        checkpoint_blocks,
+        block_roles,
+        device=device,
+        trust_checkpoint=trust_checkpoint,
+        image_backbone_builder=image_backbone_builder,
+    )
+    served = [
+        *(frame_ensemble.members if frame_ensemble else ()),
+        *(block_ensemble.members if block_ensemble else ()),
+    ]
+    elevation_floor = _elevation_floor(min_solar_elevation_deg, served) if served else None
     if block_ensemble is not None:
-        _inspect_block_checkpoints(
-            block_ensemble.checkpoints,
-            block_minutes=block_minutes,
-            device=device,
-            trust_checkpoint=trust_checkpoint,
-        )
-    known = {snapshot.captured_at: snapshot for snapshot in frames_on_disk(frames_dir)}
-    logger.info("watching with %d frame(s) already under %s", len(known), frames_dir)
+        _refuse_another_window(block_ensemble, block_minutes)
+    index = _FrameIndex(frames_on_disk(frames_dir), block_minutes)
+    logger.info("watching with %d frame(s) already under %s", len(index), frames_dir)
     closed_through: pd.Timestamp | None = None
     polls = 0
     while max_polls is None or polls < max_polls:
@@ -823,19 +906,16 @@ def run_watch(
         else:
             _index_capture(
                 snapshot,
-                known,
+                index,
                 blocks_dir,
                 frame_ensemble=frame_ensemble,
                 filed_under_blocks=elevation_floor is not None,
-                block_minutes=block_minutes,
                 min_solar_elevation_deg=elevation_floor,
                 site=resolved_site,
-                device=device,
-                trust_checkpoint=trust_checkpoint,
             )
         if elevation_floor is not None:
             closed_through = _close_ready_blocks(
-                known,
+                index,
                 blocks_dir,
                 block_ensemble,
                 now=clock(),
@@ -844,9 +924,6 @@ def run_watch(
                 grace_seconds=grace_seconds,
                 min_solar_elevation_deg=elevation_floor,
                 site=resolved_site,
-                device=device,
-                trust_checkpoint=trust_checkpoint,
-                image_backbone_builder=image_backbone_builder,
                 closed_through=closed_through,
             )
         if max_polls is None or polls < max_polls:
@@ -855,29 +932,49 @@ def run_watch(
 
 
 def _ensemble_or_none(
-    kind: str, checkpoints: Sequence[Path], sky_roles: str, dhi_roles: str
+    kind: ServedInput,
+    checkpoints: Sequence[Path],
+    roles: HeadRoles,
+    *,
+    device: str,
+    trust_checkpoint: bool,
+    image_backbone_builder: Callable[[], Any] | None = None,
 ) -> _Ensemble | None:
+    """Load the *kind* checkpoints once, refusing what the ensemble could not serve.
+
+    A member that cannot be loaded or built stops the start: the watch logs a
+    per-frame failure without stopping, which is right for a bad frame and
+    wrong for a bad member, which would otherwise leave the service running
+    all day, scoring nothing.
+    """
     if not checkpoints:
         return None
-    ensemble = _Ensemble(kind, tuple(Path(path) for path in checkpoints), sky_roles, dhi_roles)
-    ensemble.refuse_an_empty_role()
-    return ensemble
+    paths = tuple(Path(path) for path in checkpoints)
+    _refuse_an_empty_role(kind, paths, sky_roles=roles.sky.value, dhi_roles=roles.dhi.value)
+    members = tuple(
+        load_served_model(
+            path,
+            device=device,
+            trust_checkpoint=trust_checkpoint,
+            image_backbone_builder=image_backbone_builder,
+            expect=kind,
+        )
+        for path in paths
+    )
+    return _Ensemble(kind, members, roles)
 
 
 def _index_capture(
     snapshot: Snapshot,
-    known: dict[pd.Timestamp, Snapshot],
+    index: _FrameIndex,
     blocks_dir: Path,
     *,
     frame_ensemble: _Ensemble | None,
     filed_under_blocks: bool,
-    block_minutes: float,
     min_solar_elevation_deg: float | None,
     site: SiteConfig,
-    device: str,
-    trust_checkpoint: bool,
 ) -> None:
-    if snapshot.captured_at in known:
+    if snapshot.captured_at in index:
         logger.info(
             "frame %s already indexed; the camera has not advanced", snapshot.image_path.name
         )
@@ -893,10 +990,10 @@ def _index_capture(
             source,
         )
         return
-    known[snapshot.captured_at] = snapshot
+    index.add(snapshot)
     logger.info("new frame %s", snapshot.image_path.name)
     if filed_under_blocks:
-        end = block_end_of(snapshot.captured_at, block_minutes)
+        end = block_end_of(snapshot.captured_at, index.block_minutes)
         if any(path.exists() for path in _block_record_paths(blocks_dir, end)):
             logger.warning(
                 "frame %s falls in block %s, which is already closed; it is indexed but not fed",
@@ -914,10 +1011,4 @@ def _index_capture(
             min_solar_elevation_deg,
         )
         return
-    _score_frame(
-        snapshot,
-        frame_ensemble,
-        site=site,
-        device=device,
-        trust_checkpoint=trust_checkpoint,
-    )
+    _score_frame(snapshot, frame_ensemble, index, site=site)
