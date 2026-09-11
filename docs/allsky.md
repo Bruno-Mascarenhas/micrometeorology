@@ -35,7 +35,10 @@ src/allsky/
 ├── archive.py         # Mirrors the Planetário camera archive (HTTPS client, ledger, TLS repair)
 ├── overlay.py         # Reads the timestamp the camera burns into each frame + timestamped extraction
 ├── drive.py           # rclone uploads to Google Drive
-├── snapshot.py        # Live-frame capture + single-image prediction
+├── snapshot.py        # Live-frame capture, ServedModel (load once) + single-image prediction
+├── serving.py         # The serving pin: pinned checkpoints, digests, roles, reports
+├── attribution.py     # Occlusion sensitivity + region counterfactuals on a served frame
+├── publish/           # frame.json / timeline.json / model.json builders for the sky page
 ├── preprocessing.py   # Static mask / crop / resize + per-frame visual QC
 ├── clearsky.py        # Haurwitz clear-sky GHI + clear-sky index k*
 ├── erbs.py            # Erbs (1982) diffuse-fraction decomposition -> pseudo diffuse targets
@@ -220,7 +223,14 @@ allsky evaluate --checkpoint CHECKPOINT.ckpt [--split val|test|train]
                 [--config FILE] [--data-root DIR] [--report-dir DIR]
                 [--device ...] [--batch-size N] [--predictions/--no-predictions] [--strict]
                 [--tta-rotations N]
+
+allsky watch    --out DIR (--serving PIN.yaml | --checkpoint-frame CKPT ... --min-elevation-deg D)
+allsky publish-site --serving PIN.yaml --watch-dir DIR --out SITE/Ceu [--days N]
+                [--sensor-csv FILE] [--device cpu|cuda] [--prune-frames-days N]
+                [--rclone-remote NAME:path]
 ```
+
+- `watch --serving` and `publish-site` are documented in [`allsky-site.md`](allsky-site.md): the pin declares the served checkpoints and their digests, the watch scores the live frame with them, and the publisher writes the documents the public sky page reads.
 
 - `prepare-local` runs `extract-frames → build-manifest → splits`; steps are resumable and skip up-to-date outputs unless `--force`. A `--steps build-manifest` run without `extract-frames` cannot re-extract anything, so it aborts (exit 1) on a video whose frames carry no recorded provenance, or one written under a different video/mask/crop/resize config, instead of stamping the manifest with a config that did not produce those JPEGs — include the `extract-frames` step, or pass `--force` to build from the frames as they are. `--dry-run` logs the full plan and writes nothing.
 - `precompute-embeddings` reads the `embeddings` section of the PrepareConfig (backbone / pooling / batch / shard-size / dtype); backbone `"fake"` is the offline dev/test hook; the DINOv2 and DINOv3 ViTs download via `torch.hub` on first use, and `resnet50`/`efficientnet_v2_s` come from torchvision. See the [architecture reference](allsky-architecture.md#backbone-families) for the full list. `--resume` (default) skips `sample_id`s already in `index.parquet`, but refuses to resume into an embeddings dir built with a different backbone/pooling/dim/config — rerun with `--no-resume` (or a fresh `--out` dir) to overwrite.

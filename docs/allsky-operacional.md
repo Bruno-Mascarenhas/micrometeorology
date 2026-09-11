@@ -65,6 +65,16 @@ watch reads a checkpoint's role off its **file stem** — `best.ckpt` is `best`,
 `last.ckpt` is `last`, any other stem is `other`. A renamed copy such as
 `seed3-best.ckpt` plays `other` and is picked up only by the `all` selector.
 
+## From a serving pin
+
+When the checkpoints are the ones the public sky page is served from, name
+the pin instead of the files: `allsky watch --serving configs/allsky/serving/ceu.yaml --out <dir>`
+verifies each pinned SHA-256, builds every member once (a missing backbone
+weight stops the start with exit 1 instead of a day of unscored frames) and
+takes the roles and the elevation floor from the pin. The publisher that
+reads this directory, the documents it writes and the systemd user units
+that keep both running are in [allsky-site.md](allsky-site.md).
+
 ## The two modes
 
 ### One frame, now
