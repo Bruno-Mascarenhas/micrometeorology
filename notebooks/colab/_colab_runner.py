@@ -210,7 +210,7 @@ def run_experiment(
         "checkpoint": checkpoint,
     }
     allsky_cli = str(Path(python).with_name("allsky"))
-    report_name = f"eval-{split}" if checkpoint == "best" else f"eval-{split}-{checkpoint}"
+    report_name = _report_name(split, checkpoint)
 
     started = time.time()
     if archive_dir is not None and not (run_dir / "last.ckpt").exists():
@@ -224,10 +224,6 @@ def run_experiment(
             command += ["--resume", "auto"]
         train = subprocess.run(command, capture_output=True, text=True, check=False)
         run_dir.mkdir(parents=True, exist_ok=True)
-        # The engine says here, and nowhere else, which epoch a resume restarted
-        # from, whether the cosine horizon was reconciled and whether early
-        # stopping was already satisfied; dropping it on success leaves the
-        # archive unable to answer why an arm trained the epochs it did.
         (run_dir / "train.log").write_text(train.stdout + train.stderr, encoding="utf-8")
         if train.returncode != 0:
             row["status"] = "train_failed"
@@ -652,28 +648,33 @@ def sync_live(
     return beat
 
 
-def start_live_sync(out_dir: Path, target_dir: Path, *, period_seconds: float = 300.0) -> Any:
-    """Run :func:`sync_live` every *period_seconds* on a daemon thread; return it.
+def _every(name: str, work: Callable[[], object], period_seconds: float) -> Any:
+    """Run *work* every *period_seconds* on a daemon thread named *name*; return the thread.
 
-    Nothing this thread can raise is allowed to end it: it holds the only copy
-    of the checkpoints outside the VM, and a mirror that dies silently is worse
-    than a late one. A Drive FUSE hiccup raises ``OSError`` on the copy and a
-    driver under load makes ``nvidia-smi`` hit its timeout — the pass is dropped
-    and the next one runs.
+    Nothing *work* can raise is allowed to end the thread: it is what carries
+    the run off the VM, and a mirror that dies silently is worse than a late
+    one. A Drive FUSE hiccup raises ``OSError`` on the copy and a driver under
+    load makes ``nvidia-smi`` hit its timeout — the pass is dropped and the
+    next one runs.
     """
     import threading
 
     def loop() -> None:
         while True:
             try:
-                sync_live(out_dir, target_dir)
-            except Exception as exc:  # noqa: BLE001 — this thread is the only copy of the checkpoints
-                print(f"espelho ao vivo: {exc!r}")
+                work()
+            except Exception as exc:  # noqa: BLE001 — this thread is the only copy of the run
+                print(f"{name}: {exc!r}")
             time.sleep(period_seconds)
 
-    thread = threading.Thread(target=loop, name="live-sync", daemon=True)
+    thread = threading.Thread(target=loop, name=name, daemon=True)
     thread.start()
     return thread
+
+
+def start_live_sync(out_dir: Path, target_dir: Path, *, period_seconds: float = 300.0) -> Any:
+    """Run :func:`sync_live` every *period_seconds* on a daemon thread; return it."""
+    return _every("espelho ao vivo", lambda: sync_live(out_dir, target_dir), period_seconds)
 
 
 def _run_quiet(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -712,30 +713,29 @@ def mirror_once(
     return failed
 
 
+def _report_mirror_failures(pairs: Sequence[tuple[str, str]]) -> None:
+    for failure in mirror_once(pairs):
+        print(f"espelho: {failure}")
+
+
 def start_mirror(pairs: Sequence[tuple[str, str]], *, period_seconds: float = 300.0) -> Any:
     """Run :func:`mirror_once` every *period_seconds* on a daemon thread; return it."""
-    import threading
-
-    def loop() -> None:
-        while True:
-            try:
-                for failure in mirror_once(pairs):
-                    print(f"espelho: {failure}")
-            except Exception as exc:  # noqa: BLE001 — this thread is what carries the run off the VM
-                print(f"espelho: {exc!r}")
-            time.sleep(period_seconds)
-
-    thread = threading.Thread(target=loop, name="mirror", daemon=True)
-    thread.start()
-    return thread
+    return _every("espelho", lambda: _report_mirror_failures(pairs), period_seconds)
 
 
 #: The three evaluations one arm produces, in the order that makes
 #: ``eval-test-last`` on disk mean "this arm is finished": ``(split,
 #: checkpoint, column suffix)``.
 ARM_EVALUATIONS = (("test", "best", ""), ("val", "best", "_val"), ("test", "last", "_last"))
+
+
+def _report_name(split: str, checkpoint: str) -> str:
+    """The report directory ``allsky evaluate`` writes for *split* under *checkpoint*."""
+    return f"eval-{split}" if checkpoint == "best" else f"eval-{split}-{checkpoint}"
+
+
 #: Report directory of each suffix in :data:`ARM_EVALUATIONS`.
-ARM_REPORTS = {"": "eval-test", "_val": "eval-val", "_last": "eval-test-last"}
+ARM_REPORTS = {tag: _report_name(split, ckpt) for split, ckpt, tag in ARM_EVALUATIONS}
 #: What a secondary evaluation contributes to the arm's row; the first one
 #: contributes everything :func:`_harvest` produces.
 ARM_KEYS = (
@@ -1045,7 +1045,8 @@ def ensemble_predictions(
     from allsky.evaluation.metrics import classification_metrics, regression_metrics
     from labmim_core.atomic import atomic_write, atomic_write_strict_json
     from labmim_core.site import STATION_UTC_OFFSET_HOURS
-    from labmim_core.sky import SKY_CLASS_COUNT, SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES
+    from labmim_core.sky import SKY_CLASS_COUNT, SKY_CLASS_NAMES
+    from micrometeorology.stats.sky_condition import classify_sky_condition
 
     if len(members) < 2:
         raise ValueError(f"an ensemble needs at least two members, got {len(members)}")
@@ -1095,7 +1096,7 @@ def ensemble_predictions(
             )
             kt = ensemble["ens_kindex"].to_numpy() * np.asarray(kt_clear, dtype=np.float64)
             ensemble["ens_kt"] = kt
-            ensemble["ens_sky_kt_bin"] = np.digitize(kt, SKY_CLASS_KT_UPPER_BOUNDS, right=True)
+            ensemble["ens_sky_kt_bin"] = classify_sky_condition(kt)
             estimators["kt_bin"] = ensemble["ens_sky_kt_bin"].to_numpy()
         report["sky"] = {
             name: classification_metrics(
@@ -1145,13 +1146,12 @@ def sensor_block_key(frame: Any, block_minutes: float = 5.0) -> Any:
     """
     import pandas as pd
 
+    from allsky.data.blocks import block_ends, local_naive
     from labmim_core.site import STATION_UTC_OFFSET_HOURS
 
-    local = pd.to_datetime(frame["timestamp_utc"], utc=True) + pd.Timedelta(
-        hours=STATION_UTC_OFFSET_HOURS
-    )
-    block_end = local.dt.tz_localize(None).dt.ceil(f"{block_minutes:g}min")
-    return frame["day_id"].astype(str) + "@" + block_end.dt.strftime("%H:%M")
+    local = local_naive(pd.to_datetime(frame["timestamp_utc"], utc=True), STATION_UTC_OFFSET_HOURS)
+    stamps = pd.Series(block_ends(local, block_minutes).strftime("%H:%M"), index=frame.index)
+    return frame["day_id"].astype(str) + "@" + stamps
 
 
 def _ordinal_mode(values: Any) -> int:
@@ -1162,9 +1162,7 @@ def _ordinal_mode(values: Any) -> int:
     labelled = labelled[labelled >= 0]
     if labelled.size == 0:
         return -1
-    counts = np.bincount(labelled)
-    tied = np.flatnonzero(counts == counts.max())
-    return int(tied[np.abs(tied - float(np.mean(labelled))).argmin()])
+    return int(_vote_with_ordinal_tiebreak(labelled[:, None], int(labelled.max()) + 1)[0])
 
 
 #: What the notebook is allowed to call from the Colab kernel. The kernel has
@@ -1191,18 +1189,6 @@ KERNEL_SAFE = (
     "summarise_arm",
     "sync_live",
     "write_config",
-)
-
-#: The columns :func:`score_by_sensor_block` reads, and what :func:`preflight`
-#: puts in the synthetic frame it scores.
-_PREFLIGHT_COLUMNS = (
-    "day_id",
-    "timestamp_utc",
-    "obs_dhi",
-    "pred_dhi",
-    "obs_sky",
-    "pred_sky",
-    "pred_sky_kt",
 )
 
 
@@ -1403,6 +1389,7 @@ def score_by_sensor_block(
     import pandas as pd
 
     from allsky.evaluation.metrics import classification_metrics, regression_metrics
+    from allsky.evaluation.persistence import previous_same_day
     from labmim_core.sky import SKY_CLASS_COUNT, SKY_CLASS_NAMES
 
     keyed = frame.assign(_block=sensor_block_key(frame, block_minutes))
@@ -1430,11 +1417,15 @@ def score_by_sensor_block(
             SKY_CLASS_COUNT,
             probabilities=block_probabilities,
         )
-        previous = blocks.groupby("day_id")["obs_sky"].shift(1)
-        has_previous = previous.notna().to_numpy()
+        previous = previous_same_day(
+            blocks["obs_sky"].to_numpy(dtype=np.float64),
+            day_id=blocks["day_id"].to_numpy(),
+            order=blocks.index.to_numpy(),
+        )
+        has_previous = np.isfinite(previous)
         report["sky_persistence_previous_block"] = classification_metrics(
             blocks["obs_sky"].to_numpy()[has_previous],
-            previous.to_numpy()[has_previous].astype(np.int64),
+            previous[has_previous].astype(np.int64),
             SKY_CLASS_COUNT,
         )
 

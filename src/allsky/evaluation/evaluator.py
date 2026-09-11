@@ -53,10 +53,12 @@ from allsky.evaluation.metrics import (
     regression_metrics,
     skill_score,
 )
+from allsky.evaluation.persistence import previous_same_day
 from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
 from allsky.preprocessing import IMAGENET_MEAN, IMAGENET_STD, PreprocessingPipeline
 from allsky.training.checkpointing import normalizers_from_checkpoint
 from labmim_core.sky import SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES, sky_class_name
+from micrometeorology.stats.sky_condition import classify_sky_condition
 
 logger = logging.getLogger(__name__)
 
@@ -298,9 +300,6 @@ def evaluate_checkpoint(
         "kindex_kind": manifest_kind,
         "kindex_kind_ok": kindex_kind_ok,
         "dataset_version": str(meta.get("dataset_version", checkpoint.get("dataset_version"))),
-        # Which CR5000 join the dataset was built with. It decides whether a
-        # frame was paired against the logger's raw end-stamp or against the
-        # centre of the interval it averages.
         "sensor_timestamp_offset_minutes": (meta.get("thresholds") or {}).get(
             "sensor_timestamp_offset_minutes"
         ),
@@ -475,9 +474,6 @@ def _run_inference(
         frame_geometry=frame_geometry,
     )
 
-    # Under sensor_block + one_sample_per_block the dataset serves one item per
-    # datalogger block; the predictions frame must describe those items, not
-    # every frame of the split.
     split_df = dataset.served_manifest
     model = restore_model(
         cfg,
@@ -596,9 +592,12 @@ def _rotation_averaged_outputs(
     per_plane = fill.reshape((1,) * (frames.ndim - 3) + (-1, 1, 1))
     summed: dict[str, Any] = {}
     for step in range(rotations):
-        angle = step * 360.0 / rotations
-        rotated = np.ascontiguousarray(rotate_frame(frames, angle, fill=per_plane))
-        outputs = model({**batch, key: torch.from_numpy(rotated).to(device)})
+        if step == 0:
+            outputs = model(batch)
+        else:
+            angle = step * 360.0 / rotations
+            rotated = np.ascontiguousarray(rotate_frame(frames, angle, fill=per_plane))
+            outputs = model({**batch, key: torch.from_numpy(rotated).to(device)})
         for name, value in outputs.items():
             term = torch.softmax(value.float(), dim=-1) if name == "sky_logits" else value.float()
             summed[name] = term if name not in summed else summed[name] + term
@@ -628,19 +627,13 @@ def _build_split_dataset(
             if embedding_reader is not None
             else default_embedding_reader(cfg, root)
         )
-        # Mirror training's alignment strategy so the eval batches match what the
-        # model was trained on (plain embedding for center_frame/mean_embedding,
-        # padded embedding_seq + frame_mask for attention_pooling).
-        window = cfg.data.alignment.strategy
         dataset: Any = MultimodalEmbeddingDataset(
             split_df,
             feature_columns,
             embedding_reader=reader,
             train=False,
             stats=feature_normalizer,
-            window=window,
-            window_minutes=float(cfg.data.alignment.window_minutes),
-            one_sample_per_block=cfg.data.alignment.one_sample_per_block,
+            alignment=cfg.data.alignment,
             dhi_parameterization=cfg.targets.dhi.parameterization,
             utc_offset_hours=utc_offset_hours,
         )
@@ -662,10 +655,7 @@ def _build_split_dataset(
         frame_geometry=frame_geometry,
         dhi_parameterization=cfg.targets.dhi.parameterization,
         utc_offset_hours=utc_offset_hours,
-        window=cfg.data.alignment.strategy,
-        window_minutes=cfg.data.alignment.window_minutes,
-        window_max_frames=cfg.data.alignment.max_frames,
-        one_sample_per_block=cfg.data.alignment.one_sample_per_block,
+        alignment=cfg.data.alignment,
     )
     return dataset, None
 
@@ -735,20 +725,23 @@ def _build_predictions_frame(
 
 
 def _attach_kt_derived_sky(frame: pd.DataFrame, times: pd.Series, utc_offset_hours: float) -> None:
-    """Attach ``pred_kt``, ``pred_sky_kt`` and, without a sky head, ``obs_sky_kt``.
+    """Attach ``pred_kt``, ``pred_sky_kt`` and ``obs_sky_kt``.
 
     ``pred_kt`` ``(N,)`` float64 is the predicted clearness index, k* times the
     Haurwitz clear-sky clearness index at each row's zenith; ``pred_sky_kt``
-    ``(N,)`` int64 bins it on :data:`~labmim_core.sky.SKY_CLASS_KT_UPPER_BOUNDS`
-    — the rule that labelled ``sky_class`` in the manifest. ``obs_sky_kt`` rebuilds
-    the label the same way from ``obs_kindex`` only when the split carries no
-    ``obs_sky``, so the derived class is always scored against a label.
+    ``(N,)`` int64 bins it with :func:`classify_sky_condition` — the rule that
+    labelled ``sky_class`` in the manifest. ``obs_sky_kt`` is the label the
+    derived class is scored against: the manifest's ``obs_sky`` when the split
+    carries one, else the same rule applied to ``obs_kindex``, where a row
+    whose observed index is not finite carries
+    :data:`~labmim_core.sky.SKY_CLASS_MISSING`. Either way the pair scores like
+    any other classification target.
 
     Raises
     ------
     ValueError
-        When a predicted clearness index is not finite: ``numpy.digitize`` would
-        file a NaN in the last band and score it as a plausible class.
+        When a predicted clearness index is not finite: a prediction cannot be
+        scored as unlabelable.
     """
     _, kt_clear = _clearsky_ghi_and_kt(frame, times, utc_offset_hours)
     pred_kt = frame["pred_kindex"].to_numpy(dtype=np.float64) * kt_clear
@@ -758,15 +751,12 @@ def _attach_kt_derived_sky(frame: pd.DataFrame, times: pd.Series, utc_offset_hou
             "finite; the k*-derived sky class cannot be scored"
         )
     frame["pred_kt"] = pred_kt
-    frame["pred_sky_kt"] = np.digitize(pred_kt, SKY_CLASS_KT_UPPER_BOUNDS, right=True).astype(
-        np.int64
-    )
-    if "obs_sky" not in frame.columns:
+    frame["pred_sky_kt"] = classify_sky_condition(pred_kt)
+    if "obs_sky" in frame.columns:
+        frame["obs_sky_kt"] = frame["obs_sky"].to_numpy(dtype=np.int64)
+    else:
         obs_kt = frame["obs_kindex"].to_numpy(dtype=np.float64) * kt_clear
-        labelable = np.isfinite(obs_kt)
-        observed = np.full(len(frame), -1, dtype=np.int64)
-        observed[labelable] = np.digitize(obs_kt[labelable], SKY_CLASS_KT_UPPER_BOUNDS, right=True)
-        frame["obs_sky_kt"] = observed
+        frame["obs_sky_kt"] = classify_sky_condition(obs_kt)
 
 
 def _scored_targets(predictions: pd.DataFrame, enabled_targets: Sequence[str]) -> list[str]:
@@ -807,8 +797,10 @@ def _attach_reference_columns(
     for name in enabled_targets:
         if name == "sky":
             continue
-        frame[f"persistence_{name}"] = _previous_observation_same_day(
-            frame, f"obs_{name}", times=times
+        frame[f"persistence_{name}"] = previous_same_day(
+            frame[f"obs_{name}"].to_numpy(dtype=np.float64),
+            day_id=frame["day_id"].to_numpy(),
+            order=times.to_numpy(),
         )
         clearsky = _clearsky_reference(
             frame,
@@ -827,25 +819,6 @@ def _attach_reference_columns(
                 "the baseline); write the manifest's .meta.json sidecar with kindex_kind "
                 "to restore it"
             )
-
-
-def _previous_observation_same_day(
-    frame: pd.DataFrame, observed_column: str, *, times: pd.Series
-) -> np.ndarray:
-    """The previous observation of the same acquisition day, the no-change forecast.
-
-    The shift stops at the ``day_id`` boundary: the night gap between the last
-    frame of a day and the first of the next is not a persistence horizon.
-    """
-    ordered = pd.DataFrame(
-        {
-            "day_id": frame["day_id"].to_numpy(),
-            "timestamp_utc": times.to_numpy(),
-            "observed": frame[observed_column].to_numpy(dtype=np.float64),
-        }
-    ).sort_values(["day_id", "timestamp_utc"])
-    shifted = ordered.groupby("day_id", sort=False)["observed"].shift(1)
-    return shifted.sort_index().to_numpy(dtype=np.float64)
 
 
 def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame, *, utc_offset_hours: float) -> None:
@@ -897,6 +870,9 @@ def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame, *, utc_offset_hours
 #: times the clear-sky clearness index at the same zenith is a class prediction
 #: by the rule that labelled the manifest, without a classification head.
 KT_DERIVED_SKY_TARGET = "sky_kt"
+#: The targets scored as classes: ``obs_<name>`` / ``pred_<name>`` int64 class
+#: columns, with ``prob_<name>_<class>`` columns when the head emits them.
+CLASSIFICATION_TARGETS = ("sky", KT_DERIVED_SKY_TARGET)
 
 
 #: Stratification column -> the ``stratum_kind`` label reported in the long table.
@@ -921,26 +897,24 @@ def _global_metrics(
 
 
 def _target_metrics(frame: pd.DataFrame, name: str) -> dict[str, Any]:
-    """Metrics for one target over *frame* (regression or classification)."""
-    if name == KT_DERIVED_SKY_TARGET:
-        label_column = "obs_sky" if "obs_sky" in frame.columns else "obs_sky_kt"
-        labels = frame[label_column].to_numpy(dtype=np.int64)
+    """Metrics for one target over *frame* (regression or classification).
+
+    A classification target is scored over the rows carrying a label
+    (``>= 0``): :data:`~labmim_core.sky.SKY_CLASS_MISSING` marks a row the
+    manifest could not label, never a class.
+    """
+    if name in CLASSIFICATION_TARGETS:
+        labels = frame[f"obs_{name}"].to_numpy(dtype=np.int64)
         scored = labels >= 0
-        return classification_metrics(
-            labels[scored],
-            frame["pred_sky_kt"].to_numpy()[scored],
-            n_classes=len(SKY_CLASS_NAMES),
-        )
-    if name == "sky":
-        probability_columns = [f"prob_sky_{class_name}" for class_name in SKY_CLASS_NAMES]
+        probability_columns = [f"prob_{name}_{class_name}" for class_name in SKY_CLASS_NAMES]
         probabilities = (
-            frame[probability_columns].to_numpy(dtype=np.float64)
+            frame[probability_columns].to_numpy(dtype=np.float64)[scored]
             if all(column in frame.columns for column in probability_columns)
             else None
         )
         return classification_metrics(
-            frame["obs_sky"].to_numpy(),
-            frame["pred_sky"].to_numpy(),
+            labels[scored],
+            frame[f"pred_{name}"].to_numpy()[scored],
             n_classes=len(SKY_CLASS_NAMES),
             probabilities=probabilities,
         )

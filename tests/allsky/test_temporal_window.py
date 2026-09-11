@@ -17,6 +17,7 @@ import pytest
 import torch
 from torch import nn
 
+from allsky.config import AlignmentConfig
 from allsky.data.datasets import MultimodalImageDataset, resolve_time_windows
 from allsky.data.manifest import build_manifest
 from allsky.features import resolve_feature_set
@@ -124,9 +125,7 @@ class TestWindowedImageDataset:
             resolve_feature_set("bare"),
             data_root=root,
             image_size=FRAME_PX,
-            window="mean_embedding",
-            window_minutes=6.0,
-            window_max_frames=4,
+            alignment=AlignmentConfig(strategy="mean_embedding", window_minutes=6.0, max_frames=4),
         )
 
         item = dataset[len(dataset) // 2]
@@ -147,9 +146,7 @@ class TestWindowedImageDataset:
             resolve_feature_set("bare"),
             data_root=root,
             image_size=FRAME_PX,
-            window="mean_embedding",
-            window_minutes=6.0,
-            window_max_frames=4,
+            alignment=AlignmentConfig(strategy="mean_embedding", window_minutes=6.0, max_frames=4),
         )
         row = len(dataset) // 2
         members = dataset._windows[row]
@@ -171,9 +168,7 @@ class TestWindowedImageDataset:
             resolve_feature_set("bare"),
             data_root=root,
             image_size=FRAME_PX,
-            window="mean_embedding",
-            window_minutes=2.0,
-            window_max_frames=5,
+            alignment=AlignmentConfig(strategy="mean_embedding", window_minutes=2.0, max_frames=5),
         )
 
         item = dataset[0]
@@ -185,14 +180,13 @@ class TestWindowedImageDataset:
     def test_a_window_of_zero_frames_is_refused(self, tmp_path: Path):
         manifest, root = _manifest(tmp_path)
 
-        with pytest.raises(ValueError, match="window_max_frames must be at least 1"):
+        with pytest.raises(ValueError, match="max_frames"):
             MultimodalImageDataset(
                 manifest,
                 resolve_feature_set("bare"),
                 data_root=root,
                 image_size=FRAME_PX,
-                window="mean_embedding",
-                window_max_frames=0,
+                alignment=AlignmentConfig(strategy="mean_embedding", max_frames=0),
             )
 
 

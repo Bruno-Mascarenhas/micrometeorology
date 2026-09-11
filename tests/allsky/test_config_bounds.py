@@ -92,12 +92,25 @@ class TestLayerDecayBounds:
 
 
 class TestAlignmentStrategy:
-    def test_every_window_mode_the_dataset_implements_is_accepted(self):
-        """One name set, owned here and read by the dataset that implements it."""
-        from allsky.data.datasets import _WINDOW_MODES
+    def test_every_strategy_the_config_names_resolves_a_window(self):
+        """One name set, owned here; the dataset dispatches on it and must know every member."""
+        from typing import get_args
 
-        for name in _WINDOW_MODES:
-            assert AlignmentConfig(strategy=name).strategy == name
+        import pandas as pd
+
+        from allsky.config import AlignmentStrategyName
+        from allsky.data.datasets import _windows_for
+
+        manifest = pd.DataFrame(
+            {
+                "timestamp_utc": pd.to_datetime(["2026-03-21T15:00:00Z", "2026-03-21T15:01:00Z"]),
+                "day_id": ["2026-03-21", "2026-03-21"],
+            }
+        )
+        for name in get_args(AlignmentStrategyName):
+            alignment = AlignmentConfig(strategy=name)
+            windows = _windows_for(alignment.strategy, manifest, 5.0, -3.0, max_frames=5)
+            assert (windows == []) == (name == "center_frame")
 
     def test_typo_is_rejected_at_load_time(self):
         with pytest.raises(ValidationError):

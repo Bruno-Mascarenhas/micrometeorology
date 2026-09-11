@@ -27,13 +27,19 @@ import logging
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, get_args, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import numpy as np
 import pandas as pd
 
 from allsky.clearsky import clearsky_diffuse
-from allsky.config import DEFAULT_IMAGE_SIZE, AlignmentStrategyName, DHIParameterization
+from allsky.config import (
+    DEFAULT_IMAGE_SIZE,
+    AlignmentConfig,
+    AlignmentStrategyName,
+    DHIParameterization,
+)
+from allsky.data.blocks import block_centroids, block_ends, local_naive
 from allsky.data.contracts import NS_PER_MINUTE, resolve
 from allsky.features.normalization import FeatureNormalizer
 from allsky.geometry import solar_geometry_maps
@@ -64,7 +70,8 @@ type SampleTensors = dict[str, Any]
 #: so the config that selects a mode and the dataset that implements it can
 #: never disagree about which modes exist.
 type WindowMode = AlignmentStrategyName
-_WINDOW_MODES: tuple[WindowMode, ...] = get_args(AlignmentStrategyName)
+#: One frame per row, the alignment a dataset serves when none is given.
+CENTER_FRAME = AlignmentConfig()
 
 
 @runtime_checkable
@@ -134,9 +141,8 @@ def _local_block_ends_ns(
     manifest: pd.DataFrame, block_minutes: float, utc_offset_hours: float
 ) -> np.ndarray:
     """End of the datalogger block each row falls in, as naive-local ns since epoch."""
-    index = pd.DatetimeIndex(manifest["timestamp_utc"]).tz_convert("UTC").tz_localize(None)
-    local = index + pd.Timedelta(hours=utc_offset_hours)
-    return local.ceil(f"{block_minutes:g}min").as_unit("ns").to_numpy().astype("int64")
+    local = local_naive(manifest["timestamp_utc"], utc_offset_hours)
+    return block_ends(local, block_minutes).as_unit("ns").to_numpy().astype("int64")
 
 
 def resolve_sensor_block_windows(
@@ -207,18 +213,11 @@ def representative_rows_per_block(
     numpy.ndarray
         ``(N,)`` bool, aligned to *manifest*'s rows.
     """
-    ends = _local_block_ends_ns(manifest, block_minutes, utc_offset_hours)
-    local_ns = (
-        (
-            pd.DatetimeIndex(manifest["timestamp_utc"]).tz_convert("UTC").tz_localize(None)
-            + pd.Timedelta(hours=utc_offset_hours)
-        )
-        .as_unit("ns")
-        .to_numpy()
-        .astype("int64")
-    )
-    centroid = ends - round(block_minutes / 2.0 * NS_PER_MINUTE)
-    distance = np.abs(local_ns - centroid)
+    local = local_naive(manifest["timestamp_utc"], utc_offset_hours)
+    ends_index = block_ends(local, block_minutes)
+    ends = ends_index.as_unit("ns").to_numpy().astype("int64")
+    centroid = block_centroids(ends_index, block_minutes).as_unit("ns").to_numpy().astype("int64")
+    distance = np.abs(local.as_unit("ns").to_numpy().astype("int64") - centroid)
     table = pd.DataFrame(
         {"day": manifest["day_id"].astype(str).to_numpy(), "end": ends, "distance": distance}
     )
@@ -484,10 +483,7 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         frame_geometry: Mapping[str, Any] | None = None,
         dhi_parameterization: DHIParameterization = "raw",
         utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
-        window: WindowMode = "center_frame",
-        window_minutes: float = 10.0,
-        window_max_frames: int = 5,
-        one_sample_per_block: bool = False,
+        alignment: AlignmentConfig = CENTER_FRAME,
     ) -> None:
         super().__init__(
             manifest,
@@ -510,21 +506,13 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         # the model runs, or inference sees pixels training never produced.
         self.preprocess = preprocess
         self._seed = int(seed)
-        if window not in _WINDOW_MODES:
-            raise ValueError(f"window must be one of {_WINDOW_MODES}, got {window!r}")
-        if window_minutes <= 0:
-            raise ValueError(f"window_minutes must be positive, got {window_minutes}")
-        if window_max_frames < 1:
-            raise ValueError(f"window_max_frames must be at least 1, got {window_max_frames}")
-        self.window = window
-        self.window_minutes = float(window_minutes)
-        self.seq_len = int(window_max_frames)
+        self.window: WindowMode = alignment.strategy
+        self.window_minutes = float(alignment.window_minutes)
+        self.seq_len = int(alignment.max_frames)
         self._windows: list[list[int]] = _windows_for(
-            window, manifest, self.window_minutes, utc_offset_hours, max_frames=self.seq_len
+            self.window, manifest, self.window_minutes, utc_offset_hours, max_frames=self.seq_len
         )
-        if one_sample_per_block:
-            if window != "sensor_block":
-                raise ValueError("one_sample_per_block needs window='sensor_block'")
+        if alignment.one_sample_per_block:
             self._serve_one_row_per_sensor_block(self.window_minutes)
         self._geometry_channels = tuple(geometry_channels)
         self.frame_geometry = frame_geometry
@@ -612,6 +600,10 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         preprocessing path necessarily pays them, because the stage is defined
         on float CHW and PIL cannot bilinear-resize one.
         """
+        return self._frame_planes(image_path, idx, self._geometry_maps(idx))
+
+    def _frame_planes(self, image_path: Path, idx: int, maps: np.ndarray | None) -> np.ndarray:
+        """:meth:`_load_image` with the ``(G, H, W)`` geometry planes *maps* of row *idx* given."""
         # Imported here because allsky.preprocessing reaches back into
         # allsky.data.contracts, so a module-level import would close a cycle
         # through this package's __init__.
@@ -622,14 +614,8 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
             size=self.image_size,
             preprocess=self.preprocess,
         )
-        maps = self._geometry_maps(idx)
         stacked = self._augmented(chw, idx, maps)
-        # `chw` was allocated there, so standardising in place costs no copy.
-        standardized = imagenet_standardize(stacked[:3], copy=False)
-        if maps is None:
-            return standardized
-        if stacked is chw:
-            return np.concatenate([standardized, maps], axis=0)
+        imagenet_standardize(stacked[:3], copy=False)
         return stacked
 
     def _geometry_maps(self, idx: int) -> np.ndarray | None:
@@ -654,12 +640,12 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         RNG would otherwise leak into the batch — while the epoch term keeps the
         draw varying across passes.
 
-        Returns *chw* itself when nothing can fire, and otherwise the augmented
-        ``(3, H, W)`` frame — ``(3 + G, H, W)`` with the moved *geometry* planes
-        appended when they were given — still in ``[0, 1]``.
+        Returns the ``(3, H, W)`` frame — ``(3 + G, H, W)`` with the *geometry*
+        planes appended when they were given, moved with the frame when a
+        transform fired — still in ``[0, 1]``.
         """
         if self.augment is None or not self.augment.enabled:
-            return chw
+            return chw if geometry is None else np.concatenate([chw, geometry], axis=0)
         rng = np.random.default_rng((self._seed, self.epoch, idx))
         augmented: np.ndarray = self.augment(
             chw, rng, self._imaged_pixels(chw.shape[1:]), geometry=geometry
@@ -699,12 +685,13 @@ class MultimodalImageDataset(_BaseMultimodalDataset):
         members = self._windows[anchor]
         frames = np.zeros((self.seq_len, *self._frame_shape()), dtype=np.float32)
         mask = np.zeros(self.seq_len, dtype=bool)
+        maps = self._geometry_maps(anchor)
         for slot, position in enumerate(members):
             # Seeded on the SERVED row, never on the co-frame's own position: a
             # per-frame draw gives each frame of one window an independent
             # exposure and noise realisation, which is scintillation the sky did
             # not produce — and the window exists precisely to average the sky.
-            frames[slot] = self._load_image(self._paths[position], anchor)
+            frames[slot] = self._frame_planes(self._paths[position], anchor, maps)
             mask[slot] = True
         item["image_seq"] = torch.from_numpy(frames)
         item["frame_mask"] = torch.from_numpy(mask)
@@ -763,9 +750,7 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
         embedding_reader: EmbeddingReader,
         train: bool = True,
         stats: FeatureNormalizer | None = None,
-        window: WindowMode = "center_frame",
-        window_minutes: float = 10.0,
-        one_sample_per_block: bool = False,
+        alignment: AlignmentConfig = CENTER_FRAME,
         dhi_parameterization: DHIParameterization = "raw",
         utc_offset_hours: float = STATION_UTC_OFFSET_HOURS,
     ) -> None:
@@ -777,21 +762,17 @@ class MultimodalEmbeddingDataset(_BaseMultimodalDataset):
             dhi_parameterization=dhi_parameterization,
             utc_offset_hours=utc_offset_hours,
         )
-        if window not in _WINDOW_MODES:
-            raise ValueError(f"window must be one of {_WINDOW_MODES}, got {window!r}")
-        if window_minutes <= 0:
-            raise ValueError(f"window_minutes must be positive, got {window_minutes}")
         self.embedding_reader = embedding_reader
         declared = getattr(embedding_reader, "dim", None)
         self._embedding_dim = int(declared) if declared is not None else None
-        self.window = window
-        self.window_minutes = float(window_minutes)
+        self.window: WindowMode = alignment.strategy
+        self.window_minutes = float(alignment.window_minutes)
         #: Fixed padded window length ``T`` for ``attention_pooling``.
         self.seq_len = math.ceil(self.window_minutes) + 1
-        self._windows: list[list[int]] = self._resolve_windows() if window != "center_frame" else []
-        if one_sample_per_block:
-            if window != "sensor_block":
-                raise ValueError("one_sample_per_block needs window='sensor_block'")
+        self._windows: list[list[int]] = (
+            self._resolve_windows() if self.window != "center_frame" else []
+        )
+        if alignment.one_sample_per_block:
             self._serve_one_row_per_sensor_block(self.window_minutes)
 
     @property

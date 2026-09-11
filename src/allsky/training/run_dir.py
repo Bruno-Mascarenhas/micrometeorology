@@ -27,7 +27,7 @@ import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from allsky.config import ExperimentConfig
 from allsky.training.checkpointing import BEST_CHECKPOINT, EMA_CHECKPOINT, LAST_CHECKPOINT
@@ -120,6 +120,45 @@ def free_rotation_destination(preferred: Path) -> Path:
     return destination
 
 
+MetricDirection = Literal["min", "max"]
+
+#: Every val metric the engine logs, per enabled target, with the direction it
+#: improves in. :func:`csv_fields` emits these columns and
+#: :func:`metric_direction` answers the early-stopping monitor from the same
+#: table, so a metric cannot be logged without saying which way is better.
+TARGET_METRIC_DIRECTIONS: dict[str, dict[str, MetricDirection]] = {
+    "dhi": {"loss_dhi": "min", "dhi_mae": "min"},
+    "kindex": {"loss_kindex": "min", "kindex_mae": "min"},
+    "sky": {"loss_sky": "min", "sky_acc": "max", "sky_balanced_acc": "max"},
+    "cloud_fraction": {"loss_cloud_fraction": "min"},
+}
+VAL_METRIC_DIRECTIONS: dict[str, MetricDirection] = {
+    "loss": "min",
+    **{
+        key: direction
+        for table in TARGET_METRIC_DIRECTIONS.values()
+        for key, direction in table.items()
+    },
+}
+
+
+def metric_direction(metric_key: str) -> MetricDirection:
+    """``"min"`` or ``"max"``: which way the val metric *metric_key* improves.
+
+    Raises
+    ------
+    ValueError
+        For a key :data:`VAL_METRIC_DIRECTIONS` does not declare.
+    """
+    try:
+        return VAL_METRIC_DIRECTIONS[metric_key]
+    except KeyError:
+        raise ValueError(
+            f"no direction declared for metric {metric_key!r}; known: "
+            f"{', '.join(sorted(VAL_METRIC_DIRECTIONS))}"
+        ) from None
+
+
 def csv_fields(cfg: ExperimentConfig) -> list[str]:
     """Stable, config-derived CSV column order (identical across resumes).
 
@@ -138,16 +177,11 @@ def csv_fields(cfg: ExperimentConfig) -> list[str]:
     splits = ["train", "val"]
     if cfg.train.weight_average.enabled:
         splits.append("val_ema")
+    enabled = [name for name in TARGET_METRIC_DIRECTIONS if getattr(cfg.targets, name).enabled]
     for split in splits:
         fields.append(f"{split}_loss")
-        if cfg.targets.dhi.enabled:
-            fields += [f"{split}_loss_dhi", f"{split}_dhi_mae"]
-        if cfg.targets.kindex.enabled:
-            fields += [f"{split}_loss_kindex", f"{split}_kindex_mae"]
-        if cfg.targets.sky.enabled:
-            fields += [f"{split}_loss_sky", f"{split}_sky_acc", f"{split}_sky_balanced_acc"]
-        if cfg.targets.cloud_fraction.enabled:
-            fields.append(f"{split}_loss_cloud_fraction")
+        for target in enabled:
+            fields += [f"{split}_{key}" for key in TARGET_METRIC_DIRECTIONS[target]]
     if cfg.train.cmixup.enabled:
         fields.append("train_cmixup_mixed_rows")
     return fields

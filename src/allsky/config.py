@@ -114,6 +114,9 @@ DATASET_SPLIT_FILENAME = "splits.json"
 #: and :mod:`allsky.data.datasets` can read it without an import cycle, and a
 #: typo such as ``centre_frame`` fails at ``load_experiment_config`` time rather
 #: than deep inside dataset construction — or, in image mode, not at all.
+#: The poolers a windowed image run can fold its frames with.
+TemporalPooling = Literal["mean", "attention", "mean_std"]
+
 AlignmentStrategyName = Literal[
     "center_frame", "mean_embedding", "attention_pooling", "sensor_block"
 ]
@@ -452,6 +455,9 @@ class ExperimentModelConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     name: str = "concat"
+    #: How a windowed image run pools the frames of a window; ``None`` leaves
+    #: it to the alignment strategy (:func:`allsky.modeling.registry.temporal_pooling_for_strategy`).
+    temporal_pooling: TemporalPooling | None = None
 
 
 class SchedulerConfig(BaseModel):
@@ -630,7 +636,7 @@ class ExperimentConfig(BaseModel):
 
     @model_validator(mode="after")
     def _std_pooling_needs_an_image_window(self) -> ExperimentConfig:
-        pooling = self.model.model_dump().get("temporal_pooling")
+        pooling = self.model.temporal_pooling
         if pooling == "mean_std" and (
             self.data.input_mode != "image" or self.data.alignment.strategy == "center_frame"
         ):

@@ -102,6 +102,7 @@ from allsky.training.run_dir import (
     STALE_RUN_SUFFIX,
     append_csv,
     csv_fields,
+    metric_direction,
     reset_stale_run_artifacts,
     resolve_resume_path,
     rotate_best,
@@ -303,6 +304,13 @@ def run_experiment(
 
     optimizer, lr_labels = _build_optimizer(model, cfg)
     monitor_key = _monitor_key(cfg.train.early_stopping.monitor)
+    fields = csv_fields(cfg)
+    monitored = _monitorable_metrics(fields)
+    if monitor_key not in monitored:
+        raise TrainingError(
+            f"early-stopping monitor {cfg.train.early_stopping.monitor!r} resolves to "
+            f"{monitor_key!r}, absent from the val metrics this run logs {sorted(monitored)}"
+        )
     monitor_mode = _monitor_mode(monitor_key)
     scheduler, scheduler_is_plateau = _build_scheduler(
         cfg.train.scheduler, optimizer, cfg.train.epochs, monitor_mode
@@ -318,13 +326,6 @@ def run_experiment(
     loss_fn = MultitaskLoss(cfg.targets, target_normalizers).to(resolved_device)
     mixer = _build_cmixup(cfg)
 
-    fields = csv_fields(cfg)
-    monitored = _monitorable_metrics(fields)
-    if monitor_key not in monitored:
-        raise TrainingError(
-            f"early-stopping monitor {cfg.train.early_stopping.monitor!r} resolves to "
-            f"{monitor_key!r}, absent from the val metrics this run logs {sorted(monitored)}"
-        )
     start_epoch = 0
     global_step = 0
     best_value: float | None = None
@@ -774,16 +775,12 @@ def _build_datasets(
             else default_embedding_reader(cfg, root)
         )
         _validate_embedding_coverage(reader, train_df, val_df)
-        window = cfg.data.alignment.strategy
-        window_minutes = float(cfg.data.alignment.window_minutes)
         train_ds = MultimodalEmbeddingDataset(
             train_df,
             feature_columns,
             embedding_reader=reader,
             train=True,
-            window=window,
-            window_minutes=window_minutes,
-            one_sample_per_block=cfg.data.alignment.one_sample_per_block,
+            alignment=cfg.data.alignment,
             dhi_parameterization=cfg.targets.dhi.parameterization,
             utc_offset_hours=utc_offset_hours,
         )
@@ -793,9 +790,7 @@ def _build_datasets(
             embedding_reader=reader,
             train=False,
             stats=train_ds.stats,
-            window=window,
-            window_minutes=window_minutes,
-            one_sample_per_block=cfg.data.alignment.one_sample_per_block,
+            alignment=cfg.data.alignment,
             dhi_parameterization=cfg.targets.dhi.parameterization,
             utc_offset_hours=utc_offset_hours,
         )
@@ -832,10 +827,7 @@ def _build_datasets(
         frame_geometry=frame_geometry,
         dhi_parameterization=cfg.targets.dhi.parameterization,
         utc_offset_hours=utc_offset_hours,
-        window=cfg.data.alignment.strategy,
-        window_minutes=cfg.data.alignment.window_minutes,
-        window_max_frames=cfg.data.alignment.max_frames,
-        one_sample_per_block=cfg.data.alignment.one_sample_per_block,
+        alignment=cfg.data.alignment,
     )
     image_val = MultimodalImageDataset(
         val_df,
@@ -849,10 +841,7 @@ def _build_datasets(
         frame_geometry=frame_geometry,
         dhi_parameterization=cfg.targets.dhi.parameterization,
         utc_offset_hours=utc_offset_hours,
-        window=cfg.data.alignment.strategy,
-        window_minutes=cfg.data.alignment.window_minutes,
-        window_max_frames=cfg.data.alignment.max_frames,
-        one_sample_per_block=cfg.data.alignment.one_sample_per_block,
+        alignment=cfg.data.alignment,
     )
     return image_train, image_val, None
 
@@ -1377,10 +1366,8 @@ class _MetricAccumulator:
             mask = batch["sky_class"] >= 0
             hits = (predicted == batch["sky_class"]) & mask
             self._fold_physical("sky_acc", hits.sum(), mask.sum())
-            # Per-class tallies through scatter_add_ over a fixed-size vector:
-            # the shapes stay static, so no device sync per batch. The balanced
-            # accuracy — the mean of the per-class recalls, the number the sky
-            # head is selected on — is derived once, in result().
+            # scatter_add over a fixed-size vector keeps the shapes static: no
+            # device sync per batch.
             n_classes = int(outputs["sky_logits"].shape[-1])
             labels = batch["sky_class"].clamp(min=0)
             tally = torch.zeros(n_classes, dtype=torch.float64, device=labels.device)
@@ -1732,6 +1719,7 @@ def _checkpoint_common(
         "split_id": split_id,
         "manifest_sha256": meta.get("manifest_sha256"),
         "sensor_pairing": _sensor_pairing(meta),
+        "night_filter": _night_filter(meta),
         "frame_geometry": meta.get("frame_geometry"),
         "backbone_info": backbone_info,
         "code_version_info": code_version(),
@@ -1757,6 +1745,19 @@ def _sensor_pairing(meta: Mapping[str, Any]) -> dict[str, float] | None:
         "timestamp_offset_minutes": float(offset or 0.0),
         "tolerance_minutes": float(tolerance) if tolerance is not None else float("nan"),
     }
+
+
+def _night_filter(meta: Mapping[str, Any]) -> dict[str, float] | None:
+    """The solar-elevation floor this run's manifest dropped frames under, for serving.
+
+    ``night_min_elevation_deg`` of the sidecar's thresholds is the
+    ``night_filter.min_solar_elevation_deg`` of the prepare config; the
+    labelable floor beside it (``min_elevation_deg``) gates the sky class and
+    is not the one serving refuses skies under. ``None`` when the sidecar
+    records no night floor.
+    """
+    floor = (meta.get("thresholds") or {}).get("night_min_elevation_deg")
+    return {"min_solar_elevation_deg": float(floor)} if floor is not None else None
 
 
 def _embedding_recipe(cfg: ExperimentConfig) -> dict[str, Any] | None:
@@ -1792,13 +1793,8 @@ def _monitor_key(monitor: str) -> str:
 
 
 def _monitor_mode(monitor_key: str) -> str:
-    """``"max"`` for an accuracy-like monitor, ``"min"`` for every other.
-
-    Decided by name: the val metrics the engine logs are losses, mean absolute
-    errors in physical units (``dhi_mae``, ``kindex_mae``) and ``sky_acc``, and
-    only an accuracy is better when larger.
-    """
-    return "max" if "acc" in monitor_key else "min"
+    """The direction the monitored metric improves in, as :data:`VAL_METRIC_DIRECTIONS` declares it."""
+    return metric_direction(monitor_key)
 
 
 def _improved(current: float, best: float | None, mode: str, min_delta: float) -> bool:

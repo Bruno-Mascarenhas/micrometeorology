@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from allsky.config import SITE_UTC_OFFSET_HOURS, ExperimentConfig
+from allsky.config import SITE_UTC_OFFSET_HOURS, AlignmentConfig, ExperimentConfig
 from allsky.data.contracts import resolve
 from allsky.data.datasets import MultimodalImageDataset
 from allsky.data.manifest import build_manifest, write_manifest_parquet
@@ -147,10 +147,12 @@ def _served_dataset(
         stats=feature_normalizer,
         preprocess=PreprocessingPipeline.from_config(cfg),
         dhi_parameterization="clearsky_index",
-        window="sensor_block",
-        window_minutes=BLOCK_MINUTES,
-        window_max_frames=MAX_FRAMES,
-        one_sample_per_block=True,
+        alignment=AlignmentConfig(
+            strategy="sensor_block",
+            window_minutes=BLOCK_MINUTES,
+            max_frames=MAX_FRAMES,
+            one_sample_per_block=True,
+        ),
     )
 
 
@@ -277,10 +279,12 @@ def test_the_geometry_planes_of_every_co_frame_match_the_datasets(
         image_size=IMAGE_PX,
         train=True,
         geometry_channels=resolve_geometry_channels(True),
-        window="sensor_block",
-        window_minutes=BLOCK_MINUTES,
-        window_max_frames=MAX_FRAMES,
-        one_sample_per_block=True,
+        alignment=AlignmentConfig(
+            strategy="sensor_block",
+            window_minutes=BLOCK_MINUTES,
+            max_frames=MAX_FRAMES,
+            one_sample_per_block=True,
+        ),
     )
     item = dataset[3]
     served = dataset.served_manifest.iloc[3]

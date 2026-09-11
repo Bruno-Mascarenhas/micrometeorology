@@ -84,7 +84,8 @@ class TestGlobalMetrics:
         root, reader, ckpt = _train(tmp_path, targets=targets)
         result = evaluate_checkpoint(ckpt, split="val", data_root=root, embedding_reader=reader)
 
-        assert "obs_sky_kt" not in result.predictions.columns
+        frame = result.predictions
+        assert (frame["obs_sky_kt"].to_numpy() == frame["obs_sky"].to_numpy()).all()
         assert result.global_metrics["sky_kt"]["n"] == result.global_metrics["sky"]["n"]
 
 
