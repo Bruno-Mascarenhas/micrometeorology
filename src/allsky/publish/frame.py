@@ -108,7 +108,7 @@ STATUS_LABELS_PT: dict[str, str] = {
 
 CAVEATS = [
     "A previsão é a média dos membros servidos sobre o quadro JPEG original da câmera; os quadros de treino saíram do timelapse H.264 do dia, e a diferença entre os dois caminhos não foi medida.",
-    "O controle sem imagem é a rede só de escalares (geometria solar e anemômetro) treinada sobre o mesmo split; a diferença entre ele e a previsão é o que a imagem acrescenta neste instante. A rede servida não lê esses escalares: eles entram só pelo denominador de céu claro da difusa.",
+    "O controle sem imagem é a rede só de escalares (geometria solar e anemômetro) treinada sobre o mesmo split; a diferença entre ele e a previsão é o que a imagem acrescenta neste instante. Sem a exportação da estação, o anemômetro entra pela média do treino, e o registro diz quais colunas foram imputadas. A rede servida não lê esses escalares: eles entram só pelo denominador de céu claro da difusa.",
     "A faixa de texto neutralizada é a legenda que a câmera grava no canto (relógio, temperatura do sensor, tempo de exposição), substituída pelo nível médio da rede com o disco do céu intacto; o tempo de exposição correlaciona forte com a difusa, e este número mede quanto a rede se apoia nele.",
     "O mapa de sensibilidade é causal e grosseiro: cada célula é a variação de k* quando uma janela quadrada é substituída pelo nível médio da rede; não é atenção nem segmentação, e a resolução é a da janela.",
     "As probabilidades de condição são as da cabeça de classificação sobre as faixas de Kt de [[escobedo]] aplicadas à média de 5 minutos do piranômetro, que é o rótulo que a rede aprendeu a reproduzir.",
