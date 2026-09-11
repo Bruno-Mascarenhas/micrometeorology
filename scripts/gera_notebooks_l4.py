@@ -18,6 +18,7 @@ Usage
 import json
 import shutil
 import subprocess
+from enum import StrEnum
 from pathlib import Path
 
 from allsky.config import ExperimentConfig, load_experiment_config
@@ -70,6 +71,13 @@ def bundle_de(dataset: str) -> str:
     return f"bundle-{dataset.removeprefix('dataset-')}.tar.gz"
 
 
+class Destino(StrEnum):
+    """Onde a execucao arquiva: o bucket do Colab Enterprise ou o Drive do Colab Pro+."""
+
+    BUCKET = "bucket"
+    DRIVE = "drive"
+
+
 NOTEBOOK_DIR = Path("notebooks/colab")
 BUCKET = "gs://labmim-allsky-506901"
 BRANCH = "condicao-do-ceu-multitarefa"
@@ -96,13 +104,13 @@ def _code(text: str) -> dict[str, object]:
 def _abertura(
     arms: tuple[str, ...],
     artifacts_suffix: str,
-    destino: str = "bucket",
+    destino: Destino = Destino.BUCKET,
     numero: str = "06",
 ) -> str:
     fila = "\n".join(
         f"{i + 1}. `configs/allsky/experiments/l4/{a}.yaml`" for i, a in enumerate(arms)
     )
-    if destino == "drive":
+    if destino is Destino.DRIVE:
         paralelo = (
             "Este notebook roda **um braco no Colab Pro+**, com o Drive como arquivo. E o caminho"
             " para treinar em paralelo com o Colab Enterprise: a cota de GPU do projeto GCP vale"
@@ -149,7 +157,7 @@ hora de GPU. Cinco coisas seguram isso, e todas tem teste em `tests/allsky/test_
 
 ## O que fica arquivado, e onde
 
-{"Em `MyDrive/labmim/runs/allsky" + artifacts_suffix + "/` (o Drive e o arquivo: nao ha espelho a fazer, o que se escreve ali ja esta fora da VM):" if destino == "drive" else "Em `" + BUCKET + "/runs/allsky" + artifacts_suffix + "/`:"}
+{"Em `MyDrive/labmim/runs/allsky" + artifacts_suffix + "/` (o Drive e o arquivo: nao ha espelho a fazer, o que se escreve ali ja esta fora da VM):" if destino is Destino.DRIVE else "Em `" + BUCKET + "/runs/allsky" + artifacts_suffix + "/`:"}
 
 - `<braco>/` — `metrics.csv`/`metrics.json` do treino, os relatorios `eval-test` (best),
   `eval-val` (best) e `eval-test-last` (last) com `predictions.parquet`, `stratified.csv`,
@@ -189,7 +197,7 @@ SESSION_START = time.time()
 print(subprocess.run(["nvidia-smi"], capture_output=True, text=True, check=False).stdout)
 """
 
-_AMBIENTE = r"""
+_CLONE_BUCKET = r"""
 import os
 import subprocess
 import sys
@@ -211,40 +219,9 @@ if not os.path.exists(WORKDIR):
         subprocess.run(["git", "clone", "--depth", "1", "-b", BRANCH, REPO, WORKDIR], check=True)
 if not os.path.isdir(f"{WORKDIR}/configs/allsky/experiments/l4"):
     raise RuntimeError(f"a branch {BRANCH} do bundle nao carrega configs/allsky/experiments/l4/ — refaca o bundle")
-subprocess.run(["pip", "install", "-q", "uv"], check=True)
-subprocess.run(["uv", "python", "install", "3.14"], cwd=WORKDIR, check=True)
-subprocess.run(["uv", "venv", "--python", "3.14", ".venv"], cwd=WORKDIR, check=True)
-subprocess.run(["uv", "sync", "--locked", "--extra", "allsky"], cwd=WORKDIR, check=True)
-subprocess.run(
-    ["uv", "pip", "install", "--python", ".venv/bin/python", "--reinstall", "--torch-backend", "auto", "torch==2.13.0"],
-    cwd=WORKDIR,
-    check=True,
-)
-
-PY = f"{WORKDIR}/.venv/bin/python"
-os.environ["PATH"] = f"{WORKDIR}/.venv/bin:" + os.environ["PATH"]
-
-# O DINOv3 nao vem pelo torch.hub (o hubconf arrasta torchmetrics/omegaconf/submitit):
-# o pacote importa hub/backbones.py direto do clone, apontado por ALLSKY_DINOV3_REPO.
-DINOV3_REPO_DIR = f"{BASE}/dinov3"
-if not os.path.exists(DINOV3_REPO_DIR):
-    subprocess.run(["git", "clone", "--depth", "1", "https://github.com/facebookresearch/dinov3", DINOV3_REPO_DIR], check=True)
-os.environ["ALLSKY_DINOV3_REPO"] = DINOV3_REPO_DIR
-sys.path.insert(0, f"{WORKDIR}/notebooks/colab")
-
-verify = subprocess.run([PY, "-c", "import torch; print(torch.__version__, torch.cuda.is_available())"], capture_output=True, text=True, check=False)
-print(verify.stdout)
-if "True" not in verify.stdout:
-    raise RuntimeError("torch sem CUDA — pare e reinstale antes de treinar")
-
-import _colab_runner as runner  # noqa: E402
-
-lacking = [name for name in ("preflight", "run_arm", "pull_live_run", "score_by_sensor_block_in") if not hasattr(runner, name)]
-if lacking:
-    raise RuntimeError(f"o _colab_runner de {BRANCH} nao tem {lacking} — aponte BRANCH para uma branch que os carregue")
 """
 
-_AMBIENTE_DRIVE = r"""
+_CLONE_DRIVE = r"""
 import os
 import subprocess
 import sys
@@ -267,7 +244,11 @@ if not os.path.exists(WORKDIR):
     subprocess.run(["git", "clone", "-b", BRANCH, BUNDLE_GIT, WORKDIR], check=True)
 if not os.path.isdir(f"{WORKDIR}/configs/allsky/experiments/l4"):
     raise RuntimeError(f"o bundle de {BRANCH} nao carrega configs/allsky/experiments/l4/ — refaca o bundle")
-subprocess.run(["pip", "install", "-q", "uv"], check=True)
+"""
+
+#: O que os dois ambientes compartilham depois do clone: uv, torch CUDA, DINOv3 e
+#: a verificacao do runner. As tres marcas sao o que muda entre bucket e Drive.
+_INSTALL = r"""subprocess.run(["pip", "install", "-q", "uv"], check=True)
 subprocess.run(["uv", "python", "install", "3.14"], cwd=WORKDIR, check=True)
 subprocess.run(["uv", "venv", "--python", "3.14", ".venv"], cwd=WORKDIR, check=True)
 subprocess.run(["uv", "sync", "--locked", "--extra", "allsky"], cwd=WORKDIR, check=True)
@@ -280,6 +261,7 @@ subprocess.run(
 PY = f"{WORKDIR}/.venv/bin/python"
 os.environ["PATH"] = f"{WORKDIR}/.venv/bin:" + os.environ["PATH"]
 
+__DINOV3_NOTA__
 DINOV3_REPO_DIR = f"{BASE}/dinov3"
 if not os.path.exists(DINOV3_REPO_DIR):
     subprocess.run(["git", "clone", "--depth", "1", "https://github.com/facebookresearch/dinov3", DINOV3_REPO_DIR], check=True)
@@ -289,14 +271,31 @@ sys.path.insert(0, f"{WORKDIR}/notebooks/colab")
 verify = subprocess.run([PY, "-c", "import torch; print(torch.__version__, torch.cuda.is_available())"], capture_output=True, text=True, check=False)
 print(verify.stdout)
 if "True" not in verify.stdout:
-    raise RuntimeError("torch sem CUDA — Runtime > Change runtime type > GPU, e rode esta celula de novo")
+    raise RuntimeError("__SEM_CUDA__")
 
 import _colab_runner as runner  # noqa: E402
 
 lacking = [name for name in ("preflight", "run_arm", "pull_live_run", "score_by_sensor_block_in") if not hasattr(runner, name)]
 if lacking:
-    raise RuntimeError(f"o _colab_runner de {BRANCH} nao tem {lacking} — refaca o bundle de uma branch que os carregue")
+    raise RuntimeError(f"o _colab_runner de {BRANCH} nao tem {lacking} — __SEM_RUNNER__")
 """
+
+
+def _ambiente(destino: Destino) -> str:
+    """A celula de ambiente de *destino*: o clone proprio mais a instalacao compartilhada."""
+    if destino is Destino.DRIVE:
+        return _CLONE_DRIVE + _INSTALL.replace("__DINOV3_NOTA__\n", "").replace(
+            "__SEM_CUDA__",
+            "torch sem CUDA — Runtime > Change runtime type > GPU, e rode esta celula de novo",
+        ).replace("__SEM_RUNNER__", "refaca o bundle de uma branch que os carregue")
+    nota = (
+        "# O DINOv3 nao vem pelo torch.hub (o hubconf arrasta torchmetrics/omegaconf/submitit):\n"
+        "# o pacote importa hub/backbones.py direto do clone, apontado por ALLSKY_DINOV3_REPO.\n"
+    )
+    return _CLONE_BUCKET + _INSTALL.replace("__DINOV3_NOTA__\n", nota).replace(
+        "__SEM_CUDA__", "torch sem CUDA — pare e reinstale antes de treinar"
+    ).replace("__SEM_RUNNER__", "aponte BRANCH para uma branch que os carregue")
+
 
 _HARDWARE = r"""
 import json
@@ -315,7 +314,7 @@ if HW["cpus"] < __WORKERS__:
     print(f"ATENCAO: {HW['cpus']} vCPU para num_workers: __WORKERS__ do config — o loader vai disputar CPU")
 """
 
-_DADOS = r"""
+_DADOS_BUCKET = r"""
 import os
 from pathlib import Path
 
@@ -348,25 +347,9 @@ print("ja arquivado:", sorted(p.name for p in Path(ARTIFACTS).iterdir()) or "nad
 MIRROR = [(ARTIFACTS, REMOTE_ARTIFACTS)]
 print("espelho inicial:", runner.mirror_once(MIRROR) or "ok")
 
-ROOT = runner.stage_bundle(BUNDLE, DATA, python=PY)
-for required in ("manifest.parquet", "splits.json", "frames"):
-    if not (Path(ROOT) / required).exists():
-        raise RuntimeError(f"{ROOT} sem {required}: o bundle nao e o __DATASET__ com frames")
-
-DATASET_LINK = Path(WORKDIR) / "output/allsky-mm/__DATASET__"
-DATASET_LINK.parent.mkdir(parents=True, exist_ok=True)
-if DATASET_LINK.is_symlink():
-    DATASET_LINK.unlink()
-elif DATASET_LINK.exists():
-    raise RuntimeError(f"{DATASET_LINK} existe e nao e um link: nao vou sobrescrever")
-DATASET_LINK.symlink_to(ROOT, target_is_directory=True)
-os.chdir(WORKDIR)
-OUT = Path(WORKDIR) / "output/allsky-mm/experiments/l4"
-OUT.mkdir(parents=True, exist_ok=True)
-print(f"{DATASET_LINK} -> {os.readlink(DATASET_LINK)}; cwd {os.getcwd()}; runs em {OUT}")
 """
 
-_DADOS_DRIVE = r"""
+_DADOS_DRIVE_HEAD = r"""
 BUNDLE = f"{STORE}/allsky-mm/__BUNDLE__"
 WEIGHTS = f"{STORE}/dinov3/dinov3_vits16plus_pretrain_lvd1689m.pth"
 for caminho in (BUNDLE, WEIGHTS):
@@ -385,7 +368,10 @@ os.makedirs(OVERRIDES, exist_ok=True)
 MIRROR = []
 print("ja arquivado:", sorted(p.name for p in Path(ARTIFACTS).iterdir()) or "nada")
 
-ROOT = runner.stage_bundle(BUNDLE, DATA, python=PY)
+"""
+
+#: Do bundle em diante os dois destinos fazem o mesmo: staging, link e diretorio de runs.
+_DADOS_TAIL = r"""ROOT = runner.stage_bundle(BUNDLE, DATA, python=PY)
 for required in ("manifest.parquet", "splits.json", "frames"):
     if not (Path(ROOT) / required).exists():
         raise RuntimeError(f"{ROOT} sem {required}: o bundle nao e o __DATASET__ com frames")
@@ -402,6 +388,13 @@ OUT = Path(WORKDIR) / "output/allsky-mm/experiments/l4"
 OUT.mkdir(parents=True, exist_ok=True)
 print(f"{DATASET_LINK} -> {os.readlink(DATASET_LINK)}; cwd {os.getcwd()}; runs em {OUT}")
 """
+
+
+def _dados(destino: Destino) -> str:
+    """A celula de dados de *destino*: a origem propria mais o staging compartilhado."""
+    head = _DADOS_DRIVE_HEAD if destino is Destino.DRIVE else _DADOS_BUCKET
+    return head + _DADOS_TAIL
+
 
 _PREFLIGHT = r"""
 for check in runner.preflight(PY, artifacts=ARTIFACTS, mirror=MIRROR, work_dir=BASE):
@@ -475,7 +468,7 @@ def build(
     *,
     suffix: str,
     slug: str,
-    destino: str = "bucket",
+    destino: Destino = Destino.BUCKET,
     numero: str = "06",
 ) -> dict[str, object]:
     """One notebook: the shared cells plus the queue this one owns.
@@ -493,7 +486,7 @@ def build(
     workers = str(config_de(arms[0]).train.num_workers)
     pre_requisitos = (
         _PRE_DRIVE
-        if destino == "drive"
+        if destino is Destino.DRIVE
         else _PRE_BUCKET.replace("__BUNDLE__", bundle_de(dataset))
         .replace("__TEMPLATE__", TEMPLATE)
         .replace("__MAQUINA__", MAQUINA)
@@ -508,14 +501,10 @@ def build(
         _markdown(
             "## 2. Ambiente\n\nClona o repositorio onde o `_colab_runner` mora, instala o torch CUDA pelo backend que o\n"
             "driver da VM pede e verifica. O repositorio vem de um `git bundle`"
-            + (" no Drive" if destino == "drive" else " no bucket")
+            + (" no Drive" if destino is Destino.DRIVE else " no bucket")
             + ": a branch desta campanha e local e nunca foi publicada."
         ),
-        _code(
-            (_AMBIENTE_DRIVE if destino == "drive" else _AMBIENTE)
-            .replace("__BRANCH__", BRANCH)
-            .replace("__BUCKET__", BUCKET)
-        ),
+        _code(_ambiente(destino).replace("__BRANCH__", BRANCH).replace("__BUCKET__", BUCKET)),
         _markdown(
             "## 3. Hardware\n\nO probe roda no interpretador do venv. Os configs declaram `amp: bf16`, entao uma GPU sem\n"
             "bfloat16 (T4, Turing) para aqui — antes de baixar o bundle de dados."
@@ -527,7 +516,7 @@ def build(
             "nao tem direcao e a copia antiga da VM sobrescreveria o arquivo posto la de fora."
         ),
         _code(
-            (_DADOS_DRIVE if destino == "drive" else _DADOS)
+            _dados(destino)
             .replace("__SUFFIX__", suffix)
             .replace("__DATASET__", dataset)
             .replace("__BUNDLE__", bundle_de(dataset))
@@ -571,9 +560,16 @@ def main() -> None:
     """
     written = []
     for path, arms, suffix, slug, destino, numero in [
-        (NOTEBOOK_DIR / "05_fila_l4.ipynb", ARMS, "-l4", "l4-fila", "bucket", "05"),
+        (NOTEBOOK_DIR / "05_fila_l4.ipynb", ARMS, "-l4", "l4-fila", Destino.BUCKET, "05"),
         *[
-            (NOTEBOOK_DIR / f"06_l4_{arm}.ipynb", (arm,), f"-l4-{arm}", f"l4-{arm}", "bucket", "06")
+            (
+                NOTEBOOK_DIR / f"06_l4_{arm}.ipynb",
+                (arm,),
+                f"-l4-{arm}",
+                f"l4-{arm}",
+                Destino.BUCKET,
+                "06",
+            )
             for arm in ARMS_L4
         ],
         *[
@@ -582,7 +578,7 @@ def main() -> None:
                 (arm,),
                 f"-l4-{arm}",
                 f"l4-{arm}-drive",
-                "drive",
+                Destino.DRIVE,
                 "07",
             )
             for arm in ARMS_DRIVE
