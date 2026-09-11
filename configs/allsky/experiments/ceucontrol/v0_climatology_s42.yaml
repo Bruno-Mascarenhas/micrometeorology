@@ -1,0 +1,33 @@
+extends: [../_base.yaml]
+name: ceucontrol_v0_climatology
+output_dir: output/allsky-mm/experiments/ceucontrol/v0_climatology
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso-20260906
+  input_mode: embedding
+  embeddings_dir: embeddings-dinov3_vits16plus
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+model:
+  name: climatology
+train:
+  epochs: 1
+  batch_size: 16
+  num_workers: 8
+  early_stopping:
+    patience: 1
+    monitor: val/kindex_mae

@@ -1,0 +1,33 @@
+extends: [../_base.yaml, ../../models/sensor_only.yaml]
+name: ceucontrol_v1_sensor_only
+output_dir: output/allsky-mm/experiments/ceucontrol/v1_sensor_only
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso-20260906
+  input_mode: embedding
+  embeddings_dir: embeddings-dinov3_vits16plus
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+train:
+  epochs: 40
+  batch_size: 16
+  lr: 0.0003
+  weight_decay: 0.05
+  num_workers: 8
+  early_stopping:
+    patience: 40
+    monitor: val/kindex_mae
