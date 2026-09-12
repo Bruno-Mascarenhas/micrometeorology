@@ -37,6 +37,7 @@ ARMS_L4 = (
     "l4ctl512_s42",
     "l4res1024cos23_s42",
     "l4res1024cos23ord_s42",
+    "l4res1024cos23ord_s43",
 )
 #: Notebooks do Colab Pro+ (rota do Drive), mantidos para os bracos de 512 px.
 ARMS_DRIVE = ARMS

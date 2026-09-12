@@ -1,0 +1,66 @@
+# Segunda semente do l4res1024cos23ord. Identico ao l4res1024cos23ord_s42 em tudo
+# menos a semente; o cabecalho daquele arquivo justifica a receita e registra a
+# regua. A replica estava condicionada ao best da s42 passar em recall da
+# parc-clara e ECE contra o l4res1024_s42, e passou (2026-09-12): recall 0,26 ->
+# 0,43, ECE 0,078 -> 0,042, bal da CE 0,654 -> 0,682, difusa igual (17,68 contra
+# 17,75). Com duas sementes a decisao "a cabeca de CE vira o classificador de
+# registro no lugar do kt_bin" deixa de depender de uma corrida; a atribuicao ao
+# alvo (e nao ao horizonte) vem do par com o l4res1024cos23_s42.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: l4res1024cos23ord_s43
+output_dir: output/allsky-mm/experiments/l4/l4res1024cos23ord_s43
+seed: 43
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso-1024-20260910
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+    class_weights: [0.670, 1.035, 1.835, 0.460]
+    ordinal_tau: 0.4
+model:
+  backbone: dinov3_vits16plus
+  image_size: 1024
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  layer_decay: 0.8
+  lr: 0.0003
+  backbone_lr: 0.00001
+  batch_size: 10
+  grad_accum_steps: 2
+  epochs: 23
+  weight_decay: 0.05
+  num_workers: 8
+  amp:
+    enabled: true
+    dtype: bf16
+  cmixup:
+    enabled: true
+    alpha: 1.0
+    bandwidth: 0.05
+    p: 0.5
+  early_stopping:
+    patience: 23
+    min_delta: 0.0002
+    monitor: val/kindex_mae
+augmentation:
+  p_exposure: 0.5
+  exposure_log2: 0.6
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25
