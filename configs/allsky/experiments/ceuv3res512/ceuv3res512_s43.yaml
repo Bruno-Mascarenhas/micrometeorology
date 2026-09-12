@@ -1,0 +1,62 @@
+# Segunda semente do braco vencedor (512 px, DINOv3 S/16+, image_only, k*-first,
+# LR por camada 0,8, jitter + C-Mixup, batch 16), com cosseno de 50 epocas: a
+# semente 42 nao degradou na validacao depois do minimo (epoca 20) e best e last
+# concordaram pela primeira vez, entao mais epocas so podem ajudar; e a segunda
+# semente e o que fecha o intervalo de confianca do resultado.
+# Resultado (2026-09-09 01:10): o cosseno mais longo nao pagou. Val k* minimo
+# 0,0743 na epoca 10 e nunca mais; teste com o last@50: DHI 18,34 (MBE +1,6),
+# kt-bal 0,668, por bloco RMSE 15,14 e F1-kt 0,668 [0,640-0,695]; o best@10 tem
+# F1-kt por bloco 0,694 mas DHI 18,95 (MBE -2,5). Tudo dentro da faixa de
+# semente da s42 (last@40: 18,00 / 0,669 / 14,77 / 0,685), sem ganho por epoca
+# extra; o ensemble das duas sementes (4 checkpoints) fecha em DHI 17,68 por
+# frame e 14,43 por bloco, F1-kt 0,690. Receita de referencia segue a s42.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: ceuv3res512_s43
+output_dir: output/allsky-mm/experiments/ceuv3res512/ceuv3res512_s43
+seed: 43
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso-20260906
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+model:
+  backbone: dinov3_vits16plus
+  image_size: 512
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  cmixup:
+    enabled: true
+    alpha: 1.0
+    bandwidth: 0.05
+    p: 0.5
+  layer_decay: 0.8
+  batch_size: 16
+  backbone_lr: 0.00001
+  epochs: 50
+  weight_decay: 0.05
+  num_workers: 8
+  early_stopping:
+    patience: 50
+    monitor: val/kindex_mae
+augmentation:
+  p_exposure: 0.5
+  exposure_log2: 0.6
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25

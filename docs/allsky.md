@@ -35,7 +35,10 @@ src/allsky/
 ├── archive.py         # Mirrors the Planetário camera archive (HTTPS client, ledger, TLS repair)
 ├── overlay.py         # Reads the timestamp the camera burns into each frame + timestamped extraction
 ├── drive.py           # rclone uploads to Google Drive
-├── snapshot.py        # Live-frame capture + single-image prediction
+├── snapshot.py        # Live-frame capture, ServedModel (load once) + single-image prediction
+├── serving.py         # The serving pin: pinned checkpoints, digests, roles, reports
+├── attribution.py     # Occlusion sensitivity + region counterfactuals on a served frame
+├── publish/           # frame.json / timeline.json / model.json builders for the sky page
 ├── preprocessing.py   # Static mask / crop / resize + per-frame visual QC
 ├── clearsky.py        # Haurwitz clear-sky GHI + clear-sky index k*
 ├── erbs.py            # Erbs (1982) diffuse-fraction decomposition -> pseudo diffuse targets
@@ -219,12 +222,20 @@ allsky train    --config EXPERIMENT.yaml [--data-root DIR] [--out-dir DIR]
 allsky evaluate --checkpoint CHECKPOINT.ckpt [--split val|test|train]
                 [--config FILE] [--data-root DIR] [--report-dir DIR]
                 [--device ...] [--batch-size N] [--predictions/--no-predictions] [--strict]
+                [--tta-rotations N]
+
+allsky watch    --out DIR (--serving PIN.yaml | --checkpoint-frame CKPT ... [--min-elevation-deg D])
+allsky publish-site --serving PIN.yaml --watch-dir DIR --out SITE/Ceu [--days N]
+                [--sensor-csv FILE] [--device cpu|cuda] [--prune-frames-days N]
+                [--rclone-remote NAME:path]
 ```
+
+- `watch --serving` and `publish-site` are documented in [`allsky-site.md`](allsky-site.md): the pin declares the served checkpoints and their digests, the watch scores the live frame with them, and the publisher writes the documents the public sky page reads.
 
 - `prepare-local` runs `extract-frames → build-manifest → splits`; steps are resumable and skip up-to-date outputs unless `--force`. A `--steps build-manifest` run without `extract-frames` cannot re-extract anything, so it aborts (exit 1) on a video whose frames carry no recorded provenance, or one written under a different video/mask/crop/resize config, instead of stamping the manifest with a config that did not produce those JPEGs — include the `extract-frames` step, or pass `--force` to build from the frames as they are. `--dry-run` logs the full plan and writes nothing.
 - `precompute-embeddings` reads the `embeddings` section of the PrepareConfig (backbone / pooling / batch / shard-size / dtype); backbone `"fake"` is the offline dev/test hook; the DINOv2 and DINOv3 ViTs download via `torch.hub` on first use, and `resnet50`/`efficientnet_v2_s` come from torchvision. See the [architecture reference](allsky-architecture.md#backbone-families) for the full list. `--resume` (default) skips `sample_id`s already in `index.parquet`, but refuses to resume into an embeddings dir built with a different backbone/pooling/dim/config — rerun with `--no-resume` (or a fresh `--out` dir) to overwrite.
 - `train` **requires** an experiment config (a YAML declaring `experiment: true`); any other config (or none) is rejected with a pointer to `configs/allsky/experiments/`. `--resume auto` finds `last.ckpt` in the run dir; `--epochs` is the **total** budget (resuming trains only the remainder and never clobbers a better `best.ckpt`).
-- `evaluate` rebuilds the model from the checkpoint, restores the train-split normalizers (no refit — leakage-safe), denormalizes to physical units, verifies `manifest_sha256`/`split_id` (warn, or error under `--strict`), and writes `metrics.json`, `stratified.csv`, `report.md` and (optionally) `predictions.parquet`.
+- `evaluate` rebuilds the model from the checkpoint, restores the train-split normalizers (no refit — leakage-safe), denormalizes to physical units, verifies `manifest_sha256`/`split_id` (warn, or error under `--strict`), and writes `metrics.json`, `stratified.csv`, `report.md` and (optionally) `predictions.parquet`. Without `--report-dir` the report lands in `<checkpoint dir>/eval-<split>`, or `eval-<split>-tta<N>` under `--tta-rotations N`, so a test-time-augmented run never overwrites the plain one.
 
 ---
 
@@ -251,7 +262,9 @@ Experiment files stay tiny by composing with `extends:` (a path or list, resolve
 1. **Uses persisted day splits.** The split artifact (`splits.json`) assigns whole calendar days to train/val/test, so near-duplicate frames of the same day never cross splits, and carries a `split_id` (no silent regeneration). Consecutive frames one minute apart are near-duplicates — a row-level split would leak validation information into training.
 2. **Standardizes features and targets from the training split only.** The `FeatureNormalizer` / `TargetNormalizer` are fit on the train split and stored in the checkpoint; validation/test reuse them verbatim (computing one locally is refused).
 3. **Resolves the device**: `device: auto` picks CUDA → MPS → CPU; on CUDA, automatic mixed precision is available (`--amp`, `fp16`/`bf16`).
-4. **Runs the engine**: optimizer/param groups (optional separate backbone LR), scheduler (`none`/`cosine`/`plateau`), gradient accumulation and clipping, early stopping, and full resume. It writes `last.ckpt` every epoch, `best.ckpt` at the best monitored metric, `metrics.json` and `metrics.csv` every epoch, and TensorBoard events under `runs/`. There is no separate run-manifest file: run provenance (`split_id`, `manifest_sha256`, `feature_columns`, `feature_groups`, `dataset_version`, the resolved config dump and `code_version_info`) is embedded in **both** checkpoints, and that is what `allsky evaluate` re-verifies.
+4. **Runs the engine**: optimizer/param groups (optional separate backbone LR, optionally decayed per backbone stage by `train.layer_decay`), scheduler (`none`/`cosine`/`plateau`), gradient accumulation and clipping, early stopping, and full resume. It writes `last.ckpt` every epoch, `best.ckpt` at the best monitored metric, `metrics.json` and `metrics.csv` every epoch, and TensorBoard events under `runs/`. There is no separate run-manifest file: run provenance (`split_id`, `manifest_sha256`, `feature_columns`, `feature_groups`, `dataset_version`, the resolved config dump and `code_version_info`) is embedded in every checkpoint (`last.ckpt`, `best.ckpt` and, when enabled, `ema.ckpt`), and that is what `allsky evaluate` re-verifies.
+5. **Averages the weights on request.** `train.weight_average: {enabled, decay, start_epoch}` keeps an exponential moving average of the trainable weights, updated after every optimizer step from `start_epoch` on, and writes it as `ema.ckpt` every epoch in the same format as `last.ckpt` — `allsky evaluate --checkpoint .../ema.ckpt` reads it unchanged. Its validation metrics are logged per epoch as `val_ema_*` columns (present only when enabled); they cannot serve as the early-stopping monitor, which selects `best.ckpt` among the live weights. A resume continues the average from the `ema.ckpt` beside `last.ckpt`, and restarts it with a warning when that file is missing; a resume with the average turned off rotates a previous invocation's `ema.ckpt` aside to `ema.ckpt.stale` and drops the `val_ema_*` columns from the history it continues.
+6. **Mixes batches on request.** `train.cmixup: {enabled, alpha, bandwidth, p}` applies C-Mixup (Yao et al. 2022) to a fraction `p` of the training batches: each row is blended with a partner drawn from the same batch by a Gaussian kernel of width `bandwidth` on the k\* target, with a weight from `Beta(alpha, alpha)`; the image, the features and the enabled regression targets are blended alike, and the sky class becomes a two-point distribution the loss scores as a soft target (unmixed rows cost what they cost without it). A row with a missing target is neither mixed nor chosen. It needs one frame per row and the k\* head, so the config refuses it under an embedding input, a frame window (`strategy` other than `center_frame`) or a disabled `targets.kindex`. `metrics.csv` gains `train_cmixup_mixed_rows`, the rows blended per epoch; an epoch that blends none is warned about.
 
 `--resume auto` restores from `last.ckpt` in the run dir and continues; `--epochs` is the total budget, so resuming trains only the remainder.
 

@@ -10,6 +10,8 @@ other, and it imports nothing from this project — the all-sky package reads th
 site from here too, which is what keeps that dependency one-directional.
 """
 
+import datetime as dt
+
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = ["STATION_SITE", "STATION_UTC_OFFSET_HOURS", "SiteConfig"]
@@ -43,6 +45,11 @@ class SiteConfig(BaseModel):
     #: of -130 degrees or a lat/lon transposition produces a finite,
     #: plausible-looking elevation instead of raising anywhere downstream.
     utc_offset_hours: float = Field(default=-3.0, ge=-12.0, le=14.0)
+
+    @property
+    def clock(self) -> dt.timezone:
+        """The fixed-offset zone the site's instruments stamp on."""
+        return dt.timezone(dt.timedelta(hours=self.utc_offset_hours))
 
 
 #: The station itself, at those default coordinates.

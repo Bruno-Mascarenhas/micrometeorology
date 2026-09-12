@@ -28,7 +28,7 @@ from typing import Any
 
 import pandas as pd
 
-from allsky.evaluation.evaluator import EvaluationResult
+from allsky.evaluation.evaluator import CLASSIFICATION_TARGETS, EvaluationResult
 from labmim_core.atomic import atomic_write, atomic_write_strict_json
 
 __all__ = ["compare_experiments", "write_evaluation_report"]
@@ -246,10 +246,13 @@ def _global_metrics_markdown(result: EvaluationResult) -> list[str]:
             for target in regression
         ]
         lines.extend(_markdown_table(header, table_rows))
-    if "sky" in result.enabled_targets:
-        lines += ["", "**sky (classification)**", ""]
+    for target in CLASSIFICATION_TARGETS:
+        if target not in result.global_metrics:
+            continue
+        title = _CLASSIFICATION_TITLES[target]
+        lines += ["", f"**{title}**", ""]
         header = ["metric", "value"]
-        sky = result.global_metrics["sky"]
+        sky = result.global_metrics[target]
         table_rows = [[m, _fmt(sky.get(m))] for m in _MARKDOWN_CLASSIFICATION_METRICS]
         lines.extend(_markdown_table(header, table_rows))
     return lines
@@ -260,6 +263,9 @@ def _frame_to_markdown(frame: pd.DataFrame) -> str:
     header = [str(column) for column in frame.columns]
     rows = [[_fmt(value) for value in record] for record in frame.itertuples(index=False)]
     return "\n".join(_markdown_table(header, rows))
+
+
+_CLASSIFICATION_TITLES = {"sky": "sky (classification)", "sky_kt": "sky from k* (classification)"}
 
 
 def _markdown_table(header: Sequence[str], rows: Sequence[Sequence[Any]]) -> list[str]:

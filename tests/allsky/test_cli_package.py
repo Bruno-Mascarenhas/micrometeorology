@@ -25,6 +25,8 @@ EXPECTED_COMMANDS = (
     "precompute-embeddings",
     "train",
     "evaluate",
+    "watch",
+    "publish-site",
 )
 
 

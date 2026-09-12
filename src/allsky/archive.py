@@ -31,6 +31,7 @@ __all__ = [
     "AIA_INTERMEDIATE_URL",
     "ARCHIVE_BASE_URL",
     "LEDGER_FILENAME",
+    "STATE_SUBDIR",
     "USER_AGENT",
     "ArchiveClient",
     "ArchiveEntry",
@@ -54,6 +55,7 @@ AIA_INTERMEDIATE_SHA256 = "e10747d4da7bab09cba9952f019d3534cb9fba070bf13d8791b16
 INTERMEDIATE_CACHE_FILENAME = "rnp-icpedu-gr46-2025.pem"
 USER_AGENT = "labmim-allsky-archive/1.0 (LabMiM/UFBA; +https://labmim.if.ufba.br)"
 LEDGER_FILENAME = "archive-ledger.json"
+STATE_SUBDIR = ".state"
 LEDGER_VERSION = 1
 
 _VIDEO_FILENAME_RE = re.compile(r"allsky-(\d{8})\.mp4")

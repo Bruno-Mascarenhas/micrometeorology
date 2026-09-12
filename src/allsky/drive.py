@@ -7,6 +7,7 @@ Why rclone rather than the Drive REST API, and the one-time setup, are in
 import logging
 import shutil
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -111,6 +112,35 @@ class RcloneUploader:
         destination = self.target.path(*remote_parts)
         self._run(["copyto", str(source), destination, "--checksum"])
         logger.info("uploaded %s -> %s", source.name, destination)
+        return destination
+
+    def copy_files(self, local_dir: str | Path, names: Sequence[str], *remote_parts: str) -> str:
+        """Copy exactly *names* from *local_dir* under ``target.path(*remote_parts)``, one at a time, in order.
+
+        One ``copyto`` per file rather than a single ``--files-from`` batch:
+        rclone walks a file list in its own (alphabetical) order, and the
+        publisher needs the images on the remote before the document that
+        names them. Nothing else in the destination is touched or deleted.
+        One transfer at a time, because the production host resets concurrent
+        connections.
+
+        Raises
+        ------
+        RcloneError
+            If *local_dir* is not a directory, a name is missing there, or
+            rclone exits non-zero for any file (the remaining files are not
+            copied).
+        """
+        source = Path(local_dir)
+        if not source.is_dir():
+            raise RcloneError(f"nothing to upload: {source} is not a directory")
+        missing = [name for name in names if not (source / name).is_file()]
+        if missing:
+            raise RcloneError(f"nothing to upload for {', '.join(missing)}: not in {source}")
+        destination = self.target.path(*remote_parts)
+        for name in names:
+            self._run(["copyto", str(source / name), f"{destination}/{name}", "--transfers", "1"])
+        logger.info("uploaded %d file(s) -> %s", len(names), destination)
         return destination
 
     def upload_dir(

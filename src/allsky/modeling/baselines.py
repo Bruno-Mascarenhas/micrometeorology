@@ -313,7 +313,9 @@ class ImageOnlyModel(nn.Module):
         outputs: ModelOutputs = self.heads(self.trunk(visual))
         return outputs
 
-    def param_groups(self, backbone_lr: float | None = None) -> list[dict[str, Any]]:
+    def param_groups(
+        self, backbone_lr: float | None = None, layer_decay: float | None = None
+    ) -> list[dict[str, Any]]:
         """Optimizer parameter groups; the image backbone gets its own LR.
 
         Same split (and same group order) as
@@ -334,4 +336,4 @@ class ImageOnlyModel(nn.Module):
             trainable parameter when no backbone rate applies.
         """
         lr = backbone_lr if backbone_lr is not None else self.backbone_lr
-        return split_backbone_param_groups(self, self.visual_encoder, lr)
+        return split_backbone_param_groups(self, self.visual_encoder, lr, layer_decay=layer_decay)

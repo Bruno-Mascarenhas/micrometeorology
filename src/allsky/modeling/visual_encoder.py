@@ -45,7 +45,7 @@ from allsky.modeling.geometry_adapter import (
 logger = logging.getLogger(__name__)
 
 #: Temporal pooling modes for a windowed ``embedding_seq``.
-TemporalPooling = Literal["mean", "attention"]
+TemporalPooling = Literal["mean", "attention", "mean_std"]
 
 __all__ = [
     "ImageEncoder",
@@ -53,6 +53,7 @@ __all__ = [
     "build_visual_encoder",
     "coerce_image_backbone",
     "masked_mean_pool",
+    "masked_mean_std_pool",
     "split_backbone_param_groups",
 ]
 
@@ -84,6 +85,42 @@ def masked_mean_pool(sequence: Tensor, mask: Tensor | None) -> Tensor:
     count = weights.sum(dim=1).clamp_min(1.0)
     masked: Tensor = summed / count
     return masked
+
+
+#: Variance floor under the square root of the pooled standard deviation, so a
+#: one-frame window (variance exactly zero) keeps a finite gradient.
+STD_POOL_EPSILON = 1e-6
+
+
+def masked_mean_std_pool(sequence: Tensor, mask: Tensor | None) -> Tensor:
+    """Mean and standard deviation over ``T`` of a ``(B, T, D)`` window, concatenated.
+
+    The mean is what :func:`masked_mean_pool` returns; the standard deviation
+    is the population one over the real steps. A datalogger block of an all-sky
+    camera is 4-5 frames of the same five minutes, and how much those frames
+    DIFFER is the signature the mean erases: a broken-cloud sky moves inside the
+    block, an overcast or clear one does not.
+
+    Parameters
+    ----------
+    sequence:
+        ``(B, T, D)`` float32.
+    mask:
+        ``(B, T)`` bool, True where the step is real; ``None`` pools everything.
+
+    Returns
+    -------
+    Tensor
+        ``(B, 2 * D)`` float32: the mean, then the standard deviation.
+    """
+    mean = masked_mean_pool(sequence, mask)
+    centred = sequence - mean.unsqueeze(1)
+    if mask is None:
+        variance = centred.pow(2).mean(dim=1)
+    else:
+        weights = mask.unsqueeze(-1).to(sequence.dtype)
+        variance = (centred.pow(2) * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+    return torch.cat([mean, torch.sqrt(variance + STD_POOL_EPSILON)], dim=-1)
 
 
 def _projection(in_dim: int, out_dim: int | None, dropout: float) -> tuple[nn.Module, int]:
@@ -282,11 +319,19 @@ class ImageEncoder(nn.Module):
         out_dim: int | None = None,
         dropout: float = 0.0,
         extra_input_channels: int = 0,
+        temporal_pooling: TemporalPooling = "mean",
     ) -> None:
         super().__init__()
         dim = getattr(backbone, "dim", None)
         if dim is None:
             raise AttributeError("image backbone must expose an integer 'dim' attribute")
+        if temporal_pooling not in ("mean", "mean_std"):
+            raise ValueError(
+                f"the image encoder pools a frame window by 'mean' or 'mean_std', got "
+                f"{temporal_pooling!r}; the learned attention pooler exists only for the "
+                "precomputed-embedding source"
+            )
+        self.temporal_pooling = temporal_pooling
         self.backbone = backbone
         partial_finetune = unfreeze_last_n > 0 and getattr(backbone, "blocks", None) is not None
         if frozen or partial_finetune:
@@ -299,7 +344,8 @@ class ImageEncoder(nn.Module):
             if extra_input_channels > 0
             else None
         )
-        self.projection, self._out_dim = _projection(int(dim), out_dim, dropout)
+        pooled_dim = int(dim) * (2 if temporal_pooling == "mean_std" else 1)
+        self.projection, self._out_dim = _projection(pooled_dim, out_dim, dropout)
 
     def train(self, mode: bool = True) -> ImageEncoder:
         """Set training mode, keeping every frozen normalisation layer in eval.
@@ -380,7 +426,7 @@ class ImageEncoder(nn.Module):
         return out
 
     def _encode_window(self, window: Tensor, mask: Tensor | None) -> Tensor:
-        """Encode a ``(B, T, C, H, W)`` window and mean-pool it to ``(B, dim)``.
+        """Encode a ``(B, T, C, H, W)`` window and pool it over ``T`` to ``(B, out)``.
 
         The window is folded into the batch so the backbone runs ONCE over
         ``B * T`` frames rather than T times over B — the cost is the same
@@ -395,28 +441,51 @@ class ImageEncoder(nn.Module):
         batch_size, steps = window.shape[0], window.shape[1]
         folded = window.reshape(batch_size * steps, *window.shape[2:])
         encoded = self.backbone(folded).reshape(batch_size, steps, -1)
+        if self.temporal_pooling == "mean_std":
+            return masked_mean_std_pool(encoded, mask)
         return masked_mean_pool(encoded, mask)
 
-    def param_groups(self, backbone_lr: float) -> list[dict[str, Any]]:
+    def param_groups(
+        self, backbone_lr: float, layer_decay: float | None = None
+    ) -> list[dict[str, Any]]:
         """Optimizer parameter groups putting the backbone on its own learning rate.
 
         Parameters
         ----------
         backbone_lr:
             Learning rate for the backbone group.
+        layer_decay:
+            When set, the backbone group is split per stage — the same
+            ``blocks`` sequence ``unfreeze_last_n`` counts.  Stage ``i`` of
+            ``n`` runs at ``backbone_lr * layer_decay ** (n - i)``; the
+            parameters registered before the first stage (patch embedding,
+            class, position and mask tokens) at ``backbone_lr * layer_decay **
+            (n + 1)``; those registered after the last (the final norm) at
+            ``backbone_lr`` itself — the layer-wise decay of Clark et al. 2020
+            and Bao et al. 2022.  Each such group carries a ``name``
+            (``backbone_embed``, ``backbone_block_<i>``, ``backbone_tail``) so
+            the engine can log one rate per group.
 
         Returns
         -------
         list[dict[str, Any]]
-            Up to two groups of **trainable** parameters: the backbone
-            parameters at ``lr=backbone_lr``, then everything else (the
-            projection) with no per-group override.  Frozen parameters are
-            omitted, so a wholly frozen backbone yields no backbone group.
+            Groups of **trainable** parameters: the backbone parameters at
+            ``lr=backbone_lr`` (one group, or one per tier under
+            *layer_decay*), then everything else (the projection) with no
+            per-group override.  Frozen parameters are omitted, so a wholly
+            frozen backbone yields no backbone group.
 
             The extra-channel branch is physically inside the backbone but is
             reported with the "everything else" group: it is a freshly
             zero-initialised module, not a pretrained one, so the small backbone
             rate that protects pretrained weights would only starve it.
+
+        Raises
+        ------
+        BackboneCapabilityError
+            If *layer_decay* is set and the backbone exposes no ``blocks``
+            sequence: a decay with no stages to tier would silently train the
+            whole backbone at ``backbone_lr`` while the config claimed otherwise.
         """
         extra_branch = (
             self.extra_channel_projection.extra_proj.parameters()
@@ -433,21 +502,82 @@ class ImageEncoder(nn.Module):
             if p.requires_grad and (not name.startswith("backbone.") or id(p) in extra_ids)
         ]
         groups: list[dict[str, Any]] = []
-        if backbone_params:
-            groups.append({"params": backbone_params, "lr": backbone_lr})
+        if layer_decay is None:
+            if backbone_params:
+                groups.append({"params": backbone_params, "lr": backbone_lr})
+        else:
+            groups.extend(self._layer_decayed_groups(backbone_params, backbone_lr, layer_decay))
         if other_params:
             groups.append({"params": other_params})
         return groups
 
+    def _layer_decayed_groups(
+        self, backbone_params: list[nn.Parameter], backbone_lr: float, layer_decay: float
+    ) -> list[dict[str, Any]]:
+        """Tier *backbone_params* by stage depth, as :meth:`param_groups` documents.
+
+        Registration order decides the tier of a parameter outside every stage:
+        before the first stage is the embedding tier, after the last is the
+        tail.  A module's own parameters are registered ahead of its
+        submodules', which is what puts the hub ViTs' tokens with the patch
+        embedding rather than with the final norm they precede in the file.
+        """
+        blocks = getattr(self.backbone, "blocks", None)
+        if blocks is None:
+            raise BackboneCapabilityError(
+                f"layer_decay needs a backbone with a 'blocks' sequence to tier, and "
+                f"{type(self.backbone).__name__} exposes none"
+            )
+        stages = list(blocks)
+        depth = len(stages)
+        stage_of = {
+            id(param): index for index, stage in enumerate(stages) for param in stage.parameters()
+        }
+        wanted = {id(param) for param in backbone_params}
+        embed: list[nn.Parameter] = []
+        tail: list[nn.Parameter] = []
+        per_stage: list[list[nn.Parameter]] = [[] for _ in stages]
+        first_stage_seen = False
+        for param in self.backbone.parameters():
+            stage = stage_of.get(id(param))
+            if stage is not None:
+                first_stage_seen = True
+            if id(param) not in wanted:
+                continue
+            if stage is not None:
+                per_stage[stage].append(param)
+            elif first_stage_seen:
+                tail.append(param)
+            else:
+                embed.append(param)
+        # Bao et al. 2022 (BEiT), layer-wise decay: the embedding is layer 0, block i is
+        # layer i + 1, the final norm is layer depth + 1; scale = decay ** (depth + 1 - layer).
+        tiers: list[tuple[str, list[nn.Parameter], float]] = [
+            ("backbone_embed", embed, layer_decay ** (depth + 1)),
+            *(
+                (f"backbone_block_{index}", params, layer_decay ** (depth - index))
+                for index, params in enumerate(per_stage)
+            ),
+            ("backbone_tail", tail, 1.0),
+        ]
+        return [
+            {"params": params, "lr": backbone_lr * scale, "name": name}
+            for name, params, scale in tiers
+            if params
+        ]
+
 
 def split_backbone_param_groups(
-    model: nn.Module, visual_encoder: nn.Module, backbone_lr: float | None
+    model: nn.Module,
+    visual_encoder: nn.Module,
+    backbone_lr: float | None,
+    layer_decay: float | None = None,
 ) -> list[dict[str, Any]]:
     """Optimizer groups for *model* with its image backbone on its own rate.
 
     The group ORDER is part of the contract: ``torch`` matches optimizer groups
     positionally in ``load_state_dict``, so ``--resume`` on an existing checkpoint
-    requires the backbone group to stay first.
+    requires the backbone group(s) to stay first, shallowest tier first.
 
     Parameters
     ----------
@@ -458,28 +588,30 @@ def split_backbone_param_groups(
         ``param_groups`` method that identifies the backbone parameters.
     backbone_lr:
         Learning rate for the backbone group; ``None`` disables the split.
+    layer_decay:
+        Per-stage decay of *backbone_lr*, handed to
+        :meth:`ImageEncoder.param_groups`; ``None`` keeps one backbone group.
 
     Returns
     -------
     list[dict[str, Any]]
         ``[backbone_at_backbone_lr, everything_else]`` when *visual_encoder*
-        exposes ``param_groups`` and *backbone_lr* is set, else a single group
-        holding every trainable parameter of *model*.  A wholly frozen backbone
-        contributes no parameters, so it collapses to that single group too.
+        exposes ``param_groups`` and *backbone_lr* is set — one backbone group
+        per tier under *layer_decay* — else a single group holding every
+        trainable parameter of *model*.  A wholly frozen backbone contributes
+        no parameters, so it collapses to that single group too.
     """
     get_backbone_groups = getattr(visual_encoder, "param_groups", None)
     if backbone_lr is None or get_backbone_groups is None:
         return [{"params": [p for p in model.parameters() if p.requires_grad]}]
-    backbone_params = {
-        id(p): p
-        for group in get_backbone_groups(backbone_lr)
+    backbone_groups = [
+        group
+        for group in get_backbone_groups(backbone_lr, layer_decay=layer_decay)
         if "lr" in group
-        for p in group["params"]
-    }
-    other = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_params]
-    groups: list[dict[str, Any]] = []
-    if backbone_params:
-        groups.append({"params": list(backbone_params.values()), "lr": backbone_lr})
+    ]
+    backbone_ids = {id(p) for group in backbone_groups for p in group["params"]}
+    other = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_ids]
+    groups: list[dict[str, Any]] = [dict(group) for group in backbone_groups]
     if other:
         groups.append({"params": other})
     return groups
@@ -690,5 +822,6 @@ def build_visual_encoder(
             out_dim=out_dim,
             dropout=dropout,
             extra_input_channels=extra_input_channels,
+            temporal_pooling=temporal_pooling,
         )
     raise ValueError(f"unknown input_mode {input_mode!r}; expected 'image' or 'embedding'")

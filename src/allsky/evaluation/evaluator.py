@@ -53,10 +53,12 @@ from allsky.evaluation.metrics import (
     regression_metrics,
     skill_score,
 )
+from allsky.evaluation.persistence import previous_same_day
 from allsky.features.normalization import FeatureNormalizer, TargetNormalizer
-from allsky.preprocessing import PreprocessingPipeline
+from allsky.preprocessing import IMAGENET_MEAN, IMAGENET_STD, PreprocessingPipeline
 from allsky.training.checkpointing import normalizers_from_checkpoint
 from labmim_core.sky import SKY_CLASS_KT_UPPER_BOUNDS, SKY_CLASS_NAMES, sky_class_name
+from micrometeorology.stats.sky_condition import classify_sky_condition
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +159,7 @@ def evaluate_checkpoint(
     trust_checkpoint: bool = False,
     embedding_reader: EmbeddingReader | None = None,
     image_backbone_builder: Callable[[], Any] | None = None,
+    tta_rotations: int = 0,
 ) -> EvaluationResult:
     """Evaluate *checkpoint_path* on *split* and return an :class:`EvaluationResult`.
 
@@ -197,6 +200,14 @@ def evaluate_checkpoint(
     image_backbone_builder:
         Zero-arg factory for the image backbone (``input_mode="image"`` visual
         models); no backbone is downloaded implicitly.
+    tta_rotations:
+        Test-time augmentation: ``N > 0`` scores every frame at the ``N``
+        rotations ``k * 360 / N`` degrees about the zenith
+        (:func:`allsky.augmentation.rotate_frame` over the whole channel
+        stack) and averages the regression outputs and the sky probabilities;
+        the sky class is the argmax of the mean, and the k*-derived class
+        follows from the mean k*. Recorded as ``meta["tta_rotations"]``. ``0``
+        scores each frame once, as it is.
 
     Returns
     -------
@@ -207,8 +218,11 @@ def evaluate_checkpoint(
     ------
     ValueError
         If *split* has no days in the artifact or none of its days appear in the
-        manifest; and, under ``strict``, on a manifest-hash, split-id or
-        k-index-kind mismatch between the checkpoint and the data on disk.
+        manifest; under ``strict``, on a manifest-hash, split-id or
+        k-index-kind mismatch between the checkpoint and the data on disk; and
+        for *tta_rotations* on a checkpoint trained without
+        ``model.geometry_channels``, where a rotation moves the sun with nothing
+        telling the model where it went.
     """
     from allsky.training.checkpointing import load_checkpoint
     from allsky.training.engine import resolve_run_device
@@ -220,6 +234,15 @@ def evaluate_checkpoint(
     )
 
     cfg = ExperimentConfig.model_validate(checkpoint["config"])
+    if tta_rotations < 0:
+        raise ValueError(f"tta_rotations must be zero or positive, got {tta_rotations}")
+    if tta_rotations and not geometry_channels_of(cfg):
+        raise ValueError(
+            f"tta_rotations={tta_rotations} rotates every frame about the zenith, and this "
+            "checkpoint was trained without model.geometry_channels: the sun would move in the "
+            "frame with no solar channel to move with it, so the rotated frames are skies the "
+            "model was never shown; evaluate without --tta-rotations"
+        )
     root = Path(data_root) if data_root is not None else Path(cfg.data.data_root)
 
     manifest, meta = load_manifest(resolve_against_root(cfg.data.manifest, root))
@@ -251,10 +274,12 @@ def evaluate_checkpoint(
         kindex_kind=manifest_kind,
         utc_offset_hours=site_utc_offset_hours(meta),
         frame_geometry=meta.get("frame_geometry"),
+        tta_rotations=tta_rotations,
     )
 
-    global_metrics = _global_metrics(predictions, enabled_targets)
-    stratified = _stratified_metrics(predictions, enabled_targets, global_metrics)
+    scored_targets = _scored_targets(predictions, enabled_targets)
+    global_metrics = _global_metrics(predictions, scored_targets)
+    stratified = _stratified_metrics(predictions, scored_targets, global_metrics)
     confusion = None
     if "sky" in global_metrics and "confusion" in global_metrics["sky"]:
         confusion = {
@@ -275,12 +300,10 @@ def evaluate_checkpoint(
         "kindex_kind": manifest_kind,
         "kindex_kind_ok": kindex_kind_ok,
         "dataset_version": str(meta.get("dataset_version", checkpoint.get("dataset_version"))),
-        # Which CR5000 join the dataset was built with. It decides whether a
-        # frame was paired against the logger's raw end-stamp or against the
-        # centre of the interval it averages.
         "sensor_timestamp_offset_minutes": (meta.get("thresholds") or {}).get(
             "sensor_timestamp_offset_minutes"
         ),
+        "tta_rotations": int(tta_rotations),
     }
     logger.info(
         "evaluated %s on '%s': %d rows, targets=%s (hash_ok=%s, split_ok=%s)",
@@ -294,7 +317,9 @@ def evaluate_checkpoint(
     return EvaluationResult(
         checkpoint_path=str(ckpt_path),
         split=split,
-        n_samples=len(split_df),
+        # The served items, not the split's rows: under sensor_block the dataset
+        # serves one item per datalogger block and the frame is the truth here.
+        n_samples=len(predictions),
         enabled_targets=enabled_targets,
         global_metrics=global_metrics,
         stratified=stratified,
@@ -425,8 +450,14 @@ def _run_inference(
     kindex_kind: str | None,
     utc_offset_hours: float,
     frame_geometry: Mapping[str, Any] | None = None,
+    tta_rotations: int = 0,
 ) -> pd.DataFrame:
-    """Rebuild the model, run a no-grad pass and assemble the predictions frame."""
+    """Rebuild the model, run a no-grad pass and assemble the predictions frame.
+
+    With *tta_rotations* the pass over each batch is one forward per rotation
+    of the frames, folded by :func:`_rotation_averaged_outputs`; without it,
+    one forward of the frames as the dataset serves them.
+    """
     import torch
     from torch.utils.data import DataLoader
 
@@ -443,6 +474,7 @@ def _run_inference(
         frame_geometry=frame_geometry,
     )
 
+    split_df = dataset.served_manifest
     model = restore_model(
         cfg,
         checkpoint,
@@ -468,6 +500,7 @@ def _run_inference(
         persistent_workers=False,
         drop_last=False,
     )
+    rotation_fill = _rotation_fill(len(geometry_channels_of(cfg))) if tta_rotations else None
     collected: dict[str, list[np.ndarray]] = {name: [] for name in enabled_targets}
     with torch.no_grad():
         for raw in loader:
@@ -475,9 +508,18 @@ def _run_inference(
                 key: (value.to(device) if isinstance(value, torch.Tensor) else value)
                 for key, value in raw.items()
             }
-            outputs = model(batch)
+            if rotation_fill is None:
+                outputs = model(batch)
+            else:
+                outputs = _rotation_averaged_outputs(
+                    model, batch, raw, rotations=tta_rotations, fill=rotation_fill, device=device
+                )
             for name in enabled_targets:
                 collected[name].append(_extract_prediction(name, outputs))
+            if "sky" in enabled_targets:
+                collected.setdefault("prob_sky", []).append(
+                    torch.softmax(outputs["sky_logits"].detach().float(), dim=-1).cpu().numpy()
+                )
 
     predicted: dict[str, np.ndarray] = {
         name: np.concatenate(chunks) if chunks else np.empty(0)
@@ -506,6 +548,65 @@ def _run_inference(
     )
 
 
+def _rotation_fill(n_geometry_channels: int) -> np.ndarray:
+    """What a rotated frame's uncovered corners hold, per plane, ``(3 + G,)`` float32.
+
+    The dataset serves standardized RGB, so the black the prepare pad writes —
+    and the training rotation fills with, on the ``[0, 1]`` frame — is
+    ``(0 - mean) / std`` per channel here. The geometry planes are filled with
+    zero, which is what :func:`allsky.geometry.solar_geometry_maps` writes on
+    every pixel beyond the horizon, so the corners a rotation uncovers hold
+    what the unrotated plane holds there.
+    """
+    rgb = (np.zeros(3) - np.asarray(IMAGENET_MEAN)) / np.asarray(IMAGENET_STD)
+    return np.concatenate([rgb, np.zeros(n_geometry_channels)]).astype(np.float32)
+
+
+def _rotation_averaged_outputs(
+    model: Any,
+    batch: dict[str, Any],
+    raw: Mapping[str, Any],
+    *,
+    rotations: int,
+    fill: np.ndarray,
+    device: str,
+) -> dict[str, Any]:
+    """The model's outputs averaged over *rotations* uniform turns of the frames.
+
+    Each regression head is the mean of its outputs over the rotations, in the
+    normalized space the head emits — the denormalization is affine, so this is
+    the mean in physical units too. ``sky_logits`` comes back as the log of the
+    mean class probability: the argmax the caller takes is then the argmax of
+    the mean probability, and the softmax it applies recovers that mean.
+
+    *raw* is the batch as the loader emitted it, still on the CPU: the frames
+    are rotated there, whole channel stack at a time so the solar-geometry
+    planes turn with the pixels, and only the rotated copy travels to *device*.
+    """
+    import torch
+
+    from allsky.augmentation import rotate_frame
+
+    key = "image_seq" if "image_seq" in batch else "image"
+    frames = raw[key].numpy()
+    per_plane = fill.reshape((1,) * (frames.ndim - 3) + (-1, 1, 1))
+    summed: dict[str, Any] = {}
+    for step in range(rotations):
+        if step == 0:
+            outputs = model(batch)
+        else:
+            angle = step * 360.0 / rotations
+            rotated = np.ascontiguousarray(rotate_frame(frames, angle, fill=per_plane))
+            outputs = model({**batch, key: torch.from_numpy(rotated).to(device)})
+        for name, value in outputs.items():
+            term = torch.softmax(value.float(), dim=-1) if name == "sky_logits" else value.float()
+            summed[name] = term if name not in summed else summed[name] + term
+    averaged = {name: value / rotations for name, value in summed.items()}
+    if "sky_logits" in averaged:
+        averaged["sky_logits"] = torch.log(averaged["sky_logits"])
+    return averaged
+
+
 def _build_split_dataset(
     cfg: ExperimentConfig,
     split_df: pd.DataFrame,
@@ -526,18 +627,13 @@ def _build_split_dataset(
             if embedding_reader is not None
             else default_embedding_reader(cfg, root)
         )
-        # Mirror training's alignment strategy so the eval batches match what the
-        # model was trained on (plain embedding for center_frame/mean_embedding,
-        # padded embedding_seq + frame_mask for attention_pooling).
-        window = cfg.data.alignment.strategy
         dataset: Any = MultimodalEmbeddingDataset(
             split_df,
             feature_columns,
             embedding_reader=reader,
             train=False,
             stats=feature_normalizer,
-            window=window,
-            window_minutes=float(cfg.data.alignment.window_minutes),
+            alignment=cfg.data.alignment,
             dhi_parameterization=cfg.targets.dhi.parameterization,
             utc_offset_hours=utc_offset_hours,
         )
@@ -559,9 +655,7 @@ def _build_split_dataset(
         frame_geometry=frame_geometry,
         dhi_parameterization=cfg.targets.dhi.parameterization,
         utc_offset_hours=utc_offset_hours,
-        window=cfg.data.alignment.strategy,
-        window_minutes=cfg.data.alignment.window_minutes,
-        window_max_frames=cfg.data.alignment.max_frames,
+        alignment=cfg.data.alignment,
     )
     return dataset, None
 
@@ -605,6 +699,10 @@ def _build_predictions_frame(
         if name == "sky":
             frame["obs_sky"] = split_df["sky_class"].to_numpy(dtype=np.int64)
             frame["pred_sky"] = np.asarray(predicted["sky"], dtype=np.int64)
+            if "prob_sky" in predicted:
+                probabilities = np.asarray(predicted["prob_sky"], dtype=np.float32)
+                for index, class_name in enumerate(SKY_CLASS_NAMES):
+                    frame[f"prob_sky_{class_name}"] = probabilities[:, index]
         else:
             obs_column = _REGRESSION_TARGETS[name]
             observed = (
@@ -614,6 +712,8 @@ def _build_predictions_frame(
             )
             frame[f"obs_{name}"] = observed
             frame[f"pred_{name}"] = np.asarray(predicted[name], dtype=np.float64)
+    if "kindex" in enabled_targets and kindex_kind == "kstar" and "solar_zenith" in frame.columns:
+        _attach_kt_derived_sky(frame, times, utc_offset_hours)
     _attach_reference_columns(
         frame,
         enabled_targets,
@@ -622,6 +722,48 @@ def _build_predictions_frame(
         utc_offset_hours=utc_offset_hours,
     )
     return frame
+
+
+def _attach_kt_derived_sky(frame: pd.DataFrame, times: pd.Series, utc_offset_hours: float) -> None:
+    """Attach ``pred_kt``, ``pred_sky_kt`` and ``obs_sky_kt``.
+
+    ``pred_kt`` ``(N,)`` float64 is the predicted clearness index, k* times the
+    Haurwitz clear-sky clearness index at each row's zenith; ``pred_sky_kt``
+    ``(N,)`` int64 bins it with :func:`classify_sky_condition` — the rule that
+    labelled ``sky_class`` in the manifest. ``obs_sky_kt`` is the label the
+    derived class is scored against: the manifest's ``obs_sky`` when the split
+    carries one, else the same rule applied to ``obs_kindex``, where a row
+    whose observed index is not finite carries
+    :data:`~labmim_core.sky.SKY_CLASS_MISSING`. Either way the pair scores like
+    any other classification target.
+
+    Raises
+    ------
+    ValueError
+        When a predicted clearness index is not finite: a prediction cannot be
+        scored as unlabelable.
+    """
+    _, kt_clear = _clearsky_ghi_and_kt(frame, times, utc_offset_hours)
+    pred_kt = frame["pred_kindex"].to_numpy(dtype=np.float64) * kt_clear
+    if not np.isfinite(pred_kt).all():
+        raise ValueError(
+            f"{int((~np.isfinite(pred_kt)).sum())} predicted clearness index value(s) are not "
+            "finite; the k*-derived sky class cannot be scored"
+        )
+    frame["pred_kt"] = pred_kt
+    frame["pred_sky_kt"] = classify_sky_condition(pred_kt)
+    if "obs_sky" in frame.columns:
+        frame["obs_sky_kt"] = frame["obs_sky"].to_numpy(dtype=np.int64)
+    else:
+        obs_kt = frame["obs_kindex"].to_numpy(dtype=np.float64) * kt_clear
+        frame["obs_sky_kt"] = classify_sky_condition(obs_kt)
+
+
+def _scored_targets(predictions: pd.DataFrame, enabled_targets: Sequence[str]) -> list[str]:
+    """The enabled targets plus the k*-derived sky class when the frame carries it."""
+    if "pred_sky_kt" in predictions.columns:
+        return [*enabled_targets, KT_DERIVED_SKY_TARGET]
+    return list(enabled_targets)
 
 
 def _attach_reference_columns(
@@ -655,8 +797,10 @@ def _attach_reference_columns(
     for name in enabled_targets:
         if name == "sky":
             continue
-        frame[f"persistence_{name}"] = _previous_observation_same_day(
-            frame, f"obs_{name}", times=times
+        frame[f"persistence_{name}"] = previous_same_day(
+            frame[f"obs_{name}"].to_numpy(dtype=np.float64),
+            day_id=frame["day_id"].to_numpy(),
+            order=times.to_numpy(),
         )
         clearsky = _clearsky_reference(
             frame,
@@ -675,25 +819,6 @@ def _attach_reference_columns(
                 "the baseline); write the manifest's .meta.json sidecar with kindex_kind "
                 "to restore it"
             )
-
-
-def _previous_observation_same_day(
-    frame: pd.DataFrame, observed_column: str, *, times: pd.Series
-) -> np.ndarray:
-    """The previous observation of the same acquisition day, the no-change forecast.
-
-    The shift stops at the ``day_id`` boundary: the night gap between the last
-    frame of a day and the first of the next is not a persistence horizon.
-    """
-    ordered = pd.DataFrame(
-        {
-            "day_id": frame["day_id"].to_numpy(),
-            "timestamp_utc": times.to_numpy(),
-            "observed": frame[observed_column].to_numpy(dtype=np.float64),
-        }
-    ).sort_values(["day_id", "timestamp_utc"])
-    shifted = ordered.groupby("day_id", sort=False)["observed"].shift(1)
-    return shifted.sort_index().to_numpy(dtype=np.float64)
 
 
 def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame, *, utc_offset_hours: float) -> None:
@@ -739,6 +864,17 @@ def _add_strata(frame: pd.DataFrame, split_df: pd.DataFrame, *, utc_offset_hours
         )
 
 
+#: The sky class read off the k* head, scored beside the enabled targets. The
+#: four sky conditions are bands of the clearness index (Escobedo et al. 2009,
+#: :data:`~labmim_core.sky.SKY_CLASS_KT_UPPER_BOUNDS`), so a k* prediction
+#: times the clear-sky clearness index at the same zenith is a class prediction
+#: by the rule that labelled the manifest, without a classification head.
+KT_DERIVED_SKY_TARGET = "sky_kt"
+#: The targets scored as classes: ``obs_<name>`` / ``pred_<name>`` int64 class
+#: columns, with ``prob_<name>_<class>`` columns when the head emits them.
+CLASSIFICATION_TARGETS = ("sky", KT_DERIVED_SKY_TARGET)
+
+
 #: Stratification column -> the ``stratum_kind`` label reported in the long table.
 _STRATUM_KINDS: dict[str, str] = {
     "sky_class": "sky_class",
@@ -761,12 +897,26 @@ def _global_metrics(
 
 
 def _target_metrics(frame: pd.DataFrame, name: str) -> dict[str, Any]:
-    """Metrics for one target over *frame* (regression or classification)."""
-    if name == "sky":
+    """Metrics for one target over *frame* (regression or classification).
+
+    A classification target is scored over the rows carrying a label
+    (``>= 0``): :data:`~labmim_core.sky.SKY_CLASS_MISSING` marks a row the
+    manifest could not label, never a class.
+    """
+    if name in CLASSIFICATION_TARGETS:
+        labels = frame[f"obs_{name}"].to_numpy(dtype=np.int64)
+        scored = labels >= 0
+        probability_columns = [f"prob_{name}_{class_name}" for class_name in SKY_CLASS_NAMES]
+        probabilities = (
+            frame[probability_columns].to_numpy(dtype=np.float64)[scored]
+            if all(column in frame.columns for column in probability_columns)
+            else None
+        )
         return classification_metrics(
-            frame["obs_sky"].to_numpy(),
-            frame["pred_sky"].to_numpy(),
+            labels[scored],
+            frame[f"pred_{name}"].to_numpy()[scored],
             n_classes=len(SKY_CLASS_NAMES),
+            probabilities=probabilities,
         )
     obs_col, pred_col = f"obs_{name}", f"pred_{name}"
     observed = frame[obs_col].to_numpy(dtype=np.float64)
@@ -911,6 +1061,8 @@ def _metric_rows(
     rows: list[dict[str, Any]] = []
     for metric, value in metrics.items():
         if metric in skipped:
+            continue
+        if isinstance(value, dict | list):
             continue
         count = _row_count(metric, metrics)
         if count is None:

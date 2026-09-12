@@ -141,7 +141,7 @@ recorded beside the resume digest as provenance a reader can consult, never as a
 migration key: it lets someone tell "the formula widened" from "the pixels
 changed", and nothing reads it to carry a store across either.
 
-### Checkpoint payload (`last.ckpt` / `best.ckpt`)
+### Checkpoint payload (`last.ckpt` / `best.ckpt` / `ema.ckpt`)
 
 `torch.save`, atomic. Read back under torch's **restricted** unpickler
 (`weights_only=True` plus an allowlist of the payload's own types): a checkpoint
@@ -152,8 +152,13 @@ unrestricted reader for a file you produced yourself.
 Contains `model_state`, `optimizer_state`, `scheduler_state`, `scaler_state`,
 `epoch`, `global_step`, `epochs_no_improve`, `best_metric`, the full `config`
 dump, `normalizers`, ordered `feature_columns`, `feature_groups`,
-`dataset_version`, `split_id`, `manifest_sha256`, `backbone` info (image mode),
-`code_version`, and `rng_state` for deterministic resume.
+`dataset_version`, `split_id`, `manifest_sha256`, `sensor_pairing` (the
+frame-to-row pairing rule the serving path re-applies), `frame_geometry` (the
+prepare mask/crop/resize the live frame is put through), `backbone` info
+(image mode), `code_version`, and `rng_state` for deterministic resume.
+`ema.ckpt`, written only under `train.weight_average`, carries the same
+payload with `model_state` holding the exponential moving average of the
+weights at that epoch.
 
 Resume is crash-safe: the train batch order is drawn from a dedicated sampler
 generator re-seeded to `seed * 100003 + epoch` — a pure function of
@@ -266,6 +271,14 @@ holds the circumsolar region that governs the diffuse split.
 projection, the east-west mirror and the mount rotation. Channels:
 `cos_sun_angle`, `cos_pixel_zenith`, `solar_disc`. The zenith channel is fixed
 for a fixed camera — a spatial prior, carrying no information *between* samples.
+Every plane is zero beyond the horizon, where the frame holds the prepare pad:
+a rotation about the zenith (`augmentation.p_rotate` in training,
+`evaluate --tta-rotations` at test time) fills the corners it uncovers with
+zero, so the rotated plane is the plane of the rotated sun over the whole frame
+and training and evaluation see the same corners. A checkpoint trained before
+the planes were zeroed there was fed the lens model's extrapolation past the
+horizon instead; evaluating it now does not reproduce its recorded metrics
+exactly.
 
 **How the channels attach.** Widening the pretrained convolution would put the
 new weights inside the backbone, where the freeze sweep owns them:
@@ -348,7 +361,9 @@ Beyond the ladder, `configs/allsky/experiments/` carries one directory per arm,
 each a seed sweep over a single question: `iso` (isotropic re-extraction, the
 control), `sunmap`/`sunangle` (geometry channels), `kdindex`/`kdsun` (clear-sky
 index target), `janela` (temporal window), `resnet50`/`effnet`/`dinov3s`
-(backbone family), `folsom`/`transfer` (pre-train and transfer), plus the
+(backbone family), `folsom`/`transfer` (pre-train and transfer), `ceu` (the sky
+condition as the primary target: sky + k* + clear-sky-index DHI heads, fine-tuned,
+`cls+mean` pooling, the annealed recipe, three seeds for an ensemble), plus the
 earlier `control`/`exposure`/`shuffled`/`finetune`/`anneal`/`loss`/`normlr`/`res`
 sweeps. Every arm pins its seed and every run records the commit hash.
 

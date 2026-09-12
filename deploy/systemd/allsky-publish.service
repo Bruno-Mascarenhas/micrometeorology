@@ -1,0 +1,19 @@
+[Unit]
+Description=publish the sky-page artifacts from the watch (allsky publish-site)
+OnFailure=allsky-publish-failed.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/labmim/micrometeorology
+Nice=10
+Environment=OMP_NUM_THREADS=4
+Environment=MKL_NUM_THREADS=4
+Environment=ALLSKY_DINOV3_REPO=%h/.cache/torch/hub/facebookresearch_dinov3_main
+Environment=ALLSKY_DINOV3_WEIGHTS=%h/labmim/dinov3/dinov3_vits16plus_pretrain_lvd1689m.pth
+ExecStart=%h/miniforge3/envs/micrometeorology/bin/allsky publish-site \
+  --serving configs/allsky/serving/ceu.yaml \
+  --watch-dir %h/labmim/allsky-watch/ceuv3res512 \
+  --out %h/labmim/site-labmim/site/Ceu \
+  --days 3 \
+  --prune-frames-days 14 \
+  --trust-checkpoint

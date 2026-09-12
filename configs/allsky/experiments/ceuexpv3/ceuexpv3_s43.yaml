@@ -1,0 +1,62 @@
+# ceuexpv3: o DINOv3 ViT-S/16+ com a receita que a sonda congelada justifica.
+# Congelado, o v3 empata ou supera o v2 neste dado (kt bal 0,63 vs 0,62-0,64,
+# DHI 25-26 vs 26-28); fine-tunado com a receita do v2 (12 blocos a 1e-5
+# uniforme) ele perdeu em tudo. Logo o que falha e o fine-tuning, nao a
+# feature: LR por camada (Bao et al. 2022; e a convencao do proprio DINOv3 em
+# dinov3/train/param_groups.py) protege os blocos rasos, e 256 px e a
+# resolucao de pre-treino do v3 (16 x 16 tokens). Mesmo monitor e EMA do ceuexp2.
+# Ajuste apos a semente 42 (2026-09-07 04:10): o val k* MAE do v3 chegou ao minimo
+# (0,0772) na epoca 8 e subiu ate 0,0828 na 40, enquanto o v2 fica plano em
+# 0,078 — o LR ainda e alto para o v3 mesmo com o decaimento por camada. Nas
+# sementes 43/44: backbone_lr 1e-5 -> 5e-6, cosseno de 40 -> 30 epocas, e a EMA
+# com decay 0,9998 (horizonte ~5 epocas em vez de ~1, para ser uma media de
+# verdade e nao uma copia do last). A semente 42 fica como referencia da
+# primeira receita.
+extends: [../_base.yaml, ../../models/film.yaml]
+name: ceuexpv3_s43
+output_dir: output/allsky-mm/experiments/ceuexpv3/ceuexpv3_s43
+seed: 43
+features:
+  set: bare
+  extra: [log2_exposure_s, log2_relative_radiance]
+data:
+  data_root: output/allsky-mm/dataset-iso-20260906-exp
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+model:
+  backbone: dinov3_vits16plus
+  image_size: 256
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  layer_decay: 0.8
+  weight_average:
+    enabled: true
+    decay: 0.9998
+    start_epoch: 2
+  backbone_lr: 0.000005
+  epochs: 30
+  weight_decay: 0.05
+  num_workers: 8
+  early_stopping:
+    patience: 30
+    monitor: val/kindex_mae
+augmentation:
+  p_exposure: 0.0
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25

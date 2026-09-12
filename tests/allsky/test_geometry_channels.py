@@ -19,7 +19,7 @@ import pytest
 import torch
 from torch import nn
 
-from allsky.augmentation import AugmentationPipeline
+from allsky.augmentation import AugmentationPipeline, rotate_frame, translate
 from allsky.config import ExperimentConfig, geometry_channels_of
 from allsky.data.datasets import MultimodalImageDataset
 from allsky.data.manifest import build_manifest
@@ -43,11 +43,13 @@ from allsky.modeling.geometry_adapter import (
 )
 from allsky.modeling.registry import build_model
 from allsky.modeling.visual_encoder import ImageEncoder
+from allsky.preprocessing import IMAGENET_MEAN, IMAGENET_STD
 from labmim_core import solar
 from labmim_core.site import SiteConfig
 
 FRAME_PX = 32
 PATCH_PX = 8
+MODEL_FRAME_PX = 224
 
 
 @pytest.fixture
@@ -110,6 +112,51 @@ class TestSolarGeometryMaps:
         centre = (round(calibration.centre_row), round(calibration.centre_col))
 
         assert zenith[centre] == pytest.approx(1.0, abs=2e-3)
+
+    def test_every_plane_is_zero_beyond_the_horizon_and_nonzero_somewhere_inside(
+        self, calibration: LensCalibration
+    ):
+        maps = solar_geometry_maps(
+            calibration, (FRAME_PX, FRAME_PX), sun_zenith_rad=1.4, sun_azimuth_rad=0.7
+        )
+        beyond = ~calibration.keep_mask((FRAME_PX, FRAME_PX))
+
+        assert beyond.any()
+        assert np.all(maps[:, beyond] == 0.0)
+        assert np.all(np.abs(maps[:, ~beyond]).max(axis=-1) > 0.0)
+
+    def test_a_rotation_of_the_planes_reproduces_the_planes_of_the_rotated_sun(self):
+        """A positive ``rotate_frame`` angle carries a pixel's bearing forward
+        by that angle, so the frame turned by 45 degrees shows the sun at
+        ``azimuth + 45``; with the planes zero beyond the horizon the resampled
+        plane is the recomputed one over the whole frame, corners included, up
+        to the bilinear blur along the horizon and the sub-pixel offset of the
+        optical centre. At the model's frame size the horizon blur is a thin
+        ring, so the mean residual isolates the corners."""
+        size = MODEL_FRAME_PX
+        calibration = isotropic_calibration(size)
+        zenith, azimuth, turn_deg = 1.0, 0.7, 45.0
+        before = solar_geometry_maps(
+            calibration,
+            (size, size),
+            sun_zenith_rad=zenith,
+            sun_azimuth_rad=azimuth,
+            channels=("cos_sun_angle",),
+        )
+        after = solar_geometry_maps(
+            calibration,
+            (size, size),
+            sun_zenith_rad=zenith,
+            sun_azimuth_rad=azimuth + np.radians(turn_deg),
+            channels=("cos_sun_angle",),
+        )
+        corner = (0, 0)
+
+        turned = rotate_frame(before, turn_deg)
+
+        assert not calibration.keep_mask((size, size))[corner]
+        assert turned[0][corner] == 0.0 == after[0][corner]
+        assert np.abs(turned - after).mean() < 0.01
 
 
 class TestChannelSelection:
@@ -345,21 +392,80 @@ class TestImageDatasetChannels:
         assert torch.equal(with_geometry[0]["image"][:3], plain[0]["image"])
         assert not torch.equal(with_geometry[0]["image"][3:], with_geometry[-1]["image"][3:])
 
-    def test_a_translating_augmentation_is_refused_instead_of_silently_misaligning(
+    def test_a_translating_augmentation_shifts_the_geometry_planes_with_the_frame(
         self, tmp_path: Path
     ):
+        """Edge replication commutes with the per-channel standardization, so
+        the served item is the plain item shifted by the draw the pipeline
+        makes right after its gate."""
         manifest, root = _manifest(tmp_path)
+        plain = self._dataset(manifest, root)
+        shifted = self._dataset(
+            manifest, root, AugmentationPipeline(p_translate=1.0, translate_px=3)
+        )
+        replay = np.random.default_rng((0, 0, 0))
+        replay.random()
 
-        with pytest.raises(ValueError, match="incompatible with p_translate"):
-            MultimodalImageDataset(
-                manifest,
-                resolve_feature_set("bare"),
-                data_root=root,
-                image_size=FRAME_PX,
-                train=True,
-                augment=AugmentationPipeline(p_translate=1.0),
-                geometry_channels=GEOMETRY_CHANNEL_NAMES,
-            )
+        expected = translate(plain[0]["image"].numpy(), replay, max_shift=3)
+
+        assert not torch.equal(shifted[0]["image"][3:], plain[0]["image"][3:])
+        np.testing.assert_array_equal(shifted[0]["image"].numpy(), expected)
+
+    def test_a_rotating_augmentation_turns_the_geometry_planes_with_the_pixels(
+        self, tmp_path: Path
+    ):
+        """The rotation runs on the [0, 1] stack with a black fill; on the
+        standardized stack the same rotation has the standardized black as its
+        fill, because bilinear resampling commutes with an affine map of the
+        values once the outside value is mapped too."""
+        manifest, root = _manifest(tmp_path)
+        plain = self._dataset(manifest, root)
+        turned = self._dataset(
+            manifest, root, AugmentationPipeline(p_rotate=1.0, rotate_max_deg=180)
+        )
+        replay = np.random.default_rng((0, 0, 0))
+        replay.random()
+        angle = float(replay.uniform(-180.0, 180.0))
+        black = (np.zeros(3) - np.asarray(IMAGENET_MEAN)) / np.asarray(IMAGENET_STD)
+        fill = np.concatenate([black, np.zeros(len(GEOMETRY_CHANNEL_NAMES))]).astype(np.float32)
+
+        expected = rotate_frame(plain[0]["image"].numpy(), angle, fill=fill.reshape(-1, 1, 1))
+
+        assert not torch.equal(turned[0]["image"][3:], plain[0]["image"][3:])
+        np.testing.assert_allclose(turned[0]["image"].numpy(), expected, atol=1e-4)
+
+    def test_the_corner_of_the_geometry_planes_is_zero_with_and_without_the_rotation(
+        self, tmp_path: Path
+    ):
+        """The corner lies beyond the horizon, where a rotation writes its fill;
+        the unrotated planes hold the same zero there, so the model sees the
+        corner in evaluation as it saw it in training."""
+        manifest, root = _manifest(tmp_path)
+        plain = self._dataset(manifest, root)
+        turned = self._dataset(
+            manifest, root, AugmentationPipeline(p_rotate=1.0, rotate_max_deg=180)
+        )
+
+        plain_corner = plain[0]["image"][3:, 0, 0]
+        turned_corner = turned[0]["image"][3:, 0, 0]
+
+        assert torch.equal(plain_corner, torch.zeros_like(plain_corner))
+        assert torch.equal(turned_corner, torch.zeros_like(turned_corner))
+
+    @staticmethod
+    def _dataset(
+        manifest: pd.DataFrame, root: Path, augment: AugmentationPipeline | None = None
+    ) -> MultimodalImageDataset:
+        return MultimodalImageDataset(
+            manifest,
+            resolve_feature_set("bare"),
+            data_root=root,
+            image_size=FRAME_PX,
+            train=True,
+            augment=augment,
+            seed=0,
+            geometry_channels=GEOMETRY_CHANNEL_NAMES,
+        )
 
     def test_a_subset_narrows_the_frame_to_rgb_plus_those_planes(self, tmp_path: Path):
         manifest, root = _manifest(tmp_path)

@@ -8,9 +8,11 @@ exit 0), a missing checkpoint (non-zero exit) and cross-model comparison.
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from allsky.cli import app
+from allsky.cli.evaluate import _default_report_dir
 from allsky.embeddings.storage import (
     SafetensorsEmbeddingReader,
 )
@@ -84,6 +86,42 @@ class TestEvaluateCommand:
         assert result.exit_code == 0, result.output
         assert (report_dir / "eval_metrics.json").exists()
         assert not (report_dir / "predictions.parquet").exists()
+
+    def test_tta_rotations_reach_the_evaluator_and_are_refused_without_solar_planes(
+        self, tmp_path: Path
+    ):
+        """The embedding-mode checkpoint has no geometry planes, so the only way
+        the flag can produce this exit is by reaching the evaluator's refusal."""
+        root, run_dir = _train(tmp_path)
+
+        result = runner.invoke(
+            app,
+            [
+                "evaluate",
+                "--checkpoint",
+                str(run_dir / "best.ckpt"),
+                "--data-root",
+                str(root),
+                "--tta-rotations",
+                "4",
+            ],
+        )
+
+        assert result.exit_code == 1, result.output
+        assert not (run_dir / "eval-val-tta4" / "eval_metrics.json").exists()
+
+    @pytest.mark.parametrize(
+        ("split", "rotations", "expected"),
+        [("val", 0, "eval-val"), ("test", 4, "eval-test-tta4"), ("val", 3, "eval-val-tta3")],
+    )
+    def test_the_default_report_dir_keeps_a_rotated_evaluation_apart_from_the_plain_one(
+        self, tmp_path: Path, split: str, rotations: int, expected: str
+    ):
+        checkpoint = tmp_path / "run" / "best.ckpt"
+
+        out_dir = _default_report_dir(checkpoint, split, rotations)
+
+        assert out_dir == tmp_path / "run" / expected
 
     def test_the_config_supplies_the_data_root_when_no_flag_does(self, tmp_path: Path):
         """The checkpoint's own baked root is valid here, so a --config that was

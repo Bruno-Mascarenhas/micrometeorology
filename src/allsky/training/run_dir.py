@@ -27,10 +27,10 @@ import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from allsky.config import ExperimentConfig
-from allsky.training.checkpointing import BEST_CHECKPOINT, LAST_CHECKPOINT
+from allsky.training.checkpointing import BEST_CHECKPOINT, EMA_CHECKPOINT, LAST_CHECKPOINT
 from allsky.training.errors import TrainingError
 from labmim_core.atomic import atomic_write, atomic_write_json
 
@@ -46,6 +46,7 @@ __all__ = [
     "resolve_resume_path",
     "rewrite_csv",
     "rotate_best",
+    "rotate_stale_ema",
     "truncate_metrics",
 ]
 
@@ -119,24 +120,70 @@ def free_rotation_destination(preferred: Path) -> Path:
     return destination
 
 
+MetricDirection = Literal["min", "max"]
+
+#: Every val metric the engine logs, per enabled target, with the direction it
+#: improves in. :func:`csv_fields` emits these columns and
+#: :func:`metric_direction` answers the early-stopping monitor from the same
+#: table, so a metric cannot be logged without saying which way is better.
+TARGET_METRIC_DIRECTIONS: dict[str, dict[str, MetricDirection]] = {
+    "dhi": {"loss_dhi": "min", "dhi_mae": "min"},
+    "kindex": {"loss_kindex": "min", "kindex_mae": "min"},
+    "sky": {"loss_sky": "min", "sky_acc": "max", "sky_balanced_acc": "max"},
+    "cloud_fraction": {"loss_cloud_fraction": "min"},
+}
+VAL_METRIC_DIRECTIONS: dict[str, MetricDirection] = {
+    "loss": "min",
+    **{
+        key: direction
+        for table in TARGET_METRIC_DIRECTIONS.values()
+        for key, direction in table.items()
+    },
+}
+
+
+def metric_direction(metric_key: str) -> MetricDirection:
+    """``"min"`` or ``"max"``: which way the val metric *metric_key* improves.
+
+    Raises
+    ------
+    ValueError
+        For a key :data:`VAL_METRIC_DIRECTIONS` does not declare.
+    """
+    try:
+        return VAL_METRIC_DIRECTIONS[metric_key]
+    except KeyError:
+        raise ValueError(
+            f"no direction declared for metric {metric_key!r}; known: "
+            f"{', '.join(sorted(VAL_METRIC_DIRECTIONS))}"
+        ) from None
+
+
 def csv_fields(cfg: ExperimentConfig) -> list[str]:
     """Stable, config-derived CSV column order (identical across resumes).
 
     ``lr_backbone`` is always emitted rather than made to depend on the optimizer's
     group count: the header must not change mid-run, and a run without a separate
-    backbone rate simply leaves the cell blank.
+    backbone rate simply leaves the cell blank — as does a run under
+    ``train.layer_decay``, whose backbone has one rate per stage and no single
+    one (they are logged per group to TensorBoard).
+
+    ``val_ema_*`` mirrors the ``val_*`` columns for the averaged weights and is
+    present only when ``train.weight_average`` is enabled, so a run without it
+    keeps the header it always had. ``train_cmixup_mixed_rows`` likewise
+    appears only under ``train.cmixup``: the count of rows the epoch blended.
     """
     fields = ["epoch", "lr", "lr_backbone"]
-    for split in ("train", "val"):
+    splits = ["train", "val"]
+    if cfg.train.weight_average.enabled:
+        splits.append("val_ema")
+    enabled = [name for name in TARGET_METRIC_DIRECTIONS if getattr(cfg.targets, name).enabled]
+    for split in splits:
         fields.append(f"{split}_loss")
-        if cfg.targets.dhi.enabled:
-            fields += [f"{split}_loss_dhi", f"{split}_dhi_mae"]
-        if cfg.targets.kindex.enabled:
-            fields += [f"{split}_loss_kindex", f"{split}_kindex_mae"]
-        if cfg.targets.sky.enabled:
-            fields += [f"{split}_loss_sky", f"{split}_sky_acc"]
-        if cfg.targets.cloud_fraction.enabled:
-            fields.append(f"{split}_loss_cloud_fraction")
+        for target in enabled:
+            fields += [f"{split}_{key}" for key in TARGET_METRIC_DIRECTIONS[target]]
+    if cfg.train.cmixup.enabled:
+        fields.append("train_cmixup_mixed_rows")
     return fields
 
 
@@ -172,6 +219,11 @@ def truncate_metrics(run_dir: Path, fields: list[str], resumed_epoch: int) -> li
     is returned for the loop to keep appending to.  ``metrics.json`` is the source
     of truth (it is always present once a checkpoint exists); when it is absent
     the history is rebuilt from ``metrics.csv``, which carries the same rows.
+
+    Each kept row is projected onto *fields*: a column the resumed config no
+    longer logs (``val_ema_*`` once the weight average is turned off) is dropped
+    from ``metrics.json`` just as the rewritten CSV header drops it, so the two
+    files keep describing the same columns.
     """
     metrics_json = run_dir / "metrics.json"
     metrics_csv = run_dir / "metrics.csv"
@@ -182,18 +234,28 @@ def truncate_metrics(run_dir: Path, fields: list[str], resumed_epoch: int) -> li
             "resume: metrics.json is missing; rebuilding the history from metrics.csv",
         )
         loaded = _rows_from_csv(metrics_csv)
-        history = [row for row in loaded if _row_epoch(row, metrics_csv) <= resumed_epoch]
+        history = _within_fields(
+            [row for row in loaded if _row_epoch(row, metrics_csv) <= resumed_epoch], fields
+        )
         rewrite_csv(metrics_csv, fields, history)
         atomic_write_json(metrics_json, history)
         return history
     loaded = json.loads(metrics_json.read_text(encoding="utf-8"))
-    history = [row for row in loaded if _row_epoch(row, metrics_json) <= resumed_epoch]
+    history = _within_fields(
+        [row for row in loaded if _row_epoch(row, metrics_json) <= resumed_epoch], fields
+    )
     dropped = len(loaded) - len(history)
     if dropped:
         logger.info("resume: dropped %d stale metrics row(s) past epoch %d", dropped, resumed_epoch)
     rewrite_csv(metrics_csv, fields, history)
     atomic_write_json(metrics_json, history)
     return history
+
+
+def _within_fields(rows: list[dict[str, Any]], fields: list[str]) -> list[dict[str, Any]]:
+    """Each row of *rows* with only the keys named in *fields*, in the rows' order."""
+    kept = set(fields)
+    return [{key: value for key, value in row.items() if key in kept} for row in rows]
 
 
 def _row_epoch(row: Mapping[str, Any], source: Path) -> int:
@@ -236,6 +298,27 @@ def _rows_from_csv(path: Path) -> list[dict[str, Any]]:
     return parsed
 
 
+def rotate_stale_ema(run_dir: Path) -> None:
+    """Rotate a previous invocation's ``ema.ckpt`` aside on a resume without the average.
+
+    A resume with ``train.weight_average`` off never rewrites ``ema.ckpt``, so the
+    file an earlier invocation left would stay behind at a past epoch while
+    ``last.ckpt`` moves on, and be reported as this run's average.  It is renamed
+    to ``ema.ckpt.stale`` (replacing an older backup), as
+    :func:`reset_stale_run_artifacts` does on a fresh run.
+    """
+    path = run_dir / EMA_CHECKPOINT
+    if path.exists():
+        backup = path.with_name(f"{EMA_CHECKPOINT}{STALE_RUN_SUFFIX}")
+        os.replace(path, backup)
+        logger.warning(
+            "resume without train.weight_average: rotated stale %s aside to %s (a previous "
+            "invocation wrote it)",
+            path,
+            backup.name,
+        )
+
+
 def reset_stale_run_artifacts(run_dir: Path) -> None:
     """Rotate a previous run's metrics and checkpoints aside on a fresh run.
 
@@ -247,16 +330,18 @@ def reset_stale_run_artifacts(run_dir: Path) -> None:
 
     ``last.ckpt`` is rotated with them: it is overwritten at the end of epoch 1,
     which would leave the preserved metrics describing weights that no longer
-    exist anywhere.  ``best.ckpt`` is *not* rotated here —
+    exist anywhere.  ``ema.ckpt`` follows for the same reason, and because a
+    fresh run without the average enabled would otherwise leave a previous run's
+    average in place looking like its own.  ``best.ckpt`` is *not* rotated here —
     :func:`rotate_best` does it at the first epoch that improves, so a fresh run
     that dies before producing a replacement leaves the previous best where it is
     instead of emptying the directory.
 
-    Only these three names are rotated, and only onto their own ``.stale``
+    Only these four names are rotated, and only onto their own ``.stale``
     destination: a ``best.ckpt.stale-monitor`` rotated under an earlier monitor is
     left untouched.
     """
-    for name in ("metrics.csv", "metrics.json", LAST_CHECKPOINT):
+    for name in ("metrics.csv", "metrics.json", LAST_CHECKPOINT, EMA_CHECKPOINT):
         path = run_dir / name
         if path.exists():
             backup = path.with_name(f"{name}{STALE_RUN_SUFFIX}")

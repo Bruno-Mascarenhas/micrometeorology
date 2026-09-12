@@ -24,7 +24,7 @@ from typing import Any, Literal, cast
 
 from torch import nn
 
-from allsky.config import ExperimentConfig, geometry_channels_of, image_size_of
+from allsky.config import ExperimentConfig, TemporalPooling, geometry_channels_of, image_size_of
 from allsky.embeddings.backbone import POOLINGS, Pooling
 from allsky.features.policy import resolve_feature_set
 from allsky.modeling.baselines import ClimatologyModel, ImageOnlyModel, SensorOnlyModel
@@ -36,8 +36,10 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "MODEL_BUILDERS",
+    "SCALAR_ONLY_MODELS",
     "build_model",
     "default_image_backbone_builder",
+    "reads_visual_input",
     "restore_model",
     "temporal_pooling_for_strategy",
 ]
@@ -90,13 +92,6 @@ _VISUAL_PARAMS = (
             "visual_out_dim",
             "backbone_frozen",
             "unfreeze_last_n",
-            # Kept as a RECOGNISED name although the builder never reads it: the
-            # engine and the evaluator both derive the pooler from
-            # `data.alignment.strategy` and pass it as an override that always
-            # wins, so a config setting it is inert. Dropping it from the known
-            # set would warn on the shipped configs that still carry it; the
-            # docstring of build_model states where the value really comes from.
-            "temporal_pooling",
             "geometry_channels",
         }
     )
@@ -119,9 +114,7 @@ KNOWN_MODEL_PARAMS: dict[str, frozenset[str]] = {
 
 def _params(cfg: ExperimentConfig) -> dict[str, Any]:
     """Architecture hyper-parameters from the model config (drops ``name``)."""
-    params = dict(cfg.model.model_dump())
-    params.pop("name", None)
-    return params
+    return dict(cfg.model.model_dump(exclude={"name", "temporal_pooling"}))
 
 
 def _sensor_hidden(params: dict[str, Any]) -> tuple[int, ...]:
@@ -129,7 +122,7 @@ def _sensor_hidden(params: dict[str, Any]) -> tuple[int, ...]:
     return tuple(params.get("sensor_hidden", (64, 128)))
 
 
-def temporal_pooling_for_strategy(strategy: str) -> Literal["mean", "attention"]:
+def temporal_pooling_for_strategy(strategy: str) -> Literal["mean", "attention"] | None:
     """Visual temporal pooler implied by an alignment *strategy*.
 
     Only ``"attention_pooling"`` — whose dataset emits a padded ``embedding_seq``
@@ -149,23 +142,30 @@ def temporal_pooling_for_strategy(strategy: str) -> Literal["mean", "attention"]
 
     Returns
     -------
-    Literal["mean", "attention"]
-        The pooler name to hand :func:`build_model`.
+    Literal["mean", "attention"] | None
+        The pooler name to hand :func:`build_model`; ``None`` under
+        ``sensor_block``, whose image window may be pooled by ``mean`` or by
+        ``mean_std`` as ``model.temporal_pooling`` says — the one strategy where
+        that knob is read rather than overridden.
     """
-    return "attention" if strategy == "attention_pooling" else "mean"
+    if strategy == "attention_pooling":
+        return "attention"
+    if strategy == "sensor_block":
+        return None
+    return "mean"
 
 
 def _temporal_pooling(
-    params: dict[str, Any], override: Literal["mean", "attention"] | None = None
-) -> Literal["mean", "attention"]:
-    """Temporal pooling: *override* (engine/evaluator) wins, else the model param.
+    cfg: ExperimentConfig, override: Literal["mean", "attention"] | None = None
+) -> TemporalPooling:
+    """Temporal pooling: *override* (engine/evaluator) wins, else ``model.temporal_pooling``.
 
     The default is ``"mean"``; the value is validated downstream by
     :class:`~allsky.modeling.visual_encoder.PrecomputedEmbedding`.
     """
     if override is not None:
         return override
-    return cast('Literal["mean", "attention"]', str(params.get("temporal_pooling", "mean")))
+    return cfg.model.temporal_pooling or "mean"
 
 
 def _build_climatology(
@@ -221,7 +221,7 @@ def _build_image_only(
         frozen=bool(params.get("backbone_frozen", False)),
         unfreeze_last_n=int(params.get("unfreeze_last_n", 0)),
         dropout=float(params.get("dropout", 0.1)),
-        temporal_pooling=_temporal_pooling(params, temporal_pooling),
+        temporal_pooling=_temporal_pooling(cfg, temporal_pooling),
         extra_input_channels=_extra_input_channels(cfg),
     )
     return ImageOnlyModel(
@@ -265,7 +265,7 @@ def _multimodal_builder(fusion_name: str) -> ModelBuilder:
             backbone_frozen=bool(params.get("backbone_frozen", False)),
             unfreeze_last_n=int(params.get("unfreeze_last_n", 0)),
             extra_input_channels=_extra_input_channels(cfg),
-            temporal_pooling=_temporal_pooling(params, temporal_pooling),
+            temporal_pooling=_temporal_pooling(cfg, temporal_pooling),
             backbone_lr=cfg.train.backbone_lr,
         )
 
@@ -281,6 +281,23 @@ MODEL_BUILDERS: dict[str, ModelBuilder] = {
     "film": _multimodal_builder("film"),
     "cross_attention": _multimodal_builder("cross_attention"),
 }
+
+#: The architectures whose forward pass reads the scalar vector alone: the image
+#: or embedding a batch carries is ignored, so serving one never decodes a frame.
+SCALAR_ONLY_MODELS = frozenset({"climatology", "sensor_only"})
+
+
+def reads_visual_input(name: str) -> bool:
+    """Whether the registered architecture *name* consumes pixels or an embedding.
+
+    Raises
+    ------
+    ValueError
+        For a name the registry does not know.
+    """
+    if name not in MODEL_BUILDERS:
+        raise ValueError(f"unknown model {name!r}; available: {', '.join(sorted(MODEL_BUILDERS))}")
+    return name not in SCALAR_ONLY_MODELS
 
 
 def build_model(

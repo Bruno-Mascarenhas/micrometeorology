@@ -9,12 +9,13 @@ paths (warn by default, error under strict).
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
 from allsky.evaluation.evaluator import evaluate_checkpoint
 from allsky.training.engine import run_experiment
-from labmim_core.sky import SKY_CLASS_COUNT
+from labmim_core.sky import SKY_CLASS_COUNT, SKY_CLASS_KT_UPPER_BOUNDS
 from tests.allsky import _synthetic as synthetic
 
 
@@ -52,8 +53,40 @@ class TestGlobalMetrics:
         }
         root, reader, ckpt = _train(tmp_path, targets=targets)
         result = evaluate_checkpoint(ckpt, split="val", data_root=root, embedding_reader=reader)
-        assert set(result.global_metrics) == {"dhi", "kindex"}
+        assert set(result.global_metrics) == {"dhi", "kindex", "sky_kt"}
         assert result.confusion is None  # sky head disabled
+
+    def test_the_kstar_head_yields_a_sky_class_by_the_kt_bands(self, tmp_path: Path):
+        targets = {
+            "dhi": {"enabled": True, "loss": "mse"},
+            "kindex": {"enabled": True, "kind": "kstar"},
+        }
+        root, reader, ckpt = _train(tmp_path, targets=targets)
+        result = evaluate_checkpoint(ckpt, split="val", data_root=root, embedding_reader=reader)
+
+        frame = result.predictions
+        expected = np.digitize(frame["pred_kt"], SKY_CLASS_KT_UPPER_BOUNDS, right=True)
+        assert (frame["pred_sky_kt"].to_numpy() == expected).all()
+        assert set(frame["obs_sky_kt"].unique()) <= {0, 1, 2, 3}
+        assert {"balanced_accuracy", "macro_f1", "per_class"} <= set(
+            result.global_metrics["sky_kt"]
+        )
+        assert "sky_kt" in set(result.stratified["target"])
+
+    def test_the_kt_derived_class_is_scored_against_the_manifest_label_when_the_sky_head_runs(
+        self, tmp_path: Path
+    ):
+        targets = {
+            "dhi": {"enabled": True, "loss": "mse"},
+            "kindex": {"enabled": True, "kind": "kstar"},
+            "sky": {"enabled": True},
+        }
+        root, reader, ckpt = _train(tmp_path, targets=targets)
+        result = evaluate_checkpoint(ckpt, split="val", data_root=root, embedding_reader=reader)
+
+        frame = result.predictions
+        assert (frame["obs_sky_kt"].to_numpy() == frame["obs_sky"].to_numpy()).all()
+        assert result.global_metrics["sky_kt"]["n"] == result.global_metrics["sky"]["n"]
 
 
 class TestStratified:

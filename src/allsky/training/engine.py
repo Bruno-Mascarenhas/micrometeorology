@@ -24,7 +24,10 @@
 #. checkpoint ``last.ckpt`` every epoch and ``best.ckpt`` on monitor improvement
    (resume-safe best seeding), with early stopping.  A run in which every epoch
    left the monitor non-finite writes no ``best.ckpt`` and raises rather than
-   returning a summary naming an artifact that was never written;
+   returning a summary naming an artifact that was never written.  Under
+   ``train.weight_average`` a third checkpoint, ``ema.ckpt``, holds the
+   exponential moving average of the weights in the same format, its own val
+   metrics logged as ``val_ema_*``;
 #. resume fully from ``last.ckpt`` (``resume="auto"`` or a path), restoring
    model / optimizer / scheduler / scaler / epoch / global_step / best / RNG —
    but only after the checkpoint's dataset provenance matches this run (a rebuilt
@@ -82,6 +85,7 @@ from allsky.modeling.baselines import ClimatologyModel
 from allsky.preprocessing import PreprocessingPipeline
 from allsky.training.checkpointing import (
     BEST_CHECKPOINT,
+    EMA_CHECKPOINT,
     LAST_CHECKPOINT,
     capture_rng_state,
     code_version,
@@ -90,6 +94,7 @@ from allsky.training.checkpointing import (
     restore_rng_state,
     save_checkpoint,
 )
+from allsky.training.cmixup import CMixup
 from allsky.training.device import resolve_device
 from allsky.training.errors import TrainingError
 from allsky.training.run_dir import (
@@ -97,11 +102,14 @@ from allsky.training.run_dir import (
     STALE_RUN_SUFFIX,
     append_csv,
     csv_fields,
+    metric_direction,
     reset_stale_run_artifacts,
     resolve_resume_path,
     rotate_best,
+    rotate_stale_ema,
     truncate_metrics,
 )
+from allsky.training.weight_average import ExponentialMovingAverage
 from labmim_core.atomic import atomic_write_json
 from labmim_core.seeds import set_global_seed
 
@@ -113,6 +121,11 @@ __all__ = ["resolve_run_device", "run_experiment"]
 #: (``seed * this + epoch``): a prime far above any epoch budget, so the seeds of
 #: two neighbouring runs never land on the same batch permutation.
 _SAMPLER_SEED_STRIDE = 100003
+
+#: Second word of the per-epoch C-Mixup seed ``(seed, this, epoch)``, so its
+#: stream is a pure function of ``(seed, epoch)`` like the sampler's and never
+#: coincides with the dataset's ``(seed, epoch, idx)`` augmentation streams.
+_CMIXUP_SEED_TAG = 0x63_6D_69_78
 
 
 def resolve_run_device(requested: str) -> str:
@@ -205,11 +218,12 @@ def run_experiment(
     -------
     dict
         ``{best_metric, epochs_ran, epoch, global_step, final_val_metrics,
-        output_dir, checkpoint_last, checkpoint_best, wall_seconds}``.
-        ``checkpoint_last`` and ``checkpoint_best`` are paths only when the file
-        exists on disk and ``None`` otherwise (a resume that trained nothing into
-        a new run directory), so the summary never names an artifact a caller
-        cannot read.
+        output_dir, checkpoint_last, checkpoint_best, checkpoint_ema,
+        wall_seconds}``.  ``checkpoint_last``, ``checkpoint_best`` and
+        ``checkpoint_ema`` are paths only when the file exists on disk and
+        ``None`` otherwise (a resume that trained nothing into a new run
+        directory; a run without ``train.weight_average``), so the summary
+        never names an artifact a caller cannot read.
 
     Raises
     ------
@@ -290,7 +304,14 @@ def run_experiment(
 
     optimizer, lr_labels = _build_optimizer(model, cfg)
     monitor_key = _monitor_key(cfg.train.early_stopping.monitor)
-    monitor_mode = "max" if "acc" in monitor_key else "min"
+    fields = csv_fields(cfg)
+    monitored = _monitorable_metrics(fields)
+    if monitor_key not in monitored:
+        raise TrainingError(
+            f"early-stopping monitor {cfg.train.early_stopping.monitor!r} resolves to "
+            f"{monitor_key!r}, absent from the val metrics this run logs {sorted(monitored)}"
+        )
+    monitor_mode = _monitor_mode(monitor_key)
     scheduler, scheduler_is_plateau = _build_scheduler(
         cfg.train.scheduler, optimizer, cfg.train.epochs, monitor_mode
     )
@@ -303,14 +324,8 @@ def run_experiment(
     from allsky.training.losses import MultitaskLoss
 
     loss_fn = MultitaskLoss(cfg.targets, target_normalizers).to(resolved_device)
+    mixer = _build_cmixup(cfg)
 
-    fields = csv_fields(cfg)
-    monitored = {field.removeprefix("val_") for field in fields if field.startswith("val_")}
-    if monitor_key not in monitored:
-        raise TrainingError(
-            f"early-stopping monitor {cfg.train.early_stopping.monitor!r} resolves to "
-            f"{monitor_key!r}, absent from the val metrics this run logs {sorted(monitored)}"
-        )
     start_epoch = 0
     global_step = 0
     best_value: float | None = None
@@ -330,6 +345,7 @@ def run_experiment(
             feature_columns=feature_columns,
             cfg=cfg,
         )
+        _check_param_group_count(checkpoint, optimizer, cfg)
         _warn_optimizer_knob_drift(checkpoint, cfg)
         stored_monitor = (checkpoint.get("best_metric") or {}).get("name")
         monitor_changed = stored_monitor is not None and str(stored_monitor) != monitor_key
@@ -364,6 +380,8 @@ def run_experiment(
                 reason="it was selected under the previous monitor",
             )
         _reconcile_cosine_horizon(scheduler, optimizer, cfg)
+        if not cfg.train.weight_average.enabled:
+            rotate_stale_ema(run_dir)
         history = truncate_metrics(run_dir, fields, start_epoch)
         logger.info(
             "resumed from %s at epoch %d (global_step %d, epochs_no_improve %d)",
@@ -375,6 +393,14 @@ def run_experiment(
     else:
         reset_stale_run_artifacts(run_dir)
     superseded_best_pending = resume_path is None and (run_dir / BEST_CHECKPOINT).exists()
+    weight_average = _resume_weight_average(
+        cfg,
+        model,
+        resume_path=resume_path,
+        start_epoch=start_epoch,
+        device=resolved_device,
+        trust_checkpoint=trust_checkpoint,
+    )
 
     from torch.utils.tensorboard import SummaryWriter
 
@@ -402,6 +428,15 @@ def run_experiment(
                 # Augmentation seeds on (seed, epoch, idx); without advancing
                 # this, every epoch would replay the identical draw per sample.
                 train_ds.set_epoch(epoch)
+                if weight_average is None and _averaging_has_begun(cfg, epoch + 1):
+                    weight_average = ExponentialMovingAverage(
+                        model, decay=cfg.train.weight_average.decay
+                    )
+                    logger.info(
+                        "weight average: started at epoch %d with decay %s",
+                        epoch + 1,
+                        cfg.train.weight_average.decay,
+                    )
                 lrs = _current_lrs(optimizer, lr_labels)
                 train_metrics, global_step = _train_epoch(
                     model=model,
@@ -418,6 +453,9 @@ def run_experiment(
                     global_step=global_step,
                     target_stats=(dhi_mean, dhi_std, kindex_mean, kindex_std),
                     component_weights=component_weights,
+                    weight_average=weight_average,
+                    mixer=mixer,
+                    mix_rng=np.random.default_rng((cfg.seed, _CMIXUP_SEED_TAG, epoch)),
                 )
                 val_metrics = _eval_epoch(
                     model=model,
@@ -430,6 +468,19 @@ def run_experiment(
                     component_weights=component_weights,
                 )
                 last_val_metrics = val_metrics
+                ema_val_metrics: dict[str, float] = {}
+                if weight_average is not None:
+                    with weight_average.applied_to(model):
+                        ema_val_metrics = _eval_epoch(
+                            model=model,
+                            loader=val_loader,
+                            loss_fn=loss_fn,
+                            device=resolved_device,
+                            autocast_device=autocast_device,
+                            autocast_dtype=autocast_dtype,
+                            target_stats=(dhi_mean, dhi_std, kindex_mean, kindex_std),
+                            component_weights=component_weights,
+                        )
 
                 monitor_value = val_metrics.get(monitor_key)
                 if monitor_value is None:
@@ -455,8 +506,10 @@ def run_experiment(
                 else:
                     epochs_no_improve += 1
 
-                _log_epoch(writer, epoch, lrs, train_metrics, val_metrics)
-                row = _epoch_row(fields, epoch + 1, lrs, train_metrics, val_metrics)
+                _log_epoch(writer, epoch, lrs, train_metrics, val_metrics, ema_val_metrics)
+                row = _epoch_row(
+                    fields, epoch + 1, lrs, train_metrics, val_metrics, ema_val_metrics
+                )
                 append_csv(run_dir / "metrics.csv", fields, row)
                 history.append(row)
                 atomic_write_json(run_dir / "metrics.json", history)
@@ -485,6 +538,16 @@ def run_experiment(
                     epochs_no_improve=epochs_no_improve,
                     **common,
                 )
+                if weight_average is not None:
+                    save_checkpoint(
+                        run_dir / EMA_CHECKPOINT,
+                        epoch=epoch + 1,
+                        global_step=global_step,
+                        best_metric=best_metric,
+                        rng_state=rng_state,
+                        epochs_no_improve=epochs_no_improve,
+                        **{**common, "model": weight_average},
+                    )
                 if improved:
                     # Deferred from reset_stale_run_artifacts to the first
                     # improving epoch: rotating at the start of a fresh run
@@ -539,6 +602,7 @@ def run_experiment(
 
     best_checkpoint = run_dir / BEST_CHECKPOINT
     last_checkpoint = run_dir / LAST_CHECKPOINT
+    ema_checkpoint = run_dir / EMA_CHECKPOINT
     return {
         "best_metric": {"name": monitor_key, "value": best_value, "epoch": best_epoch},
         "epochs_ran": epochs_ran,
@@ -548,8 +612,107 @@ def run_experiment(
         "output_dir": str(run_dir),
         "checkpoint_last": str(last_checkpoint) if last_checkpoint.exists() else None,
         "checkpoint_best": str(best_checkpoint) if best_checkpoint.exists() else None,
+        "checkpoint_ema": str(ema_checkpoint) if ema_checkpoint.exists() else None,
         "wall_seconds": time.monotonic() - started,
     }
+
+
+def _monitorable_metrics(fields: list[str]) -> set[str]:
+    """The val metric keys an early-stopping monitor may name, from the CSV fields.
+
+    The averaged weights' ``val_ema_*`` columns are excluded: ``best.ckpt``
+    holds the live weights, so selecting it by the average's metric would pair
+    a score with weights that never earned it.
+    """
+    return {
+        field.removeprefix("val_")
+        for field in fields
+        if field.startswith("val_") and not field.startswith("val_ema_")
+    }
+
+
+def _averaging_has_begun(cfg: ExperimentConfig, epoch: int) -> bool:
+    """True when the weight average is enabled and *epoch* (1-based) has reached its start."""
+    average = cfg.train.weight_average
+    return average.enabled and epoch >= average.start_epoch
+
+
+def _resume_weight_average(
+    cfg: ExperimentConfig,
+    model: nn.Module,
+    *,
+    resume_path: Path | None,
+    start_epoch: int,
+    device: str,
+    trust_checkpoint: bool,
+) -> ExponentialMovingAverage | None:
+    """Rebuild the running average a resumed run had reached, from ``ema.ckpt``.
+
+    The average lives beside ``last.ckpt`` and is written in the same epoch, so
+    the one beside *resume_path* stamped with *start_epoch* is the state the
+    interrupted run held.  Without it — the previous invocation ran without the
+    average, or its file was lost — the average restarts from the restored
+    weights at the next epoch, and says so; a fresh run, or a resume before
+    ``start_epoch``, has nothing to rebuild and returns ``None`` for the epoch
+    loop to start the average when its time comes.
+    """
+    if resume_path is None or not _averaging_has_begun(cfg, start_epoch):
+        return None
+    candidate = resume_path.with_name(EMA_CHECKPOINT)
+    if not candidate.exists():
+        logger.warning(
+            "resume: %s is absent beside %s; the weight average restarts from the restored "
+            "weights at epoch %d instead of continuing",
+            candidate.name,
+            resume_path,
+            start_epoch + 1,
+        )
+        return None
+    stored = load_checkpoint(candidate, map_location=device, trust_pickle=trust_checkpoint)
+    stored_epoch = int(stored["epoch"])
+    if stored_epoch != start_epoch:
+        logger.warning(
+            "resume: %s was written at epoch %d, not the resumed epoch %d; the weight "
+            "average restarts from the restored weights instead of continuing",
+            candidate,
+            stored_epoch,
+            start_epoch,
+        )
+        return None
+    average = ExponentialMovingAverage(model, decay=cfg.train.weight_average.decay)
+    average.load_state_dict(stored["model_state"])
+    logger.info("resume: weight average continued from %s (epoch %d)", candidate, stored_epoch)
+    return average
+
+
+def _build_cmixup(cfg: ExperimentConfig) -> CMixup | None:
+    """The batch mixer ``train.cmixup`` asks for, ``None`` when it is off.
+
+    The heads it blends are the enabled ones, so the pairing mask reads exactly
+    the targets the loss will read; :class:`~allsky.config.ExperimentConfig`
+    has already refused the modes with no frame to blend.
+    """
+    settings = cfg.train.cmixup
+    if not settings.enabled:
+        return None
+    regression = tuple(
+        name
+        for name, head in (
+            ("dhi", cfg.targets.dhi),
+            ("kindex", cfg.targets.kindex),
+            ("cloud_fraction", cfg.targets.cloud_fraction),
+        )
+        if head.enabled
+    )
+    mixer = CMixup(
+        alpha=float(settings.alpha),
+        bandwidth=float(settings.bandwidth),
+        p=float(settings.p),
+        regression_targets=regression,
+        sky=bool(cfg.targets.sky.enabled),
+    )
+    logger.info("c-mixup: %s", mixer)
+    return mixer
 
 
 def _select_splits(manifest: pd.DataFrame, split: Any) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -612,15 +775,12 @@ def _build_datasets(
             else default_embedding_reader(cfg, root)
         )
         _validate_embedding_coverage(reader, train_df, val_df)
-        window = cfg.data.alignment.strategy
-        window_minutes = float(cfg.data.alignment.window_minutes)
         train_ds = MultimodalEmbeddingDataset(
             train_df,
             feature_columns,
             embedding_reader=reader,
             train=True,
-            window=window,
-            window_minutes=window_minutes,
+            alignment=cfg.data.alignment,
             dhi_parameterization=cfg.targets.dhi.parameterization,
             utc_offset_hours=utc_offset_hours,
         )
@@ -630,8 +790,7 @@ def _build_datasets(
             embedding_reader=reader,
             train=False,
             stats=train_ds.stats,
-            window=window,
-            window_minutes=window_minutes,
+            alignment=cfg.data.alignment,
             dhi_parameterization=cfg.targets.dhi.parameterization,
             utc_offset_hours=utc_offset_hours,
         )
@@ -644,6 +803,14 @@ def _build_datasets(
     pipeline = AugmentationPipeline(**cfg.augmentation.model_dump())
     if pipeline.enabled:
         logger.info("augmentation: %s", pipeline)
+    if pipeline.p_rotate > 0.0 and not geometry_channels_of(cfg):
+        logger.warning(
+            "augmentation.p_rotate=%s with no model.geometry_channels: a rotation without a "
+            "solar channel destroys the sun-cloud geometry the label depends on — the sun "
+            "moves in the frame while nothing tells the model where it went; set "
+            "model.geometry_channels (e.g. [cos_sun_angle]) or drop p_rotate",
+            pipeline.p_rotate,
+        )
     preprocess = PreprocessingPipeline.from_config(cfg)
     if preprocess.enabled:
         logger.info("preprocessing: %s", preprocess)
@@ -660,9 +827,7 @@ def _build_datasets(
         frame_geometry=frame_geometry,
         dhi_parameterization=cfg.targets.dhi.parameterization,
         utc_offset_hours=utc_offset_hours,
-        window=cfg.data.alignment.strategy,
-        window_minutes=cfg.data.alignment.window_minutes,
-        window_max_frames=cfg.data.alignment.max_frames,
+        alignment=cfg.data.alignment,
     )
     image_val = MultimodalImageDataset(
         val_df,
@@ -676,9 +841,7 @@ def _build_datasets(
         frame_geometry=frame_geometry,
         dhi_parameterization=cfg.targets.dhi.parameterization,
         utc_offset_hours=utc_offset_hours,
-        window=cfg.data.alignment.strategy,
-        window_minutes=cfg.data.alignment.window_minutes,
-        window_max_frames=cfg.data.alignment.max_frames,
+        alignment=cfg.data.alignment,
     )
     return image_train, image_val, None
 
@@ -825,12 +988,14 @@ def _build_optimizer(
     """
     param_groups_fn = getattr(model, "param_groups", None)
     if callable(param_groups_fn):
-        params: Any = param_groups_fn(cfg.train.backbone_lr)
-        labels = ["lr_backbone" if "lr" in group else "lr" for group in params]
+        params: Any = param_groups_fn(cfg.train.backbone_lr, layer_decay=cfg.train.layer_decay)
+        labels = [_group_label(group) for group in params]
     else:
         params = [p for p in model.parameters() if p.requires_grad]
         labels = ["lr"]
-    if cfg.train.backbone_lr is not None and "lr_backbone" not in labels:
+    if cfg.train.backbone_lr is not None and not any(
+        label.startswith("lr_backbone") for label in labels
+    ):
         logger.warning(
             "train.backbone_lr=%s is set but model %r produced no separate backbone "
             "parameter group; every trainable parameter runs at train.lr=%s",
@@ -839,7 +1004,30 @@ def _build_optimizer(
             cfg.train.lr,
         )
     optimizer = torch.optim.AdamW(params, lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
+    if cfg.train.layer_decay is not None:
+        table = "\n".join(
+            f"  {label:<24} lr={float(group['lr']):.3e}  "
+            f"{sum(p.numel() for p in group['params']):>10d} params"
+            for label, group in zip(labels, optimizer.param_groups, strict=True)
+        )
+        logger.info(
+            "layer decay %s over the backbone stages, one rate per group:\n%s",
+            cfg.train.layer_decay,
+            table,
+        )
     return optimizer, labels
+
+
+def _group_label(group: Mapping[str, Any]) -> str:
+    """The metrics label of one optimizer parameter group.
+
+    A group naming itself (the per-tier backbone groups under
+    ``train.layer_decay``) is ``lr_<name>``; otherwise the group carrying its
+    own ``lr`` is the image backbone and everything else runs at ``train.lr``.
+    """
+    if "name" in group:
+        return f"lr_{group['name']}"
+    return "lr_backbone" if "lr" in group else "lr"
 
 
 def _current_lrs(optimizer: torch.optim.Optimizer, labels: list[str]) -> dict[str, float]:
@@ -931,15 +1119,43 @@ def _train_epoch(
     global_step: int,
     target_stats: tuple[float, float, float, float],
     component_weights: Mapping[str, float],
+    weight_average: ExponentialMovingAverage | None = None,
+    mixer: CMixup | None = None,
+    mix_rng: np.random.Generator | None = None,
 ) -> tuple[dict[str, float], int]:
-    """Run one training epoch with grad accumulation/clipping; return metrics + step."""
+    """Run one training epoch with grad accumulation/clipping; return metrics + step.
+
+    *weight_average*, when given, is moved toward the weights after every
+    optimizer step — including a step the GradScaler skipped for an inf
+    gradient, which averages the unchanged weights once more, as
+    ``torch.optim.swa_utils`` would.
+
+    *mixer*, when given, blends each batch by C-Mixup: the pairing is drawn
+    from *mix_rng* on the CPU batch before it moves, so no value is read back
+    from the device, and the blend runs on the device once it has. The rows it
+    mixed are counted on the device and reported once, as
+    ``cmixup_mixed_rows``, so a run whose mixer never found a pair — every
+    batch gated out, or an enabled target missing from the manifest — is told
+    apart from one that mixed.
+    """
     model.train()
     accumulator = _MetricAccumulator(target_stats, component_weights)
     n_batches = len(loader)
     pending = 0
+    mixed_rows: Tensor | None = None
     optimizer.zero_grad(set_to_none=True)
     for i, raw in enumerate(loader):
+        plan = None
+        if mixer is not None:
+            if mix_rng is None:
+                raise ValueError("a C-Mixup mixer needs the generator its pairing is drawn from")
+            plan = mixer.plan(raw, mix_rng)
         batch = _move(raw, device)
+        if mixer is not None and plan is not None:
+            placed = plan.to(device)
+            batch = mixer.apply(batch, placed)
+            count = placed.mixed.sum()
+            mixed_rows = count if mixed_rows is None else mixed_rows + count
         with _autocast(autocast_device, autocast_dtype):
             outputs = model(batch)
             losses = loss_fn(outputs, batch)
@@ -958,11 +1174,23 @@ def _train_epoch(
                     scaler.update()
                 else:
                     optimizer.step()
+                if weight_average is not None:
+                    weight_average.update(model)
                 optimizer.zero_grad(set_to_none=True)
                 pending = 0
                 global_step += 1
         accumulator.update(outputs, batch, losses)
-    return accumulator.result(), global_step
+    metrics = accumulator.result()
+    if mixer is not None:
+        n_mixed = int(mixed_rows.item()) if mixed_rows is not None else 0
+        metrics["cmixup_mixed_rows"] = float(n_mixed)
+        if n_mixed == 0:
+            logger.warning(
+                "c-mixup: no row was mixed this epoch (p=%s); the batch gate never opened or "
+                "an enabled target is missing on every row",
+                mixer.p,
+            )
+    return metrics, global_step
 
 
 def _eval_epoch(
@@ -1079,6 +1307,8 @@ class _MetricAccumulator:
         self._component_counts: dict[str, Tensor] = {}
         self._physical_sums: dict[str, Tensor] = {}
         self._physical_counts: dict[str, Tensor] = {}
+        self._sky_hits_per_class: Tensor | None = None
+        self._sky_rows_per_class: Tensor | None = None
 
     def update(
         self, outputs: Mapping[str, Tensor], batch: dict[str, Tensor], losses: Mapping[str, Tensor]
@@ -1136,6 +1366,17 @@ class _MetricAccumulator:
             mask = batch["sky_class"] >= 0
             hits = (predicted == batch["sky_class"]) & mask
             self._fold_physical("sky_acc", hits.sum(), mask.sum())
+            # scatter_add over a fixed-size vector keeps the shapes static: no
+            # device sync per batch.
+            n_classes = int(outputs["sky_logits"].shape[-1])
+            labels = batch["sky_class"].clamp(min=0)
+            tally = torch.zeros(n_classes, dtype=torch.float64, device=labels.device)
+            self._sky_hits_per_class = _fold(
+                self._sky_hits_per_class, tally.scatter_add(0, labels, hits.to(torch.float64))
+            )
+            self._sky_rows_per_class = _fold(
+                self._sky_rows_per_class, tally.scatter_add(0, labels, mask.to(torch.float64))
+            )
 
     def _fold_physical(self, key: str, summed: Tensor, count: Tensor) -> None:
         """Fold one batch's ``(sum, row count)`` for the physical-unit metric *key*."""
@@ -1166,6 +1407,11 @@ class _MetricAccumulator:
             count = int(self._physical_counts[key])
             if count:
                 metrics[key] = float(summed) / count
+        if self._sky_rows_per_class is not None and self._sky_hits_per_class is not None:
+            present = self._sky_rows_per_class > 0
+            if bool(present.any()):
+                recalls = self._sky_hits_per_class[present] / self._sky_rows_per_class[present]
+                metrics["sky_balanced_acc"] = float(recalls.mean())
         return metrics
 
 
@@ -1282,6 +1528,38 @@ def _knob_differs(stored: float | None, current: float | None) -> bool:
     return not math.isclose(float(stored), float(current), rel_tol=_OPTIMIZER_KNOB_REL_TOL)
 
 
+def _check_param_group_count(
+    checkpoint: Mapping[str, Any], optimizer: torch.optim.Optimizer, cfg: ExperimentConfig
+) -> None:
+    """Refuse a resume whose optimizer has a different number of parameter groups.
+
+    ``optimizer.load_state_dict`` matches groups positionally and raises on a
+    count mismatch with a message that names no config field.  The count follows
+    ``train.backbone_lr`` (a separate backbone group when set),
+    ``train.layer_decay`` (one group per trainable backbone stage when set) and
+    which stages are trainable at all (``model.backbone_frozen`` /
+    ``model.unfreeze_last_n``, a frozen tier yielding no group), so the refusal
+    names those.  Runs before :func:`_warn_optimizer_knob_drift`, whose promise
+    that the restored state wins would otherwise precede a restore that cannot
+    happen.
+
+    Raises
+    ------
+    TrainingError
+        When the stored and the freshly built group counts differ.
+    """
+    stored = len(checkpoint["optimizer_state"]["param_groups"])
+    current = len(optimizer.param_groups)
+    if stored != current:
+        raise TrainingError(
+            f"resume: the checkpoint's optimizer holds {stored} parameter group(s) but this "
+            f"config builds {current}; train.backbone_lr ({cfg.train.backbone_lr!r}), "
+            f"train.layer_decay ({cfg.train.layer_decay!r}) and the trainable backbone "
+            "stages (model.backbone_frozen / model.unfreeze_last_n) must match the "
+            "invocation that wrote the checkpoint"
+        )
+
+
 def _warn_optimizer_knob_drift(checkpoint: Mapping[str, Any], cfg: ExperimentConfig) -> None:
     """Warn when an edited optimizer knob is about to lose to the restored state.
 
@@ -1298,6 +1576,7 @@ def _warn_optimizer_knob_drift(checkpoint: Mapping[str, Any], cfg: ExperimentCon
         ("lr", cfg.train.lr),
         ("weight_decay", cfg.train.weight_decay),
         ("backbone_lr", cfg.train.backbone_lr),
+        ("layer_decay", cfg.train.layer_decay),
     ):
         if field not in stored_train:
             continue
@@ -1440,6 +1719,7 @@ def _checkpoint_common(
         "split_id": split_id,
         "manifest_sha256": meta.get("manifest_sha256"),
         "sensor_pairing": _sensor_pairing(meta),
+        "night_filter": _night_filter(meta),
         "frame_geometry": meta.get("frame_geometry"),
         "backbone_info": backbone_info,
         "code_version_info": code_version(),
@@ -1465,6 +1745,19 @@ def _sensor_pairing(meta: Mapping[str, Any]) -> dict[str, float] | None:
         "timestamp_offset_minutes": float(offset or 0.0),
         "tolerance_minutes": float(tolerance) if tolerance is not None else float("nan"),
     }
+
+
+def _night_filter(meta: Mapping[str, Any]) -> dict[str, float] | None:
+    """The solar-elevation floor this run's manifest dropped frames under, for serving.
+
+    ``night_min_elevation_deg`` of the sidecar's thresholds is the
+    ``night_filter.min_solar_elevation_deg`` of the prepare config; the
+    labelable floor beside it (``min_elevation_deg``) gates the sky class and
+    is not the one serving refuses skies under. ``None`` when the sidecar
+    records no night floor.
+    """
+    floor = (meta.get("thresholds") or {}).get("night_min_elevation_deg")
+    return {"min_solar_elevation_deg": float(floor)} if floor is not None else None
 
 
 def _embedding_recipe(cfg: ExperimentConfig) -> dict[str, Any] | None:
@@ -1497,6 +1790,11 @@ def _monitor_key(monitor: str) -> str:
         if monitor.startswith(prefix):
             return monitor[len(prefix) :]
     return monitor
+
+
+def _monitor_mode(monitor_key: str) -> str:
+    """The direction the monitored metric improves in, as :data:`VAL_METRIC_DIRECTIONS` declares it."""
+    return metric_direction(monitor_key)
 
 
 def _improved(current: float, best: float | None, mode: str, min_delta: float) -> bool:
@@ -1534,19 +1832,21 @@ def _epoch_row(
     lrs: Mapping[str, float],
     train_metrics: Mapping[str, float],
     val_metrics: Mapping[str, float],
+    ema_val_metrics: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     """Build a metrics row keyed by the canonical *fields* (missing -> empty)."""
     row: dict[str, Any] = dict.fromkeys(fields, "")
     row["epoch"] = epoch
     row.update({key: value for key, value in lrs.items() if key in row})
-    for key, value in train_metrics.items():
-        field = f"train_{key}"
-        if field in row:
-            row[field] = value
-    for key, value in val_metrics.items():
-        field = f"val_{key}"
-        if field in row:
-            row[field] = value
+    for prefix, metrics in (
+        ("train", train_metrics),
+        ("val", val_metrics),
+        ("val_ema", ema_val_metrics or {}),
+    ):
+        for key, value in metrics.items():
+            field = f"{prefix}_{key}"
+            if field in row:
+                row[field] = value
     return row
 
 
@@ -1556,6 +1856,7 @@ def _log_epoch(
     lrs: Mapping[str, float],
     train_metrics: Mapping[str, float],
     val_metrics: Mapping[str, float],
+    ema_val_metrics: Mapping[str, float] | None = None,
 ) -> None:
     """Write per-epoch TensorBoard scalars."""
     for name, value in lrs.items():
@@ -1564,3 +1865,5 @@ def _log_epoch(
         writer.add_scalar(f"train/{key}", value, epoch)
     for key, value in val_metrics.items():
         writer.add_scalar(f"val/{key}", value, epoch)
+    for key, value in (ema_val_metrics or {}).items():
+        writer.add_scalar(f"val_ema/{key}", value, epoch)

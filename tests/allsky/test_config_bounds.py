@@ -51,13 +51,66 @@ class TestEarlyStoppingBounds:
         assert (early.patience, early.min_delta) == (1, 0.0)
 
 
-class TestAlignmentStrategy:
-    def test_every_window_mode_the_dataset_implements_is_accepted(self):
-        """One name set, owned here and read by the dataset that implements it."""
-        from allsky.data.datasets import _WINDOW_MODES
+class TestWeightAverageBounds:
+    @pytest.mark.parametrize("decay", [0.0, 1.0, 1.5, -0.1])
+    def test_a_decay_outside_the_open_unit_interval_is_rejected(self, decay: float):
+        with pytest.raises(ValidationError, match="decay"):
+            _config({"weight_average": {"enabled": True, "decay": decay}})
 
-        for name in _WINDOW_MODES:
-            assert AlignmentConfig(strategy=name).strategy == name
+    def test_a_start_epoch_of_zero_is_rejected(self):
+        with pytest.raises(ValidationError, match="start_epoch"):
+            _config({"weight_average": {"enabled": True, "start_epoch": 0}})
+
+    def test_a_start_past_the_epoch_budget_is_rejected_because_no_ema_would_be_written(self):
+        with pytest.raises(ValidationError, match=r"no ema\.ckpt"):
+            _config({"epochs": 3, "weight_average": {"enabled": True, "start_epoch": 4}})
+
+    def test_a_start_past_the_budget_is_harmless_while_the_average_is_off(self):
+        cfg = _config({"epochs": 3, "weight_average": {"enabled": False, "start_epoch": 4}})
+        assert cfg.train.weight_average.enabled is False
+
+    def test_the_default_is_off_with_the_documented_decay(self):
+        average = _config({}).train.weight_average
+        assert (average.enabled, average.decay, average.start_epoch) == (False, 0.999, 1)
+
+
+class TestLayerDecayBounds:
+    @pytest.mark.parametrize("layer_decay", [0.0, 1.5, -0.5])
+    def test_a_decay_outside_the_half_open_unit_interval_is_rejected(self, layer_decay: float):
+        with pytest.raises(ValidationError, match="layer_decay"):
+            _config({"backbone_lr": 1e-5, "layer_decay": layer_decay})
+
+    def test_a_decay_of_one_is_accepted(self):
+        assert _config({"backbone_lr": 1e-5, "layer_decay": 1.0}).train.layer_decay == 1.0
+
+    def test_a_decay_without_a_backbone_rate_is_rejected_because_it_would_be_inert(self):
+        with pytest.raises(ValidationError, match="backbone_lr is unset"):
+            _config({"layer_decay": 0.75})
+
+    def test_the_default_is_none(self):
+        assert _config({}).train.layer_decay is None
+
+
+class TestAlignmentStrategy:
+    def test_every_strategy_the_config_names_resolves_a_window(self):
+        """One name set, owned here; the dataset dispatches on it and must know every member."""
+        from typing import get_args
+
+        import pandas as pd
+
+        from allsky.config import AlignmentStrategyName
+        from allsky.data.datasets import _windows_for
+
+        manifest = pd.DataFrame(
+            {
+                "timestamp_utc": pd.to_datetime(["2026-03-21T15:00:00Z", "2026-03-21T15:01:00Z"]),
+                "day_id": ["2026-03-21", "2026-03-21"],
+            }
+        )
+        for name in get_args(AlignmentStrategyName):
+            alignment = AlignmentConfig(strategy=name)
+            windows = _windows_for(alignment.strategy, manifest, 5.0, -3.0, max_frames=5)
+            assert (windows == []) == (name == "center_frame")
 
     def test_typo_is_rejected_at_load_time(self):
         with pytest.raises(ValidationError):
@@ -230,3 +283,82 @@ class TestPixelSectionsNeedImageMode:
             {"data": {"input_mode": "image"}, "augmentation": {"p_noise": 0.3}}
         )
         assert cfg.augmentation.p_noise == pytest.approx(0.3)
+
+    def test_a_rotation_alone_is_refused_in_embedding_mode(self):
+        with pytest.raises(ValidationError, match="decodes none"):
+            ExperimentConfig.model_validate(
+                {"data": {"input_mode": "embedding"}, "augmentation": {"p_rotate": 0.5}}
+            )
+
+
+class TestRotationBounds:
+    @pytest.mark.parametrize(
+        "payload", [{"p_rotate": 1.5}, {"p_rotate": -0.1}, {"rotate_max_deg": 181.0}]
+    )
+    def test_a_rotation_knob_outside_its_range_is_rejected(self, payload: dict):
+        with pytest.raises(ValidationError):
+            ExperimentConfig.model_validate({"augmentation": payload})
+
+    def test_the_default_is_off_over_the_whole_circle(self):
+        augmentation = ExperimentConfig().augmentation
+        assert augmentation.p_rotate == 0.0
+        assert augmentation.rotate_max_deg == pytest.approx(180.0)
+
+
+_REGRESSION_HEADS = {"dhi": {"enabled": True}, "kindex": {"enabled": True}}
+
+
+class TestCMixupNeedsSingleFramesAndTheKindexHead:
+    def test_it_loads_on_the_single_frame_image_path_with_the_kindex_head(self):
+        cfg = ExperimentConfig.model_validate(
+            {
+                "data": {"input_mode": "image"},
+                "targets": _REGRESSION_HEADS,
+                "train": {"cmixup": {"enabled": True, "alpha": 0.4, "bandwidth": 0.1, "p": 0.5}},
+            }
+        )
+        assert cfg.train.cmixup.bandwidth == pytest.approx(0.1)
+
+    def test_embedding_mode_is_refused(self):
+        with pytest.raises(ValidationError, match="input_mode"):
+            ExperimentConfig.model_validate(
+                {
+                    "data": {"input_mode": "embedding"},
+                    "targets": _REGRESSION_HEADS,
+                    "train": {"cmixup": {"enabled": True}},
+                }
+            )
+
+    def test_a_window_of_frames_is_refused(self):
+        with pytest.raises(ValidationError, match="window"):
+            ExperimentConfig.model_validate(
+                {
+                    "data": {"input_mode": "image", "alignment": {"strategy": "mean_embedding"}},
+                    "targets": _REGRESSION_HEADS,
+                    "train": {"cmixup": {"enabled": True}},
+                }
+            )
+
+    def test_a_run_without_the_kindex_head_is_refused(self):
+        with pytest.raises(ValidationError, match="kindex"):
+            ExperimentConfig.model_validate(
+                {
+                    "data": {"input_mode": "image"},
+                    "targets": {"dhi": {"enabled": True}},
+                    "train": {"cmixup": {"enabled": True}},
+                }
+            )
+
+    @pytest.mark.parametrize(
+        "payload", [{"alpha": 0.0}, {"bandwidth": 0.0}, {"p": 1.5}, {"p": -0.1}]
+    )
+    def test_a_knob_outside_its_range_is_rejected(self, payload: dict):
+        with pytest.raises(ValidationError):
+            _config({"cmixup": payload})
+
+    def test_the_documented_defaults_hold_while_off(self):
+        cmixup = ExperimentConfig().train.cmixup
+        assert cmixup.enabled is False
+        assert cmixup.alpha == pytest.approx(1.0)
+        assert cmixup.bandwidth == pytest.approx(0.05)
+        assert cmixup.p == pytest.approx(1.0)

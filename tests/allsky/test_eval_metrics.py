@@ -113,3 +113,54 @@ def test_a_perfect_model_scores_full_skill():
 @pytest.mark.parametrize("reference", [0.0, float("nan")])
 def test_an_unusable_reference_yields_no_skill_rather_than_infinity(reference: float):
     assert math.isnan(skill_score(10.0, reference))
+
+
+def test_quadratic_kappa_charges_a_far_miss_more_than_a_neighbouring_one() -> None:
+    truth = np.array([0, 1, 2, 3, 0, 1, 2, 3])
+
+    near = classification_metrics(truth, np.array([0, 2, 2, 3, 0, 1, 1, 3]))
+    far = classification_metrics(truth, np.array([0, 3, 2, 3, 0, 1, 0, 3]))
+
+    assert near["accuracy"] == pytest.approx(far["accuracy"])
+    assert near["kappa_quadratic"] > far["kappa_quadratic"]
+    assert near["within_one_class"] == pytest.approx(1.0)
+    assert far["within_one_class"] == pytest.approx(0.75)
+
+
+def test_per_class_scores_are_keyed_by_the_sky_condition_names() -> None:
+    report = classification_metrics(np.array([0, 1, 2, 3]), np.array([0, 1, 2, 3]))
+
+    assert set(report["per_class"]) == {
+        "cloudy",
+        "partly_cloudy_diffuse",
+        "partly_cloudy_clear",
+        "clear",
+    }
+    assert report["per_class"]["clear"] == {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 1,
+    }
+
+
+def test_confident_and_correct_probabilities_are_perfectly_calibrated() -> None:
+    truth = np.array([0, 1, 2, 3])
+    probabilities = np.eye(4)
+
+    report = classification_metrics(truth, truth, probabilities=probabilities)
+
+    assert report["ece"] == pytest.approx(0.0)
+    assert report["brier"] == pytest.approx(0.0)
+    assert report["nll"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_probability_rows_follow_the_dropped_labels() -> None:
+    truth = np.array([0, -1, 3])
+    predicted = np.array([0, 0, 3])
+    probabilities = np.array([[1.0, 0.0, 0.0, 0.0], [0.25, 0.25, 0.25, 0.25], [0.0, 0.0, 0.0, 1.0]])
+
+    report = classification_metrics(truth, predicted, probabilities=probabilities)
+
+    assert report["n"] == 2
+    assert report["nll"] == pytest.approx(0.0, abs=1e-9)

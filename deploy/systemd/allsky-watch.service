@@ -1,0 +1,21 @@
+[Unit]
+Description=all-sky live frame scoring (allsky watch)
+
+[Service]
+Type=simple
+WorkingDirectory=%h/labmim/micrometeorology
+Environment=OMP_NUM_THREADS=6
+Environment=MKL_NUM_THREADS=6
+Environment=ALLSKY_DINOV3_REPO=%h/.cache/torch/hub/facebookresearch_dinov3_main
+Environment=ALLSKY_DINOV3_WEIGHTS=%h/labmim/dinov3/dinov3_vits16plus_pretrain_lvd1689m.pth
+ExecStart=%h/miniforge3/envs/micrometeorology/bin/allsky watch \
+  --serving configs/allsky/serving/ceu.yaml \
+  --out %h/labmim/allsky-watch/ceuv3res512 \
+  --trust-checkpoint
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=30
+MemoryMax=6G
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,88 @@
+# l4bloco512: a unidade de bloco a 512 px — o que a L4 (24 GB) compra e os 8 GB
+# da RTX 2060 nao cabem.
+#
+# Receita do ceuv3res512_s42, a melhor ate aqui (DINOv3 ViT-S/16+ a 512 px,
+# image_only, alvo no k* com sky 0,25, LR por camada 0,8, jitter/ruido/erase,
+# monitor val/kindex_mae, last como checkpoint operacional; teste novo com o
+# last: DHI 18,0 W/m2, kt-bal 0,669, por bloco F1 0,685 pela classe do k* e
+# 0,653 pela cabeca de ceu, contra 0,659 da persistencia; com o best: 18,1 /
+# 0,672 / 0,695 / 0,674), com o
+# data.alignment do ceubloco_s42: uma amostra = os 4-5 frames da mesma linha do
+# CR5000, media das codificacoes, one_sample_per_block. E o unico mecanismo que
+# move o teto do rotulo: 0,73 por frame -> 0,84+ por bloco. A avaliacao ja sai
+# por bloco (1.477 itens no teste em vez de 7.265 frames).
+#
+# Memoria: um item sao ate 5 frames de 512 px (1.024 tokens cada); batch 8 = 40
+# imagens por passo, ~15 GB estimados a partir dos ~6 GB de 16 imagens na 2060.
+# lr e backbone_lr sao os do ceubloco (1,5e-4 / 5e-6, medidos com 16 blocos por
+# passo) e ficam sem reescalar para os 8 blocos daqui: a regra da raiz quadrada
+# daria 1,06e-4 / 3,5e-6, diferenca menor que a incerteza da receita a 512 px.
+# 60 epocas como no ceubloco — com uma amostra por bloco os passos por epoca caem
+# 5x — e paciencia = teto, para o monitor so escolher o best.
+#
+# Sem C-Mixup: o validador recusa a mistura sobre janelas (train.cmixup exige
+# center_frame). Sem rotacao, como no ceuv3res512. amp bf16: a L4 (Ada) tem
+# bfloat16; o fp16 da _base e o que a 2060 (Turing) impoe.
+# 150 epocas com parada por paciencia (pedido do dono, 2026-09-08 12:15): monitor
+# val/kindex_mae, paciencia 15 — a 512 px o minimo caiu na epoca 20 com oscilacao
+# de +-0,002; o cosseno longo deixa o LR alto quando parar, entao o checkpoint
+# operacional desta fila e o best.
+# min_delta 0,0002 no k* (2026-09-09 05:00, apos a primeira execucao na L4): o
+# bloco a 512 renovou o minimo por 0,0001 nas epocas 39 e 53 sobre um plato de
+# 0,066-0,068 desde a epoca 29, e a paciencia estendeu o treino ate a 68 com LR
+# alto; so uma melhora acima da oscilacao da 4a casa conta como progresso.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: l4bloco512_s42
+output_dir: output/allsky-mm/experiments/l4/l4bloco512_s42
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso-20260906
+  input_mode: image
+  alignment:
+    strategy: sensor_block
+    window_minutes: 5.0
+    max_frames: 5
+    one_sample_per_block: true
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+model:
+  backbone: dinov3_vits16plus
+  image_size: 512
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  layer_decay: 0.8
+  lr: 0.00015
+  backbone_lr: 0.000005
+  batch_size: 8
+  epochs: 150
+  weight_decay: 0.05
+  num_workers: 8
+  amp:
+    enabled: true
+    dtype: bf16
+  early_stopping:
+    patience: 15
+    min_delta: 0.0002
+    monitor: val/kindex_mae
+augmentation:
+  p_exposure: 0.5
+  exposure_log2: 0.6
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25

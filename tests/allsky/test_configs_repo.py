@@ -21,6 +21,7 @@ CPU-only otherwise; no dataset, embeddings or network are touched.
 import json
 import re
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -146,6 +147,10 @@ def test_every_experiment_trains_on_a_dataset_some_prepare_config_builds(
     cfg = load_experiment_config(experiment)
     prepared = {load_prepare_config(path).output.dataset_dir for path in _PREPARE_CONFIGS}
 
+    if experiment.parent.name in _EXPOSURE_ARMS:
+        assert cfg.data.data_root == _EXPOSURE_DATA_ROOT, cfg.data.data_root
+        assert _EXPOSURE_SOURCE_ROOT in prepared
+        return
     if experiment.parent.name == "folsom":
         # Known and open: the UCSD-Folsom adapter ships in allsky.data.folsom but
         # no configs/allsky/data/*.yaml builds `dataset-folsom`, so this arm's
@@ -154,6 +159,14 @@ def test_every_experiment_trains_on_a_dataset_some_prepare_config_builds(
         assert cfg.data.data_root not in prepared
         return
     assert cfg.data.data_root in prepared, cfg.data.data_root
+
+
+#: The arms that train on the dataset ``allsky exposure-features`` derives from
+#: ``_EXPOSURE_SOURCE_ROOT`` — no prepare config builds it, its producer is the
+#: CLI command, so the test asserts the chain instead of the prepare set.
+_EXPOSURE_ARMS = frozenset({"ceuexp", "ceuexpshuf", "ceuexp2", "ceuexpv3"})
+_EXPOSURE_DATA_ROOT = "output/allsky-mm/dataset-iso-20260906-exp"
+_EXPOSURE_SOURCE_ROOT = "output/allsky-mm/dataset-iso-20260906"
 
 
 #: Arms known to resolve to the same run and left in place deliberately, as
@@ -298,7 +311,7 @@ def test_experiment_builds_and_forwards(experiment: Path) -> None:
     # Read the width off the config's own policy set rather than pinning it: the
     # engine sizes the sensor branch the same way, so a hardcoded 13 turned a
     # switch to `minimal` into a shape error in the test instead of in the code.
-    n_features = len(resolve_feature_set(cfg.features.feature_set))
+    n_features = len(resolve_feature_set(cfg.features.feature_set, cfg.features.extra))
 
     if cfg.data.input_mode == "image":
         model = build_model(cfg, n_features, image_backbone=_StubBackbone())
@@ -307,10 +320,13 @@ def test_experiment_builds_and_forwards(experiment: Path) -> None:
         # has to be as wide as the wrapped convolution now expects.
         channels = getattr(getattr(model, "visual_encoder", None), "extra_channel_projection", None)
         n_channels = 3 if channels is None else channels.in_channels
-        batch = {
-            "features": torch.randn(_BATCH, n_features),
-            "image": torch.randn(_BATCH, n_channels, 8, 8),
-        }
+        batch = {"features": torch.randn(_BATCH, n_features)}
+        if cfg.data.alignment.strategy == "center_frame":
+            batch["image"] = torch.randn(_BATCH, n_channels, 8, 8)
+        else:
+            frames = cfg.data.alignment.max_frames
+            batch["image_seq"] = torch.randn(_BATCH, frames, n_channels, 8, 8)
+            batch["frame_mask"] = torch.ones(_BATCH, frames, dtype=torch.bool)
     else:
         model = build_model(cfg, n_features, embedding_dim=_EMBED_DIM)
         batch = {
@@ -380,3 +396,64 @@ class TestTransferDirection:
             cfg = load_experiment_config(path)
 
             assert model_param(cfg, "init_from", None) is None, path.name
+
+
+def _gerador_de_notebooks() -> ModuleType:
+    import importlib.util
+    import sys
+
+    caminho = Path(__file__).resolve().parents[2] / "scripts" / "gera_notebooks_l4.py"
+    spec = importlib.util.spec_from_file_location("gera_notebooks_l4", caminho)
+    assert spec is not None
+    assert spec.loader is not None
+    gerador = importlib.util.module_from_spec(spec)
+    sys.modules["gera_notebooks_l4"] = gerador
+    spec.loader.exec_module(gerador)
+    return gerador
+
+
+def _codigo_do_notebook(caminho: Path) -> str:
+    notebook = json.loads(caminho.read_text(encoding="utf-8"))
+    return "".join(
+        "".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"
+    )
+
+
+def test_the_drive_notebooks_look_for_the_bundle_the_exporter_writes() -> None:
+    """The bundle name the notebook builds must be the file ``export-colab-bundle`` produces.
+
+    A notebook that names a bundle nobody wrote dies at the data cell, after the
+    eight minutes the environment cell costs. The rule is a prefix swap, so it is
+    derived from the dataset root rather than typed twice.
+    """
+    gerador = _gerador_de_notebooks()
+
+    assert gerador.bundle_de("dataset-iso-20260906") == "bundle-iso-20260906.tar.gz"
+    assert gerador.bundle_de("dataset-iso-1024-20260910") == "bundle-iso-1024-20260910.tar.gz"
+
+    for arm in gerador.ARMS_DRIVE:
+        codigo = _codigo_do_notebook(gerador.NOTEBOOK_DIR / f"07_prop_{arm}.ipynb")
+        assert f'allsky-mm/{gerador.bundle_de(gerador.dataset_de(arm))}"' in codigo, arm
+        assert "bundle-dataset-" not in codigo, arm
+
+
+def test_the_bucket_notebooks_download_the_bundle_of_the_dataset_their_arm_trains_on() -> None:
+    """The data cell copies ``allsky-mm/<bundle>`` from Cloud Storage before staging.
+
+    The Drive cell derived the bundle from the dataset root while the bucket
+    cell still named the 512 px bundle by hand, so the first 1024 px arm on the
+    bucket route would have staged the wrong frames and trained a 1024 px model
+    on 512 px images without any error. Only code cells count: the markdown
+    pre-requisites named the right bundle while the code fetched the wrong one.
+    """
+    gerador = _gerador_de_notebooks()
+
+    notebooks = [
+        (gerador.NOTEBOOK_DIR / "05_fila_l4.ipynb", gerador.ARMS[0]),
+        *[(gerador.NOTEBOOK_DIR / f"06_l4_{arm}.ipynb", arm) for arm in gerador.ARMS_L4],
+    ]
+    for caminho, arm in notebooks:
+        codigo = _codigo_do_notebook(caminho)
+        esperado = f'BUNDLE_REL = "allsky-mm/{gerador.bundle_de(gerador.dataset_de(arm))}"'
+        assert esperado in codigo, (caminho.name, esperado)
+        assert "bundle-dataset-" not in codigo, caminho.name

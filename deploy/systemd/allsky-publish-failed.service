@@ -1,0 +1,6 @@
+[Unit]
+Description=leave a marker when allsky publish-site fails
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'date -Is > %h/labmim/allsky-watch/ceuv3res512/.state/publish-failed'

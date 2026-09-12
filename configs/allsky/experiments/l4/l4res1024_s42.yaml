@@ -1,0 +1,116 @@
+# Braco de 1024 px por quadro, na L4 de 24 GB. A semente 42 e o cabecalho da
+# familia: s43, s44 e o controle l4ctl512_s42 sao identicos a este em tudo menos
+# o que os seus cabecalhos declaram.
+#
+# Por que resolucao, e por que por quadro. A resolucao foi a unica alavanca que
+# melhorou as DUAS tarefas: de 256 para 512 px a difusa caiu de 20,5 para 18,0
+# W/m2 e o F1 por bloco subiu de 0,658 para 0,695. Backbone maior (ViT-B/16) e
+# features tabulares (exposicao, log-radiancia) foram inertes, e a unidade de
+# bloco PERDEU do quadro a quadro no mesmo teste (2026-09-09: bloco 17,9 / 0,660
+# contra quadro 14,5 / 0,695), porque media de predicoes reduz variancia e media
+# de codificacoes nao. Entao: um quadro por amostra, 1024 px, e a agregacao por
+# bloco fica para a avaliacao. O disco do ceu tem 1711 px na reextracao
+# isotropica (allsky.lens.ISOTROPIC_FRAME_PX), entao 1024 ainda e reducao: ha
+# detalhe real entrando. Exige a raiz dataset-iso-1024-20260910, mesmo split_id
+# do dataset de 512 px (23ada0d68486).
+#
+# Lote 10 com grad_accum_steps 2 = 20 imagens por passo de otimizador. Memoria
+# medida na 2060 em 2026-09-10 com o modelo real (DINOv3 S/16+, 12 blocos
+# livres, AdamW com LLRD, C-Mixup, autocast), lotes 1 a 4 a 1024 px: pico
+# alocado 1,22 GB por imagem + 0,48 GB; pico reservado (o que o nvidia-smi e o
+# heartbeat mostram) 1,40 GB por imagem + 0,48 GB. Lote 10 reserva ~14,5 GB,
+# ~18 GB com 25% de margem; lote 12 chegaria a 21,5 GB no pior caso, sem folga.
+# O lr NAO foi reescalado com o lote, como no ceuv3res512 (a ida de 8 para 16 a
+# 512 px tambem nao foi, e foi ela que produziu o melhor braco); o scheduler
+# avanca por epoca, entao a acumulacao nao toca o cosseno. O C-Mixup pareia
+# dentro do lote do loader: 10 candidatos por lote.
+#
+# Tempo. O custo marginal por imagem a 1024 e 6,8x o de 512 na mesma medicao (a
+# 2060 usa o SDPA mem_efficient; a L4, Ada, tem flash, entao 6,8x e um teto).
+# 11,9 min/epoca medidos a 512 px na L4 (l4v3res512_s45, lote 32) dao ate ~81
+# min/epoca sobre 33.608 imagens de treino. O loader nao limita (26,6 ms por
+# quadro num nucleo); num_workers 8 = as 8 vCPU do g2-standard-8.
+#
+# 48 epocas de cosseno com paciencia 12 e min_delta 0,0002. O HORIZONTE, nao a
+# paciencia, decide se o last serve: num cosseno de 150 a taxa da cabeca ainda
+# esta em 83% do pico na epoca 40 e o last e um peso de meio de treino
+# (l4bloco512_s42: last 0,624 contra best 0,660; l4v3res512_s44 idem). Com 48,
+# a taxa cai a zero na 48 e best e last voltam a concordar como no
+# ceuv3res512_s42 (cosseno de 40 fechado). Paciencia 12: em cinco runs a ultima
+# melhora acima de min_delta nunca veio depois da epoca 29 (s42 na 9, s43 na 10,
+# bloco na 29, s44 na 10, s45 na 16).
+#
+# Sessoes. Uma execucao do Colab Enterprise tem teto duro de 24 h (a API recusa
+# mais: "Max execution duration is 86400s"): ~17 epocas por sessao, 48 epocas
+# em 3 sessoes (2 se a paciencia parar na casa dos 30), mais ~40 min dos tres
+# relatorios na GPU (o runner passa `--device cuda` ao evaluate; na CPU de 8
+# vCPU seriam ~14 h, como as 2,1 h medidas a 512 px vezes 6,8). O braco
+# atravessa sessoes pelo espelho de last.ckpt/best.ckpt no bucket, pull_live_run
+# e `allsky train --resume auto`, com _reconcile_cosine_horizon repondo o T_max;
+# cada fronteira perde ate uma epoca mais o setup (~15 min). Relancar a
+# execucao e o unico passo manual, e e o que roda-ate-fechar.sh faz.
+#
+# Comparabilidade. A referencia e a familia ceuv3res512/l4v3res512 (quatro
+# sementes a 512 px: DHI 18,1-19,5, F1 por bloco 0,692-0,695), que espalha 1,4
+# W/m2 entre sementes: por isso a 1024 px sao tres sementes (42, 43, 44). A
+# comparacao nao e pareada (lote 16/32 contra 20, fp16/bf16, cossenos 40/50/150
+# contra 48, sem parada contra paciencia 12); o controle l4ctl512_s42, mesma
+# receita e mesmos JPEGs de 1024 reduzidos a 512, fecha a lacuna: se ele cair
+# dentro da faixa da familia de 512, a receita e inerte a 512 e as sementes de
+# 1024 passam a ser comparaveis a familia inteira.
+extends: [../_base.yaml, ../../models/image_only.yaml]
+name: l4res1024_s42
+output_dir: output/allsky-mm/experiments/l4/l4res1024_s42
+seed: 42
+features:
+  set: bare
+data:
+  data_root: output/allsky-mm/dataset-iso-1024-20260910
+  input_mode: image
+targets:
+  dhi:
+    enabled: true
+    loss: mae
+    weight: 1.0
+    parameterization: clearsky_index
+  kindex:
+    enabled: true
+    kind: kstar
+    loss: mae
+    weight: 1.0
+  sky:
+    enabled: true
+    weight: 0.25
+model:
+  backbone: dinov3_vits16plus
+  image_size: 1024
+  backbone_frozen: false
+  unfreeze_last_n: 12
+  backbone_pooling: cls+mean
+train:
+  layer_decay: 0.8
+  lr: 0.0003
+  backbone_lr: 0.00001
+  batch_size: 10
+  grad_accum_steps: 2
+  epochs: 48
+  weight_decay: 0.05
+  num_workers: 8
+  amp:
+    enabled: true
+    dtype: bf16
+  cmixup:
+    enabled: true
+    alpha: 1.0
+    bandwidth: 0.05
+    p: 0.5
+  early_stopping:
+    patience: 12
+    min_delta: 0.0002
+    monitor: val/kindex_mae
+augmentation:
+  p_exposure: 0.5
+  exposure_log2: 0.6
+  p_noise: 0.3
+  noise_sigma: 0.01
+  p_erase: 0.25

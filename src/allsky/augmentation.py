@@ -18,8 +18,15 @@ is closely related to the position of the sun in a sky image, geometric
 transformations, such as flipping and rotation, are not suitable in this task".
 
 Do not add ``RandomHorizontalFlip``, ``RandomRotation`` or ``RandomAffine`` in
-the frame's own coordinates. The only rotation the physics admits is one about
-the *sun*, which :func:`polar_unwrap` turns into a translation instead.
+the frame's own coordinates. Two rotations survive that argument. One is about
+the *sun*, which :func:`polar_unwrap` turns into a translation instead. The
+other is :func:`rotate_about_zenith`, a rotation about the *zenith* applied to
+the RGB planes AND the solar-geometry planes together: the sun moves in the
+image and the channel that tells the model where the sun is moves with it, so
+the sample stays physically consistent — the sky a mount turned by that angle
+would have imaged. Without the geometry channel the same rotation is the
+illegal one above, which is why the engine warns when ``p_rotate`` is set on a
+run without ``model.geometry_channels``.
 
 WHAT IS LEGAL, AND WHY
 ----------------------
@@ -43,6 +50,11 @@ WHAT IS LEGAL, AND WHY
 :func:`translate`
     A few pixels of camera shift. Mount flex and servicing really do move the
     frame slightly; the sun moves with the scene, so geometry stays consistent.
+:func:`rotate_about_zenith`
+    A rotation of the whole channel stack about the zenith, the regulariser
+    Steiner et al. (2022, arXiv:2106.10270) find substitutes for data when a
+    ViT is fine-tuned on little of it. Legal only with the solar-geometry
+    planes in the stack, see above.
 :func:`polar_unwrap`
     Sun-centred polar re-parameterisation (SPIN, Paletta et al., CVPR 2022
     OmniCV workshop, arXiv:2111.14507). Rotational invariance about the sun
@@ -59,18 +71,23 @@ WHAT IS LEGAL, AND WHY
 
 All functions take and return ``(3, H, W)`` float32 CHW arrays in ``[0, 1]`` —
 BEFORE the DINOv2 standardisation, which must stay last so the backbone always
-receives the distribution it was pretrained on.
+receives the distribution it was pretrained on. The two geometric transforms,
+:func:`translate` and :func:`rotate_about_zenith`, also accept the stack with
+the geometry planes appended, ``(3 + G, H, W)``, and move every plane alike.
 """
 
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import ndimage
 
 __all__ = [
     "AugmentationPipeline",
     "exposure_jitter",
     "polar_unwrap",
     "random_erasing",
+    "rotate_about_zenith",
+    "rotate_frame",
     "sensor_noise",
     "translate",
 ]
@@ -277,6 +294,102 @@ def translate(chw: np.ndarray, rng: np.random.Generator, *, max_shift: int = 4) 
     return np.ascontiguousarray(padded[:, top : top + height, left : left + width])
 
 
+def rotate_frame(
+    chw: np.ndarray, angle_deg: float, *, fill: float | np.ndarray = 0.0
+) -> np.ndarray:
+    """Rotate every plane of *chw* by *angle_deg* about the centre of the pixel grid.
+
+    Bilinear resampling; the pixels the rotation pulls in from outside the
+    frame take *fill*.
+
+    Parameters
+    ----------
+    chw:
+        ``(..., H, W)`` float32 — a ``(C, H, W)`` frame, or a batch
+        ``(B, C, H, W)`` / window ``(B, T, C, H, W)`` of them; every leading
+        axis is carried and only the last two are rotated. RGB in ``[0, 1]`` or
+        standardized, and the geometry planes, are all rotated alike.
+    angle_deg:
+        Rotation in degrees. Positive turns the frame the way
+        ``numpy.rot90(plane)`` does — a pixel on the top edge moves to the left
+        edge — and ``90`` reproduces ``numpy.rot90`` up to resampling error.
+    fill:
+        Value written where the source lies outside the frame; a scalar, or an
+        array broadcastable to *chw* for a per-plane fill.
+
+    Returns
+    -------
+    numpy.ndarray
+        Same shape and dtype as *chw*; the input array itself when *angle_deg*
+        is zero.
+
+    Notes
+    -----
+    The centre of rotation is the centre of the pixel grid, ``((H - 1) / 2,
+    (W - 1) / 2)``, and it is the zenith only for frames of the isotropic
+    re-extraction: there the crop and pad of ``local_prepare_iso.yaml`` put the
+    disc concentric with the frame, and :func:`allsky.lens.isotropic_calibration`
+    places the zenith at ``112.03`` px in a 224 px frame against the grid
+    centre's ``111.5`` — 0.53 px off, at most 1.06 px of displacement at 180
+    degrees, against the 14 px patch the backbone tokenises. On a frame from the
+    plain 1920x1080 resize this would be wrong: the fitted optical axis sits
+    62 px below the sensor centre in the native frame
+    (:data:`allsky.lens.PLANETARIO_NATIVE`), ``62 * S / 1080`` px in a frame
+    resized to ``S``, and rotating about the grid centre there would swing the
+    sun along an arc it never travels.
+
+    The per-plane *fill* goes through a scalar-only resampler as
+    ``rotate(x - fill) + fill``, which equals rotating ``x`` with *fill*
+    outside because bilinear interpolation is linear.
+
+    The test for a zero angle is an exact one on purpose, against the
+    tolerance rule for floats: it is an identity shortcut, not a numerical
+    comparison — a draw of exactly ``0.0`` (a ``max_deg`` of zero, or the
+    first of the ``k * 360 / N`` test-time turns) hands back the input array
+    untouched, and any other angle, however small, is resampled.
+    """
+    if angle_deg == 0.0:
+        return chw
+    offset = np.asarray(fill, dtype=chw.dtype)
+    shifted = chw - offset if np.any(offset) else chw
+    rotated: np.ndarray = ndimage.rotate(
+        shifted, angle_deg, axes=(-2, -1), reshape=False, order=1, mode="constant", cval=0.0
+    )
+    return rotated + offset if np.any(offset) else rotated
+
+
+def rotate_about_zenith(chw: np.ndarray, rng: np.random.Generator, *, max_deg: float) -> np.ndarray:
+    """Rotate the channel stack about the zenith by a uniform random angle.
+
+    The angle is drawn uniformly in ``[-max_deg, max_deg]``; the rotation is
+    :func:`rotate_frame` with a fill of ``0`` — black, the level the prepare pad
+    writes into the corners the camera never imaged, which is what the corners
+    of an isotropic frame hold before the rotation too. That is why this runs on
+    the ``[0, 1]`` frame rather than the standardized one: a zero after
+    standardization is mid-grey, not the pad.
+
+    Parameters
+    ----------
+    chw:
+        ``(3 + G, H, W)`` float32: RGB in ``[0, 1]`` followed by the ``G``
+        solar-geometry planes, all rotated together so the sun's pixel and the
+        plane that marks it stay on the same bearing. A bare ``(3, H, W)``
+        frame is accepted but physically illegal, see the module docstring.
+    rng:
+        Seeded generator; the caller owns reproducibility.
+    max_deg:
+        Half-width of the angle range, in degrees; ``180`` is a uniform
+        rotation over the whole circle.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(3 + G, H, W)`` float32; the input array itself when the draw is zero.
+    """
+    angle = float(rng.uniform(-max_deg, max_deg))
+    return rotate_frame(chw, angle)
+
+
 def polar_unwrap(
     chw: np.ndarray,
     *,
@@ -341,12 +454,18 @@ class AugmentationPipeline:
 
     Every probability defaults to ``0.0``, so constructing one without arguments
     is a no-op and an existing experiment keeps its numbers. Order is fixed:
-    photometric first (exposure, then noise), geometry last (translation, then
-    erasing), so an erased rectangle keeps the frame's mean fill rather than a
-    value the noise then perturbs.
+    rotation first, then photometric (exposure, then noise), then translation
+    and erasing, so an erased rectangle keeps the frame's mean fill rather than
+    a value the noise then perturbs, and the rotation's resampling never
+    correlates the noise the sensor draws independently per pixel. A transform
+    consumes the generator only when its probability is set, so a pipeline with
+    ``p_rotate = 0`` draws exactly what it drew before rotation existed and
+    reproduces the same frames under the same seed.
 
     Attributes
     ----------
+    p_rotate, rotate_max_deg:
+        Probability and half-width, in degrees, of :func:`rotate_about_zenith`.
     p_exposure, exposure_log2:
         Probability and half-width, in stops, of :func:`exposure_jitter`.
     p_noise, noise_sigma:
@@ -375,17 +494,22 @@ class AugmentationPipeline:
     p_translate: float = 0.0
     translate_px: int = 4
     p_erase: float = 0.0
+    p_rotate: float = 0.0
+    rotate_max_deg: float = 180.0
 
     @property
     def enabled(self) -> bool:
         """True when at least one transform can fire."""
-        return max(self.p_exposure, self.p_noise, self.p_translate, self.p_erase) > 0.0
+        return (
+            max(self.p_exposure, self.p_noise, self.p_translate, self.p_erase, self.p_rotate) > 0.0
+        )
 
     def __call__(
         self,
         chw: np.ndarray,
         rng: np.random.Generator,
         valid: np.ndarray | None = None,
+        geometry: np.ndarray | None = None,
     ) -> np.ndarray:
         """Apply the pipeline to one CHW frame in ``[0, 1]``.
 
@@ -395,14 +519,41 @@ class AugmentationPipeline:
         :func:`random_erasing` averages its fill over the imaged ones. Exposure
         and translation need no mask — the first is multiplicative, so zero stays
         zero, and the second moves absence with the frame.
+
+        *geometry* is the ``(G, H, W)`` float32 stack of solar-geometry planes of
+        the same frame, when the run feeds them to the model. Rotation and
+        translation move it together with the RGB planes; the photometric
+        transforms and the erasing never touch it. The return is then
+        ``(3 + G, H, W)`` with the moved planes appended — RGB still in
+        ``[0, 1]``, for the caller to standardize — and ``(3, H, W)`` without it.
         """
         out = chw
+        planes = geometry
+        if self.p_rotate and rng.random() < self.p_rotate:
+            out, planes = _split(
+                rotate_about_zenith(_stack(out, planes), rng, max_deg=self.rotate_max_deg), planes
+            )
         if self.p_exposure and rng.random() < self.p_exposure:
             out = exposure_jitter(out, rng, log2_range=self.exposure_log2)
         if self.p_noise and rng.random() < self.p_noise:
             out = sensor_noise(out, rng, sigma=self.noise_sigma, valid=valid)
         if self.p_translate and rng.random() < self.p_translate:
-            out = translate(out, rng, max_shift=self.translate_px)
+            out, planes = _split(
+                translate(_stack(out, planes), rng, max_shift=self.translate_px), planes
+            )
         if self.p_erase and rng.random() < self.p_erase:
             out = random_erasing(out, rng, valid=valid)
-        return np.ascontiguousarray(out, dtype=np.float32)
+        result = np.ascontiguousarray(out, dtype=np.float32)
+        return result if planes is None else np.concatenate([result, planes], axis=0)
+
+
+def _stack(rgb: np.ndarray, geometry: np.ndarray | None) -> np.ndarray:
+    return rgb if geometry is None else np.concatenate([rgb, geometry], axis=0)
+
+
+def _split(
+    stacked: np.ndarray, geometry: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray | None]:
+    if geometry is None:
+        return stacked, None
+    return stacked[:3], stacked[3:]

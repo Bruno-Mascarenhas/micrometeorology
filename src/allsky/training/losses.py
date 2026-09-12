@@ -86,6 +86,8 @@ class MultitaskLoss(nn.Module):
     so the cloud head is MSE by construction.
     """
 
+    _sky_class_weights: Tensor | None
+
     def __init__(
         self,
         targets: TargetsConfig,
@@ -110,6 +112,14 @@ class MultitaskLoss(nn.Module):
         self._kindex_kind = str(targets.kindex.loss)
         self._sky_enabled = bool(targets.sky.enabled)
         self._sky_weight = float(targets.sky.weight)
+        self._sky_label_smoothing = float(targets.sky.label_smoothing)
+        self._sky_ordinal_tau = targets.sky.ordinal_tau
+        self.register_buffer(
+            "_sky_class_weights",
+            None
+            if targets.sky.class_weights is None
+            else torch.tensor(targets.sky.class_weights, dtype=torch.float32),
+        )
         self._cloud_enabled = bool(targets.cloud_fraction.enabled)
         self._cloud_weight = float(targets.cloud_fraction.weight)
         self._cloud_kind = "mse"
@@ -131,7 +141,10 @@ class MultitaskLoss(nn.Module):
             ``"clearsky_index"``,
             ``kindex`` ``(B,)`` (dimensionless ratio) and ``cloud_fraction``
             ``(B,)`` in ``[0, 1]`` — all ``float``, NaN = missing — plus
-            ``sky_class`` ``(B,)`` ``int64`` with ``-1`` = missing.
+            ``sky_class`` ``(B,)`` ``int64`` with ``-1`` = missing, and
+            optionally ``sky_distribution`` ``(B, SKY_CLASS_COUNT)`` float, a
+            target distribution per row (a mixed batch), which replaces the
+            hard class for the rows ``sky_class`` marks as labelled.
 
         Returns
         -------
@@ -158,7 +171,9 @@ class MultitaskLoss(nn.Module):
             components["loss_kindex"] = component
             total = _accumulate(total, self._kindex_weight, component)
         if self._sky_enabled:
-            component = self._sky_loss(outputs["sky_logits"], batch["sky_class"])
+            component = self._sky_loss(
+                outputs["sky_logits"], batch["sky_class"], batch.get("sky_distribution")
+            )
             components["loss_sky"] = component
             total = _accumulate(total, self._sky_weight, component)
         if self._cloud_enabled:
@@ -209,15 +224,82 @@ class MultitaskLoss(nn.Module):
             )
         return _masked_mean(per_row, mask)
 
-    @staticmethod
-    def _sky_loss(logits: Tensor, sky_class: Tensor) -> Tensor:
-        """Masked cross-entropy over rows with a valid (``>= 0``) class label."""
+    def _sky_loss(
+        self, logits: Tensor, sky_class: Tensor, distribution: Tensor | None = None
+    ) -> Tensor:
+        """Masked cross-entropy over rows with a valid (``>= 0``) class label.
+
+        The hard target of a row is its one-hot distribution; a *distribution*
+        ``(B, K)`` replaces it for every row. Under either, ``label_smoothing``
+        mixes the target with the uniform, ``ordinal_tau`` replaces it by its
+        mix of the soft targets of :func:`ordinal_soft_targets`, and
+        ``class_weights`` scales each row by its class: inside the class sum on
+        the smoothed target, as ``functional.cross_entropy`` does with
+        ``weight`` and ``label_smoothing`` together, and as a factor on the row
+        under the ordinal targets. The masked mean is over rows, not over
+        weights, so a re-weighted batch is not re-normalised.
+        """
         mask = sky_class >= 0
-        # `clamp(min=0)` only feeds the masked-out rows a valid index; their loss
-        # is zeroed below. `ignore_index=-1` with the default reduction would do
-        # the masking too, but returns NaN for a batch where every row is masked.
-        per_row = functional.cross_entropy(logits, sky_class.clamp(min=0), reduction="none")
-        return _masked_mean(per_row, mask)
+        if distribution is None:
+            # `clamp(min=0)` only feeds the masked-out rows a valid index; their
+            # loss is zeroed by the masked mean.
+            distribution = functional.one_hot(sky_class.clamp(min=0), logits.shape[-1])
+        return _masked_mean(self._distribution_loss(logits, distribution), mask)
+
+    def _distribution_loss(self, logits: Tensor, distribution: Tensor) -> Tensor:
+        """Per-row cross-entropy against a target distribution, unmasked.
+
+        The class weight enters where the hard path puts it: inside the sum
+        over classes on the smoothed target, as ``functional.cross_entropy``
+        does with ``weight`` and ``label_smoothing`` together, and as a factor
+        on the row under the ordinal targets, where the hard path scales the row
+        by its label's weight.
+        """
+        n_classes = logits.shape[-1]
+        target = distribution.to(logits.dtype)
+        log_prob = functional.log_softmax(logits, dim=-1)
+        weights = self._sky_class_weights
+        if self._sky_ordinal_tau is not None:
+            ranks = torch.arange(n_classes, device=logits.device)
+            target = target @ ordinal_soft_targets(ranks, n_classes, self._sky_ordinal_tau)
+            per_row = -(target * log_prob).sum(dim=-1)
+            if weights is not None:
+                per_row = per_row * (distribution.to(logits.dtype) * weights).sum(-1)
+            return per_row
+        if self._sky_label_smoothing > 0.0:
+            smoothing = self._sky_label_smoothing
+            target = (1.0 - smoothing) * target + smoothing / n_classes
+        if weights is not None:
+            target = target * weights
+        return -(target * log_prob).sum(dim=-1)
+
+
+def ordinal_soft_targets(labels: Tensor, n_classes: int, tau: float) -> Tensor:
+    """Soft target distribution that decays with the rank distance to the label.
+
+    The encoding of Díaz & Marathe (2019, "Soft Labels for Ordinal Regression",
+    CVPR): ``softmax_k(-|k - y| / tau)``, with the absolute rank distance as the
+    metric so the penalty grows one step per class — the same distance the
+    evaluation's ordinal MAE counts. As ``tau`` shrinks the distribution
+    converges to the one-hot target and the loss to plain cross-entropy.
+
+    Parameters
+    ----------
+    labels:
+        ``(B,)`` int64 class indices in ``[0, n_classes)``.
+    n_classes:
+        Number of ordered classes.
+    tau:
+        Temperature of the decay, in class-rank units; positive.
+
+    Returns
+    -------
+    Tensor
+        ``(B, n_classes)`` float32 distributions, each row summing to one.
+    """
+    ranks = torch.arange(n_classes, device=labels.device, dtype=torch.float32)
+    distance = (ranks[None, :] - labels[:, None].to(torch.float32)).abs()
+    return torch.softmax(-distance / float(tau), dim=-1)
 
 
 def _sanitised(target: Tensor, mask: Tensor) -> Tensor:

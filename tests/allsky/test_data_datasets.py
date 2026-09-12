@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from allsky.config import AlignmentConfig
 from allsky.data.datasets import MultimodalEmbeddingDataset, MultimodalImageDataset
 from allsky.data.manifest import build_manifest
 from allsky.features import resolve_feature_set
@@ -447,8 +448,7 @@ class TestEmbeddingWindowModes:
             resolve_feature_set("safe"),
             embedding_reader=reader,
             train=True,
-            window="mean_embedding",
-            window_minutes=5.0,
+            alignment=AlignmentConfig(strategy="mean_embedding", window_minutes=5.0),
         )
         # 12:05 window [12:02:30, 12:07:30] -> 12:03..12:07 (1-min cadence).
         idx = int(manifest.index[manifest["sample_id"] == "allsky-20250321-1205"][0])
@@ -466,8 +466,7 @@ class TestEmbeddingWindowModes:
             resolve_feature_set("safe"),
             embedding_reader=reader,
             train=True,
-            window="attention_pooling",
-            window_minutes=5.0,
+            alignment=AlignmentConfig(strategy="attention_pooling", window_minutes=5.0),
         )
         assert dataset.seq_len == 6  # ceil(5) + 1
         idx = int(manifest.index[manifest["sample_id"] == "allsky-20250321-1205"][0])
@@ -496,8 +495,9 @@ class TestEmbeddingWindowModes:
             resolve_feature_set("safe"),
             embedding_reader=reader,
             train=True,
-            window="mean_embedding",
-            window_minutes=1.0,  # tiny window -> only the own frame qualifies
+            alignment=AlignmentConfig(
+                strategy="mean_embedding", window_minutes=1.0
+            ),  # tiny window -> only the own frame qualifies
         )
         idx = 5
         expected = reader(str(manifest["sample_id"].iloc[idx]))
@@ -535,21 +535,20 @@ class TestEmbeddingWindowModes:
                 manifest,
                 ["f"],
                 embedding_reader=FakeEmbeddingReader(dim=2),
-                window="mean_embedding",
-                window_minutes=window_minutes,
+                alignment=AlignmentConfig(strategy="mean_embedding", window_minutes=window_minutes),
             )
             assert dataset._windows == _reference_windows(manifest, window_minutes)
 
     @pytest.mark.usefixtures("torch")
     def test_invalid_window_raises(self, tmp_path: Path):
         manifest = _build_minutely(tmp_path)
-        with pytest.raises(ValueError, match="window"):
+        with pytest.raises(ValueError, match="strategy"):
             MultimodalEmbeddingDataset(
                 manifest,
                 resolve_feature_set("safe"),
                 embedding_reader=FakeEmbeddingReader(),
                 train=True,
-                window="bogus",  # type: ignore[arg-type]
+                alignment=AlignmentConfig(strategy="bogus"),  # type: ignore[arg-type]
             )
 
 
@@ -570,8 +569,7 @@ def test_a_window_whose_co_frames_are_absent_still_serves_the_row(tmp_path: Path
         resolve_feature_set("safe"),
         embedding_reader=partial_reader,
         train=True,
-        window="mean_embedding",
-        window_minutes=10.0,
+        alignment=AlignmentConfig(strategy="mean_embedding", window_minutes=10.0),
     )
 
     np.testing.assert_allclose(windowed[2]["embedding"].numpy(), np.full(8, 3.0))
@@ -595,8 +593,132 @@ def test_a_row_whose_whole_window_is_unreadable_falls_back_to_its_own(tmp_path: 
             reader(sample_id) if sample_id == own else only_the_row_itself(sample_id)
         ),
         train=True,
-        window="mean_embedding",
-        window_minutes=10.0,
+        alignment=AlignmentConfig(strategy="mean_embedding", window_minutes=10.0),
     )
 
     np.testing.assert_array_equal(windowed[1]["embedding"].numpy(), reader(own))
+
+
+def _one_day_manifest(times_utc: list[str]) -> pd.DataFrame:
+    n = len(times_utc)
+    return pd.DataFrame(
+        {
+            "sample_id": [f"s{i}" for i in range(n)],
+            "timestamp_utc": pd.to_datetime(times_utc, utc=True),
+            "day_id": ["2026-08-20"] * n,
+            "f": np.zeros(n),
+            "target_dhi": np.zeros(n),
+            "target_kindex": np.zeros(n),
+            "cloud_fraction": np.full(n, np.nan),
+            "sky_class": np.zeros(n, dtype=np.int64),
+        }
+    )
+
+
+_BLOCK_TIMES = [
+    "2026-08-20T09:35:32Z",
+    "2026-08-20T09:36:33Z",
+    "2026-08-20T09:38:00Z",
+    "2026-08-20T09:39:58Z",
+    "2026-08-20T09:40:30Z",
+    "2026-08-20T09:44:00Z",
+]
+
+
+def test_sensor_block_windows_group_the_frames_that_share_a_datalogger_row() -> None:
+    from allsky.data.datasets import resolve_sensor_block_windows
+
+    windows = resolve_sensor_block_windows(_one_day_manifest(_BLOCK_TIMES), 5.0, -3.0)
+
+    assert windows[0] == windows[3] == [0, 1, 2, 3]
+    assert windows[4] == windows[5] == [4, 5]
+
+
+def test_sensor_block_windows_never_cross_a_day() -> None:
+    from allsky.data.datasets import resolve_sensor_block_windows
+
+    manifest = _one_day_manifest(_BLOCK_TIMES[:2])
+    manifest.loc[1, "day_id"] = "2026-08-21"
+
+    windows = resolve_sensor_block_windows(manifest, 5.0, -3.0)
+
+    assert windows == [[0], [1]]
+
+
+def test_representative_rows_keep_the_frame_nearest_the_block_centroid() -> None:
+    from allsky.data.datasets import representative_rows_per_block
+
+    keep = representative_rows_per_block(_one_day_manifest(_BLOCK_TIMES), 5.0, -3.0)
+
+    assert keep.tolist() == [False, False, True, False, False, True]
+
+
+@pytest.mark.usefixtures("torch")
+def test_the_embedding_dataset_under_sensor_block_serves_the_block_mean() -> None:
+    reader = FakeEmbeddingReader(dim=4)
+    manifest = _one_day_manifest(_BLOCK_TIMES)
+    dataset = MultimodalEmbeddingDataset(
+        manifest,
+        ["f"],
+        embedding_reader=reader,
+        train=True,
+        alignment=AlignmentConfig(strategy="sensor_block", window_minutes=5.0),
+    )
+
+    served = dataset[1]["embedding"].numpy()
+
+    expected = np.mean([reader(f"s{i}") for i in range(4)], axis=0)
+    np.testing.assert_allclose(served, expected, rtol=1e-6)
+
+
+@pytest.mark.usefixtures("torch")
+def test_one_sample_per_block_serves_the_centroid_frame_with_its_whole_block() -> None:
+    reader = FakeEmbeddingReader(dim=4)
+    manifest = _one_day_manifest(_BLOCK_TIMES)
+    dataset = MultimodalEmbeddingDataset(
+        manifest,
+        ["f"],
+        embedding_reader=reader,
+        train=True,
+        alignment=AlignmentConfig(
+            strategy="sensor_block", window_minutes=5.0, one_sample_per_block=True
+        ),
+    )
+
+    served = dataset.served_manifest
+
+    assert len(dataset) == 2
+    assert served["sample_id"].tolist() == ["s2", "s5"]
+    first_block = np.mean([reader(f"s{i}") for i in range(4)], axis=0)
+    np.testing.assert_allclose(dataset[0]["embedding"].numpy(), first_block, rtol=1e-6)
+
+
+@pytest.mark.usefixtures("torch")
+def test_one_sample_per_block_keeps_the_served_targets_in_item_order() -> None:
+    manifest = _one_day_manifest(_BLOCK_TIMES)
+    manifest["target_dhi"] = [10.0, 10.0, 10.0, 10.0, 20.0, 20.0]
+    dataset = MultimodalEmbeddingDataset(
+        manifest,
+        ["f"],
+        embedding_reader=FakeEmbeddingReader(dim=2),
+        train=True,
+        alignment=AlignmentConfig(
+            strategy="sensor_block", window_minutes=5.0, one_sample_per_block=True
+        ),
+    )
+
+    assert dataset.served_targets["dhi"].tolist() == [10.0, 20.0]
+    assert float(dataset[1]["dhi"]) == 20.0
+
+
+@pytest.mark.usefixtures("torch")
+def test_one_sample_per_block_without_the_block_strategy_is_refused() -> None:
+    with pytest.raises(ValueError, match="sensor_block"):
+        MultimodalEmbeddingDataset(
+            _one_day_manifest(_BLOCK_TIMES),
+            ["f"],
+            embedding_reader=FakeEmbeddingReader(dim=2),
+            alignment=AlignmentConfig(
+                strategy="mean_embedding", window_minutes=5.0, one_sample_per_block=True
+            ),
+        )

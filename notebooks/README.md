@@ -17,7 +17,19 @@ https://colab.research.google.com/github/Bruno-Mascarenhas/micrometeorology/blob
 | [`allsky_multimodal_colab.ipynb`](allsky_multimodal_colab.ipynb) | Train the **multimodal** all-sky pipeline (V0–V7 DHI / k-index / sky models) from a prepared Colab bundle |
 | [`tcc/02_colab_training.ipynb`](tcc/02_colab_training.ipynb) | Train the **solrad_correction** models (SVM / LSTM / Transformer) via `solrad-colab` |
 | `colab/01_calibracao.ipynb`, `colab/02_backbones_pesados.ipynb`, `colab/03_portfolio_24h.ipynb` | The Colab Pro+ GPU campaign, in that order: 01 reproduces the local reference and **gates** the other two, 02 tests backbone capacity and input resolution, 03 is the 24-hour portfolio. All three drive `colab/_colab_runner.py` |
+| `colab/04_ceu_multitarefa.ipynb` | Sky condition first: the fine-tuned multitask arms (`CEU_TARGETS`) on the `dataset-iso` bundle — a transfer gate against the local `ceu` arm, ViT-B/14, a 5-frame temporal window, 448 px, and a 5-seed ensemble scored by `_colab_runner.ensemble_predictions` |
+| `colab/05_fila_l4.ipynb` | Colab Enterprise on one L4 (24 GB): the three arms of `configs/allsky/experiments/l4/` in sequence — the sensor-block unit at 512 px and the extra 512-px seeds with batch 32 |
+| `colab/06_l4_<arm>.ipynb` | The same machinery with one arm each, for three L4 at once: separate bucket prefixes, so three executions share no state |
 | `exploratory/*.ipynb` | Local data exploration (sensor merging, WRF time series) — no GPU needed |
+
+The five notebooks under `colab/0[56]_*` are written by
+`scripts/gera_notebooks_l4.py` from one template: edit the script and re-run it,
+never the `.ipynb`. Their queue logic lives in `colab/_colab_runner.py`
+(`run_arm`, `preflight`, `sync_live`, `pull_live_run`), which
+`tests/allsky/test_colab_runner.py` covers — including a test that calls every
+kernel-facing function with `allsky` and `labmim_core` unimportable, the way the
+Colab kernel actually has them. A session that reaches hour fourteen and then
+dies importing the project in the kernel is what that test exists to prevent.
 
 The multimodal notebook is **thin**: it provisions a CPython 3.14 venv with `uv`
 (the package requires Python ≥ 3.14, which the Colab base runtime is not assumed

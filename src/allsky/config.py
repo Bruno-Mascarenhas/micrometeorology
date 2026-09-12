@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from allsky.data.contracts import LABELABLE_MIN_ELEVATION_DEG
 from labmim_core.site import SiteConfig
+from labmim_core.sky import SKY_CLASS_COUNT
 
 #: Fixed UTC offset of the LabMiM camera and datalogger clocks. Pinned rather
 #: than read from the host TZ: a UTC-configured container would otherwise shift
@@ -113,7 +114,12 @@ DATASET_SPLIT_FILENAME = "splits.json"
 #: and :mod:`allsky.data.datasets` can read it without an import cycle, and a
 #: typo such as ``centre_frame`` fails at ``load_experiment_config`` time rather
 #: than deep inside dataset construction — or, in image mode, not at all.
-AlignmentStrategyName = Literal["center_frame", "mean_embedding", "attention_pooling"]
+#: The poolers a windowed image run can fold its frames with.
+TemporalPooling = Literal["mean", "attention", "mean_std"]
+
+AlignmentStrategyName = Literal[
+    "center_frame", "mean_embedding", "attention_pooling", "sensor_block"
+]
 
 
 class AlignmentConfig(BaseModel):
@@ -126,18 +132,38 @@ class AlignmentConfig(BaseModel):
     learned pooler that only the embedding source has (see
     :class:`DataSourceConfig`). ``window_minutes`` is the full width of the
     alignment window.
+
+    ``sensor_block`` pools the frames that share one datalogger row: the CR5000
+    end-stamps a ``window_minutes`` average, so the members of a row's window are
+    every same-day frame whose local stamp rounds up to the same block end. That
+    is the label's own support — measured on ``dataset-iso`` the key reproduces
+    it exactly (``target_dhi`` constant in all 9,538 blocks) — and an oracle that
+    knows the instantaneous Kt scores macro-F1 0.73 against the 5-min label per
+    frame but 0.84-0.99 per block. ``one_sample_per_block`` then keeps, for
+    training and validation, only the frame nearest each block's centroid, so an
+    epoch costs the same backbone forwards as the single-frame recipe.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     strategy: AlignmentStrategyName = "center_frame"
     window_minutes: float = Field(default=10.0, gt=0.0)
+    one_sample_per_block: bool = False
     #: Cap on frames per window in IMAGE mode, evenly subsampled keeping the
     #: ends. The embedding path ignores it: an embedding is a 384-float read,
     #: while a frame is a JPEG decode plus a backbone forward, so a ten-minute
     #: window at this camera's one-frame-per-minute cadence would be eleven
     #: forwards per sample.
     max_frames: int = Field(default=5, ge=1)
+
+    @model_validator(mode="after")
+    def _one_sample_needs_the_block_strategy(self) -> AlignmentConfig:
+        if self.one_sample_per_block and self.strategy != "sensor_block":
+            raise ValueError(
+                "alignment.one_sample_per_block only applies to strategy 'sensor_block', "
+                f"got {self.strategy!r}"
+            )
+        return self
 
 
 class DataSourceConfig(BaseModel):
@@ -268,12 +294,50 @@ class KIndexTargetConfig(BaseModel):
 
 
 class SkyClassTargetConfig(BaseModel):
-    """Sky-condition classification head over the four published Kt conditions."""
+    """Sky-condition classification head over the four published Kt conditions.
+
+    ``class_weights`` scales each row's cross-entropy by its class (one factor per
+    condition, in class order), the plain remedy for the two partly-cloudy
+    conditions that hold 19 % and 11 % of the training rows against 30 % and 41 %.
+    ``label_smoothing`` is the uniform mix of Szegedy et al. (2016,
+    arXiv:1512.00567, sec. 7); Müller et al. (2019, arXiv:1906.02629) show it
+    calibrates the head instead of letting its validation cross-entropy climb
+    while its accuracy holds — the trajectory the ``ceu`` arm measured.
+    ``ordinal_tau`` replaces the hard target by the soft distribution of Díaz &
+    Marathe (2019, CVPR): ``softmax(-|k - y| / tau)`` over the classes, so a
+    partly-cloudy frame labelled next to its true condition costs less than one
+    labelled at the far end — the conditions are ordered in Kt and the errors
+    the ``ceu`` arm makes are between neighbours. The two smoothings are
+    alternatives, never combined.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     weight: float = 1.0
+    class_weights: tuple[float, ...] | None = None
+    label_smoothing: float = 0.0
+    ordinal_tau: float | None = None
+
+    @model_validator(mode="after")
+    def _one_smoothing_and_positive_weights(self) -> SkyClassTargetConfig:
+        if not 0.0 <= self.label_smoothing < 1.0:
+            raise ValueError(f"sky.label_smoothing must be in [0, 1), got {self.label_smoothing}")
+        if self.ordinal_tau is not None and self.ordinal_tau <= 0.0:
+            raise ValueError(f"sky.ordinal_tau must be positive, got {self.ordinal_tau}")
+        if self.ordinal_tau is not None and self.label_smoothing > 0.0:
+            raise ValueError("sky.label_smoothing and sky.ordinal_tau are alternatives; set one")
+        if self.class_weights is not None:
+            if len(self.class_weights) != SKY_CLASS_COUNT:
+                raise ValueError(
+                    f"sky.class_weights needs one factor per condition ({SKY_CLASS_COUNT}), "
+                    f"got {len(self.class_weights)}"
+                )
+            if any(w <= 0.0 for w in self.class_weights):
+                raise ValueError(
+                    f"sky.class_weights must all be positive, got {self.class_weights}"
+                )
+        return self
 
 
 class CloudFractionTargetConfig(BaseModel):
@@ -358,8 +422,12 @@ class AugmentationConfig(BaseModel):
     Every probability defaults to ``0.0``, so an experiment that does not
     mention this section trains on exactly the pixels it trained on before.
     The transforms and the physical argument for each live in
-    :mod:`allsky.augmentation`; flips and frame-centred rotations are absent on
-    purpose, because they move the sun while the geometry features stay put.
+    :mod:`allsky.augmentation`; flips are absent on purpose, because they move
+    the sun while the geometry features stay put. ``p_rotate`` turns the frame
+    about the zenith TOGETHER with the ``model.geometry_channels`` planes, so
+    the sun's pixel and the plane that marks it move as one; the engine warns
+    when it is set on a run without those planes, where the rotation would be
+    the illegal one.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -371,6 +439,8 @@ class AugmentationConfig(BaseModel):
     p_translate: float = Field(default=0.0, ge=0.0, le=1.0)
     translate_px: int = Field(default=4, ge=0)
     p_erase: float = Field(default=0.0, ge=0.0, le=1.0)
+    p_rotate: float = Field(default=0.0, ge=0.0, le=1.0)
+    rotate_max_deg: float = Field(default=180.0, ge=0.0, le=180.0)
 
 
 class ExperimentModelConfig(BaseModel):
@@ -385,6 +455,9 @@ class ExperimentModelConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     name: str = "concat"
+    #: How a windowed image run pools the frames of a window; ``None`` leaves
+    #: it to the alignment strategy (:func:`allsky.modeling.registry.temporal_pooling_for_strategy`).
+    temporal_pooling: TemporalPooling | None = None
 
 
 class SchedulerConfig(BaseModel):
@@ -403,6 +476,50 @@ class AMPConfig(BaseModel):
 
     enabled: bool = False
     dtype: Literal["fp16", "bf16"] = "fp16"
+
+
+class WeightAverageConfig(BaseModel):
+    """Exponential moving average of the trainable weights, kept beside the run.
+
+    When ``enabled`` the engine maintains a shadow copy of the model updated after
+    every optimizer step, ``shadow = decay * shadow + (1 - decay) * weights``,
+    and writes it as ``ema.ckpt`` at the end of each epoch from ``start_epoch``
+    (1-based) on, in the same format as ``last.ckpt``. ``decay`` must lie strictly
+    inside ``(0, 1)``: ``0`` would copy the live weights and ``1`` would never move
+    off the weights the average started from.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    # Polyak & Juditsky 1992; 0.999 is torch.optim.swa_utils.get_ema_multi_avg_fn's default.
+    decay: float = Field(default=0.999, gt=0.0, lt=1.0)
+    start_epoch: int = Field(default=1, ge=1)
+
+
+class CMixupConfig(BaseModel):
+    """C-Mixup over the training batches (Yao et al. 2022, NeurIPS, arXiv:2210.05775).
+
+    Each row of a batch is mixed with a partner drawn from the same batch with
+    probability proportional to ``exp(-(k*_i - k*_j)^2 / (2 bandwidth^2))``
+    on the primary regression target, and ``lambda ~ Beta(alpha, alpha)``
+    weights the pair: the frame and the sensor features linearly, the
+    regression targets linearly, the sky class as the soft label
+    ``lambda * onehot_i + (1 - lambda) * onehot_j``. ``p`` is the fraction of
+    batches mixed at all; a row whose own or partner's target is missing is
+    kept as it is. ``bandwidth`` is in the unit of ``target_kindex`` — k* —
+    so ``0.05`` pairs frames whose clear-sky index differs by a few
+    hundredths. Only the single-frame image path can be mixed: the partner's
+    pixels are what gets blended, and a window or a precomputed embedding has
+    none to blend.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    alpha: float = Field(default=1.0, gt=0.0)
+    bandwidth: float = Field(default=0.05, gt=0.0)
+    p: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
 class EarlyStoppingConfig(BaseModel):
@@ -427,8 +544,13 @@ class ExperimentTrainConfig(BaseModel):
     """Optimisation / engine settings for an experiment run.
 
     ``backbone_lr`` (when set) drives a separate parameter group for the visual
-    backbone; ``out_subdir`` is the run directory created under
-    ``ExperimentConfig.output_dir``.
+    backbone; ``layer_decay`` (when set) splits that group per backbone stage,
+    scaling ``backbone_lr`` by ``layer_decay ** (stages above it + 1)`` — the
+    last block once, the embedding ``depth + 1`` times — so shallow blocks move
+    less than deep ones (Clark et al. 2020; Bao et al.
+    2022). ``weight_average`` keeps an exponential moving average of the weights
+    as a third evaluable checkpoint. ``out_subdir`` is the run directory created
+    under ``ExperimentConfig.output_dir``.
 
     ``epochs`` must be at least 1: both checkpoint writes live inside the epoch
     loop, so ``epochs: 0`` would exit 0 while advertising ``last.ckpt`` /
@@ -443,6 +565,7 @@ class ExperimentTrainConfig(BaseModel):
     batch_size: int = Field(default=32, ge=1)
     lr: float = Field(default=3e-4, gt=0.0)
     backbone_lr: float | None = None
+    layer_decay: float | None = Field(default=None, gt=0.0, le=1.0)
     weight_decay: float = 1e-4
     # AdamW is the only algorithm allsky.training.engine builds. Declared as the
     # literal so a config naming another one is refused when it is loaded, rather
@@ -453,9 +576,41 @@ class ExperimentTrainConfig(BaseModel):
     grad_accum_steps: int = Field(default=1, ge=1)
     grad_clip_norm: float | None = None
     early_stopping: EarlyStoppingConfig = Field(default_factory=EarlyStoppingConfig)
+    weight_average: WeightAverageConfig = Field(default_factory=WeightAverageConfig)
+    cmixup: CMixupConfig = Field(default_factory=CMixupConfig)
     num_workers: int = Field(default=2, ge=0)
     device: str = "auto"
     out_subdir: str = "run"
+
+    @model_validator(mode="after")
+    def _layer_decay_needs_a_backbone_rate(self) -> ExperimentTrainConfig:
+        """Refuse ``layer_decay`` without ``backbone_lr``, the rate it scales.
+
+        Without a backbone rate the engine builds a single parameter group, so
+        the decay would have no group to split and the run would train every
+        block at ``lr`` while its config claimed otherwise.
+        """
+        if self.layer_decay is not None and self.backbone_lr is None:
+            raise ValueError(
+                "train.layer_decay scales train.backbone_lr per backbone stage, and "
+                "backbone_lr is unset; set backbone_lr or drop layer_decay"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _weight_average_starts_inside_the_budget(self) -> ExperimentTrainConfig:
+        """Refuse an average that would begin after the last epoch.
+
+        ``ema.ckpt`` is first written at the end of ``start_epoch``, so a start
+        past ``epochs`` is a run that enables the average and never writes it.
+        """
+        average = self.weight_average
+        if average.enabled and average.start_epoch > self.epochs:
+            raise ValueError(
+                f"train.weight_average.start_epoch={average.start_epoch} is past "
+                f"train.epochs={self.epochs}: no ema.ckpt would ever be written"
+            )
+        return self
 
 
 class ExperimentConfig(BaseModel):
@@ -480,6 +635,19 @@ class ExperimentConfig(BaseModel):
     augmentation: AugmentationConfig = Field(default_factory=AugmentationConfig)
 
     @model_validator(mode="after")
+    def _std_pooling_needs_an_image_window(self) -> ExperimentConfig:
+        pooling = self.model.temporal_pooling
+        if pooling == "mean_std" and (
+            self.data.input_mode != "image" or self.data.alignment.strategy == "center_frame"
+        ):
+            raise ValueError(
+                "model.temporal_pooling 'mean_std' pools a WINDOW of frames in image mode; the "
+                f"embedding source has already averaged its window and strategy "
+                f"{self.data.alignment.strategy!r} serves one frame"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _geometry_channels_need_image_mode(self) -> ExperimentConfig:
         """Refuse ``model.geometry_channels`` in embedding mode, where no pixel is read.
 
@@ -491,6 +659,37 @@ class ExperimentConfig(BaseModel):
                 "model.geometry_channels asks for solar-geometry planes, but "
                 "data.input_mode='embedding' reads precomputed vectors and no pixel; "
                 "the planes would be dropped without a word"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _cmixup_needs_single_frames_and_the_kindex_head(self) -> ExperimentConfig:
+        """Refuse C-Mixup where there is no frame to blend or no k* to pair on.
+
+        The partner's pixels are blended into the row's own, which needs the
+        single-frame image path: an embedding is already pooled and a window
+        of frames has no one partner frame per row. The pairing kernel reads
+        ``target_kindex``, which is only guaranteed labelled — and only
+        meaningful as the primary target — when the k* head trains on it.
+        """
+        if not self.train.cmixup.enabled:
+            return self
+        if self.data.input_mode != "image":
+            raise ValueError(
+                "train.cmixup blends the partner frame's pixels into each row, but "
+                f"data.input_mode={self.data.input_mode!r} reads precomputed vectors; set "
+                "input_mode: image or disable cmixup"
+            )
+        if self.data.alignment.strategy != "center_frame":
+            raise ValueError(
+                "train.cmixup blends one partner frame per row, but "
+                f"data.alignment.strategy={self.data.alignment.strategy!r} serves a window of "
+                "frames; use strategy: center_frame or disable cmixup"
+            )
+        if not self.targets.kindex.enabled:
+            raise ValueError(
+                "train.cmixup pairs rows by their k* target, and targets.kindex is disabled; "
+                "enable the k* head or disable cmixup"
             )
         return self
 
@@ -514,6 +713,7 @@ class ExperimentConfig(BaseModel):
                 self.augmentation.p_noise,
                 self.augmentation.p_translate,
                 self.augmentation.p_erase,
+                self.augmentation.p_rotate,
             )
             > 0.0
         ):

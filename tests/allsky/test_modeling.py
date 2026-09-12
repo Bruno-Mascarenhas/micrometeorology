@@ -717,3 +717,64 @@ def test_a_climatology_with_no_labelled_sky_row_refuses_to_fit():
 
     with pytest.raises(ValueError, match="no labelled row"):
         model.fit_from_targets(sky_class=np.array([-1, -1, -1]))
+
+
+class _WindowStubBackbone(torch.nn.Module):
+    """Image backbone stub for the pooling tests: a per-frame linear map with ``dim``."""
+
+    dim = 6
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = torch.nn.Linear(3, self.dim)
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        encoded: torch.Tensor = self.linear(images.flatten(1)[:, :3])
+        return encoded
+
+
+def test_mean_std_pooling_concatenates_the_window_mean_and_its_spread():
+    from allsky.modeling.visual_encoder import masked_mean_std_pool
+
+    window = torch.tensor([[[0.0, 2.0], [2.0, 2.0], [4.0, 2.0], [9.0, 9.0]]])
+    mask = torch.tensor([[True, True, True, False]])
+
+    pooled = masked_mean_std_pool(window, mask)
+
+    expected_std = torch.sqrt(torch.tensor([8.0 / 3.0, 0.0]) + 1e-6)
+    torch.testing.assert_close(pooled[0, :2], torch.tensor([2.0, 2.0]))
+    torch.testing.assert_close(pooled[0, 2:], expected_std)
+
+
+def test_the_image_encoder_under_mean_std_doubles_its_width():
+    from allsky.modeling.visual_encoder import ImageEncoder
+
+    encoder = ImageEncoder(_WindowStubBackbone(), temporal_pooling="mean_std")
+
+    assert encoder.out_dim == 2 * _WindowStubBackbone().dim
+
+
+def test_the_image_encoder_refuses_the_learned_attention_pooler():
+    from allsky.modeling.visual_encoder import ImageEncoder
+
+    with pytest.raises(ValueError, match="mean_std"):
+        ImageEncoder(_WindowStubBackbone(), temporal_pooling="attention")
+
+
+def test_sensor_block_defers_the_pooler_to_the_model_config():
+    from allsky.modeling.registry import temporal_pooling_for_strategy
+
+    assert temporal_pooling_for_strategy("sensor_block") is None
+    assert temporal_pooling_for_strategy("mean_embedding") == "mean"
+    assert temporal_pooling_for_strategy("attention_pooling") == "attention"
+
+
+def test_mean_std_pooling_is_refused_where_there_is_no_frame_window():
+    from allsky.config import load_experiment_config
+
+    cfg = load_experiment_config("configs/allsky/experiments/ceublocostd/ceublocostd_s42.yaml")
+    single_frame = cfg.model_dump()
+    single_frame["data"]["alignment"] = {"strategy": "center_frame"}
+
+    with pytest.raises(ValueError, match="mean_std"):
+        type(cfg).model_validate(single_frame)

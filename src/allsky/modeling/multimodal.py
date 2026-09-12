@@ -19,7 +19,11 @@ from allsky.modeling.contracts import ModelOutputs
 from allsky.modeling.fusion import build_fusion
 from allsky.modeling.heads import Heads, Trunk
 from allsky.modeling.sensor_encoder import SensorEncoder
-from allsky.modeling.visual_encoder import build_visual_encoder, split_backbone_param_groups
+from allsky.modeling.visual_encoder import (
+    TemporalPooling,
+    build_visual_encoder,
+    split_backbone_param_groups,
+)
 
 __all__ = ["MultimodalNet"]
 
@@ -106,7 +110,7 @@ class MultimodalNet(nn.Module):
         dropout: float = 0.1,
         num_heads: int = 4,
         token_dim: int | None = None,
-        temporal_pooling: Literal["mean", "attention"] = "mean",
+        temporal_pooling: TemporalPooling = "mean",
         backbone_frozen: bool = False,
         unfreeze_last_n: int = 0,
         extra_input_channels: int = 0,
@@ -186,7 +190,9 @@ class MultimodalNet(nn.Module):
         outputs: ModelOutputs = self.heads(self.trunk(fused))
         return outputs
 
-    def param_groups(self, backbone_lr: float | None = None) -> list[dict[str, Any]]:
+    def param_groups(
+        self, backbone_lr: float | None = None, layer_decay: float | None = None
+    ) -> list[dict[str, Any]]:
         """Optimizer parameter groups; the image backbone gets its own LR.
 
         Parameters
@@ -205,4 +211,4 @@ class MultimodalNet(nn.Module):
             group.  Otherwise a single group of all trainable parameters.
         """
         lr = backbone_lr if backbone_lr is not None else self.backbone_lr
-        return split_backbone_param_groups(self, self.visual_encoder, lr)
+        return split_backbone_param_groups(self, self.visual_encoder, lr, layer_decay=layer_decay)
